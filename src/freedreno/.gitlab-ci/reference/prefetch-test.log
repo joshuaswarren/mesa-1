@@ -149897,7 +149897,7 @@ shader-blocks:
 	:2:0052:0065[500d301ax_48082d90x] (sy)(ss)(nop2) (ul)add.f hr6.z, h400, (neg)hr<a0.x + 8>	; dontcare bits in add.f: 0005000000000000
 	:6:0053:0068[c889800bx_0f425025x] no match: c889800b0f425025
 	:7:0054:0069[f063c3fcx_7bf4fa22x] (sy)bar.g.l	; dontcare bits in bar: 0001c3fc7bf4fa22
-	:7:0055:0070[fa84d9e1x_abfcf7d3x] (sy)(jp)dcinv.shr	; dontcare bits in dcinv: 0004d9e1abfcf7d3
+	:7:0055:0070[fa84d9e1x_abfcf7d3x] (sy)(ss)(jp)dcinv.shr	; dontcare bits in dcinv: 0004c9e1abfcf7d3
 	-----------------------------------------------
 	8192 (0x2000) bytes
 	000000: 0000001e 03820000 0000001d 02820000	|................|
