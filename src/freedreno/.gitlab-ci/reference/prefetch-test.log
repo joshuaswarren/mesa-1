@@ -6,7 +6,7 @@ comm: testfw_app:sq0
 cmdline: ./testfw_app --gfx glfw --gl_api=gles -t gl_driver2_short
 gpu-initialized: 1
 revision: 618 (6.1.8.0)
-Got gpu_id=618
+Got chip_id=0x6010800
 rbbm-status: 0x00000000
 ringbuffer:
   - id: 0
