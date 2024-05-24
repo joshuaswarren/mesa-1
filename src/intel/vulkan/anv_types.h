@@ -194,5 +194,267 @@ struct anv_push_constants {
    };
 };
 
+#define ANV_DRIVER_PUSH_CONSTANTS_SIZE (sizeof(struct anv_push_constants) - MAX_PUSH_CONSTANTS_SIZE)
+
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_LDW      (UINT8_MAX - 0)
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_UDW      (UINT8_MAX - 1)
+
+/* Location of the user visible part of the dynamic state heap (1GiB) */
+#define ANV_DYNAMIC_VISIBLE_HEAP_OFFSET (1024 * 1024 * 1024)
+
+/**
+ * Stage enum for generated commands
+ */
+enum anv_dgc_stage {
+   ANV_DGC_STAGE_VERTEX = 0,
+   ANV_DGC_STAGE_TESS_CTRL,
+   ANV_DGC_STAGE_TESS_EVAL,
+   ANV_DGC_STAGE_GEOMETRY,
+   ANV_DGC_STAGE_FRAGMENT,
+   ANV_DGC_STAGE_TASK,
+   ANV_DGC_STAGE_MESH,
+
+   ANV_DGC_STAGE_COMPUTE,
+   ANV_DGC_STAGE_RT,
+
+   ANV_DGC_STAGES,
+};
+
+#define ANV_DGC_N_GFX_STAGES (ANV_DGC_STAGE_MESH + 1)
+
+enum anv_dgc_draw_type {
+   ANV_DGC_DRAW_TYPE_SEQUENTIAL,
+   ANV_DGC_DRAW_TYPE_INDEXED,
+   ANV_DGC_DRAW_TYPE_MESH,
+};
+
+#define ANV_DGC_RT_GLOBAL_DISPATCH_SIZE (128)
+
+enum anv_dgc_push_constant_flags {
+   ANV_DGC_PUSH_CONSTANTS_CMD_ACTIVE   = BITFIELD_BIT(0),
+};
+
+/**
+ * This structure represents the indirect data layout (in
+ * VkGeneratedCommandsInfoEXT::indirectAddress) for push constants
+ */
+struct anv_dgc_push_layout {
+   struct anv_dgc_push_entry {
+      /* Location of the data to copy in the indirect buffer */
+      uint32_t seq_offset;
+
+      /* Location where to write the data in anv_push_constants::client_data[]
+       */
+      uint16_t push_offset;
+
+      /* Size of the data to copy */
+      uint16_t size;
+   } entries[32];
+
+   uint8_t flags; /* enum anv_dgc_push_constant_flags */
+
+   uint8_t num_entries;
+   uint8_t mocs;
+
+   /* Whether the sequence ID is active and at what offset we should write it
+    * in the push constant data
+    */
+   uint16_t seq_id_active;
+   uint16_t seq_id_offset;
+
+   /* Offset of the push constant commands in the preprocessed buffer.
+    */
+   uint16_t cmd_offset;
+   uint16_t cmd_size;
+
+   /* Offset of the data in the indirect buffer, relative to
+    * VkGeneratedCommandsInfoEXT::indirectAddress
+    */
+   uint16_t data_offset;
+};
+
+/**
+ * This structure represents both the data layout (in
+ * VkGeneratedCommandsInfoEXT::indirectAddress) and the command layout in the
+ * preprocess buffer (in VkGeneratedCommandsInfoEXT::preprocessAddress) for
+ * graphics commands
+ */
+struct anv_dgc_gfx_layout {
+   struct anv_dgc_index_buffer {
+      uint16_t cmd_offset; /* Offset of 3DSTATE_INDEX_BUFFER */
+      uint16_t cmd_size;
+      uint16_t seq_offset; /* Offset of VkBindIndexBufferIndirectCommandEXT */
+      uint16_t mocs;
+      uint32_t u32_value;
+      uint32_t u16_value;
+      uint32_t u8_value;
+   } index_buffer;
+
+   struct {
+      struct anv_dgc_vertex_buffer {
+         uint16_t seq_offset; /* Offset of VkBindVertexBufferIndirectCommandEXT */
+         uint16_t binding;
+      } buffers[31];
+      uint16_t n_buffers;
+      uint16_t mocs;
+      uint16_t cmd_offset; /* Offset of 3DSTATE_VERTEX_BUFFERS */
+      uint16_t cmd_size;
+   } vertex_buffers;
+
+   struct anv_dgc_push_layout push_constants;
+
+   struct {
+      uint16_t final_cmds_offset;
+      uint16_t final_cmds_size;
+      uint32_t active;
+   } indirect_set;
+
+   struct {
+      uint16_t cmd_offset; /* Offset of 3DPRIMITIVE/3DMESH_3D */
+      uint16_t cmd_size;
+      uint16_t draw_type; /* anv_dgc_gfx_draw_type */
+      uint16_t seq_offset; /* Offset of :
+                            *    - VkDrawIndirectCommand
+                            *    - VkDrawIndexedIndirectCommand
+                            *    - VkDrawMeshTasksIndirectCommandEXT
+                            */
+   } draw;
+};
+
+/**
+ * This structure represents both the data layout (in
+ * VkGeneratedCommandsInfoEXT::indirectAddress) and the command layout in the
+ * preprocess buffer (in VkGeneratedCommandsInfoEXT::preprocessAddress) for
+ * compute commands
+ */
+struct anv_dgc_cs_layout {
+   struct anv_dgc_push_layout push_constants;
+
+   /* Location of the indirect execution set index */
+   struct {
+      uint32_t seq_offset;
+      uint16_t data_offset;
+      uint16_t active;
+   } indirect_set;
+
+   /* Offset of VkDispatchIndirectCommand */
+   struct {
+      uint32_t seq_offset;
+      uint16_t cmd_offset;
+      uint16_t pad;
+   } dispatch;
+};
+
+enum anv_dgc_push_slot_type {
+   ANV_DGC_PUSH_SLOT_TYPE_PUSH_CONSTANTS,
+   ANV_DGC_PUSH_SLOT_TYPE_OTHER,
+};
+
+/**
+ * This structure holds prepacked HW instructions for a set of graphics
+ * shaders forming a pipeline . It is part of the command buffer temporary
+ * memory.
+ */
+struct anv_dgc_gfx_descriptor {
+   /* Fully packed instructions ready to be copied directly into the
+    * preprocess buffer (for workarounds)
+    */
+   uint32_t final_commands[20];
+   uint32_t final_commands_size;
+
+   uint32_t wa_18019110168_remapping_table_offset;
+
+   struct {
+      struct anv_dgc_push_stage_state {
+         union {
+            struct {
+               struct anv_dgc_push_stage_slot {
+                  uint16_t push_data_offset;
+                  uint16_t push_data_size;
+                  uint32_t type; /* enum anv_dgc_push_slot_type */
+               } slots[4];
+               uint32_t n_slots;
+            } legacy;
+            struct anv_dgc_push_bindless_stage {
+               uint16_t push_data_offset;
+               uint16_t inline_dwords_count;
+               uint8_t  inline_dwords[8];
+            } bindless;
+         };
+      } stages[ANV_DGC_N_GFX_STAGES];
+      uint32_t active_stages; /* Bitfield of anv_dgc_command_stage */
+   } push_constants;
+};
+
+/**
+ * This structure holds information about the graphics state for generation.
+ */
+struct anv_dgc_gfx_state {
+   struct anv_dgc_gfx_layout layout;
+
+   struct anv_dgc_gfx_descriptor descriptor;
+
+   struct {
+      uint64_t addresses[4];
+   } push_constants;
+
+   struct {
+      uint16_t instance_multiplier;
+      uint32_t flags; /* ANV_GENERATED_FLAG_* */
+   } draw;
+};
+
+/**
+ * This structure holds prepacked HW instructions for a compute shader. It is
+ * either located in the memory associated with VkIndirectExecutionSetEXT or
+ * part of the command buffer temporary memory if indirect execution set is
+ * not used.
+ */
+struct anv_dgc_cs_descriptor {
+   union {
+      struct {
+         uint32_t compute_walker[40];
+         uint32_t inline_dwords_count;
+         uint8_t  inline_dwords[8];
+      } gfx125;
+
+      struct {
+         /* Needs to be the first field because
+          * MEDIA_INTERFACE_DESCRIPTOR_LOAD::InterfaceDescriptorDataStartAddress
+          * needs 64B alignment.
+          */
+         uint32_t interface_descriptor_data[8];
+         uint32_t gpgpu_walker[15];
+         uint32_t media_vfe_state[9];
+
+         uint32_t n_threads;
+         uint16_t cross_thread_push_size;
+         uint8_t per_thread_push_size;
+         uint8_t subgroup_id_offset;
+      } gfx9;
+   };
+
+   uint32_t right_mask;
+   uint32_t threads;
+   uint32_t simd_size;
+
+   uint32_t push_data_offset;
+
+   /* Align the struct to 64B */
+   uint32_t pad[1];
+};
+
+/**
+ * This structure holds information for a ray tracing pipeline.
+ */
+struct anv_dgc_rt_indirect_descriptor {
+   uint32_t ray_stack_stride;
+   uint32_t stack_ids_per_dss;
+   uint32_t sw_stack_size;
+
+   uint64_t call_handler;
+
+   uint64_t hit_sbt;
+   uint64_t miss_sbt;
+   uint64_t callable_sbt;
+};

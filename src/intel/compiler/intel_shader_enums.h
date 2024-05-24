@@ -11,6 +11,7 @@
 #endif
 
 #include "compiler/shader_enums.h"
+#include "util/bitscan.h"
 #include "util/enum_operators.h"
 
 #ifdef __cplusplus
