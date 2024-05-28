@@ -162,7 +162,7 @@ compile_shader(struct anv_device *device,
 
    const unsigned *program;
    if (stage == MESA_SHADER_FRAGMENT) {
-      struct genisa_stats stats[3];
+      struct genisa_stats stats[3] = {};
       struct brw_compile_fs_params params = {
          .base = {
             .nir = nir,
@@ -188,6 +188,11 @@ compile_shader(struct anv_device *device,
          if (prog_data.fs.dispatch_32) {
             check_sends(&stats[stat_idx++], sends_count_expectation *
                                             (device->info->ver < 20 ? 2 : 1));
+         }
+      } else {
+         for (uint32_t i = 0; i < ARRAY_SIZE(stats); i++) {
+            assert(stats[i].spills == 0);
+            assert(stats[i].fills == 0);
          }
       }
    } else {
@@ -303,6 +308,55 @@ anv_device_get_internal_shader(struct anv_device *device,
          .send_count = device->info->verx10 >= 125 ?
                        10 /* 5 loads (1 pull constants) + 4 stores + 1 EOT */ :
                        9 /* 4 loads + 4 stores + 1 EOT */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_GFX_COMPUTE] = {
+         .key        = {
+            .name    = "anv-dgc-gfx-compute",
+         },
+         .stage      = MESA_SHADER_COMPUTE,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_GFX_FRAGMENT] = {
+         .key        = {
+            .name    = "anv-dgc-gfx-fragment",
+         },
+         .stage      = MESA_SHADER_FRAGMENT,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_CS_COMPUTE] = {
+         .key        = {
+            .name    = "anv-dgc-cs-compute",
+         },
+         .stage      = MESA_SHADER_COMPUTE,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_CS_FRAGMENT] = {
+         .key        = {
+            .name    = "anv-dgc-cs-fragment",
+         },
+         .stage      = MESA_SHADER_FRAGMENT,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_CS_POSTPROCESS_COMPUTE] = {
+         .key        = {
+            .name    = "anv-dgc-postprocess-compute",
+         },
+         .stage      = MESA_SHADER_COMPUTE,
+         .send_count = device->info->verx10 >= 125 ? 11 : 8,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_RT_COMPUTE] = {
+         .key        = {
+            .name    = "anv-dgc-rt-compute",
+         },
+         .stage      = MESA_SHADER_COMPUTE,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_RT_FRAGMENT] = {
+         .key        = {
+            .name    = "anv-dgc-rt-fragment",
+         },
+         .stage      = MESA_SHADER_COMPUTE,
+         .send_count = 0 /* too complex */,
       },
    };
 
