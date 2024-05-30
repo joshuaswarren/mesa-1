@@ -63,7 +63,8 @@ compile_shader(struct anv_device *device,
                const char *name,
                const void *hash_key,
                uint32_t hash_key_size,
-               uint32_t sends_count_expectation)
+               uint32_t sends_count_expectation,
+               const uint16_t local_size[3])
 {
    const nir_shader_compiler_options *nir_options =
       &device->physical->compiler->nir_options[stage];
@@ -91,9 +92,13 @@ compile_shader(struct anv_device *device,
    NIR_PASS(_, nir, nir_split_per_member_structs);
 
    if (stage == MESA_SHADER_COMPUTE) {
-      nir->info.workgroup_size[0] = 16;
-      nir->info.workgroup_size[1] = 1;
-      nir->info.workgroup_size[2] = 1;
+      if (local_size[0] != 0) {
+         memcpy(nir->info.workgroup_size, local_size, sizeof(nir->info.workgroup_size));
+      } else {
+         nir->info.workgroup_size[0] = 16;
+         nir->info.workgroup_size[1] = 1;
+         nir->info.workgroup_size[2] = 1;
+      }
    }
 
    struct brw_compiler *compiler = device->physical->compiler;
@@ -259,8 +264,8 @@ anv_device_get_internal_shader(struct anv_device *device,
       } key;
 
       mesa_shader_stage stage;
-
-      uint32_t        send_count;
+      uint16_t local_size[3];
+      uint32_t send_count;
    } internal_kernels[] = {
       [ANV_INTERNAL_KERNEL_GENERATED_DRAWS] = {
          .key        = {
@@ -355,7 +360,22 @@ anv_device_get_internal_shader(struct anv_device *device,
          .key        = {
             .name    = "anv-dgc-rt-fragment",
          },
+         .stage      = MESA_SHADER_FRAGMENT,
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_DUMP_COMPUTE] = {
+         .key        = {
+            .name    = "anv-dgc-dump-compute",
+         },
          .stage      = MESA_SHADER_COMPUTE,
+         .local_size = { 1, 1, 1 },
+         .send_count = 0 /* too complex */,
+      },
+      [ANV_INTERNAL_KERNEL_DGC_DUMP_FRAGMENT] = {
+         .key        = {
+            .name    = "anv-dgc-dump-fragment",
+         },
+         .stage      = MESA_SHADER_FRAGMENT,
          .send_count = 0 /* too complex */,
       },
    };
@@ -385,7 +405,8 @@ anv_device_get_internal_shader(struct anv_device *device,
                         internal_kernels[name].key.name,
                         &internal_kernels[name].key,
                         sizeof(internal_kernels[name].key),
-                        internal_kernels[name].send_count);
+                        internal_kernels[name].send_count,
+                        internal_kernels[name].local_size);
    if (bin == NULL)
       return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
                        "Unable to compiler internal kernel");

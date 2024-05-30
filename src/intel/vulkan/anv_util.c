@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 
 #include "anv_private.h"
+#include "anv_internal_kernels.h"
 #include "vk_enum_to_str.h"
 
 #include "compiler/brw/brw_nir_rt.h"
@@ -603,4 +604,66 @@ anv_pipeline_bind_map_clone(struct anv_device *device,
    bind_map->embedded_sampler_to_binding = embedded_samplers;
 
    return bind_map;
+}
+
+void
+anv_cmd_buffer_dump_commands(struct anv_cmd_buffer *cmd_buffer,
+                             uint64_t preprocess_cmd_addr,
+                             uint32_t n_dwords)
+{
+   struct anv_device *device = cmd_buffer->device;
+   struct anv_shader_internal *generate_kernel;
+   VkResult ret =
+      anv_device_get_internal_shader(device,
+                                     anv_internal_kernel_variant(
+                                        cmd_buffer, DGC_DUMP),
+                                     &generate_kernel);
+   if (ret != VK_SUCCESS) {
+      anv_batch_set_error(&cmd_buffer->batch, ret);
+      return;
+   }
+
+   anv_add_pending_pipe_bits(cmd_buffer,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             0,
+                             "pre gfx cmd dump");
+   anv_genX(device->info, cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+
+   struct anv_simple_shader simple_state = {
+      .device               = device,
+      .cmd_buffer           = cmd_buffer,
+      .dynamic_state_stream = &cmd_buffer->dynamic_state_stream,
+      .general_state_stream = &cmd_buffer->general_state_stream,
+      .batch                = &cmd_buffer->batch,
+      .kernel               = generate_kernel,
+   };
+   anv_genX(device->info, emit_simple_shader_init)(&simple_state);
+
+   struct anv_dgc_dump_params *params;
+   struct anv_state push_data_state =
+      anv_genX(device->info, simple_shader_alloc_push)(
+         &simple_state, sizeof(*params));
+   if (push_data_state.map == NULL)
+      return;
+   params = push_data_state.map;
+
+   *params = (struct anv_dgc_dump_params) {
+      .cmd_addr = preprocess_cmd_addr,
+      .n_dwords = n_dwords,
+      .call_addr = anv_address_physical(
+         anv_batch_current_address(&cmd_buffer->batch)),
+   };
+
+   anv_genX(device->info, emit_simple_shader_dispatch)(
+      &simple_state, 1, push_data_state);
+
+   anv_add_pending_pipe_bits(cmd_buffer,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             0,
+                             "post gfx cmd dump");
+   anv_genX(device->info, cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 }

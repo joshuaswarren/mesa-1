@@ -1725,6 +1725,7 @@ enum anv_debug {
    ANV_DEBUG_SHADER_PRINT      = BITFIELD_BIT(10),
    ANV_DEBUG_SHADER_DUMP       = BITFIELD_BIT(11),
    ANV_DEBUG_EXPERIMENTAL      = BITFIELD_BIT(12),
+   ANV_DEBUG_DGC_DUMP          = BITFIELD_BIT(13),
 };
 
 extern enum anv_debug anv_debug;
@@ -1733,7 +1734,7 @@ extern enum anv_debug anv_debug;
 
 static inline bool anv_needs_printf_buffer(void)
 {
-   return ANV_DEBUG(SHADER_PRINT);
+   return ANV_DEBUG(SHADER_PRINT) || ANV_DEBUG(DGC_DUMP);
 }
 
 struct anv_instance {
@@ -2480,6 +2481,8 @@ enum anv_internal_kernel_name {
    ANV_INTERNAL_KERNEL_DGC_CS_POSTPROCESS_COMPUTE,
    ANV_INTERNAL_KERNEL_DGC_RT_COMPUTE,
    ANV_INTERNAL_KERNEL_DGC_RT_FRAGMENT,
+   ANV_INTERNAL_KERNEL_DGC_DUMP_COMPUTE,
+   ANV_INTERNAL_KERNEL_DGC_DUMP_FRAGMENT,
 
    ANV_INTERNAL_KERNEL_COUNT,
 };
@@ -6674,6 +6677,9 @@ uint32_t anv_dgc_fill_gfx_layout(struct anv_dgc_gfx_layout *layout,
                                  const struct anv_indirect_command_layout *layout_obj,
                                  struct anv_shader ** const shaders);
 
+void anv_cmd_buffer_dump_commands(struct anv_cmd_buffer *cmd_buffer,
+                                  uint64_t preprocess_cmd_addr,
+                                  uint32_t n_dwords);
 
 struct anv_vid_mem {
    struct anv_device_memory *mem;

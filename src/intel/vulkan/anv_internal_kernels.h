@@ -300,4 +300,14 @@ struct PACKED anv_dgc_rt_params {
    uint32_t flags;
 };
 
+struct PACKED anv_dgc_dump_params {
+   /* Preprocess command address */
+   uint64_t cmd_addr;
+
+   /* Number of dwords */
+   uint32_t n_dwords;
+
+   uint64_t call_addr;
+};
+
 #endif /* ANV_GENERATED_INDIRECT_DRAWS_H */

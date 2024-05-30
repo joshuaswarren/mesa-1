@@ -764,6 +764,13 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
             GENX(MI_STORE_DATA_IMM_ImmediateData_start) / 8;
       }
 
+      if (ANV_DEBUG(DGC_DUMP)) {
+         anv_cmd_buffer_dump_commands(cmd_buffer,
+                                      pGeneratedCommandsInfo->preprocessAddress,
+                                      pGeneratedCommandsInfo->maxSequenceCount *
+                                      layout->cmd_size / 4);
+      }
+
       genX(cmd_buffer_flush_gfx)(cmd_buffer);
 
       if (pGeneratedCommandsInfo->sequenceCountAddress != 0) {
@@ -921,6 +928,13 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
          genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
       }
 
+      if (ANV_DEBUG(DGC_DUMP)) {
+         anv_cmd_buffer_dump_commands(cmd_buffer,
+                                      pGeneratedCommandsInfo->preprocessAddress,
+                                      pGeneratedCommandsInfo->maxSequenceCount *
+                                      layout->cmd_size / 4);
+      }
+
       genX(cmd_buffer_flush_compute_state)(cmd_buffer, indirect_set);
 
       if (cmd_buffer->state.conditional_render_enabled)
@@ -1034,6 +1048,13 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
                                    ANV_PIPE_CS_STALL_BIT,
                                    "after generated commands");
          genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+      }
+
+      if (ANV_DEBUG(DGC_DUMP)) {
+         anv_cmd_buffer_dump_commands(cmd_buffer,
+                                      pGeneratedCommandsInfo->preprocessAddress,
+                                      pGeneratedCommandsInfo->maxSequenceCount *
+                                      layout->cmd_size / 4);
       }
 
       if (cmd_buffer->state.conditional_render_enabled)

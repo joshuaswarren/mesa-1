@@ -177,6 +177,15 @@ genX(call_internal_shader)(nir_builder *b, enum anv_internal_kernel_name shader_
          load_param(b, 64, struct anv_dgc_cs_params, return_addr),
          load_compute_index(b));
       return sizeof(struct anv_dgc_cs_params);
+
+   case ANV_INTERNAL_KERNEL_DGC_DUMP_COMPUTE:
+   case ANV_INTERNAL_KERNEL_DGC_DUMP_FRAGMENT:
+      genX(libanv_dgc_dump)(
+         b,
+         load_param(b, 64, struct anv_dgc_dump_params, cmd_addr),
+         load_param(b, 32, struct anv_dgc_dump_params, n_dwords),
+         load_param(b, 64, struct anv_dgc_dump_params, call_addr));
+      return sizeof(struct anv_dgc_dump_params);
 #endif /* GFX_VER >= 11 */
 
 #if GFX_VERx10 >= 125

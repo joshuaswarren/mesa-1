@@ -21,6 +21,7 @@ endif
 intel_shader_files = files(
   'libintel_shaders.h',
   'dgc.cl',
+  'dgc_debug.cl',
   'generate.cl',
   'generate_draws.cl',
   'generate_draws_iris.cl',
