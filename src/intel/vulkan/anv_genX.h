@@ -548,6 +548,10 @@ void genX(write_rt_shader_group)(struct anv_device *device,
                                  uint32_t shader_count,
                                  void *output);
 
+void genX(write_cs_descriptor)(struct anv_dgc_cs_descriptor *desc,
+                               struct anv_device *device,
+                               struct anv_shader *shader);
+
 uint32_t genX(shader_cmd_size)(struct anv_device *device,
                                mesa_shader_stage stage);
 

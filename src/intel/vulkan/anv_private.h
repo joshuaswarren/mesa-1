@@ -54,6 +54,7 @@
 #include "compiler/brw/brw_rt.h"
 #include "ds/intel_driver_ds.h"
 #include "dev/virtio/intel_virtio.h"
+#include "shaders/libintel_shaders.h"
 #include "util/bitset.h"
 #include "util/bitscan.h"
 #include "util/cache_ops.h"
@@ -1115,6 +1116,11 @@ struct anv_pipeline_bind_map {
    /* Bitfield of inferred behavior of the shader (enum anv_pipeline_behavior) */
    uint8_t                                      inferred_behavior;
 };
+
+struct anv_pipeline_bind_map *
+anv_pipeline_bind_map_clone(struct anv_device *device,
+                            const VkAllocationCallbacks *alloc,
+                            const struct anv_pipeline_bind_map *src);
 
 struct anv_push_descriptor_info {
    /* A bitfield of descriptors used. */
@@ -5193,6 +5199,10 @@ struct anv_event {
 
 #define ANV_STAGE_MASK ((1 << MESA_VULKAN_SHADER_STAGES) - 1)
 
+#define ANV_VK_STAGE_MASK (ANV_GRAPHICS_STAGE_BITS |    \
+                           ANV_RT_STAGE_BITS |          \
+                           VK_SHADER_STAGE_COMPUTE_BIT)
+
 #define anv_foreach_stage(stage, stage_bits)                         \
    u_foreach_bit(stage, (stage_bits & ANV_STAGE_MASK))
 
@@ -6539,6 +6549,36 @@ static inline uint32_t khr_perf_query_preamble_offset(const struct anv_query_poo
           pool->khr_perf_preamble_stride * pass;
 }
 
+struct anv_indirect_execution_set {
+   struct vk_object_base base;
+
+   struct anv_pipeline_bind_map *bind_map;
+
+   /** List of all the scratch buffers on < Gfx12.5 */
+   struct anv_reloc_list relocs;
+
+   struct anv_bo *bo;
+
+   bool uses_systolic;
+
+   uint32_t stride;
+
+   uint32_t max_final_commands_size;
+
+   /** Maximum scratch space for shaders */
+   uint32_t max_scratch;
+   /** Maximum number of ray queries used by shaders */
+   uint32_t max_ray_queries;
+};
+
+void anv_write_gfx_indirect_descriptor(struct anv_device *device,
+                                       struct anv_dgc_gfx_descriptor *descriptor,
+                                       struct anv_cmd_graphics_state *gfx);
+
+enum anv_dgc_stage anv_vk_stage_to_dgc_stage(VkShaderStageFlags vk_stage);
+
+uint32_t anv_vk_stages_to_generated_stages(VkShaderStageFlags vk_stages);
+
 struct anv_vid_mem {
    struct anv_device_memory *mem;
    VkDeviceSize       offset;
@@ -6949,6 +6989,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(anv_performance_configuration_intel, base,
 VK_DEFINE_NONDISP_HANDLE_CASTS(anv_video_session, vk.base,
                                VkVideoSessionKHR,
                                VK_OBJECT_TYPE_VIDEO_SESSION_KHR)
+VK_DEFINE_NONDISP_HANDLE_CASTS(anv_indirect_execution_set, base,
+                               VkIndirectExecutionSetEXT,
+                               VK_OBJECT_TYPE_INDIRECT_EXECUTION_SET_EXT)
 
 #define anv_genX(devinfo, thing) ({             \
    __typeof(&gfx9_##thing) genX_thing;          \

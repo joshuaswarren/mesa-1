@@ -51,6 +51,8 @@ genX_bits_included_symbols = [
   '3DSTATE_STENCIL_BUFFER::Surface Pitch',
   '3DSTATE_HIER_DEPTH_BUFFER::Surface Base Address',
   '3DSTATE_HIER_DEPTH_BUFFER::Surface Pitch',
+  '3DSTATE_DS',
+  '3DSTATE_HS',
   '3DSTATE_CLEAR_PARAMS',
   '3DSTATE_SO_BUFFER::Surface Base Address',
   '3DSTATE_SO_BUFFER::Stream Offset',
