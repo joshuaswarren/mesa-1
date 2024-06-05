@@ -4599,6 +4599,12 @@ anv_pipe_flush_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
           */
          pipe_bits |= ANV_PIPE_CS_STALL_BIT | ANV_PIPE_INVALIDATE_BITS;
          break;
+      case VK_ACCESS_2_COMMAND_PREPROCESS_WRITE_BIT_EXT:
+         /* Preprocess writes are all going through the data cache */
+         pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+         pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
+         pipe_bits |= ANV_PIPE_DATA_CACHE_FLUSH_BIT;
+         break;
       default:
          break; /* Nothing to do */
       }
@@ -4760,6 +4766,10 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
          break;
       case VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT:
          pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT;
+         break;
+      case VK_ACCESS_2_COMMAND_PREPROCESS_READ_BIT_EXT:
+         /* Preprocess can generate push constant data */
+         pipe_bits |= ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
          break;
       default:
          break; /* Nothing to do */
