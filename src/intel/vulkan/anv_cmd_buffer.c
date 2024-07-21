@@ -656,9 +656,11 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
          cmd_buffer->state.descriptor_buffers.offsets_dirty |= stages;
       } else {
          /* Plaforms with LSC will use descriptor buffer push constant
-          * offsets
+          * offsets, also with device generated commands, shaders are much
+          * more likely to access the offset on pre-LSC platforms.
           */
-         bool update_desc_sets = cmd_buffer->device->info->has_lsc;
+         bool update_desc_sets = cmd_buffer->device->vk.enabled_features.deviceGeneratedCommands ||
+                                 cmd_buffer->device->info->has_lsc;
 
          if (update_desc_sets) {
             struct anv_push_constants *push = &pipe_state->push_constants;
