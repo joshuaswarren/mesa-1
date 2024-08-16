@@ -1469,7 +1469,7 @@ brw_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
     * enabled by setting the macro below to true.
     */
    #define ENABLE_TEST_DISPATCH_PACKING false
-   assert(devinfo->ver <= 30);
+   assert(devinfo->ver <= 35);
 
    switch (stage) {
    case MESA_SHADER_FRAGMENT: {
