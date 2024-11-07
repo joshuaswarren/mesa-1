@@ -672,6 +672,16 @@ public:
    }
 
    brw_inst *
+   MULLH(const brw_reg &dst, const brw_reg &src0, const brw_reg &src1) const
+   {
+      brw_inst *inst = alu2(BRW_OPCODE_MULLH, dst, src0, src1);
+      assert(brw_type_size_bytes(dst.type) == 4);
+      const unsigned channels = (inst->exec_size + 15) & ~0xf;
+      inst->size_written = 2 * channels * brw_type_size_bytes(dst.type);
+      return inst;
+   }
+
+   brw_inst *
    BFN(const brw_reg &dst, const brw_reg &src0, const brw_reg &src1,
        const brw_reg &src2, unsigned table_byte) const
    {

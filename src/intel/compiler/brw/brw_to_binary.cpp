@@ -209,6 +209,7 @@ brw_opcode_to_gen(enum opcode op)
    case BRW_OPCODE_MOV:      return GEN_OP_MOV;
    case BRW_OPCODE_MOVI:     return GEN_OP_MOVI;
    case BRW_OPCODE_MUL:      return GEN_OP_MUL;
+   case BRW_OPCODE_MULLH:    return GEN_OP_MULLH;
    case BRW_OPCODE_NOP:      return GEN_OP_NOP;
    case BRW_OPCODE_NOT:      return GEN_OP_NOT;
    case BRW_OPCODE_OR:       return GEN_OP_OR;
@@ -1516,6 +1517,7 @@ brw_generator::generate_code(const brw_shader &s,
 
       case BRW_OPCODE_ADD:
       case BRW_OPCODE_MUL:
+      case BRW_OPCODE_MULLH:
       case BRW_OPCODE_AVG:
       case BRW_OPCODE_MACH:
       case BRW_OPCODE_AND:
@@ -1538,6 +1540,7 @@ brw_generator::generate_code(const brw_shader &s,
          assert(inst->opcode != BRW_OPCODE_MAC || devinfo->ver < 35);
          assert(inst->opcode != BRW_OPCODE_MACH || devinfo->ver < 35);
          assert(inst->opcode != BRW_OPCODE_MACL || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MULLH || devinfo->ver >= 35);
          assert(inst->opcode != BRW_OPCODE_SRND || devinfo->ver >= 20);
          assert(inst->opcode != BRW_OPCODE_ROL || devinfo->ver >= 11);
          assert(inst->opcode != BRW_OPCODE_ROR || devinfo->ver >= 11);

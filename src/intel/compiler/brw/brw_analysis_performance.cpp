@@ -348,6 +348,7 @@ namespace {
       case BRW_OPCODE_ADD:
       case BRW_OPCODE_ADD3:
       case BRW_OPCODE_MUL:
+      case BRW_OPCODE_MULLH:
       case SHADER_OPCODE_MOV_RELOC_IMM:
          if (devinfo->ver >= 11) {
             return calculate_desc(info, EU_UNIT_FPU, 0, 2, 0, 0, 2,
