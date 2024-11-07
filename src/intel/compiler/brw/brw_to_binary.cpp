@@ -1535,6 +1535,9 @@ brw_generator::generate_code(const brw_shader &s,
       case BRW_OPCODE_ROR:
       case BRW_OPCODE_CMP:
       case BRW_OPCODE_CMPN:
+         assert(inst->opcode != BRW_OPCODE_MAC || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MACH || devinfo->ver < 35);
+         assert(inst->opcode != BRW_OPCODE_MACL || devinfo->ver < 35);
          assert(inst->opcode != BRW_OPCODE_SRND || devinfo->ver >= 20);
          assert(inst->opcode != BRW_OPCODE_ROL || devinfo->ver >= 11);
          assert(inst->opcode != BRW_OPCODE_ROR || devinfo->ver >= 11);
