@@ -54,7 +54,7 @@ static inline nir_def *
 brw_load_btd_dss_id(nir_builder *b,
                     const struct intel_device_info *devinfo)
 {
-   assert(devinfo->ver >= 12 && devinfo->ver <= 30);
+   assert(devinfo->ver >= 12 && devinfo->ver <= 35);
    unsigned slice_stride = devinfo->max_subslices_per_slice;
 
    /* Xe3: Engine 3D and GPGPU Programs, EU Overview, Registers and
@@ -128,7 +128,7 @@ static inline nir_def *
 brw_load_eu_thread_simd(nir_builder *b,
                         const struct intel_device_info *devinfo)
 {
-   assert(devinfo->ver >= 12 && devinfo->ver <= 30);
+   assert(devinfo->ver >= 12 && devinfo->ver <= 35);
 
    /* Xe3: Engine 3D and GPGPU Programs, EU Overview, Registers and
     * Register Regions, ARF Registers, State Register.
