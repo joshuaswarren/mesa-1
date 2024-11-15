@@ -76,6 +76,13 @@ inferred_exec_pipe(const struct intel_device_info *devinfo, const brw_inst *inst
             inst->opcode == SHADER_OPCODE_BROADCAST ||
             inst->opcode == SHADER_OPCODE_SHUFFLE)
       return GEN_PIPE_INT;
+   else if (devinfo->ver >= 35 &&
+            (inst->opcode == BRW_OPCODE_MOV ||
+             inst->opcode == BRW_OPCODE_SRND) &&
+            inst->dst.type != inst->src[0].type &&
+            brw_type_size_bytes(inst->dst.type) <= 4 &&
+            brw_type_is_float_or_bfloat(inst->dst.type))
+      return GEN_PIPE_INT;
    else if (inst->opcode == FS_OPCODE_PACK_HALF_2x16_SPLIT)
       return GEN_PIPE_FLOAT;
    else if (devinfo->ver >= 20 &&
