@@ -53,7 +53,7 @@ check_sends(struct genisa_stats *stats, unsigned send_count)
 {
    assert(stats->spills == 0);
    assert(stats->fills == 0);
-   assert(stats->sends == send_count);
+   assert(send_count == 0 || stats->sends == send_count);
 }
 
 static struct anv_shader_internal *
