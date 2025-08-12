@@ -2863,8 +2863,9 @@ emit_samplers(struct anv_cmd_buffer *cmd_buffer,
       if (sampler == NULL)
          continue;
 
-      memcpy(state->map + (s * 16), sampler->state[binding->plane],
-             sizeof(sampler->state[0]));
+      memcpy(state->map + (s * 16),
+             sampler->state.state[binding->plane],
+             sizeof(sampler->state.state[0]));
    }
 
    return VK_SUCCESS;

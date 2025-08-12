@@ -88,6 +88,7 @@ genX_bits_included_symbols = [
   'RT_DISPATCH_GLOBALS::Launch Width',
   'RT_DISPATCH_GLOBALS::Launch Height',
   'RT_DISPATCH_GLOBALS::Launch Depth',
+  'SAMPLER_STATE',
 ]
 
 genX_bits_h = custom_target(

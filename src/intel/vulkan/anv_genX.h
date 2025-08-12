@@ -508,6 +508,11 @@ genX(cmd_buffer_flush_push_descriptors)(struct anv_cmd_buffer *cmd_buffer,
    return push_buffer_dirty | push_descriptor_dirty;
 }
 
+void genX(emit_sampler_state)(const struct anv_device *device,
+                              const struct vk_sampler_state *vk_state,
+                              uint32_t border_color_offset,
+                              struct anv_sampler_state *state);
+
 void genX(emit_embedded_sampler)(struct anv_device *device,
                                  struct anv_embedded_sampler *sampler,
                                  struct anv_pipeline_embedded_sampler_binding *binding);

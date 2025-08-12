@@ -577,7 +577,7 @@ void anv_GetDescriptorSetLayoutSupport(
                ANV_FROM_HANDLE(anv_sampler, sampler,
                                binding->pImmutableSamplers[i]);
                anv_foreach_stage(s, binding->stageFlags)
-                  surface_count[s] += sampler->n_planes;
+                  surface_count[s] += sampler->state.n_planes;
             }
          } else {
             anv_foreach_stage(s, binding->stageFlags)
@@ -866,7 +866,7 @@ VkResult anv_CreateDescriptorSetLayout(
                };
                if (has_embedded_samplers) {
                   set_layout->binding[b].samplers[i].embedded_key =
-                     sampler->embedded_key;
+                     sampler->state.embedded_key;
                }
                if (sampler->vk.ycbcr_conversion) {
                   set_layout->binding[b].samplers[i].has_ycbcr_conversion = true;
@@ -874,8 +874,8 @@ VkResult anv_CreateDescriptorSetLayout(
                      sampler->vk.ycbcr_conversion->state;
                }
 
-               if (set_layout->binding[b].max_plane_count < sampler->n_planes)
-                  set_layout->binding[b].max_plane_count = sampler->n_planes;
+               if (set_layout->binding[b].max_plane_count < sampler->state.n_planes)
+                  set_layout->binding[b].max_plane_count = sampler->state.n_planes;
             }
          }
          break;
@@ -1972,7 +1972,7 @@ anv_sampler_state_for_descriptor_set(const struct anv_sampler *sampler,
                                      const struct anv_descriptor_set *set,
                                      uint32_t plane)
 {
-   return sampler->state[plane];
+   return sampler->state.state[plane];
 }
 
 void
@@ -2053,7 +2053,7 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
       }
 
       if (sampler) {
-         for (unsigned p = 0; p < sampler->n_planes; p++)
+         for (unsigned p = 0; p < sampler->state.n_planes; p++)
             desc_data[p].sampler = sampler->bindless_state.offset + p * 32;
       }
 
@@ -2094,7 +2094,7 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
           bind_layout->descriptor_sampler_offset +
           element * bind_layout->descriptor_sampler_stride) : desc_surface_map;
       if (sampler) {
-         for (unsigned p = 0; p < sampler->n_planes; p++) {
+         for (unsigned p = 0; p < sampler->state.n_planes; p++) {
             memcpy(sampler_map + p * ANV_SAMPLER_STATE_SIZE,
                    anv_sampler_state_for_descriptor_set(sampler, set, p),
                    ANV_SAMPLER_STATE_SIZE);
@@ -2124,7 +2124,7 @@ anv_descriptor_set_write_image_view(struct anv_device *device,
    if (data & ANV_DESCRIPTOR_SURFACE_SAMPLER) {
       unsigned max_plane_count =
          MAX2(image_view ? image_view->n_planes : 1,
-              sampler ? sampler->n_planes : 1);
+              sampler ? sampler->state.n_planes : 1);
 
       for (unsigned p = 0; p < max_plane_count; p++) {
          void *plane_map = desc_surface_map + p * 2 * ANV_SURFACE_STATE_SIZE;
@@ -2758,7 +2758,7 @@ void anv_GetDescriptorEXT(
    case VK_DESCRIPTOR_TYPE_SAMPLER:
       if (pDescriptorInfo->data.pSampler &&
           (sampler = anv_sampler_from_handle(*pDescriptorInfo->data.pSampler))) {
-         memcpy(pDescriptor, sampler->state[0], ANV_SAMPLER_STATE_SIZE);
+         memcpy(pDescriptor, sampler->state.state[0], ANV_SAMPLER_STATE_SIZE);
       } else {
          memset(pDescriptor, 0, ANV_SAMPLER_STATE_SIZE);
       }
@@ -2789,7 +2789,7 @@ void anv_GetDescriptorEXT(
              (sampler = anv_sampler_from_handle(
                 pDescriptorInfo->data.pCombinedImageSampler->sampler))) {
             memcpy(pDescriptor + desc_offset + ANV_SURFACE_STATE_SIZE,
-                   sampler->state[i], ANV_SAMPLER_STATE_SIZE);
+                   sampler->state.state[i], ANV_SAMPLER_STATE_SIZE);
          } else {
             memset(pDescriptor + desc_offset + ANV_SURFACE_STATE_SIZE,
                    0, ANV_SAMPLER_STATE_SIZE);
