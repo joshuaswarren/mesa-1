@@ -159,3 +159,58 @@ void anv_DestroySampler(
 
    vk_sampler_destroy(&device->vk, pAllocator, &sampler->vk);
 }
+
+VkResult anv_RegisterCustomBorderColorEXT(
+    VkDevice                                    _device,
+    const VkSamplerCustomBorderColorCreateInfoEXT* pBorderColor,
+    VkBool32                                    requestIndex,
+    uint32_t*                                   pIndex)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   struct anv_state color_state = requestIndex ?
+         anv_state_reserved_array_pool_alloc_index(
+            &device->custom_border_colors, *pIndex) :
+         anv_state_reserved_array_pool_alloc(
+            &device->custom_border_colors, true);
+
+   if (color_state.alloc_size == 0)
+      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   *pIndex = anv_state_reserved_array_pool_state_index(
+      &device->custom_border_colors, color_state);
+
+   union isl_color_value color = { .u32 = {
+         pBorderColor->customBorderColor.uint32[0],
+         pBorderColor->customBorderColor.uint32[1],
+         pBorderColor->customBorderColor.uint32[2],
+         pBorderColor->customBorderColor.uint32[3],
+      }
+   };
+
+   const struct anv_format *format_desc =
+      pBorderColor->format != VK_FORMAT_UNDEFINED ?
+      anv_get_format(device->physical, pBorderColor->format) : NULL;
+
+   if (format_desc && format_desc->n_planes == 1 &&
+       !isl_swizzle_is_identity(format_desc->planes[0].swizzle)) {
+      const struct anv_format_plane *fmt_plane = &format_desc->planes[0];
+
+      assert(!isl_format_has_int_channel(fmt_plane->isl_format));
+      color = isl_color_value_swizzle(color, fmt_plane->swizzle, true);
+   }
+
+   memcpy(color_state.map, color.u32, sizeof(color));
+
+   return VK_SUCCESS;
+}
+
+void anv_UnregisterCustomBorderColorEXT(
+    VkDevice                                    _device,
+    uint32_t                                    index)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   anv_state_reserved_array_pool_index_free(
+      &device->custom_border_colors, index);
+}

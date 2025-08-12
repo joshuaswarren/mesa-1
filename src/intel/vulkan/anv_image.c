@@ -1738,6 +1738,20 @@ anv_image_init_sparse_bindings(struct anv_image *image,
          explicit_addresses = opaque_info->opaqueCaptureDescriptorData;
    }
 
+   if (image->vk.create_flags & VK_IMAGE_CREATE_DESCRIPTOR_HEAP_CAPTURE_REPLAY_BIT_EXT) {
+      alloc_flags |= ANV_BO_ALLOC_FIXED_ADDRESS;
+
+      const VkOpaqueCaptureDataCreateInfoEXT *opaque_info =
+         vk_find_struct_const(create_info->vk_info->pNext,
+                              OPAQUE_CAPTURE_DATA_CREATE_INFO_EXT);
+      if (opaque_info) {
+         assert(opaque_info->pData[0].size ==
+                sizeof(struct anv_image_opaque_capture_data));
+         explicit_addresses =
+            (const struct anv_image_opaque_capture_data *)opaque_info->pData;
+      }
+   }
+
    uint64_t total_size = 0;
    for (int i = 0; i < ANV_IMAGE_MEMORY_BINDING_END; i++) {
       struct anv_image_binding *b = &image->bindings[i];
@@ -4293,4 +4307,31 @@ anv_layout_has_untracked_aux_writes(const struct intel_device_info * const devin
       return false;
 
    return true;
+}
+
+VkResult anv_GetImageOpaqueCaptureDataEXT(
+    VkDevice                                    _device,
+    uint32_t                                    imageCount,
+    const VkImage*                              pImages,
+    VkHostAddressRangeEXT*                      pDatas)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   for (uint32_t i = 0; i < imageCount; i++) {
+      ANV_FROM_HANDLE(anv_image, image, pImages[i]);
+
+      if (pDatas[i].size < sizeof(uint64_t))
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+      if (anv_image_is_sparse(image) &&
+          (image->vk.create_flags & VK_IMAGE_CREATE_DESCRIPTOR_HEAP_CAPTURE_REPLAY_BIT_EXT)) {
+         *((uint64_t *)pDatas[i].address) = anv_address_physical(
+            image->bindings[ANV_IMAGE_MEMORY_BINDING_MAIN].address);
+      } else {
+         *((uint64_t *)pDatas[i].address) = 0;
+      }
+      pDatas[i].size = sizeof(uint64_t);
+   }
+
+   return VK_SUCCESS;
 }

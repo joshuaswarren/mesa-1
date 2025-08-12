@@ -2919,3 +2919,250 @@ void anv_GetDescriptorEXT(
       UNREACHABLE("Invalid descriptor type");
    }
 }
+
+VkResult anv_WriteSamplerDescriptorsEXT(
+    VkDevice                                    _device,
+    uint32_t                                    samplerCount,
+    const VkSamplerCreateInfo*                  pSamplers,
+    const VkHostAddressRangeEXT*                pDescriptors)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   const uint32_t border_color_stride = 64;
+   for (uint32_t i = 0; i < samplerCount; i++) {
+      struct vk_sampler_state vk_state;
+      vk_sampler_state_init(&vk_state, &pSamplers[i]);
+
+      const VkSamplerCustomBorderColorIndexCreateInfoEXT *color_info =
+         vk_find_struct_const(pSamplers[i].pNext,
+                              SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT);
+      const uint32_t border_color_offset =
+         vk_state.border_color <= VK_BORDER_COLOR_INT_OPAQUE_WHITE ?
+         (device->border_colors.offset + vk_state.border_color * border_color_stride) :
+         (device->custom_border_colors.state.offset + color_info->index * border_color_stride);
+
+      struct anv_sampler_state state;
+      anv_genX(device->info, emit_sampler_state)(device, &vk_state,
+                                                 border_color_offset,
+                                                 &state);
+
+      memcpy(pDescriptors[i].address, state.state[0], ANV_SAMPLER_STATE_SIZE);
+   }
+
+   return VK_SUCCESS;
+}
+
+static bool
+texel_info_is_null(const VkTexelBufferDescriptorInfoEXT *texel_info)
+{
+   return texel_info == NULL ||
+          texel_info->addressRange.size == 0 ||
+          texel_info->addressRange.address == 0;
+}
+
+static bool
+address_range_is_null(const VkDeviceAddressRangeEXT *addr)
+{
+   return addr == NULL || addr->size == 0 || addr->address == 0;
+}
+
+static enum isl_channel_select
+remap_swizzle(VkComponentSwizzle swizzle,
+              struct isl_swizzle format_swizzle)
+{
+   switch (swizzle) {
+   case VK_COMPONENT_SWIZZLE_ZERO:  return ISL_CHANNEL_SELECT_ZERO;
+   case VK_COMPONENT_SWIZZLE_ONE:   return ISL_CHANNEL_SELECT_ONE;
+   case VK_COMPONENT_SWIZZLE_R:     return format_swizzle.r;
+   case VK_COMPONENT_SWIZZLE_G:     return format_swizzle.g;
+   case VK_COMPONENT_SWIZZLE_B:     return format_swizzle.b;
+   case VK_COMPONENT_SWIZZLE_A:     return format_swizzle.a;
+   default:
+      UNREACHABLE("Invalid swizzle");
+   }
+}
+
+VkResult anv_WriteResourceDescriptorsEXT(
+    VkDevice                                    _device,
+    uint32_t                                    resourceCount,
+    const VkResourceDescriptorInfoEXT*          pResources,
+    const VkHostAddressRangeEXT*                pDescriptors)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   for (uint32_t i = 0; i < resourceCount; i++) {
+      const VkResourceDescriptorInfoEXT *res = &pResources[i];
+      const VkHostAddressRangeEXT *out = &pDescriptors[i];
+
+      switch (res->type) {
+      case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+      case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+      case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: {
+         const VkImageDescriptorInfoEXT *img_info =
+            res->data.pImage;
+         if (img_info) {
+            ANV_FROM_HANDLE(anv_image, image, img_info->pView->image);
+
+            struct vk_image_view vk_view;
+            vk_image_view_init(&device->vk, &vk_view, img_info->pView);
+
+            VkFormat view_format = vk_view.view_format;
+            if (anv_is_compressed_format_emulated(device->physical,
+                                                  view_format)) {
+               assert(image->emu_plane_format != VK_FORMAT_UNDEFINED);
+               view_format = anv_get_compressed_format_emulation(
+                  device->physical, view_format);
+            }
+
+            anv_foreach_image_aspect_bit(iaspect_bit, image, vk_view.aspects) {
+               VkImageAspectFlags aspect = 1u << iaspect_bit;
+
+               const uint32_t vplane = anv_aspect_to_plane(vk_view.aspects, aspect);
+
+               const struct anv_format_plane format = anv_get_format_plane(
+                  device->physical, view_format, vplane, image->vk.tiling);
+
+               struct isl_view isl_view = {
+                  .format = format.isl_format,
+                  .base_level = vk_view.base_mip_level,
+                  .levels = vk_view.level_count,
+                  .base_array_layer = vk_view.base_array_layer,
+                  .array_len = vk_view.layer_count,
+                  .min_lod_clamp = vk_view.min_lod,
+                  .swizzle = {
+                     .r = remap_swizzle(vk_view.swizzle.r, format.swizzle),
+                     .g = remap_swizzle(vk_view.swizzle.g, format.swizzle),
+                     .b = remap_swizzle(vk_view.swizzle.b, format.swizzle),
+                     .a = remap_swizzle(vk_view.swizzle.a, format.swizzle),
+                  },
+               };
+
+               if (vk_view.view_type == VK_IMAGE_VIEW_TYPE_3D) {
+                  isl_view.base_array_layer = 0;
+                  isl_view.array_len = vk_view.extent.depth;
+               }
+
+               if (vk_view.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
+                   vk_view.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) {
+                  isl_view.usage = ISL_SURF_USAGE_CUBE_BIT;
+               } else {
+                  isl_view.usage = 0;
+               }
+
+               const bool is_storage =
+                  res->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+               const bool read_only_layout =
+                  img_info->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+                  img_info->layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+                  img_info->layout == VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL ||
+                  img_info->layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+
+               enum isl_aux_usage aux_usage =
+                  anv_layout_to_aux_usage(device->info, image, aspect,
+                                          is_storage ?
+                                          VK_IMAGE_USAGE_STORAGE_BIT :
+                                          VK_IMAGE_USAGE_SAMPLED_BIT,
+                                          img_info->layout,
+                                          VK_QUEUE_GRAPHICS_BIT |
+                                          VK_QUEUE_COMPUTE_BIT);
+
+               struct anv_surface_state state = {};
+               anv_image_fill_surface_state(device, image, aspect,
+                                            &isl_view,
+                                            is_storage ?
+                                            ISL_SURF_USAGE_STORAGE_BIT :
+                                            ISL_SURF_USAGE_TEXTURE_BIT,
+                                            aux_usage, NULL,
+                                            read_only_layout ?
+                                            ANV_IMAGE_VIEW_STATE_TEXTURE_OPTIMAL : 0,
+                                            &state);
+
+               memcpy(out->address + vplane * ANV_SURFACE_STATE_SIZE,
+                      state.state_data.data, ANV_SURFACE_STATE_SIZE);
+            }
+         } else {
+            memcpy(out->address, device->host_null_surface_state,
+                   ANV_SURFACE_STATE_SIZE);
+         }
+         break;
+      }
+
+      case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: {
+         const VkTexelBufferDescriptorInfoEXT *texel_info =
+            res->data.pTexelBuffer;
+
+         if (!texel_info_is_null(texel_info)) {
+            struct anv_format_plane format =
+               anv_get_format_plane(device->physical,
+                                    texel_info->format,
+                                    0, VK_IMAGE_TILING_LINEAR);
+            const uint32_t format_bs =
+               isl_format_get_layout(format.isl_format)->bpb / 8;
+
+            anv_fill_buffer_surface_state(
+               device, out->address,
+               format.isl_format, format.swizzle,
+               res->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER ?
+               ISL_SURF_USAGE_STORAGE_BIT : ISL_SURF_USAGE_TEXTURE_BIT,
+               anv_address_from_u64(texel_info->addressRange.address),
+               align_down_npot_u64(texel_info->addressRange.size, format_bs),
+               format_bs);
+         } else {
+            memcpy(out->address, device->host_null_surface_state,
+                   ANV_SURFACE_STATE_SIZE);
+         }
+         break;
+      }
+
+      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: {
+         const VkDeviceAddressRangeEXT *addr_info = res->data.pAddressRange;
+
+         if (!address_range_is_null(addr_info)) {
+            VkDeviceSize range = addr_info->size;
+
+            /* We report a bounds checking alignment of 32B for the sake of
+             * block messages which read an entire register worth at a time.
+             */
+            if (res->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+               range = align64(range, ANV_UBO_ALIGNMENT);
+
+            isl_surf_usage_flags_t usage =
+               res->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ?
+               ISL_SURF_USAGE_CONSTANT_BUFFER_BIT :
+               ISL_SURF_USAGE_STORAGE_BIT;
+
+            enum isl_format format =
+               anv_isl_format_for_descriptor_type(device, res->type);
+
+            isl_buffer_fill_state(&device->isl_dev, out->address,
+                                  .address = addr_info->address,
+                                  .mocs = isl_mocs(&device->isl_dev, usage, false),
+                                  .size_B = range,
+                                  .format = format,
+                                  .swizzle = ISL_SWIZZLE_IDENTITY,
+                                  .stride_B = 1,
+                                  .usage = usage);
+         } else {
+            memcpy(out->address, device->host_null_surface_state,
+                   ANV_SURFACE_STATE_SIZE);
+         }
+         break;
+      }
+
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
+         const VkDeviceAddressRangeEXT *addr_info = res->data.pAddressRange;
+         uint64_t desc_data = addr_info ? addr_info->address : 0;
+
+         memcpy(out->address, &desc_data, sizeof(desc_data));
+         break;
+      }
+
+      default:
+         UNREACHABLE("Invalid descriptor type");
+      }
+   }
+
+   return VK_SUCCESS;
+}
