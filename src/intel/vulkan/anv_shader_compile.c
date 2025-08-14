@@ -728,25 +728,30 @@ lookup_ycbcr_conversion(const void *_stage, uint32_t set,
 {
    const struct vk_shader_compile_info *stage = _stage;
 
-   assert(set < MAX_SETS);
-   const struct anv_descriptor_set_layout *set_layout =
-      container_of(stage->set_layouts[set],
-                   struct anv_descriptor_set_layout, vk);
+   if (set == VK_NIR_YCBCR_SET_IMMUTABLE_SAMPLERS) {
+      assert(binding < stage->embedded_sampler_count);
+      return &stage->embedded_samplers[binding].ycbcr_conversion;
+   } else {
+      assert(set < MAX_SETS);
+      const struct anv_descriptor_set_layout *set_layout =
+         container_of(stage->set_layouts[set],
+                      struct anv_descriptor_set_layout, vk);
 
-   assert(binding < set_layout->binding_count);
-   const struct anv_descriptor_set_binding_layout *bind_layout =
-      &set_layout->binding[binding];
+      assert(binding < set_layout->binding_count);
+      const struct anv_descriptor_set_binding_layout *bind_layout =
+         &set_layout->binding[binding];
 
-   if (bind_layout->samplers == NULL)
-      return NULL;
+      if (bind_layout->samplers == NULL)
+         return NULL;
 
-   array_index = MIN2(array_index, bind_layout->array_size - 1);
+      array_index = MIN2(array_index, bind_layout->array_size - 1);
 
-   const struct anv_descriptor_set_layout_sampler *sampler =
-      &bind_layout->samplers[array_index];
+      const struct anv_descriptor_set_layout_sampler *sampler =
+         &bind_layout->samplers[array_index];
 
-   return sampler->has_ycbcr_conversion ?
-          &sampler->ycbcr_conversion_state : NULL;
+      return sampler->has_ycbcr_conversion ?
+             &sampler->ycbcr_conversion_state : NULL;
+   }
 }
 
 static void
@@ -1294,6 +1299,8 @@ accept_64bit_atomic_cb(const nir_intrinsic_instr *intrin, const void *data)
 {
    return (intrin->intrinsic == nir_intrinsic_image_atomic ||
            intrin->intrinsic == nir_intrinsic_image_atomic_swap ||
+           intrin->intrinsic == nir_intrinsic_image_heap_atomic ||
+           intrin->intrinsic == nir_intrinsic_image_heap_atomic_swap ||
            intrin->intrinsic == nir_intrinsic_image_deref_atomic ||
            intrin->intrinsic == nir_intrinsic_image_deref_atomic_swap) &&
           intrin->def.bit_size == 64;
@@ -1306,8 +1313,10 @@ lower_non_tg4_non_uniform_offsets(const nir_tex_instr *tex,
    /* HW cannot deal with divergent surfaces/samplers */
    if (tex->src[index].src_type == nir_tex_src_texture_offset ||
        tex->src[index].src_type == nir_tex_src_texture_handle ||
+       tex->src[index].src_type == nir_tex_src_texture_heap_offset ||
        tex->src[index].src_type == nir_tex_src_sampler_offset ||
-       tex->src[index].src_type == nir_tex_src_sampler_handle)
+       tex->src[index].src_type == nir_tex_src_sampler_handle ||
+       tex->src[index].src_type == nir_tex_src_sampler_heap_offset)
       return true;
 
    if (tex->src[index].src_type == nir_tex_src_offset) {
@@ -1555,7 +1564,6 @@ anv_shader_lower_nir(struct anv_device *device,
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       anv_shader_compute_fragment_rts(devinfo, state, shader_data);
 
-
    uint32_t dynamic_descriptors_offset = 0;
    uint32_t dynamic_descriptors_offsets[MAX_SETS] = {};
    for (uint32_t i = 0; i < set_layout_count; i++) {
@@ -1569,14 +1577,21 @@ anv_shader_lower_nir(struct anv_device *device,
       }
    }
 
-   /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
-   NIR_PASS(_, nir, anv_nir_apply_pipeline_layout,
+   /* Apply the actual layout to UBOs, SSBOs, and textures */
+   if (shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT) {
+      NIR_PASS(_, nir, anv_nir_lower_descriptor_heap, device,
+               shader_data->info->embedded_sampler_count,
+               shader_data->info->embedded_samplers,
+               &shader_data->bind_map);
+   } else {
+      NIR_PASS(_, nir, anv_nir_apply_pipeline_layout,
                pdevice, shader_data->key.base.robust_flags,
                set_layouts, set_layout_count,
                (shader_data->info->flags &
                 VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_MESA) ? NULL:
                dynamic_descriptors_offsets,
                &shader_data->bind_map, &shader_data->push_map, mem_ctx);
+   }
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             anv_nir_ubo_addr_format(pdevice, shader_data->key.base.robust_flags));
@@ -1602,7 +1617,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    const bool lower_non_uniform_texture_offsets = device->info->ver < 20;
 
-   enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
+   const enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
       nir_lower_non_uniform_texture_access |
       nir_lower_non_uniform_texture_query |
       nir_lower_non_uniform_image_access |
@@ -1616,10 +1631,8 @@ anv_shader_lower_nir(struct anv_device *device,
     * need to lower those texture messages in the same way we lower
     * non-uniform texture/sampler handles.
     */
-   if (lower_non_uniform_texture_offsets) {
-      nir_foreach_function_impl(impl, nir)
-         nir_metadata_require(impl, nir_metadata_divergence);
-   }
+   if (lower_non_uniform_texture_offsets)
+      nir_divergence_analysis(nir);
 
    /* In practice, most shaders do not have non-uniform-qualified
     * accesses (see
@@ -1695,8 +1708,10 @@ anv_shader_lower_nir(struct anv_device *device,
                &shader_data->prog_data.base,
                &shader_data->bind_map, &shader_data->push_map);
 
-   NIR_PASS(_, nir, anv_nir_lower_resource_intel, pdevice,
-               shader_data->bind_map.layout_type);
+   if (!(shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT)) {
+      NIR_PASS(_, nir, anv_nir_lower_resource_intel, pdevice,
+                  shader_data->bind_map.layout_type);
+   }
 
    shader_data->push_desc_info.push_set_buffer =
       anv_nir_loads_push_desc_buffer(
@@ -2039,7 +2054,8 @@ anv_shader_compile(struct vk_device *vk_device,
          rzalloc_array(mem_ctx, struct anv_pipeline_binding, 256);
       shader_data->bind_map.embedded_sampler_to_binding =
          rzalloc_array(mem_ctx, struct anv_pipeline_embedded_sampler_binding,
-                       sets_layout_embedded_sampler_count(info));
+                       MAX2(sets_layout_embedded_sampler_count(info),
+                            info->embedded_sampler_count));
 
       shader_data->prog_data.base.stage = info->stage;
 
