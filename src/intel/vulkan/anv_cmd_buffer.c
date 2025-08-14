@@ -892,6 +892,79 @@ void anv_CmdBindDescriptorBufferEmbeddedSamplers2EXT(
    /* no-op */
 }
 
+void anv_CmdBindSamplerHeapEXT(
+    VkCommandBuffer                             commandBuffer,
+    const VkBindHeapInfoEXT*                    pBindInfo)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct anv_cmd_state *state = &cmd_buffer->state;
+
+   if (state->descriptor_buffers.samplers_address != pBindInfo->heapRange.address)
+      state->descriptor_buffers.samplers_address = pBindInfo->heapRange.address;
+}
+
+void anv_CmdBindResourceHeapEXT(
+    VkCommandBuffer                             commandBuffer,
+    const VkBindHeapInfoEXT*                    pBindInfo)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct anv_cmd_state *state = &cmd_buffer->state;
+
+   if (state->descriptor_buffers.surfaces_address != pBindInfo->heapRange.address) {
+       state->descriptor_buffers.surfaces_address = pBindInfo->heapRange.address;
+       state->descriptor_buffers.dirty = true;
+   }
+
+   anv_cmd_buffer_maybe_dirty_descriptor_mode(cmd_buffer,
+                                              ANV_CMD_DESCRIPTOR_BUFFER_MODE_HEAP);
+}
+
+void anv_CmdPushDataEXT(
+    VkCommandBuffer                             commandBuffer,
+    const VkPushDataInfoEXT*                    pPushDataInfo)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   if (anv_cmd_buffer_is_render_queue(cmd_buffer)) {
+      struct anv_cmd_pipeline_state *pipe_state =
+         &cmd_buffer->state.gfx.base;
+
+      memcpy(pipe_state->push_constants.client_data + pPushDataInfo->offset,
+             pPushDataInfo->data.address, pPushDataInfo->data.size);
+      pipe_state->push_constants_data_dirty = true;
+      pipe_state->push_constants_client_size = MAX2(
+         pipe_state->push_constants_client_size,
+         pPushDataInfo->offset + pPushDataInfo->data.size);
+      cmd_buffer->state.push_constants_dirty |= ANV_GRAPHICS_STAGE_BITS;
+   }
+
+   if (anv_cmd_buffer_is_render_or_compute_queue(cmd_buffer)) {
+      struct anv_cmd_pipeline_state *cs_state =
+         &cmd_buffer->state.compute.base;
+
+      memcpy(cs_state->push_constants.client_data + pPushDataInfo->offset,
+             pPushDataInfo->data.address, pPushDataInfo->data.size);
+      cs_state->push_constants_data_dirty = true;
+      cs_state->push_constants_client_size = MAX2(
+         cs_state->push_constants_client_size,
+         pPushDataInfo->offset + pPushDataInfo->data.size);
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
+
+
+      if (ANV_SUPPORT_RT && cmd_buffer->device->vk.enabled_features.rayTracingPipeline) {
+         struct anv_cmd_pipeline_state *rt_state =
+            &cmd_buffer->state.rt.base;
+         memcpy(rt_state->push_constants.client_data + pPushDataInfo->offset,
+                pPushDataInfo->data.address, pPushDataInfo->data.size);
+         rt_state->push_constants_data_dirty = true;
+         rt_state->push_constants_client_size = MAX2(
+            rt_state->push_constants_client_size,
+            pPushDataInfo->offset + pPushDataInfo->data.size);
+         cmd_buffer->state.push_constants_dirty |= ANV_RT_STAGE_BITS;
+      }
+   }
+}
+
 void anv_CmdBindVertexBuffers2(
    VkCommandBuffer                              commandBuffer,
    uint32_t                                     firstBinding,

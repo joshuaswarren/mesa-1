@@ -112,6 +112,8 @@ fill_state_base_addr(struct anv_cmd_buffer *cmd_buffer,
    if (cmd_buffer->state.pending_db_mode ==
        ANV_CMD_DESCRIPTOR_BUFFER_MODE_UNKNOWN) {
       cmd_buffer->state.pending_db_mode =
+         cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_heap ?
+         ANV_CMD_DESCRIPTOR_BUFFER_MODE_HEAP :
          cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_buffer ?
          ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER :
          ANV_CMD_DESCRIPTOR_BUFFER_MODE_LEGACY;
@@ -189,7 +191,8 @@ fill_state_base_addr(struct anv_cmd_buffer *cmd_buffer,
    sba->DynamicStateBaseAddressModifyEnable = true;
    sba->DynamicStateBufferSizeModifyEnable = true;
 
-   if (cmd_buffer->state.pending_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER) {
+   if (cmd_buffer->state.pending_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER ||
+       cmd_buffer->state.pending_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_HEAP) {
 #if GFX_VERx10 >= 125
       sba->BindlessSurfaceStateBaseAddress = (struct anv_address) {
          .offset = device->physical->va.dynamic_visible_pool.addr,
@@ -3387,11 +3390,22 @@ genX(flush_descriptor_buffers)(struct anv_cmd_buffer *cmd_buffer,
 
    assert(cmd_buffer->state.current_db_mode !=
           ANV_CMD_DESCRIPTOR_BUFFER_MODE_UNKNOWN);
-   if (cmd_buffer->state.current_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER &&
+   struct anv_push_constants *push_constants =
+      &pipe_state->push_constants;
+   if (cmd_buffer->state.current_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_HEAP) {
+      /* TODO handle non 4k aligned offsets */
+      push_constants->desc_surface_offsets[0] =
+         cmd_buffer->state.descriptor_buffers.surfaces_address -
+         cmd_buffer->device->physical->va.dynamic_visible_pool.addr;
+      push_constants->desc_surface_offsets[1] =
+         cmd_buffer->state.descriptor_buffers.samplers_address -
+         cmd_buffer->device->physical->va.dynamic_state_pool.addr;
+      cmd_buffer->state.push_constants_dirty |=
+         (cmd_buffer->state.descriptor_buffers.offsets_dirty & active_stages);
+      pipe_state->push_constants_data_dirty = true;
+   } else if (cmd_buffer->state.current_db_mode == ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER &&
        (cmd_buffer->state.descriptor_buffers.dirty ||
         (active_stages & cmd_buffer->state.descriptor_buffers.offsets_dirty) != 0)) {
-      struct anv_push_constants *push_constants =
-         &pipe_state->push_constants;
       for (uint32_t i = 0; i < ARRAY_SIZE(push_constants->desc_surface_offsets); i++) {
          update_descriptor_set_surface_state(cmd_buffer, pipe_state, i);
 
@@ -3945,6 +3959,20 @@ genX(BeginCommandBuffer)(
       if (pBeginInfo->pInheritanceInfo->occlusionQueryEnable) {
          cmd_buffer->state.gfx.n_occlusion_queries = 1;
          cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_OCCLUSION_QUERY_ACTIVE;
+      }
+
+      const VkCommandBufferInheritanceDescriptorHeapInfoEXT *heap_info =
+         vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext,
+                              COMMAND_BUFFER_INHERITANCE_DESCRIPTOR_HEAP_INFO_EXT);
+      if (heap_info) {
+         if (heap_info->pSamplerHeapBindInfo) {
+            anv_CmdBindSamplerHeapEXT(commandBuffer,
+                                      heap_info->pSamplerHeapBindInfo);
+         }
+         if (heap_info->pResourceHeapBindInfo) {
+            anv_CmdBindResourceHeapEXT(commandBuffer,
+                                       heap_info->pResourceHeapBindInfo);
+         }
       }
    }
 
@@ -4623,12 +4651,16 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
          }
          break;
       case VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT:
+      case VK_ACCESS_2_RESOURCE_HEAP_READ_BIT_EXT:
          /* Invalidate the state cache (when HW reads RENDER_SURFACE_STATE &
           * SAMPLER_STATE) and the constant cache (when shaders read the
           * descriptor buffers)
           */
          pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
                       ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
+         break;
+      case VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT:
+         pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT;
          break;
       default:
          break; /* Nothing to do */

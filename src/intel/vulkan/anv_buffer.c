@@ -78,7 +78,8 @@ anv_get_buffer_memory_requirements(struct anv_device *device,
    if (flags & VK_BUFFER_CREATE_PROTECTED_BIT)
       memory_types = device->physical->memory.protected_mem_types;
    else if (usage & (VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
-                     VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT))
+                     VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
+                     VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT))
       memory_types = device->physical->memory.dynamic_visible_mem_types;
    else if (device->physical->instance->enable_buffer_comp)
       memory_types = device->physical->memory.default_buffer_mem_types |
@@ -238,7 +239,8 @@ VkResult anv_CreateBuffer(
        * allocate it on the correct heap.
        */
       if (buffer->vk.usage & (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
-                              VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+                              VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                              VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT)) {
          alloc_flags |= ANV_BO_ALLOC_DYNAMIC_VISIBLE_POOL;
       }
 
