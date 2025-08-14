@@ -936,6 +936,8 @@ Anvil(ANV) driver environment variables
     Forces all descriptor sets to use the internal :ref:`Bindless model`
   ``desc-dirty``
     Print out what dirties descriptors
+  ``experimental``
+    Enable experimental features
   ``no-gpl``
     Disables `VK_KHR_graphics_pipeline_library` support
   ``no-secondary-call``

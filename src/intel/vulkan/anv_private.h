@@ -1816,6 +1816,7 @@ enum anv_debug {
    ANV_DEBUG_DESCRIPTOR_DIRTY  = BITFIELD_BIT(9),
    ANV_DEBUG_SHADER_PRINT      = BITFIELD_BIT(10),
    ANV_DEBUG_SHADER_DUMP       = BITFIELD_BIT(11),
+   ANV_DEBUG_EXPERIMENTAL      = BITFIELD_BIT(12),
 };
 
 extern enum anv_debug anv_debug;

@@ -119,6 +119,7 @@ static const driOptionDescription anv_dri_options[] = {
 static const struct debug_control debug_control[] = {
    { "bindless",     ANV_DEBUG_BINDLESS},
    { "desc-dirty",   ANV_DEBUG_DESCRIPTOR_DIRTY},
+   { "experimental", ANV_DEBUG_EXPERIMENTAL},
    { "no-gpl",       ANV_DEBUG_NO_GPL},
    { "no-slab",      ANV_DEBUG_NO_SLAB},
    { "no-sparse",    ANV_DEBUG_NO_SPARSE},
