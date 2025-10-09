@@ -8744,11 +8744,11 @@ got cmdszdw=416
 								{ ARRAY_PITCH = 4096 | MIN_LAYERSZ = 0 }
 								{ BASE_LO = 0x373a000 }
 								{ BASE_HI = 0x1 | DEPTH = 1 }
-								{ MIN_LOD_CLAMP = 0.000000 | PLANE_PITCH = 0 }
+								{ MIN_LOD_CLAMP = 0.000000 | PLANE_PITCH = 0 | LOG2_PHASES = 0 | DILATION = 0 }
 								{ FLAG_LO = 0 }
-								{ FLAG_HI = 0 }
+								{ FLAG_HI = 0 | FILTER_SIZE_X = 0 | FILTER_SIZE_Y = 0 }
 								{ FLAG_BUFFER_ARRAY_PITCH = 0 }
-								{ FLAG_BUFFER_PITCH = 0 | FLAG_BUFFER_LOGW = 0 | FLAG_BUFFER_LOGH = 0 }
+								{ FLAG_BUFFER_PITCH = 0 | FLAG_BUFFER_LOGW = 0 | FLAG_BUFFER_LOGH = 0 | FILTER_OFFSET_X = 0 | FILTER_OFFSET_Y = 0 }
 								{ 11 = 0 }
 								{ 12 = 0 }
 								{ 13 = 0 }
