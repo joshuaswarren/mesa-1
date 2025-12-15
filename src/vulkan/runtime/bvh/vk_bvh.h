@@ -169,4 +169,9 @@ struct vk_bvh_geometry_data {
    uint32_t index_format;
 };
 
+struct key32_id_pair {
+   uint32_t id;
+   uint32_t key;
+};
+
 #endif

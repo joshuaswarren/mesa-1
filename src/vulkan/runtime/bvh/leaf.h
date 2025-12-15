@@ -204,7 +204,7 @@ main(void)
    uint32_t global_id = gl_GlobalInvocationID.x;
    uint32_t primitive_id = args.geom_data.first_id + global_id;
 
-   REF(key_id_pair) id_ptr = INDEX(key_id_pair, args.ids, primitive_id);
+   REF(key32_id_pair) id_ptr = INDEX(key32_id_pair, args.ids, primitive_id);
    uint32_t src_offset = global_id * args.geom_data.stride;
 
    uint32_t dst_stride;

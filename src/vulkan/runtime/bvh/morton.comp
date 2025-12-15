@@ -57,7 +57,7 @@ main(void)
 {
    uint32_t global_id = gl_GlobalInvocationID.x;
 
-   REF(key_id_pair) key_id = INDEX(key_id_pair, args.ids, global_id);
+   REF(key32_id_pair) key_id = INDEX(key32_id_pair, args.ids, global_id);
 
    uint32_t id = DEREF(key_id).id;
 

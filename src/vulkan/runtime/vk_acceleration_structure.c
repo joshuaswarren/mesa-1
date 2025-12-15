@@ -135,7 +135,6 @@ vk_common_GetAccelerationStructureDeviceAddressKHR(
    return vk_acceleration_structure_get_va(accel_struct);
 }
 
-#define KEY_ID_PAIR_SIZE 8
 #define MORTON_BIT_SIZE  24
 
 static void

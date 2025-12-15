@@ -39,8 +39,8 @@ delta(uint32_t index)
    uint32_t left_index = index;
    uint32_t right_index = index + 1;
 
-   uint32_t left_key = DEREF(INDEX(key_id_pair, args.ids, left_index)).key;
-   uint32_t right_key = DEREF(INDEX(key_id_pair, args.ids, right_index)).key;
+   uint32_t left_key = DEREF(INDEX(key32_id_pair, args.ids, left_index)).key;
+   uint32_t right_key = DEREF(INDEX(key32_id_pair, args.ids, right_index)).key;
 
    return left_key != right_key ? (32 + findMSB(left_key ^ right_key)) : findMSB(left_index ^ right_index);
 }
@@ -67,7 +67,7 @@ main(void)
       uint32_t child_id = VK_BVH_INVALID_NODE;
       vk_ir_node child = vk_ir_node(vk_aabb(vec3(0.0), vec3(0.0)));
       if (active_leaf_count > 0) {
-         REF(key_id_pair) key_id = INDEX(key_id_pair, args.ids, global_id);
+         REF(key32_id_pair) key_id = INDEX(key32_id_pair, args.ids, global_id);
          child_id = DEREF(key_id).id;
          child = DEREF(REF(vk_ir_node)(OFFSET(args.bvh, ir_id_to_offset(child_id))));
       }
@@ -143,7 +143,7 @@ main(void)
          uint32_t node_id_index = load_base + load_index;
          uint32_t node_id = VK_BVH_INVALID_NODE;
          if (load_index < index_range)
-            node_id = DEREF(INDEX(key_id_pair, args.ids, node_id_index)).id;
+            node_id = DEREF(INDEX(key32_id_pair, args.ids, node_id_index)).id;
 
          uvec4 node_valid_mask = subgroupBallot(node_id != VK_BVH_INVALID_NODE);
          uint32_t node_prefix_sum = subgroupBallotExclusiveBitCount(node_valid_mask);
@@ -225,7 +225,7 @@ main(void)
 
          if (gl_SubgroupInvocationID < min(end - start + 1, cluster_threshold)) {
             uint32_t dst_node = gl_SubgroupInvocationID < node_count ? node_ids[gl_SubgroupInvocationID] : VK_BVH_INVALID_NODE;
-            DEREF(INDEX(key_id_pair, args.ids, start + gl_SubgroupInvocationID)).id = dst_node;
+            DEREF(INDEX(key32_id_pair, args.ids, start + gl_SubgroupInvocationID)).id = dst_node;
          }
 
          memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
