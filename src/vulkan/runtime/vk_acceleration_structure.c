@@ -174,7 +174,7 @@ vk_acceleration_structure_build_state_init(struct vk_acceleration_structure_buil
    radix_sort_vk_memory_requirements_t requirements = {
       0,
    };
-   radix_sort_vk_get_memory_requirements(args->radix_sort, leaf_count,
+   radix_sort_vk_get_memory_requirements(args->radix_sort_64, leaf_count,
                                          &requirements);
 
    uint32_t ir_leaf_size;
@@ -687,7 +687,7 @@ morton_sort(VkCommandBuffer commandBuffer, struct vk_device *device,
    }
 
    /* Copyright 2019 The Fuchsia Authors. */
-   const radix_sort_vk_t *rs = args->radix_sort;
+   const radix_sort_vk_t *rs = args->radix_sort_64;
 
    /*
     * OVERVIEW

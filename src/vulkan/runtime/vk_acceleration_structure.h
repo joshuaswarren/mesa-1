@@ -179,7 +179,7 @@ struct vk_acceleration_structure_build_args {
    uint32_t root_flags_offset;
    bool propagate_cull_flags;
    bool emit_markers;
-   const radix_sort_vk_t *radix_sort;
+   const radix_sort_vk_t *radix_sort_64;
 };
 
 VkResult vk_get_bvh_build_pipeline_layout(struct vk_device *device, struct vk_meta_device *meta,

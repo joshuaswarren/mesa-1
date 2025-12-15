@@ -233,8 +233,8 @@ radv_device_finish_accel_struct_build_state(struct radv_device *device)
    VkDevice _device = radv_device_to_handle(device);
    struct radv_meta_state *state = &device->meta_state;
 
-   if (state->accel_struct_build.radix_sort)
-      radix_sort_vk_destroy(state->accel_struct_build.radix_sort, _device, &state->alloc);
+   if (state->accel_struct_build.radix_sort_64)
+      radix_sort_vk_destroy(state->accel_struct_build.radix_sort_64, _device, &state->alloc);
 }
 
 static VkDeviceSize
@@ -931,7 +931,7 @@ radv_update_as_gfx12(VkCommandBuffer commandBuffer, const struct vk_acceleration
    radv_compute_dispatch(cmd_buffer, &dispatch);
 }
 
-static const struct radix_sort_vk_target_config radix_sort_config = {
+static const struct radix_sort_vk_target_config radix_sort_64_config = {
    .keyval_dwords = 2,
    .fill.workgroup_size_log2 = 7,
    .fill.block_rows = 8,
@@ -984,11 +984,11 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
 
    mtx_lock(&device->meta_state.mtx);
 
-   if (device->meta_state.accel_struct_build.radix_sort)
+   if (device->meta_state.accel_struct_build.radix_sort_64)
       goto exit;
 
-   device->meta_state.accel_struct_build.radix_sort = vk_create_radix_sort_u64(
-      radv_device_to_handle(device), &device->meta_state.alloc, device->meta_state.cache, radix_sort_config);
+   device->meta_state.accel_struct_build.radix_sort_64 = vk_create_radix_sort_u64(
+      radv_device_to_handle(device), &device->meta_state.alloc, device->meta_state.cache, radix_sort_64_config);
 
    device->meta_state.accel_struct_build.build_ops = (struct vk_acceleration_structure_build_ops){
       .begin_debug_marker = vk_accel_struct_cmd_begin_debug_marker,
@@ -1043,7 +1043,7 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
    build_args->root_flags_offset = offsetof(struct radv_accel_struct_header, root_flags);
    build_args->propagate_cull_flags = pdev->info.gfx_level >= GFX11;
    build_args->emit_markers = device->sqtt.bo;
-   build_args->radix_sort = device->meta_state.accel_struct_build.radix_sort;
+   build_args->radix_sort_64 = device->meta_state.accel_struct_build.radix_sort_64;
 
 exit:
    mtx_unlock(&device->meta_state.mtx);
