@@ -174,4 +174,10 @@ struct key32_id_pair {
    uint32_t key;
 };
 
+struct key64_id_pair {
+   uint32_t id;
+   uint32_t key_lo;
+   uint32_t key_hi;
+};
+
 #endif
