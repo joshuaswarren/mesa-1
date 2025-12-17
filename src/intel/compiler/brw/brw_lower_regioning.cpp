@@ -370,7 +370,7 @@ namespace {
    has_invalid_dst_region(const intel_device_info *devinfo,
                           const brw_inst *inst)
    {
-      if (inst->is_send()) {
+      if (inst->is_send() || inst->opcode == BRW_OPCODE_DPAS) {
          return false;
 
       } else if (devinfo->has_bfloat16 && has_bfloat_operands(inst)) {
