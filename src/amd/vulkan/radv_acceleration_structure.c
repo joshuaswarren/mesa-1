@@ -10,6 +10,7 @@
 
 #include "radix_sort/common/vk/barrier.h"
 #include "radix_sort/radix_sort_u64.h"
+#include "radix_sort/radix_sort_u96.h"
 
 #include "bvh/build_interface.h"
 #include "bvh/bvh.h"
@@ -235,6 +236,8 @@ radv_device_finish_accel_struct_build_state(struct radv_device *device)
 
    if (state->accel_struct_build.radix_sort_64)
       radix_sort_vk_destroy(state->accel_struct_build.radix_sort_64, _device, &state->alloc);
+   if (state->accel_struct_build.radix_sort_96)
+      radix_sort_vk_destroy(state->accel_struct_build.radix_sort_96, _device, &state->alloc);
 }
 
 static VkDeviceSize
@@ -282,8 +285,10 @@ radv_get_build_config(VkDevice _device, struct vk_acceleration_structure_build_s
 
    VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
 
-   if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+   if (state->build_info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
       state->config.internal_type = VK_INTERNAL_BUILD_TYPE_HPLOC;
+      state->config.u64_keys = pdev->info.gfx_level < GFX12;
+   }
 
    uint32_t encode_key = 0;
    if (radv_use_bvh8(pdev)) {
@@ -945,6 +950,20 @@ static const struct radix_sort_vk_target_config radix_sort_64_config = {
    .scatter.block_rows = 14,
 };
 
+static const struct radix_sort_vk_target_config radix_sort_96_config = {
+   .keyval_dwords = 3,
+   .fill.workgroup_size_log2 = 7,
+   .fill.block_rows = 8,
+   .histogram.workgroup_size_log2 = 8,
+   .histogram.subgroup_size_log2 = 6,
+   .histogram.block_rows = 14,
+   .prefix.workgroup_size_log2 = 8,
+   .prefix.subgroup_size_log2 = 6,
+   .scatter.workgroup_size_log2 = 8,
+   .scatter.subgroup_size_log2 = 6,
+   .scatter.block_rows = 14,
+};
+
 static void
 radv_write_buffer_cp(VkCommandBuffer commandBuffer, VkDeviceAddress addr, void *data, uint32_t size)
 {
@@ -989,6 +1008,8 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
 
    device->meta_state.accel_struct_build.radix_sort_64 = vk_create_radix_sort_u64(
       radv_device_to_handle(device), &device->meta_state.alloc, device->meta_state.cache, radix_sort_64_config);
+   device->meta_state.accel_struct_build.radix_sort_96 = vk_create_radix_sort_u96(
+      radv_device_to_handle(device), &device->meta_state.alloc, device->meta_state.cache, radix_sort_96_config);
 
    device->meta_state.accel_struct_build.build_ops = (struct vk_acceleration_structure_build_ops){
       .begin_debug_marker = vk_accel_struct_cmd_begin_debug_marker,
@@ -1044,6 +1065,7 @@ radv_device_init_accel_struct_build_state(struct radv_device *device)
    build_args->propagate_cull_flags = pdev->info.gfx_level >= GFX11;
    build_args->emit_markers = device->sqtt.bo;
    build_args->radix_sort_64 = device->meta_state.accel_struct_build.radix_sort_64;
+   build_args->radix_sort_96 = device->meta_state.accel_struct_build.radix_sort_96;
 
 exit:
    mtx_unlock(&device->meta_state.mtx);
