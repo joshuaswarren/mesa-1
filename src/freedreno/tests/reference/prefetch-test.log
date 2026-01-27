@@ -8755,40 +8755,6 @@ got cmdszdw=416
 								{ 13 = 0 }
 								{ 14 = 0 }
 								{ 15 = 0 }
-							STORAGE/TEXEL/IMAGE[0]: (DESC_MULTI_PLANE)
-								{ TILE_MODE = TILE6_LINEAR | SWIZ_X = A6XX_TEX_X | SWIZ_Y = A6XX_TEX_Y | SWIZ_Z = A6XX_TEX_Z | SWIZ_W = A6XX_TEX_W | SAMPLES = MSAA_ONE | FMT = FMT6_8_8_8_8_UNORM | SWAP = WZYX }
-								{ WIDTH = 2 | HEIGHT = 2 }
-								{ PITCHALIGN = 2 | PITCH = 256 | TYPE = A6XX_TEX_2D }
-								{ 0x1 }
-								{ BASE_LO = 0x373a000 }
-								{ BASE_HI = 0x1 | DEPTH = 1 }
-								{ MIN_LOD_CLAMP = 0.000000 | PLANE_PITCH = 0 }
-								{ BASE_U_LO = 0 }
-								{ BASE_U_HI = 0 }
-								{ BASE_V_LO = 0 }
-								{ BASE_V_HI = 0 }
-								{ 11 = 0 }
-								{ 12 = 0 }
-								{ 13 = 0 }
-								{ 14 = 0 }
-								{ 15 = 0 }
-							STORAGE/TEXEL/IMAGE[0]: (DESC_BUFFER)
-								{ TILE_MODE = TILE6_LINEAR | SWIZ_X = A6XX_TEX_X | SWIZ_Y = A6XX_TEX_Y | SWIZ_Z = A6XX_TEX_Z | SWIZ_W = A6XX_TEX_W | MIPLVLS = 0 | SAMPLES = MSAA_ONE | FMT = FMT6_8_8_8_8_UNORM | SWAP = WZYX }
-								{ NUM_ELEMENTS = 65538 }
-								{ STRUCTSIZETEXELS = 2048 | STARTOFFSETTEXELS = 0 | TYPE = A6XX_TEX_2D | 0x2 }
-								{ 0x1 }
-								{ BASE_LO = 0x373a000 }
-								{ BASE_HI = 0x1 | 0x20000 }
-								{ 0 }
-								{ 0 }
-								{ 0 }
-								{ 0 }
-								{ 0 }
-								{ 11 = 0 }
-								{ 12 = 0 }
-								{ 13 = 0 }
-								{ 14 = 0 }
-								{ 15 = 0 }
 0000000100009200:							0000: 0c006880 00010002 20008002 00000001 0373a000 00020001 00000000 00000000
 *
 000000010000915c:						0000: 70348003 00524000 00009200 00000001
