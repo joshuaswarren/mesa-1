@@ -275,7 +275,7 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 
    VkShaderStageFlags push_stages =
       genX(push_constant_alloc_stages)(VK_SHADER_STAGE_FRAGMENT_BIT);
-   genX(batch_emit_push_constants)(batch, device, push_stages);
+   genX(batch_emit_push_constants_alloc)(batch, device, push_stages);
    state->cmd_buffer->state.gfx.push_constant_stages = push_stages;
 
 #if GFX_VERx10 == 125

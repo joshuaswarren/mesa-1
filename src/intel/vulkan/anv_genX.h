@@ -89,9 +89,9 @@ genX(push_constant_alloc_stages)(VkShaderStageFlags active_stages)
    return stages;
 }
 
-void genX(batch_emit_push_constants)(struct anv_batch *batch,
-                                     struct anv_device *device,
-                                     VkShaderStageFlags stages);
+void genX(batch_emit_push_constants_alloc)(struct anv_batch *batch,
+                                           struct anv_device *device,
+                                           VkShaderStageFlags stages);
 
 void
 genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
