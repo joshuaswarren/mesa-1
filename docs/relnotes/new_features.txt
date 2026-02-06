@@ -8,3 +8,4 @@ VK_KHR_performance_query on RADV/GFX11
 VK_EXT_conservative_rasterization on panvk
 shaderImageGatherExtended on pvr
 static C++ stdlib required on rusticl to workaround applications using their own C++ stdlib
+VK_EXT_pipeline_protected_access on RADV

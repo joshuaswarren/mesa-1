@@ -874,6 +874,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
       .EXT_pipeline_library_group_handles = radv_enable_rt(pdev),
+      .EXT_pipeline_protected_access = radv_tmz_enabled(pdev),
       .EXT_pipeline_robustness = !pdev->use_llvm,
       .EXT_post_depth_coverage = pdev->info.gfx_level >= GFX10,
 #ifdef RADV_USE_WSI_PLATFORM
@@ -1118,7 +1119,11 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .dynamicRenderingLocalRead = true,
       .maintenance5 = true,
       .maintenance6 = true,
-      .pipelineProtectedAccess = false,
+
+      /* The pipeline flags are ignored because it's not really possible to
+       * control this at pipeline level.
+       */
+      .pipelineProtectedAccess = radv_tmz_enabled(pdev),
       .pipelineRobustness = true,
       .hostImageCopy = radv_host_image_copy_enabled(pdev),
       .pushDescriptor = true,
