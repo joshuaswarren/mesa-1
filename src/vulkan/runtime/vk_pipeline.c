@@ -1271,7 +1271,7 @@ vk_pipeline_to_shader_flags(VkPipelineCreateFlags2KHR pipeline_flags,
        pipeline_layout != NULL &&
        (pipeline_layout->create_flags &
         VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT))
-      shader_flags |= VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_MESA;
+      shader_flags |= VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_KHR;
 
    return shader_flags;
 }

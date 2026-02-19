@@ -1613,7 +1613,7 @@ anv_shader_lower_nir(struct anv_device *device,
                pdevice, shader_data->key.base.robust_flags,
                set_layouts, set_layout_count,
                (shader_data->info->flags &
-                VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_MESA) ? NULL :
+                VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_KHR) ? NULL :
                dynamic_descriptors_offsets,
                shader_data->info->flags & VK_SHADER_CREATE_INDIRECT_BINDABLE_BIT_EXT,
                &shader_data->bind_map, &shader_data->push_map, mem_ctx);
