@@ -194,6 +194,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_maintenance8                      = true,
       .KHR_maintenance9                      = true,
       .KHR_maintenance10                     = true,
+      .KHR_maintenance11                     = true,
       .KHR_map_memory2                       = true,
       .KHR_multiview                         = true,
       .KHR_performance_query =
@@ -1047,6 +1048,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_device_generated_commands */
       .deviceGeneratedCommands = true,
       .dynamicGeneratedPipelineLayout = true,
+
+      /* VK_KHR_maintenance11 */
+      .maintenance11 = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -3168,6 +3172,13 @@ void anv_GetPhysicalDeviceQueueFamilyProperties2(
                   prop->optimalImageTransferToQueueFamilies = BITSET_MASK(pdevice->queue.family_count);
                else
                   prop->optimalImageTransferToQueueFamilies = 0;
+               break;
+            }
+
+            case VK_STRUCTURE_TYPE_QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR: {
+               VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *prop =
+                  (VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *)ext;
+               prop->optimalImageTransferGranularity = (VkExtent3D){ 1, 1, 1, };
                break;
             }
 
