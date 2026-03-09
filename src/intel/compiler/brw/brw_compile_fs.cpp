@@ -147,9 +147,6 @@ brw_emit_fb_writes(brw_shader &s)
       (key->nr_color_regions > 1 && key->alpha_to_coverage &&
        s.sample_mask.file == BAD_FILE);
 
-   prog_data->dual_src_blend = s.dual_src_output.file != BAD_FILE;
-   assert(!prog_data->dual_src_blend || key->nr_color_regions == 1);
-
    /* Following condition implements Wa_14017468336:
     *
     * "If dual source blend is enabled do not enable SIMD32 dispatch" and
@@ -881,6 +878,10 @@ brw_nir_populate_fs_prog_data(nir_shader *shader,
    prog_data->computed_depth_mode = computed_depth_mode(shader);
    prog_data->computed_stencil =
       shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL);
+
+   prog_data->dual_src_blend =
+      shader->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DUAL_SRC_BLEND);
+   assert(!prog_data->dual_src_blend || key->nr_color_regions == 1);
 
    prog_data->sample_shading =
       shader->info.fs.uses_sample_shading ||
