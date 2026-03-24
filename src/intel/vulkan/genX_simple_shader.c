@@ -397,11 +397,14 @@ genX(emit_simpler_shader_init_compute)(struct anv_simple_shader *state)
    struct anv_shader_internal *cs_bin = state->kernel;
    const struct brw_cs_prog_data *prog_data =
       (const struct brw_cs_prog_data *) cs_bin->prog_data;
-   /* Currently our simple shaders are simple enough that they never spill. */
-   assert(prog_data->base.total_scratch == 0);
    if (state->cmd_buffer != NULL) {
-      genX(cmd_buffer_ensure_cfe_state)(state->cmd_buffer, 0);
+      genX(cmd_buffer_ensure_cfe_state)(state->cmd_buffer,
+                                        prog_data->base.total_scratch);
    } else {
+      /* Currently our simple shaders not in the command buffers are simple
+       * enough that they never spill.
+       */
+      assert(prog_data->base.total_scratch == 0);
       anv_batch_emit(state->batch, GENX(CFE_STATE), cfe) {
          cfe.MaximumNumberofThreads =
             state->device->info->max_cs_threads *

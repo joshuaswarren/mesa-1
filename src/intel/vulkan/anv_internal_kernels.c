@@ -51,8 +51,8 @@ lower_base_workgroup_id(nir_builder *b, nir_intrinsic_instr *intrin,
 static void
 check_sends(struct genisa_stats *stats, unsigned send_count)
 {
-   assert(stats->spills == 0);
-   assert(stats->fills == 0);
+   assert(send_count == 0 || stats->spills == 0);
+   assert(send_count == 0 || stats->fills == 0);
    assert(send_count == 0 || stats->sends == send_count);
 }
 
@@ -213,7 +213,8 @@ compile_shader(struct anv_device *device,
       }
    }
 
-   assert(prog_data.base.total_scratch == 0);
+   /* Complex shaders are allowed to spill */
+   assert(sends_count_expectation == 0 || prog_data.base.total_scratch == 0);
    assert(program != NULL);
    struct anv_shader_internal *kernel = NULL;
    if (program == NULL)
