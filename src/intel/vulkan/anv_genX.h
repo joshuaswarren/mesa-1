@@ -228,9 +228,9 @@ void genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer);
 
 void genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer);
 
-void genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer);
-
 void genX(cmd_buffer_flush_gfx_state)(struct anv_cmd_buffer *cmd_buffer);
+
+void genX(cmd_buffer_flush_gfx)(struct anv_cmd_buffer *cmd_buffer);
 
 void genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer);
 
