@@ -1158,14 +1158,15 @@ brw_compile_mesh(const struct brw_compiler *compiler,
          if (wa_18019110168_mapping[i] != -1)
             remap_table[i] = prog_data->map.vue_map.varying_to_slot[wa_18019110168_mapping[i]];
       }
+      uint32_t constant_data_aligned_size = align(nir->constant_data_size, 32);
       uint8_t *const_data =
          (uint8_t *) rzalloc_size(params->base.mem_ctx,
-                                  nir->constant_data_size + sizeof(remap_table));
+                                  constant_data_aligned_size + sizeof(remap_table));
       memcpy(const_data, nir->constant_data, nir->constant_data_size);
-      memcpy(const_data + nir->constant_data_size, remap_table, sizeof(remap_table));
-      g.add_const_data(const_data, nir->constant_data_size + sizeof(remap_table));
+      memcpy(const_data + constant_data_aligned_size, remap_table, sizeof(remap_table));
+      g.add_const_data(const_data, constant_data_aligned_size + sizeof(remap_table));
       prog_data->wa_18019110168_mapping_offset =
-         prog_data->base.base.const_data_offset + nir->constant_data_size;
+         prog_data->base.base.const_data_offset + constant_data_aligned_size;
    } else {
       g.add_const_data(nir->constant_data, nir->constant_data_size);
    }

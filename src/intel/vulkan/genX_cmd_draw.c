@@ -628,13 +628,6 @@ fill_inline_params(uint32_t *inline_data,
       case ANV_INLINE_DWORD_PUSH_ADDRESS_UDW:
          inline_data[i] = push_addr64 >> 32;
          break;
-      case anv_drv_const_dword(gfx.mesh_provoking_vertex): {
-         const struct brw_mesh_prog_data *mesh_prog_data = get_gfx_mesh_prog_data(gfx);
-         inline_data[i] = gfx->dyn_state.mesh_provoking_vertex |
-                          ((gfx->shaders[MESA_SHADER_MESH]->kernel.offset +
-                            mesh_prog_data->wa_18019110168_mapping_offset) >> 16);
-         break;
-      }
       default:
          inline_data[i] = push_data[bind_map->inline_dwords[i]];
          break;

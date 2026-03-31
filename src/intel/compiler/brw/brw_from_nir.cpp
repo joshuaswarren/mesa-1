@@ -4157,11 +4157,6 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       bld.MOV(retype(dest, BRW_TYPE_UD), brw_imm_ud(s.max_polygons));
       break;
 
-   case nir_intrinsic_load_per_primitive_remap_intel:
-      bld.MOV(retype(dest, BRW_TYPE_UD),
-              brw_dynamic_per_primitive_remap(brw_fs_prog_data(s.prog_data)));
-      break;
-
    default:
       brw_from_nir_emit_intrinsic(ntb, bld, instr);
       break;

@@ -356,7 +356,6 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_fs_z_c0_intel:
    case nir_intrinsic_load_ray_base_mem_addr_intel:
    case nir_intrinsic_load_ray_hw_stack_size_intel:
-   case nir_intrinsic_load_per_primitive_remap_intel:
    case nir_intrinsic_load_core_count_arm:
    case nir_intrinsic_load_core_max_id_arm:
    case nir_intrinsic_load_warp_max_id_arm:

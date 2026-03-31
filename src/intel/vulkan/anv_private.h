@@ -1167,7 +1167,6 @@ enum anv_pipeline_behavior {
 
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_LDW      (UINT8_MAX - 0)
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_UDW      (UINT8_MAX - 1)
-#define ANV_INLINE_DWORD_MESH_PROVOKING_VERTEX (UINT8_MAX - 2)
 
 struct anv_pipeline_bind_map {
    unsigned char                                surface_blake3[BLAKE3_KEY_LEN];
@@ -2055,6 +2054,7 @@ enum anv_gfx_state_bits {
    ANV_GFX_STATE_WA_14018283232, /* Fake state to implement workaround */
    ANV_GFX_STATE_WA_18038825448, /* Fake state to implement workaround */
    ANV_GFX_STATE_WA_14024997852, /* Fake state to implement workaround */
+   ANV_GFX_STATE_WA_18019110168, /* Fake state to implement workaround */
    ANV_GFX_STATE_TBIMR_TILE_PASS_INFO,
    ANV_GFX_STATE_FS_CONFIG,
    ANV_GFX_STATE_TESS_CONFIG,
@@ -2462,9 +2462,9 @@ struct anv_gfx_dynamic_state {
    uint32_t tess_config;
 
    /**
-    * Provoking vertex index, sent to the mesh shader for Wa_18019110168.
+    * Prepared value for anv_push_constants::gfx::wa_18019110168.
     */
-   uint32_t mesh_provoking_vertex;
+   uint32_t wa_18019110168;
 
    bool pma_fix;
 
@@ -4396,9 +4396,13 @@ struct anv_push_constants {
          /** Robust access pushed registers. */
          uint8_t push_reg_mask[MESA_SHADER_STAGES][4];
 
-         /** Wa_18019110168 */
-         uint16_t mesh_provoking_vertex;
-         uint16_t fs_per_prim_remap_offset;
+         /** Wa_18019110168
+          * bits  4:0 : provoking vertex value
+          * bits 31:5 : per primitive table remapping offset
+          */
+#define ANV_WA_18019110168_PROVOKING_VERTEX_MASK                 ((1u << 5) - 1)
+#define ANV_WA_18019110168_PER_PRIMITIVE_REMAP_TABLE_OFFSET_MASK (~ANV_WA_18019110168_PROVOKING_VERTEX_MASK)
+         uint32_t wa_18019110168;
       } gfx;
 
       struct {

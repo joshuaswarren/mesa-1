@@ -1410,12 +1410,12 @@ struct brw_compile_mesh_params {
    struct brw_mesh_prog_data *prog_data;
    const struct brw_tue_map *tue_map;
 
-   /** Load provoking vertex
+   /** Load provoking vertex for wa_18019110168
     *
     * The callback returns a 32bit integer representing the provoking vertex.
     */
-   void *load_provoking_vertex_data;
-   nir_def *(*load_provoking_vertex)(nir_builder *b, void *data);
+   void *wa_18019110168_data;
+   nir_def *(*wa_18019110168_load_provoking_vertex)(nir_builder *b, void *data);
 };
 
 const unsigned *
@@ -1439,6 +1439,14 @@ struct brw_compile_fs_params {
    bool allow_spilling;
    bool use_rep_send;
    uint8_t max_polygons;
+
+   /** Load per primitive remapping offset for wa_18019110168
+    *
+    * The callback returns a 32bit integer representing the offset of the
+    * table in the instruction heap.
+    */
+   void *wa_18019110168_data;
+   nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(nir_builder *b, void *data);
 };
 
 /**

@@ -2800,9 +2800,6 @@ system_value("tess_config_intel", 1)
 # Dynamic fragment shader parameters (see intel_fs_config) .
 system_value("fs_config_intel", 1)
 
-# Per primitive remapping table offset.
-system_value("per_primitive_remap_intel", 1)
-
 # The (linear) local invocation index provided in the payload of mesh/task shaders.
 system_value("local_invocation_index_intel", 1)
 

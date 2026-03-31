@@ -991,22 +991,42 @@ anv_shader_compile_task(struct anv_device *device,
 }
 
 static nir_def *
-mesh_load_provoking_vertex(nir_builder *b, void *data)
+wa_18019110168_load_provoking_vertex(nir_builder *b, void *data)
 {
    const struct anv_pipeline_bind_map *bind_map = data;
+   nir_def *val = NULL;
 
    for (uint32_t i = 0; i < bind_map->inline_dwords_count; i++) {
-      if (bind_map->inline_dwords[i] == anv_drv_const_dword(gfx.mesh_provoking_vertex)) {
-         return nir_load_inline_data_intel(
-            b, 1, 16, nir_imm_int(b, 0),
-            .base = i * 4 + anv_drv_const_offset(gfx.mesh_provoking_vertex) % 4);
+      if (bind_map->inline_dwords[i] == anv_drv_const_dword(gfx.wa_18019110168)) {
+         val = nir_load_inline_data_intel(
+            b, 1, 32, nir_imm_int(b, 0),
+            .base = i * 4);
+         break;
       }
    }
 
-   return nir_load_push_data_intel(b, 1, 16, nir_imm_int(b, 0),
-                                   .base = anv_drv_const_offset(gfx.mesh_provoking_vertex) -
-                                           bind_map->push_ranges[0].start,
-                                   .range = anv_drv_const_size(gfx.mesh_provoking_vertex));
+   if (val == NULL) {
+      val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                     .base = anv_drv_const_offset(gfx.wa_18019110168) -
+                                             bind_map->push_ranges[0].start * 32,
+                                     .range = anv_drv_const_size(gfx.wa_18019110168));
+   }
+
+   return nir_iand_imm(b, val, ANV_WA_18019110168_PROVOKING_VERTEX_MASK);
+}
+
+static nir_def *
+wa_18019110168_load_per_primitive_remap_table(nir_builder *b, void *data)
+{
+   const struct anv_pipeline_bind_map *bind_map = data;
+   nir_def *val = NULL;
+
+   val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                  .base = anv_drv_const_offset(gfx.wa_18019110168) -
+                                          bind_map->push_ranges[0].start * 32,
+                                  .range = anv_drv_const_size(gfx.wa_18019110168));
+
+   return nir_iand_imm(b, val, ANV_WA_18019110168_PER_PRIMITIVE_REMAP_TABLE_OFFSET_MASK);
 }
 
 static void
@@ -1035,8 +1055,9 @@ anv_shader_compile_mesh(struct anv_device *device,
       .tue_map = task_shader_data ?
                  &task_shader_data->prog_data.task.map :
                  NULL,
-      .load_provoking_vertex = mesh_load_provoking_vertex,
-      .load_provoking_vertex_data = (void *)&mesh_shader_data->bind_map,
+      .wa_18019110168_load_provoking_vertex =
+         wa_18019110168_load_provoking_vertex,
+      .wa_18019110168_data = (void *)&mesh_shader_data->bind_map,
    };
 
    mesh_shader_data->code = (void *)brw_compile_mesh(compiler, &params);
@@ -1082,6 +1103,10 @@ anv_shader_compile_fs(struct anv_device *device,
 
       .allow_spilling = true,
       .max_polygons = UCHAR_MAX,
+
+      .wa_18019110168_load_per_primitive_remap_table_offset =
+         wa_18019110168_load_per_primitive_remap_table,
+      .wa_18019110168_data = (void *)&shader_data->bind_map,
    };
 
    if (intel_use_jay(devinfo, nir->info.stage)) {
