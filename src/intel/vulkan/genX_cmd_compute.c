@@ -1207,6 +1207,7 @@ cmd_buffer_emit_rt_dispatch_globals_indirect(struct anv_cmd_buffer *cmd_buffer,
    return rtdg_state;
 }
 
+#if GFX_VER >= 30
 static uint8_t
 get_stack_id_reduction_cap(uint32_t stack_ids)
 {
@@ -1216,7 +1217,6 @@ get_stack_id_reduction_cap(uint32_t stack_ids)
     *    This value must always be smaller than value given by
     *    CFE_STATE.Stack_ID_Control.
     */
-#if GFX_VER >= 30
    switch (stack_ids) {
    case 2048: return REDUCTION_CAP_1024;
    case 1024: return REDUCTION_CAP_512;
@@ -1224,34 +1224,20 @@ get_stack_id_reduction_cap(uint32_t stack_ids)
    case 256:  return REDUCTION_CAP_128;
    default:   UNREACHABLE("Invalid stack_ids value");
    }
-#endif
 
    return 0;
 }
+#endif
 
 static void
-cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
-                      struct trace_params *params)
+cmd_buffer_flush_rt_state(struct anv_cmd_buffer *cmd_buffer,
+                          unsigned scratch_size)
 {
    struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_ray_tracing_state *rt = &cmd_buffer->state.rt;
 
-   if (INTEL_DEBUG(DEBUG_RT_NO_TRACE))
-      return;
-
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
-
-   /* If we have a known degenerate launch size, just bail */
-   if (!params->is_launch_size_indirect &&
-       (params->launch_size[0] == 0 ||
-        params->launch_size[1] == 0 ||
-        params->launch_size[2] == 0))
-      return;
-
-   trace_intel_begin_rays(&cmd_buffer->trace);
-
-   cmd_buffer->state.compute.trace_rays_active = true;
 
    genX(cmd_buffer_config_l3)(cmd_buffer, device->l3_config);
 
@@ -1269,6 +1255,70 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
    genX(cmd_buffer_flush_push_descriptors)(cmd_buffer,
                                            &cmd_buffer->state.rt.base);
 
+   #if GFX_VERx10 == 125
+   /* Wa_14014427904 - We need additional invalidate/flush when
+    * emitting NP state commands with ATS-M in compute mode.
+    */
+   if (intel_device_info_is_atsm(device->info) &&
+      cmd_buffer->queue_family->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
+      genx_batch_emit_pipe_control(&cmd_buffer->batch,
+                                   cmd_buffer->device->info,
+                                   cmd_buffer->state.current_pipeline,
+                                   ANV_PIPE_CS_STALL_BIT |
+                                   ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
+                                   ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
+                                   ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
+                                   ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
+                                   ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT |
+                                   ANV_PIPE_HDC_PIPELINE_FLUSH_BIT);
+   }
+#endif
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_BTD), btd) {
+      uint32_t dispatch_timeout_counter =
+         cmd_buffer->device->physical->instance->dispatch_timeout_counter;
+      uint32_t clamped_timeout_counter =
+         genX(anv_get_btd_dispatch_timeout_counter)(dispatch_timeout_counter);
+#if GFX_VERx10 >= 200
+      btd.DispatchTimeoutCounter = clamped_timeout_counter;
+#else
+      btd.DispatchTimeoutCounter = clamped_timeout_counter & 0x3;
+      btd.DispatchTimeoutCounterExtend = (clamped_timeout_counter >> 2) & 0x3;
+#endif
+
+      /* BSpec 43851: "This field must be programmed to 6h i.e. memory backed
+       *               buffer must be 128KB."
+       */
+      btd.PerDSSMemoryBackedBufferSize = 6;
+      btd.MemoryBackedBufferBasePointer = (struct anv_address) { .bo = device->btd_fifo_bo };
+      if (scratch_size > 0) {
+         btd.ScratchSpaceBuffer = anv_shader_get_scratch_surf(&cmd_buffer->batch,
+                                                              cmd_buffer->device,
+                                                              MESA_SHADER_COMPUTE,
+                                                              scratch_size,
+                                                              false);
+      }
+#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
+      btd.BTDMidthreadpreemption = false;
+#endif
+
+#if GFX_VER >= 20
+      /* TODO: We can tune this value specific to apps. */
+      btd.ControlsthemaximumnumberofoutstandingRayQueriesperSS =
+         RAYS_QUERIES_OUTSTANDING_1024;
+#endif
+#if GFX_VER >= 30
+      btd.RTMemStructures64bModeEnable = true;
+      btd.DynamicstackmanagementmechanismMISSPENALTY = MISS_PENALTY_16;
+      btd.DynamicstackmanagementmechanismHITREWARD = HIT_REWARD_1;
+      btd.DynamicstackmanagementmechanismSCALINGFACTOR = SCALING_FACTOR_4;
+      btd.DynamicstackmanagementmechanismREDUCTIONCAP =
+         get_stack_id_reduction_cap(cmd_buffer->device->physical->instance->stack_ids);
+#endif
+   }
+
+   genX(cmd_buffer_ensure_cfe_state)(cmd_buffer, scratch_size);
+
    /* Add these to the reloc list as they're internal buffers that don't
     * actually have relocs to pick them up manually.
     *
@@ -1278,6 +1328,37 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
                          rt->scratch.bo);
    anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
                          cmd_buffer->device->btd_fifo_bo);
+}
+
+void
+genX(cmd_buffer_flush_rt_state)(struct anv_cmd_buffer *cmd_buffer,
+                                unsigned scratch_size)
+{
+   cmd_buffer_flush_rt_state(cmd_buffer, scratch_size);
+}
+
+static void
+cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
+                      struct trace_params *params)
+{
+   struct anv_device *device = cmd_buffer->device;
+
+   if (INTEL_DEBUG(DEBUG_RT_NO_TRACE))
+      return;
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   /* If we have a known degenerate launch size, just bail */
+   if (!params->is_launch_size_indirect &&
+       (params->launch_size[0] == 0 ||
+        params->launch_size[1] == 0 ||
+        params->launch_size[2] == 0))
+      return;
+
+   trace_intel_begin_rays(&cmd_buffer->trace);
+
+   cmd_buffer->state.compute.trace_rays_active = true;
 
    /* Allocate and set up our RT_DISPATCH_GLOBALS */
    struct anv_state rtdg_state =
@@ -1363,70 +1444,6 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          global_size[i] = DIV_ROUND_UP((uint64_t)params->launch_size[i], local_size);
       }
    }
-
-#if GFX_VERx10 == 125
-   /* Wa_14014427904 - We need additional invalidate/flush when
-    * emitting NP state commands with ATS-M in compute mode.
-    */
-   if (intel_device_info_is_atsm(device->info) &&
-      cmd_buffer->queue_family->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
-      genx_batch_emit_pipe_control(&cmd_buffer->batch,
-                                   cmd_buffer->device->info,
-                                   cmd_buffer->state.current_pipeline,
-                                   ANV_PIPE_CS_STALL_BIT |
-                                   ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
-                                   ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
-                                   ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
-                                   ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
-                                   ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT |
-                                   ANV_PIPE_HDC_PIPELINE_FLUSH_BIT);
-   }
-#endif
-
-   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_BTD), btd) {
-      uint32_t dispatch_timeout_counter =
-         cmd_buffer->device->physical->instance->dispatch_timeout_counter;
-      uint32_t clamped_timeout_counter =
-         genX(anv_get_btd_dispatch_timeout_counter)(dispatch_timeout_counter);
-#if GFX_VERx10 >= 200
-      btd.DispatchTimeoutCounter = clamped_timeout_counter;
-#else
-      btd.DispatchTimeoutCounter = clamped_timeout_counter & 0x3;
-      btd.DispatchTimeoutCounterExtend = (clamped_timeout_counter >> 2) & 0x3;
-#endif
-
-      /* BSpec 43851: "This field must be programmed to 6h i.e. memory backed
-       *               buffer must be 128KB."
-       */
-      btd.PerDSSMemoryBackedBufferSize = 6;
-      btd.MemoryBackedBufferBasePointer = (struct anv_address) { .bo = device->btd_fifo_bo };
-      if (rt->scratch_size > 0) {
-         btd.ScratchSpaceBuffer = anv_shader_get_scratch_surf(&cmd_buffer->batch,
-                                                              cmd_buffer->device,
-                                                              MESA_SHADER_COMPUTE,
-                                                              rt->scratch_size,
-                                                              false);;
-      }
-#if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
-      btd.BTDMidthreadpreemption = false;
-#endif
-
-#if GFX_VER >= 20
-      /* TODO: We can tune this value specific to apps. */
-      btd.ControlsthemaximumnumberofoutstandingRayQueriesperSS =
-         RAYS_QUERIES_OUTSTANDING_1024;
-#endif
-#if GFX_VER >= 30
-      btd.RTMemStructures64bModeEnable = true;
-      btd.DynamicstackmanagementmechanismMISSPENALTY = MISS_PENALTY_16;
-      btd.DynamicstackmanagementmechanismHITREWARD = HIT_REWARD_1;
-      btd.DynamicstackmanagementmechanismSCALINGFACTOR = SCALING_FACTOR_4;
-      btd.DynamicstackmanagementmechanismREDUCTIONCAP =
-         get_stack_id_reduction_cap(cmd_buffer->device->physical->instance->stack_ids);
-#endif
-   }
-
-   genX(cmd_buffer_ensure_cfe_state)(cmd_buffer, rt->scratch_size);
 
    const struct brw_cs_prog_data *cs_prog_data =
       brw_cs_prog_data_const(device->rt_trampoline->prog_data);
@@ -1538,6 +1555,7 @@ genX(CmdTraceRaysKHR)(
       },
    };
 
+   cmd_buffer_flush_rt_state(cmd_buffer, cmd_buffer->state.rt.scratch_size);
    cmd_buffer_trace_rays(cmd_buffer, &params);
 }
 
@@ -1561,6 +1579,7 @@ genX(CmdTraceRaysIndirectKHR)(
       .launch_size_addr        = indirectDeviceAddress,
    };
 
+   cmd_buffer_flush_rt_state(cmd_buffer, cmd_buffer->state.rt.scratch_size);
    cmd_buffer_trace_rays(cmd_buffer, &params);
 }
 
@@ -1578,6 +1597,7 @@ genX(CmdTraceRaysIndirect2KHR)(
                                  offsetof(VkTraceRaysIndirectCommand2KHR, width),
    };
 
+   cmd_buffer_flush_rt_state(cmd_buffer, cmd_buffer->state.rt.scratch_size);
    cmd_buffer_trace_rays(cmd_buffer, &params);
 }
 
