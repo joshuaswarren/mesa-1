@@ -2726,6 +2726,20 @@ struct vk_rt_pipeline {
    uint8_t dynamic_descriptor_offsets[MESA_VK_MAX_DESCRIPTOR_SETS];
 };
 
+uint32_t
+vk_pipeline_get_rt_scratch_size(struct vk_pipeline *pipeline)
+{
+   assert(pipeline->bind_point == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+   return container_of(pipeline, struct vk_rt_pipeline, base)->scratch_size;
+}
+
+uint32_t
+vk_pipeline_get_rt_ray_queries(struct vk_pipeline *pipeline)
+{
+   assert(pipeline->bind_point == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+   return container_of(pipeline, struct vk_rt_pipeline, base)->ray_queries;
+}
+
 static struct vk_rt_stage
 vk_rt_stage_ref(struct vk_rt_stage *stage)
 {
