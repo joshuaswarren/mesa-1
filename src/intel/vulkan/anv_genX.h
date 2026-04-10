@@ -517,6 +517,9 @@ void genX(emit_sampler_state)(const struct anv_device *device,
                               uint32_t border_color_offset,
                               struct anv_sampler_state *state);
 
+void genX(cmd_buffer_flush_indirect_cs_descriptor_sets)(struct anv_cmd_buffer *cmd_buffer,
+                                                        const struct anv_pipeline_bind_map *bind_map);
+
 void genX(emit_embedded_sampler)(struct anv_device *device,
                                  struct anv_embedded_sampler *sampler,
                                  struct anv_pipeline_embedded_sampler_binding *binding);
