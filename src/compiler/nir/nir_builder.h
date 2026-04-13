@@ -2196,6 +2196,7 @@ DEF_DERIV(ddy_coarse)
 
 struct nir_tex_builder {
    nir_def *coord, *ms_index, *lod, *bias, *comparator;
+   nir_def *backend1, *backend2;
    unsigned texture_index, sampler_index;
    nir_def *texture_offset, *sampler_offset;
    nir_def *texture_heap_offset, *sampler_heap_offset;

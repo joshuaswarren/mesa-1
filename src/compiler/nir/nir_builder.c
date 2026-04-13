@@ -290,7 +290,8 @@ nir_build_tex_struct(nir_builder *build, nir_texop op, struct nir_tex_builder f)
    }
 
    const unsigned num_srcs = has_texture_src + has_sampler_src + !!f.coord +
-                             !!f.ms_index + !!lod + !!f.bias + !!f.comparator;
+                             !!f.ms_index + !!lod + !!f.bias +
+                             !!f.comparator + !!f.backend1 + !!f.backend2;
 
    nir_tex_instr *tex = nir_tex_instr_create(build->shader, num_srcs);
    tex->op = op;
@@ -383,6 +384,11 @@ nir_build_tex_struct(nir_builder *build, nir_texop op, struct nir_tex_builder f)
       tex->is_new_style_shadow = true;
       tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_comparator, f.comparator);
    }
+
+   if (f.backend1)
+      tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_backend1, f.backend1);
+   if (f.backend2)
+      tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_backend2, f.backend2);
 
    assert(i == num_srcs);
 
