@@ -18,8 +18,7 @@
 #include "vk_pipeline_layout.h"
 
 #include "util/bitset.h"
-#include "nir.h"
-#include "nir_builder.h"
+#include "pan_nir.h"
 
 #if PAN_ARCH >= 9
 #define VALHALL_RESOURCE_TABLE_IDX 62
@@ -548,7 +547,7 @@ load_resource_deref_desc(nir_builder *b, nir_deref_instr *deref,
    /* note that user sets start from index 1 */
    return nir_load_ubo(
       b, num_components, bit_size,
-      nir_imm_int(b, pan_res_handle(VALHALL_RESOURCE_TABLE_IDX, set + 1)),
+      pan_nir_res_handle(b, VALHALL_RESOURCE_TABLE_IDX, set + 1, NULL),
       set_offset, .range = ~0u, .align_mul = PANVK_DESCRIPTOR_SIZE,
       .align_offset = desc_offset);
 #endif

@@ -7,6 +7,7 @@
 #include "genxml/gen_macros.h"
 #include "pan_context.h"
 #include "pan_shader.h"
+#include "pan_nir.h"
 
 static bool
 lower_tex(nir_builder *b, nir_tex_instr *tex)
@@ -17,8 +18,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex)
    nir_def *sampler_offset = nir_steal_tex_src(tex, nir_tex_src_sampler_offset);
 
    if (tex_offset != NULL) {
-      tex_offset =
-         nir_ior_imm(b, tex_offset, pan_res_handle(PAN_TABLE_TEXTURE, 0));
+      tex_offset = pan_nir_res_handle(b, PAN_TABLE_TEXTURE, 0, tex_offset);
       nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, tex_offset);
    } else {
       tex->texture_index =
@@ -32,7 +32,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex)
       tex->sampler_index = pan_res_handle(PAN_TABLE_SAMPLER, 0);
    } else if (sampler_offset != NULL) {
       sampler_offset =
-         nir_ior_imm(b, sampler_offset, pan_res_handle(PAN_TABLE_SAMPLER, 0));
+         pan_nir_res_handle(b, PAN_TABLE_SAMPLER, 0, sampler_offset);
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset, sampler_offset);
    } else {
       tex->sampler_index =
@@ -49,7 +49,7 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 
    nir_src *tex_handle = &intrin->src[0];
    nir_def *new_handle =
-      nir_ior_imm(b, tex_handle->ssa, pan_res_handle(PAN_TABLE_IMAGE, 0));
+      pan_nir_res_handle(b, PAN_TABLE_IMAGE, 0, tex_handle->ssa);
    nir_src_rewrite(tex_handle, new_handle);
 
    return true;
@@ -80,7 +80,7 @@ lower_load_ubo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
    b->cursor = nir_before_instr(&intrin->instr);
 
    nir_def *new_offset =
-      nir_ior_imm(b, intrin->src[0].ssa, pan_res_handle(PAN_TABLE_UBO, 0));
+      pan_nir_res_handle(b, PAN_TABLE_UBO, 0, intrin->src[0].ssa);
 
    nir_src_rewrite(&intrin->src[0], new_offset);
 
@@ -94,8 +94,7 @@ lower_ssbo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
    bool is_store = intrin->intrinsic == nir_intrinsic_store_ssbo;
    nir_src *handle = &intrin->src[is_store ? 1 : 0];
 
-   nir_def *new_handle = nir_ior_imm(b, handle->ssa,
-                                     pan_res_handle(PAN_TABLE_SSBO, 0));
+   nir_def *new_handle = pan_nir_res_handle(b, PAN_TABLE_SSBO, 0, handle->ssa);
 
    nir_src_rewrite(handle, new_handle);
 
