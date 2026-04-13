@@ -18,6 +18,7 @@
 #include "bi_quirks.h"
 #include "bifrost_compile.h"
 #include "bifrost_nir.h"
+#include "pan_nir.h"
 #include "compiler.h"
 
 static void pan_stats_verbose(FILE *f, const char *prefix, bi_context *ctx,
@@ -3750,56 +3751,6 @@ bi_emit_texc_offset_ms_index(bi_builder *b, nir_tex_instr *instr)
    return dest;
 }
 
-/*
- * Valhall specifies specifies texel offsets, multisample indices, and (for
- * fetches) LOD together as a u8vec4 <offset.xyz, LOD>, where the third
- * component is either offset.z or multisample index depending on context. Build
- * this register.
- */
-static bi_index
-bi_emit_valhall_offsets(bi_builder *b, nir_tex_instr *instr)
-{
-   bi_index dest = bi_zero();
-
-   int offs_idx = nir_tex_instr_src_index(instr, nir_tex_src_offset);
-   int ms_idx = nir_tex_instr_src_index(instr, nir_tex_src_ms_index);
-   int lod_idx = nir_tex_instr_src_index(instr, nir_tex_src_lod);
-
-   /* Components 0-2: offsets */
-   if (offs_idx >= 0 && !nir_src_is_zero(instr->src[offs_idx].src)) {
-      unsigned nr = nir_src_num_components(instr->src[offs_idx].src);
-      bi_index idx = bi_src_index(&instr->src[offs_idx].src);
-
-      /* No multisample index with 3D */
-      assert((nr <= 2) || (ms_idx < 0));
-
-      /* Zero extend the Z byte so we can use it with MKVEC.v2i8 */
-      bi_index z = (nr > 2)
-                      ? bi_mkvec_v2i8(b, bi_byte(bi_extract(b, idx, 2), 0),
-                                      bi_imm_u8(0), bi_zero())
-                      : bi_zero();
-
-      dest = bi_mkvec_v2i8(
-         b, (nr > 0) ? bi_byte(bi_extract(b, idx, 0), 0) : bi_imm_u8(0),
-         (nr > 1) ? bi_byte(bi_extract(b, idx, 1), 0) : bi_imm_u8(0), z);
-   }
-
-   /* Component 2: multisample index */
-   if (ms_idx >= 0 && !nir_src_is_zero(instr->src[ms_idx].src)) {
-      bi_index ms = bi_src_index(&instr->src[ms_idx].src);
-      dest = bi_mkvec_v2i16(b, bi_half(dest, false), bi_half(ms, false));
-   }
-
-   /* Component 3: 8-bit LOD */
-   if (lod_idx >= 0 && !nir_src_is_zero(instr->src[lod_idx].src) &&
-       nir_tex_instr_src_type(instr, lod_idx) != nir_type_float) {
-      dest = bi_lshift_or_i32(b, bi_src_index(&instr->src[lod_idx].src), dest,
-                              bi_imm_u8(24));
-   }
-
-   return dest;
-}
-
 static void
 bi_emit_cube_coord(bi_builder *b, bi_index coord, bi_index *face, bi_index *s,
                    bi_index *t)
@@ -4227,306 +4178,92 @@ bi_emit_texc(bi_builder *b, nir_tex_instr *instr)
                       DIV_ROUND_UP(instr->def.num_components * res_size, 4));
 }
 
-/* Staging registers required by texturing in the order they appear (Valhall) */
-
-enum valhall_tex_sreg {
-   VALHALL_TEX_SREG_X_COORD = 0,
-   VALHALL_TEX_SREG_Y_COORD = 1,
-   VALHALL_TEX_SREG_Z_COORD = 2,
-   VALHALL_TEX_SREG_Y_DELTAS = 3,
-   VALHALL_TEX_SREG_ARRAY = 4,
-   VALHALL_TEX_SREG_SHADOW = 5,
-   VALHALL_TEX_SREG_OFFSETMS = 6,
-   VALHALL_TEX_SREG_LOD = 7,
-   VALHALL_TEX_SREG_GRDESC0 = 8,
-   VALHALL_TEX_SREG_GRDESC1 = 9,
-   VALHALL_TEX_SREG_COUNT,
-};
-
 static void
-bi_emit_tex_valhall(bi_builder *b, nir_tex_instr *instr)
+bi_emit_tex_valhall(bi_builder *b, nir_tex_instr *tex)
 {
-   bool explicit_offset = false;
-   enum bi_va_lod_mode lod_mode = BI_VA_LOD_MODE_COMPUTED_LOD;
-
-   bool has_lod_mode = (instr->op == nir_texop_tex) ||
-                       (instr->op == nir_texop_txl) ||
-                       (instr->op == nir_texop_txd) ||
-                       (instr->op == nir_texop_txb);
-
-   /* 32-bit indices to be allocated as consecutive staging registers */
-   bi_index sregs[VALHALL_TEX_SREG_COUNT] = {};
-   bi_index sampler = bi_imm_u32(instr->sampler_index);
-   bi_index texture = bi_imm_u32(instr->texture_index);
-   bi_index ddx = bi_null();
-   bi_index ddy = bi_null();
-
-   for (unsigned i = 0; i < instr->num_srcs; ++i) {
-      bi_index index = bi_src_index(&instr->src[i].src);
-      unsigned sz = nir_src_bit_size(instr->src[i].src);
-
-      switch (instr->src[i].src_type) {
-      case nir_tex_src_coord: {
-         bool is_array = instr->is_array && instr->op != nir_texop_lod;
-         unsigned components = nir_tex_instr_src_size(instr, i) - is_array;
-
-         if (instr->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
-            sregs[VALHALL_TEX_SREG_X_COORD] = bi_emit_texc_cube_coord(
-               b, index, &sregs[VALHALL_TEX_SREG_Y_COORD]);
-         } else {
-            assert(components >= 1 && components <= 3);
-
-            /* Copy XY (for 2D+) or XX (for 1D) */
-            sregs[VALHALL_TEX_SREG_X_COORD] = index;
-
-            if (components >= 2)
-               sregs[VALHALL_TEX_SREG_Y_COORD] = bi_extract(b, index, 1);
-
-            if (components == 3)
-               sregs[VALHALL_TEX_SREG_Z_COORD] = bi_extract(b, index, 2);
-         }
-
-         if (is_array)
-            sregs[VALHALL_TEX_SREG_ARRAY] = bi_extract(b, index, components);
-
-         break;
-      }
-
-      case nir_tex_src_lod:
-         if (nir_src_is_zero(instr->src[i].src)) {
-            lod_mode = BI_VA_LOD_MODE_ZERO_LOD;
-         } else if (has_lod_mode) {
-            lod_mode = BI_VA_LOD_MODE_EXPLICIT;
-
-            assert(sz == 16 || sz == 32);
-            sregs[VALHALL_TEX_SREG_LOD] =
-               bi_emit_texc_lod_88(b, index, sz == 16);
-         }
-         break;
-
-      case nir_tex_src_ddx:
-	 ddx = index;
-	 break;
-
-      case nir_tex_src_ddy:
-	 ddy = index;
-	 break;
-
-      case nir_tex_src_bias:
-         /* Upper 16-bits interpreted as a clamp, leave zero */
-         assert(sz == 16 || sz == 32);
-         sregs[VALHALL_TEX_SREG_LOD] = bi_emit_texc_lod_88(b, index, sz == 16);
-
-         lod_mode = BI_VA_LOD_MODE_COMPUTED_BIAS;
-         break;
-      case nir_tex_src_ms_index:
-      case nir_tex_src_offset:
-         /* Handled below */
-         break;
-
-      case nir_tex_src_comparator:
-         sregs[VALHALL_TEX_SREG_SHADOW] = index;
-         break;
-
-      case nir_tex_src_texture_offset:
-         /* This should always be 0 as lower_index_to_offset is expected to be
-          * set */
-         assert(instr->texture_index == 0);
-         texture = index;
-         break;
-
-      case nir_tex_src_sampler_offset:
-         /* This should always be 0 as lower_index_to_offset is expected to be
-          * set */
-         assert(instr->sampler_index == 0);
-         sampler = index;
-         break;
-
-      default:
-         UNREACHABLE("Unhandled src type in tex emit");
+   nir_def *tex_h = NULL, *sr0 = NULL, *sr1 = NULL;
+   for (unsigned i = 0; i < tex->num_srcs; i++) {
+      switch (tex->src[i].src_type) {
+      case nir_tex_src_texture_handle: tex_h =  tex->src[i].src.ssa; break;
+      case nir_tex_src_backend1:       sr0 =    tex->src[i].src.ssa; break;
+      case nir_tex_src_backend2:       sr1 =    tex->src[i].src.ssa; break;
+      default: UNREACHABLE("Unknown texture source");
       }
    }
 
-   /* Generate packed offset + ms index + LOD register. These default to
-    * zero so we only need to encode if these features are actually in use.
-    */
-   bi_index offsets = bi_emit_valhall_offsets(b, instr);
+   struct pan_va_tex_flags flags;
+   STATIC_ASSERT(sizeof(tex->backend_flags) == sizeof(flags));
+   memcpy(&flags, &tex->backend_flags, sizeof(flags));
 
-   if (!bi_is_equiv(offsets, bi_zero())) {
-      sregs[VALHALL_TEX_SREG_OFFSETMS] = offsets;
-      explicit_offset = true;
-   }
+   bi_index src0 = bi_extract(b, bi_def_index(tex_h), 0);
+   bi_index src1 = bi_extract(b, bi_def_index(tex_h), 1);
 
-   bool narrow_indices = va_is_valid_const_narrow_index(texture) &&
-                         va_is_valid_const_narrow_index(sampler);
-
-   bi_index src0;
-   bi_index src1;
-
-   if (narrow_indices) {
-      unsigned tex_set =
-         va_res_fold_table_idx(pan_res_handle_get_table(texture.value));
-      unsigned sampler_set =
-         va_res_fold_table_idx(pan_res_handle_get_table(sampler.value));
-      unsigned texture_index = pan_res_handle_get_index(texture.value);
-      unsigned sampler_index = pan_res_handle_get_index(sampler.value);
-
-      unsigned packed_handle = (tex_set << 27) | (texture_index << 16) |
-                               (sampler_set << 11) | sampler_index;
-
-      src0 = bi_imm_u32(packed_handle);
-
-      /* TODO: narrow offsetms. (only when offsetms is dynamically uniform) */
-      src1 = bi_zero();
-   } else {
-      src0 = sampler;
-      src1 = texture;
-   }
-
-   enum bi_dimension dim = valhall_tex_dimension(instr->sampler_dim);
-
-   if (!bi_is_null(ddx) || !bi_is_null(ddy)) {
-      unsigned coords_comp_count =
-         instr->coord_components -
-         (instr->is_array || instr->sampler_dim == GLSL_SAMPLER_DIM_CUBE);
-      assert(!bi_is_null(ddx) && !bi_is_null(ddy));
-
-      lod_mode = BI_VA_LOD_MODE_GRDESC;
-
-      bi_index derivs[6] = {
-         bi_extract(b, ddx, 0),
-         bi_extract(b, ddy, 0),
-         coords_comp_count > 1 ? bi_extract(b, ddx, 1) : bi_null(),
-         coords_comp_count > 1 ? bi_extract(b, ddy, 1) : bi_null(),
-         coords_comp_count > 2 ? bi_extract(b, ddx, 2) : bi_null(),
-         coords_comp_count > 2 ? bi_extract(b, ddy, 2) : bi_null(),
-      };
-      bi_index derivs_packed = bi_temp(b->shader);
-      bi_make_vec_to(b, derivs_packed, derivs, NULL, coords_comp_count * 2, 32);
-      bi_index grdesc = bi_temp(b->shader);
-      bi_instr *I = bi_tex_gradient_to(b, grdesc, derivs_packed, src0, src1, dim,
-                                       !narrow_indices, 3, coords_comp_count * 2);
-      I->derivative_enable = true;
-      I->force_delta_enable = false;
-      I->lod_clamp_disable = true;
-      I->lod_bias_disable = true;
-      I->register_format = BI_REGISTER_FORMAT_U32;
-
-      bi_emit_cached_split_i32(b, grdesc, 2);
-      sregs[VALHALL_TEX_SREG_GRDESC0] = bi_extract(b, grdesc, 0);
-      sregs[VALHALL_TEX_SREG_GRDESC1] = bi_extract(b, grdesc, 1);
-   }
-
-   /* Allocate staging registers contiguously by compacting the array. */
    unsigned sr_count = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(sregs); ++i) {
-      if (!bi_is_null(sregs[i]))
-         sregs[sr_count++] = sregs[i];
+   bi_index sr_comps[8];
+   for (unsigned i = 0; i < sr0->num_components; i++)
+      sr_comps[sr_count++] = bi_extract(b, bi_def_index(sr0), i);
+   if (sr1 != NULL) {
+      for (unsigned i = 0; i < sr1->num_components; i++)
+         sr_comps[sr_count++] = bi_extract(b, bi_def_index(sr1), i);
    }
 
-   bi_index idx = sr_count ? bi_temp(b->shader) : bi_null();
+   bi_index sr = bi_temp(b->shader);
+   bi_emit_collect_to(b, sr, sr_comps, sr_count);
 
-   if (sr_count)
-      bi_make_vec_to(b, idx, sregs, NULL, sr_count, 32);
-
-   if (instr->op == nir_texop_lod) {
-      assert(instr->def.num_components == 2 && instr->def.bit_size == 32);
-
-      bi_index res[2];
-
-      for (unsigned i = 0; i < 2; i++) {
-         bi_index grdesc = bi_temp(b->shader);
-         bi_instr *I = bi_tex_gradient_to(b, grdesc, idx, src0, src1, dim,
-                                          !narrow_indices, 1, sr_count);
-         I->derivative_enable = false;
-         I->force_delta_enable = true;
-         I->lod_clamp_disable = i != 0;
-         I->register_format = BI_REGISTER_FORMAT_U32;
-         bi_index lod;
-
-         /* v11 removed S16_TO_F32 */
-         if (b->shader->arch >= 11) {
-            lod = bi_s32_to_f32(b, bi_s16_to_s32(b, bi_half(grdesc, 0)));
-         } else {
-            lod = bi_s16_to_f32(b, bi_half(grdesc, 0));
-         }
-
-         lod = bi_fmul_f32(b, lod, bi_imm_f32(1.0f / 256));
-
-         if (i == 0)
-            lod = bi_fround_f32(b, lod, BI_ROUND_NONE);
-
-         res[i] = lod;
-      }
-
-      bi_make_vec_to(b, bi_def_index(&instr->def), res, NULL, 2, 32);
-      return;
-   }
-
-   /* Only write the components that we actually read */
-   unsigned mask = nir_def_components_read(&instr->def);
-   unsigned comps_per_reg = instr->def.bit_size == 16 ? 2 : 1;
-   unsigned res_size = DIV_ROUND_UP(util_bitcount(mask), comps_per_reg);
-
-   enum bi_register_format regfmt = bi_reg_fmt_for_nir(instr->dest_type);
+   const enum bi_dimension dim = valhall_tex_dimension(tex->sampler_dim);
+   const enum bi_register_format regfmt = bi_reg_fmt_for_nir(tex->dest_type);
+   const unsigned mask = nir_def_components_read(&tex->def);
    bi_index dest = bi_temp(b->shader);
 
-   switch (instr->op) {
+   switch (tex->op) {
    case nir_texop_tex:
    case nir_texop_txb:
    case nir_texop_txl:
    case nir_texop_txd:
-      bi_tex_single_to(b, dest, idx, src0, src1, instr->is_array, dim, regfmt,
-                       instr->is_shadow, explicit_offset, lod_mode,
-                       !narrow_indices, mask, sr_count);
+      bi_tex_single_to(b, dest, sr, src0, src1, flags.array_enable, dim,
+                       regfmt, flags.compare_enable, flags.texel_offset,
+                       flags.lod_mode, flags.wide_indices,
+                       mask, sr_count);
       break;
    case nir_texop_txf:
-   case nir_texop_txf_ms: {
-      assert(instr->sampler_dim != GLSL_SAMPLER_DIM_BUF &&
-             "Texel buffers should already have been lowered");
-      /* On Valhall, TEX_FETCH doesn't have CUBE support. This is not a problem
-       * as a cube is just a 2D array in any cases. */
-      if (dim == BI_DIMENSION_CUBE)
-         dim = BI_DIMENSION_2D;
-
-      bi_tex_fetch_to(b, dest, idx, src0, src1, instr->is_array, dim, regfmt,
-                      explicit_offset, !narrow_indices, mask, sr_count);
+   case nir_texop_txf_ms:
+      bi_tex_fetch_to(b, dest, sr, src0, src1, flags.array_enable, dim,
+                      regfmt, flags.texel_offset, flags.wide_indices,
+                      mask, sr_count);
+      break;
+   case nir_texop_tg4:
+      bi_tex_gather_to(b, dest, sr, src0, src1, flags.array_enable, dim,
+                       tex->component, false, regfmt, flags.compare_enable,
+                       flags.texel_offset, flags.wide_indices,
+                       mask, sr_count);
+      break;
+   case nir_texop_gradient_pan: {
+      bi_instr *I =
+         bi_tex_gradient_to(b, dest, sr, src0, src1, dim,
+                            flags.wide_indices,
+                            mask, sr_count);
+      I->force_delta_enable = flags.force_delta_enable;
+      I->derivative_enable = flags.derivative_enable;
+      I->lod_clamp_disable = flags.lod_clamp_disable;
+      I->lod_bias_disable = flags.lod_bias_disable;
+      I->register_format = BI_REGISTER_FORMAT_U32;
       break;
    }
-   case nir_texop_tg4:
-      bi_tex_gather_to(b, dest, idx, src0, src1, instr->is_array, dim,
-                       instr->component, false, regfmt, instr->is_shadow,
-                       explicit_offset, !narrow_indices, mask, sr_count);
-      break;
    default:
       UNREACHABLE("Unhandled Valhall texture op");
    }
 
-   /* The hardware will write only what we read, and it will into
-    * contiguous registers without gaps (different from Bifrost). NIR
-    * expects the gaps, so fill in the holes (they'll be copypropped and
-    * DCE'd away later).
-    */
-   bi_index unpacked[4] = {bi_null(), bi_null(), bi_null(), bi_null()};
+   bi_emit_cached_split(b, dest, util_bitcount(mask) * tex->def.bit_size);
+   bi_index dest4[4] = { dest, dest, dest, dest };
 
-   bi_emit_cached_split_i32(b, dest, res_size);
-
-   /* Index into the packed component array */
-   unsigned j = 0;
-   unsigned comps[4] = {0};
-   unsigned nr_components = instr->def.num_components;
-
-   for (unsigned i = 0; i < nr_components; ++i) {
-      if (mask & BITFIELD_BIT(i)) {
-         unpacked[i] = dest;
-         comps[i] = j++;
-      } else {
-         unpacked[i] = bi_zero();
-      }
+   unsigned channel[4] = { };
+   for (unsigned i = 0; i < tex->def.num_components; i++) {
+      if (mask & BITFIELD_BIT(i))
+         channel[i] = util_bitcount(mask & BITFIELD_MASK(i));
    }
 
-   bi_make_vec_to(b, bi_def_index(&instr->def), unpacked, comps,
-                  instr->def.num_components, instr->def.bit_size);
+   bi_make_vec_to(b, bi_def_index(&tex->def), dest4, channel,
+                  tex->def.num_components, tex->def.bit_size);
 }
 
 /* Simple textures ops correspond to NIR tex or txl with LOD = 0 on 2D/cube

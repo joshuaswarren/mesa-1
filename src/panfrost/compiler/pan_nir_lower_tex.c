@@ -350,8 +350,7 @@ va_lower_tex(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
       if (tex->op == nir_texop_txf && srcs.lod) {
          comps[3] = nir_get_scalar(srcs.lod, 0);
          if (pan_arch(gpu_id) >= 11 && nir_scalar_is_const(comps[3])) {
-            /* On v11+, narrow_array_index is a 8.8 fixed-point value in
-             * bits [31:16]
+            /* On v11+, narrow_lod is a 8.8 fixed-point value in bits [31:16]
              */
             uint32_t imm_lod = nir_scalar_as_uint(comps[3]);
             narrow_offset |= MIN2(imm_lod, UINT8_MAX) << 24;
