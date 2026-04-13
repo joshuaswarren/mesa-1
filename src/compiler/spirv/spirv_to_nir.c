@@ -3807,6 +3807,9 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    case nir_texop_sample_pos_nv:
       vtn_fail("unexpected nir_texop_*_nv");
       break;
+   case nir_texop_gradient_pan:
+      vtn_fail("unexpected nir_texop_*_pan");
+      break;
    case nir_texop_resinfo_intel:
    case nir_texop_sparse_residency_intel:
    case nir_texop_sparse_residency_txf_intel:

@@ -3509,6 +3509,9 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
    case nir_texop_sample_pos_nv:
       return 4;
 
+   case nir_texop_gradient_pan:
+      return 2;
+
    case nir_texop_custom_border_color_agx:
       return 4;
 
@@ -3562,6 +3565,7 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_samples_identical:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_fragment_fetch_amd:
+   case nir_texop_gradient_pan:
    case nir_texop_sample_weighted_qcom:
    case nir_texop_box_filter_qcom:
    case nir_texop_block_match_sad_qcom:

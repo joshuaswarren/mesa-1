@@ -2536,6 +2536,8 @@ typedef enum nir_texop {
    nir_texop_tex_type_nv,
    /** Maps to TXQ.SAMPLER_POS */
    nir_texop_sample_pos_nv,
+   /** Maps to TEX_GRADIENT */
+   nir_texop_gradient_pan,
    /**
     * Returns the weighted average of a region of texels in the texture, using
     * the filter kernel sampled from ref_texture. (VK_QCOM_image_processing)
