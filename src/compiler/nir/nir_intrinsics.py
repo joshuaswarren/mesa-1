@@ -1733,6 +1733,18 @@ store("raw_output_pan", [], [IO_SEMANTICS, BASE])
 store("combined_output_pan", [1, 1, 1, 4], [IO_SEMANTICS, COMPONENT, SRC_TYPE, DEST_TYPE])
 load("raw_output_pan", [1], [IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
+# Returns a vec2 which is the result of CUBEFACE1/2
+# src = { x, y, z }
+intrinsic("cubeface_pan", [1, 1, 1], dest_comp=2, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# src = { z, x, face }
+intrinsic("cube_ssel_pan", [1, 1, 1], dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+# src = { y, z, face }
+intrinsic("cube_tsel_pan", [1, 1, 1], dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Loads the sampler paramaters <min_lod, max_lod, lod_bias>
 # src[] = { sampler_index }
 load("sampler_lod_parameters", [1], flags=[CAN_ELIMINATE, CAN_REORDER])

@@ -2198,6 +2198,37 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       b->shader->info.has_ld_gclk_instr = true;
       break;
 
+   case nir_intrinsic_cubeface_pan: {
+      bi_index x = bi_src_index(&instr->src[0]);
+      bi_index y = bi_src_index(&instr->src[1]);
+      bi_index z = bi_src_index(&instr->src[2]);
+
+      bi_index max_xyz = bi_temp(b->shader);
+      bi_index inf_face = bi_temp(b->shader);
+
+      /* Use a pseudo op on Bifrost due to tuple restrictions */
+      if (b->shader->arch <= 8) {
+         bi_cubeface_to(b, max_xyz, inf_face, x, y, z);
+      } else {
+         bi_cubeface1_to(b, max_xyz, x, y, z);
+         bi_cubeface2_v9_to(b, inf_face, x, y, z);
+      }
+      bi_collect_v2i32_to(b, dst, max_xyz, inf_face);
+      break;
+   }
+
+   case nir_intrinsic_cube_ssel_pan:
+      bi_cube_ssel_to(b, dst, bi_src_index(&instr->src[0]),
+                              bi_src_index(&instr->src[1]),
+                              bi_src_index(&instr->src[2]));
+      break;
+
+   case nir_intrinsic_cube_tsel_pan:
+      bi_cube_tsel_to(b, dst, bi_src_index(&instr->src[0]),
+                              bi_src_index(&instr->src[1]),
+                              bi_src_index(&instr->src[2]));
+      break;
+
    case nir_intrinsic_ddx:
    case nir_intrinsic_ddx_fine:
       bi_emit_derivative(b, dst, instr, 1, false);
