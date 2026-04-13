@@ -85,6 +85,25 @@ bool pan_nir_lower_image_index(nir_shader *shader,
 bool pan_nir_lower_texel_buffer_fetch_index(nir_shader *shader,
                                             unsigned attrib_offset);
 
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
+struct pan_va_tex_flags {
+   bool wide_indices : 1;
+   bool array_enable : 1;
+   bool texel_offset : 1;
+   bool compare_enable : 1;
+   unsigned lod_mode : 3;
+   bool derivative_enable : 1;
+   bool force_delta_enable : 1;
+   bool lod_bias_disable : 1;
+   bool lod_clamp_disable : 1;
+   unsigned _pad : 21;
+};
+PRAGMA_DIAGNOSTIC_POP
+static_assert(sizeof(struct pan_va_tex_flags) == 4, "Must fit in uint32_t");
+
+bool pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id);
+
 nir_alu_type
 pan_unpacked_type_for_format(const struct util_format_description *desc);
 
