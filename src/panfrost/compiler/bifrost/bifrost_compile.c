@@ -3530,6 +3530,16 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       bi_bitrev_i32_to(b, dst, s0);
       break;
 
+   case nir_op_bitfield_select:
+      /* Bifrost doesn't have MUX.v4i8.bit but that's okay because MUX.v4i8
+       * can't swizzle on Bifrost anyway so we can just use MUX.i32.
+       */
+      if (b->shader->arch < 9 && sz == 8)
+         bi_mux_i32_to(b, dst, s1, s2, s0, BI_MUX_BIT);
+      else
+         bi_mux_to(b, sz, dst, s1, s2, s0, BI_MUX_BIT);
+      break;
+
    case nir_op_ufind_msb: {
       bi_index clz = bi_clz(b, src_sz, s0, false);
 

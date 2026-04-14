@@ -99,6 +99,7 @@ bool valhall_can_merge_workgroups(nir_shader *nir);
       .lower_bitfield_extract8 = true,                                         \
       .lower_bitfield_extract16 = true,                                        \
       .lower_insert_byte = true,                                               \
+      .has_bitfield_select = true,                                             \
                                                                                \
       .lower_pack_64_4x16 = true,                                              \
       .lower_pack_half_2x16 = true,                                            \
