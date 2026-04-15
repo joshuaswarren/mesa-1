@@ -2127,6 +2127,10 @@ static void *si_texture_transfer_map(struct pipe_context *ctx, struct pipe_resou
    if (tex->is_depth || tex->buffer.flags & RADEON_FLAG_SPARSE) {
       /* Depth and sparse textures use staging unconditionally. */
       use_staging_texture = true;
+   } else if (!sctx->screen->has_gfx_compute) {
+      if (!tex->surface.is_linear)
+         return NULL;
+      use_staging_texture = false;
    } else {
       /* Degrade the tile mode if we get too many transfers on APUs.
        * On dGPUs, the staging texture is always faster.
