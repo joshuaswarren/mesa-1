@@ -57,6 +57,40 @@ pan_nir_res_handle(nir_builder *b, uint32_t table,
    }
 }
 
+static nir_def *
+pan_nir_load_va_desc(nir_builder *b, unsigned num_components, unsigned bit_size,
+                     nir_def *handle, uint32_t offset)
+{
+   nir_def *table = nir_ushr_imm(b, handle, 24);
+   nir_def *index = nir_iand_imm(b, handle, 0x00ffffff);
+
+   nir_def *table_handle = nir_ior_imm(b, table, pan_res_handle(62, 0));
+   nir_def *table_offset = nir_iadd_imm(b, nir_imul_imm(b, index, 32), offset);
+
+   assert(offset < 32);
+   return nir_load_ssbo(b, num_components, bit_size,
+                        table_handle, table_offset,
+                        .access = ACCESS_CAN_REORDER,
+                        .align_mul = 32,
+                        .align_offset = offset);
+}
+
+static nir_def *
+pan_nir_load_va_buf_cvt(nir_builder *b, nir_def *handle)
+{
+   /* Dword 7 of the buffer descriptor type is unused by hardware and is
+    * reserved for software to do whatever it wants with it.  By convention,
+    * we place the conversion in dw7 so that we can fetch it from the shader.
+    */
+   nir_def *cvt = pan_nir_load_va_desc(b, 1, 32, handle, 7 * 4);
+
+   /* CONSTANT 0000 L */
+   nir_def *zero_cvt = nir_imm_int(b, 95 << 12 | 231);
+   cvt = nir_bcsel(b, nir_ieq_imm(b, cvt, 0), zero_cvt, cvt);
+
+   return cvt;
+}
+
 bool pan_nir_lower_bool_to_bitsize(nir_shader *shader);
 
 bool pan_nir_lower_vertex_id(nir_shader *shader);

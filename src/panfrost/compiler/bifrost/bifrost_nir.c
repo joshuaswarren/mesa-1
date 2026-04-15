@@ -1100,7 +1100,7 @@ lower_texel_buffer_fetch(nir_builder *b, nir_tex_instr *tex, void *data)
 
    nir_def *loaded_mem;
    if (*arch >= 9) {
-      nir_def *icd = nir_load_texel_buf_conv_pan(b, res_handle);
+      nir_def *icd = pan_nir_load_va_buf_cvt(b, res_handle);
       loaded_mem = nir_load_global_cvt_pan(b, tex->def.num_components,
                                               tex->def.bit_size, texel_addr,
                                               icd, tex->dest_type);
@@ -1153,7 +1153,7 @@ lower_buf_image_access(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_image_load: {
       nir_def *icd;
       if (*arch >= 9)
-         icd = nir_load_texel_buf_conv_pan(b, res_handle);
+         icd = pan_nir_load_va_buf_cvt(b, res_handle);
       else
          icd = nir_channel(b, loaded_texel_addr, 2);
       nir_def *loaded_mem = nir_load_global_cvt_pan(
@@ -1175,7 +1175,7 @@ lower_buf_image_access(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_def *value = intr->src[3].ssa;
       nir_def *icd;
       if (*arch >= 9)
-         icd = nir_load_texel_buf_conv_pan(b, res_handle);
+         icd = pan_nir_load_va_buf_cvt(b, res_handle);
       else
          icd = nir_channel(b, loaded_texel_addr, 2);
       nir_store_global_cvt_pan(b, value, texel_addr, icd, .src_type = 32);
