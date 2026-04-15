@@ -778,7 +778,7 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
    bool flush = false;
 
    ctx = threaded_context_unwrap_sync(ctx);
-   sctx = ctx ? (struct si_context *)ctx : si_get_aux_context(&sscreen->aux_context.general);
+   sctx = ctx ? (struct si_context *)ctx : si_get_aux_context(sscreen, &sscreen->aux_context.general);
 
    if (resource->target != PIPE_BUFFER) {
       unsigned plane = whandle->plane;
@@ -1334,7 +1334,7 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
    if (num_clears) {
       struct si_aux_context *auxctx = tex->buffer.flags & RADEON_FLAG_ENCRYPTED ?
          &sscreen->aux_context.general : &sscreen->aux_context.compute_resource_init;
-      struct si_context *sctx = si_get_aux_context(auxctx);
+      struct si_context *sctx = si_get_aux_context(sscreen, auxctx);
 
       si_execute_clears(sctx, clears, num_clears, false);
       si_put_aux_context_flush(auxctx);

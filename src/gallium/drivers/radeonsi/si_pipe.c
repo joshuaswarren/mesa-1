@@ -877,7 +877,10 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
 
       /* Check if the aux_context needs to be recreated */
       for (unsigned i = 0; i < ARRAY_SIZE(sscreen->aux_contexts); i++) {
-         struct si_context *saux = si_get_aux_context(&sscreen->aux_contexts[i]);
+         if (!sscreen->aux_contexts[i].ctx)
+            continue;
+
+         struct si_context *saux = si_get_aux_context(sscreen, &sscreen->aux_contexts[i]);
          enum pipe_reset_status status =
             sctx->ws->ctx_query_reset_status(saux->ctx, true, NULL, NULL);
 
@@ -1065,7 +1068,7 @@ void si_destroy_screen(struct pipe_screen *pscreen)
       if (!sscreen->aux_contexts[i].ctx)
          continue;
 
-      struct si_context *saux = si_get_aux_context(&sscreen->aux_contexts[i]);
+      struct si_context *saux = si_get_aux_context(sscreen, &sscreen->aux_contexts[i]);
       struct u_log_context *aux_log = saux->log;
       if (aux_log) {
          saux->b.set_log_context(&saux->b, NULL);
@@ -1648,26 +1651,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                                   2 * 1024 * 1024);
    }
 
-   /* Create the auxiliary context. This must be done last. */
-   for (unsigned i = 0; i < ARRAY_SIZE(sscreen->aux_contexts); i++) {
+   for (unsigned i = 0; i < ARRAY_SIZE(sscreen->aux_contexts); i++)
       (void)mtx_init(&sscreen->aux_contexts[i].lock, mtx_plain | mtx_recursive);
-
-      bool compute = !sscreen->info.has_graphics ||
-                     &sscreen->aux_contexts[i] == &sscreen->aux_context.compute_resource_init ||
-                     &sscreen->aux_contexts[i] == &sscreen->aux_context.shader_upload;
-      sscreen->aux_contexts[i].ctx =
-         si_create_context(&sscreen->b,
-                           SI_CONTEXT_FLAG_AUX | PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET |
-                           (sscreen->options.aux_debug ? PIPE_CONTEXT_DEBUG : 0) |
-                           (compute ? PIPE_CONTEXT_COMPUTE_ONLY : 0));
-
-      if (sscreen->options.aux_debug) {
-         u_log_context_init(&sscreen->aux_contexts[i].log);
-
-         struct pipe_context *ctx = sscreen->aux_contexts[i].ctx;
-         ctx->set_log_context(ctx, &sscreen->aux_contexts[i].log);
-      }
-   }
 
    if (test_flags & DBG(TEST_CLEAR_BUFFER))
       si_test_clear_buffer(sscreen);
@@ -1741,10 +1726,29 @@ struct pipe_screen *radeonsi_screen_create(int fd, const struct pipe_screen_conf
    return rw ? rw->screen : NULL;
 }
 
-struct si_context *si_get_aux_context(struct si_aux_context *ctx)
+struct si_context *si_get_aux_context(struct si_screen *sscreen, struct si_aux_context *actx)
 {
-   mtx_lock(&ctx->lock);
-   return (struct si_context*)ctx->ctx;
+   mtx_lock(&actx->lock);
+   /* Init aux_context on demand. */
+   if (actx->ctx == NULL) {
+      bool compute = !sscreen->info.has_graphics ||
+                     actx == &sscreen->aux_context.compute_resource_init ||
+                     actx == &sscreen->aux_context.shader_upload;
+      actx->ctx =
+         si_create_context(&sscreen->b,
+                           SI_CONTEXT_FLAG_AUX | PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET |
+                           (sscreen->options.aux_debug ? PIPE_CONTEXT_DEBUG : 0) |
+                           (compute ? PIPE_CONTEXT_COMPUTE_ONLY : 0));
+      assert(actx->ctx);
+
+      if (sscreen->options.aux_debug) {
+         u_log_context_init(&actx->log);
+
+         struct pipe_context *ctx = actx->ctx;
+         ctx->set_log_context(ctx, &actx->log);
+      }
+   }
+   return (struct si_context*)actx->ctx;
 }
 
 void si_put_aux_context_flush(struct si_aux_context *ctx)
