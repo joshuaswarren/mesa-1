@@ -6,6 +6,7 @@
  */
 
 #include "si_pipe.h"
+#include "mm/si_mm.h"
 
 #include "driver_ddebug/dd_util.h"
 #include "si_public.h"
@@ -130,20 +131,6 @@ static const struct debug_named_value radeonsi_shader_debug_options[] = {
    DEBUG_NAMED_VALUE_END /* must be last */
 };
 
-static const struct debug_named_value radeonsi_multimedia_debug_options[] = {
-   /* Multimedia options: */
-   {"noefc", DBG(NO_EFC), "Disable hardware based encoder colour format conversion."},
-   {"lowlatencydec", DBG(LOW_LATENCY_DECODE), "Enable low latency decoding."},
-   {"lowlatencyenc", DBG(LOW_LATENCY_ENCODE), "Enable low latency encoding."},
-   {"novideotiling", DBG(NO_VIDEO_TILING), "Disable tiling for video."},
-   {"nodectier1", DBG(NO_DECODE_TIER1), "Disable tier1 for video decode."},
-   {"nodectier2", DBG(NO_DECODE_TIER2), "Disable tier2 for video decode."},
-   {"nodectier3", DBG(NO_DECODE_TIER3), "Disable tier3 for video decode."},
-   {"noenctier2", DBG(NO_ENCODE_TIER2), "Disable tier2 for video encode."},
-
-   DEBUG_NAMED_VALUE_END /* must be last */
-};
-
 static const struct debug_named_value test_options[] = {
    /* Tests: */
    {"clearbuffer", DBG(TEST_CLEAR_BUFFER), "Test correctness of the clear_buffer compute shader"},
@@ -211,6 +198,8 @@ static void decref_implicit_resource(struct hash_entry *entry)
 static void si_destroy_context(struct pipe_context *context)
 {
    struct si_context *sctx = (struct si_context *)context;
+
+   si_fini_mm_context(sctx);
 
    util_queue_finish(&sctx->screen->shader_compiler_queue);
    util_queue_finish(&sctx->screen->shader_compiler_queue_opt_variants);
@@ -766,19 +755,6 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
 
    sctx->sample_mask = 0xffff;
 
-   /* Initialize multimedia functions. */
-   if (sscreen->info.ip[AMD_IP_UVD].num_queues ||
-       ((sscreen->info.vcn_ip_version >= VCN_4_0_0) ?
-	 sscreen->info.ip[AMD_IP_VCN_UNIFIED].num_queues : sscreen->info.ip[AMD_IP_VCN_DEC].num_queues) ||
-       sscreen->info.ip[AMD_IP_VCN_JPEG].num_queues || sscreen->info.ip[AMD_IP_VCE].num_queues ||
-       sscreen->info.ip[AMD_IP_UVD_ENC].num_queues || sscreen->info.ip[AMD_IP_VCN_ENC].num_queues ||
-       sscreen->info.ip[AMD_IP_VPE].num_queues) {
-      sctx->b.create_video_codec = si_video_codec_create;
-      sctx->b.create_video_buffer = si_video_buffer_create;
-      if (screen->resource_create_with_modifiers)
-         sctx->b.create_video_buffer_with_modifiers = si_video_buffer_create_with_modifiers;
-   }
-
    /* GFX7 cannot unbind a constant buffer (S_BUFFER_LOAD doesn't skip loads
     * if NUM_RECORDS == 0). We need to use a dummy buffer instead. */
    if (sctx->gfx_level == GFX7) {
@@ -824,6 +800,11 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
       mesa_loge("can't create dirty_implicit_resources");
       goto fail;
    }
+
+   /* PIPE_CONTEXT_COMPUTE_ONLY doesn't mean no multimedia, it means no graphics so always
+    * init mm but don't fail if it reports an error.
+    */
+   si_init_mm_context(sscreen, sctx, flags);
 
    /* The remainder of this function initializes the gfx CS and must be last. */
    assert(sctx->gfx_cs.current.cdw == 0);
@@ -1346,7 +1327,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    sscreen->debug_flags = debug_get_flags_option("R600_DEBUG", radeonsi_debug_options, 0);
    sscreen->debug_flags |= debug_get_flags_option("AMD_DEBUG", radeonsi_debug_options, 0);
    sscreen->shader_debug_flags = debug_get_flags_option("AMD_DEBUG", radeonsi_shader_debug_options, 0);
-   sscreen->multimedia_debug_flags = debug_get_flags_option("AMD_DEBUG", radeonsi_multimedia_debug_options, 0);
    test_flags = debug_get_flags_option("AMD_TEST", test_options, 0);
 
    if (sscreen->debug_flags & DBG(NO_DISPLAY_DCC)) {
@@ -1545,6 +1525,9 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       glsl_type_singleton_decref();
       return NULL;
    }
+
+   /* Don't fail if the multimedia support is missing. */
+   si_init_mm_screen(sscreen);
 
    if (!debug_get_bool_option("RADEON_DISABLE_PERFCOUNTERS", false))
       si_init_perfcounters(sscreen);

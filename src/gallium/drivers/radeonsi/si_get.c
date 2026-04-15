@@ -8,9 +8,6 @@
 #include "compiler/nir/nir.h"
 #include "ac_nir.h"
 #include "ac_shader_util.h"
-#include "radeon_uvd_enc.h"
-#include "radeon_vce.h"
-#include "si_video.h"
 #include "si_pipe.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_screen.h"
@@ -218,16 +215,6 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    sscreen->b.get_driver_uuid = si_get_driver_uuid;
    sscreen->b.query_memory_info = si_query_memory_info;
    sscreen->b.get_disk_shader_cache = si_get_disk_shader_cache;
-
-   if (sscreen->info.ip[AMD_IP_UVD].num_queues ||
-       ((sscreen->info.vcn_ip_version >= VCN_4_0_0) ?
-	 sscreen->info.ip[AMD_IP_VCN_UNIFIED].num_queues : sscreen->info.ip[AMD_IP_VCN_DEC].num_queues) ||
-       sscreen->info.ip[AMD_IP_VCN_JPEG].num_queues || sscreen->info.ip[AMD_IP_VCE].num_queues ||
-       sscreen->info.ip[AMD_IP_UVD_ENC].num_queues || sscreen->info.ip[AMD_IP_VCN_ENC].num_queues ||
-       sscreen->info.ip[AMD_IP_VPE].num_queues) {
-      sscreen->b.get_video_param = si_video_get_param;
-      sscreen->b.is_video_format_supported = si_vid_is_format_supported;
-   }
 
    si_init_renderer_string(sscreen);
 
