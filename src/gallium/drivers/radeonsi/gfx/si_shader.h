@@ -903,8 +903,8 @@ void si_nir_gather_info(struct si_screen *sscreen, struct nir_shader *nir,
 /* si_shader_nir.c */
 void si_nir_opts(struct si_screen *sscreen, struct nir_shader *nir, bool has_array_temps);
 void si_nir_late_opts(struct nir_shader *nir);
-MESAPROC void si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir,
-                          bool optimize) TAILV;
+void si_finalize_nir(struct pipe_screen *screen, struct nir_shader *nir,
+                     bool optimize);
 
 /* si_state_shaders.cpp */
 unsigned si_shader_num_alloc_param_exports(struct si_shader *shader);
@@ -914,8 +914,8 @@ unsigned si_shader_lshs_vertex_stride(struct si_shader *ls);
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader);
 unsigned si_get_output_prim_simplified(const struct si_shader_selector *sel,
                                        const union si_shader_key *key);
-MESAPROC void si_get_scratch_tmpring_size(struct si_context *sctx, unsigned bytes_per_wave,
-                                          bool is_compute, unsigned *spi_tmpring_size) TAILV;
+void si_get_scratch_tmpring_size(struct si_context *sctx, unsigned bytes_per_wave,
+                                 bool is_compute, unsigned *spi_tmpring_size);
 
 /* si_shader_binary.c */
 unsigned si_get_shader_binary_size(struct si_screen *screen, struct si_shader *shader);
@@ -925,12 +925,12 @@ int si_shader_binary_upload_at(struct si_screen *sscreen, struct si_shader *shad
                                uint64_t scratch_va, int64_t bo_offset);
 void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shader *shader,
                                         struct util_debug_callback *debug);
-MESAPROC void si_shader_binary_clean(struct si_shader_binary *binary) TAILV;
+void si_shader_binary_clean(struct si_shader_binary *binary);
 const char *si_get_shader_name(const struct si_shader *shader);
-MESAPROC bool si_can_dump_shader(struct si_screen *sscreen, mesa_shader_stage stage,
-                             enum si_shader_dump_type dump_type) TAILB;
-MESAPROC void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
-                         struct util_debug_callback *debug, FILE *f, bool check_debug_option) TAILV;
+bool si_can_dump_shader(struct si_screen *sscreen, mesa_shader_stage stage,
+                        enum si_shader_dump_type dump_type);
+void si_shader_dump(struct si_screen *sscreen, struct si_shader *shader,
+                    struct util_debug_callback *debug, FILE *f, bool check_debug_option);
 
 /* Inline helpers. */
 
