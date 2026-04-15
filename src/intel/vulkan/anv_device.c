@@ -1353,6 +1353,9 @@ void anv_DestroyDevice(
    if (!device)
       return;
 
+   if (anv_needs_printf_buffer())
+      vk_check_printf_status(&device->vk, &device->printf);
+
    anv_memory_trace_finish(device);
 
    struct anv_physical_device *pdevice = device->physical;
