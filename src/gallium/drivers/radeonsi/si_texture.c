@@ -6,6 +6,7 @@
  */
 
 #include "drm-uapi/drm_fourcc.h"
+#include "gfx/si_gfx.h"
 #include "si_pipe.h"
 #include "si_query.h"
 #include "frontend/drm_driver.h"

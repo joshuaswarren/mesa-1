@@ -10,7 +10,7 @@
 
 #include "pipe/p_video_codec.h"
 #include "radeon_bitstream.h"
-#include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "util/u_memory.h"
 #include "vl/vl_video_buffer.h"
 #include "si_video.h"

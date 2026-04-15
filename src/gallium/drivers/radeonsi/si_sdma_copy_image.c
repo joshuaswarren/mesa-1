@@ -6,6 +6,7 @@
  */
 
 #include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "util/u_memory.h"
 #include "ac_cmdbuf_sdma.h"
 

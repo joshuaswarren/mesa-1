@@ -7,6 +7,7 @@
 /* This file implements randomized texture blit tests. */
 
 #include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "util/rand_xor.h"
 #include "util/u_surface.h"
 #include "amd/addrlib/inc/addrtypes.h"

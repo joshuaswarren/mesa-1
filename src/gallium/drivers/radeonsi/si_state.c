@@ -6,6 +6,7 @@
 
 #include "si_build_pm4.h"
 #include "si_query.h"
+#include "gfx/si_gfx.h"
 #include "gfx/si_shader_internal.h"
 #include "sid.h"
 #include "util/fast_idiv_by_const.h"

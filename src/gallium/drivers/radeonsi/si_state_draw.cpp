@@ -16,6 +16,7 @@
 #include "ac_rtld.h"
 #include "si_build_pm4.h"
 #include "si_tracepoints.h"
+#include "gfx/si_gfx.h"
 
 #if (GFX_VER == 6)
 #define GFX(name) name##GFX6

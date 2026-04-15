@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "si_pipe.h"
+#include "si_gfx.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_worklist.h"

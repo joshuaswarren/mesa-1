@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "si_pipe.h"
+#include "si_gfx.h"
 #include "nir.h"
 #include "nir/nir_xfb_info.h"
 

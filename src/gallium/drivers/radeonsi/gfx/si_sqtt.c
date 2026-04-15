@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "si_gfx.h"
 #include "ac_cmdbuf_cp.h"
 #include "ac_shader_util.h"
 #include "amd_family.h"

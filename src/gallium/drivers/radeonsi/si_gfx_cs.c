@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "gfx/si_gfx.h"
 #include "si_build_pm4.h"
 #include "si_pipe.h"
 #include "sid.h"

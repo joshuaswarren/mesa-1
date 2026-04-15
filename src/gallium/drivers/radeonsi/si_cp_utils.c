@@ -5,6 +5,7 @@
  */
 
 #include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "ac_cmdbuf_cp.h"
 
 void si_cp_release_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
