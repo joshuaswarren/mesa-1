@@ -1807,7 +1807,7 @@ system_value("idvs_output_buf_index_pan", 1, bit_sizes=[32])
 
 # src[] = { handle, vertex_id, instance_id }
 intrinsic("lea_attr_pan", [1, 1, 1], dest_comp=3, bit_sizes=[32],
-          indices=[SRC_TYPE], flags=[CAN_ELIMINATE, CAN_REORDER])
+          indices=[SRC_TYPE, DESC_SET], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # src[] = { handle, index }
 intrinsic("lea_buf_pan", [1, 1], dest_comp=2, bit_sizes=[32],

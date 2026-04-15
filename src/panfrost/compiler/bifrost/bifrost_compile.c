@@ -545,7 +545,10 @@ bi_emit_lea_attr(bi_builder *b, nir_intrinsic_instr *intr)
    assert(intr->intrinsic == nir_intrinsic_lea_attr_pan);
    const nir_alu_type src_fmt = nir_intrinsic_src_type(intr);
 
-   if (b->shader->arch < 9 && b->shader->idvs == BI_IDVS_POSITION) {
+   if (b->shader->arch < 9 &&
+       b->shader->idvs == BI_IDVS_POSITION &&
+       nir_intrinsic_desc_set(intr) == BI_TABLE_NONE &&
+       nir_src_is_zero(intr->src[0])) {
       /* Bifrost position shaders have a fast path */
       assert(nir_src_is_zero(intr->src[0]));
       assert(src_fmt == nir_type_float32);
@@ -562,7 +565,9 @@ bi_emit_lea_attr(bi_builder *b, nir_intrinsic_instr *intr)
 
    bi_index vertex_id = bi_src_index(&intr->src[1]);
    bi_index instance_id = bi_src_index(&intr->src[2]);
-   enum bi_register_format regfmt = bi_reg_fmt_for_nir(src_fmt);
+   enum bi_register_format regfmt =
+      src_fmt == 32 ? BI_REGISTER_FORMAT_AUTO
+                    : bi_reg_fmt_for_nir(src_fmt);
 
    /* Check if the index can fit in LEA_ATTR_IMM */
    uint32_t imm_res = 0;
@@ -579,9 +584,14 @@ bi_emit_lea_attr(bi_builder *b, nir_intrinsic_instr *intr)
                                        pan_res_handle_get_index(imm_res));
       if (b->shader->arch >= 9)
          I->table = va_res_fold_table_idx(pan_res_handle_get_table(imm_res));
+      else
+         I->table = nir_intrinsic_desc_set(intr);
    } else {
       bi_index res = bi_src_index(&intr->src[0]);
-      bi_lea_attr_to(b, address, vertex_id, instance_id, res, regfmt);
+      bi_instr *I = bi_lea_attr_to(b, address, vertex_id, instance_id, res,
+                                   regfmt);
+      if (b->shader->arch < 9)
+         I->table = nir_intrinsic_desc_set(intr);
    }
    bi_split_def(b, &intr->def);
 }
