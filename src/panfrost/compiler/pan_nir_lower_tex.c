@@ -4,6 +4,7 @@
  */
 
 #include "pan_nir.h"
+#include "bifrost/bifrost.h"
 #include "bifrost/valhall/valhall.h"
 #include "panfrost/model/pan_model.h"
 
@@ -170,6 +171,505 @@ scalar_as_imm_i4(nir_scalar s)
    memcpy(&_u, &(x), 4); \
    _u; \
 })
+
+static bool
+bi_lower_texs(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   assert(tex->op == nir_texop_tex || tex->op == nir_texop_txl);
+
+   if (tex->dest_type != nir_type_float32 &&
+       tex->dest_type != nir_type_float16)
+      return false;
+
+   if (tex->is_shadow || tex->is_array)
+      return false;
+
+   switch (tex->sampler_dim) {
+   case GLSL_SAMPLER_DIM_2D:
+   case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_RECT:
+      break;
+
+   case GLSL_SAMPLER_DIM_CUBE:
+      /* LOD can't be specified with TEXS_CUBE */
+      if (tex->op == nir_texop_txl)
+         return false;
+      break;
+
+   default:
+      return false;
+   }
+
+   nir_def *coord = NULL;
+   for (unsigned i = 0; i < tex->num_srcs; ++i) {
+      switch (tex->src[i].src_type) {
+      case nir_tex_src_coord:
+         coord = tex->src[i].src.ssa;
+         break;
+      case nir_tex_src_lod:
+         if (!nir_src_is_zero(tex->src[i].src))
+            return false;
+         break;
+      default:
+         return false;
+      }
+   }
+
+   /* Indices need to fit in provided bits */
+   unsigned max_index = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ? 3 : 7;
+   if (tex->sampler_index >= max_index || tex->texture_index >= max_index)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   struct pan_bi_tex_flags flags = {
+      .explicit_lod = tex->op == nir_texop_txl,
+      .sampler_idx = tex->sampler_index,
+      .texture_idx = tex->texture_index,
+   };
+
+   nir_def *res;
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
+      coord = build_cube_coord2_face(b, coord);
+      res = nir_texs_cube_pan(b, tex->def.bit_size,
+                              nir_channel(b, coord, 0),
+                              nir_channel(b, coord, 1),
+                              nir_channel(b, coord, 2),
+                              .dest_type = tex->dest_type,
+                              .flags = PAN_AS_U32(flags));
+   } else {
+      res = nir_texs_2d_pan(b, tex->def.bit_size,
+                            nir_channel(b, coord, 0),
+                            nir_channel(b, coord, 1),
+                            .dest_type = tex->dest_type,
+                            .flags = PAN_AS_U32(flags));
+   }
+
+   nir_def_replace(&tex->def, res);
+   return true;
+}
+
+static enum bifrost_texture_format_full
+bi_texture_format(nir_alu_type T, enum bi_clamp clamp)
+{
+   switch (T) {
+   case nir_type_float16:
+      return BIFROST_TEXTURE_FORMAT_F16 + clamp;
+   case nir_type_float32:
+      return BIFROST_TEXTURE_FORMAT_F32 + clamp;
+   case nir_type_uint16:
+      return BIFROST_TEXTURE_FORMAT_U16;
+   case nir_type_int16:
+      return BIFROST_TEXTURE_FORMAT_S16;
+   case nir_type_uint32:
+      return BIFROST_TEXTURE_FORMAT_U32;
+   case nir_type_int32:
+      return BIFROST_TEXTURE_FORMAT_S32;
+   default:
+      UNREACHABLE("Invalid type for texturing");
+   }
+}
+
+static unsigned
+bifrost_tex_format(enum glsl_sampler_dim dim)
+{
+   switch (dim) {
+   case GLSL_SAMPLER_DIM_1D:
+   case GLSL_SAMPLER_DIM_BUF:
+      return 1;
+
+   case GLSL_SAMPLER_DIM_2D:
+   case GLSL_SAMPLER_DIM_MS:
+   case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_RECT:
+   case GLSL_SAMPLER_DIM_SUBPASS:
+   case GLSL_SAMPLER_DIM_SUBPASS_MS:
+      return 2;
+
+   case GLSL_SAMPLER_DIM_3D:
+      return 3;
+
+   case GLSL_SAMPLER_DIM_CUBE:
+      return 0;
+
+   default:
+      UNREACHABLE("Unknown sampler dim type\n");
+   }
+}
+
+static nir_def *
+build_bi_texc(nir_builder *b, nir_alu_type dest_type,
+              nir_def *tex_idx, nir_def *samp_idx,
+              enum glsl_sampler_dim dim,
+              nir_def *coord_xy,
+              struct bifrost_texture_operation desc,
+              bool explicit_lod,
+              nir_def **sr, unsigned sr_count)
+{
+   const struct pan_bi_tex_flags flags = {
+      .explicit_lod = explicit_lod,
+   };
+
+   desc.dimension = bifrost_tex_format(dim);
+   desc.format = bi_texture_format(dest_type, BI_CLAMP_NONE);
+
+   assert(coord_xy->bit_size == 32);
+   nir_def *coord_x = nir_channel(b, coord_xy, 0);
+   nir_def *coord_y = coord_xy->num_components > 1 ?
+      nir_channel(b, coord_xy, 1) : nir_imm_int(b, 0);
+
+   uint32_t imm_tex_idx = nir_scalar_is_const(nir_get_scalar(tex_idx, 0))
+                          ? nir_scalar_as_uint(nir_get_scalar(tex_idx, 0))
+                          : UINT32_MAX;
+   uint32_t imm_samp_idx = nir_scalar_is_const(nir_get_scalar(samp_idx, 0))
+                           ? nir_scalar_as_uint(nir_get_scalar(samp_idx, 0))
+                           : UINT32_MAX;
+   if (imm_tex_idx < 128 && imm_samp_idx < 16) {
+      desc.immediate_indices = true;
+      desc.sampler_index_or_mode = imm_samp_idx;
+      desc.index = imm_tex_idx;
+      tex_idx = samp_idx = NULL;
+   } else if (imm_tex_idx == imm_samp_idx && imm_tex_idx < 128) {
+      desc.immediate_indices = false;
+      desc.sampler_index_or_mode = BIFROST_INDEX_IMMEDIATE_SHARED |
+                                   (BIFROST_TEXTURE_OPERATION_SINGLE << 2);
+      desc.index = imm_tex_idx;
+      tex_idx = samp_idx = NULL;
+   } else if (imm_tex_idx < 128) {
+      desc.immediate_indices = false;
+      desc.sampler_index_or_mode = BIFROST_INDEX_IMMEDIATE_TEXTURE |
+                                   (BIFROST_TEXTURE_OPERATION_SINGLE << 2);
+      desc.index = imm_tex_idx;
+      tex_idx = NULL;
+   } else if (imm_samp_idx < 16) {
+      desc.immediate_indices = false;
+      desc.sampler_index_or_mode = BIFROST_INDEX_IMMEDIATE_SAMPLER |
+                                   (BIFROST_TEXTURE_OPERATION_SINGLE << 2);
+      desc.index = imm_samp_idx;
+      samp_idx = NULL;
+   } else {
+      desc.immediate_indices = false;
+      desc.sampler_index_or_mode = BIFROST_INDEX_REGISTER |
+                                   (BIFROST_TEXTURE_OPERATION_SINGLE << 2);
+   }
+
+   /* Sampler and texture go at the end. (See also bifrost_tex_sreg.) Extend
+    * sr for sampler and texture if needed.
+    */
+   assert(sr_count <= 6);
+   nir_def *sr_tmp[8];
+   if (samp_idx || tex_idx) {
+      for (unsigned i = 0; i < sr_count; i++)
+         sr_tmp[i] = sr[i];
+
+      if (samp_idx)
+         sr_tmp[sr_count++] = samp_idx;
+      if (tex_idx)
+         sr_tmp[sr_count++] = tex_idx;
+
+      sr = sr_tmp;
+   }
+
+   if (sr_count == 0) {
+      return nir_texc0_pan(b, nir_alu_type_get_type_size(dest_type),
+                           coord_x, coord_y, nir_imm_int(b, desc.packed),
+                           .dest_type = dest_type,
+                           .flags = PAN_AS_U32(flags));
+   } else if (sr_count <= 4) {
+      return nir_texc1_pan(b, nir_alu_type_get_type_size(dest_type),
+                           coord_x, coord_y, nir_imm_int(b, desc.packed),
+                           nir_vec(b, sr, sr_count),
+                           .dest_type = dest_type,
+                           .flags = PAN_AS_U32(flags));
+   } else {
+      return nir_texc2_pan(b, nir_alu_type_get_type_size(dest_type),
+                           coord_x, coord_y, nir_imm_int(b, desc.packed),
+                           nir_vec(b, sr, 4),
+                           nir_vec(b, sr + 4, sr_count - 4),
+                           .dest_type = dest_type,
+                           .flags = PAN_AS_U32(flags));
+   }
+}
+
+static nir_def *
+build_bi_gradient_desc(nir_builder *b,
+                       nir_def *tex_idx, nir_def *samp_idx,
+                       enum glsl_sampler_dim dim,
+                       nir_def *ddx, nir_def *ddy)
+{
+   struct bifrost_texture_operation desc = {
+      .op = BIFROST_TEX_OP_GRDESC_DER,
+      .offset_or_bias_disable = true,
+      .shadow_or_clamp_disable = true,
+      .mask = 0xf,
+   };
+
+   nir_def *sr[4];
+   unsigned sr_count = 0;
+
+   nir_def *ddx_xy = nir_trim_vector(b, ddx, MIN2(ddx->num_components, 2));
+   for (unsigned i = 2; i < ddx->num_components; i++)
+      sr[sr_count++] = nir_channel(b, ddx, i);
+   for (unsigned i = 0; i < ddy->num_components; i++)
+      sr[sr_count++] = nir_channel(b, ddy, i);
+   assert(sr_count <= ARRAY_SIZE(sr));
+
+   return build_bi_texc(b, nir_type_float32, tex_idx, samp_idx,
+                        dim, ddx_xy, desc, true, sr, sr_count);
+}
+
+static enum bifrost_tex_op
+bi_tex_op(nir_texop op)
+{
+   switch (op) {
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+      return BIFROST_TEX_OP_TEX;
+   case nir_texop_txf:
+   case nir_texop_txf_ms:
+   case nir_texop_tg4:
+      return BIFROST_TEX_OP_FETCH;
+   case nir_texop_lod:
+      return BIFROST_TEX_OP_GRDESC;
+   default:
+      UNREACHABLE("Unhandled Bifrost texture op");
+   }
+}
+
+/* Data registers required by texturing in the order they appear. All are
+ * optional, the texture operation descriptor determines which are present.
+ * Note since 3D arrays are not permitted at an API level, Z_COORD and
+ * ARRAY/SHADOW are exlusive, so TEXC in practice reads at most 8 registers
+ */
+enum bifrost_tex_sreg {
+   BI_TEX_SR_Z_COORD = 0,
+   BI_TEX_SR_Y_DELTAS,
+   BI_TEX_SR_LOD,
+   BI_TEX_SR_GRDESC0,
+   BI_TEX_SR_GRDESC1,
+   BI_TEX_SR_SHADOW,
+   BI_TEX_SR_ARRAY,
+   BI_TEX_SR_OFFSET,
+   BI_TEX_SR_SAMPLER,
+   BI_TEX_SR_TEXTURE,
+   BI_TEX_SR_COUNT,
+};
+
+static bool
+bi_lower_tex(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   /* If txf is used, we assume there is a valid sampler bound at index 0. Use
+    * it for txf operations, since there may be no other valid samplers. This is
+    * a workaround: txf does not require a sampler in NIR (so sampler_index is
+    * undefined) but we need one in the hardware. This is ABI with the driver.
+    */
+   if (!nir_tex_instr_need_sampler(tex))
+      tex->sampler_index = 0;
+
+   struct bifrost_texture_operation desc = {
+      .mask = nir_def_components_read(&tex->def),
+   };
+
+   b->cursor = nir_before_instr(&tex->instr);
+   struct tex_srcs srcs = steal_tex_srcs(b, tex);
+
+   nir_def *coord_xy = NULL;
+   nir_def *sr[BI_TEX_SR_COUNT] = {};
+
+   const unsigned coord_comps = tex->coord_components - tex->is_array;
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
+      /* texelFetch() does not support cubes */
+      assert(tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms);
+      assert(coord_comps == 3);
+      coord_xy = build_cube_desc(b, srcs.coord);
+   } else {
+      coord_xy = nir_trim_vector(b, srcs.coord, MIN2(coord_comps, 2));
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
+         sr[BI_TEX_SR_Z_COORD] = nir_channel(b, srcs.coord, 2);
+   }
+
+   if (tex->is_array) {
+      nir_def *arr_idx = nir_channel(b, srcs.coord, coord_comps);
+
+      /* OpenGL ES 3.2 specification section 8.14.2 ("Coordinate Wrapping and
+       * Texel Selection") defines the layer to be taken from clamp(RNE(r),
+       * 0, dt - 1). So we use round RTE, clamping is handled at the data
+       * structure level
+       */
+      if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms)
+         arr_idx = nir_f2u32_rtne(b, arr_idx);
+
+      sr[BI_TEX_SR_ARRAY] = arr_idx;
+      desc.array = true;
+   }
+
+   if (tex->op == nir_texop_txf ||
+       tex->op == nir_texop_txf_ms ||
+       tex->op == nir_texop_tg4) {
+      desc.op = BIFROST_TEX_OP_FETCH;
+
+      /* FETCH always takes an LOD as an 8.8 fixed-point value.  GLSL and
+       * SPIR-V give us an integer, so we have to convert.
+       */
+      if (srcs.lod)
+         sr[BI_TEX_SR_LOD] = nir_ishl_imm(b, srcs.lod, 8);
+      else
+         sr[BI_TEX_SR_LOD] = nir_imm_int(b, 0);
+
+      if (tex->op == nir_texop_tg4) {
+         desc.lod_or_fetch = BIFROST_TEXTURE_FETCH_GATHER4_R +
+                             tex->component;
+      } else {
+         desc.lod_or_fetch = BIFROST_TEXTURE_FETCH_TEXEL;
+      }
+   } else {
+      desc.op = BIFROST_TEX_OP_TEX;
+
+      if (srcs.lod) {
+         if (nir_scalar_is_zero(nir_get_scalar(srcs.lod, 0))) {
+            desc.lod_or_fetch = BIFROST_LOD_MODE_ZERO;
+         } else {
+            desc.lod_or_fetch = BIFROST_LOD_MODE_EXPLICIT;
+            sr[BI_TEX_SR_LOD] = nir_u2u32(b, build_sfixed_8_8(b, srcs.lod));
+         }
+      } else if (srcs.min_lod || srcs.bias) {
+         desc.lod_or_fetch = BIFROST_LOD_MODE_BIAS;
+         sr[BI_TEX_SR_LOD] = build_lod_bias_clamp(b, srcs.bias, srcs.min_lod);
+      } else if (srcs.ddx || srcs.ddy) {
+         desc.lod_or_fetch = BIFROST_LOD_MODE_GRDESC;
+         nir_def *grdesc = build_bi_gradient_desc(b, srcs.tex_h, srcs.samp_h,
+                                                  tex->sampler_dim,
+                                                  srcs.ddx, srcs.ddy);
+         sr[BI_TEX_SR_GRDESC0] = nir_channel(b, grdesc, 0);
+         sr[BI_TEX_SR_GRDESC1] = nir_channel(b, grdesc, 1);
+      } else {
+         desc.lod_or_fetch = BIFROST_LOD_MODE_COMPUTE;
+      }
+   }
+
+   if (srcs.z_cmpr) {
+      sr[BI_TEX_SR_SHADOW] = srcs.z_cmpr;
+      desc.shadow_or_clamp_disable = true;
+   }
+
+   if (srcs.offset || srcs.ms_idx) {
+      /* The hardware specifies the offset, MS index, and lod (for TXF) in a
+       * u8vec4 <off_s, off_t, off_r, ms_idx>.
+       */
+      nir_scalar comps[4] = { };
+      if (srcs.offset) {
+         assert(srcs.offset->num_components == coord_comps);
+         for (unsigned i = 0; i < coord_comps; i++)
+            comps[i] = nir_get_scalar(srcs.offset, i);
+      }
+
+      if (srcs.ms_idx)
+         comps[3] = nir_get_scalar(srcs.ms_idx, 0);
+
+      /* Fill in the rest with zero */
+      for (unsigned i = 0; i < 4; i++) {
+         if (!comps[i].def)
+            comps[i] = nir_get_scalar(nir_imm_int(b, 0), 0);
+      }
+
+      sr[BI_TEX_SR_OFFSET] =
+         nir_pack_32_4x8(b, nir_i2i8(b, nir_vec_scalars(b, comps, 4)));
+      desc.offset_or_bias_disable = true;
+   }
+
+   unsigned sr_count = 0;
+   for (unsigned i = 0; i < BI_TEX_SR_COUNT; i++) {
+      if (sr[i])
+         sr[sr_count++] = sr[i];
+   }
+
+   const bool explicit_lod = !nir_tex_instr_has_implicit_derivative(tex);
+   nir_def *res = build_bi_texc(b, tex->dest_type | tex->def.bit_size,
+                                srcs.tex_h, srcs.samp_h, tex->sampler_dim,
+                                coord_xy, desc, explicit_lod, sr, sr_count);
+
+   /* For shadow, we may have to trim the result */
+   if (tex->def.num_components < res->num_components)
+      res = nir_trim_vector(b, res, tex->def.num_components);
+
+   nir_def_replace(&tex->def, res);
+   return true;
+}
+
+static bool
+bi_lower_lod(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   b->cursor = nir_before_instr(&tex->instr);
+   struct tex_srcs srcs = steal_tex_srcs(b, tex);
+
+   struct bifrost_texture_operation desc = {
+      .op = BIFROST_TEX_OP_GRDESC,
+      .mask = 1,
+   };
+
+   nir_def *coord_xy, *coord_z = NULL;
+   const unsigned coord_comps = tex->coord_components;
+   if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
+      coord_xy = build_cube_desc(b, srcs.coord);
+   } else {
+      coord_xy = nir_trim_vector(b, srcs.coord, MIN2(coord_comps, 2));
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_3D)
+         coord_z = nir_channel(b, srcs.coord, 2);
+   }
+
+   nir_def *comps[2];
+   for (unsigned i = 0; i < 2; i++) {
+      desc.shadow_or_clamp_disable = i != 0;
+      nir_def *grdesc = build_bi_texc(b, nir_type_float32,
+                                      srcs.tex_h, srcs.samp_h,
+                                      tex->sampler_dim, coord_xy, desc,
+                                      false, &coord_z, coord_z ? 1 : 0);
+
+      nir_def *lod_i16 = nir_unpack_32_2x16_split_x(b, grdesc);
+
+      assert(tex->dest_type == nir_type_float32);
+      nir_def *lod = nir_i2f32(b, lod_i16);
+
+      lod = nir_fdiv_imm(b, lod, 256.0);
+      if (i == 0)
+         lod = nir_fround_even(b, lod);
+
+      comps[i] = lod;
+   }
+
+   nir_def_replace(&tex->def, nir_vec2(b, comps[0], comps[1]));
+   return true;
+}
+
+static bool
+bi_lower_tex_instr(nir_builder *b, nir_tex_instr *tex, void *cb_data)
+{
+   uint64_t gpu_id = *(uint64_t *)cb_data;
+
+   switch (tex->op) {
+   case nir_texop_tex:
+   case nir_texop_txl:
+      if (bi_lower_texs(b, tex, gpu_id))
+         return true;
+
+      FALLTHROUGH;
+
+   case nir_texop_txb:
+   case nir_texop_txd:
+   case nir_texop_txf:
+   case nir_texop_txf_ms:
+   case nir_texop_tg4:
+      return bi_lower_tex(b, tex, gpu_id);
+
+   case nir_texop_lod:
+      return bi_lower_lod(b, tex, gpu_id);
+
+   default:
+      return false;
+   }
+}
 
 static nir_def *
 va_tex_handle(nir_builder *b, nir_def *tex_h, nir_def *samp_h)
@@ -498,7 +998,11 @@ pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id)
       return nir_shader_tex_pass(nir, va_lower_tex_instr,
                                  nir_metadata_control_flow,
                                  &gpu_id);
+   } else if (pan_arch(gpu_id) >= 6) {
+      return nir_shader_tex_pass(nir, bi_lower_tex_instr,
+                                 nir_metadata_control_flow,
+                                 &gpu_id);
    } else {
-      UNREACHABLE("Midgard and Bifrost are not supported by this pass");
+      UNREACHABLE("Midgard is not supported by this pass");
    }
 }
