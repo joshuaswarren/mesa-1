@@ -294,6 +294,18 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_descriptor_heap                   = ANV_DEBUG(EXPERIMENTAL),
       .EXT_descriptor_indexing               = true,
       .EXT_device_address_binding_report     = true,
+      /* Emitting a single compute dispatch potentially lot of memory (> 4KiB)
+       * on device prior to Gfx12.5 due to the fact that we need to emit 32B
+       * worth of data per subgroup in a workgroup, see anv_dgc_layout.c. So
+       * make it experimental on those devices for now, since vkd3d-proton
+       * will try to allocate lots of DGC preprocess buffer and those
+       * requiring to be in the dynamic visible heap, things run out of VMA
+       * pretty quick. We can some something less memory intensive with a ring
+       * buffer approach, at the expense of late preprocessing. But this is
+       * for later.
+       */
+      .EXT_device_generated_commands         = device->info.verx10 >= 125 ||
+                                               (device->info.ver >= 11 || ANV_DEBUG(EXPERIMENTAL)),
       .EXT_device_memory_report              = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control                   = true,
@@ -1032,6 +1044,10 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_EXT_descriptor_heap */
       .descriptorHeap = true,
       .descriptorHeapCaptureReplay = true,
+
+      /* VK_EXT_device_generated_commands */
+      .deviceGeneratedCommands = true,
+      .dynamicGeneratedPipelineLayout = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1774,6 +1790,43 @@ get_properties(const struct anv_physical_device *pdevice,
       props->samplerYcbcrConversionCount = 3;
       props->sparseDescriptorHeaps = pdevice->info.kmd_type == INTEL_KMD_TYPE_XE;
       props->protectedDescriptorHeaps = false;
+   }
+
+   /* VK_EXT_device_generated_commands */
+   {
+      VkShaderStageFlags stages =
+         VK_SHADER_STAGE_VERTEX_BIT |
+         VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+         VK_SHADER_STAGE_GEOMETRY_BIT |
+         VK_SHADER_STAGE_FRAGMENT_BIT |
+         VK_SHADER_STAGE_COMPUTE_BIT;
+      /* TODO: fixup Wa_18019110168 */
+      if (pdevice->info.has_mesh_shading &&
+          !intel_needs_workaround(&pdevice->info, 18019110168))
+         stages |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+      if (ANV_SUPPORT_RT && pdevice->info.has_ray_tracing)
+         stages |= ANV_RT_STAGE_BITS;
+
+      const VkShaderStageFlags indirect_stages =
+         stages & (VK_SHADER_STAGE_COMPUTE_BIT | ANV_RT_STAGE_BITS);
+
+      props->maxIndirectPipelineCount = 1 << 12; /* spec minimum */
+      props->maxIndirectShaderObjectCount = 1 << 12; /* spec minimum */
+      props->maxIndirectSequenceCount = 1 << 20; /* spec minimum */
+      props->maxIndirectCommandsTokenCount = 32;
+      props->maxIndirectCommandsTokenOffset = 64 * 1024;
+      props->maxIndirectCommandsIndirectStride = UINT32_MAX;
+      props->supportedIndirectCommandsInputModes = VK_INDIRECT_COMMANDS_INPUT_MODE_VULKAN_INDEX_BUFFER_EXT |
+                                                   VK_INDIRECT_COMMANDS_INPUT_MODE_DXGI_INDEX_BUFFER_EXT;
+      props->supportedIndirectCommandsShaderStages = stages;
+      props->supportedIndirectCommandsShaderStagesShaderBinding = indirect_stages;
+      props->supportedIndirectCommandsShaderStagesPipelineBinding = indirect_stages;
+      props->deviceGeneratedCommandsTransformFeedback = true;
+      /* Xe2+ has an indirect instruction, unfortunately it does not have a HW
+       * generated gl_DrawID so we cannot implement this...
+       */
+      props->deviceGeneratedCommandsMultiDrawIndirectCount = false;
    }
 
    /* VK_EXT_extended_dynamic_state3 */
