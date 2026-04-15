@@ -229,7 +229,8 @@ vl_video_buffer_destroy(struct pipe_video_buffer *buffer)
    assert(buf);
 
    for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
-      buf->base.context->sampler_view_release(buf->base.context, buf->sampler_view_planes[i]);
+      if (buf->sampler_view_planes[i])
+         buf->base.context->sampler_view_release(buf->base.context, buf->sampler_view_planes[i]);
       if (i < buf->num_sampler_view_components)
          buf->base.context->sampler_view_release(buf->base.context, buf->sampler_view_components[i]);
       pipe_resource_reference(&buf->resources[i], NULL);
