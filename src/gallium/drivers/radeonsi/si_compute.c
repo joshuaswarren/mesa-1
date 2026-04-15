@@ -9,6 +9,7 @@
 #include "ac_shader_util.h"
 #include "si_build_pm4.h"
 #include "si_shader_internal.h"
+#include "gfx/si_gfx.h"
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
 #include "si_tracepoints.h"

@@ -124,6 +124,7 @@ if with_gfx_compute
     'si_compute_blit.c',
     'si_compute.c',
     'si_debug_gfx_compute.c',
+    'gfx/si_shader_cache.c',
     'si_nir_mediump.c',
     'si_mesh_shader.c',
     'si_shader_aco.c',

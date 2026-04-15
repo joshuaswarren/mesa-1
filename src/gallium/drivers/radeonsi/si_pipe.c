@@ -6,6 +6,7 @@
  */
 
 #include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "mm/si_mm.h"
 
 #include "driver_ddebug/dd_util.h"
