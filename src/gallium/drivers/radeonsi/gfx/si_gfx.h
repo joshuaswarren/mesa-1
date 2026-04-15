@@ -31,20 +31,20 @@ MESAPROC bool si_init_gfx_screen(struct si_screen *sscreen) TAILBT;
 MESAPROC void si_fini_gfx_screen(struct si_screen *sscreen) TAILV;
 
 /* si_shader_cache.c */
-MESAPROC void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                                  unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]) TAILV;
+void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
+                         unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]);
 
-MESAPROC bool si_init_shader_cache(struct si_screen *sscreen) TAILB;
+bool si_init_shader_cache(struct si_screen *sscreen);
 
-MESAPROC void si_init_screen_live_shader_cache(struct si_screen *sscreen) TAILV;
+void si_init_screen_live_shader_cache(struct si_screen *sscreen);
 
-MESAPROC void si_destroy_shader_cache(struct si_screen *sscreen) TAILV;
+void si_destroy_shader_cache(struct si_screen *sscreen);
 
-MESAPROC bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN],
-                                          struct si_shader *shader) TAILB;
+bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN],
+                                 struct si_shader *shader);
 
-MESAPROC void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN],
-                                            struct si_shader *shader, bool insert_into_disk_cache) TAILV;
+void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN],
+                                   struct si_shader *shader, bool insert_into_disk_cache);
 
 #ifdef __cplusplus
 }

@@ -7,7 +7,7 @@
 #ifndef SI_PIPE_H
 #define SI_PIPE_H
 
-#include "si_shader.h"
+#include "gfx/si_shader.h"
 #include "si_state.h"
 #include "winsys/radeon_winsys.h"
 #include "util/u_blitter.h"
