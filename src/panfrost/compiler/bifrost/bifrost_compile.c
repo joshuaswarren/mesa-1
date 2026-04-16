@@ -3211,14 +3211,20 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
    }
 
    case nir_op_f2i32:
+   case nir_op_f2i32_rtne: {
       /* v11 removed F16_TO_S32 */
       assert(src_sz == 32 || (b->shader->arch < 11 && src_sz == 16));
 
+      bi_instr *I;
       if (src_sz == 32)
-         bi_f32_to_s32_to(b, dst, s0);
+         I = bi_f32_to_s32_to(b, dst, s0);
       else
-         bi_f16_to_s32_to(b, dst, s0);
+         I = bi_f16_to_s32_to(b, dst, s0);
+
+      if (instr->op == nir_op_f2i32_rtne)
+         I->round = BI_ROUND_NONE;
       break;
+   }
 
    /* Note 32-bit sources => no vectorization, so 32-bit works */
    case nir_op_f2u16:
@@ -3242,14 +3248,20 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       break;
 
    case nir_op_f2u32:
+   case nir_op_f2u32_rtne: {
       /* v11 removed F16_TO_U32 */
       assert(src_sz == 32 || (b->shader->arch < 11 && src_sz == 16));
 
+      bi_instr *I;
       if (src_sz == 32)
-         bi_f32_to_u32_to(b, dst, s0);
+         I = bi_f32_to_u32_to(b, dst, s0);
       else
-         bi_f16_to_u32_to(b, dst, s0);
+         I = bi_f16_to_u32_to(b, dst, s0);
+
+      if (instr->op == nir_op_f2u32_rtne)
+         I->round = BI_ROUND_NONE;
       break;
+   }
 
    case nir_op_u2f16:
       /* Starting with v11, we don't have V2XXX_TO_V2F16, this should have been
