@@ -3383,10 +3383,10 @@ compute_descriptor_set_surface_offset(const struct anv_cmd_buffer *cmd_buffer,
                                       const uint32_t set_idx)
 {
    const struct anv_physical_device *device = cmd_buffer->device->physical;
+   const int32_t buffer_index =
+      pipe_state->descriptor_buffers[set_idx].buffer_index;
 
    if (intel_has_extended_bindless(&device->info)) {
-      int32_t buffer_index =
-         pipe_state->descriptor_buffers[set_idx].buffer_index;
       uint64_t buffer_address =
          buffer_index == -1 ?
          device->va.push_descriptor_buffer_pool.addr :
@@ -3395,6 +3395,14 @@ compute_descriptor_set_surface_offset(const struct anv_cmd_buffer *cmd_buffer,
       return (buffer_address - device->va.dynamic_visible_pool.addr) +
               pipe_state->descriptor_buffers[set_idx].buffer_offset;
    }
+
+   /* Pre Gfx12.0, the push descriptor in EXT_descriptor_buffer mode is always
+    * accessed through the binding table. With exception to the descriptor
+    * reads going through A64 message, the offset for the A64 message is
+    * relative to the device->va.internal_surface_state_pool.addr
+    */
+   if (buffer_index == -1)
+      return pipe_state->descriptor_buffers[set_idx].buffer_offset;
 
    const uint32_t descriptor_buffer_align =
       cmd_buffer->state.descriptor_buffers.surfaces_address % 4096;
