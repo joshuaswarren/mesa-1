@@ -5,6 +5,7 @@
  */
 
 #include "si_pipe.h"
+#include "gfx/si_gfx.h"
 #include "sid.h"
 #include "si_build_pm4.h"
 #include "ac_cmdbuf_cp.h"

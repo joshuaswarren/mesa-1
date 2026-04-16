@@ -1981,22 +1981,6 @@ static inline bool util_rast_prim_is_triangles(unsigned prim)
    return ((1 << prim) & UTIL_ALL_PRIM_TRIANGLE_MODES) != 0;
 }
 
-static inline void si_need_gfx_cs_space(struct si_context *ctx, unsigned num_draws,
-                                        unsigned extra_dw_per_draw)
-{
-   struct radeon_cmdbuf *cs = &ctx->gfx_cs;
-   /* Don't count the needed CS space exactly and just use an upper bound.
-    *
-    * Also reserve space for stopping queries at the end of IB, because
-    * the number of active queries is unlimited in theory.
-    */
-   unsigned reserve_dw = 2048 + ctx->num_cs_dw_queries_suspend +
-      num_draws * (10 + extra_dw_per_draw);
-
-   if (!ctx->ws->cs_check_space(cs, reserve_dw))
-      si_flush_gfx_cs(ctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
-}
-
 /**
  * Add a buffer to the buffer list for the given command stream (CS).
  *
@@ -2013,29 +1997,6 @@ static inline void radeon_add_to_buffer_list(struct si_context *sctx, struct rad
    assert(usage);
    sctx->ws->cs_add_buffer(cs, bo->buf, usage | RADEON_USAGE_SYNCHRONIZED,
                            bo->domains);
-}
-
-static inline void si_select_draw_vbo(struct si_context *sctx)
-{
-   pipe_draw_func draw_vbo = sctx->draw_vbo[!!sctx->shader.tes.cso]
-                                           [!!sctx->shader.gs.cso]
-                                           [sctx->ngg];
-   pipe_draw_vertex_state_func draw_vertex_state =
-      sctx->draw_vertex_state[!!sctx->shader.tes.cso]
-                             [!!sctx->shader.gs.cso]
-                             [sctx->ngg];
-   assert(draw_vbo);
-   assert(draw_vertex_state);
-
-   if (unlikely(sctx->real_draw_vbo)) {
-      assert(sctx->real_draw_vertex_state);
-      sctx->real_draw_vbo = draw_vbo;
-      sctx->real_draw_vertex_state = draw_vertex_state;
-   } else {
-      assert(!sctx->real_draw_vertex_state);
-      sctx->b.draw_vbo = draw_vbo;
-      sctx->b.draw_vertex_state = draw_vertex_state;
-   }
 }
 
 /* Return the number of samples that the rasterizer uses. */

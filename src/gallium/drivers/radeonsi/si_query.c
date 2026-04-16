@@ -7,6 +7,7 @@
  */
 
 #include "si_query.h"
+#include "gfx/si_gfx.h"
 #include "si_build_pm4.h"
 
 #include "amd/common/sid.h"
