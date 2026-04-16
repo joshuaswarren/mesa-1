@@ -943,8 +943,7 @@ bifrost_postprocess_nir(nir_shader *nir,
                &info->vs.needs_extended_fifo);
    }
 
-   if (pan_arch(gpu_id) >= 9)
-      NIR_PASS(_, nir, pan_nir_lower_tex, gpu_id);
+   NIR_PASS(_, nir, pan_nir_lower_tex, gpu_id);
 
    /* Our OpenCL compiler (src/panfrost/clc/pan_compile.c) has a very weird and
     * suboptimal optimization pipeline that results in a lot of unoptimized
