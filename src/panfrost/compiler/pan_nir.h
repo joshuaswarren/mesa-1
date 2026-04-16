@@ -87,6 +87,27 @@ bool pan_nir_lower_texel_buffer_fetch_index(nir_shader *shader,
 
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
+struct pan_bi_tex_flags {
+   bool skip : 1;
+   bool explicit_lod : 1;
+   unsigned _pad : 14;
+   unsigned sampler_idx : 8;
+   unsigned texture_idx : 8;
+};
+PRAGMA_DIAGNOSTIC_POP
+static_assert(sizeof(struct pan_bi_tex_flags) == 4, "Must fit in uint32_t");
+
+static inline struct pan_bi_tex_flags
+nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
+{
+   uint32_t flags_u32 = nir_intrinsic_flags(instr);
+   struct pan_bi_tex_flags flags;
+   memcpy(&flags, &flags_u32, sizeof(flags));
+   return flags;
+}
+
+PRAGMA_DIAGNOSTIC_PUSH
+PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
    bool wide_indices : 1;
    bool array_enable : 1;

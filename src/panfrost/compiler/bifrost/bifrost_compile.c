@@ -2029,6 +2029,79 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       bi_split_def(b, &instr->def);
       break;
 
+   case nir_intrinsic_texs_2d_pan: {
+      struct pan_bi_tex_flags flags =
+         nir_intrinsic_pan_bi_tex_flags(instr);
+
+      bi_instr *I = bi_texs_2d_to(b, instr->def.bit_size,
+                                  bi_def_index(&instr->def),
+                                  bi_src_index(&instr->src[0]),
+                                  bi_src_index(&instr->src[1]),
+                                  flags.explicit_lod,
+                                  flags.sampler_idx,
+                                  flags.texture_idx);
+      I->skip = flags.skip;
+
+      bi_split_def(b, &instr->def);
+      break;
+   }
+
+   case nir_intrinsic_texs_cube_pan: {
+      struct pan_bi_tex_flags flags =
+         nir_intrinsic_pan_bi_tex_flags(instr);
+      assert(!flags.explicit_lod);
+
+      bi_instr *I = bi_texs_cube_to(b, instr->def.bit_size,
+                                    bi_def_index(&instr->def),
+                                    bi_src_index(&instr->src[0]),
+                                    bi_src_index(&instr->src[1]),
+                                    bi_src_index(&instr->src[2]),
+                                    flags.sampler_idx,
+                                    flags.texture_idx);
+      I->skip = flags.skip;
+
+      bi_split_def(b, &instr->def);
+      break;
+   }
+
+   case nir_intrinsic_texc0_pan:
+   case nir_intrinsic_texc1_pan:
+   case nir_intrinsic_texc2_pan: {
+      bi_index cx = bi_src_index(&instr->src[0]);
+      bi_index cy = bi_src_index(&instr->src[1]);
+      bi_index desc = bi_src_index(&instr->src[2]);
+      struct pan_bi_tex_flags flags =
+         nir_intrinsic_pan_bi_tex_flags(instr);
+
+      bi_index sr_comps[8];
+      unsigned sr_count = 0;
+
+      if (instr->intrinsic != nir_intrinsic_texc0_pan) {
+         bi_index sr0 = bi_src_index(&instr->src[3]);
+         for (unsigned i = 0; i < nir_src_num_components(instr->src[3]); i++)
+            sr_comps[sr_count++] = bi_extract(b, sr0, i);
+      }
+      if (instr->intrinsic == nir_intrinsic_texc2_pan) {
+         bi_index sr1 = bi_src_index(&instr->src[4]);
+         for (unsigned i = 0; i < nir_src_num_components(instr->src[4]); i++)
+            sr_comps[sr_count++] = bi_extract(b, sr1, i);
+      }
+
+      bi_index sr = bi_null();
+      if (sr_count > 0) {
+         sr = bi_temp(b->shader);
+         bi_emit_collect_to(b, sr, sr_comps, sr_count);
+      }
+
+      bi_instr *I = bi_texc_to(b, bi_def_index(&instr->def), sr, cx, cy,
+                               desc, flags.explicit_lod, sr_count, 0);
+      I->register_format = bi_reg_fmt_for_nir(nir_intrinsic_dest_type(instr));
+      I->skip = flags.skip;
+
+      bi_split_def(b, &instr->def);
+      break;
+   }
+
    case nir_intrinsic_load_pixel_coord:
       /* Vectorized load of the preloaded i16vec2 */
       bi_mov_i32_to(b, dst, bi_preload(b, BI_PRELOAD_POSITION_XY));
