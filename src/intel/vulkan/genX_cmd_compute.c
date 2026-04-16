@@ -85,16 +85,18 @@ genX(cmd_buffer_ensure_cfe_state)(struct anv_cmd_buffer *cmd_buffer,
 }
 
 static void
-cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
+cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer,
+                               struct anv_indirect_execution_set *indirect_set)
 {
    struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
    const UNUSED struct intel_device_info *devinfo = cmd_buffer->device->info;
 
-   assert(comp_state->shader);
+   assert(comp_state->shader || indirect_set);
 
    genX(cmd_buffer_config_l3)(cmd_buffer,
-                              comp_state->shader->prog_data->total_shared > 0 ?
+                              (indirect_set != NULL ||
+                               comp_state->shader->prog_data->total_shared > 0) ?
                               device->l3_slm_config : device->l3_config);
 
    genX(cmd_buffer_update_color_aux_op)(cmd_buffer, ANV_COLOR_AUX_OP_CLASS_NONE);
@@ -111,7 +113,7 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
     */
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
-   if (comp_state->pipeline_dirty) {
+   if (indirect_set != NULL || comp_state->pipeline_dirty) {
 #if GFX_VERx10 < 125
       /* From the Sky Lake PRM Vol 2a, MEDIA_VFE_STATE:
        *
@@ -145,10 +147,14 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
 
 
 #if GFX_VERx10 >= 125
-      const struct brw_cs_prog_data *prog_data = get_cs_prog_data(comp_state);
-      genX(cmd_buffer_ensure_cfe_state)(cmd_buffer, prog_data->base.total_scratch);
+      genX(cmd_buffer_ensure_cfe_state)(
+         cmd_buffer,
+         indirect_set != NULL ?
+         indirect_set->max_scratch :
+         get_cs_prog_data(comp_state)->base.total_scratch);
 #else
-      anv_batch_emit_cs(&cmd_buffer->batch, GENX(MEDIA_VFE_STATE), cs.gfx9.vfe);
+      if (indirect_set == NULL)
+         anv_batch_emit_cs(&cmd_buffer->batch, GENX(MEDIA_VFE_STATE), cs.gfx9.vfe);
 #endif
 
 #undef anv_batch_emit_cs
@@ -179,17 +185,25 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
       "dirty compute descriptor");
 
    if (cmd_buffer->state.descriptors_dirty & VK_SHADER_STAGE_COMPUTE_BIT) {
-      cmd_buffer->state.descriptors_pointers_dirty |=
-         genX(cmd_buffer_flush_descriptor_sets)(
-            cmd_buffer,
-            &cmd_buffer->state.compute.base,
-            VK_SHADER_STAGE_COMPUTE_BIT,
-            (const struct anv_shader **)&comp_state->shader, 1);
+      if (indirect_set != NULL) {
+         genX(cmd_buffer_flush_indirect_cs_descriptor_sets)(
+            cmd_buffer, indirect_set->bind_map);
+         cmd_buffer->state.descriptors_pointers_dirty |=
+            VK_SHADER_STAGE_COMPUTE_BIT;
+      } else {
+         cmd_buffer->state.descriptors_pointers_dirty |=
+            genX(cmd_buffer_flush_descriptor_sets)(
+               cmd_buffer,
+               &cmd_buffer->state.compute.base,
+               VK_SHADER_STAGE_COMPUTE_BIT,
+               (const struct anv_shader **)&comp_state->shader, 1);
+      }
       cmd_buffer->state.descriptors_dirty &= ~VK_SHADER_STAGE_COMPUTE_BIT;
    }
 #if GFX_VERx10 < 125
-   if ((cmd_buffer->state.descriptors_pointers_dirty & VK_SHADER_STAGE_COMPUTE_BIT) ||
-       cmd_buffer->state.compute.pipeline_dirty) {
+   if (indirect_set == NULL &&
+       ((cmd_buffer->state.descriptors_pointers_dirty & VK_SHADER_STAGE_COMPUTE_BIT) ||
+        cmd_buffer->state.compute.pipeline_dirty)) {
       uint32_t iface_desc_data_dw[GENX(INTERFACE_DESCRIPTOR_DATA_length)];
       struct GENX(INTERFACE_DESCRIPTOR_DATA) desc = {
          .BindingTablePointer =
@@ -214,8 +228,8 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
    }
 #endif
 
-   if (cmd_buffer->state.push_constants_dirty & VK_SHADER_STAGE_COMPUTE_BIT) {
-
+   if (indirect_set == NULL &&
+       (cmd_buffer->state.push_constants_dirty & VK_SHADER_STAGE_COMPUTE_BIT)) {
       if (comp_state->base.push_constants_state.alloc_size == 0 ||
           comp_state->base.push_constants_data_dirty) {
          comp_state->base.push_constants_state =
@@ -235,15 +249,17 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
       cmd_buffer->state.push_constants_dirty &= ~VK_SHADER_STAGE_COMPUTE_BIT;
    }
 
-   cmd_buffer->state.compute.pipeline_dirty = false;
+   if (indirect_set == NULL)
+      cmd_buffer->state.compute.pipeline_dirty = false;
 
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 }
 
 void
-genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer,
+                                     struct anv_indirect_execution_set *indirect_set)
 {
-   cmd_buffer_flush_compute_state(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer, indirect_set);
 }
 
 static void
@@ -716,7 +732,7 @@ void genX(CmdDispatchBase)(
 
    trace_intel_begin_compute(&cmd_buffer->trace);
 
-   cmd_buffer_flush_compute_state(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer, NULL);
 
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
@@ -790,7 +806,7 @@ genX(cmd_dispatch_unaligned)(
 
    assert((bind_map->binding_mask &
            ANV_PIPELINE_BIND_MASK_NUM_WORKGROUP) == 0);
-   genX(cmd_buffer_flush_compute_state)(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer, NULL);
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
 
@@ -839,7 +855,7 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
 
    trace_intel_begin_compute_indirect(&cmd_buffer->trace);
 
-   cmd_buffer_flush_compute_state(cmd_buffer);
+   cmd_buffer_flush_compute_state(cmd_buffer, NULL);
 
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
