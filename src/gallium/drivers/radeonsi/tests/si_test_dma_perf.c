@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "si_tests.h"
+#include "si_tests_private.h"
+
 #include "si_pipe.h"
 #include "si_query.h"
 #include "util/streaming-load-memcpy.h"
@@ -516,7 +519,6 @@ void si_test_clear_buffer(struct si_screen *sscreen)
    }
 
    ctx->destroy(ctx);
-   exit(0);
 }
 
 void si_test_copy_buffer(struct si_screen *sscreen)
@@ -626,5 +628,4 @@ void si_test_copy_buffer(struct si_screen *sscreen)
    }
 
    ctx->destroy(ctx);
-   exit(0);
 }

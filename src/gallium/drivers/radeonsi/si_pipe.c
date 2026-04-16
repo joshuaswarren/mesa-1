@@ -8,13 +8,13 @@
 #include "si_pipe.h"
 #include "gfx/si_gfx.h"
 #include "mm/si_mm.h"
+#include "tests/si_tests.h"
 
 #include "driver_ddebug/dd_util.h"
 #include "si_public.h"
 #include "sid.h"
 #include "util/u_memory.h"
 #include "util/u_suballoc.h"
-#include "util/u_tests.h"
 #include "util/u_upload_mgr.h"
 #include "util/xmlconfig.h"
 #include "si_utrace.h"
@@ -80,20 +80,6 @@ static const struct debug_named_value radeonsi_debug_options[] = {
    {"tmz", DBG(TMZ), "Force allocation of scanout/depth/stencil buffer as encrypted"},
    {"sqtt", DBG(SQTT), "Enable SQTT"},
    {"export_modifier", DBG(EXPORT_MODIFIER), "Export real modifier instead of DRM_FORMAT_MOD_INVALID"},
-
-   DEBUG_NAMED_VALUE_END /* must be last */
-};
-
-static const struct debug_named_value test_options[] = {
-   /* Tests: */
-   {"clearbuffer", DBG(TEST_CLEAR_BUFFER), "Test correctness of the clear_buffer compute shader"},
-   {"copybuffer", DBG(TEST_COPY_BUFFER), "Test correctness of the copy_buffer compute shader"},
-   {"imagecopy", DBG(TEST_IMAGE_COPY), "Invoke resource_copy_region tests with images and exit."},
-   {"computeblit", DBG(TEST_COMPUTE_BLIT), "Invoke blits tests and exit."},
-   {"testvmfaultcp", DBG(TEST_VMFAULT_CP), "Invoke a CP VM fault test and exit."},
-   {"testvmfaultshader", DBG(TEST_VMFAULT_SHADER), "Invoke a shader VM fault test and exit."},
-   {"dmaperf", DBG(TEST_DMA_PERF), "Test DMA performance"},
-   {"testmemperf", DBG(TEST_MEM_PERF), "Test map + memcpy perf using the winsys."},
 
    DEBUG_NAMED_VALUE_END /* must be last */
 };
@@ -204,36 +190,10 @@ void si_destroy_screen(struct pipe_screen *pscreen)
    FREE(sscreen);
 }
 
-static void si_test_vmfault(struct si_screen *sscreen, uint64_t test_flags)
-{
-   struct pipe_context *ctx = sscreen->aux_context.general.ctx;
-   struct si_context *sctx = (struct si_context *)ctx;
-   struct pipe_resource *buf = pipe_buffer_create_const0(&sscreen->b, 0, PIPE_USAGE_DEFAULT, 64);
-
-   if (!buf) {
-      puts("Buffer allocation failed.");
-      exit(1);
-   }
-
-   si_resource(buf)->gpu_address = 0; /* cause a VM fault */
-
-   if (test_flags & DBG(TEST_VMFAULT_CP)) {
-      si_cp_dma_copy_buffer(sctx, buf, buf, 0, 4, 4);
-      ctx->flush(ctx, NULL, 0);
-      puts("VM fault test: CP - done.");
-   }
-   if (test_flags & DBG(TEST_VMFAULT_SHADER)) {
-      util_test_constant_buffer(ctx, buf);
-      puts("VM fault test: Shader - done.");
-   }
-   exit(0);
-}
-
 static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                                                        const struct pipe_screen_config *config)
 {
    struct si_screen *sscreen = CALLOC_STRUCT(si_screen);
-   uint64_t test_flags;
 
    if (!sscreen) {
       return NULL;
@@ -252,7 +212,6 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
 
    sscreen->debug_flags = debug_get_flags_option("R600_DEBUG", radeonsi_debug_options, 0);
    sscreen->debug_flags |= debug_get_flags_option("AMD_DEBUG", radeonsi_debug_options, 0);
-   test_flags = debug_get_flags_option("AMD_TEST", test_options, 0);
 
    if ((sscreen->debug_flags & DBG(TMZ)) &&
        !sscreen->info.has_tmz_support) {
@@ -294,26 +253,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    for (unsigned i = 0; i < ARRAY_SIZE(sscreen->aux_contexts); i++)
       (void)mtx_init(&sscreen->aux_contexts[i].lock, mtx_plain | mtx_recursive);
 
-   if (test_flags & DBG(TEST_CLEAR_BUFFER))
-      si_test_clear_buffer(sscreen);
-
-   if (test_flags & DBG(TEST_COPY_BUFFER))
-      si_test_copy_buffer(sscreen);
-
-   if (test_flags & DBG(TEST_IMAGE_COPY))
-      si_test_image_copy_region(sscreen);
-
-   if (test_flags & DBG(TEST_COMPUTE_BLIT))
-      si_test_blit(sscreen, test_flags);
-
-   if (test_flags & DBG(TEST_DMA_PERF))
-      si_test_dma_perf(sscreen);
-
-   if (test_flags & DBG(TEST_MEM_PERF))
-      si_test_mem_perf(sscreen);
-
-   if (test_flags & (DBG(TEST_VMFAULT_CP) | DBG(TEST_VMFAULT_SHADER)))
-      si_test_vmfault(sscreen, test_flags);
+   si_run_tests(sscreen);
 
    return &sscreen->b;
 }

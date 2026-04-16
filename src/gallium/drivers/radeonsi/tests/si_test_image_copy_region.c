@@ -6,6 +6,9 @@
 
 /* This file implements randomized texture blit tests. */
 
+#include "si_tests.h"
+#include "si_tests_private.h"
+
 #include "si_pipe.h"
 #include "gfx/si_gfx.h"
 #include "util/rand_xor.h"
@@ -618,7 +621,6 @@ void si_test_image_copy_region(struct si_screen *sscreen)
    }
 
    ctx->destroy(ctx);
-   exit(0);
 }
 
 void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
@@ -944,5 +946,4 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags)
    }
 
    ctx->destroy(ctx);
-   exit(0);
 }

@@ -254,19 +254,6 @@ enum
    DBG_NO_ENCODE_TIER2,
 };
 
-enum
-{
-   /* Tests: */
-   DBG_TEST_CLEAR_BUFFER,
-   DBG_TEST_COPY_BUFFER,
-   DBG_TEST_IMAGE_COPY,
-   DBG_TEST_COMPUTE_BLIT,
-   DBG_TEST_VMFAULT_CP,
-   DBG_TEST_VMFAULT_SHADER,
-   DBG_TEST_DMA_PERF,
-   DBG_TEST_MEM_PERF,
-};
-
 #define DBG_ALL_SHADERS (((1 << (DBG_MS + 1)) - 1))
 #define DBG(name)       (1ull << DBG_##name)
 
@@ -1629,16 +1616,6 @@ MESAPROC void *gfx11_create_sh_query_result_cs(struct si_context *sctx) TAILPTR;
 /* gfx11_query.c */
 void si_gfx11_init_query(struct si_context *sctx);
 void si_gfx11_destroy_query(struct si_context *sctx);
-
-/* si_test_image_copy_region.c */
-MESAPROC void si_test_image_copy_region(struct si_screen *sscreen) TAILV;
-MESAPROC void si_test_blit(struct si_screen *sscreen, unsigned test_flags) TAILV;
-
-/* si_test_dma_perf.c */
-MESAPROC void si_test_dma_perf(struct si_screen *sscreen) TAILV;
-MESAPROC void si_test_mem_perf(struct si_screen *sscreen) TAILV;
-MESAPROC void si_test_clear_buffer(struct si_screen *sscreen) TAILV;
-MESAPROC void si_test_copy_buffer(struct si_screen *sscreen) TAILV;
 
 /* si_state_viewport.c */
 void si_update_vs_viewport_state(struct si_context *ctx);

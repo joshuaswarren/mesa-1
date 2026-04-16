@@ -144,8 +144,10 @@ if with_gfx_compute
     'gfx/si_nir_lower_vs_inputs.c',
     'gfx/si_nir_mark_divergent_texture_non_uniform.c',
     'gfx/si_nir_optim.c',
-    'si_test_dma_perf.c',
-    'si_test_image_copy_region.c',
+    'tests/si_tests.c',
+    'tests/si_test_dma_perf.c',
+    'tests/si_test_image_copy_region.c',
+    'tests/si_test_vm_fault.c',
   )
 
   foreach ver : ['6', '7', '8', '9', '10', '103', '11', '115', '117', '12']
