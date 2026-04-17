@@ -4713,6 +4713,16 @@ gfx10_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_i
    input.pbXor = surf->tile_swizzle;
    input.pMappedSurface = (char *)surf_copy_region->surf_ptr +
       (surf_copy_region->is_stencil_only ? surf->u.gfx9.zs.stencil_offset : 0);
+   if (surf_copy_region->memcpy) {
+      if (surf->blk_w == 4 && surf->blk_h == 4) {
+         /* The hybrid memcpy seems to perform better with block compressed
+          * formats due to the 256B alignment.
+          */
+         input.copyFlags.hybridMemcpy = true;
+      } else {
+         input.copyFlags.blockMemcpy = true;
+      }
+   }
 
    ADDR_E_RETURNCODE res;
    ADDR2_COPY_MEMSURFACE_REGION region = {0};
@@ -4786,6 +4796,16 @@ gfx12_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_i
    input.pbXor = surf->tile_swizzle;
    input.pMappedSurface = (char *)surf_copy_region->surf_ptr +
       (surf_copy_region->is_stencil_only ? surf->u.gfx9.zs.stencil_offset : 0);
+   if (surf_copy_region->memcpy) {
+      if (surf->blk_w == 4 && surf->blk_h == 4) {
+         /* The hybrid memcpy seems to perform better with block compressed
+          * formats due to the 256B alignment.
+          */
+         input.copyFlags.hybridMemcpy = true;
+      } else {
+         input.copyFlags.blockMemcpy = true;
+      }
+   }
 
    ADDR_E_RETURNCODE res;
    ADDR3_COPY_MEMSURFACE_REGION region = {0};
