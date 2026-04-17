@@ -344,6 +344,24 @@ radv_get_device_uuid(const struct radeon_info *gpu_info, void *uuid)
 }
 
 static void
+radv_get_optimal_tiling_layout_uuid(struct radv_physical_device *pdev, void *uuid)
+{
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   uint8_t cache_uuid[VK_UUID_SIZE];
+   blake3_hasher ctx;
+
+   radv_device_get_cache_uuid(pdev, cache_uuid);
+
+   /* The block memcpy optimization in addrlib is chip-specific. */
+   _mesa_blake3_init(&ctx);
+   _mesa_blake3_update(&ctx, cache_uuid, sizeof(cache_uuid));
+   _mesa_blake3_update(&ctx, &pdev->info.family, sizeof(pdev->info.family));
+   _mesa_blake3_final(&ctx, blake3);
+
+   memcpy(uuid, blake3, VK_UUID_SIZE);
+}
+
+static void
 radv_physical_device_init_queue_table(struct radv_physical_device *pdev)
 {
    int idx = 0;
@@ -2361,7 +2379,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    p->pCopySrcLayouts = (VkImageLayout *)supported_layouts;
    p->copyDstLayoutCount = ARRAY_SIZE(supported_layouts);
    p->pCopyDstLayouts = (VkImageLayout *)supported_layouts;
-   memcpy(p->optimalTilingLayoutUUID, pdev->driver_uuid, VK_UUID_SIZE);
+   memcpy(p->optimalTilingLayoutUUID, pdev->optimal_tiling_layout_uuid, VK_UUID_SIZE);
    p->identicalMemoryTypeRequirements = false;
 
    /* VK_EXT_physical_device_drm */
@@ -2558,6 +2576,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    radv_get_driver_uuid(&pdev->driver_uuid);
    radv_get_device_uuid(&pdev->info, &pdev->device_uuid);
+   radv_get_optimal_tiling_layout_uuid(pdev, &pdev->optimal_tiling_layout_uuid);
 
    pdev->dcc_msaa_allowed = (instance->perftest_flags & RADV_PERFTEST_DCC_MSAA);
 

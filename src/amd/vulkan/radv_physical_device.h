@@ -73,6 +73,7 @@ struct radv_physical_device {
    uint8_t driver_uuid[VK_UUID_SIZE];
    uint8_t device_uuid[VK_UUID_SIZE];
    uint8_t cache_uuid[VK_UUID_SIZE];
+   uint8_t optimal_tiling_layout_uuid[VK_UUID_SIZE];
 
    struct disk_cache *disk_cache_meta;
 
