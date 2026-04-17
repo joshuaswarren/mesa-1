@@ -1015,6 +1015,41 @@ va_lower_lod(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
 }
 
 static bool
+va_lower_tex_query(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   b->cursor = nir_before_instr(&tex->instr);
+   struct tex_srcs srcs = steal_tex_srcs(b, tex);
+
+   nir_def *val;
+   switch (tex->op) {
+   case nir_texop_txs:
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF) {
+         val = pan_nir_load_va_buf_size_el(b, srcs.tex_h);
+      } else {
+         val = pan_nir_load_va_tex_size(b, srcs.tex_h, tex->sampler_dim,
+                                        tex->is_array);
+      }
+      break;
+
+   case nir_texop_query_levels:
+      assert(tex->sampler_dim != GLSL_SAMPLER_DIM_BUF);
+      val = pan_nir_load_va_tex_levels(b, srcs.tex_h);
+      break;
+
+   case nir_texop_texture_samples:
+      assert(tex->sampler_dim != GLSL_SAMPLER_DIM_BUF);
+      val = pan_nir_load_va_tex_samples(b, srcs.tex_h);
+      break;
+
+   default:
+      UNREACHABLE("Unhandled Valhall texture query");
+   }
+
+   nir_def_replace(&tex->def, val);
+   return true;
+}
+
+static bool
 va_lower_tex_instr(nir_builder *b, nir_tex_instr *tex, void *cb_data)
 {
    uint64_t gpu_id = *(uint64_t *)cb_data;
@@ -1036,6 +1071,11 @@ va_lower_tex_instr(nir_builder *b, nir_tex_instr *tex, void *cb_data)
       assert(tex->sampler_dim != GLSL_SAMPLER_DIM_BUF);
       return va_lower_lod(b, tex, gpu_id);
 
+   case nir_texop_txs:
+   case nir_texop_query_levels:
+   case nir_texop_texture_samples:
+      return va_lower_tex_query(b, tex, gpu_id);
+
    default:
       return false;
    }
@@ -1046,8 +1086,7 @@ pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id)
 {
    if (pan_arch(gpu_id) >= 9) {
       return nir_shader_tex_pass(nir, va_lower_tex_instr,
-                                 nir_metadata_control_flow,
-                                 &gpu_id);
+                                 nir_metadata_none, &gpu_id);
    } else if (pan_arch(gpu_id) >= 6) {
       return nir_shader_tex_pass(nir, bi_lower_tex_instr,
                                  nir_metadata_control_flow,

@@ -91,6 +91,92 @@ pan_nir_load_va_buf_cvt(nir_builder *b, nir_def *handle)
    return cvt;
 }
 
+static inline nir_def *
+pan_nir_load_va_buf_size_el(nir_builder *b, nir_def *handle)
+{
+   nir_def *size = pan_nir_load_va_desc(b, 1, 32, handle, 1 * 4);
+   nir_def *stride = pan_nir_load_va_desc(b, 1, 32, handle, 4 * 4);
+   return nir_udiv(b, size, stride);
+}
+
+static inline nir_def *
+pan_nir_load_va_tex_size(nir_builder *b, nir_def *handle,
+                         enum glsl_sampler_dim dim, bool is_array)
+{
+   nir_def *dw01 = pan_nir_load_va_desc(b, 4, 16, handle, 0);
+   nir_def *is_null = nir_ieq_imm(b, nir_channel(b, dw01, 0), 0);
+
+   nir_def *size, *zero;
+   nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
+   {
+      nir_def *comps[4] = {};
+      unsigned nr_comps = 0;
+
+      comps[nr_comps++] = nir_channel(b, dw01, 2);
+      if (dim != GLSL_SAMPLER_DIM_1D)
+         comps[nr_comps++] = nir_channel(b, dw01, 3);
+
+      if (dim == GLSL_SAMPLER_DIM_3D)
+         comps[nr_comps++] = pan_nir_load_va_desc(b, 1, 16, handle, 7 * 4);
+
+      if (is_array)
+         comps[nr_comps++] = pan_nir_load_va_desc(b, 1, 16, handle, 6 * 4);
+
+      size = nir_vec(b, comps, nr_comps);
+
+      /* All size fields are stored minus(1) */
+      size = nir_iadd_imm(b, nir_u2u32(b, size), 1);
+   }
+   nir_push_else(b, nif);
+   {
+      zero = nir_imm_zero(b, size->num_components, 32);
+   }
+   nir_pop_if(b, nif);
+
+   return nir_if_phi(b, size, zero);
+}
+
+static inline nir_def *
+pan_nir_load_va_tex_levels(nir_builder *b, nir_def *handle)
+{
+   nir_def *hw0 = pan_nir_load_va_desc(b, 1, 16, handle, 0);
+   nir_def *is_null = nir_ieq_imm(b, hw0, 0);
+   nir_def *zero = nir_imm_int(b, 0);
+
+   nir_def *levels;
+   nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
+   {
+      /* LOD count is stored in word2[16:20] and has a minus(1) modifier. */
+      nir_def *w = pan_nir_load_va_desc(b, 1, 16, handle, 2 * 4 + 2);
+      levels = nir_iand_imm(b, nir_u2u32(b, w), 0x1f);
+      levels = nir_iadd_imm(b, levels, 1);
+   }
+   nir_pop_if(b, nif);
+
+   return nir_if_phi(b, levels, zero);
+}
+
+static inline nir_def *
+pan_nir_load_va_tex_samples(nir_builder *b, nir_def *handle)
+{
+   nir_def *hw0 = pan_nir_load_va_desc(b, 1, 16, handle, 0);
+   nir_def *is_null = nir_ieq_imm(b, hw0, 0);
+   nir_def *zero = nir_imm_int(b, 0);
+
+   nir_def *samples;
+   nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
+   {
+      /* Sample count is stored in word3[13:15], and has a log2 modifier. */
+      nir_def *w = pan_nir_load_va_desc(b, 1, 16, handle, 3 * 4);
+      /* No need to mask because it's at the top of the half-word */
+      samples = nir_ushr_imm(b, w, 13);
+      samples = nir_ishl(b, nir_imm_int(b, 1), nir_u2u32(b, samples));
+   }
+   nir_pop_if(b, nif);
+
+   return nir_if_phi(b, samples, zero);
+}
+
 bool pan_nir_lower_bool_to_bitsize(nir_shader *shader);
 
 bool pan_nir_lower_vertex_id(nir_shader *shader);
