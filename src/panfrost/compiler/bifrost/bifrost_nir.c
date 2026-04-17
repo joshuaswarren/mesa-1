@@ -1093,23 +1093,24 @@ lower_texel_buffer_fetch(nir_builder *b, nir_tex_instr *tex, void *data)
       }
    }
 
-   nir_def *loaded_texel_addr =
-      nir_load_texel_buf_index_address_pan(b, res_handle, buf_index);
-   nir_def *texel_addr =
-      nir_pack_64_2x32(b, nir_channels(b, loaded_texel_addr, BITFIELD_MASK(2)));
-
-   nir_def *loaded_mem;
+   nir_def *texel_addr, *icd;
    if (*arch >= 9) {
-      nir_def *icd = pan_nir_load_va_buf_cvt(b, res_handle);
-      loaded_mem = nir_load_global_cvt_pan(b, tex->def.num_components,
-                                              tex->def.bit_size, texel_addr,
-                                              icd, tex->dest_type);
+      texel_addr = nir_lea_buf_pan(b, res_handle, buf_index);
+      icd = pan_nir_load_va_buf_cvt(b, res_handle);
    } else {
-      nir_def *icd = nir_channel(b, loaded_texel_addr, 2);
-      loaded_mem = nir_load_global_cvt_pan(b, tex->def.num_components,
-                                              tex->def.bit_size, texel_addr,
-                                              icd, tex->dest_type);
+      nir_def *attr = nir_lea_attr_pan(b, res_handle, buf_index,
+                                       nir_imm_int(b, 0),
+                                       .src_type = 32,
+                                       .desc_set = BI_TABLE_ATTRIBUTE_1);
+      texel_addr = nir_channels(b, attr, BITFIELD_MASK(2));
+      icd = nir_channel(b, attr, 2);
    }
+   texel_addr = nir_pack_64_2x32(b, texel_addr);
+
+   nir_def *loaded_mem =
+      nir_load_global_cvt_pan(b, tex->def.num_components,
+                              tex->def.bit_size, texel_addr,
+                              icd, tex->dest_type);
    nir_def_replace(&tex->def, loaded_mem);
    return true;
 }
@@ -1141,21 +1142,25 @@ lower_buf_image_access(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    nir_def *res_handle = intr->src[0].ssa;
    nir_def *buf_index = nir_channel(b, intr->src[1].ssa, 0);
-   nir_def *loaded_texel_addr =
-      nir_load_texel_buf_index_address_pan(b, res_handle, buf_index);
-   nir_def *texel_addr =
-      nir_pack_64_2x32(b, nir_channels(b, loaded_texel_addr, BITFIELD_MASK(2)));
+   nir_def *texel_addr, *icd;
+   if (*arch >= 9) {
+      texel_addr = nir_lea_buf_pan(b, res_handle, buf_index);
+      icd = pan_nir_load_va_buf_cvt(b, res_handle);
+   } else {
+      nir_def *attr = nir_lea_attr_pan(b, res_handle, buf_index,
+                                       nir_imm_int(b, 0),
+                                       .src_type = 32,
+                                       .desc_set = BI_TABLE_ATTRIBUTE_1);
+      texel_addr = nir_channels(b, attr, BITFIELD_MASK(2));
+      icd = nir_channel(b, attr, 2);
+   }
+   texel_addr = nir_pack_64_2x32(b, texel_addr);
 
    switch (intr->intrinsic) {
    case nir_intrinsic_image_texel_address:
       nir_def_replace(&intr->def, texel_addr);
       break;
    case nir_intrinsic_image_load: {
-      nir_def *icd;
-      if (*arch >= 9)
-         icd = pan_nir_load_va_buf_cvt(b, res_handle);
-      else
-         icd = nir_channel(b, loaded_texel_addr, 2);
       nir_def *loaded_mem = nir_load_global_cvt_pan(
          b, intr->def.num_components, intr->def.bit_size, texel_addr, icd,
          .dest_type = nir_intrinsic_dest_type(intr));
@@ -1173,11 +1178,6 @@ lower_buf_image_access(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       assert(nir_alu_type_get_type_size(T) == 32);
 
       nir_def *value = intr->src[3].ssa;
-      nir_def *icd;
-      if (*arch >= 9)
-         icd = pan_nir_load_va_buf_cvt(b, res_handle);
-      else
-         icd = nir_channel(b, loaded_texel_addr, 2);
       nir_store_global_cvt_pan(b, value, texel_addr, icd, .src_type = 32);
       nir_instr_remove(&intr->instr);
       break;
