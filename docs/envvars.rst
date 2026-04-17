@@ -1558,6 +1558,9 @@ RADV driver environment variables
       Enable tracking of VA ranges for radv_build_is_valid_va.
    ``vm``
       add a gap between all VA allocations to check for page faults
+   ``nocachecompat``
+      disable changes to code generation which increases shader cache compatiblity
+      between devices
 
 .. envvar:: RADV_QUEUE_DISABLE
 

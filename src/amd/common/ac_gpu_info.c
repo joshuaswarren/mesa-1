@@ -234,7 +234,8 @@ static bool handle_env_var_force_family(struct radeon_info *info)
 }
 
 void
-ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info)
+ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_device *device_info,
+                      bool compat_mode)
 {
    /* We use ac_compiler_info for shader cache keys, so make sure there is no padding. */
    STATIC_ASSERT(sizeof(enum amd_gfx_level) == 4);
@@ -420,6 +421,11 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
     * Only GFX9 works as expected.
     */
    out->has_smem_with_null_prt_bug = info->gfx_level <= GFX12 && info->gfx_level != GFX9;
+
+   if (compat_mode && info->family == CHIP_REMBRANDT) {
+      out->has_ngg_passthru_no_msg = false;
+      out->has_vrs_frag_pos_z_bug = true;
+   }
 }
 
 void
@@ -1390,7 +1396,7 @@ void ac_fill_tess_info(struct radeon_info *info)
 
 enum ac_query_gpu_info_result
 ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
-                  bool require_pci_bus_info)
+                  bool require_pci_bus_info, bool compiler_compat_mode)
 {
    struct amdgpu_gpu_info amdinfo;
    struct drm_amdgpu_info_device device_info = {0};
@@ -1563,7 +1569,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
 
    ac_fill_tess_info(info);
 
-   ac_fill_compiler_info(info, &device_info);
+   ac_fill_compiler_info(info, &device_info, compiler_compat_mode);
 
    /* BIG_PAGE is supported since gfx10.3 and requires VRAM. VRAM is only guaranteed
     * with AMDGPU_GEM_CREATE_DISCARDABLE.

@@ -30,6 +30,7 @@ static const struct debug_control radv_debug_options[] = {
    {"nofastclears", RADV_DEBUG_NO_FAST_CLEARS},
    {"nodcc", RADV_DEBUG_NO_DCC},
    {"shaders", RADV_DEBUG_DUMP_SHADERS},
+   {"nocachecompat", RADV_DEBUG_NO_CACHE_COMPAT},
    {"nocache", RADV_DEBUG_NO_CACHE},
    {"shaderstats", RADV_DEBUG_DUMP_SHADER_STATS},
    {"nohiz", RADV_DEBUG_NO_HIZ},

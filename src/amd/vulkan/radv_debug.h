@@ -15,6 +15,7 @@
 enum {
    RADV_DEBUG_NO_FAST_CLEARS = 1ull << 0,
    RADV_DEBUG_NO_DCC = 1ull << 1,
+   RADV_DEBUG_NO_CACHE_COMPAT = 1ull << 2,
    RADV_DEBUG_NO_CACHE = 1ull << 3,
    RADV_DEBUG_DUMP_SHADER_STATS = 1ull << 4,
    RADV_DEBUG_NO_HIZ = 1ull << 5,
