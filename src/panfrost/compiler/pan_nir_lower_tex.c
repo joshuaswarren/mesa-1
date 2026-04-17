@@ -173,6 +173,29 @@ scalar_as_imm_i4(nir_scalar s)
 })
 
 static bool
+bi_lower_txf_buf(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   assert(tex->op == nir_texop_txf);
+
+   b->cursor = nir_before_instr(&tex->instr);
+   struct tex_srcs srcs = steal_tex_srcs(b, tex);
+
+   nir_def *attr = nir_lea_attr_pan(b, srcs.tex_h, srcs.coord,
+                                    nir_imm_int(b, 0),
+                                    .src_type = 32,
+                                    .desc_set = BI_TABLE_ATTRIBUTE_1);
+   nir_def *addr = nir_pack_64_2x32(b, nir_trim_vector(b, attr, 2));
+   nir_def *cvt  = nir_channel(b, attr, 2);
+
+   nir_def *val = nir_load_global_cvt_pan(b, tex->def.num_components,
+                                          tex->def.bit_size, addr, cvt,
+                                          tex->dest_type);
+
+   nir_def_replace(&tex->def, val);
+   return true;
+}
+
+static bool
 bi_lower_texs(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
 {
    assert(tex->op == nir_texop_tex || tex->op == nir_texop_txl);
@@ -661,14 +684,37 @@ bi_lower_tex_instr(nir_builder *b, nir_tex_instr *tex, void *cb_data)
    case nir_texop_txf:
    case nir_texop_txf_ms:
    case nir_texop_tg4:
-      return bi_lower_tex(b, tex, gpu_id);
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF)
+         return bi_lower_txf_buf(b, tex, gpu_id);
+      else
+         return bi_lower_tex(b, tex, gpu_id);
 
    case nir_texop_lod:
+      assert(tex->sampler_dim != GLSL_SAMPLER_DIM_BUF);
       return bi_lower_lod(b, tex, gpu_id);
 
    default:
       return false;
    }
+}
+
+static bool
+va_lower_txf_buf(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   assert(tex->op == nir_texop_txf);
+
+   b->cursor = nir_before_instr(&tex->instr);
+   struct tex_srcs srcs = steal_tex_srcs(b, tex);
+
+   nir_def *addr = nir_pack_64_2x32(b,
+      nir_lea_buf_pan(b, srcs.tex_h, srcs.coord));
+   nir_def *cvt = pan_nir_load_va_buf_cvt(b, srcs.tex_h);
+   nir_def *val = nir_load_global_cvt_pan(b, tex->def.num_components,
+                                          tex->def.bit_size, addr, cvt,
+                                          tex->dest_type);
+
+   nir_def_replace(&tex->def, val);
+   return true;
 }
 
 static nir_def *
@@ -981,9 +1027,13 @@ va_lower_tex_instr(nir_builder *b, nir_tex_instr *tex, void *cb_data)
    case nir_texop_txf:
    case nir_texop_txf_ms:
    case nir_texop_tg4:
-      return va_lower_tex(b, tex, gpu_id);
+      if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF)
+         return va_lower_txf_buf(b, tex, gpu_id);
+      else
+         return va_lower_tex(b, tex, gpu_id);
 
    case nir_texop_lod:
+      assert(tex->sampler_dim != GLSL_SAMPLER_DIM_BUF);
       return va_lower_lod(b, tex, gpu_id);
 
    default:
