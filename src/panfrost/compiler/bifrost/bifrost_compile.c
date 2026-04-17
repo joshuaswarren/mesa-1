@@ -1400,89 +1400,6 @@ bi_emit_image_store(bi_builder *b, nir_intrinsic_instr *instr)
 }
 
 static void
-va_emit_load_texel_buf_conversion_desc(bi_builder *b, bi_index dst,
-                                       nir_intrinsic_instr *instr)
-{
-   assert(b->shader->arch >= 9);
-   bi_index table_address, icd_offset;
-   if (nir_src_is_const(instr->src[0])) {
-      unsigned res_handle = nir_src_as_uint(instr->src[0]);
-      unsigned buf_res_table = pan_res_handle_get_table(res_handle);
-      unsigned buf_res_index = pan_res_handle_get_index(res_handle);
-      table_address = bi_imm_u32(pan_res_handle(62, buf_res_table));
-      icd_offset = bi_imm_u32(32 * buf_res_index + 4 * 7);
-   } else {
-      bi_index res_handle = bi_src_index(&instr->src[0]);
-      bi_index buf_res_table = bi_rshift_and_i32(
-         b, res_handle, bi_imm_u32(BITFIELD_MASK(8)), bi_imm_u8(24), false);
-      bi_index buf_res_index = bi_lshift_and_i32(
-         b, res_handle, bi_imm_u32(BITFIELD_MASK(24)), bi_imm_u8(0));
-      table_address = bi_iadd_imm_i32(b, buf_res_table, pan_res_handle(62, 0));
-      bi_index buf_desc_offset = bi_imul_i32(b, buf_res_index, bi_imm_u32(32));
-      icd_offset = bi_iadd_imm_i32(b, buf_desc_offset, 4 * 7);
-   }
-
-   /* Check for zeroed ICD in case robustness is enabled. */
-   if (b->shader->inputs->robust_descriptors) {
-      bi_index loaded_icd = bi_temp(b->shader);
-      bi_ld_pka_i32_to(b, loaded_icd, icd_offset, table_address);
-      /* CONSTANT 0000 L */
-      bi_index predefined_icd = bi_imm_u32(95 << 12 | 231);
-      bi_mux_i32_to(b, dst, predefined_icd, loaded_icd, loaded_icd,
-                    BI_MUX_INT_ZERO);
-   } else
-      bi_ld_pka_i32_to(b, dst, icd_offset, table_address);
-}
-
-static void
-bi_emit_load_texel_buf_index_address(bi_builder *b, bi_index dst,
-                                     nir_intrinsic_instr *instr)
-{
-   assert(b->shader->arch < 9);
-
-   /* LEA_ATTR_IMM can only be used for the first 0-15 indices. */
-   bool can_use_imm = false;
-   unsigned imm_index = 0;
-   if (nir_src_is_const(instr->src[0])) {
-      imm_index = nir_src_as_uint(instr->src[0]);
-      can_use_imm = (imm_index < 16);
-   }
-
-   /* LEA_ATTR[_IMM] defaults to the secondary attribute table, but
-    * our ABI has all images in the primary attribute table
-    */
-   if (can_use_imm) {
-      bi_instr *I =
-         bi_lea_attr_imm_to(b, dst, bi_src_index(&instr->src[1]), bi_imm_u32(0),
-                            BI_REGISTER_FORMAT_AUTO, imm_index);
-      I->table = BI_TABLE_ATTRIBUTE_1;
-   } else {
-      bi_instr *I =
-         bi_lea_attr_to(b, dst, bi_src_index(&instr->src[1]), bi_imm_u32(0),
-                        bi_src_index(&instr->src[0]), BI_REGISTER_FORMAT_AUTO);
-      I->table = BI_TABLE_ATTRIBUTE_1;
-   }
-   bi_emit_cached_split(b, dst, 96);
-}
-
-static void
-va_emit_load_texel_buf_index_address(bi_builder *b, bi_index dst,
-                                     nir_intrinsic_instr *instr)
-{
-   assert(b->shader->arch >= 9);
-   if (nir_src_is_const(instr->src[0])) {
-      unsigned res_handle = nir_src_as_uint(instr->src[0]);
-      bi_instr *I = bi_lea_buf_imm_to(b, dst, bi_src_index(&instr->src[1]));
-      I->table = pan_res_handle_get_table(res_handle);
-      I->index = pan_res_handle_get_index(res_handle);
-   } else {
-      bi_lea_buf_to(b, dst, bi_src_index(&instr->src[1]),
-                    bi_src_index(&instr->src[0]));
-   }
-   bi_emit_cached_split(b, dst, 64);
-}
-
-static void
 bi_emit_load_cvt(bi_builder *b, bi_index dst, nir_intrinsic_instr *instr,
                  enum va_memory_access mem_access)
 {
@@ -2115,19 +2032,6 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_pixel_coord:
       /* Vectorized load of the preloaded i16vec2 */
       bi_mov_i32_to(b, dst, bi_preload(b, BI_PRELOAD_POSITION_XY));
-      break;
-
-   case nir_intrinsic_load_texel_buf_conv_pan:
-      assert(b->shader->arch >= 9 &&
-             "conv desc is loaded with the texel_buf_addr on Bifrost");
-      va_emit_load_texel_buf_conversion_desc(b, dst, instr);
-      break;
-
-   case nir_intrinsic_load_texel_buf_index_address_pan:
-      if (b->shader->arch >= 9)
-         va_emit_load_texel_buf_index_address(b, dst, instr);
-      else
-         bi_emit_load_texel_buf_index_address(b, dst, instr);
       break;
 
    case nir_intrinsic_load_global_cvt_pan:

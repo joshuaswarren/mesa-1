@@ -1813,16 +1813,6 @@ intrinsic("lea_attr_pan", [1, 1, 1], dest_comp=3, bit_sizes=[32],
 intrinsic("lea_buf_pan", [1, 1], dest_comp=2, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
-# Load the address and potentially the conversion descriptor for a texel buffer index.
-# The 64 bit address is always in the first two channels, while the 32 bit
-# conversion descriptor is in the last channel only for Bifrost.
-# src[] = { resource_handle, index }
-intrinsic("load_texel_buf_index_address_pan", [1, 1], dest_comp=3, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
-
-# Load conversion descriptor for a texel buffer
-# src[] = { resource_handle }
-intrinsic("load_texel_buf_conv_pan", [1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
-
 # Load input attachment target
 # src[] = { input_attachment_index }
 # valid targets are:
