@@ -1573,6 +1573,9 @@ tu_get_properties(struct tu_physical_device *pdevice,
       pdevice->vk.supported_extensions.QCOM_image_processing
          ? (VkExtent2D) { 64, 64 }
          : (VkExtent2D) { 0, 0 };
+
+   /* VK_ANDROID_native_buffer */
+   props->sharedImage = vk_android_get_front_buffer_usage() != 0;
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
