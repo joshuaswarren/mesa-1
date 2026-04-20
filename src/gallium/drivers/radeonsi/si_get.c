@@ -217,7 +217,10 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    sscreen->b.get_disk_shader_cache = si_get_disk_shader_cache;
 
    si_init_renderer_string(sscreen);
+}
 
+void si_init_screen_nir_options(struct si_screen *sscreen)
+{
 #ifndef HAVE_GFX_COMPUTE
    return;
 #endif
@@ -297,7 +300,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    unsigned max_support_shader = enable_mesh_shader(sscreen) ?
       MESA_SHADER_MESH : MESA_SHADER_COMPUTE;
    for (unsigned i = 0; i <= max_support_shader; i++)
-      sscreen->b.nir_options[i] = options;
+      sscreen->b.nir_options[i] = sscreen->nir_options;
 }
 
 void si_init_shader_caps(struct si_screen *sscreen)
@@ -460,6 +463,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&sscreen->b.caps;
 
+   /* u_init_pipe_screen_caps depends on shader caps. */
    u_init_pipe_screen_caps(&sscreen->b, 1);
 
    /* Gfx8 (Polaris11) hangs, so don't enable this on Gfx8 and older chips. */
@@ -612,7 +616,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
 
 #ifdef HAVE_GFX_COMPUTE
    caps->graphics = sscreen->info.has_graphics;
-   caps->mesh_shader = enable_mesh_shader(sscreen);
+   caps->mesh_shader = sscreen->b.nir_options[MESA_SHADER_MESH];
    caps->compute = true;
 #else
    caps->graphics = caps->mesh_shader = caps->compute = false;
