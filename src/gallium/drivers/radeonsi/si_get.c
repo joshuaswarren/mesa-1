@@ -25,21 +25,6 @@ static const char *si_get_device_vendor(struct pipe_screen *pscreen)
    return "AMD";
 }
 
-static bool
-si_is_compute_copy_faster(struct pipe_screen *pscreen,
-                          enum pipe_format src_format,
-                          enum pipe_format dst_format,
-                          unsigned width,
-                          unsigned height,
-                          unsigned depth,
-                          bool cpu)
-{
-   if (cpu)
-      /* very basic for now */
-      return (uint64_t)width * height * depth > 64 * 64;
-   return false;
-}
-
 static void si_get_driver_uuid(struct pipe_screen *pscreen, char *uuid)
 {
    ac_compute_driver_uuid(uuid, PIPE_UUID_SIZE);
@@ -103,14 +88,7 @@ static void si_query_memory_info(struct pipe_screen *screen, struct pipe_memory_
       info->nr_device_memory_evictions = info->device_memory_evicted / 64;
 }
 
-static struct disk_cache *si_get_disk_shader_cache(struct pipe_screen *pscreen)
-{
-   struct si_screen *sscreen = (struct si_screen *)pscreen;
-
-   return sscreen->disk_shader_cache;
-}
-
-static void si_init_renderer_string(struct si_screen *sscreen)
+void si_init_renderer_string(struct si_screen *sscreen)
 {
    char first_name[256], second_name[32] = {}, kernel_version[128] = {};
    struct utsname uname_data;
@@ -160,18 +138,6 @@ static unsigned si_varying_expression_max_cost(nir_shader *producer, nir_shader 
    return ac_nir_varying_expression_max_cost(producer, consumer);
 }
 
-
-static void
-si_driver_thread_add_job(struct pipe_screen *screen, void *data,
-                         struct util_queue_fence *fence,
-                         pipe_driver_thread_func execute,
-                         pipe_driver_thread_func cleanup,
-                         const size_t job_size)
-{
-   struct si_screen *sscreen = (struct si_screen *)screen;
-   util_queue_add_job(&sscreen->shader_compiler_queue, data, fence, execute, cleanup, job_size);
-}
-
 static bool enable_mesh_shader(struct si_screen *sscreen)
 {
    return sscreen->use_ngg &&
@@ -208,15 +174,10 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    sscreen->b.get_vendor = si_get_vendor;
    sscreen->b.get_device_vendor = si_get_device_vendor;
    sscreen->b.get_screen_fd = si_get_screen_fd;
-   sscreen->b.is_compute_copy_faster = si_is_compute_copy_faster;
-   sscreen->b.driver_thread_add_job = si_driver_thread_add_job;
    sscreen->b.get_timestamp = si_get_timestamp;
    sscreen->b.get_device_uuid = si_get_device_uuid;
    sscreen->b.get_driver_uuid = si_get_driver_uuid;
    sscreen->b.query_memory_info = si_query_memory_info;
-   sscreen->b.get_disk_shader_cache = si_get_disk_shader_cache;
-
-   si_init_renderer_string(sscreen);
 }
 
 void si_init_screen_nir_options(struct si_screen *sscreen)
@@ -408,7 +369,7 @@ void si_init_compute_caps(struct si_screen *sscreen)
       sscreen->info.compiler_info.has_cs_regalloc_hang_bug ? 256 : SI_MAX_VARIABLE_THREADS_PER_BLOCK;
 }
 
-static void si_init_mesh_caps(struct si_screen *sscreen)
+void si_init_mesh_caps(struct si_screen *sscreen)
 {
    struct pipe_mesh_caps *caps = (struct pipe_mesh_caps *)&sscreen->b.caps.mesh;
 
@@ -459,7 +420,7 @@ static void si_init_mesh_caps(struct si_screen *sscreen)
    caps->pipeline_statistic_queries = sscreen->info.gfx_level >= GFX11;
 }
 
-static void si_init_gfx_caps(struct si_screen *sscreen)
+void si_init_gfx_caps(struct si_screen *sscreen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&sscreen->b.caps;
 
@@ -581,7 +542,7 @@ static void si_init_gfx_caps(struct si_screen *sscreen)
    caps->fbfetch = 1;
 
    caps->graphics = sscreen->info.has_graphics;
-   caps->mesh_shader = enable_mesh_shader(sscreen);
+   caps->mesh_shader = sscreen->b.nir_options[MESA_SHADER_MESH];
    caps->compute = sscreen->has_gfx_compute;
 
    /* Tahiti and Verde only: reduction mode is unsupported due to a bug
@@ -608,14 +569,6 @@ static void si_init_gfx_caps(struct si_screen *sscreen)
       sscreen->info.compiler_info.has_3d_cube_border_color_mipmap;
 
    caps->post_depth_coverage = sscreen->info.gfx_level >= GFX10;
-
-#ifdef HAVE_GFX_COMPUTE
-   caps->graphics = sscreen->info.has_graphics;
-   caps->mesh_shader = sscreen->b.nir_options[MESA_SHADER_MESH];
-   caps->compute = true;
-#else
-   caps->graphics = caps->mesh_shader = caps->compute = false;
-#endif
 
    caps->max_vertex_buffers = SI_MAX_ATTRIBS;
 
@@ -758,6 +711,11 @@ static void si_init_gfx_caps(struct si_screen *sscreen)
     *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
     */
    caps->max_texture_lod_bias = 16;
+
+   /* Override the value set by u_init_pipe_screen_caps because it was called
+    * before shader caps are set.
+    */
+   caps->hardware_gl_select = debug_get_bool_option("MESA_HW_ACCEL_SELECT", true);
 }
 
 void si_init_screen_caps(struct si_screen *sscreen)
@@ -771,11 +729,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
    if (sscreen->info.is_virtio)
          caps->dmabuf |= DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
 
-#ifdef HAVE_GFX_COMPUTE
-   si_init_gfx_caps(sscreen);
-#else
    caps->graphics = caps->mesh_shader = caps->compute = false;
-#endif
 
    caps->resource_from_user_memory = !UTIL_ARCH_BIG_ENDIAN && sscreen->info.has_userptr;
 
@@ -807,9 +761,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
 
    /* Conversion to nanos from cycles per millisecond */
    caps->timer_resolution = DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
-
-   if (caps->mesh_shader)
-      si_init_mesh_caps(sscreen);
 
    if (sscreen->ws->va_range)
       sscreen->ws->va_range(sscreen->ws, &caps->min_vma, &caps->max_vma);

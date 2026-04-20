@@ -1596,6 +1596,9 @@ void si_init_screen_nir_options(struct si_screen *sscreen);
 void si_init_shader_caps(struct si_screen *sscreen);
 void si_init_compute_caps(struct si_screen *sscreen);
 void si_init_screen_caps(struct si_screen *sscreen);
+void si_init_mesh_caps(struct si_screen *screen);
+void si_init_gfx_caps(struct si_screen *sscreen);
+void si_init_renderer_string(struct si_screen *sscreen);
 
 bool si_sdma_copy_image(struct si_context *ctx, struct si_texture *dst, struct si_texture *src);
 
@@ -1623,6 +1626,7 @@ MESAPROC void si_init_compute_functions(struct si_context *sctx) TAILV;
 
 /* si_pipe.c */
 struct ac_llvm_compiler *si_create_llvm_compiler(struct si_screen *sscreen);
+void si_destroy_llvm_compiler(struct ac_llvm_compiler *compiler);
 void si_init_aux_async_compute_ctx(struct si_screen *sscreen);
 struct si_context *si_get_aux_context(struct si_screen *sscreen, struct si_aux_context *ctx);
 void si_put_aux_context_flush(struct si_aux_context *ctx);

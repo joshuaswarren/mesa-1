@@ -119,6 +119,7 @@ endif
 radeonsi_gfx_libs = []
 if with_gfx_compute
   files_libradeonsi+= files(
+    'gfx/si_gfx_screen.c',
     'si_blit.c',
     'si_cp_reg_shadowing.c',
     'si_compute_blit.c',

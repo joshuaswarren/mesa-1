@@ -18,6 +18,10 @@ struct si_screen;
 struct si_shader;
 struct si_shader_selector;
 
+/* si_gfx_screen.c */
+MESAPROC bool si_init_gfx_screen(struct si_screen *sscreen) TAILBT;
+MESAPROC void si_fini_gfx_screen(struct si_screen *sscreen) TAILV;
+
 /* si_shader_cache.c */
 MESAPROC void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
                                   unsigned wave_size, unsigned char ir_blake3_cache_key[BLAKE3_KEY_LEN]) TAILV;
