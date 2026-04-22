@@ -3584,6 +3584,9 @@ typedef struct nir_loop_terminator {
    /** Condition instruction that contains the induction variable */
    nir_instr *conditional_instr;
 
+   /** Init source of the induction variable used in conditional_instr. */
+   nir_src *init_src;
+
    /** Block within ::nif that has the break instruction. */
    nir_block *break_block;
 

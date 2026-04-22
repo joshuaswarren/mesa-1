@@ -1201,6 +1201,7 @@ find_trip_count(loop_info_state *state, unsigned execution_mode,
        */
 
       nir_loop_induction_variable *lv = get_loop_var(basic_ind.def, state);
+      terminator->init_src = lv->init_src;
 
       /* The basic induction var might be a vector but, because we guarantee
        * earlier that the phi source has a scalar swizzle, we can take the
