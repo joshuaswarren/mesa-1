@@ -134,7 +134,9 @@ static void si_init_renderer_string(struct si_screen *sscreen)
       "ACO";
 
    snprintf(sscreen->renderer_string, sizeof(sscreen->renderer_string),
-            "%s (radeonsi, %s, %s, DRM %i.%i%s)", first_name, second_name, compiler_name,
+            "%s (radeonsi, %s%s%s, DRM %i.%i%s)", first_name, second_name,
+            sscreen->has_gfx_compute ? ", " : "",
+            sscreen->has_gfx_compute ? compiler_name : "",
             sscreen->info.drm_major, sscreen->info.drm_minor, kernel_version);
 }
 

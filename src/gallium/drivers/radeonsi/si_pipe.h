@@ -518,6 +518,9 @@ struct si_screen {
    unsigned eqaa_force_color_samples;
    unsigned pbb_context_states_per_bin;
    unsigned pbb_persistent_states_per_bin;
+
+   bool has_gfx_compute;
+
    bool has_draw_indirect_multi;
    bool dpbb_allowed;
    bool use_ngg;

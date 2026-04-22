@@ -1397,6 +1397,10 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       }
    }
 
+#ifdef HAVE_GFX_COMPUTE
+   sscreen->has_gfx_compute = true;
+#endif
+
    util_idalloc_mt_init_tc(&sscreen->buffer_ids);
 
    /* Set functions first. */
