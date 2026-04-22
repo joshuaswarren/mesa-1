@@ -328,7 +328,6 @@ static struct queue_data *new_queue_data(VkQueue queue,
 
 static void destroy_queue(struct queue_data *data)
 {
-   struct device_data *device_data = data->device;
    unmap_object(HKEY(data->queue));
    ralloc_free(data);
 }
@@ -353,7 +352,6 @@ static void destroy_device_data(struct device_data *data)
 static struct swapchain_data *new_swapchain_data(VkSwapchainKHR swapchain,
                                                  struct device_data *device_data)
 {
-   struct instance_data *instance_data = device_data->instance;
    struct swapchain_data *data = rzalloc(NULL, struct swapchain_data);
    data->device = device_data;
    data->swapchain = swapchain;
@@ -693,7 +691,6 @@ VkQueue getQueueForScreenshot(struct device_data *device_data,
                               struct instance_data *instance_data) {
    // Find a queue that we can use for taking a screenshot
    VkQueue queue = VK_NULL_HANDLE;
-   VkBool32 presentCapable = VK_FALSE;
    uint32_t n_family_props;
    instance_data->pd_vtable.GetPhysicalDeviceQueueFamilyProperties(device_data->physical_device,
                                                                    &n_family_props,
@@ -787,7 +784,6 @@ void *writePNG(void *data) {
    const char *tmpStr = ".tmp";
    char *filename    = (char *)malloc(length);
    char *tmpFilename = (char *)malloc(length + 4); // Allow for ".tmp"
-   VkResult res;
    png_byte *row_pointer;
    png_infop info = NULL;
    png_struct* png;
@@ -894,7 +890,6 @@ static bool write_image(
 {
    VkDevice device = device_data->device;
    VkPhysicalDevice physical_device = device_data->physical_device;
-   VkInstance instance = instance_data->instance;
 
    uint32_t const width  = swapchain_data->imageExtent.width;
    uint32_t const height = swapchain_data->imageExtent.height;
@@ -926,7 +921,6 @@ static bool write_image(
       return false;
    }
 
-   VkResult err;
    /* Attempt to set destination format to RGB to make writing to file much faster.
       If not available, try to fall back to RGBA. If both fail, abort the screenshot */
    VkFormat supported_formats[] = {VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED};
