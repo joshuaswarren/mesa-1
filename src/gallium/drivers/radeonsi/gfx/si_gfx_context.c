@@ -17,6 +17,21 @@
 #include "util/hash_table.h"
 #include "driver_ddebug/dd_util.h"
 
+void si_init_aux_async_compute_ctx(struct si_screen *sscreen)
+{
+   assert(!sscreen->async_compute_context);
+   sscreen->async_compute_context =
+      si_create_context(&sscreen->b,
+                        SI_CONTEXT_FLAG_AUX |
+                        PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET |
+                        (sscreen->options.aux_debug ? PIPE_CONTEXT_DEBUG : 0) |
+                        PIPE_CONTEXT_COMPUTE_ONLY);
+
+   /* Limit the numbers of waves allocated for this context. */
+   if (sscreen->async_compute_context)
+      ((struct si_context*)sscreen->async_compute_context)->cs_max_waves_per_sh = 2;
+}
+
 struct ac_llvm_compiler *si_create_llvm_compiler(struct si_screen *sscreen)
 {
 #if AMD_LLVM_AVAILABLE

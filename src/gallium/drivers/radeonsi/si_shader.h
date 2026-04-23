@@ -914,6 +914,8 @@ unsigned si_shader_lshs_vertex_stride(struct si_shader *ls);
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader);
 unsigned si_get_output_prim_simplified(const struct si_shader_selector *sel,
                                        const union si_shader_key *key);
+MESAPROC void si_get_scratch_tmpring_size(struct si_context *sctx, unsigned bytes_per_wave,
+                                          bool is_compute, unsigned *spi_tmpring_size) TAILV;
 
 /* si_shader_binary.c */
 unsigned si_get_shader_binary_size(struct si_screen *screen, struct si_shader *shader);

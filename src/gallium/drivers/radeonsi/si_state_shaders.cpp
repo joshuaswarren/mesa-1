@@ -4618,6 +4618,27 @@ static void si_emit_spi_ge_ring_state(struct si_context *sctx, unsigned index)
    }
 }
 
+void
+si_get_scratch_tmpring_size(struct si_context *sctx, unsigned bytes_per_wave,
+                            bool is_compute, unsigned *spi_tmpring_size)
+{
+   bytes_per_wave = ac_compute_scratch_wavesize(&sctx->screen->info, bytes_per_wave);
+
+   if (is_compute) {
+      sctx->max_seen_compute_scratch_bytes_per_wave =
+         MAX2(sctx->max_seen_compute_scratch_bytes_per_wave, bytes_per_wave);
+   } else {
+      sctx->max_seen_scratch_bytes_per_wave =
+         MAX2(sctx->max_seen_scratch_bytes_per_wave, bytes_per_wave);
+   }
+
+   /* TODO: We could decrease WAVES to make the whole buffer fit into the infinity cache. */
+   ac_get_scratch_tmpring_size(&sctx->screen->info, sctx->screen->info.max_scratch_waves,
+                               is_compute ? sctx->max_seen_compute_scratch_bytes_per_wave
+                                          : sctx->max_seen_scratch_bytes_per_wave,
+                               spi_tmpring_size);
+}
+
 void si_init_shader_functions(struct si_context *sctx)
 {
    sctx->atoms.s.vgt_pipeline_state.emit = si_emit_vgt_pipeline_state;
