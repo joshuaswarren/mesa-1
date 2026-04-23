@@ -364,7 +364,6 @@ jay_process_nir(const struct intel_device_info *devinfo,
                    &prog_data->vue.vue_map, 0, 0);
    } else if (stage == MESA_SHADER_FRAGMENT) {
       assert(key->fs.mesh_input == INTEL_NEVER && "todo");
-      assert(!key->fs.force_dual_color_blend && "todo");
       brw_nir_apply_key(pt, &key->base, 32);
       brw_nir_lower_fs_inputs(nir, devinfo, &key->fs);
       brw_nir_lower_fs_outputs(nir);

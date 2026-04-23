@@ -371,8 +371,6 @@ struct brw_fs_prog_key {
    bool alpha_test_replicate_alpha:1;
    enum intel_sometimes alpha_to_coverage:2;
 
-   bool force_dual_color_blend:1;
-
    /** Whether or inputs are interpolated at sample rate by default
     *
     * This corresponds to the sample shading API bit in Vulkan or OpenGL which
@@ -395,7 +393,7 @@ struct brw_fs_prog_key {
    bool ignore_sample_mask_out:1;
    bool coarse_pixel:1;
    bool api_sample_shading:1;
-   unsigned pad:12;
+   unsigned pad:13;
 };
 
 static inline bool

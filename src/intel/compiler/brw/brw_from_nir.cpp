@@ -3292,7 +3292,7 @@ alloc_frag_output(nir_to_brw_state &ntb, unsigned location)
    const unsigned l = GET_FIELD(location, BRW_NIR_FRAG_OUTPUT_LOCATION);
    const unsigned i = GET_FIELD(location, BRW_NIR_FRAG_OUTPUT_INDEX);
 
-   if (i > 0 || (key->force_dual_color_blend && l == FRAG_RESULT_DATA1))
+   if (i > 0)
       return alloc_temporary(ntb.bld, 4, &s.dual_src_output, 1);
 
    else if (l == FRAG_RESULT_COLOR)
