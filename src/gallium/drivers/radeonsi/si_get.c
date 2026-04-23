@@ -459,12 +459,9 @@ static void si_init_mesh_caps(struct si_screen *sscreen)
    caps->pipeline_statistic_queries = sscreen->info.gfx_level >= GFX11;
 }
 
-void si_init_screen_caps(struct si_screen *sscreen)
+static void si_init_gfx_caps(struct si_screen *sscreen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&sscreen->b.caps;
-
-   /* u_init_pipe_screen_caps depends on shader caps. */
-   u_init_pipe_screen_caps(&sscreen->b, 1);
 
    /* Gfx8 (Polaris11) hangs, so don't enable this on Gfx8 and older chips. */
    bool enable_sparse =
@@ -581,13 +578,11 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->call_finalize_nir_in_linker = true;
    caps->blit_3d = true;
    caps->glsl_bindless_handles_are_32bit = true;
-
-   /* Fixup dmabuf caps for the virtio + vpipe case (when fd=-1, u_init_pipe_screen_caps
-    * fails to set this capability). */
-   if (sscreen->info.is_virtio)
-         caps->dmabuf |= DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
-
    caps->fbfetch = 1;
+
+   caps->graphics = sscreen->info.has_graphics;
+   caps->mesh_shader = enable_mesh_shader(sscreen);
+   caps->compute = sscreen->has_gfx_compute;
 
    /* Tahiti and Verde only: reduction mode is unsupported due to a bug
     * (it might work sometimes, but that's not enough)
@@ -621,14 +616,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
 #else
    caps->graphics = caps->mesh_shader = caps->compute = false;
 #endif
-
-   caps->resource_from_user_memory = !UTIL_ARCH_BIG_ENDIAN && sscreen->info.has_userptr;
-
-   caps->device_protected_surface = sscreen->info.has_tmz_support;
-#if defined(__ANDROID__) || defined(ANDROID)
-   caps->device_protected_context = sscreen->info.has_tmz_support;
-#endif
-   caps->min_map_buffer_alignment = SI_MAP_BUFFER_ALIGNMENT;
 
    caps->max_vertex_buffers = SI_MAX_ATTRIBS;
 
@@ -680,7 +667,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->max_texture_mb = sscreen->info.max_heap_size_kb / 1024 / 4;
 
    caps->prefer_back_buffer_reuse = false;
-   caps->uma = !sscreen->info.has_dedicated_vram;
    caps->prefer_imm_arrays_as_constbuf = false;
 
    caps->performance_monitor =
@@ -688,14 +674,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
 
    caps->sparse_buffer_page_size = enable_sparse ? RADEON_SPARSE_PAGE_SIZE : 0;
 
-   caps->context_priority_mask = sscreen->info.is_amdgpu ?
-      PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM | PIPE_CONTEXT_PRIORITY_HIGH : 0;
-
-   caps->fence_signal = sscreen->info.has_syncobj;
-
    caps->constbuf0_flags = SI_RESOURCE_FLAG_32BIT;
-
-   caps->native_fence_fd = sscreen->info.has_fence_to_handle;
 
    caps->draw_parameters =
    caps->multi_draw_indirect =
@@ -752,22 +731,6 @@ void si_init_screen_caps(struct si_screen *sscreen)
    caps->max_texture_gather_offset =
    caps->max_texel_offset = 31;
 
-   caps->endianness = PIPE_ENDIAN_LITTLE;
-
-   caps->vendor_id = ATI_VENDOR_ID;
-   caps->device_id = sscreen->info.pci_id;
-   caps->video_memory = sscreen->info.vram_size_kb >> 10;
-   caps->pci_group = sscreen->info.pci.domain;
-   caps->pci_bus = sscreen->info.pci.bus;
-   caps->pci_device = sscreen->info.pci.dev;
-   caps->pci_function = sscreen->info.pci.func;
-
-   /* Conversion to nanos from cycles per millisecond */
-   caps->timer_resolution = DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
-
-   if (caps->mesh_shader)
-      si_init_mesh_caps(sscreen);
-
    caps->shader_subgroup_size = 64;
    caps->shader_subgroup_supported_stages =
       BITFIELD_MASK(caps->mesh_shader ? MESA_SHADER_MESH_STAGES : MESA_SHADER_STAGES);
@@ -795,6 +758,58 @@ void si_init_screen_caps(struct si_screen *sscreen)
     *    KHR-GL46.texture_lod_bias.texture_lod_bias_all
     */
    caps->max_texture_lod_bias = 16;
+}
+
+void si_init_screen_caps(struct si_screen *sscreen)
+{
+   struct pipe_caps *caps = (struct pipe_caps *)&sscreen->b.caps;
+
+   u_init_pipe_screen_caps(&sscreen->b, 1);
+
+   /* Fixup dmabuf caps for the virtio + vpipe case (when fd=-1, u_init_pipe_screen_caps
+    * fails to set this capability). */
+   if (sscreen->info.is_virtio)
+         caps->dmabuf |= DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT;
+
+#ifdef HAVE_GFX_COMPUTE
+   si_init_gfx_caps(sscreen);
+#else
+   caps->graphics = caps->mesh_shader = caps->compute = false;
+#endif
+
+   caps->resource_from_user_memory = !UTIL_ARCH_BIG_ENDIAN && sscreen->info.has_userptr;
+
+   caps->device_protected_surface = sscreen->info.has_tmz_support;
+#if defined(__ANDROID__) || defined(ANDROID)
+   caps->device_protected_context = sscreen->info.has_tmz_support;
+#endif
+
+   caps->min_map_buffer_alignment = SI_MAP_BUFFER_ALIGNMENT;
+
+   caps->uma = !sscreen->info.has_dedicated_vram;
+
+   caps->context_priority_mask = sscreen->info.is_amdgpu ?
+      PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM | PIPE_CONTEXT_PRIORITY_HIGH : 0;
+
+   caps->fence_signal = sscreen->info.has_syncobj;
+
+   caps->native_fence_fd = sscreen->info.has_fence_to_handle;
+
+   caps->endianness = PIPE_ENDIAN_LITTLE;
+
+   caps->vendor_id = ATI_VENDOR_ID;
+   caps->device_id = sscreen->info.pci_id;
+   caps->video_memory = sscreen->info.vram_size_kb >> 10;
+   caps->pci_group = sscreen->info.pci.domain;
+   caps->pci_bus = sscreen->info.pci.bus;
+   caps->pci_device = sscreen->info.pci.dev;
+   caps->pci_function = sscreen->info.pci.func;
+
+   /* Conversion to nanos from cycles per millisecond */
+   caps->timer_resolution = DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
+
+   if (caps->mesh_shader)
+      si_init_mesh_caps(sscreen);
 
    if (sscreen->ws->va_range)
       sscreen->ws->va_range(sscreen->ws, &caps->min_vma, &caps->max_vma);
