@@ -859,6 +859,11 @@ void *writePNG(void *data) {
    png_write_end(png, NULL);          // End image writing
    free(row_pointer);
 
+   // Close before renaming, to ensure the writes are flushed (in case of app
+   // exit without vkDestroyDevice() to join our thread).
+   fclose(file);
+   file = NULL;
+
    // Rename file, indicating completion, client should be
    // checking for the final file exists.
    if (rename(tmpFilename, filename) != 0 )
