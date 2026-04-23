@@ -1279,7 +1279,9 @@ anv_shader_compute_fragment_rts(const struct intel_device_info *devinfo,
    assert(shader_data->bind_map.surface_count == 0);
 
    nir_shader *nir = shader_data->info->nir;
-   const uint64_t rt_mask = nir->info.outputs_written >> FRAG_RESULT_DATA0;
+   const uint64_t rt_mask =
+      (nir->info.outputs_written &
+       ~BITFIELD_BIT(FRAG_RESULT_DUAL_SRC_BLEND)) >> FRAG_RESULT_DATA0;
    const unsigned num_rts = util_last_bit64(rt_mask);
    struct anv_pipeline_binding rt_bindings[MAX_RTS];
 

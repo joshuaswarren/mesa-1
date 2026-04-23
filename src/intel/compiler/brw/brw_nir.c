@@ -1629,15 +1629,8 @@ brw_nir_lower_mesh_outputs(nir_shader *nir,
 void
 brw_nir_lower_fs_outputs(nir_shader *nir)
 {
-   nir_foreach_shader_out_variable(var, nir) {
-      var->data.driver_location =
-         SET_FIELD(var->data.index, BRW_NIR_FRAG_OUTPUT_INDEX) |
-         SET_FIELD(var->data.location, BRW_NIR_FRAG_OUTPUT_LOCATION);
-   }
-
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out, type_size_vec4, 0);
    NIR_PASS(_, nir, brw_nir_lower_16bit_io, nir_var_shader_out);
-   nir->info.disable_output_offset_src_constant_folding = true;
 }
 
 static bool

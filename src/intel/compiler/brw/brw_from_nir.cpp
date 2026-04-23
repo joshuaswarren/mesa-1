@@ -3282,17 +3282,15 @@ alloc_temporary(const brw_builder &bld, unsigned size, brw_reg *regs, unsigned n
 }
 
 static brw_reg
-alloc_frag_output(nir_to_brw_state &ntb, unsigned location)
+alloc_frag_output(nir_to_brw_state &ntb, unsigned l)
 {
    brw_shader &s = ntb.s;
 
    assert(s.stage == MESA_SHADER_FRAGMENT);
    const brw_fs_prog_key *const key =
       reinterpret_cast<const brw_fs_prog_key *>(s.key);
-   const unsigned l = GET_FIELD(location, BRW_NIR_FRAG_OUTPUT_LOCATION);
-   const unsigned i = GET_FIELD(location, BRW_NIR_FRAG_OUTPUT_INDEX);
 
-   if (i > 0)
+   if (l == FRAG_RESULT_DUAL_SRC_BLEND)
       return alloc_temporary(ntb.bld, 4, &s.dual_src_output, 1);
 
    else if (l == FRAG_RESULT_COLOR)
@@ -3807,11 +3805,9 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
 
    case nir_intrinsic_store_output: {
       const brw_reg src = get_nir_src(ntb, instr->src[0], -1);
-      const unsigned store_offset = nir_src_as_uint(instr->src[1]);
-      const unsigned location = nir_intrinsic_base(instr) +
-         SET_FIELD(store_offset, BRW_NIR_FRAG_OUTPUT_LOCATION);
+      const nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
       const brw_reg new_dest =
-         offset(retype(alloc_frag_output(ntb, location), src.type),
+         offset(retype(alloc_frag_output(ntb, sem.location), src.type),
                 bld, nir_intrinsic_component(instr));
 
       brw_combine_with_vec(bld, new_dest, src, instr->num_components);
@@ -3819,11 +3815,9 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
    }
 
    case nir_intrinsic_load_output: {
-      const unsigned l = GET_FIELD(nir_intrinsic_base(instr),
-                                   BRW_NIR_FRAG_OUTPUT_LOCATION);
-      assert(l >= FRAG_RESULT_DATA0);
-      const unsigned load_offset = nir_src_as_uint(instr->src[0]);
-      const unsigned target = l - FRAG_RESULT_DATA0 + load_offset;
+      const nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
+      assert(sem.location >= FRAG_RESULT_DATA0);
+      const unsigned target = sem.location - FRAG_RESULT_DATA0;
       const brw_reg tmp = bld.vgrf(dest.type, 4);
 
       /* Not functional after Gfx20 */

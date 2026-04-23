@@ -350,11 +350,6 @@ brw_uniform_block_size(const struct intel_device_info *devinfo,
 
 void brw_nir_optimize(struct brw_pass_tracker *pt);
 
-#define BRW_NIR_FRAG_OUTPUT_INDEX_SHIFT 0
-#define BRW_NIR_FRAG_OUTPUT_INDEX_MASK INTEL_MASK(0, 0)
-#define BRW_NIR_FRAG_OUTPUT_LOCATION_SHIFT 1
-#define BRW_NIR_FRAG_OUTPUT_LOCATION_MASK INTEL_MASK(31, 1)
-
 bool brw_nir_move_interpolation_to_top(nir_shader *nir);
 nir_def *brw_nir_load_global_const(nir_builder *b,
                                        nir_intrinsic_instr *load_uniform,

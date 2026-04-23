@@ -3665,7 +3665,11 @@ iris_create_shader_state(struct pipe_context *ctx,
       const uint64_t color_outputs = info->outputs_written &
          ~(BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
            BITFIELD64_BIT(FRAG_RESULT_STENCIL) |
-           BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK));
+           BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK) |
+           BITFIELD64_BIT(FRAG_RESULT_DUAL_SRC_BLEND));
+
+      const bool dual_color =
+         info->outputs_written & BITFIELD64_BIT(FRAG_RESULT_DUAL_SRC_BLEND);
 
       bool can_rearrange_varyings =
          util_bitcount64(info->inputs_read & BRW_FS_VARYING_INPUT_MASK) <= 16;
@@ -3673,7 +3677,7 @@ iris_create_shader_state(struct pipe_context *ctx,
       key.fs = (struct iris_fs_prog_key) {
          KEY_INIT(base),
          .vue_layout = vue_layout(ish->nir->info.separate_shader),
-         .nr_color_regions = util_bitcount(color_outputs),
+         .nr_color_regions = util_bitcount(color_outputs) ?: dual_color,
          .coherent_fb_fetch = devinfo->ver >= 9 && devinfo->ver < 20,
          .input_slots_valid =
             can_rearrange_varyings ? 0 : info->inputs_read | VARYING_BIT_POS,
