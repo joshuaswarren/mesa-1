@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "gfx/si_gfx.h"
 #include "ac_rtld.h"
 #include "nir/tgsi_to_nir.h"
 #include "ac_shader_util.h"

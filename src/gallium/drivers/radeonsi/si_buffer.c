@@ -916,6 +916,8 @@ void si_init_buffer_functions(struct si_context *sctx)
    sctx->b.texture_subdata = u_default_texture_subdata;
    sctx->b.buffer_subdata = si_buffer_subdata;
    sctx->b.resource_commit = si_resource_commit;
-   if (!sctx->b.resource_copy_region)
-      sctx->b.resource_copy_region = si_resource_copy_buffer;
+   /* Default implementation, may be overriden from
+    * si_init_blit_functions.
+    */
+   sctx->b.resource_copy_region = si_resource_copy_buffer;
 }

@@ -17,6 +17,16 @@ extern "C" {
 struct si_screen;
 struct si_shader;
 struct si_shader_selector;
+struct si_context;
+struct ac_llvm_compiler;
+
+/* si_gfx_context.c */
+MESAPROC bool si_init_gfx_context(struct si_screen *sscreen, struct si_context *sctx, unsigned flags) TAILB;
+MESAPROC void si_fini_gfx_context(struct si_context *sctx) TAILV;
+void si_destroy_llvm_compiler(struct ac_llvm_compiler *compiler);
+MESAPROC void si_get_scratch_tmpring_size(struct si_context *sctx, unsigned bytes_per_wave,
+                                          bool is_compute, unsigned *spi_tmpring_size) TAILV;
+void si_init_aux_async_compute_ctx(struct si_screen *sscreen);
 
 /* si_gfx_screen.c */
 MESAPROC bool si_init_gfx_screen(struct si_screen *sscreen) TAILBT;
