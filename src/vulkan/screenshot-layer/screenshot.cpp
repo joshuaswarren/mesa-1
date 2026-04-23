@@ -798,6 +798,9 @@ void writePNG(void *job, void *gdata, UNUSED int thread_index) {
    int matrixSize = localHeight * rowPitch;
    strcpy(tmpFilename, threadData->filename);
    strcat(tmpFilename, tmpStr);
+
+   device_data->vtable.WaitForFences(device_data->device, 1, &threadData->cleanup.fence, VK_TRUE, UINT64_MAX);
+
    file = fopen(tmpFilename, "wb"); //create file for output
    if (!file) {
       LOG(ERROR, "Failed to open output file, '%s', error(%d): %s\n", tmpFilename, errno, strerror(errno));
@@ -818,7 +821,6 @@ void writePNG(void *job, void *gdata, UNUSED int thread_index) {
       LOG(ERROR, "setjmp() failed\n");
       goto cleanup;
    }
-   device_data->vtable.WaitForFences(device_data->device, 1, &threadData->cleanup.fence, VK_TRUE, UINT64_MAX);
    threadData->pFramebuffer += threadData->srLayout.offset;
    start_time = get_time();
 
