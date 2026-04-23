@@ -106,7 +106,6 @@ struct instance_data {
 pthread_cond_t ptCondition = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t ptLock = PTHREAD_MUTEX_INITIALIZER;
 
-VkFence copyDone;
 const VkPipelineStageFlags dstStageWaitBeforeSubmission = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 const VkSemaphore *pSemaphoreWaitBeforePresent;
 uint32_t semaphoreWaitBeforePresentCount;
@@ -729,6 +728,7 @@ struct WriteFileCleanupData {
     bool mem3mapped;
     VkCommandBuffer commandBuffer;
     VkCommandPool commandPool;
+    VkFence fence;
     ~WriteFileCleanupData();
 };
 
@@ -740,6 +740,8 @@ WriteFileCleanupData::~WriteFileCleanupData() {
     if (mem3mapped) dev_data->vtable.UnmapMemory(dev_data->device, mem3);
     if (mem3) dev_data->vtable.FreeMemory(dev_data->device, mem3, NULL);
     if (image3) dev_data->vtable.DestroyImage(dev_data->device, image3, NULL);
+
+    if (fence) dev_data->vtable.DestroyFence(dev_data->device, fence, NULL);
 
     if (commandBuffer) dev_data->vtable.FreeCommandBuffers(dev_data->device, commandPool, 1, &commandBuffer);
     if (commandPool) dev_data->vtable.DestroyCommandPool(dev_data->device, commandPool, NULL);
@@ -1191,6 +1193,10 @@ static bool write_image(
                         &presentMemoryBarrier);
    VK_CHECK(device_data->vtable.EndCommandBuffer(data.commandBuffer));
 
+   VkFenceCreateInfo fenceInfo = {};
+   fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+   device_data->vtable.CreateFence(device_data->device, &fenceInfo, nullptr, &data.fence);
+
    VkSubmitInfo submitInfo;
    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
    submitInfo.pNext = NULL;
@@ -1201,7 +1207,7 @@ static bool write_image(
    submitInfo.pCommandBuffers = &data.commandBuffer;
    submitInfo.signalSemaphoreCount = 1;
    submitInfo.pSignalSemaphores = &semaphoreWaitAfterSubmission;
-   VK_CHECK(device_data->vtable.QueueSubmit(queue, 1, &submitInfo, copyDone));
+   VK_CHECK(device_data->vtable.QueueSubmit(queue, 1, &submitInfo, data.fence));
 
    // Map the final image so that the CPU can read it.
    const VkImageSubresource img_subresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
@@ -1220,7 +1226,7 @@ static bool write_image(
    // Thread off I/O operations
    pthread_t ioThread;
    pthread_mutex_lock(&ptLock); // Grab lock, we need to wait until thread has copied values of pointers
-   struct ThreadSaveData threadData = {device_data, filename, pFramebuffer, srLayout, copyDone, newWidth, newHeight, numChannels};
+   struct ThreadSaveData threadData = {device_data, filename, pFramebuffer, srLayout, data.fence, newWidth, newHeight, numChannels};
 
    // Write the data to a PNG file.
    pthread_create(&ioThread, NULL, writePNG, (void *)&threadData);
@@ -1246,7 +1252,6 @@ static VkResult screenshot_QueuePresentKHR(
    VkResult result = VK_SUCCESS;
    loader_platform_thread_lock_mutex(&globalLock);
    VkSemaphoreCreateInfo semaphoreInfo = {};
-   VkFenceCreateInfo fenceInfo = {};
 
    if (pPresentInfo && pPresentInfo->swapchainCount > 0) {
       VkSwapchainKHR swapchain = pPresentInfo->pSwapchains[0];
@@ -1336,8 +1341,6 @@ static VkResult screenshot_QueuePresentKHR(
             semaphoreWaitBeforePresentCount = pPresentInfo->waitSemaphoreCount;
             semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
             device_data->vtable.CreateSemaphore(device_data->device, &semaphoreInfo, nullptr, &semaphoreWaitAfterSubmission);
-            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            device_data->vtable.CreateFence(device_data->device, &fenceInfo, nullptr, &copyDone);
             if(write_image(full_path,
                            swapchain_data->image,
                            device_data,
@@ -1365,10 +1368,6 @@ static VkResult screenshot_QueuePresentKHR(
    if (semaphoreWaitAfterSubmission != VK_NULL_HANDLE) {
       device_data->vtable.DestroySemaphore(device_data->device, semaphoreWaitAfterSubmission, nullptr);
       semaphoreWaitAfterSubmission = VK_NULL_HANDLE;
-   }
-   if (copyDone != VK_NULL_HANDLE) {
-      device_data->vtable.DestroyFence(device_data->device, copyDone, nullptr);
-      copyDone = VK_NULL_HANDLE;
    }
    return result;
 }
