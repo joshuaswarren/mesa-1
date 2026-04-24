@@ -608,6 +608,7 @@ emit_store(struct lower_io_state *state, nir_def *data,
       assert(location == FRAG_RESULT_COLOR || location == FRAG_RESULT_DATA0);
 
       location = FRAG_RESULT_DUAL_SRC_BLEND;
+      b->shader->info.outputs_written |= BITFIELD64_BIT(location);
       dual_src_blend = false;
    }
 
