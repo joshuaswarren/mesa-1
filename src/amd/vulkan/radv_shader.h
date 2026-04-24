@@ -548,7 +548,7 @@ struct radv_compiler_info {
 
       int32_t force_aniso;
 
-      uint32_t family;
+      uint32_t family; /* CHIP_UNKNOWN unless LLVM is used. */
 
       /* Wave/subgroup sizes */
       uint8_t ge_wave_size;

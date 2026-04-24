@@ -1189,7 +1189,8 @@ radv_device_init_compiler_info(struct radv_device *device)
             .lower_terminate_to_discard = instance->drirc.debug.lower_terminate_to_discard,
             .no_implicit_varying_subgroup_size = instance->drirc.debug.no_implicit_varying_subgroup_size,
             .force_aniso = device->force_aniso,
-            .family = pdev->info.family,
+            /* Use CHIP_UNKNOWN for increased compatiblity between caches. */
+            .family = pdev->use_llvm ? pdev->info.family : CHIP_UNKNOWN,
 
             /* Wave/subgroup sizes */
             .ge_wave_size = pdev->ge_wave_size,
