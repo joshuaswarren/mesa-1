@@ -203,9 +203,26 @@ VkResult anv_CreateIndirectCommandsLayoutEXT(
       }
 
       /* 3DSTATE_VERTEX_BUFFERS */
-      if (vk_layout->dgc_info & BITFIELD_BIT(MESA_VK_DGC_VB)) {
+      if (devinfo->ver == 9) {
+         const uint32_t n_vb_entries =
+            2 + util_bitcount(vk_layout->vertex_bindings);
          layout_add_command(layout_obj,
                             (1 /* TODO: _3DSTATE_VERTEX_BUFFERS_length(devinfo) */ +
+                             /* Number of vertex buffers + draw params (Gfx9 only) */
+                             n_vb_entries *
+                             VERTEX_BUFFER_STATE_length(devinfo)) * 4,
+                            "vertex");
+         if (vk_layout->dgc_info & BITFIELD_BIT(MESA_VK_DGC_VB)) {
+            layout_add_command(layout_obj,
+                               PIPE_CONTROL_length(devinfo) * 4,
+                               "vertex cache inval");
+         }
+         /* Draw params data, gl_BaseInstance, gl_BaseVertex, gl_DrawID */
+         layout_add_data(layout_obj, 4 * 3, 4, NULL);
+      } else if (vk_layout->dgc_info & BITFIELD_BIT(MESA_VK_DGC_VB)) {
+         layout_add_command(layout_obj,
+                            (1 /* TODO: _3DSTATE_VERTEX_BUFFERS_length(devinfo) */ +
+                             /* Number of vertex buffers */
                              util_bitcount(vk_layout->vertex_bindings) *
                              VERTEX_BUFFER_STATE_length(devinfo)) * 4,
                             "vertex");
@@ -499,9 +516,26 @@ anv_dgc_fill_gfx_layout(struct anv_dgc_gfx_layout *layout,
          layout->vertex_buffers.buffers[i].binding =
             vk_layout->vb_layouts[i].binding;
       }
-
-      cmd_offset += layout->vertex_buffers.cmd_size;
    }
+   if (devinfo->ver == 9) {
+      const struct brw_vs_prog_data *vs_prog_data =
+         get_shader_vs_prog_data(shaders[MESA_SHADER_VERTEX]);
+      if (vs_prog_data->uses_firstvertex ||
+          vs_prog_data->uses_baseinstance ||
+          vs_prog_data->uses_drawid) {
+         layout->vertex_buffers.cmd_size = MAX2(
+            layout->vertex_buffers.cmd_size,
+            4 /* TODO: _3DSTATE_VERTEX_BUFFERS_length(devinfo) */);
+         if (vs_prog_data->uses_firstvertex ||
+             vs_prog_data->uses_baseinstance)
+            layout->vertex_buffers.cmd_size += VERTEX_BUFFER_STATE_length(devinfo) * 4;
+         if (vs_prog_data->uses_drawid)
+            layout->vertex_buffers.cmd_size += VERTEX_BUFFER_STATE_length(devinfo) * 4;
+      }
+      if (vk_layout->dgc_info & BITFIELD_BIT(MESA_VK_DGC_VB))
+         layout->vertex_buffers.cmd_size += PIPE_CONTROL_length(devinfo) * 4;
+   }
+   cmd_offset += layout->vertex_buffers.cmd_size;
 
    layout->indirect_set.final_cmds_offset = cmd_offset;
    if (intel_needs_workaround(devinfo, 16011107343) &&

@@ -786,6 +786,21 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
       if (cmd_buffer->state.conditional_render_enabled)
          genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
 
+#if GFX_VER == 9
+      /* Gfx9 has a VF cache issues (only considers the bottom 32bit of the VF
+       * buffer address), since we're likely to emit those in the DGC buffer,
+       * invalidate the cache here, further invalidation is emitted in the
+       * generated commands if needed.
+       */
+      anv_add_pending_pipe_bits(cmd_buffer,
+                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT_KHR,
+                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                ANV_PIPE_VF_CACHE_INVALIDATE_BIT,
+                                "Gfx9 VF cache inval pre dgc exec");
+      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+#endif
+
       /* If a shader runs, flush the data to make it visible to CS. */
       if (params) {
          anv_add_pending_pipe_bits(cmd_buffer,

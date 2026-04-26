@@ -68,6 +68,15 @@ anv_write_gfx_indirect_descriptor(struct anv_device *device,
    }
    assert(descriptor->final_commands_size <= sizeof(descriptor->final_commands));
 
+   if (device->info->ver == 9) {
+      const struct brw_vs_prog_data *vs_prog_data = get_gfx_vs_prog_data(gfx);
+
+      descriptor->draw_params =
+         ((vs_prog_data->uses_firstvertex || vs_prog_data->uses_baseinstance) ?
+          ANV_DGC_DRAW_PARAM_BASE_INSTANCE_VERTEX : 0) |
+         (vs_prog_data->uses_drawid ? ANV_DGC_DRAW_PARAM_DRAW_ID : 0);
+   }
+
    anv_foreach_vk_stage(vk_stage, ANV_GRAPHICS_STAGE_BITS) {
       enum anv_dgc_stage gen_stage = anv_vk_stage_to_dgc_stage(vk_stage);
       enum mesa_shader_stage stage = vk_to_mesa_shader_stage(vk_stage);

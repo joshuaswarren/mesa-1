@@ -163,8 +163,6 @@ struct intel_perf_query_result;
 #define BINDING_TABLE_VIEW_SIZE (1u << 20)
 #define BINDING_TABLE_POOL_DEFAULT_BLOCK_SIZE (4096)
 
-#define HW_MAX_VBS 33
-
 /* 3DSTATE_VERTEX_BUFFER supports 33 VBs, but before Gen11 we used 2
  * for base & drawid SGVs */
 static inline int

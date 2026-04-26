@@ -11,7 +11,7 @@
    (((descriptor)->active_stages & \
      BITFIELD_BIT(ANV_DGC_STAGE_##stage)) != 0)
 
-#if GFX_VER >= 11
+#if GFX_VER >= 9
 
 static void
 merge_dwords(global void *dst, global void *src1, global void *src2, uint32_t n_dwords)
@@ -434,19 +434,35 @@ genX(libanv_preprocess_gfx_generate)(global void *cmd_base,
 
    /* 3DSTATE_VERTEX_BUFFERS */
    uint32_t n_vertex_buffers = state->layout.vertex_buffers.n_buffers;
-   if (n_vertex_buffers) {
+   uint32_t n_draw_param_buffers = GFX_VER == 9 ? util_bitcount(state->descriptor.draw_params) : 0;
+   if (n_vertex_buffers > 0 || n_draw_param_buffers > 0) {
       global void *cmd_vb = cmd_ptr + state->layout.vertex_buffers.cmd_offset;
 
-      genX(write_3DSTATE_VERTEX_BUFFERS)(cmd_vb, n_vertex_buffers);
+      genX(write_3DSTATE_VERTEX_BUFFERS)(cmd_vb, n_vertex_buffers + n_draw_param_buffers);
       cmd_vb += 4;
+
+#if GFX_VER == 9
+      global void *prev_seq_ptr = seq_base + (seq_idx == 0 ? 0 : (seq_idx - 1))  * seq_stride;
+      bool needs_vf_inval = false;
+#endif
 
       uint16_t mocs = state->layout.vertex_buffers.mocs;
       for (uint32_t i = 0; i < n_vertex_buffers; i++) {
          struct anv_dgc_vertex_buffer vb = state->layout.vertex_buffers.buffers[i];
-
          VkBindVertexBufferIndirectCommandEXT vtx_data =
             *(global VkBindVertexBufferIndirectCommandEXT *)(
                seq_ptr + vb.seq_offset);
+#if GFX_VER == 9
+         VkBindVertexBufferIndirectCommandEXT prev_vtx_data =
+            *(global VkBindVertexBufferIndirectCommandEXT *)(
+               prev_seq_ptr + vb.seq_offset);
+         if ((vtx_data.bufferAddress >> 32) != (prev_vtx_data.bufferAddress >> 32)) {
+            uint32_t offset = vtx_data.bufferAddress & 0xffffffff;
+            uint32_t prev_offset = prev_vtx_data.bufferAddress & 0xffffffff;
+            if (offset >= prev_offset && offset < (prev_offset + prev_vtx_data.size))
+               needs_vf_inval = true;
+         }
+#endif
 
          genX(write_VERTEX_BUFFER_STATE)(cmd_vb, mocs, vb.binding,
                                          vtx_data.bufferAddress,
@@ -454,6 +470,53 @@ genX(libanv_preprocess_gfx_generate)(global void *cmd_base,
                                          vtx_data.stride);
          cmd_vb += GENX(VERTEX_BUFFER_STATE_length) * 4;
       }
+
+#if GFX_VER == 9
+      global uint32_t *draw_param_ptr =
+         get_ptr(data_base, data_stride, data_prolog_size, seq_idx) +
+         state->layout.push_constants.data_offset +
+         MAX_PUSH_CONSTANTS_SIZE +
+         ANV_DRIVER_PUSH_CONSTANTS_SIZE;
+
+      if (state->descriptor.draw_params & ANV_DGC_DRAW_PARAM_BASE_INSTANCE_VERTEX) {
+         genX(write_VERTEX_BUFFER_STATE)(cmd_vb, mocs, ANV_SVGS_VB_INDEX,
+                                         (uint64_t)draw_param_ptr, 8, 0);
+         cmd_vb += GENX(VERTEX_BUFFER_STATE_length) * 4;
+         if (state->layout.draw.draw_type == ANV_DGC_DRAW_TYPE_SEQUENTIAL) {
+            VkDrawIndirectCommand data =
+               *((global VkDrawIndirectCommand *)(seq_ptr + state->layout.draw.seq_offset));
+            draw_param_ptr[0] = data.firstVertex;
+            draw_param_ptr[1] = data.firstInstance;
+         } else {
+            VkDrawIndexedIndirectCommand data =
+               *((global VkDrawIndexedIndirectCommand *)(seq_ptr + state->layout.draw.seq_offset));
+            draw_param_ptr[0] = data.vertexOffset;
+            draw_param_ptr[1] = data.firstInstance;
+         }
+         draw_param_ptr += 2;
+      }
+      if (state->descriptor.draw_params & ANV_DGC_DRAW_PARAM_DRAW_ID) {
+         genX(write_VERTEX_BUFFER_STATE)(cmd_vb, mocs, ANV_DRAWID_VB_INDEX,
+                                         (uint64_t)draw_param_ptr, 4, 0);
+         cmd_vb += GENX(VERTEX_BUFFER_STATE_length) * 4;
+         /* gl_DrawID is always 0 since we don't support
+          * VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_COUNT_EXT
+          */
+         draw_param_ptr[0] = 0;
+         draw_param_ptr += 1;
+      }
+
+      if (needs_vf_inval) {
+         struct GENX(PIPE_CONTROL) pc = {
+            .CommandStreamerStallEnable = true,
+            .VFCacheInvalidationEnable = true,
+         };
+         GENX(PIPE_CONTROL_pack)(cmd_vb, &pc);
+      } else {
+         genX(set_data)(cmd_vb, GENX(PIPE_CONTROL_length) * 4, 0);
+      }
+      cmd_vb += GENX(PIPE_CONTROL_length) * 4;
+#endif
    }
 
 #if INTEL_WA_16011107343_GFX_VER || INTEL_WA_22018402687_GFX_VER
@@ -497,8 +560,8 @@ genX(libanv_preprocess_gfx_generate)(global void *cmd_base,
                        false /* indexed */,
                        is_predicated,
                        tbimr_enabled,
-                       true /* uses_base, unused for Gfx11+ */,
-                       true /* uses_draw_id, unused for Gfx11+ */,
+                       false /* uses_base, unused for Gfx11+ */,
+                       false /* uses_draw_id, unused for Gfx11+ */,
                        0 /* mocs, unused for Gfx11+ */);
       break;
 
@@ -511,8 +574,8 @@ genX(libanv_preprocess_gfx_generate)(global void *cmd_base,
                        true /* indexed */,
                        is_predicated,
                        tbimr_enabled,
-                       true /* uses_base, unused for Gfx11+ */,
-                       true /* uses_draw_id, unused for Gfx11+ */,
+                       false /* uses_base, unused for Gfx11+ */,
+                       false /* uses_draw_id, unused for Gfx11+ */,
                        0 /* mocs, unused for Gfx11+ */);
       break;
 
@@ -944,4 +1007,4 @@ genX(libanv_preprocess_rt_generate)(global void *cmd_base,
 }
 #endif /* GFX_VERx10 >= 125 */
 
-#endif /* GFX_VER >= 11 */
+#endif /* GFX_VER >= 9 */

@@ -75,6 +75,8 @@
  */
 #define MAX_BINDING_TABLE_SIZE 240
 
+#define HW_MAX_VBS 33
+
  /* 3DSTATE_VERTEX_BUFFER supports 33 VBs, but these limits are applied on Gen9
   * graphics, where 2 VBs are reserved for base & drawid SGVs.
   */
@@ -350,6 +352,11 @@ enum anv_dgc_push_slot_type {
    ANV_DGC_PUSH_SLOT_TYPE_OTHER,
 };
 
+enum anv_dgc_draw_params {
+   ANV_DGC_DRAW_PARAM_BASE_INSTANCE_VERTEX = BITFIELD_BIT(0),
+   ANV_DGC_DRAW_PARAM_DRAW_ID              = BITFIELD_BIT(1),
+};
+
 /**
  * This structure holds prepacked HW instructions for a set of graphics
  * shaders forming a pipeline . It is part of the command buffer temporary
@@ -362,7 +369,12 @@ struct anv_dgc_gfx_descriptor {
    uint32_t final_commands[20];
    uint32_t final_commands_size;
 
-   uint32_t wa_18019110168_remapping_table_offset;
+   union {
+      /* Gfx12.5 only */
+      uint32_t wa_18019110168_remapping_table_offset;
+      /* Gfx9 only */
+      enum anv_dgc_draw_params draw_params;
+   };
 
    struct {
       struct anv_dgc_push_stage_state {

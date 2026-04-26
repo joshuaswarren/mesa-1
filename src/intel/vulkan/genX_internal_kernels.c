@@ -110,7 +110,6 @@ genX(call_internal_shader)(nir_builder *b, enum anv_internal_kernel_name shader_
          nir_imul_imm(b, load_compute_index(b), 4));
       return sizeof(struct anv_memcpy_params);
 
-#if GFX_VER >= 11
    case ANV_INTERNAL_KERNEL_DGC_GFX_COMPUTE:
    case ANV_INTERNAL_KERNEL_DGC_GFX_FRAGMENT:
       genX(libanv_preprocess_gfx_generate)(
@@ -186,7 +185,6 @@ genX(call_internal_shader)(nir_builder *b, enum anv_internal_kernel_name shader_
          load_param(b, 32, struct anv_dgc_dump_params, n_dwords),
          load_param(b, 64, struct anv_dgc_dump_params, call_addr));
       return sizeof(struct anv_dgc_dump_params);
-#endif /* GFX_VER >= 11 */
 
 #if GFX_VERx10 >= 125
    case ANV_INTERNAL_KERNEL_DGC_RT_COMPUTE:

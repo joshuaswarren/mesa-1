@@ -304,8 +304,7 @@ get_device_extensions(const struct anv_physical_device *device,
        * buffer approach, at the expense of late preprocessing. But this is
        * for later.
        */
-      .EXT_device_generated_commands         = device->info.verx10 >= 125 ||
-                                               (device->info.ver >= 11 || ANV_DEBUG(EXPERIMENTAL)),
+      .EXT_device_generated_commands         = device->info.verx10 >= 125 || ANV_DEBUG(EXPERIMENTAL),
       .EXT_device_memory_report              = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control                   = true,

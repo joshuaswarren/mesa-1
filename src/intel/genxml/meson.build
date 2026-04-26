@@ -230,6 +230,7 @@ genX_cl_included_symbols = [
   'MI_ARB_CHECK',
   'MI_BATCH_BUFFER_START',
   'MI_STORE_DATA_IMM',
+  'PIPE_CONTROL',
   # structures
   '3DSTATE_CONSTANT_ALL_DATA',
   '3DSTATE_CONSTANT_BODY',
