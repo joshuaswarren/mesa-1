@@ -14,6 +14,7 @@
 #include "drm/freedreno_ringbuffer.h"
 #include "perfcntrs/freedreno_dt.h"
 #include "perfcntrs/freedreno_perfcntr.h"
+#include "util/hash_table.h"
 
 #include "pps/pps.h"
 #include "pps/pps_algorithm.h"
@@ -1493,10 +1494,19 @@ FreedrenoDriver::configure_counters(bool reset, bool wait)
 void
 FreedrenoDriver::collect_countables()
 {
-   last_dump_ts = perfetto::base::GetBootTimeNs().count();
+   last_dump_ts = gpu_timestamp();
 
    for (const auto &countable : countables)
       countable.collect();
+}
+
+static uint64_t
+ticks_to_ns(uint64_t ticks)
+{
+   constexpr uint64_t ALWAYS_ON_FREQUENCY_HZ = 19200000;
+   constexpr double GPU_TICKS_PER_NS = ALWAYS_ON_FREQUENCY_HZ / 1000000000.0;
+
+   return ticks / GPU_TICKS_PER_NS;
 }
 
 bool
@@ -1617,7 +1627,7 @@ FreedrenoDriver::dump_perfcnt()
 
    collect_countables();
 
-   auto elapsed_time_ns = last_dump_ts - last_ts;
+   auto elapsed_time_ns = ticks_to_ns(last_dump_ts - last_ts);
 
    time = (float)elapsed_time_ns / 1000000000.0;
 
@@ -1777,13 +1787,26 @@ FreedrenoDriver::counter(std::string name, Counter::Units units,
 uint32_t
 FreedrenoDriver::gpu_clock_id() const
 {
-   return perfetto::protos::pbzero::BUILTIN_CLOCK_BOOTTIME;
+   static uint32_t gpu_clock_id;
+
+   if (!gpu_clock_id) {
+      /* Note: clock_id's below 128 are reserved.. for custom clock sources,
+       * using the hash of a namespaced string is the recommended approach.
+       * See: https://perfetto.dev/docs/concepts/clock-sync
+       */
+      gpu_clock_id =
+         _mesa_hash_string("org.freedesktop.pps.freedreno") | 0x80000000;
+   }
+
+   return gpu_clock_id;
 }
 
 uint64_t
 FreedrenoDriver::gpu_timestamp() const
 {
-   return perfetto::base::GetBootTimeNs().count();
+   uint64_t ts;
+   fd_pipe_get_param(pipe, FD_TIMESTAMP, &ts);
+   return ts;
 }
 
 bool
