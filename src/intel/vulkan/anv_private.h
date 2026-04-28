@@ -1762,10 +1762,6 @@ struct anv_instance {
     bool                                        force_filter_addr_rounding;
     bool                                        fp64_workaround_enabled;
     float                                       lower_depth_range_rate;
-    unsigned                                    generated_indirect_threshold;
-    unsigned                                    generated_indirect_ring_threshold;
-    unsigned                                    query_clear_with_blorp_threshold;
-    unsigned                                    query_copy_with_shader_threshold;
     unsigned                                    force_vk_vendor;
     bool                                        has_fake_sparse;
     bool                                        disable_fcv;
@@ -1775,14 +1771,9 @@ struct anv_instance {
     bool                                        anv_fake_nonlocal_memory;
     bool                                        anv_upper_bound_descriptor_pool_sampler;
     bool                                        custom_border_colors_without_format;
-    bool                                        vf_component_packing;
     bool                                        large_workgroup_non_coherent_image_workaround;
-    bool                                        force_sampler_prefetch;
-    bool                                        force_compute_surface_prefetch;
-    unsigned                                    binding_table_block_size;
     bool                                        barrier_post_typed_clear_shader;
     bool                                        barrier_post_untyped_clear_shader;
-    bool                                        state_cache_perf_fix;
 
     /* HW workarounds */
     bool                                        no_16bit;
@@ -1792,8 +1783,17 @@ struct anv_instance {
     /**
      * Performance workarounds
      */
+    unsigned                                    binding_table_block_size;
     bool                                        disable_lto;
     enum brw_divergent_atomics_flags            enable_opt_divergent_atomics;
+    bool                                        force_sampler_prefetch;
+    bool                                        force_compute_surface_prefetch;
+    unsigned                                    generated_indirect_threshold;
+    unsigned                                    generated_indirect_ring_threshold;
+    unsigned                                    query_clear_with_blorp_threshold;
+    unsigned                                    query_copy_with_shader_threshold;
+    bool                                        state_cache_perf_fix;
+    bool                                        vf_component_packing;
 
     /**
      * Ray tracing configuration.
