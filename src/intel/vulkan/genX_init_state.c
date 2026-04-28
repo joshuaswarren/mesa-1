@@ -783,6 +783,16 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
    }
 #endif
 
+   if (device->physical->instance->disable_push_constant_alloc) {
+      genX(batch_emit_push_constants_alloc)(
+         batch, device,
+         VK_SHADER_STAGE_VERTEX_BIT |
+         VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+         VK_SHADER_STAGE_GEOMETRY_BIT |
+         VK_SHADER_STAGE_FRAGMENT_BIT);
+   }
+
    anv_batch_emit(batch, GENX(MI_BATCH_BUFFER_END), bbe);
 
    result = batch->status;

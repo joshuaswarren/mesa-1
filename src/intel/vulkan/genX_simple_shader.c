@@ -273,27 +273,12 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
    anv_batch_emit(batch, GENX(3DSTATE_PRIMITIVE_REPLICATION), pr);
 #endif
 
-   VkShaderStageFlags push_stages =
-      genX(push_constant_alloc_stages)(VK_SHADER_STAGE_FRAGMENT_BIT);
-   genX(batch_emit_push_constants_alloc)(batch, device, push_stages);
-   state->cmd_buffer->state.gfx.push_constant_stages = push_stages;
-
-#if GFX_VERx10 == 125
-   /* DG2: Wa_22011440098
-    * MTL: Wa_18022330953
-    *
-    * In 3D mode, after programming push constant alloc command immediately
-    * program push constant command(ZERO length) without any commit between
-    * them.
-    *
-    * Note that Wa_16011448509 isn't needed here as all address bits are zero.
-    */
-   anv_batch_emit(batch, GENX(3DSTATE_CONSTANT_ALL), c) {
-      /* Update empty push constants for all stages (bitmask = 11111b) */
-      c.ShaderUpdateEnable = 0x1f;
-      c.MOCS = anv_mocs(device, NULL, 0);
+   if (!device->physical->instance->disable_push_constant_alloc) {
+      VkShaderStageFlags push_stages =
+         genX(push_constant_alloc_stages)(VK_SHADER_STAGE_FRAGMENT_BIT);
+      genX(batch_emit_push_constants_alloc)(batch, device, push_stages);
+      state->cmd_buffer->state.gfx.push_constant_stages = push_stages;
    }
-#endif
 
 #if GFX_VER == 9
    /* Allocate a binding table for Gfx9 because the HW does not have a null-rt

@@ -42,8 +42,8 @@ batch_emit_push_constants_alloc(struct anv_batch *batch,
                                 VkShaderStageFlags stages)
 {
    const unsigned push_constant_kb =
-      (stages & VK_SHADER_STAGE_MESH_BIT_EXT) ?
-      device->info->mesh_max_constant_urb_size_kb :
+      /* GFX_VERx10 >= 125 ? */
+      /* devinfo->mesh_max_constant_urb_size_kb : */
       device->info->max_constant_urb_size_kb;
 
    /* On Gfx12.5 there is no more push constant allocation required */
@@ -107,10 +107,12 @@ genX(batch_emit_push_constants_alloc)(struct anv_batch *batch,
 static void
 cmd_buffer_alloc_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer)
 {
+   if (cmd_buffer->device->physical->instance->disable_push_constant_alloc)
+      return;
+
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
    const VkShaderStageFlags stages =
       genX(push_constant_alloc_stages)(gfx->active_stages);
-
    if (stages == cmd_buffer->state.gfx.push_constant_stages)
       return;
 

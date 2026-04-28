@@ -1785,6 +1785,7 @@ struct anv_instance {
      */
     unsigned                                    binding_table_block_size;
     bool                                        disable_lto;
+    bool                                        disable_push_constant_alloc;
     enum brw_divergent_atomics_flags            enable_opt_divergent_atomics;
     bool                                        force_sampler_prefetch;
     bool                                        force_compute_surface_prefetch;
