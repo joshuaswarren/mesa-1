@@ -2320,8 +2320,8 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    p->conformanceVersion = (VkConformanceVersion){
       .major = 1,
       .minor = 4,
-      .subminor = 0,
-      .patch = 0,
+      .subminor = 5,
+      .patch = 3,
    };
 
    /* VK_EXT_host_image_copy */
