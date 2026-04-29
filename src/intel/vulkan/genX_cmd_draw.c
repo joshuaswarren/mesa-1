@@ -47,9 +47,14 @@ batch_emit_push_constants(struct anv_batch *batch,
    else
       push_constant_kb = device->info->max_constant_urb_size_kb;
 
+   /* On Gfx12.5 there is no more push constant allocation required */
+   if (GFX_VERx10 >= 125)
+      stages &= ~VK_SHADER_STAGE_FRAGMENT_BIT;
+
    const unsigned num_stages =
       util_bitcount(stages & VK_SHADER_STAGE_ALL_GRAPHICS);
-   unsigned size_per_stage = push_constant_kb / num_stages;
+   unsigned size_per_stage = num_stages == 0 ? push_constant_kb :
+      push_constant_kb / num_stages;
 
    /* Broadwell+ and Haswell gt3 require that the push constant sizes be in
     * units of 2KB.  Incidentally, these are the same platforms that have
@@ -69,10 +74,12 @@ batch_emit_push_constants(struct anv_batch *batch,
       kb_used += push_size;
    }
 
+#if GFX_VERx10 < 125
    anv_batch_emit(batch, GENX(3DSTATE_PUSH_CONSTANT_ALLOC_PS), alloc) {
       alloc.ConstantBufferOffset = kb_used;
       alloc.ConstantBufferSize = push_constant_kb - kb_used;
    }
+#endif
 
 #if GFX_VERx10 == 125
    /* DG2: Wa_22011440098

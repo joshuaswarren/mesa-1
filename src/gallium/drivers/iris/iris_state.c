@@ -1117,10 +1117,11 @@ iris_alloc_push_constants(struct iris_batch *batch)
 
    /* Divide as equally as possible with any remainder given to FRAGMENT. */
    const unsigned push_constant_kb = devinfo->max_constant_urb_size_kb;
-   const unsigned stage_size = push_constant_kb / 5;
+   const unsigned n_stages = GFX_VERx10 >= 125 ? 4 : 5;
+   const unsigned stage_size = push_constant_kb / n_stages;
    const unsigned frag_size = push_constant_kb - 4 * stage_size;
 
-   for (int i = 0; i <= MESA_SHADER_FRAGMENT; i++) {
+   for (int i = 0; i <= (GFX_VERx10 >= 125 ? MESA_SHADER_GEOMETRY : MESA_SHADER_FRAGMENT); i++) {
       iris_emit_cmd(batch, GENX(3DSTATE_PUSH_CONSTANT_ALLOC_VS), alloc) {
          alloc._3DCommandSubOpcode = 18 + i;
          alloc.ConstantBufferOffset = stage_size * i;

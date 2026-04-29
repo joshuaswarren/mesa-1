@@ -2,6 +2,7 @@
 <genxml name="GFX125" gen="12.5">
   <import name="gen120.xml">
     <exclude name="3D_CHICKEN3" />
+    <exclude name="3DSTATE_PUSH_CONSTANT_ALLOC_PS" />
     <exclude name="GPGPU_WALKER" />
     <exclude name="GT_MODE" />
     <exclude name="MEDIA_CURBE_LOAD" />
