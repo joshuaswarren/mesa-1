@@ -1684,13 +1684,13 @@ v3dv_physical_device_device_id(const struct v3dv_physical_device *dev)
    }
 }
 
-/* We support exactly one queue family. */
+/* We support multiqueue emulation */
 static const VkQueueFamilyProperties
 v3dv_queue_family_properties = {
    .queueFlags = VK_QUEUE_GRAPHICS_BIT |
                  VK_QUEUE_COMPUTE_BIT |
                  VK_QUEUE_TRANSFER_BIT,
-   .queueCount = 1,
+   .queueCount = V3DV_MAX_QUEUES,
    .timestampValidBits = 64,
    .minImageTransferGranularity = { 1, 1, 1 },
 };
@@ -1909,14 +1909,16 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
 
-   /* Check requested queues (we only expose one queue ) */
-   assert(pCreateInfo->queueCreateInfoCount == 1);
+   /* Check requested queues */
+   uint32_t total_queues = 0;
    for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       assert(pCreateInfo->pQueueCreateInfos[i].queueFamilyIndex == 0);
-      assert(pCreateInfo->pQueueCreateInfos[i].queueCount == 1);
+      assert(pCreateInfo->pQueueCreateInfos[i].queueCount <= V3DV_MAX_QUEUES);
       if (pCreateInfo->pQueueCreateInfos[i].flags != 0)
          return vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
+      total_queues += pCreateInfo->pQueueCreateInfos[i].queueCount;
    }
+   assert(total_queues <= V3DV_MAX_QUEUES);
 
    device = vk_zalloc2(&physical_device->vk.instance->alloc, pAllocator,
                        sizeof(*device), 8,
@@ -1939,6 +1941,7 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    device->instance = instance;
    device->pdevice = physical_device;
 
+   mtx_init(&device->queue_mutex, mtx_plain);
    mtx_init(&device->query_mutex, mtx_plain);
    cnd_init(&device->query_ended);
 
@@ -1948,10 +1951,25 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    vk_device_set_drm_fd(&device->vk, physical_device->render_fd);
    vk_device_enable_threaded_submit(&device->vk);
 
-   result = queue_init(device, &device->queue,
-                       pCreateInfo->pQueueCreateInfos, 0);
-   if (result != VK_SUCCESS)
-      goto fail;
+   device->queues = vk_zalloc2(&device->vk.alloc, pAllocator,
+                               sizeof(*device->queues) * total_queues, 8,
+                               VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!device->queues) {
+      result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto fail_queues_alloc;
+   }
+
+   device->queue_count = 0;
+   for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
+      for (uint32_t j = 0; j < pCreateInfo->pQueueCreateInfos[i].queueCount; j++) {
+         result = queue_init(device, &device->queues[device->queue_count],
+                             &pCreateInfo->pQueueCreateInfos[i], j);
+         if (result != VK_SUCCESS)
+            goto fail;
+
+         device->queue_count++;
+      }
+   }
 
    device->devinfo = physical_device->devinfo;
 
@@ -2000,9 +2018,13 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    return VK_SUCCESS;
 
 fail:
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      queue_finish(&device->queues[i]);
+   vk_free2(&device->vk.alloc, pAllocator, device->queues);
+fail_queues_alloc:
    cnd_destroy(&device->query_ended);
    mtx_destroy(&device->query_mutex);
-   queue_finish(&device->queue);
+   mtx_destroy(&device->queue_mutex);
    if (device->noop_job)
       v3dv_job_destroy(device->noop_job);
    destroy_device_meta(device);
@@ -2022,7 +2044,9 @@ v3dv_DestroyDevice(VkDevice _device,
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
 
    device->vk.dispatch_table.DeviceWaitIdle(_device);
-   queue_finish(&device->queue);
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      queue_finish(&device->queues[i]);
+   vk_free2(&device->vk.alloc, pAllocator, device->queues);
 
    if (device->noop_job)
       v3dv_job_destroy(device->noop_job);
@@ -2049,6 +2073,7 @@ v3dv_DestroyDevice(VkDevice _device,
 
    cnd_destroy(&device->query_ended);
    mtx_destroy(&device->query_mutex);
+   mtx_destroy(&device->queue_mutex);
 
    vk_device_finish(&device->vk);
    vk_free2(&device->vk.alloc, pAllocator, device);
@@ -2258,8 +2283,11 @@ free_memory(struct v3dv_device *device,
    if (mem->bo->map)
       device_unmap(device, mem);
 
-   if (mem->is_for_device_address)
+   if (mem->is_for_device_address) {
+      mtx_lock(&device->queue_mutex);
       device_remove_device_address_bo(device, mem->bo);
+      mtx_unlock(&device->queue_mutex);
+   }
 
    device_free(device, mem);
 
