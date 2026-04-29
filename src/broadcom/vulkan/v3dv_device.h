@@ -205,8 +205,6 @@ struct v3dv_queue {
 
    struct v3dv_last_job_sync last_job_syncs;
 
-   struct v3dv_job *noop_job;
-
    /* The last active perfmon ID to prevent mixing of counter results when a
     * job is submitted with a different perfmon id.
     */
@@ -215,6 +213,8 @@ struct v3dv_queue {
 
 VkResult v3dv_queue_driver_submit(struct vk_queue *vk_queue,
                                   struct vk_queue_submit *submit);
+
+VkResult v3dv_device_create_noop_job(struct v3dv_device *device);
 
 #define V3DV_META_BLIT_CACHE_KEY_SIZE              (4 * sizeof(uint32_t))
 #define V3DV_META_TEXEL_BUFFER_COPY_CACHE_KEY_SIZE (3 * sizeof(uint32_t) + \
@@ -254,6 +254,8 @@ struct v3dv_device {
 
    struct v3d_device_info devinfo;
    struct v3dv_queue queue;
+
+   struct v3dv_job *noop_job;
 
    /* Guards query->maybe_available and value for timestamps */
    mtx_t query_mutex;

@@ -1233,41 +1233,13 @@ queue_handle_job(struct v3dv_queue *queue,
 }
 
 static VkResult
-queue_create_noop_job(struct v3dv_queue *queue)
-{
-   struct v3dv_device *device = queue->device;
-   queue->noop_job = vk_zalloc(&device->vk.alloc, sizeof(struct v3dv_job), 8,
-                               VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-   if (!queue->noop_job)
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
-   v3dv_job_init(queue->noop_job, V3DV_JOB_TYPE_GPU_CL, device, NULL, -1);
-
-   v3d_X((&device->devinfo), job_emit_noop)(queue->noop_job);
-
-   /* We use no-op jobs to signal semaphores/fences. These jobs needs to be
-    * serialized across all hw queues to comply with Vulkan's signal operation
-    * order requirements, which basically require that signal operations occur
-    * in submission order.
-    */
-   queue->noop_job->serialize = V3DV_BARRIER_ALL;
-
-   return VK_SUCCESS;
-}
-
-static VkResult
 queue_submit_noop_job(struct v3dv_queue *queue,
                       uint32_t counter_pass_idx,
                       struct v3dv_submit_sync_info *sync_info,
                       bool signal_syncs)
 {
-   if (!queue->noop_job) {
-      VkResult result = queue_create_noop_job(queue);
-      if (result != VK_SUCCESS)
-         return result;
-   }
-
-   assert(queue->noop_job);
-   return queue_handle_job(queue, queue->noop_job, counter_pass_idx, NULL,
+   assert(queue->device->noop_job);
+   return queue_handle_job(queue, queue->device->noop_job, counter_pass_idx, NULL,
                            sync_info, signal_syncs);
 }
 
