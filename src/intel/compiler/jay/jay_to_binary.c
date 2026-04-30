@@ -153,11 +153,12 @@ to_brw_reg(jay_function *f,
       }
 
       if (d.file == GPR) {
-         R = byte_offset(xe2_vec8_grf(phys_reg, 0),
-                         simd_offs * simd_width * stride_bits / 8);
+         R = xe2_vec8_grf(phys_reg, 0);
       } else {
          R = brw_vecn_reg(8, ARF, BRW_ARF_ACCUMULATOR + (phys_reg * 2), 0);
       }
+
+      R = byte_offset(R, simd_offs * simd_width * stride_bits / 8);
 
       if (stride_bits == (type_bits * 4)) {
          R = stride(R, 8, 2, 4);
