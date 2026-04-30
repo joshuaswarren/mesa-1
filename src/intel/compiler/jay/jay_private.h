@@ -39,6 +39,7 @@ void jay_spill(jay_function *func, unsigned limit);
 void jay_partition_grf(jay_shader *shader);
 void jay_register_allocate(jay_shader *s);
 void jay_assign_flags(jay_shader *s);
+void jay_assign_accumulators(jay_shader *s);
 void jay_repair_ssa(jay_function *func);
 
 const char *jay_file_prefix(enum jay_file file);

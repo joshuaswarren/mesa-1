@@ -2686,6 +2686,7 @@ jay_compile(const struct intel_device_info *devinfo,
 
    if (!(jay_debug & JAY_DBG_NOOPT)) {
       JAY_PASS(s, jay_opt_predicate);
+      JAY_PASS(s, jay_assign_accumulators);
    }
 
    JAY_PASS(s, jay_lower_scoreboard);

@@ -47,6 +47,7 @@ jay_nir_algebraic = custom_target(
 
 libintel_compiler_jay_files = files(
   'jay.h',
+  'jay_assign_accumulators.c',
   'jay_assign_flags.c',
   'jay_from_nir.c',
   'jay_ir.h',

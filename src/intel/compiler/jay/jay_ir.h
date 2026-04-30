@@ -1072,6 +1072,9 @@ typedef struct jay_block {
    struct u_sparse_bitset live_in;
    struct u_sparse_bitset live_out;
 
+   BITSET_DECLARE(postra_gpr_live_in, JAY_NUM_PHYS_GRF);
+   BITSET_DECLARE(postra_gpr_live_out, JAY_NUM_PHYS_GRF);
+
    /**
     * After register allocation but before going out-of-SSA, registers that
     * are free at the logical end of the block (before phi_src). These will
