@@ -166,12 +166,50 @@ inferred_sync_pipe(const struct intel_device_info *devinfo, const jay_inst *I)
    }
 }
 
+/*
+ * Return the maximum ALU distance to consider. Anything further is guaranteed
+ * to have already written its result by the time we issue. These values are not
+ * in the bspec but are #define'd in IGC as SWSB_MAX_*_DEPENDENCE_DISTANCE.
+ *
+ * Confusingly, IGC also defines SWSB_MAX_ALU_DEPENDENCE_DISTANCE_VALUE as 7.
+ * There is a discrepency between what the hardware does and what we can encode.
+ * Any writes from 11 instructions ago are guaranteed to have landed, whereas if
+ * you need to sync, you can only sync with something up to 7 instructions ago
+ * (and implicitly, everything in-order before that).
+ *
+ * These are conservative values. Some archeology suggests the real values may
+ * be lower on some platforms but for now we match IGC to be safe.
+ */
+static inline unsigned
+max_dependence(enum tgl_pipe pipe)
+{
+   return pipe == TGL_PIPE_SCALAR ? 2 :
+          pipe == TGL_PIPE_MATH   ? 18 :
+          pipe == TGL_PIPE_LONG   ? 15 :
+                                    11;
+}
+
 static void
-depend_on_writer(struct swsb_state *state, struct gpr_range r, unsigned *dep)
+depend_on_writer(struct swsb_state *state,
+                 struct gpr_range r,
+                 unsigned *dep,
+                 enum tgl_pipe exec,
+                 bool except_exec)
 {
    for (unsigned i = 0; i < r.width; ++i) {
       uint32_t w = state->access[r.base + i][0];
-      dep[writer_pipe(w)] = MAX2(dep[writer_pipe(w)], writer_ip(w));
+      enum tgl_pipe write = writer_pipe(w);
+
+      /* We omit write-after-{read,write} dependencies (except_exec) within a
+       * single execution pipe, since each pipe is internally in-order. We also
+       * omit dependencies on the same pipe that are too far to be relevant.
+       */
+      if (write != exec ||
+          (!except_exec &&
+           writer_ip(w) + max_dependence(exec) > state->ip[write])) {
+
+         dep[write] = MAX2(dep[write], writer_ip(w));
+      }
    }
 }
 
@@ -192,21 +230,23 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
          continue;
       }
 
-      /* Write-after-{write, read} */
       jay_foreach_dst(I, def) {
          struct gpr_range r = def_to_gpr(func, I, def);
-         depend_on_writer(&state, r, dep);
+         depend_on_writer(&state, r, dep, exec_pipe, true /* except_pipe */);
 
          for (unsigned i = 0; i < r.width; ++i) {
             jay_foreach_pipe(p) {
-               dep[p] = MAX2(dep[p], state.access[r.base + i][p]);
+               if (p != exec_pipe) {
+                  dep[p] = MAX2(dep[p], state.access[r.base + i][p]);
+               }
             }
          }
       }
 
       /* Read-after-write */
       jay_foreach_src(I, s) {
-         depend_on_writer(&state, def_to_gpr(func, I, I->src[s]), dep);
+         depend_on_writer(&state, def_to_gpr(func, I, I->src[s]), dep,
+                          exec_pipe, false);
       }
 
       unsigned nr_waits = 0;
