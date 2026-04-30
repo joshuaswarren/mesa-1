@@ -341,6 +341,7 @@ emit(struct brw_codegen *p,
       OP2(SHR, SHR)
       OP2(SHL, SHL)
       OP2(BFI1, BFI1)
+      OP2(MAC, MAC)
       OP3(BFI2, BFI2)
       OP3(ADD3, ADD3)
       OP3(CSEL, CSEL)
