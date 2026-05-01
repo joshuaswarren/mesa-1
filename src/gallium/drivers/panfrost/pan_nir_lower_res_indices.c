@@ -9,6 +9,118 @@
 #include "pan_shader.h"
 #include "pan_nir.h"
 
+static unsigned
+mid_image_offset(nir_shader *nir)
+{
+   /* Bifrost and Midgard shaders get passed images through the vertex
+    * attribute descriptor array.  For vertex shaders, we need to add an
+    * offset to all image intrinsics so they point to the right attribute.
+    */
+   if (nir->info.stage == MESA_SHADER_VERTEX)
+      return util_bitcount64(nir->info.inputs_read);
+   else
+      return 0;
+}
+
+static unsigned
+mid_texel_buffer_offset(nir_shader *nir, uint64_t gpu_id)
+{
+   /* Bifrost needs to use attributes to access texel buffers. We place these
+    * after images, which are also accessed using attributes.
+    */
+   assert(pan_arch(gpu_id) <= 7);
+   if (pan_arch(gpu_id) >= 6)
+      return mid_image_offset(nir) + BITSET_LAST_BIT(nir->info.images_used);
+   else
+      return 0;
+}
+
+static bool
+mid_lower_tex(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+{
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
+      return false;
+
+   /* We don't adjust the index for queries because those go through the
+    * sysvals table and it's simpler if they stay the original texture index.
+    *
+    * TODO: Fix this once we have better query code.
+    */
+   if (tex->op != nir_texop_txf)
+      return false;
+
+   unsigned tex_offset = mid_texel_buffer_offset(b->shader, gpu_id);
+   if (tex_offset == 0)
+      return false;
+
+   tex->texture_index += tex_offset;
+   return true;
+}
+
+static bool
+mid_lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
+{
+   unsigned image_offset = mid_image_offset(b->shader);
+   if (image_offset == 0)
+      return false;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   nir_src *tex_handle = &intrin->src[0];
+   nir_def *new_handle = nir_iadd_imm(b, tex_handle->ssa, image_offset);
+   nir_src_rewrite(tex_handle, new_handle);
+
+   return true;
+}
+
+static bool
+mid_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_image_load:
+   case nir_intrinsic_image_store:
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
+      return mid_lower_image_intrin(b, intrin);
+
+   case nir_intrinsic_image_size:
+   case nir_intrinsic_image_samples:
+      /* We don't adjust the index for queries because those go through the
+       * sysvals table and it's simpler if they stay the original texture
+       * index.
+       *
+       * TODO: Fix this once we have better query code.
+       */
+      return false;
+
+   default:
+      return false;
+   }
+}
+
+static bool
+mid_lower_instr(nir_builder *b, nir_instr *instr, void *data)
+{
+   uint64_t gpu_id = *(uint64_t *)data;
+
+   switch (instr->type) {
+   case nir_instr_type_tex:
+      return mid_lower_tex(b, nir_instr_as_tex(instr), gpu_id);
+   case nir_instr_type_intrinsic:
+      return mid_lower_intrinsic(b, nir_instr_as_intrinsic(instr));
+   default:
+      return false;
+   }
+}
+
+static bool
+mid_lower_res_indices(nir_shader *shader, uint64_t gpu_id)
+{
+   return nir_shader_instructions_pass(shader, mid_lower_instr,
+                                       nir_metadata_control_flow,
+                                       &gpu_id);
+}
+
 static bool
 va_lower_tex(nir_builder *b, nir_tex_instr *tex)
 {
@@ -140,17 +252,18 @@ va_lower_instr(nir_builder *b, nir_instr *instr, void *data)
    }
 }
 
-bool
-panfrost_nir_lower_res_indices(nir_shader *shader,
-                               struct pan_compile_inputs *inputs)
+static bool
+va_lower_res_indices(nir_shader *shader)
 {
-   /**
-    * Starting with Valhall, we are required to encode table indices by the
-    * compiler ABI.
-    */
-   if (pan_arch(inputs->gpu_id) < 9)
-      return false;
-
    return nir_shader_instructions_pass(shader, va_lower_instr,
                                        nir_metadata_control_flow, NULL);
+}
+
+bool
+panfrost_nir_lower_res_indices(nir_shader *shader, uint64_t gpu_id)
+{
+   if (pan_arch(gpu_id) >= 9)
+      return va_lower_res_indices(shader);
+   else
+      return mid_lower_res_indices(shader, gpu_id);
 }
