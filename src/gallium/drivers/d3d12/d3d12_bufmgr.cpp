@@ -23,6 +23,7 @@
 
 #include "d3d12_bufmgr.h"
 #include "d3d12_context.h"
+#include "d3d12_fence.h"
 #include "d3d12_format.h"
 #include "d3d12_screen.h"
 
@@ -366,8 +367,18 @@ d3d12_buffer_validate(struct pb_buffer *pbuf,
 
 static void
 d3d12_buffer_fence(struct pb_buffer *pbuf,
-                   struct pipe_fence_handle *fence )
+                   struct pipe_fence_handle *fence)
 {
+   if (!fence)
+      return;
+   struct d3d12_buffer *buf = d3d12_buffer(pbuf);
+   struct d3d12_fence *f = d3d12_fence(fence);
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(buf->bo, &offset);
+   if (f->cmdqueue_fence != base->screen->fence)
+      return;
+   if (f->value > base->last_used_fence)
+      base->last_used_fence = f->value;
 }
 
 const struct pb_vtbl d3d12_buffer_vtbl = {
@@ -433,8 +444,11 @@ d3d12_bufmgr_destroy(struct pb_manager *_mgr)
 static bool
 d3d12_bufmgr_is_buffer_busy(struct pb_manager *_mgr, struct pb_buffer *_buf)
 {
-   /* We're only asked this on buffers that are known not busy */
-   return false;
+   struct d3d12_bufmgr *mgr = d3d12_bufmgr(_mgr);
+   struct d3d12_buffer *buf = d3d12_buffer(_buf);
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(buf->bo, &offset);
+   return base->last_used_fence > mgr->screen->fence->GetCompletedValue();
 }
 
 struct pb_manager *
