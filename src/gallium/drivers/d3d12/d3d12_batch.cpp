@@ -405,6 +405,8 @@ d3d12_end_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
 #endif // HAVE_GALLIUM_D3D12_GRAPHICS
 
    mtx_unlock(&screen->submit_mutex);
+
+   d3d12_screen_reclaim_completed(screen);
 }
 
 
