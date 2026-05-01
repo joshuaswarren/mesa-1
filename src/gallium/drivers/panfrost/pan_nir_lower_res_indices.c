@@ -10,7 +10,7 @@
 #include "pan_nir.h"
 
 static bool
-lower_tex(nir_builder *b, nir_tex_instr *tex)
+va_lower_tex(nir_builder *b, nir_tex_instr *tex)
 {
    b->cursor = nir_before_instr(&tex->instr);
 
@@ -44,7 +44,7 @@ lower_tex(nir_builder *b, nir_tex_instr *tex)
 }
 
 static bool
-lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
+va_lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -57,8 +57,7 @@ lower_image_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 }
 
 static bool
-lower_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
-                   const struct pan_compile_inputs *inputs)
+va_lower_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    /* All vertex attributes come from the attribute table.
     * Fragment inputs come from the attribute table too, unless they've
@@ -76,7 +75,7 @@ lower_input_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
 }
 
 static bool
-lower_load_ubo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
+va_lower_load_ubo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -89,7 +88,7 @@ lower_load_ubo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 }
 
 static bool
-lower_ssbo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
+va_lower_ssbo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    b->cursor = nir_before_instr(&intrin->instr);
    bool is_store = intrin->intrinsic == nir_intrinsic_store_ssbo;
@@ -103,8 +102,7 @@ lower_ssbo_intrin(nir_builder *b, nir_intrinsic_instr *intrin)
 }
 
 static bool
-lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
-                const struct pan_compile_inputs *inputs)
+va_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
 {
    switch (intrin->intrinsic) {
    case nir_intrinsic_image_load:
@@ -113,32 +111,30 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_atomic_swap:
    case nir_intrinsic_image_size:
    case nir_intrinsic_image_samples:
-      return lower_image_intrin(b, intrin);
+      return va_lower_image_intrin(b, intrin);
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_interpolated_input:
-      return lower_input_intrin(b, intrin, inputs);
+      return va_lower_input_intrin(b, intrin);
    case nir_intrinsic_load_ubo:
-      return lower_load_ubo_intrin(b, intrin);
+      return va_lower_load_ubo_intrin(b, intrin);
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_store_ssbo:
    case nir_intrinsic_ssbo_atomic:
    case nir_intrinsic_ssbo_atomic_swap:
-      return lower_ssbo_intrin(b, intrin);
+      return va_lower_ssbo_intrin(b, intrin);
    default:
       return false;
    }
 }
 
 static bool
-lower_instr(nir_builder *b, nir_instr *instr, void *data)
+va_lower_instr(nir_builder *b, nir_instr *instr, void *data)
 {
-   const struct pan_compile_inputs *inputs = data;
-
    switch (instr->type) {
    case nir_instr_type_tex:
-      return lower_tex(b, nir_instr_as_tex(instr));
+      return va_lower_tex(b, nir_instr_as_tex(instr));
    case nir_instr_type_intrinsic:
-      return lower_intrinsic(b, nir_instr_as_intrinsic(instr), inputs);
+      return va_lower_intrinsic(b, nir_instr_as_intrinsic(instr));
    default:
       return false;
    }
@@ -155,7 +151,6 @@ panfrost_nir_lower_res_indices(nir_shader *shader,
    if (pan_arch(inputs->gpu_id) < 9)
       return false;
 
-   return nir_shader_instructions_pass(
-      shader, lower_instr, nir_metadata_control_flow,
-      inputs);
+   return nir_shader_instructions_pass(shader, va_lower_instr,
+                                       nir_metadata_control_flow, NULL);
 }
