@@ -143,12 +143,15 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
       d3d12_evicted : d3d12_resident;
 
    D3D12_HEAP_PROPERTIES heap_pris = GetCustomHeapProperties(dev, heap_type);
-   HRESULT hres = dev->CreateCommittedResource(&heap_pris,
-                                               heap_flags,
-                                               &res_desc,
-                                               D3D12_RESOURCE_STATE_COMMON,
-                                               NULL,
-                                               IID_PPV_ARGS(&res));
+   HRESULT hres;
+   do {
+      hres = dev->CreateCommittedResource(&heap_pris,
+                                          heap_flags,
+                                          &res_desc,
+                                          D3D12_RESOURCE_STATE_COMMON,
+                                          NULL,
+                                          IID_PPV_ARGS(&res));
+   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
 
    if (FAILED(hres))
       return NULL;

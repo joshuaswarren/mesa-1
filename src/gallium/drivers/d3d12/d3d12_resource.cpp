@@ -313,6 +313,7 @@ init_texture(struct d3d12_screen *screen,
 
    HRESULT hres = E_FAIL;
    enum d3d12_residency_status init_residency;
+   do {
 #ifndef _GAMING_XBOX
 
    if (heap && screen->max_feature_level == D3D_FEATURE_LEVEL_1_0_GENERIC) {
@@ -400,6 +401,7 @@ init_texture(struct d3d12_screen *screen,
                                                      IID_PPV_ARGS(&d3d12_res));
       }
    }
+   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
 
    if (FAILED(hres))
       return false;
