@@ -966,14 +966,6 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, panvk_lower_load_vs_input,
                nir_metadata_control_flow, NULL);
 
-   /* since valhall, panvk_per_arch(nir_lower_descriptors) separates the
-    * driver set and the user sets, and does not need pan_nir_lower_image_index
-    */
-   if (PAN_ARCH < 9 && nir->info.stage == MESA_SHADER_VERTEX) {
-      NIR_PASS(_, nir, pan_nir_lower_image_index, MAX_VS_ATTRIBS);
-      NIR_PASS(_, nir, pan_nir_lower_texel_buffer_fetch_index, MAX_VS_ATTRIBS);
-   }
-
    pan_postprocess_nir(nir, &input, &shader->info);
 
    if (noperspective_varyings && nir->info.stage == MESA_SHADER_VERTEX) {

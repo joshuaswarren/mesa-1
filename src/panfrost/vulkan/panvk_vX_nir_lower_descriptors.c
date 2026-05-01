@@ -49,6 +49,7 @@ struct lower_desc_info {
 };
 
 struct lower_desc_ctx {
+   mesa_shader_stage stage;
    const struct panvk_descriptor_set_layout *set_layouts[MAX_SETS];
    struct lower_desc_info desc_info;
    struct hash_table_u64 *ht;
@@ -161,14 +162,22 @@ shader_desc_idx(uint32_t set, uint32_t binding,
    const struct lower_desc_map *map;
 
 #if PAN_ARCH < 9
+   uint32_t table = PANVK_BIFROST_DESC_TABLE_INVALID;
    if (bind_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
       map = &ctx->desc_info.dyn_ubos;
    } else if (bind_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
       map = &ctx->desc_info.dyn_ssbos;
    } else {
-      uint32_t table = desc_type_to_table_type(bind_layout, src.sampler_subdesc);
-
+      table = desc_type_to_table_type(bind_layout, src.sampler_subdesc);
       assert(table < PANVK_BIFROST_DESC_TABLE_COUNT);
+
+      /* For some reason, GCC thinks the initialization above will lead to an
+       * OOB array access on ctx->desc_info.others[table] even though it
+       * clearly gets overwritten above. This gets rid of the warning.
+       */
+      if (table >= PANVK_BIFROST_DESC_TABLE_COUNT)
+         return 0;
+
       map = &ctx->desc_info.others[table];
    }
 #else
@@ -180,11 +189,17 @@ shader_desc_idx(uint32_t set, uint32_t binding,
    uint32_t idx = entry - map->map;
 
 #if PAN_ARCH < 9
-   /* Adjust the destination index for all dynamic UBOs, which are laid out
-    * just after the regular UBOs in the UBO table. */
    if (bind_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+      /* Adjust the destination index for all dynamic UBOs, which are laid out
+       * just after the regular UBOs in the UBO table.
+       */
       idx += ctx->desc_info.others[PANVK_BIFROST_DESC_TABLE_UBO].count;
-   } else if (subdesc.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+   } else if (table == PANVK_BIFROST_DESC_TABLE_IMG) {
+      /* Images go after attributes in the attribute table. */
+      idx += ctx->stage == MESA_SHADER_VERTEX ? MAX_VS_ATTRIBS : 0;
+   }
+
+   if (subdesc.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
       /* the Cb/Cr planes share the same sampler, so in a 3 plane arrangement
        * the number of planes can exceed the number of samplers */
       idx += MIN2(subdesc.plane, bind_layout->samplers_per_desc - 1);
@@ -1284,6 +1299,7 @@ panvk_per_arch(nir_lower_descriptors)(
    struct panvk_shader_desc_info *desc_info)
 {
    struct lower_desc_ctx ctx = {
+      .stage = nir->info.stage,
       .add_bounds_checks =
          rs->storage_buffers !=
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
