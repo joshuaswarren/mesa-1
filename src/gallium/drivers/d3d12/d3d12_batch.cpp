@@ -61,6 +61,7 @@ d3d12_init_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
 
    batch->local_bos = UTIL_DYNARRAY_INIT;
    batch->local_bo_pending = UTIL_DYNARRAY_INIT;
+   batch->bos_pending = UTIL_DYNARRAY_INIT;
 
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    batch->surfaces = _mesa_set_create(NULL, _mesa_hash_pointer,
@@ -176,6 +177,10 @@ d3d12_reset_batch(struct d3d12_context *ctx, struct d3d12_batch *batch, uint64_t
 
    _mesa_hash_table_clear(batch->bos, delete_bo_entry);
 
+   util_dynarray_foreach(&batch->bos_pending, struct d3d12_pending_free_entry*, entry)
+      FREE(*entry);
+   util_dynarray_clear(&batch->bos_pending);
+
 #ifdef HAVE_GALLIUM_D3D12_GRAPHICS
    set_foreach_remove(batch->surfaces, entry) {
       struct pipe_surface *surf = (struct pipe_surface *)entry->key;
@@ -240,6 +245,7 @@ d3d12_destroy_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
    _mesa_set_destroy(batch->objects, NULL);
    util_dynarray_fini(&batch->local_bos);
    util_dynarray_fini(&batch->local_bo_pending);
+   util_dynarray_fini(&batch->bos_pending);
 }
 
 void
@@ -327,34 +333,61 @@ d3d12_end_batch(struct d3d12_context *ctx, struct d3d12_batch *batch)
    batch->fence = d3d12_create_fence(screen, true);
 
    if (batch->fence) {
+      uint64_t fv = batch->fence->value;
+
       unsigned n_local = util_dynarray_num_elements(&batch->local_bo_pending,
                                                     struct d3d12_pending_free_entry*);
-      bool all_ok = n_local > 0;
-      struct d3d12_pending_free_entry **entries =
+      struct d3d12_pending_free_entry **local_entries =
          (struct d3d12_pending_free_entry **)util_dynarray_begin(&batch->local_bo_pending);
+      bool local_ok = n_local > 0;
       for (unsigned i = 0; i < n_local; ++i) {
-         if (!entries[i]) {
-            all_ok = false;
+         if (!local_entries[i]) {
+            local_ok = false;
             break;
          }
       }
 
-      if (all_ok) {
-         struct d3d12_bo **bos =
-            (struct d3d12_bo **)util_dynarray_begin(&batch->local_bos);
-         uint64_t fv = batch->fence->value;
+      unsigned n_shared = util_dynarray_num_elements(&batch->bos_pending,
+                                                     struct d3d12_pending_free_entry*);
+      struct d3d12_pending_free_entry **shared_entries =
+         (struct d3d12_pending_free_entry **)util_dynarray_begin(&batch->bos_pending);
+      bool shared_ok = n_shared > 0;
+      for (unsigned i = 0; i < n_shared; ++i) {
+         if (!shared_entries[i]) {
+            shared_ok = false;
+            break;
+         }
+      }
 
+      if (local_ok || shared_ok) {
          mtx_lock(&screen->pending_free_lock);
-         for (unsigned i = 0; i < n_local; ++i) {
-            entries[i]->fence_value = fv;
-            list_addtail(&entries[i]->link, &screen->pending_free_list);
+         if (local_ok) {
+            for (unsigned i = 0; i < n_local; ++i) {
+               local_entries[i]->fence_value = fv;
+               list_addtail(&local_entries[i]->link, &screen->pending_free_list);
+            }
+         }
+         if (shared_ok) {
+            for (unsigned i = 0; i < n_shared; ++i) {
+               shared_entries[i]->fence_value = fv;
+               list_addtail(&shared_entries[i]->link, &screen->pending_free_list);
+            }
          }
          mtx_unlock(&screen->pending_free_lock);
+      }
 
+      if (local_ok) {
+         struct d3d12_bo **bos =
+            (struct d3d12_bo **)util_dynarray_begin(&batch->local_bos);
          for (unsigned i = 0; i < n_local; ++i)
             bos[i]->local_reference_mask[batch->ctx_id] &= ~(1 << batch->ctx_index);
          util_dynarray_clear(&batch->local_bos);
          util_dynarray_clear(&batch->local_bo_pending);
+      }
+
+      if (shared_ok) {
+         _mesa_hash_table_clear(batch->bos, NULL);
+         util_dynarray_clear(&batch->bos_pending);
       }
    }
 
@@ -417,6 +450,10 @@ d3d12_batch_acquire_reference(struct d3d12_batch *batch,
       if (entry == NULL) {
          d3d12_bo_reference(bo);
          entry = _mesa_hash_table_insert(batch->bos, bo, NULL);
+         struct d3d12_pending_free_entry *pe = MALLOC_STRUCT(d3d12_pending_free_entry);
+         if (pe)
+            pe->bo = bo;
+         util_dynarray_append(&batch->bos_pending, pe);
       }
 
       return (uint8_t*)&entry->data;
