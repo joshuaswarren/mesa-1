@@ -110,6 +110,8 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_store:
    case nir_intrinsic_image_atomic:
    case nir_intrinsic_image_atomic_swap:
+   case nir_intrinsic_image_size:
+   case nir_intrinsic_image_samples:
       return lower_image_intrin(b, intrin);
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_interpolated_input:
