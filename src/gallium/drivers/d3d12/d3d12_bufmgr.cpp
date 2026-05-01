@@ -215,6 +215,57 @@ d3d12_bo_unreference(struct d3d12_bo *bo)
    }
 }
 
+bool
+d3d12_screen_reclaim_completed(struct d3d12_screen *screen)
+{
+   uint64_t completed = screen->fence->GetCompletedValue();
+   struct list_head retired;
+   list_inithead(&retired);
+
+   mtx_lock(&screen->pending_free_lock);
+   list_for_each_entry_safe(struct d3d12_pending_free_entry, entry,
+                            &screen->pending_free_list, link) {
+      if (entry->fence_value > completed)
+         break;
+      list_del(&entry->link);
+      list_addtail(&entry->link, &retired);
+   }
+   mtx_unlock(&screen->pending_free_lock);
+
+   bool dropped = !list_is_empty(&retired);
+   list_for_each_entry_safe(struct d3d12_pending_free_entry, entry, &retired, link) {
+      d3d12_bo_unreference(entry->bo);
+      FREE(entry);
+   }
+   return dropped;
+}
+
+bool
+d3d12_screen_reclaim_one(struct d3d12_screen *screen)
+{
+   uint64_t target = 0;
+   bool have_target = false;
+
+   mtx_lock(&screen->pending_free_lock);
+   if (!list_is_empty(&screen->pending_free_list)) {
+      struct d3d12_pending_free_entry *head =
+         list_first_entry(&screen->pending_free_list,
+                          struct d3d12_pending_free_entry, link);
+      target = head->fence_value;
+      have_target = true;
+   }
+   mtx_unlock(&screen->pending_free_lock);
+
+   if (!have_target)
+      return false;
+
+   if (screen->fence->GetCompletedValue() < target)
+      screen->fence->SetEventOnCompletion(target, nullptr);
+
+   d3d12_screen_reclaim_completed(screen);
+   return true;
+}
+
 void *
 d3d12_bo_map(struct d3d12_bo *bo, D3D12_RANGE *range)
 {
