@@ -77,7 +77,6 @@ pan_preprocess_nir(nir_shader *nir, uint64_t gpu_id)
       .lower_txd = pan_arch(gpu_id) < 6,
       .lower_txd_cube_map = true,
       .lower_invalid_implicit_lod = true,
-      .lower_index_to_offset = pan_arch(gpu_id) >= 6,
    };
 
    NIR_PASS(_, nir, nir_lower_tex, &lower_tex_options);
