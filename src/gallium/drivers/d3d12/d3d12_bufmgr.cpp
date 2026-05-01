@@ -30,6 +30,7 @@
 #include "pipebuffer/pb_bufmgr.h"
 
 #include "util/format/u_format.h"
+#include "util/set.h"
 #include "util/u_memory.h"
 
 #include <dxguids/dxguids.h>
@@ -195,9 +196,13 @@ d3d12_bo_unreference(struct d3d12_bo *bo)
 
       /* MSVC's offsetof fails when the name is ambiguous between struct and function */
       typedef struct d3d12_context d3d12_context_type;
-      list_for_each_entry(d3d12_context_type, ctx, &bo->screen->context_list, context_list_entry)
-         if (ctx->id == D3D12_CONTEXT_NO_ID)
+      list_for_each_entry(d3d12_context_type, ctx, &bo->screen->context_list, context_list_entry) {
+         if (ctx->id == D3D12_CONTEXT_NO_ID) {
             util_dynarray_append_typed(&ctx->recently_destroyed_bos, uint64_t, bo->unique_id);
+         } else if (bo->local_context_state_mask & (1u << ctx->id)) {
+            _mesa_set_remove_key(ctx->local_state_bos, bo);
+         }
+      }
 
       mtx_unlock(&bo->screen->submit_mutex);
 
