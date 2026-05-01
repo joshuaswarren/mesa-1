@@ -15,10 +15,11 @@ lower_tex(nir_builder *b, nir_tex_instr *tex)
    b->cursor = nir_before_instr(&tex->instr);
 
    nir_def *tex_offset = nir_steal_tex_src(tex, nir_tex_src_texture_offset);
-   nir_def *sampler_offset = nir_steal_tex_src(tex, nir_tex_src_sampler_offset);
+   nir_def *samp_offset = nir_steal_tex_src(tex, nir_tex_src_sampler_offset);
 
    if (tex_offset != NULL) {
-      tex_offset = pan_nir_res_handle(b, PAN_TABLE_TEXTURE, 0, tex_offset);
+      tex_offset = pan_nir_res_handle(b, PAN_TABLE_TEXTURE,
+                                      tex->texture_index, tex_offset);
       nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, tex_offset);
    } else {
       tex->texture_index =
@@ -30,10 +31,10 @@ lower_tex(nir_builder *b, nir_tex_instr *tex)
     */
    if (!nir_tex_instr_need_sampler(tex)) {
       tex->sampler_index = pan_res_handle(PAN_TABLE_SAMPLER, 0);
-   } else if (sampler_offset != NULL) {
-      sampler_offset =
-         pan_nir_res_handle(b, PAN_TABLE_SAMPLER, 0, sampler_offset);
-      nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset, sampler_offset);
+   } else if (samp_offset != NULL) {
+      samp_offset = pan_nir_res_handle(b, PAN_TABLE_SAMPLER,
+                                       tex->sampler_index, samp_offset);
+      nir_tex_instr_add_src(tex, nir_tex_src_sampler_offset, samp_offset);
    } else {
       tex->sampler_index =
          pan_res_handle(PAN_TABLE_SAMPLER, tex->sampler_index);
