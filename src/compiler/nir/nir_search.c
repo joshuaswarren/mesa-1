@@ -447,9 +447,9 @@ construct_value(nir_builder *build,
             nir_alu_instr *bcsel = nir_def_as_alu(def);
             assert(bcsel->op == nir_op_bcsel);
             util_dynarray_append_typed(state->states, uint16_t, 0);
-            nir_algebraic_automaton(nir_src_parent_instr(&bcsel->src[1].src), state->states, state->pass_op_table);
+            nir_algebraic_automaton(nir_def_instr(bcsel->src[1].src.ssa), state->states, state->pass_op_table);
             util_dynarray_append_typed(state->states, uint16_t, 0);
-            nir_algebraic_automaton(nir_src_parent_instr(&bcsel->src[2].src), state->states, state->pass_op_table);
+            nir_algebraic_automaton(nir_def_instr(bcsel->src[2].src.ssa), state->states, state->pass_op_table);
          }
       } else {
          nir_builder_instr_insert(build, &alu->instr);
