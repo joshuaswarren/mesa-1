@@ -156,6 +156,9 @@ bool si_compute_clear_copy_buffer(struct si_context *sctx, struct pipe_resource 
    assert(!src || src->target != PIPE_BUFFER || src_offset + size <= src->width0);
    bool is_copy = src != NULL;
 
+   if (!sctx->screen->has_gfx_compute)
+      return false;
+
    struct ac_cs_clear_copy_buffer_options options = {
       .nir_options = sctx->screen->nir_options,
       .info = &sctx->screen->info,

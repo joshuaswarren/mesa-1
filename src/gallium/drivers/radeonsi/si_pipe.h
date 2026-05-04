@@ -1445,6 +1445,10 @@ void si_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
                      bool render_condition_enable);
 void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct pipe_resource *src,
                     uint64_t dst_offset, uint64_t src_offset, unsigned size);
+void si_resource_copy_buffer(struct pipe_context *ctx, struct pipe_resource *dst,
+                             unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
+                             struct pipe_resource *src, unsigned src_level,
+                             const struct pipe_box *src_box);
 
 /* si_clear.c */
 #define SI_CLEAR_TYPE_CMASK  (1 << 0)

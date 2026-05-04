@@ -841,6 +841,24 @@ void si_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
    si_cp_dma_clear_buffer(sctx, &sctx->gfx_cs, dst, offset, size, *clear_value);
 }
 
+void si_resource_copy_buffer(struct pipe_context *ctx, struct pipe_resource *dst,
+                             unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
+                             struct pipe_resource *src, unsigned src_level,
+                             const struct pipe_box *src_box)
+{
+   struct si_context *sctx = (struct si_context *)ctx;
+
+   /* This function only handles buffers. */
+   if (dst->target != PIPE_BUFFER || src->target != PIPE_BUFFER) {
+      assert(false);
+      return;
+   }
+
+   si_barrier_before_simple_buffer_op(sctx, 0, dst, src);
+   si_copy_buffer(sctx, dst, src, dstx, src_box->x, src_box->width);
+   si_barrier_after_simple_buffer_op(sctx, 0, dst, src);
+}
+
 static uint64_t si_resource_get_address(struct pipe_screen *screen,
                                         struct pipe_resource *resource)
 {
@@ -898,4 +916,6 @@ void si_init_buffer_functions(struct si_context *sctx)
    sctx->b.texture_subdata = u_default_texture_subdata;
    sctx->b.buffer_subdata = si_buffer_subdata;
    sctx->b.resource_commit = si_resource_commit;
+   if (!sctx->b.resource_copy_region)
+      sctx->b.resource_copy_region = si_resource_copy_buffer;
 }
