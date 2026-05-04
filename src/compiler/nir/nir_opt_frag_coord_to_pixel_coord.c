@@ -39,7 +39,7 @@ opt_frag_pos(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
             return false;
       }
 
-      nir_instr *use_instr = nir_src_parent_instr(use);
+      nir_instr *use_instr = nir_src_use_instr(use);
 
       if (use_instr->type != nir_instr_type_alu)
          return false;
@@ -74,7 +74,7 @@ opt_frag_pos(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
 
       nir_src_rewrite(use, pixel_coord);
 
-      nir_alu_instr *use_instr = nir_instr_as_alu(nir_src_parent_instr(use));
+      nir_alu_instr *use_instr = nir_instr_as_alu(nir_src_use_instr(use));
 
       /* load_frag_coord is always positive, so we should never sign extend here. */
       bool needs_float = use_instr->op == nir_op_ffloor || use_instr->op == nir_op_ftrunc;

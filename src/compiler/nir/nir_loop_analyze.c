@@ -1213,7 +1213,7 @@ find_trip_count(loop_info_state *state, unsigned execution_mode,
       };
 
       nir_alu_instr *step_alu =
-         nir_instr_as_alu(nir_src_parent_instr(&lv->update_src->src));
+         nir_instr_as_alu(nir_src_use_instr(&lv->update_src->src));
 
       /* If the comparision is of unsigned type we don't necessarily need to
        * know the initial value to be able to calculate the max number of

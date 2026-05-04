@@ -436,7 +436,7 @@ nir_def_rewrite_uses_with_alu_src(nir_builder *build, nir_def *def,
    nir_def *mov = NULL;
 
    nir_foreach_use_including_if_safe(use, def) {
-      if (nir_src_is_if(use) || nir_src_parent_instr(use)->type != nir_instr_type_alu) {
+      if (nir_src_is_if(use) || nir_src_use_instr(use)->type != nir_instr_type_alu) {
          if (!mov)
             mov = nir_mov_alu(build, src, num_components);
 

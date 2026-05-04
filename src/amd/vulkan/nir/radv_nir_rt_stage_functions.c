@@ -764,7 +764,7 @@ lower_rt_deref_var(nir_shader *shader, nir_function_impl *impl, nir_instr *instr
       if (nir_src_is_if(use))
          continue;
 
-      nir_instr *parent = nir_src_parent_instr(use);
+      nir_instr *parent = nir_src_use_instr(use);
       if (parent->type != nir_instr_type_intrinsic)
          continue;
 

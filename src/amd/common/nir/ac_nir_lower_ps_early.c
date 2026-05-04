@@ -550,9 +550,9 @@ gather_info(nir_builder *b, nir_intrinsic_instr *intr, void *state)
    case nir_intrinsic_load_frag_coord:
       assert(intr->def.bit_size == 32);
       nir_foreach_use(use, &intr->def) {
-         if (nir_src_parent_instr(use)->type == nir_instr_type_alu &&
+         if (nir_src_use_instr(use)->type == nir_instr_type_alu &&
              nir_src_components_read(use) & 0x3) {
-            switch (nir_instr_as_alu(nir_src_parent_instr(use))->op) {
+            switch (nir_instr_as_alu(nir_src_use_instr(use))->op) {
             case nir_op_f2i8:
             case nir_op_f2i16:
             case nir_op_f2i32:

@@ -2879,7 +2879,7 @@ get_single_use_as_alu(nir_def *def)
       return NULL;
 
    nir_instr *instr =
-      nir_src_parent_instr(list_first_entry(&def->uses, nir_src, use_link));
+      nir_src_use_instr(list_first_entry(&def->uses, nir_src, use_link));
    if (instr->type != nir_instr_type_alu)
       return NULL;
 
@@ -3900,7 +3900,7 @@ try_move_postdominator(struct linkage_info *linkage,
           */
          nir_foreach_use_safe(src, nir_instr_def(load)) {
             if (nir_instr_dominates_use(postdom_state, postdom,
-                                        nir_src_parent_instr(src))) {
+                                        nir_src_use_instr(src))) {
                nir_src_rewrite(src, nir_undef(&linkage->consumer_builder,
                                               src->ssa->num_components,
                                               src->ssa->bit_size));

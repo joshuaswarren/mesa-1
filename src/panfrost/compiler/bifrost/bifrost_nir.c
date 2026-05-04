@@ -1185,7 +1185,7 @@ bifrost_nir_lower_vs_atomics_impl(nir_builder *b, nir_intrinsic_instr *intr,
 
    unsigned output_mask = 0;
    nir_foreach_use(use, &intr->def) {
-      nir_instr *parent = nir_src_parent_instr(use);
+      nir_instr *parent = nir_src_use_instr(use);
       if (parent->type != nir_instr_type_intrinsic)
          continue;
 

@@ -24,7 +24,7 @@ static bool
 radv_arg_def_is_unused(nir_def *def)
 {
    nir_foreach_use (use, def) {
-      nir_instr *use_instr = nir_src_parent_instr(use);
+      nir_instr *use_instr = nir_src_use_instr(use);
       if (use_instr->type == nir_instr_type_call)
          continue;
       if (use_instr->type == nir_instr_type_phi) {

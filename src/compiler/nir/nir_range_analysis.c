@@ -2187,9 +2187,9 @@ ssa_def_bits_used(const nir_def *def, int recur)
       return all_bits;
 
    nir_foreach_use(src, def) {
-      switch (nir_src_parent_instr(src)->type) {
+      switch (nir_src_use_instr(src)->type) {
       case nir_instr_type_alu: {
-         nir_alu_instr *use_alu = nir_instr_as_alu(nir_src_parent_instr(src));
+         nir_alu_instr *use_alu = nir_instr_as_alu(nir_src_use_instr(src));
          unsigned src_idx = container_of(src, nir_alu_src, src) - use_alu->src;
 
          /* If a user of the value produces a vector result, return the
@@ -2357,7 +2357,7 @@ ssa_def_bits_used(const nir_def *def, int recur)
 
       case nir_instr_type_intrinsic: {
          nir_intrinsic_instr *use_intrin =
-            nir_instr_as_intrinsic(nir_src_parent_instr(src));
+            nir_instr_as_intrinsic(nir_src_use_instr(src));
          unsigned src_idx = src - use_intrin->src;
 
          switch (use_intrin->intrinsic) {
@@ -2418,7 +2418,7 @@ ssa_def_bits_used(const nir_def *def, int recur)
       }
 
       case nir_instr_type_phi: {
-         nir_phi_instr *use_phi = nir_instr_as_phi(nir_src_parent_instr(src));
+         nir_phi_instr *use_phi = nir_instr_as_phi(nir_src_use_instr(src));
          bits_used |= ssa_def_bits_used(&use_phi->def, recur);
          break;
       }

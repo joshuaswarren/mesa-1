@@ -597,7 +597,7 @@ opt_16bit_destination(nir_def *ssa, nir_alu_type dest_type, unsigned exec_mode,
       nir_get_rounding_mode_from_float_controls(exec_mode, nir_type_float16);
 
    nir_foreach_use(use, ssa) {
-      nir_instr *instr = nir_src_parent_instr(use);
+      nir_instr *instr = nir_src_use_instr(use);
       if (instr->type != nir_instr_type_alu)
          return false;
 
@@ -653,7 +653,7 @@ opt_16bit_destination(nir_def *ssa, nir_alu_type dest_type, unsigned exec_mode,
 
    /* All uses are the same conversions. Replace them with mov. */
    nir_foreach_use(use, ssa) {
-      nir_alu_instr *alu = nir_instr_as_alu(nir_src_parent_instr(use));
+      nir_alu_instr *alu = nir_instr_as_alu(nir_src_use_instr(use));
       switch (alu->op) {
       case nir_op_f2f16_rtne:
       case nir_op_f2f16_rtz:

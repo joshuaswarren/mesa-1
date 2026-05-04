@@ -1029,7 +1029,7 @@ remat_load_const(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
       return false;
 
    nir_foreach_use_safe (src, &nconst->def) {
-      nir_instr *use_instr = nir_src_parent_instr(src);
+      nir_instr *use_instr = nir_src_use_instr(src);
       b->cursor = nir_before_instr(use_instr);
 
       nir_def *remat_const = nir_build_imm(b,
