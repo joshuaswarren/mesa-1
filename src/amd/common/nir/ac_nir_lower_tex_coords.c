@@ -289,6 +289,30 @@ struct loop_if_state {
    unsigned prev_break_continue;
 };
 
+static bool
+instr_needs_move(nir_cursor cursor, nir_instr *instr)
+{
+   nir_block *cursor_block = nir_cursor_current_block(cursor);
+
+   if (instr->block->index > cursor_block->index)
+      return true;
+   if (instr->block->index < cursor_block->index)
+      return false;
+
+   switch (cursor.option) {
+   case nir_cursor_before_block: return true;
+   case nir_cursor_after_block: return false;
+   case nir_cursor_before_instr:
+   case nir_cursor_after_instr:
+      foreach_list_typed_from(nir_instr, other, node, &(block)->instr_list, &cursor.instr->node) {
+         if (instr == other)
+            return true;
+      }
+      return false;
+   default: UNREACHABLE("unhandled cursor mode");
+   }
+}
+
 static nir_def *
 build_coordinate(struct move_tex_coords_state *state, nir_scalar scalar, coord_info info)
 {
@@ -302,18 +326,17 @@ build_coordinate(struct move_tex_coords_state *state, nir_scalar scalar, coord_i
 
    ASSERTED nir_src offset = *nir_get_io_offset_src(info.load);
    assert(nir_src_is_const(offset) && !nir_src_as_uint(offset));
-   nir_block *cursor_block = nir_cursor_current_block(b->cursor);
 
-   /* Move load_*input(barycentric, imm) to the cursor block if it's after that block. */
-   if (info.load->instr.block->index > cursor_block->index) {
+   /* Move load_*input(barycentric, imm) to the cursor location if nessecary. */
+   if (instr_needs_move(b->cursor, &info.load->instr)) {
       nir_instr_move(b->cursor, &info.load->instr);
 
       unsigned num_srcs = nir_intrinsic_infos[info.load->intrinsic].num_srcs;
 
       for (unsigned i = 0; i < num_srcs; i++) {
-         if (nir_def_instr(info.load->src[i].ssa)->block->index > cursor_block->index) {
-            nir_instr_move(nir_before_instr(&info.load->instr),
-                           nir_def_instr(info.load->src[i].ssa));
+         nir_cursor cursor = nir_before_instr(&info.load->instr);
+         if (instr_needs_move(cursor, nir_def_instr(info.load->src[i].ssa))) {
+            nir_instr_move(cursor, nir_def_instr(info.load->src[i].ssa));
          }
       }
    }
