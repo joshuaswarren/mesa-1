@@ -328,6 +328,7 @@ struct rvce_encoder {
 
    bool use_vm;
    bool dual_pipe;
+   bool error;
    unsigned fw_version;
 };
 

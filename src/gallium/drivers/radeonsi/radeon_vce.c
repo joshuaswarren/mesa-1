@@ -773,19 +773,24 @@ static void rvce_begin_frame(struct pipe_video_codec *encoder, struct pipe_video
     * imports external buffer it may not be aligned and then we need to blit
     * into internal surface used as input surface. */
    if (source->height % 16) {
-      enc->source_copy = enc->base.context->create_video_buffer(enc->base.context, source);
-      assert(enc->source_copy);
-      struct vl_video_buffer *dst = (struct vl_video_buffer *)enc->source_copy;
-      for (unsigned i = 0; i < 2; i++) {
-         struct pipe_box box = {
-            .width = util_format_get_plane_width(source->buffer_format, i, source->width),
-            .height = util_format_get_plane_height(source->buffer_format, i, source->height),
-            .depth = 1,
-         };
-         si_resource_copy_region(enc->base.context, dst->resources[i], 0, 0, 0, 0, vid_buf->resources[i], 0, &box);
+      if (si_screen(enc->screen)->has_gfx_compute) {
+         enc->source_copy = enc->base.context->create_video_buffer(enc->base.context, source);
+         assert(enc->source_copy);
+         struct vl_video_buffer *dst = (struct vl_video_buffer *)enc->source_copy;
+         for (unsigned i = 0; i < 2; i++) {
+            struct pipe_box box = {
+               .width = util_format_get_plane_width(source->buffer_format, i, source->width),
+               .height = util_format_get_plane_height(source->buffer_format, i, source->height),
+               .depth = 1,
+            };
+            si_resource_copy_region(enc->base.context, dst->resources[i], 0, 0, 0, 0, vid_buf->resources[i], 0, &box);
+         }
+         enc->base.context->flush(enc->base.context, NULL, 0);
+         vid_buf = (struct vl_video_buffer *)enc->source_copy;
+      } else {
+         RVID_ERR("VDE requires 16x16 aligned input surface\n");
+         enc->error = true;
       }
-      enc->base.context->flush(enc->base.context, NULL, 0);
-      vid_buf = (struct vl_video_buffer *)enc->source_copy;
    }
 
    enc->get_buffer(vid_buf->resources[0], &enc->handle, &enc->luma);
@@ -932,6 +937,9 @@ static int rvce_end_frame(struct pipe_video_codec *encoder, struct pipe_video_bu
                           struct pipe_picture_desc *picture)
 {
    struct rvce_encoder *enc = (struct rvce_encoder *)encoder;
+
+   if (enc->error)
+      return 1;
 
    flush(enc, picture->flush_flags, picture->out_fence);
 
