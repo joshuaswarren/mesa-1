@@ -22,6 +22,15 @@ struct tex_srcs {
    nir_def *z_cmpr;
 };
 
+static nir_def *
+combine_index(nir_builder *b, nir_def *offset, uint32_t index)
+{
+   if (offset)
+      return nir_iadd_imm(b, offset, index);
+   else
+      return nir_imm_int(b, index);
+}
+
 static struct tex_srcs
 steal_tex_srcs(nir_builder *b, nir_tex_instr *tex)
 {
@@ -50,13 +59,8 @@ steal_tex_srcs(nir_builder *b, nir_tex_instr *tex)
    }
    tex->num_srcs = 0;
 
-   /* If we don't have a texture or sampler handle, grab it from the
-    * immediate texture/sampler_index.
-    */
-   if (!srcs.tex_h)
-      srcs.tex_h = nir_imm_int(b, tex->texture_index);
-   if (!srcs.samp_h)
-      srcs.samp_h = nir_imm_int(b, tex->sampler_index);
+   srcs.tex_h = combine_index(b, srcs.tex_h, tex->texture_index);
+   srcs.samp_h = combine_index(b, srcs.samp_h, tex->sampler_index);
 
    return srcs;
 }
