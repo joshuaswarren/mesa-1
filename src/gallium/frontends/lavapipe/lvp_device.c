@@ -179,6 +179,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .KHR_maintenance8                      = true,
    .KHR_maintenance9                      = true,
    .KHR_maintenance10                     = true,
+   .KHR_maintenance11                     = true,
    .KHR_map_memory2                       = true,
    .KHR_multiview                         = true,
    .KHR_push_descriptor                   = true,
@@ -844,6 +845,8 @@ lvp_get_features(const struct lvp_physical_device *pdevice,
       .maintenance9 = true,
       /* maintenance10 */
       .maintenance10 = true,
+      /* maintenance11 */
+      .maintenance11 = true,
 
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
@@ -1664,6 +1667,12 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceQueueFamilyProperties2(
       prio->priorities[1] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
       prio->priorities[2] = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
       prio->priorities[3] = VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR;
+   }
+   VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *gran = vk_find_struct(pQueueFamilyProperties, QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR);
+   if (gran) {
+      gran->optimalImageTransferGranularity.width = 1;
+      gran->optimalImageTransferGranularity.height = 1;
+      gran->optimalImageTransferGranularity.depth = 1;
    }
    VkQueueFamilyOwnershipTransferPropertiesKHR *prop = vk_find_struct(pQueueFamilyProperties, QUEUE_FAMILY_OWNERSHIP_TRANSFER_PROPERTIES_KHR);
    if (prop)
