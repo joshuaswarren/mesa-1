@@ -7,6 +7,7 @@
 #include "compiler/brw/brw_eu_defines.h"
 #include "util/bitset.h"
 #include "util/macros.h"
+#include "util/u_math.h"
 #include "jay_builder.h"
 #include "jay_ir.h"
 #include "jay_opcodes.h"
@@ -249,9 +250,6 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
                           exec_pipe, false);
       }
 
-      unsigned nr_waits = 0;
-      unsigned last_pipe = TGL_PIPE_NONE;
-
       /* If dependency P implies dependency Q, drop dependency Q to avoid
        * unnecessary annotations.
        */
@@ -265,17 +263,21 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
          }
       }
 
+      uint32_t wait_pipes = 0;
       unsigned min_delta = 7;
+
       jay_foreach_pipe(p) {
          if (dep[p] && (exec_pipe == TGL_PIPE_NONE /* TODO: Sends */ ||
                         dep[p] > state.finished_ip[exec_pipe][p])) {
             unsigned delta = state.ip[p] - dep[p] + 1;
             min_delta = MIN2(min_delta, delta);
             state.finished_ip[exec_pipe][p] = dep[p];
-            nr_waits++;
-            last_pipe = p;
+            wait_pipes |= BITFIELD_BIT(p);
          }
       }
+
+      uint32_t last_pipe = util_logbase2(wait_pipes);
+      bool single_wait = wait_pipes == BITFIELD_BIT(last_pipe);
 
       /* If we're SIMD split the same way as our dependency, we can relax the
        * dependency to have each half wait in parallel. We could do even better
@@ -285,7 +287,7 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
       unsigned shape = ((simd_split << 2) | jay_macro_length(I)) + 1;
       bool same_shape = state.last_shape[last_pipe] == shape;
 
-      if (simd_split && same_shape && nr_waits == 1 && min_delta == 1) {
+      if (simd_split && same_shape && single_wait && min_delta == 1) {
          min_delta += ((1 << simd_split) - 1) * jay_macro_length(I);
          I->replicate_dep = true;
          I->decrement_dep = last_pipe != exec_pipe;
@@ -295,10 +297,10 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
       I->dep = (struct tgl_swsb) {
          .sbid = has_sbid ? jay_send_sbid(I) : 0,
          .mode = has_sbid ? TGL_SBID_SET : TGL_SBID_NULL,
-         .regdist = nr_waits ? min_delta : 0,
-         .pipe = nr_waits == 1 && (!has_sbid ||
-                                   last_pipe == TGL_PIPE_FLOAT ||
-                                   last_pipe == TGL_PIPE_INT) ?
+         .regdist = wait_pipes ? min_delta : 0,
+         .pipe = single_wait && (!has_sbid ||
+                                 last_pipe == TGL_PIPE_FLOAT ||
+                                 last_pipe == TGL_PIPE_INT) ?
                     last_pipe :
                     TGL_PIPE_ALL,
       };
