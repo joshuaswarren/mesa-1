@@ -325,6 +325,7 @@ isl_device_init(struct isl_device *dev,
    dev->has_bit6_swizzling = info->has_bit6_swizzle;
    dev->buffer_length_in_aux_addr = false;
    dev->sampler_route_to_lsc = false;
+   dev->requires_padding = false;
 
    /* The ISL_DEV macros may be defined in the CFLAGS, thus hardcoding some
     * device properties at buildtime. Verify that the macros with the device
