@@ -409,6 +409,11 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
        * dependency.
        */
       if (src_reg->flags & IR3_REG_CONST) {
+         if (!(src_reg->flags & IR3_REG_RELATIV) &&
+             !ir3_valid_const(instr, n, src_reg->num)) {
+            return false;
+         }
+
          /* an instruction cannot reference two different
           * address registers:
           */

@@ -998,6 +998,8 @@ int ir3_flut(struct ir3_register *src_reg);
 bool ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags);
 
 bool ir3_valid_immediate(struct ir3_instruction *instr, int32_t immed);
+bool ir3_valid_const(struct ir3_instruction *instr, unsigned src_n,
+                     unsigned num);
 
 /**
  * Given an instruction whose result we want to test for nonzero, return a
