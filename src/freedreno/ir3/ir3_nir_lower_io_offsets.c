@@ -388,6 +388,16 @@ ir3_nir_max_imm_offset(nir_intrinsic_instr *intrin, const void *data)
       if (!compiler->info->props.has_ssbo_imm_offsets)
          return 0;
       return 127; /* stib.b */
+   case nir_intrinsic_load_global_ir3:
+   case nir_intrinsic_store_global_ir3:
+      /* The immediate offset field is larger for ldg/stg than for their .a
+       * versions. Return the max for .a. If the offset src itself turns out to
+       * be constant and doesn't fit in BASE, but does fit in ldg/stg, we can
+       * detect this when emitting the ir3 instruction.
+       */
+      if (compiler->gen >= 7)
+         return 255;
+      return 3;
    default:
       return 0;
    }
@@ -396,7 +406,13 @@ ir3_nir_max_imm_offset(nir_intrinsic_instr *intrin, const void *data)
 bool
 ir3_nir_allow_base_offset_wrap(nir_intrinsic_instr *intrin, const void *data)
 {
-   return true;
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_global_ir3:
+   case nir_intrinsic_store_global_ir3:
+      return false;
+   default:
+      return true;
+   }
 }
 
 unsigned
