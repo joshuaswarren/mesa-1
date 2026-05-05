@@ -1043,6 +1043,9 @@ panvk_emit_tiler_dcd(struct panvk_cmd_buffer *cmdbuf,
 
       cfg.occlusion_query = cmdbuf->state.gfx.occlusion_query.mode;
       cfg.occlusion = cmdbuf->state.gfx.occlusion_query.ptr;
+#if PAN_ARCH == 9
+      cfg.scissor_to_bounding_box = true;
+#endif
    }
 }
 
