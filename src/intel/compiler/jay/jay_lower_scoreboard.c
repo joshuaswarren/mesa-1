@@ -269,11 +269,15 @@ lower_regdist_local(jay_function *func, jay_block *block, u32_per_pipe *access)
       jay_foreach_pipe(p) {
          if (dep[p] && (exec_pipe == TGL_PIPE_NONE /* TODO: Sends */ ||
                         dep[p] > state.finished_ip[exec_pipe][p])) {
-            unsigned delta = state.ip[p] - dep[p] + 1;
-            min_delta = MIN2(min_delta, delta);
-            state.finished_ip[exec_pipe][p] = dep[p];
+
+            min_delta = MIN2(min_delta, state.ip[p] - dep[p] + 1);
             wait_pipes |= BITFIELD_BIT(p);
          }
+      }
+
+      /* We'll wait on the unioned dependency. Update the tracking for that. */
+      u_foreach_bit(p, wait_pipes) {
+         state.finished_ip[exec_pipe][p] = state.ip[p] + 1 - min_delta;
       }
 
       uint32_t last_pipe = util_logbase2(wait_pipes);
