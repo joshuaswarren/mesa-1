@@ -258,6 +258,52 @@ lower_offset_for_ssbo(nir_intrinsic_instr *intrinsic, nir_builder *b,
    return true;
 }
 
+/* On a6xx, global memory is accessed in units of the type size. Legalize
+ * offset_shift to correspond to this.
+ */
+static bool
+lower_offset_for_global(nir_builder *b, nir_intrinsic_instr *intr,
+                        struct ir3_compiler *compiler)
+{
+   if (compiler->gen >= 7) {
+      assert(nir_intrinsic_offset_shift(intr) == 0);
+      return false;
+   }
+
+   unsigned bit_size = intr->intrinsic == nir_intrinsic_load_global_ir3
+                          ? intr->def.bit_size
+                          : intr->src[0].ssa->bit_size;
+
+   assert(bit_size < 64);
+
+   int shift = ffs(bit_size / 8) - 1;
+   int cur_shift = nir_intrinsic_offset_shift(intr);
+   int extra_shift = shift - cur_shift;
+
+   if (extra_shift == 0) {
+      return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   nir_src *offset_src = nir_get_io_offset_src(intr);
+   nir_io_offset new_offset = {
+      .def = ir3_nir_try_propagate_bit_shift(b, offset_src->ssa, -extra_shift),
+      .shift = shift,
+   };
+
+   if (!new_offset.def) {
+      if (extra_shift > 0) {
+         new_offset.def = nir_ushr_imm(b, offset_src->ssa, extra_shift);
+      } else {
+         new_offset.def = nir_ishl_imm(b, offset_src->ssa, -extra_shift);
+      }
+   }
+
+   nir_set_io_offset(intr, new_offset);
+   return true;
+}
+
 static bool
 lower_io_offsets_block(nir_block *block, nir_builder *b, void *mem_ctx,
                        struct ir3_compiler *c)
@@ -287,6 +333,11 @@ lower_io_offsets_block(nir_block *block, nir_builder *b, void *mem_ctx,
          b->cursor = nir_before_instr(instr);
          scalarize_load(intr, b);
          progress = true;
+      }
+
+      if (intr->intrinsic == nir_intrinsic_load_global_ir3 ||
+          intr->intrinsic == nir_intrinsic_store_global_ir3) {
+         progress |= lower_offset_for_global(b, intr, c);
       }
    }
 
