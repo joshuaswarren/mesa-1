@@ -376,16 +376,17 @@ ir3_nir_max_imm_offset(nir_intrinsic_instr *intrin, const void *data)
 {
    const struct ir3_compiler *compiler = data;
 
-   if (!compiler->info->props.has_ssbo_imm_offsets)
-      return 0;
-
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_ssbo_ir3:
+      if (!compiler->info->props.has_ssbo_imm_offsets)
+         return 0;
       if ((nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
           !(compiler->options.storage_8bit && intrin->def.bit_size == 8))
          return 255; /* isam.v */
       return 127;    /* ldib.b */
    case nir_intrinsic_store_ssbo_ir3:
+      if (!compiler->info->props.has_ssbo_imm_offsets)
+         return 0;
       return 127; /* stib.b */
    default:
       return 0;
