@@ -12,7 +12,6 @@ if [ ! -d platform-hardware-libhardware ]; then
     git clone --depth 1 https://android.googlesource.com/platform/hardware/libhardware platform-hardware-libhardware
     git clone --depth 1 https://android.googlesource.com/platform/system/core platform-system-core
     git clone --depth 1 https://android.googlesource.com/platform/system/logging platform-system-logging
-    git clone --depth 1 https://android.googlesource.com/platform/system/unwinding platform-system-unwinding
 fi
 
 dest=include/android_stub
@@ -20,6 +19,13 @@ dest=include/android_stub
 # Persist the frozen Android N system/window.h for backward compatibility
 
 cp -av ${dest}/system/window.h platform-system-core/libsystem/include/system
+
+# Persist the frozen libbacktrace header for backward compatibility, since the
+# support has been dropped in Android 15.
+#
+# TODO: add support for libunwindstack
+mkdir -p platform-system-unwinding/libbacktrace/include
+cp -av ${dest}/backtrace platform-system-unwinding/libbacktrace/include/
 
 rm -rf ${dest}
 mkdir ${dest}
