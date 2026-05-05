@@ -151,8 +151,8 @@ op('send', 4, None, Props.SIDE_EFFECTS, [
 op('reloc',   0, 'u32 u64', 0, ['unsigned param', 'unsigned base'])
 op('preload', 0, 'u32',     0, ['unsigned reg'])
 op('deswizzle', 0, 'u32', Props.NO_DEST, ['unsigned size'])
-op('deswizzle_odd', 2, 'u32', 0, ['bool src2_hi'])
-op('deswizzle_even', 1, 'u32', 0, ['bool src_hi'])
+op('deswizzle_odd', 2, 'f32', 0, ['bool src2_hi'])
+op('deswizzle_even', 1, 'f32', 0, ['bool src_hi'])
 
 # Calculating the lane ID requires multiple power-of-two steps each involving
 # complex architectural features not modelled in the IR.
