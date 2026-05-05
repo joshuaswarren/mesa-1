@@ -79,7 +79,16 @@ protected:
       glsl_type_singleton_decref();
    }
 
+   enum instr_count_filter {
+      instr_count_all,
+      instr_count_used,
+      instr_count_unused,
+   };
+
+   int count_instr_common(nir_op op, instr_count_filter filter);
    int count_instr(nir_op op);
+   int count_used_instr(nir_op op);
+   int count_unused_instr(nir_op op);
    int count_loops(void);
 
    nir_builder bld;
@@ -88,7 +97,7 @@ protected:
 } /* namespace */
 
 int
-nir_loop_unroll_test::count_instr(nir_op op)
+nir_loop_unroll_test::count_instr_common(nir_op op, instr_count_filter filter)
 {
    int count = 0;
    nir_foreach_block(block, bld.impl) {
@@ -96,12 +105,36 @@ nir_loop_unroll_test::count_instr(nir_op op)
          if (instr->type != nir_instr_type_alu)
             continue;
          nir_alu_instr *alu_instr = nir_instr_as_alu(instr);
-         if (alu_instr->op == op)
+         if (alu_instr->op != op)
+            continue;
+
+         bool unused = nir_def_is_unused(&alu_instr->def);
+         if (filter == instr_count_all ||
+             (filter == instr_count_used && !unused) ||
+             (filter == instr_count_unused && unused))
             count++;
       }
    }
 
    return count;
+}
+
+int
+nir_loop_unroll_test::count_instr(nir_op op)
+{
+   return count_instr_common(op, instr_count_all);
+}
+
+int
+nir_loop_unroll_test::count_used_instr(nir_op op)
+{
+   return count_instr_common(op, instr_count_used);
+}
+
+int
+nir_loop_unroll_test::count_unused_instr(nir_op op)
+{
+   return count_instr_common(op, instr_count_unused);
 }
 
 int
