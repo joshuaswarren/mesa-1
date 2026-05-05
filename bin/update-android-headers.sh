@@ -46,7 +46,7 @@ cp -av                                                                  \
 # We only need a few files from these big directories so just copy those
 
 mkdir ${dest}/hardware
-cp -av platform-hardware-libhardware/include/hardware/{hardware,gralloc,gralloc1,fb}.h ${dest}/hardware
+cp -av platform-hardware-libhardware/include_all/hardware/{hardware,gralloc,gralloc1,fb}.h ${dest}/hardware
 cp -av platform-frameworks-native/vulkan/include/hardware/hwvulkan.h ${dest}/hardware
 
 mkdir ${dest}/cutils
