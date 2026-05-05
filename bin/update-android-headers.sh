@@ -31,14 +31,13 @@ rm -rf ${dest}
 mkdir ${dest}
 
 
-# These directories contains mostly only the files we need, so copy wholesale
+# These directories contains only the files we need, so copy wholesale
 
 cp -av                                                                  \
     platform-frameworks-native/libs/nativewindow/include/vndk           \
     platform-frameworks-native/libs/nativebase/include/nativebase       \
     platform-system-core/libsync/include/ndk                            \
     platform-system-core/libsync/include/sync                           \
-    platform-system-core/libsystem/include/system                       \
     platform-system-unwinding/libbacktrace/include/backtrace            \
     ${dest}
 
@@ -52,14 +51,16 @@ cp -av platform-frameworks-native/vulkan/include/hardware/hwvulkan.h ${dest}/har
 mkdir ${dest}/cutils
 cp -av platform-system-core/libcutils/include/cutils/native_handle.h ${dest}/cutils
 
+mkdir ${dest}/system
+cp -av platform-system-core/libsystem/include/system/{graphics*,window.h} ${dest}/system
 
 # include/android has files from a few different projects
 
 mkdir ${dest}/android
 cp -av                                                                  \
-    platform-frameworks-native/libs/nativewindow/include/android/*      \
-    platform-frameworks-native/libs/arect/include/android/*             \
-    platform-system-core/libsync/include/android/*                      \
+    platform-frameworks-native/libs/nativewindow/include/android/{data_space,hardware_buffer,native_window}.h \
+    platform-frameworks-native/libs/arect/include/android/rect.h        \
+    platform-system-core/libsync/include/android/sync.h                 \
     platform-system-logging/liblog/include/android/log.h                \
     ${dest}/android
 
