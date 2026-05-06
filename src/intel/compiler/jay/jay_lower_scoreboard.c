@@ -33,11 +33,9 @@ def_to_gpr(jay_function *func, jay_inst *I, jay_def x)
 }
 
 static inline void
-sync_sbid(jay_function *func, jay_inst *I, uint32_t *busy, unsigned sbid)
+jay_SYNC_nop(jay_builder *b, struct tgl_swsb dep)
 {
-   jay_builder b = jay_init_builder(func, jay_before_inst(I));
-   jay_SYNC(&b, TGL_SYNC_NOP)->dep = tgl_swsb_sbid(TGL_SBID_DST, sbid);
-   *busy &= ~BITFIELD_BIT(sbid);
+   jay_SYNC(b, TGL_SYNC_NOP)->dep = dep;
 }
 
 static void
@@ -52,13 +50,16 @@ lower_send_local(jay_function *func, jay_block *block)
    unsigned roundrobin = 0;
 
    jay_foreach_inst_in_block_safe(block, I) {
+      jay_builder b = jay_init_builder(func, jay_before_inst(I));
+
       /* Read-after-write */
       jay_foreach_src(I, s) {
          struct gpr_range src = def_to_gpr(func, I, I->src[s]);
 
          u_foreach_bit(sbid, busy) {
             if (BITSET_TEST_COUNT(tokens[sbid].writing, src.base, src.width)) {
-               sync_sbid(func, I, &busy, sbid);
+               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
+               busy &= ~BITFIELD_BIT(sbid);
             }
          }
       }
@@ -70,7 +71,8 @@ lower_send_local(jay_function *func, jay_block *block)
          u_foreach_bit(sbid, busy) {
             if (BITSET_TEST_COUNT(tokens[sbid].reading, dst.base, dst.width) ||
                 BITSET_TEST_COUNT(tokens[sbid].writing, dst.base, dst.width)) {
-               sync_sbid(func, I, &busy, sbid);
+               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
+               busy &= ~BITFIELD_BIT(sbid);
             }
          }
       }
@@ -100,7 +102,7 @@ lower_send_local(jay_function *func, jay_block *block)
       jay_builder b = jay_init_builder(func, jay_before_jump(block));
 
       u_foreach_bit(sbid, busy) {
-         jay_SYNC(&b, TGL_SYNC_NOP)->dep = tgl_swsb_sbid(TGL_SBID_DST, sbid);
+         jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
       }
    }
 }
@@ -376,7 +378,7 @@ lower_trivial(jay_function *func)
          I->dep = tgl_swsb_dst_dep(tgl_swsb_sbid(TGL_SBID_SET, 0), 1);
 
          jay_builder b = jay_init_builder(func, jay_after_inst(I));
-         jay_SYNC(&b, TGL_SYNC_NOP)->dep = tgl_swsb_sbid(TGL_SBID_DST, 0);
+         jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, 0));
       } else {
          I->dep = tgl_swsb_regdist(1);
       }
