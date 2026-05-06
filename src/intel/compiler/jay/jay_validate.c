@@ -250,6 +250,8 @@ validate_inst(struct validate_state *validate, jay_inst *I)
 
    if (I->op == JAY_OPCODE_SEL) {
       CHECK(jay_is_flag(I->src[2]) && "SEL src[2] (selector) must be a flag");
+   } else if (I->op == JAY_OPCODE_SYNC) {
+      CHECK(validate->post_ra && "SYNC does not exist while scheduling");
    }
 }
 

@@ -80,6 +80,16 @@ lower_send_local(jay_function *func, jay_block *block)
          }
       }
 
+      /* Lower ordering barriers */
+      if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
+         if (busy) {
+            jay_SYNC(&b, TGL_SYNC_ALLWR);
+            busy = 0;
+         }
+
+         jay_remove_instruction(I);
+      }
+
       if (I->op == JAY_OPCODE_SEND && !jay_send_eot(I)) {
          unsigned sbid = (roundrobin++) % NUM_TOKENS;
          jay_set_send_sbid(I, sbid);
@@ -96,6 +106,12 @@ lower_send_local(jay_function *func, jay_block *block)
          jay_foreach_src(I, s) {
             struct gpr_range src = def_to_gpr(func, I, I->src[s]);
             BITSET_SET_COUNT(tokens[sbid].reading, src.base, src.width);
+         }
+
+         /* Barriers are non-EOT gateway messages. Insert the needed SYNC */
+         if (jay_send_sfid(I) == BRW_SFID_MESSAGE_GATEWAY) {
+            b.cursor = jay_after_inst(I);
+            jay_SYNC(&b, TGL_SYNC_BAR);
          }
       }
    }

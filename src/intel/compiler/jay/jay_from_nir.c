@@ -681,8 +681,6 @@ jay_emit_memory_barrier(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
 {
    nir_variable_mode modes = nir_intrinsic_memory_modes(intr);
 
-   jay_SYNC(&nj->bld, TGL_SYNC_ALLWR);
-
    if (modes & nir_var_image) {
       emit_lsc_fence(nj, intr, BRW_SFID_TGM);
       assert(!nj->nir->info.use_lowered_image_to_global && "fix common code");
@@ -703,10 +701,8 @@ jay_emit_memory_barrier(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
 }
 
 static void
-jay_emit_signal_barrier(struct nir_to_jay_state *nj)
+jay_emit_signal_barrier(jay_builder *b, struct nir_to_jay_state *nj)
 {
-   jay_builder *b = &nj->bld;
-
    /* Signal barrier / Active threads only (BSpec 72052).
     *
     * Source 0 is the number of subgroups in [31:24], which comes from the u0.2
@@ -729,8 +725,6 @@ jay_emit_signal_barrier(struct nir_to_jay_state *nj)
    jay_SEND(b, .sfid = BRW_SFID_MESSAGE_GATEWAY,
             .msg_desc = BRW_MESSAGE_GATEWAY_SFID_BARRIER_MSG, .srcs = &zipped,
             .nr_srcs = 1, .type = JAY_TYPE_U32, .uniform = true);
-
-   jay_SYNC(b, TGL_SYNC_BAR);
 }
 
 static void
@@ -1194,24 +1188,22 @@ jay_emit_intrinsic(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
       break;
    }
 
-   case nir_intrinsic_barrier:
+   case nir_intrinsic_barrier: {
+      jay_SCHEDULE_BARRIER(b);
+
       if (nir_intrinsic_memory_scope(intr) != SCOPE_NONE) {
          jay_emit_memory_barrier(nj, intr);
       }
 
-      if (cs) {
-         if (nir_intrinsic_execution_scope(intr) == SCOPE_WORKGROUP) {
-            if (jay_workgroup_is_one_subgroup(b, nj->nir)) {
-               // XXX: when we have a scheduler, jay_SCHEDULE_BARRIER(b);
-            } else {
-               jay_emit_signal_barrier(nj);
-               s->prog_data->cs.uses_barrier = true;
-            }
-         }
-      } else {
-         // XXX: when we have a scheduler, jay_SCHEDULE_BARRIER(b);
+      if ((cs && nir_intrinsic_execution_scope(intr) == SCOPE_WORKGROUP) &&
+          !jay_workgroup_is_one_subgroup(b, nj->nir)) {
+
+         jay_emit_signal_barrier(b, nj);
+         s->prog_data->cs.uses_barrier = true;
       }
+
       break;
+   }
 
    case nir_intrinsic_begin_invocation_interlock:
    case nir_intrinsic_end_invocation_interlock:
