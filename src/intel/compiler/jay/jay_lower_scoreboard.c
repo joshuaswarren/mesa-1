@@ -5,6 +5,7 @@
 
 #include <limits.h>
 #include "compiler/brw/brw_eu_defines.h"
+#include "util/bitscan.h"
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/u_math.h"
@@ -33,9 +34,14 @@ def_to_gpr(jay_function *func, jay_inst *I, jay_def x)
 }
 
 static inline void
-jay_SYNC_nop(jay_builder *b, struct tgl_swsb dep)
+sync_sbids(jay_builder *b, uint32_t mask, enum tgl_sbid_mode mode)
 {
-   jay_SYNC(b, TGL_SYNC_NOP)->dep = dep;
+   if (util_is_power_of_two_nonzero(mask)) {
+      jay_SYNC(b, jay_null(), TGL_SYNC_NOP)->dep =
+         tgl_swsb_sbid(mode, util_logbase2(mask));
+   } else if (mask) {
+      jay_SYNC(b, mask, mode == TGL_SBID_DST ? TGL_SYNC_ALLWR : TGL_SYNC_ALLRD);
+   }
 }
 
 static void
@@ -51,6 +57,7 @@ lower_send_local(jay_function *func, jay_block *block)
 
    jay_foreach_inst_in_block_safe(block, I) {
       jay_builder b = jay_init_builder(func, jay_before_inst(I));
+      uint32_t sbid_dst = 0, sbid_src = 0;
 
       /* Read-after-write */
       jay_foreach_src(I, s) {
@@ -58,7 +65,7 @@ lower_send_local(jay_function *func, jay_block *block)
 
          u_foreach_bit(sbid, busy) {
             if (BITSET_TEST_COUNT(tokens[sbid].writing, src.base, src.width)) {
-               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
+               sbid_dst |= BITFIELD_BIT(sbid);
                busy &= ~BITFIELD_BIT(sbid);
             }
          }
@@ -70,35 +77,28 @@ lower_send_local(jay_function *func, jay_block *block)
 
          u_foreach_bit(sbid, busy) {
             if (BITSET_TEST_COUNT(tokens[sbid].writing, dst.base, dst.width)) {
-               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
-               busy &= ~BITFIELD_BIT(sbid);
+               sbid_dst |= BITFIELD_BIT(sbid);
             } else if (BITSET_TEST_COUNT(tokens[sbid].reading, dst.base,
                                          dst.width)) {
-               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_SRC, sbid));
+               sbid_src |= BITFIELD_BIT(sbid);
                BITSET_ZERO(tokens[sbid].reading);
             }
          }
-      }
-
-      /* Lower ordering barriers */
-      if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
-         if (busy) {
-            jay_SYNC(&b, TGL_SYNC_ALLWR);
-            busy = 0;
-         }
-
-         jay_remove_instruction(I);
       }
 
       if (I->op == JAY_OPCODE_SEND && !jay_send_eot(I)) {
          unsigned sbid = (roundrobin++) % NUM_TOKENS;
          jay_set_send_sbid(I, sbid);
 
-         if (!(busy & BITSET_BIT(sbid))) {
-            busy |= BITSET_BIT(sbid);
+         if (!(busy & BITFIELD_BIT(sbid))) {
+            busy |= BITFIELD_BIT(sbid);
             BITSET_ZERO(tokens[sbid].writing);
             BITSET_ZERO(tokens[sbid].reading);
          }
+
+         /* SBID.set implies SBID.dst (which implies SBID.src), so elide */
+         sbid_dst &= ~BITFIELD_BIT(sbid);
+         sbid_src &= ~BITFIELD_BIT(sbid);
 
          struct gpr_range dst = def_to_gpr(func, I, I->dst);
          BITSET_SET_COUNT(tokens[sbid].writing, dst.base, dst.width);
@@ -111,18 +111,29 @@ lower_send_local(jay_function *func, jay_block *block)
          /* Barriers are non-EOT gateway messages. Insert the needed SYNC */
          if (jay_send_sfid(I) == BRW_SFID_MESSAGE_GATEWAY) {
             b.cursor = jay_after_inst(I);
-            jay_SYNC(&b, TGL_SYNC_BAR);
+            jay_SYNC(&b, jay_null(), TGL_SYNC_BAR);
          }
+      } else if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
+         sbid_dst |= busy;
+      }
+
+      b.cursor = jay_before_inst(I);
+      assert(((sbid_dst & sbid_src) == 0) && "by construction");
+
+      busy &= ~sbid_dst;
+      sync_sbids(&b, sbid_dst, TGL_SBID_DST);
+      sync_sbids(&b, sbid_src, TGL_SBID_SRC);
+
+      if (I->op == JAY_OPCODE_SCHEDULE_BARRIER) {
+         /* Lowered above into a sync, but removed late to keep the cursor */
+         jay_remove_instruction(I);
       }
    }
 
    /* Sync on block boundaries. */
    if (block != jay_last_block(func)) {
       jay_builder b = jay_init_builder(func, jay_before_jump(block));
-
-      u_foreach_bit(sbid, busy) {
-         jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
-      }
+      sync_sbids(&b, busy, TGL_SBID_DST);
    }
 }
 
@@ -397,7 +408,7 @@ lower_trivial(jay_function *func)
          I->dep = tgl_swsb_dst_dep(tgl_swsb_sbid(TGL_SBID_SET, 0), 1);
 
          jay_builder b = jay_init_builder(func, jay_after_inst(I));
-         jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, 0));
+         sync_sbids(&b, BITFIELD_BIT(0), TGL_SBID_DST);
       } else {
          I->dep = tgl_swsb_regdist(1);
       }

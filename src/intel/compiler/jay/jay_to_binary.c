@@ -413,6 +413,10 @@ emit(struct brw_codegen *p,
 
    case JAY_OPCODE_SYNC:
       brw_SYNC(p, jay_sync_op(I));
+
+      if (!jay_is_null(I->src[0])) {
+         brw_set_src0(p, brw_eu_last_inst(p), stride(SRC(0), 0, 1, 0));
+      }
       break;
 
    case JAY_OPCODE_CMP:
