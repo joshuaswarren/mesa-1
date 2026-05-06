@@ -122,7 +122,6 @@ if ! printf "%s" "$VK_RUNTIME_VERSION" | grep -Fq -- "${MESA_BUILD_VERSION}"; th
 fi
 
 get_surfaceflinger_pid() {
-  while [ "$($ADB shell dumpsys -l | grep 'SurfaceFlinger$')" = "" ] ; do sleep 1; done
   $ADB shell ps -A | grep -i surfaceflinger | tr -s ' ' | cut -d ' ' -f 2
 }
 
