@@ -2033,7 +2033,7 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf,
    if (dcd1_dirty) {
       struct mali_dcd_flags_1_packed dcd1;
       pan_pack(&dcd1, DCD_FLAGS_1, cfg) {
-         cfg.sample_mask = msaa ? dyns->ms.sample_mask : UINT16_MAX;
+         cfg.sample_mask = dyns->ms.sample_mask;
          cfg.render_target_mask = rt_written;
       }
 

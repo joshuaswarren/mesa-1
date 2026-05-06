@@ -331,8 +331,7 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
       }
 
       cfg.multisample_misc.multisample_enable = msaa;
-      cfg.multisample_misc.sample_mask =
-         msaa ? dyns->ms.sample_mask : UINT16_MAX;
+      cfg.multisample_misc.sample_mask = dyns->ms.sample_mask;
 
       cfg.multisample_misc.depth_function =
          test_z ? translate_compare_func(ds->depth.compare_op)
