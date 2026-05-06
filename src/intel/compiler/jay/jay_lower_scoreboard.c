@@ -69,10 +69,13 @@ lower_send_local(jay_function *func, jay_block *block)
          struct gpr_range dst = def_to_gpr(func, I, I->dst);
 
          u_foreach_bit(sbid, busy) {
-            if (BITSET_TEST_COUNT(tokens[sbid].reading, dst.base, dst.width) ||
-                BITSET_TEST_COUNT(tokens[sbid].writing, dst.base, dst.width)) {
+            if (BITSET_TEST_COUNT(tokens[sbid].writing, dst.base, dst.width)) {
                jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_DST, sbid));
                busy &= ~BITFIELD_BIT(sbid);
+            } else if (BITSET_TEST_COUNT(tokens[sbid].reading, dst.base,
+                                         dst.width)) {
+               jay_SYNC_nop(&b, tgl_swsb_sbid(TGL_SBID_SRC, sbid));
+               BITSET_ZERO(tokens[sbid].reading);
             }
          }
       }
