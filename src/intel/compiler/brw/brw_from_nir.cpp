@@ -2175,19 +2175,40 @@ emit_pixel_interpolater_alu_at_offset(const brw_builder &bld,
          if (interpolation != INTERP_MODE_NOPERSPECTIVE) {
             jbld.MAD(acc, horiz_offset(rhw_c0, acc_width * j),
                      horiz_offset(rhw_cx, acc_width * j), offset(delta_x, jbld, j));
-            jbld.MAC(offset(rhw, jbld, j),
-                     horiz_offset(rhw_cy, acc_width * j), offset(delta_y, jbld, j));
+            if (devinfo->ver < 35) {
+               jbld.MAC(offset(rhw, jbld, j),
+                        horiz_offset(rhw_cy, acc_width * j),
+                        offset(delta_y, jbld, j));
+            } else {
+               jbld.MAD(offset(rhw, jbld, j),
+                        acc, horiz_offset(rhw_cy, acc_width * j),
+                        offset(delta_y, jbld, j));
+            }
          }
 
          jbld.MAD(acc, horiz_offset(bary1_c0, acc_width * j),
                   horiz_offset(bary1_cx, acc_width * j), offset(delta_x, jbld, j));
-         jbld.MAC(offset(bary1, jbld, j),
-                  horiz_offset(bary1_cy, acc_width * j), offset(delta_y, jbld, j));
+         if (devinfo->ver < 35) {
+            jbld.MAC(offset(bary1, jbld, j),
+                     horiz_offset(bary1_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         } else {
+            jbld.MAD(offset(bary1, jbld, j),
+                     acc, horiz_offset(bary1_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         }
 
          jbld.MAD(acc, horiz_offset(bary2_c0, acc_width * j),
                   horiz_offset(bary2_cx, acc_width * j), offset(delta_x, jbld, j));
-         jbld.MAC(offset(bary2, jbld, j),
-                  horiz_offset(bary2_cy, acc_width * j), offset(delta_y, jbld, j));
+         if (devinfo->ver < 35) {
+            jbld.MAC(offset(bary2, jbld, j),
+                     horiz_offset(bary2_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         } else {
+            jbld.MAD(offset(bary2, jbld, j),
+                     acc, horiz_offset(bary2_cy, acc_width * j),
+                     offset(delta_y, jbld, j));
+         }
       }
 
       /* Scale the results dividing by the interpolated RHW coordinate
