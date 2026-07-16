@@ -403,7 +403,11 @@ brw_shader::assign_curb_setup()
 
             /* Prepare section of mask, at 1/4 size */
             brw_builder ubld_mask = ubld.group(simd_width_mask, 0);
-            brw_reg offset_reg = ubld_mask.vgrf(BRW_TYPE_UW);
+            /* For the CMP below, on Xe3P the byte stride of dst (mask_reg)
+             * and src1 (offset_reg) must match.
+             */
+            brw_reg offset_reg =
+               ubld_mask.vgrf(devinfo->ver < 35 ? BRW_TYPE_UW : BRW_TYPE_UD);
             unsigned mask_start = grf, mask_end = grf + mask_length;
             ubld_mask.ADD(offset_reg, offset_base, brw_imm_uw((mask_start - grf_start) * 2));
             /* Compare the 16B increments with the value coming from push
