@@ -327,10 +327,17 @@ public:
       switch (opcode) {
       case BRW_OPCODE_BFE:
       case BRW_OPCODE_BFI2:
-      case BRW_OPCODE_MAD:
       case BRW_OPCODE_LRP:
          for (unsigned i = 0; i < 3; i++)
             inst->src[i] = fix_3src_operand(inst->src[i]);
+         break;
+
+      case BRW_OPCODE_MAD:
+         for (unsigned i = 0; i < 3; i++) {
+            if (shader->devinfo->ver >= 35 && inst->src[i].is_accumulator())
+               continue;
+            inst->src[i] = fix_3src_operand(inst->src[i]);
+         }
          break;
 
       default:
