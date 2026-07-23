@@ -1765,7 +1765,7 @@ static const struct {
    { "mul (8) acc0<2>:d r1<8;4,2>:d r2<8;4,2>:d",
      "Architecture registers cannot be used for 64-bit and integer DW-multiply operations on Gfx9 LP.", { .is_9lp = true }
    },
-   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", VALID, { .lt = 350 } },
+   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", VALID },
    { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d {AccWrEn}", VALID, { .lt = 200, .is_not_9lp = true } },
    { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d {AccWrEn}",
      "Architecture registers cannot be used for 64-bit and integer DW-multiply operations on Gfx9 LP.", { .is_9lp = true }
@@ -2138,7 +2138,6 @@ static const struct {
    { "mad (8) r0:f r1:f r2:bf r3:f",      SAME_ERROR, { .ge = 350 } },
    { "add (8) r0<2>:bf r1:f r2.16:bf",    SAME_ERROR, { .ge = 350 } },
    { "mul (8) r0 -r1 r2:uw",              SAME_ERROR, { .ge = 350 } },
-   { "mul (8) null<2>:d r1<8;4,2>:d r2<8;4,2>:d", SAME_ERROR, { .ge = 350 } },
    { "add (8) r0:d r2:d r4:w",            SAME_ERROR, { .ge = 350 } },
    { "add (8) r0<2>:w r2:d r4:w",         SAME_ERROR, { .ge = 350 } },
    { "add (8) r0.1:w r2:w r4.2<2>:w",     SAME_ERROR, { .ge = 350 } },

@@ -263,9 +263,6 @@ gen_element_offset(const struct intel_device_info *devinfo,
 static inline unsigned
 gen_byte_stride(gen_operand op)
 {
-   if (op.file == GEN_ARF && op.nr == GEN_ARF_NULL)
-      return 4; /* brw_null_reg() uses type F with <8;8,1> */
-
    if (op.file == GEN_IMM)
       return 0;
 
