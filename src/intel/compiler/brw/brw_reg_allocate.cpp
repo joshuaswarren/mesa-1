@@ -857,7 +857,8 @@ brw_reg_alloc::build_lane_offsets(const brw_builder &bld, uint32_t spill_offset,
                                brw_imm_uv(0x76543210));
    _mesa_set_add(spill_insts, inst);
 
-   if (spill_offset > 0 && spill_offset <= 0xffffu && !*out_use_base_offset) {
+   if (spill_offset > 0 && spill_offset <= 0xffffu && !*out_use_base_offset &&
+       devinfo->ver < 35) {
       inst = ubld.group(8, 0).MAD(offset,
                                   brw_imm_uw(spill_offset),
                                   offset_uw,
