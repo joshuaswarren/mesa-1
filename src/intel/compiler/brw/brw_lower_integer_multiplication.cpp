@@ -448,8 +448,7 @@ brw_lower_integer_multiplication(brw_shader &s)
          } else if (!inst->dst.is_accumulator() &&
                     (inst->dst.type == BRW_TYPE_D ||
                      inst->dst.type == BRW_TYPE_UD) &&
-                    (!devinfo->has_integer_dword_mul ||
-                     devinfo->verx10 >= 125)) {
+                    !devinfo->has_integer_dword_mul) {
             brw_lower_mul_dword_inst(s, inst);
             inst->remove();
             progress = true;
