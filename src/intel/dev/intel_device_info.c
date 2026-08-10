@@ -1266,7 +1266,8 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
 #define XE3P_FEATURES                                           \
    XE3_FEATURES,                                                \
    .ver = 35,                                                   \
-   .verx10 = 350
+   .verx10 = 350,                                               \
+   .has_integer_dword_mul = true
 
 #define XE3P_CONFIG(platform_suffix)                            \
    XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
