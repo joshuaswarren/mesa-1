@@ -397,6 +397,49 @@ TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, UpdateLightmapNativeIntegerAndMaskForms)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+
+   agx_index r13 = agx_register(26, AGX_SIZE_32);
+   r13.cache = true;
+   agx_ffs_to(b, r13, r13);
+
+   agx_index r10 = agx_register(20, AGX_SIZE_32);
+   agx_index r3 = agx_register(6, AGX_SIZE_32);
+   r10.cache = r3.cache = true;
+   agx_bitop_to(b, agx_register(20, AGX_SIZE_32), r10, r3, 0x2);
+
+   agx_index half = agx_register(6, AGX_SIZE_16);
+   agx_index half_dest = agx_register(6, AGX_SIZE_16);
+   half_dest.cache = true;
+   agx_fcmpsel_to(b, half_dest, agx_immediate(176),
+                  agx_register(30, AGX_SIZE_32), half, agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+                                 AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
+   append(want, bytes, len);
+   const uint16_t bit_src[] = {20, 6};
+   const enum agx3_alu_hint bit_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE};
+   ASSERT_TRUE(agx3_alu_bit_andc(AGX_ISA_ENCODING_AGX3B, 20, bit_src,
+                                  bit_hints, false, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_fcmp_minifloat_select_half(
+      AGX_ISA_ENCODING_AGX3B, 6, 30, 176, 6, 0,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX_FCOND_GT, true, 0,
+      bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
@@ -1484,12 +1527,12 @@ TEST_F(AGX3PackBinary, FloatModifierRouting)
 
 TEST_F(AGX3PackBinary, RefusesUnmappedOp)
 {
-   /* A texture sample has no grounded AGX3 mapping yet; the backend must fail
-    * the shader, not emit a plausible-but-wrong stream. */
+   /* BITREV remains unmapped; the backend must fail the shader rather than
+    * treating it like the now-grounded tied-register FT1 operation. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index w0 = agx_register(0, AGX_SIZE_32);
-   agx_index w2 = agx_register(2, AGX_SIZE_32);
-   agx_iadd_to(b, w0, w0, w2, 3); /* shift != 0 -> out of grounded domain */
+   agx_instr *I = agx_ffs_to(b, w0, w0);
+   I->op = AGX_OPCODE_BITREV;
    agx_stop(b);
    pack(b, /*expect_ok=*/false);
 }

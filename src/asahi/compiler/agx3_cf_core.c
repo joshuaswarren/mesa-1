@@ -166,6 +166,44 @@ agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
 }
 
 bool
+agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                     bool or_nan, unsigned slot, const uint16_t src_in[2],
+                     const bool neg_in[2],
+                     const struct agx3_cf_source_hints hints_in[2],
+                     uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src_in || !neg_in || !hints_in ||
+       !out || !len || !slot_ok(slot) || or_nan ||
+       (cond != AGX3_CF_FCOND_LT && cond != AGX3_CF_FCOND_GT) ||
+       (neg_in[0] == neg_in[1]) || src_in[0] >= 128 || src_in[1] >= 128 ||
+       (src_in[0] & 1) || (src_in[1] & 1) ||
+       (hints_in[0].cache && hints_in[0].discard) ||
+       (hints_in[1].cache && hints_in[1].discard))
+      return false;
+
+   uint16_t src[2] = {src_in[0], src_in[1]};
+   struct agx3_cf_source_hints hints[2] = {hints_in[0], hints_in[1]};
+   if (neg_in[0]) {
+      const uint16_t tmp = src[0];
+      src[0] = src[1];
+      src[1] = tmp;
+      const struct agx3_cf_source_hints hint = hints[0];
+      hints[0] = hints[1];
+      hints[1] = hint;
+      cond = cond == AGX3_CF_FCOND_LT ? AGX3_CF_FCOND_GT
+                                      : AGX3_CF_FCOND_LT;
+   }
+
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(26, 2), KV(27, 2), KV(38, 1)};
+   const struct agx3_field_kv ov[] = {
+      KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
+      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(32, 1), KV(35, slot), KV(46, cond)};
+   return agx3_bind_compose(enc, "fcmp", 0, base, 5, ov, 9, out, len);
+}
+
+bool
 agx3_cf_cndst(enum agx_isa_encoding enc, unsigned slot, bool invert,
               unsigned push_count, uint8_t out[AGX3_CF_MAX_LENGTH],
               uint8_t *len)

@@ -13,6 +13,116 @@
 #include <assert.h>
 
 static void
+test_native_ft1(void)
+{
+   static const struct {
+      uint16_t reg, wait;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint8_t bytes[8];
+   } witnesses[] = {
+      {2, 1, AGX3_ALU_HINT_NONE, false,
+       {0xa7, 0x05, 0x56, 0x02, 0x02, 0x00, 0x4c, 0x04}},
+      {0, 0, AGX3_ALU_HINT_CACHE, true,
+       {0xa7, 0x05, 0x54, 0x00, 0x03, 0x00, 0x5c, 0x04}},
+      {6, 1, AGX3_ALU_HINT_DISCARD, true,
+       {0xa7, 0x05, 0x56, 0x06, 0x03, 0x00, 0x4e, 0x04}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, witnesses[i].reg,
+                              witnesses[i].hint, witnesses[i].dest_cache,
+                              witnesses[i].wait, bytes, &len));
+      assert(len == 8 && !memcmp(bytes, witnesses[i].bytes, len));
+   }
+
+   /* This exact post-RA shape is the vkQuake update_lightmap use. */
+   assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+                           AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
+   assert(len == 8 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0xa7, 0x05, 0x54, 0x1a,
+                              0x03, 0x00, 0x5c, 0x04},
+                  8));
+
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3C, 26,
+                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 27,
+                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+                            AGX3_ALU_HINT_CACHE, true, 64, bytes, &len));
+}
+
+static void
+test_native_bit_andc(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const uint16_t dead_src[] = {0, 2};
+   const enum agx3_alu_hint dead[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+   };
+   assert(agx3_alu_bit_andc(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead,
+                            false, 32, bytes, &len));
+   assert(len == 10 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0x0b, 0x01, 0x0e, 0x03, 0x02,
+                              0x00, 0x00, 0x80, 0x00, 0x00},
+                  10));
+
+   const uint16_t live_src[] = {2, 4};
+   const enum agx3_alu_hint live[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_bit_andc(AGX_ISA_ENCODING_AGX3B, 0, live_src, live,
+                            false, 32, bytes, &len));
+   assert(len == 10 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0x0b, 0x03, 0x16, 0x05, 0x02,
+                              0x00, 0x00, 0x80, 0x00, 0x00},
+                  10));
+
+   /* Exact vkQuake update_lightmap shape: r10 = $r10 & ~$r3. */
+   const uint16_t quake_src[] = {20, 6};
+   const enum agx3_alu_hint cached[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+   };
+   assert(agx3_alu_bit_andc(AGX_ISA_ENCODING_AGX3B, 20, quake_src, cached,
+                            false, 0, bytes, &len));
+   assert(len == 10 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0xab, 0x95, 0x06, 0x87, 0x02,
+                              0x00, 0x00, 0x00, 0x00, 0x00},
+                  10));
+   assert(!agx3_alu_bit_andc(AGX_ISA_ENCODING_AGX3C, 20, quake_src, cached,
+                             false, 0, bytes, &len));
+}
+
+static void
+test_native_minifloat_half_select(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_fcmp_minifloat_select_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 176, 10, 0,
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, 0, false, 32,
+      bytes, &len));
+   assert(len == 10 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0x02, 0x01, 0x19, 0xb1, 0x86,
+                              0x0a, 0x00, 0xc2, 0x20, 0x80},
+                  10));
+
+   /* Exact Quake form after normalizing its commutative #176,r15 compare. */
+   assert(agx3_alu_fcmp_minifloat_select_half(
+      AGX_ISA_ENCODING_AGX3B, 6, 30, 176, 6, 0,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, 2, true, 0, bytes, &len));
+   assert(len == 10 &&
+          !memcmp(bytes,
+                  (uint8_t[]){0x32, 0x1f, 0x31, 0xb1, 0x02,
+                              0x06, 0x02, 0x02, 0x20, 0x80},
+                  10));
+}
+
+static void
 check_minifloat_bits(bool multiply, unsigned dest, unsigned src, unsigned imm,
                      bool kill, unsigned wait)
 {
@@ -982,7 +1092,20 @@ static void test_native_select_reg_imm(void)
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_zeroreg,
       false,both_abs,zeroreg_imm,no_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201030327800000000400800300");
-   puts("Native absolute-comparison FSEL: five exact G17P vectors PASS");
+
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
+      false,both_abs,reg0_imm,no_hints,1,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030303040300208000800300");
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_regreg,
+      false,both_abs,reg_immediate,regreg_hints,1,false,false,32,bytes,&len));
+   exact(bytes,len,"3201070303040300800600800300");
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_zeroreg,
+      false,both_abs,zeroreg_imm,no_hints,1,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030323800300000400800300");
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
+      false,both_abs,reg0_imm,no_hints,2,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030303040200208000800300");
+   puts("Native absolute-comparison FSEL: nine exact G17P vectors PASS");
 }
 
 static void test_native_high_float_registers(void)
@@ -1021,6 +1144,9 @@ static void test_native_high_float_registers(void)
 }
 
 int main(void){
+   test_native_minifloat_half_select();
+   test_native_bit_andc();
+   test_native_ft1();
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_multiply();

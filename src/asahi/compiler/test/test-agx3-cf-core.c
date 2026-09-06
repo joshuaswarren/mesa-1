@@ -131,6 +131,32 @@ test_float_zero_compare(void)
 }
 
 static void
+test_float_negated_register_compare(void)
+{
+   const uint16_t src[] = {0, 2};
+   const bool left[] = {true, false};
+   const bool right[] = {false, true};
+   const struct agx3_cf_source_hints discard[] = {
+      {false,true},{false,true}};
+   const struct agx3_cf_source_hints cache[] = {
+      {true,false},{true,false}};
+   const uint8_t native_left[] = {0x0a,0x03,0x2a,0x81,0x02,0x28};
+   const uint8_t native_right[] = {0x0a,0x81,0x32,0x03,0x03,0x28};
+   uint8_t out[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   bool ok = agx3_cf_fcmp_reg_neg(AGX_ISA_ENCODING_AGX3B,
+      AGX3_CF_FCOND_LT, false, 0, src, left, discard, out, &len);
+   checks++;
+   if (!ok || len != sizeof(native_left) || memcmp(out,native_left,len))
+      failures++;
+   ok = agx3_cf_fcmp_reg_neg(AGX_ISA_ENCODING_AGX3B,
+      AGX3_CF_FCOND_LT, false, 0, src, right, cache, out, &len);
+   checks++;
+   if (!ok || len != sizeof(native_right) || memcmp(out,native_right,len))
+      failures++;
+}
+
+static void
 test_half_float_zero_compare(void)
 {
    const uint8_t gold[2][3][10]={
@@ -156,6 +182,7 @@ int
 main(void)
 {
    test_float_zero_compare();
+   test_float_negated_register_compare();
    test_half_float_zero_compare();
    test_half_comparisons();
    test_half_zero_lifetime();

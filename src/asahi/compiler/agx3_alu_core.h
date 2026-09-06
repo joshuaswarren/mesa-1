@@ -46,6 +46,14 @@ bool agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* G17P 32-bit a & ~b.  Apple exposes this truth-table shape as bit_andc;
+ * unlike AND it is not commutative, so the source order is preserved. */
+bool agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
+                      const uint16_t src[2],
+                      const enum agx3_alu_hint hints[2], bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
 bool agx3_alu_shift_add16(enum agx_isa_encoding enc, uint16_t dest,
                             const uint16_t src[2],
                             const enum agx3_alu_hint hints[2], unsigned shift,
@@ -85,6 +93,15 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
                              uint8_t if_false, bool dest_16, bool dest_cache,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* G17P f32-register == minifloat comparison selecting a half register or
+ * immediate.  This is the exact vectorized native form used for half masks. */
+bool agx3_alu_fcmp_minifloat_select_half(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
+   uint8_t minifloat, uint16_t if_true, uint8_t if_false,
+   enum agx3_alu_hint compare_hint, enum agx3_alu_hint true_hint,
+   unsigned condition, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Plain f32 register FADD/FMUL/FMA with actual post-RA source hints and
  * scheduler waits. Compact witnessed forms only; unsupported wait combinations
@@ -136,6 +153,16 @@ bool agx3_alu_add_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 bool agx3_alu_u16_to_f32(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t src, enum agx3_alu_hint hint, uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* G17P's tied-register find-top-one operation.  This is the native operation
+ * selected for llvm.agx2.ft1 and is the direct hardware implementation of
+ * Mesa's ufind_msb/FFS instruction.  The zero input result is -1, matching
+ * NIR.  Only the witnessed f32-width register form and its native
+ * cache/discard and six dependency-wait axes are admitted. */
+bool agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t reg,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len);
 
 /* Native G17P f32 GPR + 8-bit minifloat, normal rounding, no modifiers.
  * The six-byte form carries no wait, one of six waits, or slots1+2 together.
@@ -201,7 +228,7 @@ bool agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t sourc
                         uint8_t *length);
 
 /* G17P register/immediate FSEL. Absolute compare modifiers are grounded for
- * f32 equality with register-register comparators and f32 selected values. */
+ * f32 eq/lt/gt with register-register comparators and f32 selected values. */
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4], bool compare_zero,
                                   const bool compare_abs[2],

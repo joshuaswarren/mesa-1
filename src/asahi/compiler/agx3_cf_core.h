@@ -90,6 +90,13 @@ bool agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                       bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
+/* G17P register comparison with exactly one negated f32 source. */
+bool agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc,
+                          enum agx3_cf_fcond cond, bool or_nan, unsigned slot,
+                          const uint16_t src[2], const bool neg[2],
+                          const struct agx3_cf_source_hints hints[2],
+                          uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
 /* Float comparison against literal zero, retaining the actual source lifetime. */
 bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         bool or_nan, unsigned slot, uint16_t source, bool source_16,
