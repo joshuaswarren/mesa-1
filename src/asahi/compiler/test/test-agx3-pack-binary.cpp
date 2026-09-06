@@ -538,6 +538,40 @@ TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
    }
 }
 
+TEST_F(AGX3PackBinary, DeviceAtomicUsesNativeMaskedExecutionMode)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->cursor.block->divergent = true;
+   agx_atomic_to(b, agx_register(6, AGX_SIZE_32),
+                 agx_register(6, AGX_SIZE_32),
+                 agx_uniform(0, AGX_SIZE_64), agx_immediate(0),
+                 AGX_ATOMIC_OPC_ADD);
+   agx_stop(b);
+
+   struct agx3_device_atomic_desc atomic = {
+      .op = AGX3_ATOMIC_ADD,
+      .value = 6,
+      .exec_masked = true,
+      .returns_value = true,
+      .result = 6,
+      .slot = 1,
+      .base_kind = AGX3_ATOMIC_BASE_UNIFORM,
+      .index_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
+   };
+   uint8_t bytes[AGX3_ATOMIC_MAX_LENGTH], atomic_len;
+   ASSERT_TRUE(agx3_atomic_encode_device(AGX_ISA_ENCODING_AGX3B, &atomic,
+                                         bytes, &atomic_len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+
+   std::vector<uint8_t> want;
+   append(want, bytes, atomic_len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+   ASSERT_GE(want.size(), 2u);
+   EXPECT_EQ(want[1], 0x11);
+}
+
 TEST_F(AGX3PackBinary, DeviceAtomicFoldsElementOffsetToBytes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

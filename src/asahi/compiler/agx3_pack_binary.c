@@ -1755,7 +1755,8 @@ agx3_map_atomic_op(enum agx_atomic_opc in, enum agx3_atomic_op *out)
  * only an RA-coalesced value/result pair is accepted on that encoding. */
 static bool
 agx3_translate_device_atomic(const agx_instr *I,
-                             enum agx_isa_encoding enc, uint8_t slot,
+                             enum agx_isa_encoding enc, bool exec_masked,
+                             uint8_t slot,
                              uint16_t wait_mask,
                              struct agx3_device_atomic_desc *d)
 {
@@ -1763,6 +1764,8 @@ agx3_translate_device_atomic(const agx_instr *I,
    if (I->op != AGX_OPCODE_ATOMIC || I->nr_dests != 1 || I->nr_srcs != 3 ||
        !agx3_map_atomic_op(I->atomic_opc, &d->op))
       return false;
+
+   d->exec_masked = exec_masked;
 
    const unsigned value_channels =
       d->op == AGX3_ATOMIC_CMPXCHG ? 2 : 1;
@@ -4174,7 +4177,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_device_atomic_desc d;
             uint8_t bytes[AGX3_ATOMIC_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_device_atomic(I, enc, slot, wait, &d) ||
+            if (!agx3_translate_device_atomic(I, enc, block->divergent,
+                                              slot, wait, &d) ||
                 !agx3_atomic_encode_device(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);

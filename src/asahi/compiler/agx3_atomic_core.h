@@ -54,6 +54,7 @@ struct agx3_device_atomic_desc {
    enum agx3_atomic_op op;
    uint16_t value; /* GPR half index */
    bool value_kill;
+   bool exec_masked; /* instruction is inside partial/elected execution */
 
    bool returns_value;
    uint16_t result; /* GPR half index; equals value on AGX3b */

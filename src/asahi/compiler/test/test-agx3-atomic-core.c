@@ -27,7 +27,16 @@ check_device(enum agx_isa_encoding enc, struct agx3_device_atomic_desc d,
    uint8_t len = 0;
    CHECK(agx3_atomic_encode_device(enc, &d, bytes, &len));
    CHECK(len == expected_len);
-   CHECK(memcmp(bytes, expected, len) == 0);
+   if (memcmp(bytes, expected, len) != 0) {
+      fprintf(stderr, "actual:   ");
+      for (unsigned i = 0; i < len; ++i)
+         fprintf(stderr, "%02x", bytes[i]);
+      fprintf(stderr, "\nexpected: ");
+      for (unsigned i = 0; i < len; ++i)
+         fprintf(stderr, "%02x", expected[i]);
+      fprintf(stderr, "\n");
+      CHECK(false);
+   }
    return 0;
 }
 static int
@@ -65,6 +74,44 @@ main(void)
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, base, b_add, sizeof(b_add)) == 0);
    CHECK(check_device(AGX_ISA_ENCODING_AGX3C, base, c_add, sizeof(c_add)) == 0);
 
+   /* Native atomicvoid differs from the standalone add only in the
+    * elected/partial-execution mode bit at byte +1. */
+   struct agx3_device_atomic_desc elected_void = base;
+   elected_void.exec_masked = true;
+   static const uint8_t b_elected_void[] =
+      {0x67,0x11,0x54,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x20,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, elected_void, b_elected_void,
+                      sizeof(b_elected_void)) == 0);
+
+   /* Native atomicuse changes only byte +9 from the return-unused shader;
+    * the low bits select the returned operation's scheduler slot. */
+   struct agx3_device_atomic_desc elected_used = elected_void;
+   elected_used.returns_value = true;
+   elected_used.result = elected_used.value;
+   elected_used.slot = 2;
+   static const uint8_t b_elected_used[] =
+      {0x67,0x11,0x54,0x00,0x00,0x00,0x00,0x00,0x00,0x44,0x00,0x00,0x20,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, elected_used, b_elected_used,
+                      sizeof(b_elected_used)) == 0);
+
+   /* Native da_store/da_xchg_r are the standalone counterpart: identical
+    * 14-byte instructions except byte +9, with no elected-mode bit. */
+   struct agx3_device_atomic_desc xchg_void = base;
+   xchg_void.op = AGX3_ATOMIC_XCHG;
+   static const uint8_t b_xchg_void[] =
+      {0x67,0x01,0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x3c,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, xchg_void, b_xchg_void,
+                      sizeof(b_xchg_void)) == 0);
+   struct agx3_device_atomic_desc xchg_used = xchg_void;
+   xchg_used.value_kill = false;
+   xchg_used.returns_value = true;
+   xchg_used.result = xchg_used.value;
+   xchg_used.slot = 1;
+   static const uint8_t b_xchg_used[] =
+      {0x67,0x01,0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x3c,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, xchg_used, b_xchg_used,
+                      sizeof(b_xchg_used)) == 0);
+
    struct agx3_device_atomic_desc x = base;
    x.op = AGX3_ATOMIC_XOR;
    static const uint8_t b_xor[] =
@@ -79,11 +126,10 @@ main(void)
    ret.result = 6;
    ret.returns_value = true;
    ret.slot = 1;
-   ret.wait_mask = 1;
+   ret.exec_masked = true;
    static const uint8_t b_ret[] =
       {0x67,0x11,0x54,0x00,0x00,0x80,0x01,0x00,0x00,0x42,0x00,0x00,0x20,0x00};
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, ret, b_ret, sizeof(b_ret)) == 0);
-
    /* Fresh Apple G17P register-base fetch-add.  The single field16 value is
     * both the update input and old-value result; index4 remains independent.
     * The source pointer is retained for a second atomic and the update waits
@@ -107,6 +153,7 @@ main(void)
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, g17p_reg_return,
                       b_g17p_reg_return, sizeof(b_g17p_reg_return)) == 0);
 
+   ret.exec_masked = false;
    ret.result = 4;
    ret.wait_mask = 0;
    static const uint8_t c_ret[] =
