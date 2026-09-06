@@ -102,6 +102,32 @@ agx_vdm_hal200_direct_draw_unpack(
 }
 
 bool
+agx_vdm_hal200_draw_emit(enum agx_chip chip, const void *packed,
+                         size_t packed_size, bool render_state_emitted,
+                         void *stream, size_t stream_capacity,
+                         size_t *emitted_size)
+{
+   if (emitted_size)
+      *emitted_size = 0;
+
+   if (chip != AGX_CHIP_G17P || !packed || !stream || !emitted_size ||
+       (packed_size != AGX_VDM_HAL200_DIRECT_DRAW_LENGTH &&
+        packed_size != AGX_VDM_HAL200_INDEXED_DRAW_LENGTH))
+      return false;
+
+   const size_t skip = render_state_emitted
+                          ? 0
+                          : AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH;
+   const size_t size = packed_size - skip;
+   if (stream_capacity < size)
+      return false;
+
+   memcpy(stream, (const uint8_t *)packed + skip, size);
+   *emitted_size = size;
+   return true;
+}
+
+bool
 agx_vdm_hal200_index_range(uint64_t address, uint64_t range_B,
                            uint32_t first_index, uint32_t count,
                            uint8_t index_size_B, uint64_t *relocated,

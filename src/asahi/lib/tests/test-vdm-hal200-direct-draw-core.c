@@ -31,6 +31,13 @@ check_indexed(void)
    assert(packed.length == sizeof(native));
    assert(memcmp(packed.bytes, native, sizeof(native)) == 0);
 
+   uint8_t body[AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH];
+   size_t emitted;
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  false, body, sizeof(body), &emitted));
+   assert(emitted == sizeof(body));
+   assert(!memcmp(body, &native[1], sizeof(body)));
+
    /* firstIndex is in uint16 elements and reduces the remaining byte range.
     * Relocating an equivalent bound buffer must preserve the complete packet. */
    f.index_buffer -= 6;
@@ -171,25 +178,39 @@ main(void)
       AGX_CHIP_G17P, packed.bytes, packed.length, &unpacked));
    assert(memcmp(&unpacked, &fields, sizeof(fields)) == 0);
 
-   /* The original single-draw fixture is unchanged after the caller appends
-    * its separate END. Consecutive draw bodies must not manufacture ENDs.
+   /* The first draw follows newly emitted render state and therefore carries
+    * its four-byte PPP selector.  Native drawPrimitives emits exactly the
+    * following 16-byte body.  With unchanged state, a consecutive draw is
+    * another body directly; inserting a bare selector makes VDM interpret
+    * the 0x61c4 header as part of an address (the hardware fault witness).
     */
    static const uint32_t end = 0xc0000000;
-   uint8_t stream[44];
-   memcpy(stream, packed.bytes, packed.length);
+   uint8_t stream[40];
+   size_t emitted;
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  true, stream, sizeof(stream), &emitted));
+   assert(emitted == AGX_VDM_HAL200_DIRECT_DRAW_LENGTH);
    memcpy(stream + packed.length, &end, sizeof(end));
    static const uint32_t old_single[] = {
       0x00048000, 0x61c40600, 3, 1, 0, 0xc0000000,
    };
    assert(!memcmp(stream, old_single, sizeof(old_single)));
-   memcpy(stream + packed.length, packed.bytes, packed.length);
-   memcpy(stream + 2 * packed.length, &end, sizeof(end));
-   for (unsigned i = 0; i < 2; ++i) {
-      assert(agx_vdm_hal200_direct_draw_unpack(
-         AGX_CHIP_G17P, stream + i * packed.length, packed.length, &unpacked));
-      assert(unpacked.vertex_count == 3);
-   }
-   assert(!memcmp(stream + 40, &end, sizeof(end)));
+   assert(agx_vdm_hal200_draw_emit(
+      AGX_CHIP_G17P, packed.bytes, packed.length, false,
+      stream + packed.length, sizeof(stream) - packed.length, &emitted));
+   assert(emitted == AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH);
+   memcpy(stream + packed.length + AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH,
+          &end, sizeof(end));
+   static const uint32_t native_two_draw[] = {
+      0x00048000, 0x61c40600, 3, 1, 0,
+      0x61c40600, 3, 1, 0, 0xc0000000,
+   };
+   assert(!memcmp(stream, native_two_draw, sizeof(native_two_draw)));
+   emitted = 0xdeadbeef;
+   assert(!agx_vdm_hal200_draw_emit(
+      AGX_CHIP_G17P, packed.bytes, packed.length, false, stream,
+      AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH - 1, &emitted));
+   assert(emitted == 0);
 
    /* A payload may equal the terminal opcode. Finalization must not inspect
     * vertex_start and mistake it for an already emitted stream terminator.

@@ -15,7 +15,11 @@
 extern "C" {
 #endif
 
-#define AGX_VDM_HAL200_DIRECT_DRAW_LENGTH 20u
+#define AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH 4u
+#define AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH 16u
+#define AGX_VDM_HAL200_DIRECT_DRAW_LENGTH \
+   (AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH + \
+    AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH)
 #define AGX_VDM_HAL200_DIRECT_DRAW_OPCODE UINT32_C(0x61c4)
 
 struct agx_vdm_hal200_direct_draw_fields {
@@ -43,11 +47,22 @@ bool agx_vdm_hal200_direct_draw_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
    struct agx_vdm_hal200_direct_draw_fields *fields);
 
+/* Metal emits the leading PPP selector as part of render-state publication.
+ * When state is unchanged, only the native draw body is legal in the stream.
+ * Copy the correct slice of an already validated packed draw atomically. */
+bool agx_vdm_hal200_draw_emit(enum agx_chip chip, const void *packed,
+                             size_t packed_size, bool render_state_emitted,
+                             void *stream, size_t stream_capacity,
+                             size_t *emitted_size);
+
 /* Finish the preceding PPP pointer, publish native restart state, then the
  * 28-byte direct indexed record. Primitive, native index width, restart and
  * instance count remain ordinary hardware fields. Base instance is supplied
  * through the vertex uniform ABI, independently of this record. */
-#define AGX_VDM_HAL200_INDEXED_DRAW_LENGTH 40u
+#define AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH 36u
+#define AGX_VDM_HAL200_INDEXED_DRAW_LENGTH \
+   (AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH + \
+    AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH)
 
 struct agx_vdm_hal200_indexed_draw_fields {
    uint8_t primitive;
