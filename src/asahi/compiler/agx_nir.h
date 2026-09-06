@@ -76,6 +76,17 @@ struct agx_g17p_sampled_storage_binding {
    uint8_t pbe_set;
 };
 
+/* Indexed texture/sampler heaps occupy native slots 0/0; a formatted storage
+ * destination shares that ABI by occupying PBE state 1. */
+struct agx_g17p_indexed_storage_binding {
+   uint32_t pbe_offset_B;
+   uint8_t pbe_set;
+};
+
+bool agx_nir_lower_g17p_indexed_storage(
+   struct nir_shader *s,
+   struct agx_g17p_indexed_storage_binding *binding);
+
 /* Turn one statically indexed set-0 Gen9 combined image/sampler used by the
  * initial G17P graphics or compute path into texture-state 0 / sampler-state
  * 0. The caller must place the corresponding native states in those CProg

@@ -330,6 +330,28 @@ hk_agx3_g17p_sampled_storage_pointers(
 }
 
 bool
+hk_agx3_g17p_indexed_storage_pointers(
+   const struct hk_agx3_g17p_indexed_storage_heap *heap,
+   uint64_t pointers[4])
+{
+   if (!heap || !pointers || !heap->texture_heap_va ||
+       !heap->sampler_heap_va || !heap->pbe_descriptor_set_va ||
+       (heap->pbe_offset_B & 7) != 0 ||
+       heap->pbe_descriptor_set_va > UINT64_MAX - heap->pbe_offset_B ||
+       heap->pbe_descriptor_set_va + heap->pbe_offset_B > UINT64_MAX - 31)
+      return false;
+
+   const uint64_t staged[4] = {
+      heap->texture_heap_va,
+      heap->sampler_heap_va,
+      heap->pbe_descriptor_set_va + heap->pbe_offset_B,
+      UINT64_C(0xffff),
+   };
+   memcpy(pointers, staged, sizeof(staged));
+   return true;
+}
+
+bool
 hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
                         uint64_t root_va,
                         struct agx3_ioto_uniform_range *range)

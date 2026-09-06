@@ -4730,3 +4730,27 @@ TEST_F(AGX3PackBinary, SampledRgba8WriteUsesNativeStateOneProtocol)
    EXPECT_TRUE(b->shader->agx3_staging_known);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
 }
+
+TEST_F(AGX3PackBinary, ComputedRgb10WriteUsesNativeStateOneProtocol)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_index data = agx_register(16, AGX_SIZE_32);
+   data.channels_m1 = 3;
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_instr *write = agx_image_write(
+      b, data, coord, agx_immediate(0), agx_immediate(0), agx_immediate(1),
+      AGX_DIM_2D, false);
+   write->format = AGX_FORMAT_RGB10A2;
+   agx_stop(b);
+
+   const std::vector<uint8_t> code = pack(b);
+   static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x01,
+      0x00, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x09, 0x00,
+   };
+   EXPECT_NE(std::search(code.begin(), code.end(), imgwci,
+                         imgwci + sizeof(imgwci)),
+             code.end());
+}

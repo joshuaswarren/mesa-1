@@ -1309,6 +1309,26 @@ test_g17p_combined_sampler_pointers(void)
    invalid.pbe_descriptor_set_va = UINT64_MAX - 64;
    CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
    CHECK(memcmp(four, four_before, sizeof(four)) == 0);
+
+   const struct hk_agx3_g17p_indexed_storage_heap indexed_storage = {
+      .texture_heap_va = UINT64_C(0x9000000000),
+      .sampler_heap_va = UINT64_C(0x9100000000),
+      .pbe_descriptor_set_va = UINT64_C(0x9200000000),
+      .pbe_offset_B = 176,
+   };
+   CHECK(hk_agx3_g17p_indexed_storage_pointers(&indexed_storage, four));
+   CHECK(four[0] == indexed_storage.texture_heap_va);
+   CHECK(four[1] == indexed_storage.sampler_heap_va);
+   CHECK(four[2] == UINT64_C(0x92000000b0));
+   CHECK(four[3] == UINT64_C(0xffff));
+
+   const uint64_t indexed_before[4] = {
+      four[0], four[1], four[2], four[3],
+   };
+   struct hk_agx3_g17p_indexed_storage_heap bad_indexed = indexed_storage;
+   bad_indexed.pbe_offset_B++;
+   CHECK(!hk_agx3_g17p_indexed_storage_pointers(&bad_indexed, four));
+   CHECK(memcmp(four, indexed_before, sizeof(four)) == 0);
    return 0;
 }
 

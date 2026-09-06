@@ -114,6 +114,17 @@ bool hk_agx3_g17p_sampled_storage_pointers(
    const struct hk_agx3_g17p_sampled_storage_heap *heap,
    uint64_t pointers[4]);
 
+struct hk_agx3_g17p_indexed_storage_heap {
+   uint64_t texture_heap_va;
+   uint64_t sampler_heap_va;
+   uint64_t pbe_descriptor_set_va;
+   uint32_t pbe_offset_B;
+};
+
+bool hk_agx3_g17p_indexed_storage_pointers(
+   const struct hk_agx3_g17p_indexed_storage_heap *heap,
+   uint64_t pointers[4]);
+
 /* Load one root descriptor followed by every descriptor-set pointer named by
  * the shader's pipeline layout. */
 bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,

@@ -1221,9 +1221,17 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                candidate = nir_shader_clone(NULL, nir);
                if (candidate &&
                    agx_nir_lower_g17p_indexed_samplers(candidate)) {
+                  struct agx_g17p_indexed_storage_binding indexed_storage;
+                  const bool has_indexed_storage =
+                     agx_nir_lower_g17p_indexed_storage(candidate,
+                                                        &indexed_storage);
                   ralloc_free(nir);
                   nir = candidate;
                   shader->info.agx3_indexed_sampler_valid = true;
+                  shader->info.agx3_indexed_storage_valid =
+                     has_indexed_storage;
+                  if (has_indexed_storage)
+                     shader->info.agx3_indexed_storage = indexed_storage;
                } else {
                   ralloc_free(candidate);
                   candidate = nir_shader_clone(NULL, nir);
@@ -1328,7 +1336,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    }
 
    unsigned root = (shader->info.agx3_storage_image_valid ||
-                    shader->info.agx3_sampled_storage_valid)
+                    shader->info.agx3_sampled_storage_valid ||
+                    shader->info.agx3_indexed_storage_valid)
                       ? AGX_G17P_STORAGE_ROOT_HALFS
                    : (shader->info.agx3_txf_texture_valid ||
                       shader->info.agx3_indexed_sampler_valid)

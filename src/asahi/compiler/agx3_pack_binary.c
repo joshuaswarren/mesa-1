@@ -868,11 +868,11 @@ agx3_emit_image_coord(struct util_dynarray *emission,
           len == sizeof(bytes) && agx3_append(emission, bytes, len);
 }
 
-/* Two bounded public storage-image forms: noncoherent 2D RGBA8UI state0 fed
- * by one image load, and rgba8 UNORM state1 fed by one explicit-LOD sample.
- * The four slot2 COPYs route the packed vec4 into the exact imgwci data lanes.
- * The first COPY consumes the one-shot texture dependency; native imgwci then
- * waits for staging slot2.
+/* Two bounded public storage-image state classes: noncoherent 2D RGBA8UI
+ * state0, and normalized formatted-float state1. The latter is format-generic:
+ * the PBE descriptor selects RGBA8 versus RGB10A2 packing. The four slot2
+ * COPYs route the packed vec4 into the exact imgwci data lanes; the first COPY
+ * consumes any producer dependency, and native imgwci waits for staging slot2.
  * Validation happens before the first append, so a refusal leaves the output
  * transaction untouched. */
 static bool
@@ -880,9 +880,11 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                               enum agx_isa_encoding enc, const agx_instr *I,
                               uint16_t wait_mask)
 {
+   const bool normalized = I->format == AGX_FORMAT_U8NORM ||
+                           I->format == AGX_FORMAT_RGB10A2;
    if (enc != AGX_ISA_ENCODING_AGX3B || I->nr_dests != 0 ||
        I->nr_srcs != 5 ||
-       I->dim != AGX_DIM_2D || I->coherent || wait_mask != 1 ||
+       I->dim != AGX_DIM_2D || I->coherent ||
        !agx3_tex_plain_reg(I->src[0]) || I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != 4 || (I->src[0].value & 1) ||
        I->src[0].value > 248 || !agx3_tex_plain_reg(I->src[1]) ||
@@ -891,7 +893,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        !agx3_tex_imm(I->src[2], 0) || !agx3_tex_imm(I->src[3], 0) ||
        I->src[4].type != AGX_INDEX_IMMEDIATE ||
        !((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
-         (I->src[4].value == 1 && I->format == AGX_FORMAT_U8NORM))) {
+         (I->src[4].value == 1 && normalized))) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
@@ -926,8 +928,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
 
    uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
    if (!agx3_tex_encode_image_write_rgba8_2d(
-          enc, wait_mask, I->src[4].value,
-          I->format == AGX_FORMAT_U8NORM, imgwci, &imgwci_len) ||
+          enc, 1, I->src[4].value, normalized, imgwci, &imgwci_len) ||
        !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)

@@ -177,12 +177,14 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
            ((s->info.agx3_txf_texture_valid ||
              s->info.agx3_storage_image_valid ||
              s->info.agx3_sampled_storage_valid ||
+             s->info.agx3_indexed_storage_valid ||
              s->info.agx3_indexed_sampler_valid) &&
             s->b.info.sampler_state_count == 1)) &&
           !s->b.info.uses_sampler_heap &&
           (!linked->b.uses_txf || s->info.agx3_txf_texture_valid ||
            s->info.agx3_storage_image_valid ||
            s->info.agx3_sampled_storage_valid ||
+           s->info.agx3_indexed_storage_valid ||
            s->info.agx3_indexed_sampler_valid) &&
           s->info.set_count <= HK_AGX3_G17P_MAX_ROOT_SETS;
 }
@@ -196,6 +198,7 @@ hk_g17p_compute_uniform_ranges(
        (!!texture_pointers != (s->info.agx3_txf_texture_valid ||
                                s->info.agx3_storage_image_valid ||
                                s->info.agx3_sampled_storage_valid ||
+                               s->info.agx3_indexed_storage_valid ||
                                s->info.agx3_indexed_sampler_valid)))
       return false;
 
@@ -228,7 +231,8 @@ hk_g17p_compute_uniform_ranges(
    }
 
    const unsigned root_uniform = (s->info.agx3_storage_image_valid ||
-                                  s->info.agx3_sampled_storage_valid)
+                                  s->info.agx3_sampled_storage_valid ||
+                                  s->info.agx3_indexed_storage_valid)
                                     ? AGX_G17P_STORAGE_ROOT_HALFS
                                  : texture_pointers
                                     ? AGX_G17P_TXF_ROOT_HALFS
@@ -316,6 +320,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint64_t texture_pointers = 0;
    if (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid ||
        s->info.agx3_sampled_storage_valid ||
+       s->info.agx3_indexed_storage_valid ||
        s->info.agx3_indexed_sampler_valid) {
       const struct hk_descriptor_state *descriptors = &cmd->state.cs.descriptors;
 
@@ -326,11 +331,44 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             return;
          }
-         const uint64_t pointers[2] = {
+         uint64_t pointers[4] = {
             dev->sampled_images.bo->va->addr,
             dev->samplers.table.bo->va->addr,
          };
-         texture_pointers = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+         unsigned pointer_count = 2;
+         if (s->info.agx3_indexed_storage_valid) {
+            const struct agx_g17p_indexed_storage_binding *binding =
+               &s->info.agx3_indexed_storage;
+            if (binding->pbe_set >= HK_MAX_SETS) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+            const uint64_t set_address =
+               descriptors->root.sets[binding->pbe_set];
+            const uint32_t set_size =
+               descriptors->set_sizes[binding->pbe_set];
+            if (!set_address || binding->pbe_offset_B > set_size ||
+                set_size - binding->pbe_offset_B < 32) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+            const struct hk_agx3_g17p_indexed_storage_heap heap = {
+               .texture_heap_va = pointers[0],
+               .sampler_heap_va = pointers[1],
+               .pbe_descriptor_set_va = set_address,
+               .pbe_offset_B = binding->pbe_offset_B,
+            };
+            if (!hk_agx3_g17p_indexed_storage_pointers(&heap, pointers)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+            pointer_count = 4;
+         }
+         texture_pointers = hk_pool_upload(
+            cmd, pointers, pointer_count * sizeof(pointers[0]), 8);
          if (!texture_pointers)
             return;
       } else if (s->info.agx3_sampled_storage_valid) {

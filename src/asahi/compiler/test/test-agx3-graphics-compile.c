@@ -1613,6 +1613,89 @@ test_indexed_compute_sample(void)
 }
 
 static bool
+test_indexed_compute_storage(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "AGX3 indexed compute sample and formatted store");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *gid = nir_load_global_invocation_id(&b, 32);
+   nir_def *element = nir_channel(&b, gid, 0);
+   nir_def *offset = nir_imul_imm(&b, element, 72);
+   nir_def *set = nir_load_descriptor_set_agx(&b, 4);
+   nir_def *entry = nir_iadd(&b, set, nir_u2u64(&b, offset));
+   nir_def *sampler_index = nir_load_global_constant(
+      &b, 1, 16, nir_iadd_imm(&b, entry, 40), .align_mul = 2);
+   nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 4);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_iadd_imm(&b, offset, 32), sampler_index, .desc_set = 4);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 4);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_vec2(&b, nir_u2f32(&b, element), nir_imm_float(&b, 0.5f)));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   tex->src[3] =
+      nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(&b, 0.0f));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *coord = nir_vec4(&b, element, zero, zero, zero);
+   nir_def *pbe = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 176), .desc_set = 0);
+   nir_def *data = nir_fadd_imm(&b, &tex->def, 0.25f);
+   nir_bindless_image_store(
+      &b, pbe, coord, zero, data, zero, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .image_array = false, .format = PIPE_FORMAT_R10G10B10A2_UNORM,
+      .access = ACCESS_RESTRICT);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   struct agx_g17p_indexed_storage_binding binding = {
+      .pbe_offset_B = UINT32_MAX,
+      .pbe_set = UINT8_MAX,
+   };
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader) &&
+             agx_nir_lower_g17p_indexed_storage(b.shader, &binding) &&
+             binding.pbe_set == 0 && binding.pbe_offset_B == 176;
+
+   unsigned bindless_stores = 0, ordinary_stores = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         const nir_intrinsic_op op =
+            nir_instr_as_intrinsic(instr)->intrinsic;
+         bindless_stores += op == nir_intrinsic_bindless_image_store;
+         ordinary_stores += op == nir_intrinsic_image_store;
+      }
+   }
+   ok &= bindless_stores == 0 && ordinary_stores == 1;
+
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   key.reserved_preamble = 80;
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
 test_g17p_eot_block_store(void)
 {
    /* Genuine applegpu-nt builtin EOT, key0x10020300, RTmask1. Native fragment
@@ -2234,6 +2317,12 @@ main(int argc, char **argv)
              ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--indexed-storage-only")) {
+      const bool ok = test_indexed_compute_storage();
+      printf("indexed compute samples plus RGB10 storage: %s\n",
+             ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--sampler-root-only")) {
       const bool ok = test_combined_sampler_root() && test_combined_sampler_scope();
       fprintf(stderr, "native sampler plus push-root lowering: %s\n", ok ? "PASS" : "FAIL");
@@ -2294,6 +2383,11 @@ main(int argc, char **argv)
 
    if (!test_indexed_compute_sample()) {
       fputs("indexed compute sampler lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_indexed_compute_storage()) {
+      fputs("indexed compute storage lowering mismatch\n", stderr);
       all_ok = false;
    }
 

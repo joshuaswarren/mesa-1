@@ -1605,6 +1605,11 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
       case PIPE_FORMAT_R8G8B8A8_UNORM:
          write->format = AGX_FORMAT_U8NORM;
          break;
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+         /* Formatted float writes share the native normalized imgwci path;
+          * the PBE descriptor supplies the packed destination format. */
+         write->format = AGX_FORMAT_RGB10A2;
+         break;
       default:
          /* The AGX3 packer remains fail-closed for unqualified formats. */
          write->format = AGX_NUM_FORMATS;

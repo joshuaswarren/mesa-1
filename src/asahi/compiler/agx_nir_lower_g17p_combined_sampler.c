@@ -644,6 +644,76 @@ g17p_storage_handle_offset(const nir_intrinsic_instr *intr,
    return g17p_storage_handle_binding(intr, &set, offset_B) && set == 0;
 }
 
+bool
+agx_nir_lower_g17p_indexed_storage(
+   nir_shader *shader, struct agx_g17p_indexed_storage_binding *binding)
+{
+   if (!shader || !binding || shader->info.stage != MESA_SHADER_COMPUTE)
+      return false;
+
+   nir_intrinsic_instr *store = NULL;
+   uint8_t pbe_set = 0;
+   uint32_t pbe_offset_B = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
+               const enum pipe_format format = nir_intrinsic_format(intr);
+               if (store ||
+                   nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
+                   nir_intrinsic_image_array(intr) ||
+                   (format != PIPE_FORMAT_R8G8B8A8_UNORM &&
+                    format != PIPE_FORMAT_R10G10B10A2_UNORM) ||
+                   nir_src_num_components(intr->src[1]) != 4 ||
+                   nir_src_bit_size(intr->src[1]) != 32 ||
+                   nir_src_num_components(intr->src[3]) != 4 ||
+                   nir_src_bit_size(intr->src[3]) != 32 ||
+                   !nir_src_is_const(intr->src[2]) ||
+                   nir_src_as_uint(intr->src[2]) != 0 ||
+                   !nir_src_is_const(intr->src[4]) ||
+                   nir_src_as_uint(intr->src[4]) != 0 ||
+                   (nir_intrinsic_access(intr) &
+                    (ACCESS_COHERENT | ACCESS_VOLATILE)) ||
+                   !g17p_storage_handle_binding(intr, &pbe_set,
+                                                 &pbe_offset_B) ||
+                   (pbe_offset_B & 7) != 0)
+                  return false;
+               store = intr;
+            } else if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                       intr->intrinsic ==
+                          nir_intrinsic_bindless_image_sparse_load ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_atomic ||
+                       intr->intrinsic ==
+                          nir_intrinsic_bindless_image_atomic_swap ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_size ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_samples) {
+               return false;
+            }
+         }
+      }
+   }
+
+   if (!store)
+      return false;
+
+   nir_builder b = nir_builder_at(nir_before_instr(&store->instr));
+   nir_src_rewrite(&store->src[0], nir_imm_intN_t(&b, 1, 16));
+   store->intrinsic = nir_intrinsic_image_store;
+   nir_progress(true, nir_shader_get_entrypoint(shader),
+                nir_metadata_control_flow);
+   NIR_PASS(_, shader, nir_opt_dce);
+
+   *binding = (struct agx_g17p_indexed_storage_binding){
+      .pbe_offset_B = pbe_offset_B,
+      .pbe_set = pbe_set,
+   };
+   return true;
+}
+
 static bool
 g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
 {
