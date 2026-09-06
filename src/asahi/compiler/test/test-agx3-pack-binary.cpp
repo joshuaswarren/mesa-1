@@ -367,6 +367,36 @@ TEST_F(AGX3PackBinary, WboitInfinityRepairUsesMixedWidthFsel)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(34, AGX_SIZE_32);
+   agx_index c = agx_register(20, AGX_SIZE_32);
+   agx_index selected = agx_register(24, AGX_SIZE_32);
+   agx_index dest = agx_register(26, AGX_SIZE_32);
+   a.abs = c.abs = true;
+   a.cache = c.cache = selected.cache = dest.cache = true;
+   agx_fcmpsel_to(b, dest, a, c, selected, agx_immediate(0), AGX_FCOND_EQ);
+   agx_stop(b);
+
+   const uint16_t src[] = {34, 20, 24, 0};
+   const bool compare_abs[] = {true, true};
+   const bool immediate[] = {false, true};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_alu_fcmp_select_reg_imm(
+      AGX_ISA_ENCODING_AGX3B, 26, src, false, compare_abs, immediate,
+      hints, AGX_FCOND_EQ, false, true, 0, bytes, &len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   std::vector<uint8_t> want;
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

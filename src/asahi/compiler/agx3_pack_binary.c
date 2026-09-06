@@ -4505,6 +4505,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                }
             }
             const uint16_t src[]={compare.value,0,I->src[swap?3:2].value,I->src[swap?2:3].value};
+            const bool compare_abs[]={false,false};
             const bool immediate[]={true,true};
             const enum agx3_alu_hint hints[]={agx3_post_ra_hint(compare),AGX3_ALU_HINT_NONE,
                AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
@@ -4518,7 +4519,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                fsel_wait=0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,true,immediate,hints,
+            if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,true,
+                 compare_abs,immediate,hints,
                  condition,I->dest[0].size==AGX_SIZE_16,I->dest[0].cache,fsel_wait,bytes,&len) ||
                !agx3_append(emission,bytes,len))AGX3_REFUSE(I);
             continue;
@@ -4531,7 +4533,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->nr_dests==1 && I->nr_srcs==4 &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory && agx_channels(I->dest[0])==1 &&
              (I->dest[0].size==AGX_SIZE_16 || I->dest[0].size==AGX_SIZE_32) &&
-             ((agx3_vary_reg32(I->src[0]) && agx3_vary_reg32(I->src[1])) ||
+             ((agx3_mod_src_ok(I->src[0]) && agx3_mod_src_ok(I->src[1])) ||
               (agx3_vary_reg32(I->src[0]) && agx3_src_is_zero_imm(I->src[1])) ||
               (agx3_src_is_zero_imm(I->src[0]) && agx3_vary_reg32(I->src[1]))) &&
              (agx3_src_is_register(I->src[2]) ||
@@ -4554,15 +4556,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index operands[]={I->src[zero_first?1:0],I->src[zero_first?0:1],
                                        I->src[swap?3:2],I->src[swap?2:3]};
             uint16_t src[4]; enum agx3_alu_hint hints[4]; bool immediate[2];
+            bool compare_abs[2];
             bool invalid=I->saturate;
             for(unsigned i=0;i<4;i++) {
                const agx_index x=operands[i];
                const bool imm=x.type==AGX_INDEX_IMMEDIATE;
-               invalid|=x.abs || x.neg || x.kill || x.memory || agx_channels(x)!=1 ||
+               invalid|=x.neg || (i>=2 && x.abs) || x.kill || x.memory ||
+                  agx_channels(x)!=1 ||
                   (x.cache && x.discard) ||
                   (imm ? x.value>255 : (!agx3_src_is_register(x) ||
                     x.size!=(i<2?AGX_SIZE_32:I->dest[0].size)));
                src[i]=x.value; hints[i]=imm?AGX3_ALU_HINT_NONE:agx3_post_ra_hint(x);
+               if(i<2)compare_abs[i]=x.abs;
                if(i>=2)immediate[i-2]=imm;
             }
             if(invalid)AGX3_REFUSE(I);
@@ -4572,7 +4577,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                fsel_wait=0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,compare_zero,immediate,hints,
+            if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,compare_zero,
+                 compare_abs,immediate,hints,
                  condition,I->dest[0].size==AGX_SIZE_16,I->dest[0].cache,fsel_wait,bytes,&len) ||
                !agx3_append(emission,bytes,len))AGX3_REFUSE(I);
             continue;

@@ -826,15 +826,19 @@ agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
 }
 
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
-                                  const uint16_t src[4], bool compare_zero, const bool immediate[2],
+                                  const uint16_t src[4], bool compare_zero,
+                                  const bool compare_abs[2],
+                                  const bool immediate[2],
                                   const enum agx3_alu_hint hints[4], unsigned condition,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !immediate ||
-       !hints || dest>=256 || (!dest_16 && (dest&1)) ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src ||
+       !compare_abs || !immediate || !hints || dest>=256 ||
+       (!dest_16 && (dest&1)) ||
        (condition!=0 && condition!=1 && condition!=2 && condition!=5 && condition!=6) ||
-       (wait_mask!=0 && wait_mask!=32) || (compare_zero && src[1]!=0))
+       (wait_mask!=0 && wait_mask!=32) ||
+       (compare_zero && (src[1]!=0 || compare_abs[1])))
       return false;
    for(unsigned i=0;i<4;i++) {
       const bool imm=(i==1 && compare_zero) || (i>=2 && immediate[i-2]);
@@ -842,23 +846,46 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
          (unsigned)hints[i]>AGX3_ALU_HINT_CACHE || (imm && hints[i]!=AGX3_ALU_HINT_NONE))
          return false;
    }
-   const struct agx3_field_kv base[]={
-      {10,2},{11,dest_16?1:2},{42,2},{43,2},{59,compare_zero?1:2},{60,2},
-      {76,immediate[0]?1:2},{77,dest_16?1:2},{93,immediate[1]?1:2},{94,dest_16?1:2},
-   };
-   struct agx3_field_kv fields[16]={
-      {3,dest},{12,dest_cache},{35,src[0]},{compare_zero?51:52,src[1]},
+   const bool abs_compare = compare_abs[0] || compare_abs[1];
+   const bool abs_immediate_select =
+      abs_compare && (immediate[0] || immediate[1]);
+   if (abs_compare && (compare_zero || condition != 0 || dest_16))
+      return false;
+
+   struct agx3_field_kv base[12];
+   unsigned nbase=0;
+   base[nbase++]=(struct agx3_field_kv){42,2};
+   base[nbase++]=(struct agx3_field_kv){43,2};
+   base[nbase++]=(struct agx3_field_kv){59,compare_zero?1:2};
+   base[nbase++]=(struct agx3_field_kv){60,2};
+   base[nbase++]=(struct agx3_field_kv){76,immediate[0]?1:2};
+   base[nbase++]=(struct agx3_field_kv){77,dest_16?1:2};
+   base[nbase++]=(struct agx3_field_kv){93,immediate[1]?1:2};
+   base[nbase++]=(struct agx3_field_kv){94,dest_16?1:2};
+   if (abs_immediate_select) {
+      base[nbase++]=(struct agx3_field_kv){0,1};
+      base[nbase++]=(struct agx3_field_kv){24,2};
+      base[nbase++]=(struct agx3_field_kv){25,2};
+   } else {
+      base[nbase++]=(struct agx3_field_kv){10,2};
+      base[nbase++]=(struct agx3_field_kv){11,dest_16?1:2};
+   }
+   struct agx3_field_kv fields[18]={
+      {abs_immediate_select?17:3,dest},
+      {abs_immediate_select?26:12,dest_cache},
+      {35,src[0]},{compare_zero?51:52,src[1]},
       {immediate[0]?68:69,src[2]},{immediate[1]?85:86,src[3]},
-      {110,condition},{107,wait_mask==32},
+      {110,condition},{107,wait_mask==32},{47,compare_abs[0]},
+      {64,compare_abs[1]},
    };
    const unsigned cache[]={44,61,78,95},discard[]={46,63,80,97};
-   unsigned n=8;
+   unsigned n=10;
    for(unsigned i=0;i<4;i++) if((i<2 && !(i==1 && compare_zero)) || (i>=2 && !immediate[i-2])) {
       fields[n++]=(struct agx3_field_kv){cache[i],hints[i]==AGX3_ALU_HINT_CACHE};
       fields[n++]=(struct agx3_field_kv){discard[i],hints[i]==AGX3_ALU_HINT_DISCARD};
    }
-   for(unsigned ep=0;ep<28;ep++)
-      if(agx3_bind_compose(enc,"fsel",ep,base,10,fields,n,out,len))
+   for(unsigned ep=0;ep<36;ep++)
+      if(agx3_bind_compose(enc,"fsel",ep,base,nbase,fields,n,out,len))
          return true;
    return false;
 }

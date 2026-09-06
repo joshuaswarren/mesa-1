@@ -200,8 +200,12 @@ bool agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t sourc
                         uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                         uint8_t *length);
 
+/* G17P register/immediate FSEL. Absolute compare modifiers are grounded for
+ * f32 equality with register-register comparators and f32 selected values. */
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
-                                  const uint16_t src[4], bool compare_zero, const bool immediate[2],
+                                  const uint16_t src[4], bool compare_zero,
+                                  const bool compare_abs[2],
+                                  const bool immediate[2],
                                   const enum agx3_alu_hint hints[4], unsigned condition,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);

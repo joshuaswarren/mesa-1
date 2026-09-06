@@ -896,12 +896,13 @@ static void test_native_select_reg_imm(void)
    const uint16_t src[4][4]={{0,2,10,1},{0,2,7,1},{0,2,10,1},{4,6,2,1}};
    const char *golden[]={"02011d03860a00c02081","32011d03060700c02081",
       "02011f03860a00c02081","02051f07060200c02081"};
+   const bool no_abs[]={false,false};
    const bool imm[]={false,true};
    for(unsigned i=0;i<4;i++) {
       const enum agx3_alu_hint hints[]={AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,
          (i&1)?AGX3_ALU_HINT_NONE:AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_NONE};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?6:0,src[i],false,imm,
+      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?6:0,src[i],false,no_abs,imm,
          hints,0,i<2,false,32,bytes,&len));
       exact(bytes,len,golden[i]);
    }
@@ -912,7 +913,7 @@ static void test_native_select_reg_imm(void)
       const enum agx3_alu_hint hints[]={live?AGX3_ALU_HINT_NONE:AGX3_ALU_HINT_DISCARD,
          AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,0,inputs,true,immediate,
+      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,0,inputs,true,no_abs,immediate,
          hints,2,true,false,32,bytes,&len));
       exact(bytes,len,live?"02030581228102c22080":"02010d81228102c22080");
    }
@@ -930,7 +931,7 @@ static void test_native_select_reg_imm(void)
          (i&1)?live_hint:AGX3_ALU_HINT_DISCARD};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?1:0,registers[i],
-         false,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
+         false,no_abs,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
       exact(bytes,len,reg_golden[i]);
    }
    puts("Native register-register FSEL: four exact 16/32-bit live/dead vectors PASS");
@@ -944,10 +945,44 @@ static void test_native_select_reg_imm(void)
          (i&1)?live_hint:AGX3_ALU_HINT_DISCARD};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?1:0,
-         zero_registers[i],true,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
+         zero_registers[i],true,no_abs,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
       exact(bytes,len,zero_golden[i]);
    }
    puts("Native zero-compare register FSEL: four exact 16/32-bit live/dead vectors PASS");
+
+   /* Own Metal kernels isolate fabs on each comparator and retain all three
+    * selected-operand forms used by update_lightmap. */
+   const bool both_abs[]={true,true};
+   const uint16_t abs_reg0[]={0,2,4,0};
+   const bool reg0_imm[]={false,true};
+   const enum agx3_alu_hint no_hints[]={AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
+      false,both_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030307040000208000800300");
+
+   const bool left_abs[]={true,false},right_abs[]={false,true};
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
+      false,left_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030307040000208000800100");
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
+      false,right_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030307040000208000800200");
+
+   const uint16_t abs_regreg[]={0,2,4,6};
+   const enum agx3_alu_hint regreg_hints[]={AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_DISCARD};
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_regreg,
+      false,both_abs,reg_immediate,regreg_hints,0,false,false,32,bytes,&len));
+   exact(bytes,len,"3201070307040000800600800300");
+
+   const uint16_t abs_zeroreg[]={0,2,0,4};
+   const bool zeroreg_imm[]={true,false};
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_zeroreg,
+      false,both_abs,zeroreg_imm,no_hints,0,false,false,32,bytes,&len));
+   exact(bytes,len,"3201030327800000000400800300");
+   puts("Native absolute-comparison FSEL: five exact G17P vectors PASS");
 }
 
 static void test_native_high_float_registers(void)
