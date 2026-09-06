@@ -624,6 +624,62 @@ TEST_F(AGX3PackBinary, DeviceAtomicInPlaceReturnDiscardsConsumedValue)
    EXPECT_EQ(atomics, 1u);
 }
 
+TEST_F(AGX3PackBinary, RegisterSubtractDestinationDoesNotAliasInputs)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index lhs = agx_mov_imm(b, 32, 0x77777777);
+   agx_index rhs = agx_mov_imm(b, 32, 0x11111111);
+   agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+   agx_iadd_to(b, result, lhs, agx_neg(rhs), 0);
+   agx_st_vary(b, agx_immediate(0), result);
+   agx_stop(b);
+
+   agx_ra(b->shader);
+
+   unsigned subtracts = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_srcs != 2 || !I->src[1].neg)
+         continue;
+
+      ++subtracts;
+      EXPECT_NE(I->dest[0].value, I->src[0].value);
+      EXPECT_NE(I->dest[0].value, I->src[1].value);
+   }
+   EXPECT_EQ(subtracts, 1u);
+}
+
+TEST_F(AGX3PackBinary, RegisterAndDestinationDoesNotAliasInputs)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index lhs = agx_mov_imm(b, 32, 0x77777777);
+   agx_index rhs = agx_mov_imm(b, 32, 0x55555555);
+   agx_index result = agx_and(b, lhs, rhs);
+   agx_st_vary(b, agx_immediate(0), result);
+   agx_stop(b);
+
+   agx_ra(b->shader);
+
+   unsigned ands = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_BITOP ||
+          (I->truth_table & 0xfu) != 0x8u)
+         continue;
+
+      ++ands;
+      EXPECT_NE(I->dest[0].value, I->src[0].value);
+      EXPECT_NE(I->dest[0].value, I->src[1].value);
+   }
+   EXPECT_EQ(ands, 1u);
+}
+
 TEST_F(AGX3PackBinary, DeviceAtomicFoldsElementOffsetToBytes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

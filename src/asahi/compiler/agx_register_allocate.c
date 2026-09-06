@@ -1283,7 +1283,31 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          I->op == AGX_OPCODE_BFEIL && I->nr_srcs == 3 &&
          I->src[2].type == AGX_INDEX_NORMAL && I->src[2].kill;
 
-      if (I->nr_dests == 1 && !g17p_ft1 && !g17p_srl_boundary) {
+      /* Apple's G17P register-subtract witnesses and both exact passing SWAR
+       * shaders keep the destination distinct from their inputs. The compact
+       * tied shape has not been independently qualified, so allocate the
+       * result before freeing either source for the register-register shape
+       * the packer maps to ISUB. */
+      const bool g17p_reg_isub =
+         rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 && I->shift == 0 &&
+         I->src[0].type == AGX_INDEX_NORMAL &&
+         I->src[1].type == AGX_INDEX_NORMAL && !I->src[0].abs &&
+         !I->src[0].neg && !I->src[1].abs && I->src[1].neg;
+
+      /* The same destructive restriction applies to G17P's register AND.
+       * The failing compact form reused src1 (the mask) for the destination;
+       * both the fully staged shader (distinct from both) and the keepalive
+       * discriminator (tied only to src0) are exact on hardware. */
+      const bool g17p_reg_and =
+         rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_BITOP && I->nr_srcs == 2 &&
+         (I->truth_table & 0xfu) == 0x8u &&
+         I->src[0].type == AGX_INDEX_NORMAL &&
+         I->src[1].type == AGX_INDEX_NORMAL;
+
+      if (I->nr_dests == 1 && !g17p_ft1 && !g17p_srl_boundary &&
+          !g17p_reg_isub && !g17p_reg_and) {
          unsigned first_src = 0;
          unsigned end = 0;
          unsigned start = 0;
