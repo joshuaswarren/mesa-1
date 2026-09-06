@@ -4206,6 +4206,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);
+   if (agx_optimize_g17p_imul_high_div3(ctx)) {
+      agx_validate(ctx, "agx_optimize_g17p_imul_high_div3");
+      AGX_PASS(ctx, agx_dce, true);
+   }
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);

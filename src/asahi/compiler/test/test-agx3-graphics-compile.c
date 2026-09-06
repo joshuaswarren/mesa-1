@@ -280,6 +280,29 @@ build_vs_flat(void)
    return b.shader;
 }
 
+static nir_shader *
+build_vs_g17p_div3_mul_high(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "AGX3 div3 mul-high VS");
+   nir_def *id = nir_load_vertex_id(&b);
+   nir_def *high =
+      nir_imul_high(&b, id, nir_imm_int(&b, UINT32_C(0x55555556)));
+   nir_def *pos[4] = {
+      nir_i2f32(&b, high),
+      nir_u2f32(&b, id),
+      nir_imm_float(&b, 0.0f),
+      nir_imm_float(&b, 1.0f),
+   };
+
+   for (unsigned c = 0; c < 4; ++c)
+      nir_store_uvs_agx(&b, pos[c], nir_imm_intN_t(&b, c, 16));
+
+   b.shader->info.outputs_written = VARYING_BIT_POS;
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 /* Instance ID uses its own G17P special register. Keep a complete shader case
  * so the end-to-end compiler, not only the standalone rld encoder, proves the
  * hardware-vertex lowering. */
@@ -1883,6 +1906,8 @@ struct agx3_graphics_case {
 
 static const struct agx3_graphics_case cases[] = {
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
+   {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
+    .expected_leading_sr = 0xdd, .g17p_only = true},
    {"vs-instance-id", build_vs_instance_id, true,
     .expected_leading_sr = 0xd8},
    {"vs-attribute-fetch", build_vs_attribute, true,

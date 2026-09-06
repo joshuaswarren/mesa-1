@@ -163,6 +163,11 @@ bool agx3_alu_fadd_one_absneg(enum agx_isa_encoding enc, uint16_t dest,
                              enum agx3_alu_hint hint, uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+bool agx3_alu_imul_high_div3(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src, enum agx3_alu_hint hint,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Same bounded operand/wait domain as fadd_minifloat, native f32 multiply. */
 bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src, uint16_t immediate, enum agx3_alu_hint hint,

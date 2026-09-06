@@ -5,6 +5,8 @@
 #include "agx3_alu_core.h"
 #include "agx3_binder.h"
 
+#include <string.h>
+
 bool
 agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
@@ -167,6 +169,36 @@ agx3_alu_fadd_one_absneg(enum agx_isa_encoding enc, uint16_t dest,
    }
 
    return false;
+}
+
+bool
+agx3_alu_imul_high_div3(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, enum agx3_alu_hint hint,
+                        uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || ((dest | src) & 1) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       wait_mask != 1)
+      return false;
+
+   /* Apple Metal 32023.917 lowers signed vertex_id % 3 through this native
+    * high-word multiply by 0x55555556. The magic multiplier is selected by
+    * f28/f43 rather than carried as a general register operand. Native
+    * cached and discard witnesses identify f25/f27 as the source hints. */
+   static const uint8_t native[] = {
+      0x9f, 0x10, 0x54, 0x00, 0x03, 0x08,
+      0x02, 0x00, 0xe0, 0x24, 0x16, 0x00,
+   };
+   memcpy(out, native, sizeof(native));
+   out[3] = dest;
+   out[5] = (out[5] & 1) | ((src & 0x7f) << 1);
+   out[6] = (out[6] & ~1u) | (src >> 7);
+   out[6] = (out[6] & ~2u) | (hint == AGX3_ALU_HINT_CACHE ? 2u : 0u);
+   out[9] = (out[9] & ~2u) | (hint == AGX3_ALU_HINT_DISCARD ? 2u : 0u);
+   *len = sizeof(native);
+   return true;
 }
 
 bool

@@ -159,6 +159,36 @@ TEST_F(Optimizer, G17PPreservesTiedConstantFmax)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+TEST_F(Optimizer, G17PLowersSignedMulHighDiv3)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index magic = agx_mov_imm(actual, 32, 0x55555556);
+   agx_index product = agx_temp(actual->shader, AGX_SIZE_64);
+   agx_imad_to(actual, product, wx, magic, agx_zero(), 0);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_instr *split = agx_split(actual, 2, product);
+   split->dest[0] = agx_null();
+   split->dest[1] = out;
+   agx_unit_test(actual, out);
+
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_imul_high_div3_agx3_to(expected, out, wx);
+   agx_unit_test(expected, out);
+
+   agx_dce(actual->shader, true);
+   ASSERT_TRUE(agx_optimize_g17p_imul_high_div3(actual->shader));
+   agx_dce(actual->shader, true);
+   agx_reindex_ssa(actual->shader);
+   agx_reindex_ssa(expected->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(Optimizer, FusedFABSNEG)
 {
    CASE32(agx_fadd_to(b, out, agx_fmov(b, agx_abs(wx)), wy),

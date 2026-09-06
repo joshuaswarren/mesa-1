@@ -417,6 +417,10 @@ op("persp_mul_agx3", None, srcs = 2, imms = [IMM], is_float = True)
 # Projective RCP also carries the RHW coefficient; preserve it independently.
 op("persp_rcp_agx3", None, srcs = 1, imms = [IMM], is_float = True)
 
+# Signed high word of x * 0x55555556, the native constant-divide-by-three
+# primitive used for vertex-index modulo lowering on G17P.
+op("imul_high_div3_agx3", None, srcs = 1, agx3_mnemonic = "imadd")
+
 
 # Sources are the coeffient register for the varying, the coefficient register
 # for W, and the sample index (if applicable)

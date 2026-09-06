@@ -406,6 +406,24 @@ test_modified_minifloat_add(void)
    printf("Modified minifloat add:9 native witnesses +%u physical bit checks passed\n", shapes);
 }
 
+static void
+test_imul_high_div3(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_imul_high_div3(
+      AGX_ISA_ENCODING_AGX3B, 0, 4, AGX3_ALU_HINT_CACHE, 1,
+      out, &len));
+   exact(out, len, "9f10540003080200e0241600");
+   assert(agx3_alu_imul_high_div3(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_DISCARD, 1,
+      out, &len));
+   exact(out, len, "9f10540003000000e0261600");
+   assert(!agx3_alu_imul_high_div3(
+      AGX_ISA_ENCODING_AGX3C, 0, 4, AGX3_ALU_HINT_CACHE, 1,
+      out, &len));
+   puts("Native signed mul-high-by-div3 magic: 2 exact G17P vertex witnesses PASS");
+}
+
 static void test_half_uv(void)
 {
    uint8_t out[16], size;
@@ -968,6 +986,7 @@ int main(void){
    test_integer_lifetimes();
    test_bitwise_lifetimes();
    test_modified_minifloat_add();
+   test_imul_high_div3();
    test_half_uv();
    test_fmul_minifloat();
    test_fadd_minifloat();

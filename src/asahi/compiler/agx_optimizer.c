@@ -595,6 +595,81 @@ agx_optimizer_signext(agx_instr **defs, agx_instr *I)
    }
 }
 
+/* Apple G17P has a native signed high-word multiply by the division-by-three
+ * magic constant. Collapse Mesa's generic 32x32->64 multiply plus dead-low
+ * split only when the defining graph proves that exact operation. */
+static bool
+agx_optimizer_g17p_imul_high_div3(agx_context *ctx, agx_instr **defs,
+                                  agx_instr *I)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       I->op != AGX_OPCODE_SPLIT || I->nr_srcs != 1 || I->nr_dests != 2 ||
+       I->src[0].type != AGX_INDEX_NORMAL ||
+       agx_index_size_16(I->src[0]) != 4 ||
+       !agx_is_null(I->dest[0]) ||
+       I->dest[1].type != AGX_INDEX_NORMAL ||
+       I->dest[1].size != AGX_SIZE_32 || agx_channels(I->dest[1]) != 1)
+      return false;
+
+   agx_instr *mul = defs[I->src[0].value];
+   if (!mul || mul->op != AGX_OPCODE_IMAD || mul->nr_dests != 1 ||
+       mul->nr_srcs != 3 || mul->dest[0].size != AGX_SIZE_64 ||
+       agx_channels(mul->dest[0]) != 1 ||
+       mul->shift != 0 || mul->src[2].type != AGX_INDEX_IMMEDIATE ||
+       mul->src[2].value != 0 || mul->src[2].abs || mul->src[2].neg)
+      return false;
+
+   agx_index source = agx_null();
+   for (unsigned magic = 0; magic < 2; ++magic) {
+      agx_index candidate = mul->src[magic];
+      agx_index other = mul->src[1 - magic];
+      if (candidate.type != AGX_INDEX_NORMAL || candidate.abs || candidate.neg ||
+          candidate.size != AGX_SIZE_32 || agx_channels(candidate) != 1 ||
+          other.type == AGX_INDEX_IMMEDIATE || other.type == AGX_INDEX_NULL ||
+          other.size != AGX_SIZE_32 || agx_channels(other) != 1 ||
+          other.abs || other.neg)
+         continue;
+
+      agx_instr *constant = defs[candidate.value];
+      if (constant && constant->op == AGX_OPCODE_MOV_IMM &&
+          constant->nr_dests == 1 && constant->dest[0].size == AGX_SIZE_32 &&
+          agx_channels(constant->dest[0]) == 1 &&
+          constant->imm == UINT32_C(0x55555556)) {
+         source = other;
+         break;
+      }
+   }
+
+   if (agx_is_null(source))
+      return false;
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   defs[I->dest[1].value] =
+      agx_imul_high_div3_agx3_to(&b, I->dest[1], source);
+   agx_remove_instruction(I);
+   return true;
+}
+
+bool
+agx_optimize_g17p_imul_high_div3(agx_context *ctx)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+   }
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I)
+      progress |= agx_optimizer_g17p_imul_high_div3(ctx, defs, I);
+
+   free(defs);
+   return progress;
+}
+
 void
 agx_optimizer_forward(agx_context *ctx)
 {

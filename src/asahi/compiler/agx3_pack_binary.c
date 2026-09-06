@@ -4344,6 +4344,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         if (I->op == AGX_OPCODE_IMUL_HIGH_DIV3_AGX3 && I->nr_dests == 1 &&
+             I->nr_srcs == 1 && agx3_src_is_register(I->dest[0]) &&
+             I->dest[0].size == AGX_SIZE_32 &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
+             !I->src[0].abs && !I->src[0].neg &&
+             I->src[0].size == AGX_SIZE_32 &&
+             agx_channels(I->src[0]) == 1) {
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_imul_high_div3(
+                   enc, I->dest[0].value, I->src[0].value,
+                   agx3_post_ra_hint(I->src[0]), wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Native mixed-width comparison against floating zero with full
           * float alternatives. Keep the half comparator in its assigned half
           * register; neither widening nor a separate comparison is needed. */
