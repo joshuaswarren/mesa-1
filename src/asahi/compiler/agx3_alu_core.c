@@ -134,6 +134,42 @@ agx3_alu_fadd_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_alu_fadd_one_absneg(enum agx_isa_encoding enc, uint16_t dest,
+                         uint16_t src, bool dest_cache,
+                         enum agx3_alu_hint hint, uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || ((dest | src) & 1) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3f))
+      return false;
+
+   /* Native live/discard variants are 19b12481820800000200 and
+    * 09b13401820800000200. f25 selects the minifloat input, while f47/f48
+    * retain abs+neg on the GPR and f11 retains a partially live destination.
+    */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {25, 1}, {26, 2}, {42, 2}, {43, 2},
+   };
+   struct agx3_field_kv fields[20] = {
+      {2, dest}, {35, src}, {17, 0x30}, {11, dest_cache}, {47, 1}, {48, 1},
+      {44, hint == AGX3_ALU_HINT_CACHE},
+      {46, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 8;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){52 + slot,
+                                          (wait_mask >> slot) & 1};
+
+   for (unsigned ep = 0; ep <= 3; ++ep) {
+      if (agx3_bind_compose(enc, "f32add", ep, base, 6, fields, n, out, len))
+         return true;
+   }
+
+   return false;
+}
+
+bool
 agx3_alu_float_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                      uint16_t dest, const uint16_t src[3],
                      const enum agx3_alu_hint hints[3], uint16_t wait_mask,

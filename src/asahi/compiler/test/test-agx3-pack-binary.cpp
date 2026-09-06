@@ -286,6 +286,26 @@ TEST_F(AGX3PackBinary, FaddMinifloatRefusesUngroundedModes)
    }
 }
 
+TEST_F(AGX3PackBinary, FaddOneMinusAbsMatchesNativeLiveForm)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index dest = agx_register(2, AGX_SIZE_32);
+   dest.cache = true;
+   agx_index src = agx_register(0, AGX_SIZE_32);
+   src.abs = true;
+   src.neg = true;
+   src.cache = true;
+   agx_fadd_to(b, dest, agx_immediate(0x30), src);
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x19, 0xb1, 0x24, 0x81, 0x82, 0x08, 0x00, 0x00, 0x02, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

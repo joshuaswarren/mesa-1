@@ -334,6 +334,17 @@ test_modified_minifloat_add(void)
       exact(out, len, cases[i].hex);
    }
 
+   /* Fresh Metal 32023.917 G17P fragments for 1.0f - abs(x), with x dead
+    * and then retained for another output channel. */
+   assert(agx3_alu_fadd_one_absneg(AGX_ISA_ENCODING_AGX3B, 0, 0, true,
+                                   AGX3_ALU_HINT_DISCARD, 0, out, &len));
+   exact(out, len, "09b13401820800000200");
+   assert(agx3_alu_fadd_one_absneg(AGX_ISA_ENCODING_AGX3B, 2, 0, true,
+                                   AGX3_ALU_HINT_CACHE, 0, out, &len));
+   exact(out, len, "19b12481820800000200");
+   assert(!agx3_alu_fadd_one_absneg(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
+                                    AGX3_ALU_HINT_NONE, 0, out, &len));
+
    const unsigned regs[] = {0, 2, 30, 62, 126, 128, 254};
    const unsigned immediates[] = {0, 0x20, 0x30, 0x80, 0xb0, 0xff};
    unsigned shapes = 0;
