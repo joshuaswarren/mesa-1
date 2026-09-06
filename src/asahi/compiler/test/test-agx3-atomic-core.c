@@ -111,6 +111,14 @@ main(void)
       {0x67,0x01,0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00,0x3c,0x00};
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, xchg_used, b_xchg_used,
                       sizeof(b_xchg_used)) == 0);
+   /* Byte-exact native returned xchg retains f76=0 under lane-zero control;
+    * its consumed in-place input independently sets f27. */
+   xchg_used.exec_masked = true;
+   xchg_used.value_kill = true;
+   static const uint8_t b_xchg_masked[] =
+      {0x67,0x01,0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x42,0x00,0x00,0x3c,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, xchg_used, b_xchg_masked,
+                      sizeof(b_xchg_masked)) == 0);
 
    struct agx3_device_atomic_desc x = base;
    x.op = AGX3_ATOMIC_XOR;

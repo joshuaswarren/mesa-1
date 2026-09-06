@@ -161,11 +161,15 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
          74, d->op == AGX3_ATOMIC_CMPXCHG ? 3 : 1);
    }
 
-   /* On AGX3b, f76 also selects the elected/partial-execution atomic form.
-    * Native return-used and return-unused shaders both set it inside the
-    * compiler-generated first-lane block. */
+   /* On AGX3b, f76 also selects the elected/partial-execution atomic form for
+    * arithmetic and cmpxchg.  Native returned xchg keeps its standalone form
+    * even inside the same compiler-generated first-lane block. */
    const uint16_t waits =
-      d->wait_mask | ((enc == AGX_ISA_ENCODING_AGX3B && d->exec_masked) ? 1 : 0);
+      d->wait_mask |
+      ((enc == AGX_ISA_ENCODING_AGX3B && d->exec_masked &&
+        d->op != AGX3_ATOMIC_XCHG)
+          ? 1
+          : 0);
    n = append_waits(waits, f, n);
    return compose_first(enc, "atomicdev", f, n, out, len);
 }
