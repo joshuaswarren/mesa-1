@@ -2474,10 +2474,19 @@ agx_coerce_f16_src(agx_builder *b, agx_index src)
 }
 
 static agx_index
-agx_g17p_ushr_imm(agx_builder *b, agx_index value, unsigned shift)
+agx_g17p_shift_boundary(agx_builder *b, unsigned shift)
 {
    assert(shift >= 1 && shift <= 31);
-   return agx_ushr(b, value, agx_mov_imm(b, 32, 0u - shift));
+   agx_index positive = agx_mov_imm(b, 32, shift);
+   agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
+   agx_iadd_to(b, boundary, agx_zero(), agx_neg(positive), 0);
+   return boundary;
+}
+
+static agx_index
+agx_g17p_ushr_imm(agx_builder *b, agx_index value, unsigned shift)
+{
+   return agx_ushr(b, value, agx_g17p_shift_boundary(b, shift));
 }
 
 static agx_index
@@ -2705,7 +2714,7 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
        * operation despite having the same low five bits. */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          if (s1.type == AGX_INDEX_IMMEDIATE) {
-            s1 = agx_mov_imm(b, 32, 0u - s1.value);
+            s1 = agx_g17p_shift_boundary(b, s1.value);
          } else {
             agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
             agx_iadd_to(b, boundary, i0, agx_neg(s1), 0);
