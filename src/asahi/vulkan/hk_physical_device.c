@@ -695,6 +695,7 @@ hk_get_device_features(
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->shaderResourceMinLod = false;
+      features->advancedBlendCoherentOperations = false;
       features->sparseBinding = false;
       features->sparseResidencyAliased = false;
       features->sparseResidencyImage2D = false;
@@ -1111,6 +1112,15 @@ hk_get_device_properties(const struct agx_device *dev,
       .advancedBlendAllOperations = true,
    };
 
+   if (dev->chip == AGX_CHIP_G17P) {
+      properties->advancedBlendMaxColorAttachments = 0;
+      properties->advancedBlendIndependentBlend = false;
+      properties->advancedBlendNonPremultipliedSrcColor = false;
+      properties->advancedBlendNonPremultipliedDstColor = false;
+      properties->advancedBlendCorrelatedOverlap = false;
+      properties->advancedBlendAllOperations = false;
+   }
+
    strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
 
    /* VK_EXT_shader_module_identifier */
@@ -1347,6 +1357,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    struct vk_device_extension_table supported_extensions;
    hk_get_device_extensions(instance, &supported_extensions);
+
+   /* HAL200 advanced blend epilogs currently complete without a fault but
+    * write zero instead of the blended colour.  Keep the extension private to
+    * the compiler until its fragment tile protocol is hardware-qualified. */
+   if (pdev->dev.chip == AGX_CHIP_G17P)
+      supported_extensions.EXT_blend_operation_advanced = false;
 
    struct vk_features supported_features;
    hk_get_device_features(&pdev->dev, instance, &supported_extensions,
