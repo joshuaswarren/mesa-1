@@ -176,6 +176,28 @@ main(void)
 
    free(part.binary);
    ralloc_free(b.shader);
+
+   /* Fully disabled G17P colour writes use an identity blend to materialize
+    * the existing tile value. Validate the exact load/store shape and backend
+    * widths independently of the Vulkan key construction. */
+   epilog_key.link.sample_shading = false;
+   epilog_key.blend.rt[0].mode =
+      agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO,
+                              PIPE_BLENDFACTOR_ONE, PIPE_BLEND_ADD,
+                              PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE);
+   b = nir_builder_init_simple_shader(0, &agx_nir_options,
+                                      "G17P masked colour identity epilog");
+   agx_nir_fs_epilog(&b, &epilog_key);
+   ok &= count_intrinsic(b.shader, nir_intrinsic_load_local_pixel_agx) == 1;
+   ok &= count_intrinsic(b.shader, nir_intrinsic_store_local_pixel_agx) == 1;
+   agx_preprocess_nir(b.shader);
+   memset(&part, 0, sizeof(part));
+   ok &= agx_compile_shader_nir(b.shader, &backend_key, &part) &&
+         has_lstcol(&part);
+   if (!ok)
+      fprintf(stderr, "G17P masked colour identity epilog failed\n");
+   free(part.binary);
+   ralloc_free(b.shader);
    ralloc_free(main);
    return ok ? 0 : 1;
 }

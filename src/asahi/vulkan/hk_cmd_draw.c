@@ -4043,10 +4043,20 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          bool write_enable = dyn->cb.color_write_enables & BITFIELD_BIT(i);
          unsigned write_mask = write_enable ? cb->write_mask : 0;
 
-         /* nir_lower_blend always blends, so use a default blend state when
+         /* A zero hardware mask deletes the tile store while raster coverage
+          * still makes a HAL200 tile nonempty. Materialize the unchanged tile
+          * value with the already-grounded blend load/store path instead.
+          * nir_lower_blend always blends, so use a default blend state when
           * blending is disabled at an API level.
           */
-         if (!dyn->cb.attachments[i].blend_enable) {
+         if (dev->dev.chip == AGX_CHIP_G17P && !write_enable) {
+            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
+               .colormask = BITFIELD_MASK(4),
+               .mode = agx_pack_blend_standard(
+                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE,
+                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE),
+            };
+         } else if (!dyn->cb.attachments[i].blend_enable) {
             key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
                .colormask = write_mask,
                .mode = agx_pack_blend_standard(
