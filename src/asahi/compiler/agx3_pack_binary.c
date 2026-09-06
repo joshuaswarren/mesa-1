@@ -868,11 +868,11 @@ agx3_emit_image_coord(struct util_dynarray *emission,
           len == sizeof(bytes) && agx3_append(emission, bytes, len);
 }
 
-/* One bounded public storage-image form: noncoherent 2D RGBA8UI, native
- * texture-state0/PBE-state0, one preceding image load on scoreboard slot1.
- * The four slot2 COPYs route its packed vec4 into the exact imgwci data lanes.
- * The first COPY consumes the one-shot image-load dependency; native imgwci
- * then waits for staging slot2.
+/* Two bounded public storage-image forms: noncoherent 2D RGBA8UI state0 fed
+ * by one image load, and rgba8 UNORM state1 fed by one explicit-LOD sample.
+ * The four slot2 COPYs route the packed vec4 into the exact imgwci data lanes.
+ * The first COPY consumes the one-shot texture dependency; native imgwci then
+ * waits for staging slot2.
  * Validation happens before the first append, so a refusal leaves the output
  * transaction untouched. */
 static bool
@@ -889,7 +889,9 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 2 ||
        (I->src[1].value & 1) || I->src[1].value > 252 ||
        !agx3_tex_imm(I->src[2], 0) || !agx3_tex_imm(I->src[3], 0) ||
-       !agx3_tex_imm(I->src[4], 0)) {
+       I->src[4].type != AGX_INDEX_IMMEDIATE ||
+       !((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
+         (I->src[4].value == 1 && I->format == AGX_FORMAT_U8NORM))) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
@@ -923,8 +925,9 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    }
 
    uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
-   if (!agx3_tex_encode_image_write_rgba8ui_2d(enc, wait_mask, imgwci,
-                                                &imgwci_len) ||
+   if (!agx3_tex_encode_image_write_rgba8_2d(
+          enc, wait_mask, I->src[4].value,
+          I->format == AGX_FORMAT_U8NORM, imgwci, &imgwci_len) ||
        !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)
@@ -3357,6 +3360,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned tile_stores_left = 0;
    unsigned image_loads_left = 0;
    unsigned image_writes_left = 0;
+   unsigned texture_samples_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    unsigned count = 0;
@@ -3386,6 +3390,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             image_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_WRITE)
             image_writes_left++;
+         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE)
+            texture_samples_left++;
       }
    }
 
@@ -3479,13 +3485,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17p_vertex_load_policy =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_VERTEX &&
       device_loads_left > 0;
-   /* Native read_write storage-image kernels assign their sole image read to
-    * slot 1 and imgwci waits on that slot. Select slot 1 from the exact
-    * one-load/one-write compute graph; the ordinary dependency pass still
-    * derives the write's wait bit from the load result registers. */
+   /* Native read_write and sample-to-write kernels assign their sole texture
+    * producer to slot 1 and imgwci waits on that slot. Select slot 1 from the
+    * exact one-producer/one-write compute graph; the ordinary dependency pass
+    * still derives the write's wait bit from the producer result registers. */
    const bool g17p_storage_image_protocol =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_COMPUTE &&
-      image_loads_left == 1 && image_writes_left == 1;
+      image_loads_left + texture_samples_left == 1 &&
+      image_writes_left == 1 && texture_ops_left == 1;
 
    /* Assign one scoreboard timeline over the whole linearized shader, rather
     * than restarting at each basic block.  Fallthrough blocks may consume an
@@ -3513,7 +3520,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I);
-         if (g17p_storage_image_protocol && I->op == AGX_OPCODE_IMAGE_LOAD)
+         if (g17p_storage_image_protocol &&
+             (I->op == AGX_OPCODE_IMAGE_LOAD ||
+              I->op == AGX_OPCODE_TEXTURE_SAMPLE))
             e->preferred_slot = 1;
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
              vertex_loads_scheduled++ == 0)

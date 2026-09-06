@@ -102,6 +102,18 @@ bool hk_agx3_g17p_combined_sampler_pointers(
    const struct hk_agx3_g17p_combined_sampler_heap *heap,
    uint64_t pointers[2]);
 
+struct hk_agx3_g17p_sampled_storage_heap {
+   struct hk_agx3_g17p_combined_sampler_heap sampled;
+   uint64_t pbe_descriptor_set_va;
+   uint32_t pbe_offset_B;
+};
+
+/* Resolve Apple's exact four-slot compute texture0/sample0 -> write-texture1
+ * tuple: sampled texture, sampler, destination PBE, coordinate clamp. */
+bool hk_agx3_g17p_sampled_storage_pointers(
+   const struct hk_agx3_g17p_sampled_storage_heap *heap,
+   uint64_t pointers[4]);
+
 /* Load one root descriptor followed by every descriptor-set pointer named by
  * the shader's pipeline layout. */
 bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,

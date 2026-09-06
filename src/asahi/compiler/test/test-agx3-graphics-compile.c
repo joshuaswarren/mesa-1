@@ -1349,6 +1349,112 @@ test_storage_image_lowering(void)
    return true;
 }
 
+static nir_shader *
+build_cs_sampled_storage(unsigned mode)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "AGX3 sampled texture to storage image CS");
+   b.shader->info.workgroup_size[0] = 8;
+   b.shader->info.workgroup_size[1] = 8;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *gid = nir_load_global_invocation_id(&b, 32);
+   nir_def *coord2 = nir_vec2(&b, nir_u2f32(&b, nir_channel(&b, gid, 0)),
+                              nir_u2f32(&b, nir_channel(&b, gid, 1)));
+   nir_def *texture = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 0), .desc_set = 0);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 32), nir_imm_intN_t(&b, 28, 16), .desc_set = 0);
+   nir_tex_instr *sample = nir_tex_instr_create(b.shader, 4);
+   sample->op = nir_texop_txl;
+   sample->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   sample->dest_type = nir_type_float32;
+   sample->coord_components = 2;
+   sample->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord2);
+   sample->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_handle, texture);
+   sample->src[2] =
+      nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   sample->src[3] =
+      nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(&b, 0.0f));
+   nir_def_init(&sample->instr, &sample->def, 4, 32);
+   nir_builder_instr_insert(&b, &sample->instr);
+
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *coord4 = nir_vec4(&b, nir_channel(&b, gid, 0),
+                              nir_channel(&b, gid, 1), zero, zero);
+   nir_def *pbe = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 32), .desc_set = 1);
+   nir_def *value = mode == 2
+      ? nir_fadd_imm(&b, &sample->def, 1.0f)
+      : &sample->def;
+   nir_bindless_image_store(
+      &b, pbe, coord4, zero, value, zero,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+      .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
+                          : PIPE_FORMAT_R8G8B8A8_UNORM,
+      .access = ACCESS_RESTRICT);
+   return b.shader;
+}
+
+static bool
+test_sampled_storage_lowering(void)
+{
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      nir_shader *nir = build_cs_sampled_storage(mode);
+      struct agx_g17p_sampled_storage_binding binding = {
+         .texture_offset_B = UINT32_MAX,
+         .sampler_index_offset_B = UINT32_MAX,
+         .pbe_offset_B = UINT32_MAX,
+         .texture_set = UINT8_MAX,
+         .pbe_set = UINT8_MAX,
+      };
+      const bool lowered =
+         agx_nir_lower_g17p_sampled_storage(nir, &binding);
+      unsigned bindless_handles = 0, bindless_stores = 0;
+      unsigned ordinary_stores = 0, samples = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               samples++;
+               if (lowered &&
+                   (nir_tex_instr_src_index(tex,
+                                            nir_tex_src_texture_handle) >= 0 ||
+                    nir_tex_instr_src_index(tex,
+                                            nir_tex_src_sampler_handle) >= 0))
+                  samples += 100;
+            } else if (instr->type == nir_instr_type_intrinsic) {
+               const nir_intrinsic_op op =
+                  nir_instr_as_intrinsic(instr)->intrinsic;
+               bindless_handles += op == nir_intrinsic_bindless_image_agx ||
+                                   op == nir_intrinsic_bindless_sampler_agx;
+               bindless_stores += op == nir_intrinsic_bindless_image_store;
+               ordinary_stores += op == nir_intrinsic_image_store;
+            }
+         }
+      }
+
+      const bool ok = mode == 0
+         ? lowered && binding.texture_set == 0 && binding.pbe_set == 1 &&
+              binding.texture_offset_B == 0 &&
+              binding.sampler_index_offset_B == 40 &&
+              binding.pbe_offset_B == 32 && bindless_handles == 0 &&
+              bindless_stores == 0 && ordinary_stores == 1 && samples == 1
+         : !lowered && binding.texture_offset_B == UINT32_MAX &&
+              binding.sampler_index_offset_B == UINT32_MAX &&
+              binding.pbe_offset_B == UINT32_MAX &&
+              binding.texture_set == UINT8_MAX &&
+              binding.pbe_set == UINT8_MAX && bindless_handles == 3 &&
+              bindless_stores == 1 && ordinary_stores == 0 && samples == 1;
+      ralloc_free(nir);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
 static bool
 test_g17p_eot_block_store(void)
 {
@@ -1989,6 +2095,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--sampled-storage-lowering-only")) {
+      const bool ok = test_sampled_storage_lowering();
+      fprintf(stderr, "G17P sampled RGBA8 storage-image lowering: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -2015,6 +2127,11 @@ main(int argc, char **argv)
 
    if (!test_storage_image_lowering()) {
       fputs("bounded storage-image lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_sampled_storage_lowering()) {
+      fputs("sampled storage-image lowering mismatch\n", stderr);
       all_ok = false;
    }
 

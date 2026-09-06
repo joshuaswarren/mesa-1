@@ -1287,6 +1287,28 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(hk_agx3_g17p_combined_sampler_pointers(&client, pointers));
    CHECK(pointers[0] == UINT64_C(0x87ffed0040));
    CHECK(pointers[1] == UINT64_C(0x87ffef40e0));
+
+   const struct hk_agx3_g17p_sampled_storage_heap sampled_storage = {
+      .sampled = client,
+      .pbe_descriptor_set_va = UINT64_C(0x87fff10000),
+      .pbe_offset_B = 160,
+   };
+   uint64_t four[4] = {0};
+   CHECK(hk_agx3_g17p_sampled_storage_pointers(&sampled_storage, four));
+   CHECK(four[0] == UINT64_C(0x87ffed0040));
+   CHECK(four[1] == UINT64_C(0x87ffef40e0));
+   CHECK(four[2] == UINT64_C(0x87fff100a0));
+   CHECK(four[3] == UINT64_C(0xffff));
+
+   const uint64_t four_before[4] = {four[0], four[1], four[2], four[3]};
+   struct hk_agx3_g17p_sampled_storage_heap invalid = sampled_storage;
+   invalid.pbe_offset_B++;
+   CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
+   CHECK(memcmp(four, four_before, sizeof(four)) == 0);
+   invalid = sampled_storage;
+   invalid.pbe_descriptor_set_va = UINT64_MAX - 64;
+   CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
+   CHECK(memcmp(four, four_before, sizeof(four)) == 0);
    return 0;
 }
 

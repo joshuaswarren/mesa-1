@@ -1182,38 +1182,51 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
               nir->info.stage == MESA_SHADER_COMPUTE) {
       nir_shader *candidate = nir_shader_clone(NULL, nir);
-      struct agx_g17p_storage_image_binding storage;
+      struct agx_g17p_sampled_storage_binding sampled_storage;
       if (candidate &&
-          agx_nir_lower_g17p_storage_image(candidate, &storage)) {
+          !dev->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
+          agx_nir_lower_g17p_sampled_storage(candidate, &sampled_storage)) {
          ralloc_free(nir);
          nir = candidate;
-         shader->info.agx3_storage_image_valid = true;
-         shader->info.agx3_storage_image = storage;
+         shader->info.agx3_sampled_storage_valid = true;
+         shader->info.agx3_sampled_storage = sampled_storage;
       } else {
          ralloc_free(candidate);
          candidate = nir_shader_clone(NULL, nir);
-         struct agx_g17p_combined_sampler_binding sampled_binding;
+         struct agx_g17p_storage_image_binding storage;
          if (candidate &&
-             !dev->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
-             agx_nir_lower_g17p_combined_sampler(candidate, &sampled_binding)) {
+             agx_nir_lower_g17p_storage_image(candidate, &storage)) {
             ralloc_free(nir);
             nir = candidate;
-            shader->info.agx3_combined_sampler_valid = true;
-            shader->info.agx3_combined_sampler = sampled_binding;
-            shader->info.agx3_txf_texture_valid = true;
-            shader->info.agx3_txf_texture.texture_offset_B =
-               sampled_binding.texture_offset_B;
+            shader->info.agx3_storage_image_valid = true;
+            shader->info.agx3_storage_image = storage;
          } else {
             ralloc_free(candidate);
             candidate = nir_shader_clone(NULL, nir);
-            struct agx_g17p_txf_binding binding;
-            if (candidate && agx_nir_lower_g17p_txf(candidate, &binding)) {
+            struct agx_g17p_combined_sampler_binding sampled_binding;
+            if (candidate &&
+                !dev->vk.enabled_features.descriptorBindingSampledImageUpdateAfterBind &&
+                agx_nir_lower_g17p_combined_sampler(candidate,
+                                                    &sampled_binding)) {
                ralloc_free(nir);
                nir = candidate;
+               shader->info.agx3_combined_sampler_valid = true;
+               shader->info.agx3_combined_sampler = sampled_binding;
                shader->info.agx3_txf_texture_valid = true;
-               shader->info.agx3_txf_texture = binding;
+               shader->info.agx3_txf_texture.texture_offset_B =
+                  sampled_binding.texture_offset_B;
             } else {
                ralloc_free(candidate);
+               candidate = nir_shader_clone(NULL, nir);
+               struct agx_g17p_txf_binding binding;
+               if (candidate && agx_nir_lower_g17p_txf(candidate, &binding)) {
+                  ralloc_free(nir);
+                  nir = candidate;
+                  shader->info.agx3_txf_texture_valid = true;
+                  shader->info.agx3_txf_texture = binding;
+               } else {
+                  ralloc_free(candidate);
+               }
             }
          }
       }
@@ -1303,7 +1316,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       }
    }
 
-   unsigned root = shader->info.agx3_storage_image_valid
+   unsigned root = (shader->info.agx3_storage_image_valid ||
+                    shader->info.agx3_sampled_storage_valid)
                       ? AGX_G17P_STORAGE_ROOT_HALFS
                    : shader->info.agx3_txf_texture_valid
                       ? AGX_G17P_TXF_ROOT_HALFS

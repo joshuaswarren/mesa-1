@@ -356,8 +356,9 @@ agx3_tex_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_tex_encode_image_write_rgba8ui_2d(
-   enum agx_isa_encoding enc, uint16_t wait_mask,
+agx3_tex_encode_image_write_rgba8_2d(
+   enum agx_isa_encoding enc, uint16_t wait_mask, uint8_t image_index,
+   bool normalized,
    uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len)
 {
    if (out == NULL || len == NULL)
@@ -365,17 +366,20 @@ agx3_tex_encode_image_write_rgba8ui_2d(
 
    memset(out, 0, AGX3_IMAGE_WRITE_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || wait_mask != 1)
+   if (enc != AGX_ISA_ENCODING_AGX3B || wait_mask != 1 ||
+       !((image_index == 0 && !normalized) ||
+         (image_index == 1 && normalized)))
       return false;
 
    /* Nonzero field values recovered by decoding the native 16-byte
     * imgwci.ep0. Every omitted field is intentionally zero; the composer
-    * validates the complete selected form, including the state0 selectors. */
+    * validates the complete selected form. Fields 70/91 are the only
+    * differences in Apple's sampled-float-to-write-state1 witness. */
    const struct agx3_field_kv fields[] = {
       KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
       KV(51, 1),  KV(52, 1),  KV(60, 1),   KV(71, 2), KV(72, 1),
       KV(74, 1),  KV(79, 4),  KV(85, 3),   KV(86, 3), KV(99, 1),
-      KV(100, 1), KV(113, 1),
+      KV(100, 1), KV(113, 1), KV(70, normalized), KV(91, image_index),
    };
 
    if (!agx3_bind_compose(enc, "imgwci", 0, fields,

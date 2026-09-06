@@ -4414,16 +4414,16 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWitnessAndRefusesOtherWaits
    };
    uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH];
    uint8_t len = 0;
-   ASSERT_TRUE(agx3_tex_encode_image_write_rgba8ui_2d(
-      AGX_ISA_ENCODING_AGX3B, 1, bytes, &len));
+   ASSERT_TRUE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, false, bytes, &len));
    ASSERT_EQ(len, sizeof(native));
    EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
 
    for (unsigned wait : {0u, 2u, 3u, 0x40u}) {
       memset(bytes, 0xa5, sizeof(bytes));
       len = 0xa5;
-      EXPECT_FALSE(agx3_tex_encode_image_write_rgba8ui_2d(
-         AGX_ISA_ENCODING_AGX3B, wait, bytes, &len));
+      EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
+         AGX_ISA_ENCODING_AGX3B, wait, 0, false, bytes, &len));
       EXPECT_EQ(len, 0);
       for (uint8_t byte : bytes)
          EXPECT_EQ(byte, 0);
@@ -4431,11 +4431,25 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWitnessAndRefusesOtherWaits
 
    memset(bytes, 0xa5, sizeof(bytes));
    len = 0xa5;
-   EXPECT_FALSE(agx3_tex_encode_image_write_rgba8ui_2d(
-      AGX_ISA_ENCODING_AGX3C, 1, bytes, &len));
+   EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3C, 1, 0, false, bytes, &len));
    EXPECT_EQ(len, 0);
    for (uint8_t byte : bytes)
       EXPECT_EQ(byte, 0);
+
+   static const uint8_t sampled_write[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x01,
+      0x00, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x09, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, 1, 1, true, bytes, &len));
+   ASSERT_EQ(len, sizeof(sampled_write));
+   EXPECT_EQ(memcmp(bytes, sampled_write, sizeof(sampled_write)), 0);
+
+   EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, true, bytes, &len));
+   EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, 1, 1, false, bytes, &len));
 }
 
 TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShapes)
@@ -4516,4 +4530,38 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShape
          EXPECT_TRUE(code.empty());
       }
    }
+}
+
+TEST_F(AGX3PackBinary, SampledRgba8WriteUsesNativeStateOneProtocol)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_index sample = agx_register(0, AGX_SIZE_32);
+   sample.channels_m1 = 3;
+   agx_index sample_coord = agx_register(8, AGX_SIZE_32);
+   sample_coord.channels_m1 = 1;
+   agx_instr *read = agx_texture_sample_to(
+      b, sample, sample_coord, agx_immediate_f(0.0f), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   read->mask = 15;
+
+   agx_index write_coord = agx_register(12, AGX_SIZE_32);
+   write_coord.channels_m1 = 1;
+   agx_instr *write = agx_image_write(
+      b, sample, write_coord, agx_immediate(0), agx_immediate(0),
+      agx_immediate(1), AGX_DIM_2D, false);
+   write->format = AGX_FORMAT_U8NORM;
+   agx_stop(b);
+
+   const std::vector<uint8_t> code = pack(b);
+   static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x01,
+      0x00, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x09, 0x00,
+   };
+   ASSERT_GE(code.size(), sizeof(imgwci) + 4);
+   EXPECT_TRUE(std::equal(imgwci, imgwci + sizeof(imgwci),
+                          code.end() - 4 - sizeof(imgwci)));
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
 }

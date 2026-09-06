@@ -159,9 +159,10 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
                                  struct hk_linked_shader *linked)
 {
    if (s && linked && hk_g17p_launch_trace_enabled())
-      fprintf(stderr,"G17P compute resources: txf=%u binding=%u storage=%u preamble=%u local=%u texture=%u sampler=%u heap=%u scratch=%u/%u\n",
+      fprintf(stderr,"G17P compute resources: txf=%u binding=%u storage=%u sampled_storage=%u preamble=%u local=%u texture=%u sampler=%u heap=%u scratch=%u/%u\n",
          linked->b.uses_txf,s->info.agx3_txf_texture_valid,
-         s->info.agx3_storage_image_valid,s->b.info.has_preamble,
+         s->info.agx3_storage_image_valid,s->info.agx3_sampled_storage_valid,
+         s->b.info.has_preamble,
          s->b.info.local_size,s->b.info.texture_state_count,s->b.info.sampler_state_count,
          s->b.info.uses_sampler_heap,s->b.info.scratch_size,linked->b.scratch_size);
    return s && linked && s->info.stage == MESA_SHADER_COMPUTE &&
@@ -174,11 +175,13 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
           s->b.info.texture_state_count == 0 &&
           (s->b.info.sampler_state_count == 0 ||
            ((s->info.agx3_txf_texture_valid ||
-             s->info.agx3_storage_image_valid) &&
+             s->info.agx3_storage_image_valid ||
+             s->info.agx3_sampled_storage_valid) &&
             s->b.info.sampler_state_count == 1)) &&
           !s->b.info.uses_sampler_heap &&
           (!linked->b.uses_txf || s->info.agx3_txf_texture_valid ||
-           s->info.agx3_storage_image_valid) &&
+           s->info.agx3_storage_image_valid ||
+           s->info.agx3_sampled_storage_valid) &&
           s->info.set_count <= HK_AGX3_G17P_MAX_ROOT_SETS;
 }
 
@@ -189,7 +192,8 @@ hk_g17p_compute_uniform_ranges(
 {
    if (!s || !ranges || !range_count ||
        (!!texture_pointers != (s->info.agx3_txf_texture_valid ||
-                               s->info.agx3_storage_image_valid)))
+                               s->info.agx3_storage_image_valid ||
+                               s->info.agx3_sampled_storage_valid)))
       return false;
 
    /* A shader that reads neither the root descriptor nor any descriptor set
@@ -220,7 +224,8 @@ hk_g17p_compute_uniform_ranges(
       return true;
    }
 
-   const unsigned root_uniform = s->info.agx3_storage_image_valid
+   const unsigned root_uniform = (s->info.agx3_storage_image_valid ||
+                                  s->info.agx3_sampled_storage_valid)
                                     ? AGX_G17P_STORAGE_ROOT_HALFS
                                  : texture_pointers
                                     ? AGX_G17P_TXF_ROOT_HALFS
@@ -306,8 +311,73 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
 
    uint64_t texture_pointers = 0;
-   if (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid) {
+   if (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid ||
+       s->info.agx3_sampled_storage_valid) {
       const struct hk_descriptor_state *descriptors = &cmd->state.cs.descriptors;
+
+      if (s->info.agx3_sampled_storage_valid) {
+         const struct agx_g17p_sampled_storage_binding *binding =
+            &s->info.agx3_sampled_storage;
+         if (binding->texture_set >= HK_MAX_SETS ||
+             binding->pbe_set >= HK_MAX_SETS) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+         const uint64_t texture_set_address =
+            descriptors->root.sets[binding->texture_set];
+         const uint64_t pbe_set_address =
+            descriptors->root.sets[binding->pbe_set];
+         const uint32_t texture_set_size =
+            descriptors->set_sizes[binding->texture_set];
+         const uint32_t pbe_set_size =
+            descriptors->set_sizes[binding->pbe_set];
+         struct hk_descriptor_set *texture_set =
+            descriptors->sets[binding->texture_set];
+         if (!texture_set_address || !pbe_set_address || !texture_set ||
+             !texture_set->mapped_ptr ||
+             binding->texture_offset_B > texture_set_size ||
+             texture_set_size - binding->texture_offset_B < 32 ||
+             binding->sampler_index_offset_B > texture_set->size ||
+             texture_set->size - binding->sampler_index_offset_B <
+                sizeof(uint16_t) ||
+             binding->pbe_offset_B > pbe_set_size ||
+             pbe_set_size - binding->pbe_offset_B < 32 ||
+             !dev->samplers.table.bo || !dev->samplers.table.bo->va) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+
+         uint16_t sampler_index;
+         memcpy(&sampler_index,
+                (const uint8_t *)texture_set->mapped_ptr +
+                   binding->sampler_index_offset_B,
+                sizeof(sampler_index));
+         const struct hk_agx3_g17p_sampled_storage_heap heap = {
+            .sampled = {
+               .descriptor_set_va = texture_set_address,
+               .sampler_heap_va = dev->samplers.table.bo->va->addr,
+               .texture_offset_B = binding->texture_offset_B,
+               .sampler_index = sampler_index,
+               .sampler_count = dev->samplers.table.alloc,
+               .sampler_element_size_B =
+                  agx_chip_sampler_heap_element_size(dev->dev.chip),
+            },
+            .pbe_descriptor_set_va = pbe_set_address,
+            .pbe_offset_B = binding->pbe_offset_B,
+         };
+         uint64_t pointers[4] = {0};
+         if (!hk_agx3_g17p_sampled_storage_pointers(&heap, pointers)) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+
+         texture_pointers = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+         if (!texture_pointers)
+            return;
+      } else {
       const uint64_t set_address = descriptors->root.sets[0];
       const uint32_t set_size = descriptors->set_sizes[0];
       const uint32_t offset = s->info.agx3_storage_image_valid
@@ -397,6 +467,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          hk_pool_upload(cmd, pointers, pointer_count * sizeof(pointers[0]), 8);
       if (!texture_pointers)
          return;
+      }
    }
 
    struct agx3_ioto_uniform_range ranges[3];

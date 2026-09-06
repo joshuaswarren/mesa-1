@@ -1595,8 +1595,23 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
    /* Image stores act like tilebuffer stores when used for tib spilling */
    b->shader->out->tag_write_disable = false;
 
-   return agx_image_write(b, data, coords, lod, base, index, dim,
-                          nir_is_coherent(instr));
+   agx_instr *write = agx_image_write(b, data, coords, lod, base, index, dim,
+                                      nir_is_coherent(instr));
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      switch (nir_intrinsic_format(instr)) {
+      case PIPE_FORMAT_R8G8B8A8_UINT:
+         write->format = AGX_FORMAT_I8;
+         break;
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+         write->format = AGX_FORMAT_U8NORM;
+         break;
+      default:
+         /* The AGX3 packer remains fail-closed for unqualified formats. */
+         write->format = AGX_NUM_FORMATS;
+         break;
+      }
+   }
+   return write;
 }
 
 static enum agx_simd_op

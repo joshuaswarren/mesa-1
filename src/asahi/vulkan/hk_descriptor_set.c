@@ -175,7 +175,8 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
          view->plane_count == 1 &&
          view->vk.image->samples == VK_SAMPLE_COUNT_1_BIT &&
          view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
-         view->vk.format == VK_FORMAT_R8G8B8A8_UINT &&
+         (view->vk.format == VK_FORMAT_R8G8B8A8_UINT ||
+          view->vk.format == VK_FORMAT_R8G8B8A8_UNORM) &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
       if (supported) {

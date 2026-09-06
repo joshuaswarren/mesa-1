@@ -62,6 +62,18 @@ struct agx_g17p_storage_image_binding {
    uint32_t pbe_offset_B;
 };
 
+/* Apple's sampled-texture-to-write-image kernel ABI places a sampled texture,
+ * its native sampler, the destination PBE state, and the coordinate clamp in
+ * uniform slots 0..3.  Keep the two descriptor sets explicit: Vulkan does not
+ * require sampled and storage images to share a set. */
+struct agx_g17p_sampled_storage_binding {
+   uint32_t texture_offset_B;
+   uint32_t sampler_index_offset_B;
+   uint32_t pbe_offset_B;
+   uint8_t texture_set;
+   uint8_t pbe_set;
+};
+
 /* Turn one statically indexed set-0 Gen9 combined image/sampler used by the
  * initial G17P graphics or compute path into texture-state 0 / sampler-state
  * 0. The caller must place the corresponding native states in those CProg
@@ -82,3 +94,8 @@ bool agx_nir_lower_g17p_txf(
  * texture-state 0 / PBE-state 0. Every other image shape stays fail-closed. */
 bool agx_nir_lower_g17p_storage_image(
    struct nir_shader *s, struct agx_g17p_storage_image_binding *binding);
+
+/* Lower the exact compute textureLod(..., 0) -> rgba8 imageStore form emitted
+ * by vkQuake.  The caller publishes the four-slot native resource tuple. */
+bool agx_nir_lower_g17p_sampled_storage(
+   struct nir_shader *s, struct agx_g17p_sampled_storage_binding *binding);

@@ -43,8 +43,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
 }
 
 static bool
-g17p_handle_offset(const nir_tex_instr *tex, nir_tex_src_type source,
-                   nir_intrinsic_op intrinsic, uint32_t *offset_B)
+g17p_handle_binding(const nir_tex_instr *tex, nir_tex_src_type source,
+                    nir_intrinsic_op intrinsic, uint8_t *set,
+                    uint32_t *offset_B)
 {
    const int index = nir_tex_instr_src_index(tex, source);
    if (index < 0)
@@ -52,16 +53,26 @@ g17p_handle_offset(const nir_tex_instr *tex, nir_tex_src_type source,
 
    nir_intrinsic_instr *handle = nir_src_as_intrinsic(tex->src[index].src);
    if (!handle || handle->intrinsic != intrinsic ||
-       nir_intrinsic_desc_set(handle) != 0 ||
+       nir_intrinsic_desc_set(handle) > UINT8_MAX ||
        !nir_src_is_const(handle->src[0]))
       return false;
 
+   *set = nir_intrinsic_desc_set(handle);
    *offset_B = nir_src_as_uint(handle->src[0]);
    return true;
 }
 
 static bool
-g17p_is_set0_address(nir_def *def)
+g17p_handle_offset(const nir_tex_instr *tex, nir_tex_src_type source,
+                   nir_intrinsic_op intrinsic, uint32_t *offset_B)
+{
+   uint8_t set;
+   return g17p_handle_binding(tex, source, intrinsic, &set, offset_B) &&
+          set == 0;
+}
+
+static bool
+g17p_is_set_address(nir_def *def, uint8_t set)
 {
    nir_scalar address = nir_scalar_resolved(def, 0);
    nir_intrinsic_instr *load =
@@ -69,7 +80,7 @@ g17p_is_set0_address(nir_def *def)
 
    return address.comp == 0 && load &&
           load->intrinsic == nir_intrinsic_load_descriptor_set_agx &&
-          nir_intrinsic_desc_set(load) == 0;
+          nir_intrinsic_desc_set(load) == set;
 }
 
 static bool
@@ -98,7 +109,8 @@ g17p_is_constant_offset(nir_def *def, uint32_t expected)
  * sampler word, so this zero-valued software load must not become a txb.
  */
 static bool
-g17p_is_sampler_bias(const nir_tex_instr *tex, uint32_t expected_offset_B)
+g17p_is_sampler_bias(const nir_tex_instr *tex, uint8_t set,
+                     uint32_t expected_offset_B)
 {
    const int index = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    if (index < 0)
@@ -110,7 +122,7 @@ g17p_is_sampler_bias(const nir_tex_instr *tex, uint32_t expected_offset_B)
 
    if (load->intrinsic == nir_intrinsic_load_global_constant_offset ||
        load->intrinsic == nir_intrinsic_load_global_constant_bounded) {
-      return g17p_is_set0_address(load->src[0].ssa) &&
+      return g17p_is_set_address(load->src[0].ssa, set) &&
              g17p_is_constant_offset(load->src[1].ssa, expected_offset_B);
    }
 
@@ -125,9 +137,9 @@ g17p_is_sampler_bias(const nir_tex_instr *tex, uint32_t expected_offset_B)
    nir_scalar lhs = nir_scalar_chase_alu_src(address, 0);
    nir_scalar rhs = nir_scalar_chase_alu_src(address, 1);
 
-   return (g17p_is_set0_address(lhs.def) &&
+   return (g17p_is_set_address(lhs.def, set) &&
            g17p_is_constant_scalar(rhs, expected_offset_B)) ||
-          (g17p_is_set0_address(rhs.def) &&
+          (g17p_is_set_address(rhs.def, set) &&
            g17p_is_constant_scalar(lhs, expected_offset_B));
 }
 
@@ -199,7 +211,7 @@ agx_nir_lower_g17p_combined_sampler(
       return false;
 
    /* The Gen9 software LOD bias is at byte 12 of sampler state. */
-   if (!g17p_is_sampler_bias(sample, sampler_state_offset_B + 12))
+   if (!g17p_is_sampler_bias(sample, 0, sampler_state_offset_B + 12))
       return false;
 
    nir_steal_tex_src(sample, nir_tex_src_texture_handle);
@@ -456,17 +468,26 @@ agx_nir_lower_g17p_txf(nir_shader *shader,
 }
 
 static bool
-g17p_storage_handle_offset(const nir_intrinsic_instr *intr,
-                           uint32_t *offset_B)
+g17p_storage_handle_binding(const nir_intrinsic_instr *intr, uint8_t *set,
+                            uint32_t *offset_B)
 {
    nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
    if (!handle || handle->intrinsic != nir_intrinsic_bindless_image_agx ||
-       nir_intrinsic_desc_set(handle) != 0 ||
+       nir_intrinsic_desc_set(handle) > UINT8_MAX ||
        !nir_src_is_const(handle->src[0]))
       return false;
 
+   *set = nir_intrinsic_desc_set(handle);
    *offset_B = nir_src_as_uint(handle->src[0]);
    return true;
+}
+
+static bool
+g17p_storage_handle_offset(const nir_intrinsic_instr *intr,
+                           uint32_t *offset_B)
+{
+   uint8_t set;
+   return g17p_storage_handle_binding(intr, &set, offset_B) && set == 0;
 }
 
 static bool
@@ -573,6 +594,123 @@ agx_nir_lower_g17p_storage_image(
    *binding = (struct agx_g17p_storage_image_binding){
       .texture_offset_B = texture_offset_B,
       .pbe_offset_B = pbe_offset_B,
+   };
+   return true;
+}
+
+static bool
+g17p_sampled_storage_store_shape(const nir_intrinsic_instr *intr)
+{
+   return intr->intrinsic == nir_intrinsic_bindless_image_store &&
+          nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_2D &&
+          !nir_intrinsic_image_array(intr) &&
+          nir_intrinsic_format(intr) == PIPE_FORMAT_R8G8B8A8_UNORM &&
+          nir_src_num_components(intr->src[1]) == 4 &&
+          nir_src_bit_size(intr->src[1]) == 32 &&
+          nir_src_num_components(intr->src[3]) == 4 &&
+          nir_src_bit_size(intr->src[3]) == 32 &&
+          nir_src_is_const(intr->src[2]) &&
+          nir_src_as_uint(intr->src[2]) == 0 &&
+          nir_src_is_const(intr->src[4]) &&
+          nir_src_as_uint(intr->src[4]) == 0 &&
+          !(nir_intrinsic_access(intr) &
+            (ACCESS_COHERENT | ACCESS_VOLATILE));
+}
+
+bool
+agx_nir_lower_g17p_sampled_storage(
+   nir_shader *shader, struct agx_g17p_sampled_storage_binding *binding)
+{
+   if (!shader || !binding || shader->info.stage != MESA_SHADER_COMPUTE)
+      return false;
+
+   nir_tex_instr *sample = NULL;
+   nir_intrinsic_instr *store = NULL;
+   unsigned impl_count = 0, block_count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      impl_count++;
+      nir_foreach_block(block, impl) {
+         block_count++;
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               if (sample || !g17p_sample_shape(nir_instr_as_tex(instr)))
+                  return false;
+               sample = nir_instr_as_tex(instr);
+               continue;
+            }
+
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
+               if (store || !g17p_sampled_storage_store_shape(intr))
+                  return false;
+               store = intr;
+            } else if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_sparse_load ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_atomic ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_atomic_swap ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_size ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_samples) {
+               return false;
+            }
+         }
+      }
+   }
+
+   /* This protocol is derived from Apple's straight-line kernel with one
+    * explicit level-zero sample feeding one rgba8 write.  Keep all control
+    * flow and independent data transforms outside the qualified shape. */
+   if (impl_count != 1 || block_count != 1 || !sample || !store ||
+       store->src[3].ssa != &sample->def || sample->op != nir_texop_txl)
+      return false;
+
+   const int lod = nir_tex_instr_src_index(sample, nir_tex_src_lod);
+   if (lod < 0 || !nir_src_is_const(sample->src[lod].src) ||
+       nir_src_as_uint(sample->src[lod].src) != 0)
+      return false;
+
+   uint8_t texture_set, sampler_set, pbe_set;
+   uint32_t texture_offset_B, sampler_state_offset_B, storage_offset_B;
+   if (!g17p_handle_binding(sample, nir_tex_src_texture_handle,
+                            nir_intrinsic_bindless_image_agx, &texture_set,
+                            &texture_offset_B) ||
+       !g17p_handle_binding(sample, nir_tex_src_sampler_handle,
+                            nir_intrinsic_bindless_sampler_agx, &sampler_set,
+                            &sampler_state_offset_B) ||
+       !g17p_storage_handle_binding(store, &pbe_set, &storage_offset_B) ||
+       texture_set != sampler_set || (texture_offset_B & 7) != 0 ||
+       sampler_state_offset_B != texture_offset_B + 32 ||
+       !g17p_is_sampler_bias(sample, texture_set,
+                             sampler_state_offset_B + 12) ||
+       (storage_offset_B & 7) != 0)
+      return false;
+
+   nir_steal_tex_src(sample, nir_tex_src_texture_handle);
+   nir_steal_tex_src(sample, nir_tex_src_sampler_handle);
+   if (sample->op == nir_texop_txb) {
+      nir_steal_tex_src(sample, nir_tex_src_bias);
+      sample->op = nir_texop_tex;
+   }
+   sample->texture_index = 0;
+   sample->sampler_index = 0;
+
+   nir_builder b = nir_builder_create(nir_shader_get_entrypoint(shader));
+   b.cursor = nir_before_instr(&store->instr);
+   nir_src_rewrite(&store->src[0], nir_imm_intN_t(&b, 1, 16));
+   store->intrinsic = nir_intrinsic_image_store;
+
+   NIR_PASS(_, shader, nir_opt_dce);
+   if (g17p_has_bindless_texture_access(shader))
+      return false;
+
+   *binding = (struct agx_g17p_sampled_storage_binding){
+      .texture_offset_B = texture_offset_B,
+      .sampler_index_offset_B = sampler_state_offset_B + 8,
+      .pbe_offset_B = storage_offset_B,
+      .texture_set = texture_set,
+      .pbe_set = pbe_set,
    };
    return true;
 }
