@@ -1393,12 +1393,46 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
                  const VkBlitImageInfo2 *pBlitImageInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(hk_image, src_image, pBlitImageInfo->srcImage);
+   VK_FROM_HANDLE(hk_image, dst_image, pBlitImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    perf_debug(cmd, "Blit image");
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   vk_meta_blit_image2(&cmd->vk, &dev->meta, pBlitImageInfo);
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      for (uint32_t r = 0; r < pBlitImageInfo->regionCount; ++r) {
+         const VkImageBlit2 *region = &pBlitImageInfo->pRegions[r];
+         const uint32_t src_layers = vk_image_subresource_layer_count(
+            &src_image->vk, &region->srcSubresource);
+         const uint32_t dst_layers = vk_image_subresource_layer_count(
+            &dst_image->vk, &region->dstSubresource);
+
+         for (uint32_t layer = 0; layer < src_layers; ++layer) {
+            VkImageBlit2 one;
+            if (!hk_g17p_image_blit_slice(
+                   dev->dev.chip, src_image->vk.image_type,
+                   dst_image->vk.image_type, src_layers, dst_layers,
+                   region, layer, &one)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               break;
+            }
+
+            VkBlitImageInfo2 info = *pBlitImageInfo;
+            info.regionCount = 1;
+            info.pRegions = &one;
+            vk_meta_blit_image2(&cmd->vk, &dev->meta, &info);
+            if (vk_command_buffer_has_error(&cmd->vk))
+               break;
+         }
+
+         if (vk_command_buffer_has_error(&cmd->vk))
+            break;
+      }
+   } else {
+      vk_meta_blit_image2(&cmd->vk, &dev->meta, pBlitImageInfo);
+   }
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
 

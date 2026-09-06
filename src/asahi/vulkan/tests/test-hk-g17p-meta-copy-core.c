@@ -169,6 +169,39 @@ main(void)
    CHECK(!hk_g17p_image_copy_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
       &layered, 0, &untouched));
+
+   const VkImageBlit2 blit = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 2, 3},
+      .srcOffsets = {{7, 5, 0}, {26, 18, 1}},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 5, 3},
+      .dstOffsets = {{11, 13, 0}, {48, 42, 1}},
+   };
+   for (uint32_t layer = 0; layer < 3; ++layer) {
+      VkImageBlit2 one;
+      CHECK(hk_g17p_image_blit_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 3, 3,
+         &blit, layer, &one));
+      CHECK(one.srcSubresource.baseArrayLayer == 2 + layer);
+      CHECK(one.dstSubresource.baseArrayLayer == 5 + layer);
+      CHECK(one.srcSubresource.layerCount == 1);
+      CHECK(one.dstSubresource.layerCount == 1);
+      CHECK(one.srcOffsets[0].x == 7 && one.srcOffsets[1].x == 26);
+      CHECK(one.dstOffsets[0].y == 13 && one.dstOffsets[1].y == 42);
+   }
+   VkImageBlit2 bad_blit = blit;
+   bad_blit.dstOffsets[1].z = 2;
+   VkImageBlit2 no_blit = {.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 3, 3,
+      &bad_blit, 0, &no_blit));
+   CHECK(no_blit.sType == 0);
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 3, 2,
+      &blit, 0, &no_blit));
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+      &blit, 0, &no_blit));
    printf("Honeykrisp G17P meta copy region/mip/layer checks passed (%u exhaustive layer cases)\n", tested);
    return 0;
 }

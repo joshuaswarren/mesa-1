@@ -46,3 +46,9 @@ bool hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
                               uint32_t dst_layers,
                               const VkImageCopy2 *region, uint32_t slice,
                               VkImageCopy2 *out);
+
+bool hk_g17p_image_blit_slice(enum agx_chip chip, VkImageType src_type,
+                              VkImageType dst_type, uint32_t src_layers,
+                              uint32_t dst_layers,
+                              const VkImageBlit2 *region, uint32_t slice,
+                              VkImageBlit2 *out);
