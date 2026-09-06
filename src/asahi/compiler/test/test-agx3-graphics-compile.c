@@ -1576,6 +1576,7 @@ test_indexed_compute_sample(void)
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
    tex->dest_type = nir_type_float32;
    tex->coord_components = 2;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
    tex->src[0] = nir_tex_src_for_ssa(
       nir_tex_src_coord,
       nir_vec2(&b, nir_u2f32(&b, element), nir_imm_float(&b, 0.5f)));

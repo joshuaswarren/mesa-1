@@ -17,7 +17,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
        tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
        tex->is_shadow || tex->is_sparse ||
        tex->coord_components != (tex->is_array ? 3 : 2) ||
-       (tex->backend_flags & ~AGX_TEXTURE_FLAG_CLAMP_TO_0) != 0 ||
+       (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
+                               AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
+       tex->backend_flags == (AGX_TEXTURE_FLAG_CLAMP_TO_0 |
+                              AGX_TEXTURE_FLAG_NO_CLAMP) ||
        tex->dest_type != nir_type_float32 || tex->def.num_components != 4 ||
        tex->def.bit_size != 32)
       return false;
