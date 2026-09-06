@@ -344,6 +344,11 @@ test_modified_minifloat_add(void)
    exact(out, len, "19b12481820800000200");
    assert(!agx3_alu_fadd_one_absneg(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
                                     AGX3_ALU_HINT_NONE, 0, out, &len));
+   assert(agx3_alu_fadd_abs_negzero(AGX_ISA_ENCODING_AGX3B, 8, 2, true,
+                                    AGX3_ALU_HINT_CACHE, 1, out, &len));
+   exact(out, len, "49812c83822000000200");
+   assert(!agx3_alu_fadd_abs_negzero(AGX_ISA_ENCODING_AGX3C, 8, 2, true,
+                                     AGX3_ALU_HINT_CACHE, 1, out, &len));
 
    const unsigned regs[] = {0, 2, 30, 62, 126, 128, 254};
    const unsigned immediates[] = {0, 0x20, 0x30, 0x80, 0xb0, 0xff};

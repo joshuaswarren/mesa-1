@@ -5179,6 +5179,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_ALU_MAX_LENGTH];
             uint8_t len = 0;
             const bool multiply = I->op == AGX_OPCODE_FMUL;
+            if (!multiply && !I->saturate && reg.abs && !reg.neg && !reg.kill &&
+                imm.value == 0x80 && !imm.memory && !imm.abs && !imm.neg &&
+                agx3_src_is_register(reg) && !reg.memory &&
+                !(reg.cache && reg.discard) && reg.size == AGX_SIZE_32 &&
+                agx_channels(reg) == 1) {
+               if (!agx3_alu_fadd_abs_negzero(
+                      enc, I->dest[0].value, reg.value, I->dest[0].cache,
+                      agx3_post_ra_hint(reg), wait, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
             if (!multiply && !I->saturate && reg.abs && reg.neg && !reg.kill &&
                 imm.value == 0x30 && !imm.memory && !imm.abs && !imm.neg &&
                 agx3_src_is_register(reg) && !reg.memory &&

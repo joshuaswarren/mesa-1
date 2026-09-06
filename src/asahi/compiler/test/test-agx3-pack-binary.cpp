@@ -325,6 +325,25 @@ TEST_F(AGX3PackBinary, SignedMulHighDiv3MatchesNativeVertexWitness)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, FabsMaterializationKeepsNegativeZeroAndWait)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index source = agx_register(2, AGX_SIZE_32);
+   source.cache = true;
+   source.abs = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fadd_to(b, dest, source, agx_negzero());
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x49, 0x81, 0x2c, 0x83, 0x82, 0x00, 0x00, 0x00,
+      0x02, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
