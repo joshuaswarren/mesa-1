@@ -422,6 +422,32 @@ agx3_alu_s16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    enum agx3_alu_hint hint, bool dest_cache,
+                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                    uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 128 || (src & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+
+   /* Fresh G17P Metal kernels ground the RTZ float-to-short form with odd and
+    * even half destinations, sources 0 and 2, both destination-cache states,
+    * preserved and discarded sources, and no wait versus slot 6. A kernel
+    * stores the original float after conversion, proving 0x90 preserves it. */
+   const uint8_t bytes[] = {
+      0x27, 0x07, wait_mask ? 0x56 : 0x54, (uint8_t)dest,
+      dest_cache ? 0x03 : 0x02, (uint8_t)(src << 1),
+      hint == AGX3_ALU_HINT_DISCARD ? 0xb0 : 0x90,
+      0xc8, 0x02, 0x00,
+   };
+   memcpy(out, bytes, sizeof(bytes));
+   *len = sizeof(bytes);
+   return true;
+}
+
+bool
 agx3_alu_add_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     uint16_t immediate, enum agx3_alu_hint hint, bool dest_cache,
                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
@@ -444,6 +470,36 @@ agx3_alu_add_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    for(unsigned i=0;i<6;++i)
       if(wait_mask & (1u<<i))fields[n++]=(struct agx3_field_kv){45+i,1};
    return agx3_bind_compose(enc,"iadd",0,base,6,fields,n,out,len);
+}
+
+bool
+agx3_alu_sub_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                   uint16_t immediate, enum agx3_alu_hint hint,
+                   bool dest_cache, uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 128 || immediate == 0 || immediate > 255 ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+
+   /* Apple G17P emits a distinct ten-byte subtract-immediate form rather
+    * than negating the add form. Controlled Metal kernels witness immediate
+    * values 1, 2, 17 and 255; half destinations 1, 2 and 3; half sources 2,
+    * 3 and 4; both destination-cache states; both source lifetime hints; and
+    * no wait versus wait slot 6. The immediate is an unsigned byte scaled by
+    * four in bytes 6..7, exactly matching modulo-16-bit subtraction. */
+   const uint16_t encoded_immediate = immediate << 2;
+   const uint8_t bytes[] = {
+      0x1f, 0x01, wait_mask ? 0x56 : 0x54, (uint8_t)dest,
+      dest_cache ? 0x03 : 0x02, (uint8_t)(src << 1),
+      (uint8_t)encoded_immediate, (uint8_t)(encoded_immediate >> 8),
+      hint == AGX3_ALU_HINT_DISCARD ? 0x13 : 0x11, 0x01,
+   };
+   memcpy(out, bytes, sizeof(bytes));
+   *len = sizeof(bytes);
+   return true;
 }
 
 /* Exact native G17P witnesses include 0x1800 (1/512), adjacent literals,

@@ -5937,19 +5937,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   continue;
             }
 
+            /* Hyprland lowers its signed 16-bit gradient counter to
+             * `iadd dst32, #0, src16 << 4`. A bare narrow integer is signed
+             * on AGX (ABS denotes unsigned); fresh G17P Metal witnesses the
+             * exact zero-immediate, sign-extended shift-4 form, including a
+             * cached destination. Keep other bare-half shifts closed. */
+            const bool signed_half_shift4 =
+               enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
+               constant.type == AGX_INDEX_IMMEDIATE && constant.value == 0 &&
+               reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
+               I->shift == 4;
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
                 !constant.neg && constant.value <= 0xff &&
                 agx3_src_is_register(reg) && !reg.memory &&
                 agx_channels(reg) == 1 && !(reg.abs && reg.neg) &&
                 (reg.size == AGX_SIZE_32 ||
-                 (reg.size == AGX_SIZE_16 && (reg.abs || reg.neg)))) {
+                 (reg.size == AGX_SIZE_16 &&
+                  (reg.abs || reg.neg || signed_half_shift4)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
+                  .dest_cache = signed_half_shift4 && I->dest[0].cache,
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
                   .src_16 = reg.size == AGX_SIZE_16,
-                  .sign_extend = reg.neg,
+                  .sign_extend = signed_half_shift4 || reg.neg,
                   .shift = I->shift,
                   .wait_mask = wait,
                };
@@ -6541,17 +6553,57 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index imm = I->src[imm_first ? 0 : 1];
             const agx_index reg = I->src[imm_first ? 1 : 0];
             if (imm.type == AGX_INDEX_IMMEDIATE && imm.value <= 255 &&
-                !imm.abs && !imm.neg && !imm.memory &&
+                !imm.abs && !imm.memory &&
                 reg.type == AGX_INDEX_REGISTER && !reg.memory &&
                 reg.size == AGX_SIZE_16 && agx_channels(reg) == 1 &&
                 !reg.abs && !reg.neg && !reg.kill && !(reg.cache && reg.discard)) {
                uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-               if (!agx3_alu_add_imm16(enc,I->dest[0].value,reg.value,imm.value,
-                     agx3_post_ra_hint(reg),I->dest[0].cache,wait,bytes,&len) ||
+               uint16_t immediate_wait = wait;
+               if (imm.neg && immediate_wait != 0 && immediate_wait != 32) {
+                  if (!agx3_retire_slots_noop(emission, enc, immediate_wait))
+                     AGX3_REFUSE(I);
+                  immediate_wait = 0;
+               }
+               const bool encoded = imm.neg
+                  ? agx3_alu_sub_imm16(enc, I->dest[0].value, reg.value,
+                                       imm.value, agx3_post_ra_hint(reg),
+                                       I->dest[0].cache, immediate_wait, bytes,
+                                       &len)
+                  : agx3_alu_add_imm16(enc, I->dest[0].value, reg.value,
+                                       imm.value, agx3_post_ra_hint(reg),
+                                       I->dest[0].cache, wait, bytes, &len);
+               if (!encoded ||
                    !agx3_append(emission,bytes,len))
                   AGX3_REFUSE(I);
                continue;
             }
+         }
+
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->round == AGX_ROUND_RTZ &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[0].value == AGX_CONVERT_F_TO_S16 &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[1]) && agx_channels(I->src[1]) == 1 &&
+             !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
+             !(I->src[1].cache && I->src[1].discard)) {
+            uint16_t convert_wait = wait;
+            if (convert_wait != 0 && convert_wait != 32) {
+               if (!agx3_retire_slots_noop(emission, enc, convert_wait))
+                  AGX3_REFUSE(I);
+               convert_wait = 0;
+            }
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_f32_to_s16(
+                   enc, I->dest[0].value, I->src[1].value,
+                   agx3_post_ra_hint(I->src[1]), I->dest[0].cache,
+                   convert_wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
          }
 
          /* Coordinates and loop counters use16-bit halves. Apple has a direct

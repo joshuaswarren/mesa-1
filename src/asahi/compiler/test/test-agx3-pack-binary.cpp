@@ -6087,6 +6087,40 @@ TEST_F(AGX3PackBinary, BlurSignedHalfConversionAndCounterStayNative)
    }
 }
 
+TEST_F(AGX3PackBinary, HyprlandGradientCounterSubtractStaysNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index float_source = agx_register(6, AGX_SIZE_32);
+   float_source.cache = true;
+   agx_index converted = agx_register(3, AGX_SIZE_16);
+   converted.cache = true;
+   agx_convert_to(b, converted, agx_immediate(AGX_CONVERT_F_TO_S16),
+                  float_source, AGX_ROUND_RTZ);
+   agx_index source = agx_register(3, AGX_SIZE_16);
+   source.discard = true;
+   agx_index immediate = agx_immediate(1);
+   immediate.neg = true;
+   agx_index narrow = agx_register(2, AGX_SIZE_16);
+   narrow.cache = true;
+   agx_iadd_to(b, narrow, source, immediate, 0);
+   agx_index wide = agx_register(4, AGX_SIZE_32);
+   wide.cache = true;
+   agx_instr *widen = agx_iadd_to(b, wide, agx_immediate(0),
+                                  agx_register(2, AGX_SIZE_16), 0);
+   widen->shift = 4;
+   agx_stop(b);
+
+   const auto code = pack(b);
+   const uint8_t native[] = {
+      0x27,0x07,0x54,0x03,0x03,0x0c,0x90,0xc8,0x02,0x00,
+      0x1f,0x01,0x54,0x02,0x03,0x06,0x04,0x00,0x13,0x01,
+      0x9f,0x01,0x54,0x04,0x03,0x00,0x08,0x08,0x10,0x0c,
+   };
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(std::vector<uint8_t>(code.begin(), code.begin() + sizeof(native)),
+             std::vector<uint8_t>(native, native + sizeof(native)));
+}
+
 TEST_F(AGX3PackBinary, NarrowBitwiseUsesWiderSourcesLowHalves)
 {
    for (unsigned mask = 1; mask < 4; ++mask) {

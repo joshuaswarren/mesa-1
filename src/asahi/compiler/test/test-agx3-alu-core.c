@@ -1234,7 +1234,41 @@ test_blur_half_arithmetic(void)
    exact(out,len,"9f01560202040c001104");
    assert(agx3_alu_add_imm16(AGX_ISA_ENCODING_AGX3B,3,3,17,AGX3_ALU_HINT_DISCARD,false,0,out,&len));
    exact(out,len,"9f01540302220c001504");
-   puts("Blur half arithmetic: seven native signed-conversion/immediate-add witnesses PASS");
+   assert(agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,2,1,
+                            AGX3_ALU_HINT_DISCARD,false,32,out,&len));
+   exact(out,len,"1f015602020404001301");
+   assert(agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,3,2,
+                            AGX3_ALU_HINT_CACHE,false,32,out,&len));
+   exact(out,len,"1f015602020608001101");
+   assert(agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,3,3,17,
+                            AGX3_ALU_HINT_DISCARD,false,0,out,&len));
+   exact(out,len,"1f015403020644001301");
+   assert(agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,2,255,
+                            AGX3_ALU_HINT_DISCARD,true,0,out,&len));
+   exact(out,len,"1f0154020304fc031301");
+   assert(!agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3C,2,2,2,
+                             AGX3_ALU_HINT_DISCARD,false,0,out,&len));
+   assert(!agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,2,0,
+                             AGX3_ALU_HINT_DISCARD,false,0,out,&len));
+   assert(agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,3,2,
+                            AGX3_ALU_HINT_NONE,false,32,out,&len));
+   exact(out,len,"1f015602020608001101");
+   assert(!agx3_alu_sub_imm16(AGX_ISA_ENCODING_AGX3B,2,2,2,
+                             AGX3_ALU_HINT_DISCARD,false,1,out,&len));
+   assert(agx3_alu_f32_to_s16(AGX_ISA_ENCODING_AGX3B,2,2,
+                              AGX3_ALU_HINT_DISCARD,false,32,out,&len));
+   exact(out,len,"270756020204b0c80200");
+   assert(agx3_alu_f32_to_s16(AGX_ISA_ENCODING_AGX3B,1,2,
+                              AGX3_ALU_HINT_NONE,false,0,out,&len));
+   exact(out,len,"27075401020490c80200");
+   assert(agx3_alu_f32_to_s16(AGX_ISA_ENCODING_AGX3B,2,0,
+                              AGX3_ALU_HINT_CACHE,true,0,out,&len));
+   exact(out,len,"27075402030090c80200");
+   assert(!agx3_alu_f32_to_s16(AGX_ISA_ENCODING_AGX3C,2,0,
+                               AGX3_ALU_HINT_NONE,false,0,out,&len));
+   assert(!agx3_alu_f32_to_s16(AGX_ISA_ENCODING_AGX3B,2,1,
+                               AGX3_ALU_HINT_NONE,false,0,out,&len));
+   puts("Blur half arithmetic: fourteen exact native conversion/add/sub witnesses PASS");
 }
 
 static void test_native_extract32(void)
