@@ -1271,6 +1271,17 @@ test_g17p_rt0_eot_program(void)
    mrt.attachment_count = 1;
    CHECK(!hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
                                                  &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
+   mrt.attachment_count = 2;
+   mrt.imageblock_offset_B = 8;
+   CHECK(!hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
+                                                 &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
+   mrt.imageblock_offset_B = 0;
+   mrt.imageblock_offset1_B = 16;
+   CHECK(!hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
+                                                 &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
    return 0;
 }
 
@@ -2043,6 +2054,8 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.sample_size_B == 16);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 8);
+   tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    tib = agx_build_tilebuffer_layout(rgba, 1, 2, false);
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));

@@ -77,6 +77,7 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
       return false;
 
    const bool mixed_mrt =
+      tib->nr_samples == 1 &&
       tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
       tib->logical_format[1] == PIPE_FORMAT_R8_UNORM &&
       !tib->spilled[1] && tib->_offset_B[0] == 0 &&
@@ -632,7 +633,9 @@ hk_agx3_g17p_rt0_eot_program_generate(
    const bool wboit_mrt = desc && desc->shader_binary_size == 120 &&
                           desc->nr_gprs == 8 &&
                           desc->staging_halfs == 16 &&
-                          desc->attachment_count == 2;
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 8;
    if (!program || chip != AGX_CHIP_G17P || !desc || (!rt0 && !wboit_mrt) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -

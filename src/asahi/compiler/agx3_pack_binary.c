@@ -3760,6 +3760,43 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
    return phase == 4 ? write : NULL;
 }
 
+/* The native WBOIT layout is one RGBA16F target followed by one R8 target in
+ * the same tilebuffer. Both colour stores belong to one pixel transaction, so
+ * enter once before the first class-12 wait and release only after the second
+ * store. Keep this exact until another MRT layout is captured. */
+static bool
+agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
+{
+   unsigned blocks = 0, f16 = 0, r8 = 0, r8_loads = 0;
+
+   agx_foreach_block(ctx, block) {
+      if (++blocks != 1)
+         return false;
+
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op == AGX_OPCODE_LD_TILE) {
+            if (I->format != AGX_FORMAT_U8NORM || I->mask != 1 ||
+                I->pixel_offset != 8 || I->explicit_coords)
+               return false;
+            r8_loads++;
+         } else if (I->op == AGX_OPCODE_ST_TILE) {
+            if (I->explicit_coords)
+               return false;
+            if (I->format == AGX_FORMAT_F16 && I->mask == 15 &&
+                I->pixel_offset == 0)
+               f16++;
+            else if (I->format == AGX_FORMAT_U8NORM && I->mask == 1 &&
+                     I->pixel_offset == 8)
+               r8++;
+            else
+               return false;
+         }
+      }
+   }
+
+   return blocks == 1 && r8_loads == 1 && f16 == 1 && r8 == 1;
+}
+
 /* Prove complete shader-part shapes from post-RA IR. EXPORT is an ABI
  * declaration with no machine instruction; every declared source must be
  * supplied by one of the bounded uniform copies. Never infer this from bytes.
@@ -4054,10 +4091,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * immediately after the store. Restrict synthesis to that exact API-shader
     * shape; programmable blending, MRT and special BG/EOT programs retain
     * their existing independently witnessed protocols. */
-   const bool g17p_colour_protocol =
+   const bool g17p_wboit_mrt_colour =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
-      !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 1 &&
-      tile_loads_left == 0;
+      !ctx->key->fs.ignore_tib_dependencies &&
+      agx3_is_g17p_wboit_mrt_colour(ctx);
+   const bool g17p_colour_protocol =
+      (enc == AGX_ISA_ENCODING_AGX3B &&
+       ctx->stage == MESA_SHADER_FRAGMENT &&
+       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 1 &&
+       tile_loads_left == 0) || g17p_wboit_mrt_colour;
+
+   /* Multiple colour stores share one pixel transaction. The only captured
+    * G17P transaction is the WBOIT pair above; emitting the individual tile
+    * operations without its entry/release bracket produces a syntactically
+    * valid but unusable shader. */
+   if (enc == AGX_ISA_ENCODING_AGX3B &&
+       ctx->stage == MESA_SHADER_FRAGMENT &&
+       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left > 1 &&
+       !g17p_wboit_mrt_colour)
+      goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.
     * Keep MRT, special coordinates, other formats and control flow closed.
