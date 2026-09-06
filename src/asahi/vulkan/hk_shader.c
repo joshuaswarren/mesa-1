@@ -1219,14 +1219,24 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
             } else {
                ralloc_free(candidate);
                candidate = nir_shader_clone(NULL, nir);
-               struct agx_g17p_txf_binding binding;
-               if (candidate && agx_nir_lower_g17p_txf(candidate, &binding)) {
+               if (candidate &&
+                   agx_nir_lower_g17p_indexed_samplers(candidate)) {
                   ralloc_free(nir);
                   nir = candidate;
-                  shader->info.agx3_txf_texture_valid = true;
-                  shader->info.agx3_txf_texture = binding;
+                  shader->info.agx3_indexed_sampler_valid = true;
                } else {
                   ralloc_free(candidate);
+                  candidate = nir_shader_clone(NULL, nir);
+                  struct agx_g17p_txf_binding binding;
+                  if (candidate &&
+                      agx_nir_lower_g17p_txf(candidate, &binding)) {
+                     ralloc_free(nir);
+                     nir = candidate;
+                     shader->info.agx3_txf_texture_valid = true;
+                     shader->info.agx3_txf_texture = binding;
+                  } else {
+                     ralloc_free(candidate);
+                  }
                }
             }
          }
@@ -1320,7 +1330,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    unsigned root = (shader->info.agx3_storage_image_valid ||
                     shader->info.agx3_sampled_storage_valid)
                       ? AGX_G17P_STORAGE_ROOT_HALFS
-                   : shader->info.agx3_txf_texture_valid
+                   : (shader->info.agx3_txf_texture_valid ||
+                      shader->info.agx3_indexed_sampler_valid)
                       ? AGX_G17P_TXF_ROOT_HALFS
                       : 0;
    if (sw_stage == MESA_SHADER_FRAGMENT)

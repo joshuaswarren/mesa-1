@@ -300,7 +300,8 @@ g17p_sample_heap_index(const nir_tex_instr *tex)
 bool
 agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   if (!shader || shader->info.stage != MESA_SHADER_FRAGMENT)
+   if (!shader || (shader->info.stage != MESA_SHADER_FRAGMENT &&
+                   shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
 
    unsigned samples = 0;
