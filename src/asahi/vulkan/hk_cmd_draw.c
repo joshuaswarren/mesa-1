@@ -218,8 +218,6 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
 void
 hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd)
 {
-   hk_cmd_buffer_dirty_all(cmd);
-
    /* From the Vulkan 1.3.275 spec:
     *
     *    "...There is one exception to this rule - if the primary command
@@ -230,8 +228,15 @@ hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd)
     * We need to reset everything EXCEPT the render pass state.
     */
    struct hk_rendering_state render_save = cmd->state.gfx.render;
+   struct hk_push_descriptor_set *push[HK_MAX_SETS];
+   memcpy(push, cmd->state.gfx.descriptors.push, sizeof(push));
    memset(&cmd->state.gfx, 0, sizeof(cmd->state.gfx));
    cmd->state.gfx.render = render_save;
+   memcpy(cmd->state.gfx.descriptors.push, push, sizeof(push));
+
+   /* Dirty after clearing the cached state.  Doing this before memset loses
+    * every dirty bit and lets a post-secondary rebind be elided. */
+   hk_cmd_buffer_dirty_all(cmd);
 }
 
 static void

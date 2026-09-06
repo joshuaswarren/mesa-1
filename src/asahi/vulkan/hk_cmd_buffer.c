@@ -43,6 +43,7 @@
 #include "pool.h"
 #include "shader_enums.h"
 #include "vk_pipeline_layout.h"
+#include "vk_common_entrypoints.h"
 #include "vk_synchronization.h"
 
 #include "util/list.h"
@@ -221,6 +222,26 @@ const struct vk_command_buffer_ops hk_cmd_buffer_ops = {
    .reset = hk_reset_cmd_buffer,
    .destroy = hk_destroy_cmd_buffer,
 };
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
+                      uint32_t commandBufferCount,
+                      const VkCommandBuffer *pCommandBuffers)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Secondary command buffers are materialized by replaying their common
+    * command queues into the primary.  Their last bound state is therefore
+    * also the driver's cached state in the primary after replay.  Vulkan
+    * makes that state undefined (except for the active render pass), so an
+    * application is required to bind it again.  Invalidate here so binding
+    * the same object used by the secondary cannot be incorrectly elided.
+    */
+   vk_common_CmdExecuteCommands(commandBuffer, commandBufferCount,
+                                pCommandBuffers);
+   hk_cmd_invalidate_graphics_state(cmd);
+   hk_cmd_invalidate_compute_state(cmd);
+}
 
 static VkResult
 hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,

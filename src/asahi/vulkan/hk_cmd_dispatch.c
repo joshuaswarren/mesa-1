@@ -38,7 +38,10 @@ hk_cmd_buffer_begin_compute(struct hk_cmd_buffer *cmd,
 void
 hk_cmd_invalidate_compute_state(struct hk_cmd_buffer *cmd)
 {
+   struct hk_push_descriptor_set *push[HK_MAX_SETS];
+   memcpy(push, cmd->state.cs.descriptors.push, sizeof(push));
    memset(&cmd->state.cs, 0, sizeof(cmd->state.cs));
+   memcpy(cmd->state.cs.descriptors.push, push, sizeof(push));
 }
 
 void
