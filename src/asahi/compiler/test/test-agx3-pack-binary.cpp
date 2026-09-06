@@ -4338,6 +4338,34 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    EXPECT_EQ(memcmp(code.data()+38,pop_native,sizeof(pop_native)),0);
 }
 
+TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index r0l = agx_register(0, AGX_SIZE_16);
+   r0l.cache = true;
+   agx_break_if_icmp(b, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   std::vector<uint8_t> want;
+   const uint16_t src[] = {0, 0};
+   const struct agx3_cf_source_hints live[] = {
+      {false, false}, {false, false},
+   };
+   ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
+                                  AGX3_CF_ICOND_EQ, 0, src, live, 0,
+                                  bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 0, false, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, HalfZeroGnomeSamplerIndexSurvivesBranch)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
