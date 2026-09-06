@@ -457,6 +457,18 @@ if with_tests
     suite : ['asahi'],
   )
 
+  test(
+    'hk_memory_budget_core',
+    executable(
+      'hk_memory_budget_core_test',
+      files('tests/test-hk-memory-budget-core.c'),
+      include_directories : [include_directories('.')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
   if with_platform_x11
     executable(
       'g17p-wsi-triangle',

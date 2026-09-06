@@ -16,6 +16,7 @@
 #include "hk_entrypoints.h"
 #include "hk_image.h"
 #include "hk_instance.h"
+#include "hk_memory_budget_core.h"
 #include "hk_agx3_vdm_decode.h"
 #include "hk_native_descriptor.h"
 #include "hk_private.h"
@@ -201,7 +202,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
-      .EXT_memory_budget = false,
+      .EXT_memory_budget = true,
       .EXT_multi_draw = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_non_seamless_cube_map = true,
@@ -1578,10 +1579,8 @@ hk_GetPhysicalDeviceMemoryProperties2(
              * system-wide and does not include our allocations so we need
              * to add that in.
              */
-            uint64_t budget = MIN2(available + used, heap->size);
-
-            /* Set the budget at 90% of available to avoid thrashing */
-            p->heapBudget[i] = ROUND_DOWN_TO(budget * 9 / 10, 1 << 20);
+            p->heapBudget[i] =
+               hk_memory_budget_B(heap->size, used, available);
          }
 
          /* From the Vulkan 1.3.278 spec:
