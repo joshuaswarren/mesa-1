@@ -1619,6 +1619,10 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 8);
 
    tib = agx_build_tilebuffer_layout(rgba, 1, 2, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.nr_samples == 2 && tib.sample_size_B == 8 &&
+         tib.tile_size == 32 * 32 && !tib.spilled[0]);
+   tib = agx_build_tilebuffer_layout(rgba, 1, 4, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
    return 0;

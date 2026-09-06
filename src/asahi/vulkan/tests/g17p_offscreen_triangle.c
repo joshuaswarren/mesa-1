@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -36,12 +37,33 @@
 #define G17P_HOST_IMAGE_COPY 0
 #endif
 
-#if G17P_HOST_IMAGE_COPY
+#ifndef G17P_MSAA_SAMPLES
+#define G17P_MSAA_SAMPLES 1
+#endif
+
+#if G17P_MSAA_SAMPLES != 1 && G17P_MSAA_SAMPLES != 2
+#error "the G17P qualification fixture covers only 1x and native-default 2x"
+#endif
+
+#if G17P_HOST_IMAGE_COPY && G17P_MSAA_SAMPLES != 1
+#error "the MSAA fixture validates the GPU resolve and copy path"
+#endif
+
+#if G17P_MSAA_SAMPLES == 2
+#define PROBE_NAME "g17p-msaa2-triangle"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
+#define READBACK_GUARD_BYTES 0
+#define READBACK_BYTES IMAGE_BYTES
 #else
 #define PROBE_NAME "g17p-offscreen-triangle"
 #define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 0
+#define READBACK_BYTES IMAGE_BYTES
 #endif
 
 #define VK_FN(name) static PFN_##name name
@@ -150,6 +172,33 @@ fnv1a64(const uint8_t *bytes, size_t size)
    return hash;
 }
 
+static bool
+verify_readback(const uint8_t *map)
+{
+   for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
+      if (map[i] != 0xa5 ||
+          map[READBACK_GUARD_BYTES + IMAGE_BYTES + i] != 0xa5) {
+         fprintf(stderr, PROBE_NAME ": readback guard %zu was modified\n", i);
+         return false;
+      }
+   }
+
+   const uint8_t *pixels = map + READBACK_GUARD_BYTES;
+   static const uint8_t expected[4] = {255, 71, 13, 255};
+   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+      const uint8_t *actual = &pixels[pixel * 4];
+      if (memcmp(actual, expected, sizeof(expected)) != 0) {
+         fprintf(stderr,
+                 PROBE_NAME ": pixel %zu is {%u,%u,%u,%u}, "
+                            "expected {255,71,13,255}\n",
+                 pixel, actual[0], actual[1], actual[2], actual[3]);
+         return false;
+      }
+   }
+
+   return true;
+}
+
 int
 main(void)
 {
@@ -233,6 +282,10 @@ main(void)
    free(physical_devices);
    if (!physical)
       die("no T8140 device has a graphics-and-transfer queue");
+
+   if (!(properties.limits.framebufferColorSampleCounts &
+         (VkSampleCountFlags)G17P_MSAA_SAMPLES))
+      die("requested color sample count is not advertised");
 
    VkFormatProperties format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
@@ -386,13 +439,39 @@ main(void)
    check(vkBindImageMemory(device, image, image_memory, 0),
          "vkBindImageMemory");
 
+#if G17P_MSAA_SAMPLES == 2
+   VkImageCreateInfo msaa_image_info = image_info;
+   msaa_image_info.samples = VK_SAMPLE_COUNT_2_BIT;
+   msaa_image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+   VkImage msaa_image;
+   check(vkCreateImage(device, &msaa_image_info, NULL, &msaa_image),
+         "vkCreateImage(msaa2)");
+   VkMemoryRequirements msaa_image_requirements;
+   vkGetImageMemoryRequirements(device, msaa_image, &msaa_image_requirements);
+   const uint32_t msaa_image_memory_type =
+      find_memory_type(&memory_properties,
+                       msaa_image_requirements.memoryTypeBits,
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+   const VkMemoryAllocateInfo msaa_image_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = msaa_image_requirements.size,
+      .memoryTypeIndex = msaa_image_memory_type,
+   };
+   VkDeviceMemory msaa_image_memory;
+   check(vkAllocateMemory(device, &msaa_image_memory_info, NULL,
+                          &msaa_image_memory),
+         "vkAllocateMemory(msaa2)");
+   check(vkBindImageMemory(device, msaa_image, msaa_image_memory, 0),
+         "vkBindImageMemory(msaa2)");
+#endif
+
 #if G17P_HOST_IMAGE_COPY
    uint8_t readback_storage[IMAGE_BYTES];
    uint8_t *readback_map = readback_storage;
 #else
    const VkBufferCreateInfo readback_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = IMAGE_BYTES,
+      .size = READBACK_BYTES,
       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
@@ -417,11 +496,11 @@ main(void)
    check(vkBindBufferMemory(device, readback, readback_memory, 0),
          "vkBindBufferMemory(readback)");
    uint8_t *readback_map = NULL;
-   check(vkMapMemory(device, readback_memory, 0, IMAGE_BYTES, 0,
+   check(vkMapMemory(device, readback_memory, 0, READBACK_BYTES, 0,
                      (void **)&readback_map),
          "vkMapMemory(readback)");
 #endif
-   memset(readback_map, 0xa5, IMAGE_BYTES);
+   memset(readback_map, 0xa5, READBACK_BYTES);
 
    const VkImageViewCreateInfo view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -438,24 +517,62 @@ main(void)
    check(vkCreateImageView(device, &view_info, NULL, &view),
          "vkCreateImageView");
 
-   const VkAttachmentDescription attachment = {
+#if G17P_MSAA_SAMPLES == 2
+   VkImageViewCreateInfo msaa_view_info = view_info;
+   msaa_view_info.image = msaa_image;
+   VkImageView msaa_view;
+   check(vkCreateImageView(device, &msaa_view_info, NULL, &msaa_view),
+         "vkCreateImageView(msaa2)");
+#endif
+
+   const VkAttachmentDescription attachments[] = {{
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+#if G17P_MSAA_SAMPLES == 2
+      .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+#else
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+#endif
+      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+#if G17P_MSAA_SAMPLES == 2
+      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+#else
+      .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+#endif
+   },
+#if G17P_MSAA_SAMPLES == 2
+   {
       .format = VK_FORMAT_R8G8B8A8_UNORM,
       .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
       .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+   },
+#endif
    };
    const VkAttachmentReference color_ref = {
       .attachment = 0,
       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
    };
+#if G17P_MSAA_SAMPLES == 2
+   const VkAttachmentReference resolve_ref = {
+      .attachment = 1,
+      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+   };
+#endif
    const VkSubpassDescription subpass = {
       .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
       .colorAttachmentCount = 1,
       .pColorAttachments = &color_ref,
+#if G17P_MSAA_SAMPLES == 2
+      .pResolveAttachments = &resolve_ref,
+#endif
    };
    const VkSubpassDependency dependencies[] = {
       {
@@ -476,8 +593,8 @@ main(void)
    };
    const VkRenderPassCreateInfo render_pass_info = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-      .attachmentCount = 1,
-      .pAttachments = &attachment,
+      .attachmentCount = sizeof(attachments) / sizeof(attachments[0]),
+      .pAttachments = attachments,
       .subpassCount = 1,
       .pSubpasses = &subpass,
       .dependencyCount = 2,
@@ -568,7 +685,7 @@ main(void)
    };
    const VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      .rasterizationSamples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
    };
    const VkPipelineColorBlendAttachmentState blend_attachment = {
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -597,11 +714,17 @@ main(void)
                                    NULL, &pipeline),
          "vkCreateGraphicsPipelines");
 
+#if G17P_MSAA_SAMPLES == 2
+   const VkImageView framebuffer_views[] = {msaa_view, view};
+#else
+   const VkImageView framebuffer_views[] = {view};
+#endif
    const VkFramebufferCreateInfo framebuffer_info = {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
       .renderPass = render_pass,
-      .attachmentCount = 1,
-      .pAttachments = &view,
+      .attachmentCount =
+         sizeof(framebuffer_views) / sizeof(framebuffer_views[0]),
+      .pAttachments = framebuffer_views,
       .width = IMAGE_WIDTH,
       .height = IMAGE_HEIGHT,
       .layers = 1,
@@ -653,6 +776,7 @@ main(void)
 
 #if !G17P_HOST_IMAGE_COPY
    const VkBufferImageCopy copy = {
+      .bufferOffset = READBACK_GUARD_BYTES,
       .imageSubresource = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .layerCount = 1,
@@ -676,7 +800,7 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_HOST_IMAGE_COPY
+#if G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES == 2
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000));
    if (waited == VK_TIMEOUT)
@@ -708,19 +832,17 @@ main(void)
          "vkCopyImageToMemoryEXT");
 #endif
 
-   static const uint8_t expected[4] = {255, 71, 13, 255};
-   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
-      const uint8_t *actual = &readback_map[pixel * 4];
-      if (memcmp(actual, expected, sizeof(expected)) != 0) {
-         fprintf(stderr,
-                 PROBE_NAME ": pixel %zu is {%u,%u,%u,%u}, "
-                 "expected {255,71,13,255}\n",
-                 pixel, actual[0], actual[1], actual[2], actual[3]);
-         return EXIT_FAILURE;
-      }
-   }
+   if (!verify_readback(readback_map))
+      return EXIT_FAILURE;
 
-   const uint64_t checksum = fnv1a64(readback_map, IMAGE_BYTES);
+#if G17P_MSAA_SAMPLES == 2
+   sleep(3);
+   if (!verify_readback(readback_map))
+      return EXIT_FAILURE;
+#endif
+
+   const uint64_t checksum =
+      fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
    printf(PROBE_NAME ": PASS — %ux%u RGBA8, checksum "
           "%016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);

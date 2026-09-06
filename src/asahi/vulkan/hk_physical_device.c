@@ -725,10 +725,13 @@ hk_get_device_properties(const struct agx_device *dev,
 
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+   const VkSampleCountFlagBits color_sample_counts =
       dev->chip == AGX_CHIP_G17P
-         ? VK_SAMPLE_COUNT_1_BIT
-         : VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
-              VK_SAMPLE_COUNT_4_BIT;
+         ? VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT
+         : sample_counts;
+   const VkSampleCountFlagBits other_sample_counts =
+      dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
@@ -841,16 +844,16 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxFramebufferHeight = 16384,
       .maxFramebufferWidth = 16384,
       .maxFramebufferLayers = 2048,
-      .framebufferColorSampleCounts = sample_counts,
-      .framebufferDepthSampleCounts = sample_counts,
-      .framebufferNoAttachmentsSampleCounts = sample_counts,
-      .framebufferStencilSampleCounts = sample_counts,
+      .framebufferColorSampleCounts = color_sample_counts,
+      .framebufferDepthSampleCounts = other_sample_counts,
+      .framebufferNoAttachmentsSampleCounts = other_sample_counts,
+      .framebufferStencilSampleCounts = other_sample_counts,
       .maxColorAttachments = HK_MAX_RTS,
-      .sampledImageColorSampleCounts = sample_counts,
-      .sampledImageIntegerSampleCounts = sample_counts,
-      .sampledImageDepthSampleCounts = sample_counts,
-      .sampledImageStencilSampleCounts = sample_counts,
-      .storageImageSampleCounts = sample_counts,
+      .sampledImageColorSampleCounts = other_sample_counts,
+      .sampledImageIntegerSampleCounts = other_sample_counts,
+      .sampledImageDepthSampleCounts = other_sample_counts,
+      .sampledImageStencilSampleCounts = other_sample_counts,
+      .storageImageSampleCounts = other_sample_counts,
       .maxSampleMaskWords = 1,
       .timestampComputeAndGraphics = true,
       /* FIXME: Is timestamp period actually 1? */
@@ -961,7 +964,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .filterMinmaxSingleComponentFormats = instance->fake_minmax,
       .filterMinmaxImageComponentMapping = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
-      .framebufferIntegerColorSampleCounts = sample_counts,
+      .framebufferIntegerColorSampleCounts = other_sample_counts,
 
       /* Vulkan 1.3 properties */
       .minSubgroupSize = 32,
@@ -1074,7 +1077,8 @@ hk_get_device_properties(const struct agx_device *dev,
       .robustUniformBufferAccessSizeAlignment = HK_MIN_UBO_ALIGNMENT,
 
       /* VK_EXT_sample_locations */
-      .sampleLocationSampleCounts = sample_counts & ~VK_SAMPLE_COUNT_1_BIT,
+      .sampleLocationSampleCounts =
+         other_sample_counts & ~VK_SAMPLE_COUNT_1_BIT,
       .maxSampleLocationGridSize = (VkExtent2D){1, 1},
       .sampleLocationCoordinateRange[0] = 0.0f,
       .sampleLocationCoordinateRange[1] = 0.9375f,

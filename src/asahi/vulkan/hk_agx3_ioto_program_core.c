@@ -72,7 +72,7 @@ hk_agx3_g17p_single_layer_rendering(uint32_t view_mask, uint32_t layer_count)
 bool
 hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 {
-   if (!tib || tib->nr_samples != 1 || tib->layered ||
+   if (!tib || (tib->nr_samples != 1 && tib->nr_samples != 2) || tib->layered ||
        tib->tile_size != 32 * 32 || tib->spilled[0])
       return false;
 

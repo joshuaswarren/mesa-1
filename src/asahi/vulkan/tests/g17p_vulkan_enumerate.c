@@ -150,7 +150,7 @@ main(void)
           !strstr(properties.deviceName, "A18 Pro") ||
           !strstr(properties.deviceName, "G17P") ||
           properties.limits.framebufferColorSampleCounts !=
-             VK_SAMPLE_COUNT_1_BIT ||
+             (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT) ||
           !properties.limits.timestampComputeAndGraphics ||
           properties.limits.timestampPeriod != 1.0f ||
           features.geometryShader || features.tessellationShader ||
