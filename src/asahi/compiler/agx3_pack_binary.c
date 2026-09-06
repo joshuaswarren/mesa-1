@@ -2497,8 +2497,8 @@ agx3_cf_is_zero(agx_index src)
 }
 
 /* Emit the compare half of a fused AGX IR control-flow instruction. The flag
- * is consumed by the immediately following cnd instruction, so slot zero can
- * be reused by every lowered IR instruction without overlapping lifetimes. */
+ * is consumed by the immediately following cnd instruction. Loop predicates
+ * use distinct persistent slots by nesting depth; ordinary ifs reuse slot 0. */
 static bool
 agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
                      const agx_instr *I, bool is_float, unsigned flag_slot,
@@ -2751,11 +2751,20 @@ agx3_is_cf_op(const agx_instr *I)
    }
 }
 
+static bool
+agx3_is_nested_loop_push(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_IF_FCMP && I->target == NULL && I->nest == 1 &&
+          I->fcond == AGX_FCOND_EQ && !I->invert_cond && I->nr_srcs == 2 &&
+          agx3_cf_is_zero(I->src[0]) && agx3_cf_is_zero(I->src[1]);
+}
+
 static int
 agx3_try_control_flow(struct util_dynarray *emission,
                       struct util_dynarray *fixups, enum agx_isa_encoding enc,
                       const agx_instr *I, uint16_t wait_mask,
-                      uint16_t outstanding, bool after_loop_backedge)
+                      uint16_t outstanding, bool after_loop_backedge,
+                      unsigned loop_depth)
 {
    const bool is_if =
       I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_IF_FCMP;
@@ -2793,10 +2802,7 @@ agx3_try_control_flow(struct util_dynarray *emission,
    if (I->op == AGX_OPCODE_BEGIN_CF)
       return wait_mask == 0 ? 1 : -1; /* architectural state: zero bytes */
 
-   if (is_if && I->op == AGX_OPCODE_IF_FCMP && I->target == NULL &&
-       I->nest == 1 && I->fcond == AGX_FCOND_EQ && !I->invert_cond &&
-       I->nr_srcs == 2 && agx3_cf_is_zero(I->src[0]) &&
-       agx3_cf_is_zero(I->src[1])) {
+   if (agx3_is_nested_loop_push(I)) {
       /* agx_push_exec(1), used before a nested loop, becomes Apple's
        * unconditional TRUE-slot loop entry and opens two architectural
        * exec-mask levels. No compare is emitted. */
@@ -2824,9 +2830,23 @@ agx3_try_control_flow(struct util_dynarray *emission,
       const bool is_float = I->op == AGX_OPCODE_IF_FCMP ||
                             I->op == AGX_OPCODE_WHILE_FCMP ||
                             I->op == AGX_OPCODE_BREAK_IF_FCMP;
-      if (!agx3_emit_cf_compare(emission, enc, I, is_float, 0, &invert))
+      /* CNDLT predicates are persistent across a backedge. Apple assigns
+       * outer through inner loop predicates to successive flag slots; NEST
+       * is the number of exec-mask levels a break exits and is not this
+       * depth. The linear pack walk tracks each native nested-loop push and
+       * its matching backedge pop. */
+      const unsigned flag_slot = is_break_if || is_while ? loop_depth - 1 : 0;
+      if (flag_slot >= 6 ||
+          !agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
+                                &invert))
          return -1;
-      if (!agx3_emit_cnd(emission, enc, I->op, 0, invert, is_if ? 1 : 2))
+      /* CNDLT retains lanes for which its consumed predicate is true. A
+       * WHILE predicate already means "continue", whereas BREAK_IF names
+       * the complementary lanes that must leave the loop. */
+      if (is_break_if)
+         invert = !invert;
+      if (!agx3_emit_cnd(emission, enc, I->op, flag_slot, invert,
+                         is_if ? 1 : 2))
          return -1;
       return 1;
    }
@@ -3632,6 +3652,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    k = 0;
    unsigned vertex_loads_seen = 0;
+   unsigned loop_depth = 1;
    bool interpolation_started = false;
    if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -3684,12 +3705,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         const int cf = agx3_try_control_flow(emission, &fixups, enc, I,
-                                              cf_wait, cf_outstanding,
-                                              after_loop_backedge);
+         const bool nested_loop_push = agx3_is_nested_loop_push(I);
+         const bool loop_pop =
+            I->op == AGX_OPCODE_POP_EXEC && after_loop_backedge;
+         const int cf = agx3_try_control_flow(
+            emission, &fixups, enc, I, cf_wait, cf_outstanding,
+            after_loop_backedge, loop_depth);
          if (cf < 0)
             AGX3_REFUSE(I);
          if (cf > 0) {
+            if (nested_loop_push)
+               loop_depth++;
+            else if (loop_pop && loop_depth > 1) {
+               loop_depth--;
+            }
             after_loop_backedge = I->op == AGX_OPCODE_JMP_EXEC_ANY;
             continue;
          }

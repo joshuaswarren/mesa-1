@@ -74,7 +74,7 @@ TEST_F(LowerPseudo, LowersAgx3UnconditionalBreak)
    agx_begin_cf(expected);
    agx_break_if_icmp(expected, wx, wy, 1, false, AGX_ICOND_ULT, NULL);
    agx_index r0l = agx_register(0, AGX_SIZE_16);
-   agx_break_if_icmp(expected, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
+   agx_break_if_icmp(expected, r0l, r0l, 2, false, AGX_ICOND_UEQ, NULL);
 
    agx_lower_pseudo(actual->shader);
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);

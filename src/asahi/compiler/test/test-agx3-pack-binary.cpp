@@ -2587,9 +2587,9 @@ TEST_F(AGX3PackBinary, NestedLoopEntryBackedgeAndPop)
       ASSERT_TRUE(agx3_cf_cndst(enc, 6, false, 2, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(
-         agx3_cf_icmp_reg(enc, AGX3_CF_ICOND_ULT, 0, 0, 2, bytes, &len));
+         agx3_cf_icmp_reg(enc, AGX3_CF_ICOND_ULT, 1, 0, 2, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_cf_cndlt(enc, 0, false, bytes, &len));
+      ASSERT_TRUE(agx3_cf_cndlt(enc, 1, false, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, false, bytes, &len));
       ASSERT_EQ(len, AGX3_CF_MAX_LENGTH);
@@ -4407,8 +4407,8 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    const auto code = pack(b);
    const uint8_t prefix[] = {
       0x0f,0x05,0x54,0x1a,
-      0x0a,0x12,0x23,0x00,0x02,0x00,0x17,0x08,0x02,0x00,
-      0x8f,0x04,0x54,0x02,
+      0x2a,0x12,0x23,0x00,0x02,0x00,0x17,0x08,0x02,0x00,
+      0x8f,0x04,0x54,0x26,
    };
    ASSERT_EQ(code.size(),48u);
    EXPECT_EQ(memcmp(code.data(),prefix,sizeof(prefix)),0);
@@ -4450,10 +4450,10 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
       {false, false}, {false, false},
    };
    ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
-                                  AGX3_CF_ICOND_EQ, 0, src, live, 0,
+                                  AGX3_CF_ICOND_EQ, 1, src, live, 0,
                                   bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 0, false, bytes, &len));
+   ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 1, true, bytes, &len));
    append(want, bytes, len);
    const size_t branch_offset = want.size();
    ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));

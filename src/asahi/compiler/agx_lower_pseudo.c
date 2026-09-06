@@ -134,7 +134,7 @@ lower(agx_builder *b, agx_instr *I)
             return NULL;
 
          agx_index r0l = agx_register(0, AGX_SIZE_16);
-         return agx_break_if_icmp(b, r0l, r0l, 1, false, AGX_ICOND_UEQ,
+         return agx_break_if_icmp(b, r0l, r0l, I->nest, false, AGX_ICOND_UEQ,
                                   I->target);
       }
       agx_mov_imm_to(b, agx_register(0, AGX_SIZE_16), I->nest);
