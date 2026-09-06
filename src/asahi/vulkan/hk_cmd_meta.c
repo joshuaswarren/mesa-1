@@ -266,13 +266,25 @@ build_event_wait_shader(void)
    nir_def *value = nir_load_push_constant(
       &b, 1, 32, nir_imm_int(&b, offsetof(struct hk_meta_event_wait_info,
                                           value)));
+   nir_def *zero = nir_load_push_constant(
+      &b, 1, 32,
+      nir_imm_int(&b, offsetof(struct hk_meta_event_wait_info, pad)));
 
+   /* Every recovered AGX3 loop is nested beneath an ordinary conditional:
+    * cndst(push=1), then the loop's unconditional cndst(push=2), cndlt,
+    * backward branch and paired cndend pops.  A bare top-level loop has no
+    * native control-flow witness.  The caller supplies a positive SET value
+    * and the zero pad, making this guard true while retaining the exact
+    * recovered nesting protocol.
+    */
+   nir_if *valid = nir_push_if(&b, nir_ult(&b, zero, value));
    nir_loop *loop = nir_push_loop(&b);
    nir_def *status = nir_load_global(
       &b, 1, 32, address, .align_mul = sizeof(uint32_t),
       .access = ACCESS_COHERENT | ACCESS_VOLATILE);
    nir_break_if(&b, nir_ieq(&b, status, value));
    nir_pop_loop(&b, loop);
+   nir_pop_if(&b, valid);
 
    return b.shader;
 }
