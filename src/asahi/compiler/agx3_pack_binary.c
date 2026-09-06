@@ -2259,16 +2259,14 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
    else
       return false;
 
-   /* Register-index subgroup multiplication is produced by common NIR as a
-    * shuffle tree.  Its first read can consume an asynchronous device load,
-    * but the grounded register-lane shuffle form has no known wait fields.
-    * Retire the dependency with the existing synchronous identity prelude,
-    * then emit the unchanged byte-grounded shuffle. */
-   if (wait_mask != 0) {
-      if (!agx3_retire_slots_noop(emission, enc, wait_mask))
-         return false;
-      wait_mask = 0;
-   }
+   /* The register/uniform-lane native shuffle forms have no witnessed
+    * scoreboard field.  Public shuffles commonly consume values directly
+    * from an asynchronous SSBO/device load, so retire only their concrete
+    * producer slots through the same synchronous identity prelude used by
+    * other no-wait subgroup forms. */
+   if (wait_mask != 0 &&
+       !agx3_retire_slots_noop(emission, enc, wait_mask))
+      return false;
 
    const struct agx3_subgroup_shuffle_desc d = {
       .quad = quad,
@@ -2277,7 +2275,7 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
       .dest = I->dest[0].value,
       .src = I->src[0].value,
       .lane = I->src[1].value,
-      .wait_mask = wait_mask,
+      .wait_mask = 0,
    };
    uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&

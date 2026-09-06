@@ -1133,6 +1133,53 @@ TEST_F(AGX3PackBinary, RegisterAndUniformSubgroupShuffles)
    }
 }
 
+TEST_F(AGX3PackBinary, RegisterSubgroupShufflesWaitForDeviceLoad)
+{
+   for (int e = 0; e < 2; ++e) {
+      const enum agx_isa_encoding enc =
+         e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+      for (unsigned op = 0; op < AGX3_SUBGROUP_SHUFFLE_NUM; ++op) {
+         agx_builder *b = builder(enc);
+         const agx_index value = agx_register(4, AGX_SIZE_32);
+         agx_device_load_to(b, value, agx_register(10, AGX_SIZE_64),
+                            agx_register(14, AGX_SIZE_32), AGX_FORMAT_I32, 1,
+                            2, false);
+         build_shuffle(b, false, op, agx_register(6, AGX_SIZE_32), value,
+                       agx_register(8, AGX_SIZE_32));
+         agx_stop(b);
+
+         std::vector<uint8_t> want;
+         uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+         /* The slot allocator selects slot6 for this AGX3b register-lane
+          * graph and slot1 for the corresponding AGX3c graph. */
+         const uint16_t wait =
+            enc == AGX_ISA_ENCODING_AGX3B ? 1u << 5 : 1u;
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                      wait, bytes, &length));
+         append(want, bytes, length);
+
+         const struct agx3_subgroup_shuffle_desc shuffle = {
+            .op = (enum agx3_subgroup_shuffle_op)op,
+            .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+            .dest = 6,
+            .src = 4,
+            .lane = 8,
+         };
+         ASSERT_TRUE(agx3_subgroup_encode_shuffle(enc, &shuffle, bytes,
+                                                   &length));
+         append(want, bytes, length);
+         struct agx3_encoded_end end;
+         ASSERT_TRUE(agx3_pack_end(enc, &end));
+         append(want, end.bytes, end.length);
+
+         const std::vector<uint8_t> got = pack(b);
+         ASSERT_GE(got.size(), want.size());
+         const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
+         EXPECT_EQ(tail, want);
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, BallotCompareZero)
 {
    for (int e = 0; e < 2; ++e) {
