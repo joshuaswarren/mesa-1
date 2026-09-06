@@ -701,10 +701,6 @@ hk_get_device_features(
       features->sparseResidencyImage2D = false;
       features->sparseResidencyBuffer = false;
       features->multiview = false;
-      /* Multiple HAL200 direct-draw records in one VDM stream deterministically
-       * fault DM1 before TA/3D completion. The native inter-draw framing is
-       * not established, so keep the extension's execution feature closed. */
-      features->multiDraw = false;
       features->transformFeedback = false;
       features->geometryStreams = false;
       /* HAL200's native storage-image fetch is memory-safe, but its TEX
