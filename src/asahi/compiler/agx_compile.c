@@ -2477,7 +2477,7 @@ static agx_index
 agx_g17p_ushr_imm(agx_builder *b, agx_index value, unsigned shift)
 {
    assert(shift >= 1 && shift <= 31);
-   return agx_ushr(b, value, agx_immediate((0u - shift) & 31u));
+   return agx_ushr(b, value, agx_mov_imm(b, 32, 0u - shift));
 }
 
 static agx_index
@@ -2698,15 +2698,14 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
    case nir_op_ishl:
       return agx_bfi_to(b, dst, i0, s0, s1, 0);
    case nir_op_ushr: {
-      /* G17P's native register `srl` operand is a bitfield boundary, so its
-       * effective logical shift is (-operand) & 31.  Convert NIR's ordinary
-       * right-shift count before selecting the witnessed instruction.  This
-       * is observable in 64-bit lowering: for a count of 11, passing 11
-       * extracts the top 11 bits (x >> 21), while passing -11 produces the
-       * required x >> 11. */
+      /* G17P's native register `srl` operand is a signed bitfield boundary.
+       * Convert NIR's ordinary right-shift count to the full-width negative
+       * value before selecting the witnessed instruction.  The upper bits
+       * are significant: -1 performs x >> 1, whereas +31 is a different
+       * operation despite having the same low five bits. */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          if (s1.type == AGX_INDEX_IMMEDIATE) {
-            s1.value = (0u - s1.value) & 31u;
+            s1 = agx_mov_imm(b, 32, 0u - s1.value);
          } else {
             agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
             agx_iadd_to(b, boundary, i0, agx_neg(s1), 0);
