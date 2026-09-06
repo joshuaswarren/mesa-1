@@ -2389,6 +2389,32 @@ agx3_cf_map_icond(enum agx_icond in, enum agx3_cf_icond *out)
    return false;
 }
 
+/* Canonicalize `immediate relation register` to the already-grounded
+ * `register swapped-relation immediate` encoding.  Equality is symmetric;
+ * the four ordered relations exchange LT and GT without changing signedness. */
+static bool
+agx3_cf_swap_icond(enum agx3_cf_icond *cond)
+{
+   switch (*cond) {
+   case AGX3_CF_ICOND_EQ:
+      return true;
+   case AGX3_CF_ICOND_ULT:
+      *cond = AGX3_CF_ICOND_UGT;
+      return true;
+   case AGX3_CF_ICOND_UGT:
+      *cond = AGX3_CF_ICOND_ULT;
+      return true;
+   case AGX3_CF_ICOND_SLT:
+      *cond = AGX3_CF_ICOND_SGT;
+      return true;
+   case AGX3_CF_ICOND_SGT:
+      *cond = AGX3_CF_ICOND_SLT;
+      return true;
+   }
+
+   return false;
+}
+
 /* Normalize Mesa's seven float relations to AGX3's three base conditions,
  * or-NaN selector, and the consuming cnd instruction's invert bit. */
 static bool
@@ -2506,11 +2532,10 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission,bytes,len);
    }
 
-   if (!agx3_cf_reg32(I->src[0]))
-      return false;
-
    bool ok;
    if (is_float) {
+      if (!agx3_cf_reg32(I->src[0]))
+         return false;
       enum agx3_cf_fcond cond;
       bool or_nan;
       if (!agx3_cf_reg32(I->src[1]) ||
@@ -2524,13 +2549,26 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       if (!agx3_cf_map_icond(I->icond, &cond))
          return false;
 
-      if (I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
-          !I->src[1].neg && I->src[1].value <= UINT8_MAX) {
-         ok = agx3_cf_icmp_imm(enc, cond, flag_slot, I->src[0].value,
-                               I->src[1].value, bytes, &len);
-      } else if (agx3_cf_reg32(I->src[1])) {
-         ok = agx3_cf_icmp_reg(enc, cond, flag_slot, I->src[0].value,
-                               I->src[1].value, bytes, &len);
+      agx_index lhs = I->src[0];
+      agx_index rhs = I->src[1];
+      if (lhs.type == AGX_INDEX_IMMEDIATE && !lhs.abs && !lhs.neg &&
+          lhs.value <= UINT8_MAX && agx3_cf_reg32(rhs)) {
+         agx_index temporary = lhs;
+         lhs = rhs;
+         rhs = temporary;
+         if (!agx3_cf_swap_icond(&cond))
+            return false;
+      }
+
+      if (!agx3_cf_reg32(lhs))
+         return false;
+      if (rhs.type == AGX_INDEX_IMMEDIATE && !rhs.abs && !rhs.neg &&
+          rhs.value <= UINT8_MAX) {
+         ok = agx3_cf_icmp_imm(enc, cond, flag_slot, lhs.value, rhs.value,
+                               bytes, &len);
+      } else if (agx3_cf_reg32(rhs)) {
+         ok = agx3_cf_icmp_reg(enc, cond, flag_slot, lhs.value, rhs.value,
+                               bytes, &len);
       } else {
          return false;
       }

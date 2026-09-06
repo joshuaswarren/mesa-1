@@ -2149,6 +2149,46 @@ TEST_F(AGX3PackBinary, AllGroundedComparisonRelations)
    }
 }
 
+TEST_F(AGX3PackBinary, ImmediateLeftIntegerComparisonsCanonicalize)
+{
+   const struct {
+      enum agx_icond mesa;
+      enum agx3_cf_icond swapped;
+   } cases[] = {
+      {AGX_ICOND_UEQ, AGX3_CF_ICOND_EQ},
+      {AGX_ICOND_SEQ, AGX3_CF_ICOND_EQ},
+      {AGX_ICOND_ULT, AGX3_CF_ICOND_UGT},
+      {AGX_ICOND_UGT, AGX3_CF_ICOND_ULT},
+      {AGX_ICOND_SLT, AGX3_CF_ICOND_SGT},
+      {AGX_ICOND_SGT, AGX3_CF_ICOND_SLT},
+   };
+
+   for (int e = 0; e < 2; ++e) {
+      const enum agx_isa_encoding enc =
+         e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+
+      for (const auto &test : cases) {
+         agx_builder *b = builder(enc);
+         agx_if_icmp(b, agx_immediate(15),
+                     agx_register(2, AGX_SIZE_32), 1, test.mesa, false, NULL);
+         agx_stop(b);
+
+         uint8_t bytes[AGX3_CF_MAX_LENGTH];
+         uint8_t len = 0;
+         std::vector<uint8_t> want;
+         ASSERT_TRUE(agx3_cf_icmp_imm(enc, test.swapped, 0, 2, 15, bytes,
+                                      &len));
+         append(want, bytes, len);
+         ASSERT_TRUE(agx3_cf_cndst(enc, 0, false, 1, bytes, &len));
+         append(want, bytes, len);
+         struct agx3_encoded_end end;
+         ASSERT_TRUE(agx3_pack_end(enc, &end));
+         append(want, end.bytes, end.length);
+         EXPECT_EQ(pack(b), want);
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, StructuredIfAndForwardBranch)
 {
    /* One fused AGX IR if becomes icmp + cndst. The optional exec-none jump is
