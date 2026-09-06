@@ -660,6 +660,19 @@ if with_tests
   )
 
   test(
+    'agx3_event_wait',
+    executable(
+      'agx3_event_wait_test',
+      files('test/test-agx3-event-wait.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_pixel_core',
     executable(
       'agx3_pixel_core_test',

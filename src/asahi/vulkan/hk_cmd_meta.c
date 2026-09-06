@@ -240,6 +240,125 @@ hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
    }
 }
 
+enum hk_meta_object_key_type {
+   HK_META_OBJECT_KEY_EVENT_WAIT = VK_META_OBJECT_KEY_DRIVER_OFFSET,
+};
+
+struct hk_meta_event_wait_info {
+   uint64_t address;
+   uint32_t value;
+   uint32_t pad;
+};
+
+static nir_shader *
+build_event_wait_shader(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, NULL, "hk-meta-event-wait");
+
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *address = nir_load_push_constant(
+      &b, 1, 64, nir_imm_int(&b, offsetof(struct hk_meta_event_wait_info,
+                                          address)));
+   nir_def *value = nir_load_push_constant(
+      &b, 1, 32, nir_imm_int(&b, offsetof(struct hk_meta_event_wait_info,
+                                          value)));
+
+   nir_loop *loop = nir_push_loop(&b);
+   nir_def *status = nir_load_global(
+      &b, 1, 32, address, .align_mul = sizeof(uint32_t),
+      .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+   nir_break_if(&b, nir_ieq(&b, status, value));
+   nir_pop_loop(&b, loop);
+
+   return b.shader;
+}
+
+static VkResult
+get_event_wait_pipeline(struct hk_device *dev, VkPipelineLayout *layout_out,
+                        VkPipeline *pipeline_out)
+{
+   const enum hk_meta_object_key_type key = HK_META_OBJECT_KEY_EVENT_WAIT;
+   const VkPushConstantRange push_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = sizeof(struct hk_meta_event_wait_info),
+   };
+
+   VkResult result = vk_meta_get_pipeline_layout(
+      &dev->vk, &dev->meta, NULL, &push_range, &key, sizeof(key), layout_out);
+   if (unlikely(result != VK_SUCCESS))
+      return result;
+
+   VkPipeline cached =
+      vk_meta_lookup_pipeline(&dev->meta, &key, sizeof(key));
+   if (cached != VK_NULL_HANDLE) {
+      *pipeline_out = cached;
+      return VK_SUCCESS;
+   }
+
+   const VkPipelineShaderStageNirCreateInfoMESA nir_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA,
+      .nir = build_event_wait_shader(),
+   };
+   const VkComputePipelineCreateInfo info = {
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .pNext = &nir_info,
+         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+         .pName = "main",
+      },
+      .layout = *layout_out,
+   };
+
+   result = vk_meta_create_compute_pipeline(
+      &dev->vk, &dev->meta, &info, &key, sizeof(key), pipeline_out);
+   ralloc_free(nir_info.nir);
+   return result;
+}
+
+void
+hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
+                       uint32_t value)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (dev->dev.chip != AGX_CHIP_G17P || !address || (address & 3)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   struct hk_meta_save save;
+   hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+
+   VkPipelineLayout layout;
+   VkPipeline pipeline;
+   VkResult result = get_event_wait_pipeline(dev, &layout, &pipeline);
+   if (unlikely(result != VK_SUCCESS)) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      return;
+   }
+
+   const struct hk_meta_event_wait_info args = {
+      .address = address,
+      .value = value,
+   };
+   const struct vk_device_dispatch_table *disp = &dev->vk.dispatch_table;
+   VkCommandBuffer command_buffer = vk_command_buffer_to_handle(&cmd->vk);
+
+   disp->CmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                         pipeline);
+   disp->CmdPushConstants(command_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(args), &args);
+   disp->CmdDispatch(command_buffer, 1, 1, 1);
+
+   hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+}
+
 #define BINDING_OUTPUT 0
 #define BINDING_INPUT  1
 

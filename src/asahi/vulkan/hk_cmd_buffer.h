@@ -978,6 +978,11 @@ void hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
 void hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
                             uint64_t address, uint64_t size, uint32_t value);
 
+/* Poll a naturally aligned 32-bit device address from a native G17P compute
+ * stream until it reaches value. */
+void hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
+                            uint32_t value);
+
 void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                          uint64_t attribs_read, struct agx_velem_key *keys);
 

@@ -116,6 +116,7 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
                   const VkDependencyInfo *pDependencyInfos)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    perf_debug(cmd, "Wait events");
 
    /* The big hammer. Need to check if this is actually needed.
@@ -124,4 +125,19 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
     */
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
+
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      for (uint32_t i = 0; i < eventCount; ++i) {
+         VK_FROM_HANDLE(hk_event, event, pEvents[i]);
+         hk_g17p_meta_wait_addr(cmd, event->addr, VK_EVENT_SET);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return;
+      }
+
+      /* The event poll and every dependency covered by pDependencyInfos must
+       * precede later work.  Closing the polling CDM stream is the existing
+       * full memory-dependency implementation used by PipelineBarrier2. */
+      hk_cmd_buffer_end_compute(cmd);
+      hk_cmd_buffer_end_graphics(cmd);
+   }
 }
