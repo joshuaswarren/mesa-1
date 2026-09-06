@@ -2518,8 +2518,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
       /* agx_lower_pseudo spells an unconditional G17P loop break as the
        * integer identity r0l == r0l.  Register allocation may mark both
-       * occurrences cached because the fixed architectural half has no SSA
-       * definition.  Native half comparisons ground the same live/live
+       * occurrences cached and killed because the fixed architectural half
+       * has no SSA definition.  Native half comparisons ground the live/live
        * register form, and cache/discard are only operand lifetime hints, so
        * normalize this compiler-generated identity back to that form.  Keep
        * every non-identity comparison's independently allocated hints. */
@@ -2533,7 +2533,7 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
          hints[0] = (struct agx3_cf_source_hints){false, false};
          hints[1] = (struct agx3_cf_source_hints){false, false};
       }
-      if (I->src[0].kill || I->src[1].kill ||
+      if ((!unconditional_break && (I->src[0].kill || I->src[1].kill)) ||
           !agx3_cf_map_icond(I->icond, &condition) ||
           !agx3_cf_icmp_reg16(enc, condition, flag_slot, src, hints, 0, bytes, &len))
          return false;

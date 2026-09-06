@@ -4343,6 +4343,7 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index r0l = agx_register(0, AGX_SIZE_16);
    r0l.cache = true;
+   r0l.kill = true;
    agx_break_if_icmp(b, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
    agx_stop(b);
 
