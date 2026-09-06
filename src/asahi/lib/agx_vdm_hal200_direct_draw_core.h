@@ -97,6 +97,33 @@ bool agx_vdm_hal200_indexed_draw_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,
    struct agx_vdm_hal200_indexed_draw *out);
 
+/* Native HAL200 indirect draws use the same context-relative PPP selector as
+ * direct draws, followed by the independently recovered G17P indirect Index
+ * List record. */
+#define AGX_VDM_HAL200_INDIRECT_NONINDEXED_DRAW_LENGTH 16u
+#define AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH 36u
+
+struct agx_vdm_hal200_indirect_draw_fields {
+   uint32_t draw_state_context_offset;
+   uint8_t primitive;
+   bool indexed;
+   uint8_t index_size_B;
+   bool restart_enable;
+   uint32_t restart_index;
+   uint64_t index_buffer;
+   uint32_t index_buffer_range_B;
+   uint64_t indirect_buffer;
+};
+
+struct agx_vdm_hal200_indirect_draw {
+   uint8_t bytes[AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH];
+   uint8_t length;
+};
+
+bool agx_vdm_hal200_indirect_draw_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_indirect_draw_fields *fields,
+   struct agx_vdm_hal200_indirect_draw *out);
+
 #ifdef __cplusplus
 }
 #endif

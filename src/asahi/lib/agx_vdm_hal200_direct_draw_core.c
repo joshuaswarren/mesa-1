@@ -210,3 +210,64 @@ agx_vdm_hal200_indexed_draw_pack(
    out->length = AGX_VDM_HAL200_INDEXED_DRAW_LENGTH;
    return true;
 }
+
+bool
+agx_vdm_hal200_indirect_draw_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_indirect_draw_fields *fields,
+   struct agx_vdm_hal200_indirect_draw *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   if (!out || !fields || chip != AGX_CHIP_G17P ||
+       !fields->draw_state_context_offset ||
+       (fields->draw_state_context_offset & 3) || !fields->indirect_buffer)
+      return false;
+
+   enum agx_vdm_index_list_index_size index_size;
+   switch (fields->index_size_B) {
+   case 1:
+      index_size = AGX_VDM_INDEX_LIST_INDEX_SIZE_U8;
+      break;
+   case 2:
+      index_size = AGX_VDM_INDEX_LIST_INDEX_SIZE_U16;
+      break;
+   case 4:
+      index_size = AGX_VDM_INDEX_LIST_INDEX_SIZE_U32;
+      break;
+   default:
+      index_size = AGX_VDM_INDEX_LIST_INDEX_SIZE_U8;
+      if (fields->indexed)
+         return false;
+      break;
+   }
+
+   uint32_t size_word = 0;
+   if (fields->indexed) {
+      const uint64_t dwords = ((uint64_t)fields->index_buffer_range_B + 3) >> 2;
+      const uint64_t limit = UINT64_C(1) << 48;
+      if (!fields->index_buffer ||
+          (fields->index_buffer & (fields->index_size_B - 1)) ||
+          fields->index_buffer >= limit ||
+          fields->index_buffer_range_B > limit - fields->index_buffer ||
+          dwords == 0 || dwords > UINT32_MAX)
+         return false;
+      size_word = (uint32_t)(dwords - 1);
+   }
+
+   struct agx_vdm_index_list_indirect_words packet;
+   if (!agx_vdm_index_list_indirect_pack_words(
+          chip, fields->primitive, fields->indexed, fields->restart_enable,
+          index_size, fields->index_buffer, fields->indirect_buffer,
+          fields->restart_index, size_word, &packet))
+      return false;
+
+   store_le32(out->bytes, fields->draw_state_context_offset);
+   for (unsigned i = 0; i < packet.count; ++i)
+      store_le32(out->bytes + 4 + 4 * i, packet.words[i]);
+   out->length = 4 + 4 * packet.count;
+
+   return out->length == (fields->indexed
+                             ? AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH
+                             : AGX_VDM_HAL200_INDIRECT_NONINDEXED_DRAW_LENGTH);
+}

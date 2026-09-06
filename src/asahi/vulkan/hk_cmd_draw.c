@@ -4866,23 +4866,34 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    hk_stat_enabled(stat_c_inv) || hk_stat_enabled(stat_c_prims);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* Validate the native direct index span before robustness or geometry
-    * lowering can introduce a pre-render compute dispatch. */
+   /* Validate the native index domain before robustness or geometry lowering
+    * can introduce a pre-render compute dispatch. G17P has a native indirect
+    * Index List, but the software robustness rewrite does not yet publish its
+    * HAL200 draw-state selector, so keep that combination fail-closed. */
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
       uint64_t address;
       uint32_t size_word;
-      if (agx_is_indirect(draw_.b) ||
-          (draw_.index_size != AGX_INDEX_SIZE_U8 &&
+      const bool robust_indirect =
+         agx_is_indirect(draw_.b) &&
+         (dev->vk.enabled_features.robustBufferAccess ||
+          dev->vk.enabled_features.robustBufferAccess2 ||
+          dev->vk.enabled_features.pipelineRobustness);
+      if ((draw_.index_size != AGX_INDEX_SIZE_U8 &&
            draw_.index_size != AGX_INDEX_SIZE_U16 &&
            draw_.index_size != AGX_INDEX_SIZE_U32) ||
-          ia_stats || cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
+          robust_indirect || ia_stats ||
+          cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] ||
-          !agx_vdm_hal200_index_range(
-             draw_.index_buffer, draw_.index_buffer_range_B, draw_.start,
-             draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
-             &address, &size_word)) {
-         mesa_loge("native G17P indexed draw requires an in-bounds direct "
-                   "uint8/uint16/uint32 span without geometry or query lowering");
+          (agx_is_indirect(draw_.b)
+              ? (!draw_.b.ptr || !draw_.index_buffer ||
+                 draw_.index_buffer_range_B == 0)
+              : !agx_vdm_hal200_index_range(
+                   draw_.index_buffer, draw_.index_buffer_range_B, draw_.start,
+                   draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
+                   &address, &size_word))) {
+         mesa_loge("native G17P indexed draw requires an in-bounds "
+                   "uint8/uint16/uint32 span without geometry, query, or "
+                   "indirect robustness lowering");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -5004,13 +5015,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
-            if (agx_is_indirect(draw.b)) {
-               mesa_loge("native HAL200 indirect draw framing is not yet admitted");
-               vk_command_buffer_set_error(&cmd->vk,
-                                           VK_ERROR_FEATURE_NOT_PRESENT);
-               return;
-            }
-
             /* This context-relative PPP record selects the latest scissor
              * and depth-bias array entries. Header0x100 is PPP selector bit8,
              * not a direct-draw shape; +4 contains indices, not enable flags.
@@ -5025,7 +5029,35 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
-            if (draw.indexed) {
+            if (agx_is_indirect(draw.b)) {
+               const struct agx_vdm_hal200_indirect_draw_fields fields = {
+                  .draw_state_context_offset = draw_state_offset,
+                  .primitive = (uint8_t)topology,
+                  .indexed = draw.indexed,
+                  .index_size_B =
+                     draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
+                  .restart_enable = draw.restart,
+                  .restart_index = cmd->state.gfx.index.restart,
+                  .index_buffer = draw.index_buffer,
+                  .index_buffer_range_B = draw.index_buffer_range_B,
+                  .indirect_buffer = draw.b.ptr,
+               };
+               struct agx_vdm_hal200_indirect_draw encoded;
+               if (!agx_vdm_hal200_indirect_draw_pack(dev->dev.chip, &fields,
+                                                       &encoded)) {
+                  vk_command_buffer_set_error(&cmd->vk,
+                                              VK_ERROR_FEATURE_NOT_PRESENT);
+                  return;
+               }
+               memcpy(out, encoded.bytes, encoded.length);
+               cs->current = out + encoded.length;
+               if (hk_g17p_launch_trace_enabled())
+                  hk_g17p_trace_line(draw.indexed
+                                        ? "hal200-indexed-indirect-draw"
+                                        : "hal200-indirect-draw",
+                                     draw.b.ptr, encoded.bytes,
+                                     encoded.length);
+            } else if (draw.indexed) {
                const struct agx_vdm_hal200_indexed_draw_fields fields = {
                   .primitive = (uint8_t)topology,
                   .index_size_B = agx_index_size_to_B(draw.index_size),

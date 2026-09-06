@@ -152,11 +152,67 @@ static void check_native_indexed_domain(void)
    assert(!agx_vdm_hal200_index_range(0x1000, 64, 0, 1, 8, &addr, &size));
 }
 
+static void
+check_native_indirect(void)
+{
+   const struct agx_vdm_hal200_indirect_draw_fields indexed = {
+      .draw_state_context_offset = 0x48000,
+      .primitive = 9,
+      .indexed = true,
+      .index_size_B = 4,
+      .restart_enable = true,
+      .restart_index = UINT32_MAX,
+      .index_buffer = UINT64_C(0x123456789abc),
+      .index_buffer_range_B = UINT32_C(0x4080c100),
+      .indirect_buffer = UINT64_C(0x23456789abc0),
+   };
+   static const uint32_t indexed_expected[] = {
+      0x00048000, 0x40000001, 0xffffffff, 0x64350934,
+      0x56789abc, 0x00002345, 0x6789abc0, 0x1020303f,
+      0x00000012,
+   };
+   struct agx_vdm_hal200_indirect_draw packed;
+   assert(agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &indexed,
+                                             &packed));
+   assert(packed.length == sizeof(indexed_expected));
+   assert(!memcmp(packed.bytes, indexed_expected, sizeof(indexed_expected)));
+
+   const struct agx_vdm_hal200_indirect_draw_fields nonindexed = {
+      .draw_state_context_offset = 0x48000,
+      .primitive = 6,
+      .indirect_buffer = UINT64_C(0x23456789abc0),
+   };
+   static const uint32_t nonindexed_expected[] = {
+      0x00048000, 0x64040600, 0x00002345, 0x6789abc0,
+   };
+   assert(agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &nonindexed,
+                                             &packed));
+   assert(packed.length == sizeof(nonindexed_expected));
+   assert(!memcmp(packed.bytes, nonindexed_expected,
+                  sizeof(nonindexed_expected)));
+
+   struct agx_vdm_hal200_indirect_draw_fields bad = indexed;
+   bad.draw_state_context_offset |= 1;
+   assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &bad, &packed));
+   bad = indexed;
+   bad.index_size_B = 3;
+   assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &bad, &packed));
+   bad = indexed;
+   bad.index_buffer_range_B = 0;
+   assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &bad, &packed));
+   bad = indexed;
+   bad.indirect_buffer |= 2;
+   assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &bad, &packed));
+   assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17G, &indexed,
+                                             &packed));
+}
+
 int
 main(void)
 {
    check_indexed();
    check_native_indexed_domain();
+   check_native_indirect();
    const struct agx_vdm_hal200_direct_draw_fields fields = {
       .draw_state_context_offset = 0x48000,
       .primitive = 6,
@@ -227,6 +283,6 @@ main(void)
       assert(!agx_vdm_hal200_direct_draw_unpack(
          AGX_CHIP_G17P, stream, size, &unpacked));
    assert(!agx_vdm_hal200_direct_draw_pack(AGX_CHIP_G17G, &fields, &packed));
-   puts("PASS: preserved native U16 golden; 240 width/topology/restart/instance packets, signed base vertices and range boundaries");
+   puts("PASS: native HAL200 direct/indexed/indirect framing and checked ranges");
    return 0;
 }
