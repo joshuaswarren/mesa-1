@@ -5721,14 +5721,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
                 src.abs || src.neg)
                AGX3_REFUSE(I);
-            /* Apple's G17P FT1 forms carry wait0. Hardware exposes a staged
-             * intermediate result without it even when the ordinary slot
-             * pass considers an earlier shared consumer synchronized. */
+            /* Apple's G17P clz FT1 carries wait0 and the cached destination
+             * form (op-enable 3). The uncached/op-enable-2 combination with
+             * a discarded source exposes the internal logarithmic stage
+             * instead of the completed bit index. */
             const uint16_t ft1_wait = wait | 1u;
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
             if (!agx3_alu_ft1_u32(enc, dest.value, src.value,
                                   agx3_post_ra_hint(src),
-                                  dest.cache, ft1_wait, bytes, &length) ||
+                                  true, ft1_wait, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
