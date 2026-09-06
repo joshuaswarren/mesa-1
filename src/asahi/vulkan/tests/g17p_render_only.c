@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -80,6 +81,7 @@ VK_FN(vkCreateQueryPool);
 VK_FN(vkCmdResetQueryPool);
 VK_FN(vkCmdBeginQuery);
 VK_FN(vkCmdEndQuery);
+VK_FN(vkCmdWriteTimestamp);
 VK_FN(vkGetQueryPoolResults);
 #endif
 
@@ -255,6 +257,25 @@ main(void)
    vkGetPhysicalDeviceFeatures(physical, &physical_features);
    if (!physical_features.occlusionQueryPrecise)
       die("T8140 does not advertise precise occlusion queries");
+   if (physical_features.pipelineStatisticsQuery)
+      die("T8140 unexpectedly advertises ungrounded pipeline statistics");
+   if (!properties.limits.timestampComputeAndGraphics ||
+       properties.limits.timestampPeriod != 1.0f)
+      die("T8140 timestamp properties differ from the bounded profile");
+
+   uint32_t query_queue_count = 0;
+   vkGetPhysicalDeviceQueueFamilyProperties(physical, &query_queue_count,
+                                             NULL);
+   VkQueueFamilyProperties *query_queues =
+      calloc(query_queue_count, sizeof(*query_queues));
+   if (!query_queues)
+      die("out of host memory");
+   vkGetPhysicalDeviceQueueFamilyProperties(physical, &query_queue_count,
+                                             query_queues);
+   if (queue_family >= query_queue_count ||
+       query_queues[queue_family].timestampValidBits != 64)
+      die("T8140 graphics queue does not expose exact 64-bit timestamps");
+   free(query_queues);
 #endif
 
    const float queue_priority = 1.0f;
@@ -310,6 +331,7 @@ main(void)
    LOAD_DEVICE(device, vkCmdResetQueryPool);
    LOAD_DEVICE(device, vkCmdBeginQuery);
    LOAD_DEVICE(device, vkCmdEndQuery);
+   LOAD_DEVICE(device, vkCmdWriteTimestamp);
    LOAD_DEVICE(device, vkGetQueryPoolResults);
 #endif
 
@@ -615,12 +637,23 @@ main(void)
    const VkQueryPoolCreateInfo query_info = {
       .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
       .queryType = VK_QUERY_TYPE_OCCLUSION,
-      .queryCount = 1,
+      .queryCount = 2,
    };
-   VkQueryPool query_pool;
-   check(vkCreateQueryPool(device, &query_info, NULL, &query_pool),
+   VkQueryPool occlusion_pool;
+   check(vkCreateQueryPool(device, &query_info, NULL, &occlusion_pool),
          "vkCreateQueryPool(occlusion)");
-   vkCmdResetQueryPool(command_buffer, query_pool, 0, 1);
+   const VkQueryPoolCreateInfo timestamp_info = {
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_TIMESTAMP,
+      .queryCount = 2,
+   };
+   VkQueryPool timestamp_pool;
+   check(vkCreateQueryPool(device, &timestamp_info, NULL, &timestamp_pool),
+         "vkCreateQueryPool(timestamp)");
+   vkCmdResetQueryPool(command_buffer, occlusion_pool, 0, 2);
+   vkCmdResetQueryPool(command_buffer, timestamp_pool, 0, 2);
+   vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       timestamp_pool, 0);
 #endif
    const VkClearValue clear = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
    const VkRenderPassBeginInfo render_begin = {
@@ -639,14 +672,24 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
 #ifdef G17P_OCCLUSION_QUERY
-   vkCmdBeginQuery(command_buffer, query_pool, 0,
+   vkCmdBeginQuery(command_buffer, occlusion_pool, 0,
                    VK_QUERY_CONTROL_PRECISE_BIT);
 #endif
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #ifdef G17P_OCCLUSION_QUERY
-   vkCmdEndQuery(command_buffer, query_pool, 0);
+   vkCmdEndQuery(command_buffer, occlusion_pool, 0);
+   /* A second, empty precise interval proves reset and post-graphics
+    * availability independently of the nonzero hardware counter. */
+   vkCmdBeginQuery(command_buffer, occlusion_pool, 1,
+                   VK_QUERY_CONTROL_PRECISE_BIT);
+   vkCmdEndQuery(command_buffer, occlusion_pool, 1);
 #endif
    vkCmdEndRenderPass(command_buffer);
+
+#ifdef G17P_OCCLUSION_QUERY
+   vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                       timestamp_pool, 1);
+#endif
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
@@ -688,24 +731,49 @@ main(void)
    }
 
 #ifdef G17P_OCCLUSION_QUERY
-   struct {
+   struct query_result {
       uint64_t samples;
       uint64_t available;
-   } query_result = {0};
-   check(vkGetQueryPoolResults(device, query_pool, 0, 1,
-                               sizeof(query_result), &query_result,
-                               sizeof(query_result),
+   } query_results[2] = {{0}};
+   check(vkGetQueryPoolResults(device, occlusion_pool, 0, 2,
+                               sizeof(query_results), query_results,
+                               sizeof(query_results[0]),
                                VK_QUERY_RESULT_64_BIT |
+                                  VK_QUERY_RESULT_WAIT_BIT |
                                   VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
          "vkGetQueryPoolResults(occlusion)");
    fprintf(stderr,
-           "g17p-render-only: occlusion samples=%" PRIu64
-           " available=%" PRIu64 " expected=%u\n",
-           query_result.samples, query_result.available,
+           "g17p-render-only: occlusion samples=[%" PRIu64 ",%" PRIu64
+           "] available=[%" PRIu64 ",%" PRIu64 "] expected=[%u,0]\n",
+           query_results[0].samples, query_results[1].samples,
+           query_results[0].available, query_results[1].available,
            IMAGE_WIDTH * IMAGE_HEIGHT);
-   if (query_result.available != 1 ||
-       query_result.samples != IMAGE_WIDTH * IMAGE_HEIGHT)
-      die("precise occlusion result differs from the full viewport");
+   if (query_results[0].available != 1 || query_results[1].available != 1 ||
+       query_results[0].samples != IMAGE_WIDTH * IMAGE_HEIGHT ||
+       query_results[1].samples != 0)
+      die("precise occlusion results differ from full and empty intervals");
+
+   struct timestamp_result {
+      uint64_t value;
+      uint64_t available;
+   } timestamp_results[2] = {{0}};
+   check(vkGetQueryPoolResults(device, timestamp_pool, 0, 2,
+                               sizeof(timestamp_results), timestamp_results,
+                               sizeof(timestamp_results[0]),
+                               VK_QUERY_RESULT_64_BIT |
+                                  VK_QUERY_RESULT_WAIT_BIT |
+                                  VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+         "vkGetQueryPoolResults(timestamp)");
+   fprintf(stderr,
+           "g17p-render-only: timestamps=[%" PRIu64 ",%" PRIu64
+           "] available=[%" PRIu64 ",%" PRIu64 "]\n",
+           timestamp_results[0].value, timestamp_results[1].value,
+           timestamp_results[0].available, timestamp_results[1].available);
+   if (timestamp_results[0].available != 1 ||
+       timestamp_results[1].available != 1 ||
+       timestamp_results[0].value == 0 ||
+       timestamp_results[1].value <= timestamp_results[0].value)
+      die("timestamp interval is unavailable, zero, or non-increasing");
 #endif
 
    /* Verify PIXELS, not just the fence. The clear is opaque black and the
@@ -720,7 +788,7 @@ main(void)
    check(vkMapMemory(device, image_memory, 0, IMAGE_BYTES, 0,
                      (void **)&pixels),
          "vkMapMemory(image)");
-   unsigned cleared = 0, drawn = 0;
+   unsigned exact = 0;
    uint32_t first = 0;
    for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; i++) {
       const uint8_t r = pixels[i * 4 + 0], g = pixels[i * 4 + 1];
@@ -728,14 +796,12 @@ main(void)
       if (i == 0)
          first = ((uint32_t)r << 24) | ((uint32_t)g << 16) |
                  ((uint32_t)b << 8) | a;
-      if (r == 0 && g == 0 && b == 0)
-         cleared++;
-      else
-         drawn++;
+      if (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
+         exact++;
    }
    fprintf(stderr,
-           "g17p-render-only: pixels drawn=%u cleared=%u first=%#010x\n",
-           drawn, cleared, first);
+           "g17p-render-only: pixels exact=%u/%u first=%#010x\n",
+           exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
    for (unsigned y = 0; y < IMAGE_HEIGHT; y += 4) {
       char row[IMAGE_WIDTH / 2 + 1];
       for (unsigned x = 0; x < IMAGE_WIDTH; x += 2) {
@@ -745,12 +811,46 @@ main(void)
       row[IMAGE_WIDTH / 2] = 0;
       fprintf(stderr, "g17p-render-only: |%s|\n", row);
    }
-   if (drawn == 0) {
-      printf("g17p-render-only: FAIL - fence signalled but every pixel is the "
-             "clear colour; nothing was drawn\n");
-      return EXIT_FAILURE;
+   if (exact != IMAGE_WIDTH * IMAGE_HEIGHT)
+      die("render target differs from exact RGBA8 draw colour");
+   if (memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
+      die("vertex source changed during query render");
+
+#ifdef G17P_OCCLUSION_QUERY
+   sleep(3);
+   struct query_result stable_queries[2] = {{0}};
+   struct timestamp_result stable_timestamps[2] = {{0}};
+   check(vkGetQueryPoolResults(device, occlusion_pool, 0, 2,
+                               sizeof(stable_queries), stable_queries,
+                               sizeof(stable_queries[0]),
+                               VK_QUERY_RESULT_64_BIT |
+                                  VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+         "vkGetQueryPoolResults(occlusion stable)");
+   check(vkGetQueryPoolResults(device, timestamp_pool, 0, 2,
+                               sizeof(stable_timestamps), stable_timestamps,
+                               sizeof(stable_timestamps[0]),
+                               VK_QUERY_RESULT_64_BIT |
+                                  VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+         "vkGetQueryPoolResults(timestamp stable)");
+   if (memcmp(stable_queries, query_results, sizeof(query_results)) != 0 ||
+       memcmp(stable_timestamps, timestamp_results,
+              sizeof(timestamp_results)) != 0 ||
+       memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
+      die("query results or source changed after three seconds");
+   for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; ++i) {
+      const uint8_t *p = &pixels[i * 4];
+      if (p[0] != 0xff || p[1] != 0x47 || p[2] != 0x0d || p[3] != 0xff)
+         die("render target changed after three seconds");
    }
-   printf("g17p-render-only: PASS - %ux%u RGBA8, %u/%u pixels drawn\n",
-          IMAGE_WIDTH, IMAGE_HEIGHT, drawn, IMAGE_WIDTH * IMAGE_HEIGHT);
+#endif
+
+   printf("g17p-render-only: PASS - %ux%u RGBA8, %u/%u exact pixels%s\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, exact, IMAGE_WIDTH * IMAGE_HEIGHT,
+#ifdef G17P_OCCLUSION_QUERY
+          ", precise occlusion + timestamp interval stable"
+#else
+          ""
+#endif
+   );
    return EXIT_SUCCESS;
 }

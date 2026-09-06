@@ -80,6 +80,8 @@ has_bounded_g17p_queue(VkPhysicalDevice physical)
                                     VK_QUEUE_SPARSE_BINDING_BIT;
       if ((queues[i].queueFlags & required) == required &&
           !(queues[i].queueFlags & deferred) && queues[i].queueCount == 1) {
+         if (queues[i].timestampValidBits != 64)
+            continue;
          found = true;
          break;
       }
@@ -149,8 +151,11 @@ main(void)
           !strstr(properties.deviceName, "G17P") ||
           properties.limits.framebufferColorSampleCounts !=
              VK_SAMPLE_COUNT_1_BIT ||
+          !properties.limits.timestampComputeAndGraphics ||
+          properties.limits.timestampPeriod != 1.0f ||
           features.geometryShader || features.tessellationShader ||
           !features.samplerAnisotropy || features.sparseBinding ||
+          !features.occlusionQueryPrecise || features.pipelineStatisticsQuery ||
           !has_bounded_g17p_queue(devices[i])) {
          die("T8140/G17P properties do not match the bounded profile");
       }
