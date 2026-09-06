@@ -340,44 +340,81 @@ static bool
 check_device_atomic_compute(enum agx_isa_encoding encoding)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   static const struct {
+      nir_atomic_op op;
+      const char *name;
+   } cases[] = {
+      {nir_atomic_op_iadd, "add"},   {nir_atomic_op_imin, "imin"},
+      {nir_atomic_op_umin, "umin"}, {nir_atomic_op_imax, "imax"},
+      {nir_atomic_op_umax, "umax"}, {nir_atomic_op_xchg, "xchg"},
+      {nir_atomic_op_cmpxchg, "cmpxchg"},
+   };
 
-   nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 device atomic");
-   b.shader->info.workgroup_size[0] = 1;
-   b.shader->info.workgroup_size[1] = 1;
-   b.shader->info.workgroup_size[2] = 1;
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 device atomic family");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
 
-   nir_def *address = nir_imm_int64(&b, 0x1000);
-   nir_def *old = nir_global_atomic(&b, 32, address, nir_imm_int(&b, 1),
-                                    .atomic_op = nir_atomic_op_iadd);
-   nir_store_global(&b, old, nir_iadd_imm(&b, address, sizeof(uint32_t)),
-                    .align_mul = sizeof(uint32_t));
-   agx_preprocess_nir(b.shader);
+      nir_def *address = nir_imm_int64(&b, 0x1000);
+      nir_def *value_address = nir_imm_int64(&b, 0x2000);
+      nir_def *value = nir_load_global(&b, 1, 32, value_address,
+                                       .align_mul = sizeof(uint32_t));
+      nir_def *old;
+      if (cases[i].op == nir_atomic_op_cmpxchg) {
+         nir_def *replacement = nir_load_global(
+            &b, 1, 32,
+            nir_iadd_imm(&b, value_address, sizeof(uint32_t)),
+            .align_mul = sizeof(uint32_t));
+         old = nir_global_atomic_swap(&b, 32, address, value, replacement,
+                                      .atomic_op = nir_atomic_op_cmpxchg);
+      } else {
+         old = nir_global_atomic(&b, 32, address, value,
+                                 .atomic_op = cases[i].op);
+      }
 
-   struct agx_shader_key key = {0};
-   key.dev.encoding = encoding;
-   struct agx_shader_part part = {0};
+      /* Keep both the returned-old value and the input live.  AGX3b must copy
+       * a live scalar input to a private register before using its in-place
+       * return form; cmpxchg must preserve [replacement, compare] ordering.
+       */
+      nir_store_global(&b, old, nir_imm_int64(&b, 0x3000),
+                       .align_mul = sizeof(uint32_t));
+      nir_store_global(&b, value, nir_imm_int64(&b, 0x3004),
+                       .align_mul = sizeof(uint32_t));
+      agx_preprocess_nir(b.shader);
 
-   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
-      fprintf(stderr, "AGX3 device-atomic compute shader was rejected\n");
+      struct agx_shader_key key = {0};
+      key.dev.encoding = encoding;
+      struct agx_shader_part part = {0};
+
+      if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+         fprintf(stderr, "AGX3 device atomic %s was rejected\n",
+                 cases[i].name);
+         ralloc_free(b.shader);
+         return false;
+      }
+
+      const bool valid =
+         part.binary != NULL && part.info.binary_size > sizeof(end) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == part.info.binary_size &&
+         part.info.stats.instrs >= 6 &&
+         memcmp((const uint8_t *)part.binary +
+                   part.info.binary_size - sizeof(end),
+                end, sizeof(end)) == 0;
+
+      if (!valid)
+         fprintf(stderr, "AGX3 device atomic %s metadata/binary mismatch\n",
+                 cases[i].name);
+
+      free(part.binary);
       ralloc_free(b.shader);
-      return false;
+      if (!valid)
+         return false;
    }
 
-   const bool valid =
-      part.binary != NULL && part.info.binary_size > sizeof(end) &&
-      part.info.main_offset == 0 &&
-      part.info.main_size == part.info.binary_size &&
-      part.info.stats.instrs >= 4 &&
-      memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
-             end, sizeof(end)) == 0;
-
-   if (!valid)
-      fprintf(stderr, "AGX3 device-atomic metadata/binary mismatch\n");
-
-   free(part.binary);
-   ralloc_free(b.shader);
-   return valid;
+   return true;
 }
 
 static bool
@@ -933,7 +970,7 @@ check_uniform_alu_policy(void)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
@@ -942,6 +979,18 @@ main(void)
 
    /* glsl_array_type() in the constant-array case needs the type singleton. */
    glsl_type_singleton_init_or_ref();
+
+   if (argc == 2 && strcmp(argv[1], "--device-atomics-only") == 0) {
+      for (unsigned i = 0; i < ARRAY_SIZE(encodings); ++i) {
+         if (!check_device_atomic_compute(encodings[i]))
+            return 1;
+      }
+      return 0;
+   }
+   if (argc != 1) {
+      fprintf(stderr, "usage: %s [--device-atomics-only]\n", argv[0]);
+      return 1;
+   }
 
    if (!check_uniform_alu_policy())
       return 1;

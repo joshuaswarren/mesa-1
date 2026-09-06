@@ -1237,6 +1237,33 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          continue;
       }
 
+      /* AGX3b device atomics return the old value in-place over their value
+       * operand.  When that operand dies here, assign the destination to its
+       * exact base before the generic allocator can choose a different free
+       * region.  This also handles cmpxchg: its two-channel
+       * [replacement, compare] source dies as a unit while the scalar return
+       * occupies the first channel.  Scalar returned atomics were given a
+       * private value above, so their source is guaranteed to die here.
+       */
+      if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
+          !agx_is_null(I->dest[0]) && I->src[0].type == AGX_INDEX_NORMAL &&
+          I->src[0].kill) {
+         const unsigned reg = ssa_to_reg[I->src[0].value];
+
+         kill_source(rctx, I, 0);
+         assign_regs(rctx, I->dest[0], reg);
+
+         for (unsigned s = 1; s < I->nr_srcs; ++s) {
+            if (I->src[s].type == AGX_INDEX_NORMAL && I->src[s].kill)
+               kill_source(rctx, I, s);
+         }
+
+         agx_set_sources(rctx, I);
+         agx_set_dests(rctx, I);
+         continue;
+      }
+
       /* Search for regions of contiguous killed sources to early-kill. */
       rctx->early_killed = false;
 
@@ -1432,9 +1459,33 @@ lower_exports(agx_context *ctx)
    agx_emit_parallel_copies(&b, copies, nr);
 }
 
+/* AGX3b device atomics return the old value by overwriting the value operand.
+ * Give every scalar returning atomic a private sacrificial value before
+ * liveness is computed.  This is required when a source-level value (commonly
+ * a CSE'd constant) remains live after the atomic.  cmpxchg already arrives as
+ * a private two-channel collect built specifically for the instruction.
+ */
+static void
+agx_lower_agx3b_atomic_returns(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_ATOMIC || I->nr_dests != 1 ||
+          agx_is_null(I->dest[0]) || I->atomic_opc == AGX_ATOMIC_OPC_CMPXCHG)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_replace_src(I, 0, agx_mov(&b, I->src[0]));
+   }
+}
+
 void
 agx_ra(agx_context *ctx)
 {
+   agx_lower_agx3b_atomic_returns(ctx);
+
    bool force_spilling =
       (agx_compiler_debug & AGX_DBG_SPILL) && ctx->key->has_scratch;
 
