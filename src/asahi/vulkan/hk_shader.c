@@ -1153,6 +1153,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(_, nir, agx_nir_lower_g17p_cube_samples);
       nir_shader *candidate = nir_shader_clone(NULL, nir);
       struct agx_g17p_combined_sampler_binding binding;
       if (candidate &&

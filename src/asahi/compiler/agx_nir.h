@@ -40,6 +40,8 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
 bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
 
+bool agx_nir_lower_g17p_cube_samples(struct nir_shader *s);
+
 struct agx_g17p_combined_sampler_binding {
    uint32_t texture_offset_B;
    uint32_t sampler_index_offset_B;

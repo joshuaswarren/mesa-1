@@ -369,6 +369,143 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 }
 
 static bool
+g17p_cube_sample_shape(const nir_tex_instr *tex)
+{
+   if (tex->op != nir_texop_tex ||
+       tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE || tex->is_array ||
+       tex->is_shadow || tex->is_sparse || tex->coord_components != 3 ||
+       tex->num_srcs != 3 ||
+       (tex->backend_flags & ~AGX_TEXTURE_FLAG_CLAMP_TO_0) != 0 ||
+       tex->dest_type != nir_type_float32 || tex->def.num_components != 4 ||
+       tex->def.bit_size != 32 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0)
+      return false;
+
+   int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord < 0)
+      coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+
+   return coord >= 0 && nir_src_num_components(tex->src[coord].src) == 3 &&
+          nir_src_bit_size(tex->src[coord].src) == 32;
+}
+
+/* Lower the exact implicit, non-array cube sample to the already-qualified
+ * G17P 2D-array path. Cube images are six consecutive 2D layers; select the
+ * major axis and map its face coordinate to [0, 1] before the ordinary array
+ * layer marshalling pass. The face ordering and transforms are the Vulkan/GL
+ * cube convention (the same mapping used by Mesa's software samplers). */
+bool
+agx_nir_lower_g17p_cube_samples(nir_shader *shader)
+{
+   if (!shader || shader->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+
+   unsigned cubes = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE)
+               continue;
+            if (!g17p_cube_sample_shape(tex))
+               return false;
+            cubes++;
+         }
+      }
+   }
+
+   if (!cubes)
+      return false;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_builder b = nir_builder_create(impl);
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            if (tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE)
+               continue;
+
+            int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+            if (coord_index < 0)
+               coord_index =
+                  nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+
+            nir_def *coord = tex->src[coord_index].src.ssa;
+            b.cursor = nir_before_instr(instr);
+            nir_def *x = nir_channel(&b, coord, 0);
+            nir_def *y = nir_channel(&b, coord, 1);
+            nir_def *z = nir_channel(&b, coord, 2);
+            nir_def *x2 = nir_fmul(&b, x, x);
+            nir_def *y2 = nir_fmul(&b, y, y);
+            nir_def *z2 = nir_fmul(&b, z, z);
+            nir_def *half = nir_imm_float(&b, 0.5f);
+
+            nir_def *x_positive = nir_fge_imm(&b, x, 0.0f);
+            nir_def *y_positive = nir_fge_imm(&b, y, 0.0f);
+            nir_def *z_positive = nir_fge_imm(&b, z, 0.0f);
+
+            /* rsqrt(c*c) gives 1/abs(c) without materializing fabs/fneg,
+             * whose standalone AGX3 forms are not yet qualified. */
+            nir_def *rx = nir_frsq(&b, x2);
+            nir_def *ry = nir_frsq(&b, y2);
+            nir_def *rz = nir_frsq(&b, z2);
+            nir_def *px = nir_fmul_imm(&b, rx, 0.5f);
+            nir_def *nx = nir_fmul_imm(&b, rx, -0.5f);
+            nir_def *py = nir_fmul_imm(&b, ry, 0.5f);
+            nir_def *ny = nir_fmul_imm(&b, ry, -0.5f);
+            nir_def *pz = nir_fmul_imm(&b, rz, 0.5f);
+            nir_def *nz = nir_fmul_imm(&b, rz, -0.5f);
+
+            nir_def *face_x = nir_vec3(
+               &b,
+               nir_bcsel(&b, x_positive, nir_ffma(&b, nx, z, half),
+                          nir_ffma(&b, px, z, half)),
+               nir_ffma(&b, nx, y, half),
+               nir_bcsel(&b, x_positive, nir_imm_float(&b, 0.0f),
+                          nir_imm_float(&b, 1.0f)));
+            nir_def *face_y = nir_vec3(
+               &b, nir_ffma(&b, py, x, half),
+               nir_bcsel(&b, y_positive, nir_ffma(&b, py, z, half),
+                          nir_ffma(&b, ny, z, half)),
+               nir_bcsel(&b, y_positive, nir_imm_float(&b, 2.0f),
+                          nir_imm_float(&b, 3.0f)));
+            nir_def *face_z = nir_vec3(
+               &b,
+               nir_bcsel(&b, z_positive, nir_ffma(&b, pz, x, half),
+                          nir_ffma(&b, nz, x, half)),
+               nir_ffma(&b, nz, y, half),
+               nir_bcsel(&b, z_positive, nir_imm_float(&b, 4.0f),
+                          nir_imm_float(&b, 5.0f)));
+
+            nir_def *use_x = nir_iand(&b, nir_fge(&b, x2, y2),
+                                      nir_fge(&b, x2, z2));
+            nir_def *use_y = nir_iand(&b, nir_fge(&b, y2, x2),
+                                      nir_fge(&b, y2, z2));
+            nir_def *mapped = nir_bcsel(
+               &b, use_x, face_x, nir_bcsel(&b, use_y, face_y, face_z));
+
+            nir_src_rewrite(&tex->src[coord_index].src, mapped);
+            tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+            tex->is_array = true;
+            tex->array_is_lowered_cube = true;
+         }
+      }
+
+      nir_progress(true, impl, nir_metadata_control_flow);
+   }
+
+   NIR_PASS(_, shader, nir_opt_dce);
+   return true;
+}
+
+static bool
 g17p_txf_shape(const nir_tex_instr *tex)
 {
    if (tex->op != nir_texop_txf ||

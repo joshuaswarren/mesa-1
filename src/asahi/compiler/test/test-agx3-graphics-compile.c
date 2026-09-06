@@ -1018,6 +1018,78 @@ test_indexed_sampler_sets(void)
    return ok;
 }
 
+static bool
+lower_test_descriptor_set(nir_builder *b, nir_intrinsic_instr *intr,
+                          UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_descriptor_set_agx)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def,
+                   nir_load_preamble(b, 1, 64,
+                                     .base = 4 * nir_intrinsic_desc_set(intr)));
+   return true;
+}
+
+static bool
+test_g17p_cube_sample_lowering(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P cube sample lowering");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *coord = nir_load_interpolated_input(
+      &b, 3, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *image =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+   nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+   nir_def *heap_index = nir_load_global_constant(
+      &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2,
+      .access = ACCESS_CAN_SPECULATE);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 32), heap_index, .desc_set = 0);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   bool ok = agx_nir_lower_g17p_cube_samples(b.shader) &&
+             tex->sampler_dim == GLSL_SAMPLER_DIM_2D && tex->is_array &&
+             tex->array_is_lowered_cube && tex->coord_components == 3;
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   ok &= ci >= 0 && nir_src_num_components(tex->src[ci].src) == 3 &&
+         agx_nir_lower_g17p_indexed_samplers(b.shader);
+
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   key.reserved_preamble = 24;
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_tex_instr *
 custom_border_sample(nir_builder *b, nir_def *image, nir_def *sampler,
                      nir_def *coord, unsigned flags)
@@ -2101,6 +2173,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--cube-sample-lowering-only")) {
+      const bool ok = test_g17p_cube_sample_lowering();
+      fprintf(stderr, "G17P cube-to-array sample lowering: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -2132,6 +2210,11 @@ main(int argc, char **argv)
 
    if (!test_sampled_storage_lowering()) {
       fputs("sampled storage-image lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_cube_sample_lowering()) {
+      fputs("cube-to-array sample lowering mismatch\n", stderr);
       all_ok = false;
    }
 
