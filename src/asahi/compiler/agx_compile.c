@@ -1307,6 +1307,37 @@ agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
    }
 }
 
+bool
+agx_lower_agx3_device_atomic_sources(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_ATOMIC || I->atomic_opc == AGX_ATOMIC_OPC_CMPXCHG ||
+          I->nr_dests != 1 || I->nr_srcs != 3 || agx_is_null(I->dest[0]) ||
+          I->dest[0].type != AGX_INDEX_NORMAL ||
+          I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+          I->src[0].type != AGX_INDEX_NORMAL ||
+          I->src[0].size != AGX_SIZE_32 || agx_channels(I->src[0]) != 1)
+         continue;
+
+      /* Native G17P atomicdev has one GPR field (field16) for both the input
+       * value and returned old value.  Copy the SSA value to a last-use
+       * temporary; RA then assigns the atomic destination to that temporary's
+       * physical register.  The address index remains an independent live
+       * operand and can never be overwritten by this legalization. */
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index tied = agx_temp(ctx, AGX_SIZE_32);
+      agx_mov_to(&b, tied, I->src[0]);
+      I->src[0] = tied;
+      progress = true;
+   }
+
+   return progress;
+}
+
 static enum agx_format
 format_for_bitsize(unsigned bitsize)
 {
@@ -4242,6 +4273,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_validate(ctx, "agx_optimize_g17p_imul_high_div3");
       AGX_PASS(ctx, agx_dce, true);
    }
+
+   AGX_PASS(ctx, agx_lower_agx3_device_atomic_sources);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);

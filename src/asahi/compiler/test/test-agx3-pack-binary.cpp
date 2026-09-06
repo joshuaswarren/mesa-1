@@ -614,6 +614,45 @@ TEST_F(AGX3PackBinary, DeviceAtomicMapsPostRaDiscardHints)
    }
 }
 
+TEST_F(AGX3PackBinary, DeviceAtomicReturnIsTiedWithoutClobberingIndex)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_COMPUTE;
+
+   agx_index value = agx_temp(b->shader, AGX_SIZE_32);
+   agx_mov_imm_to(b, value, 0xfffffffa);
+   agx_index index = agx_temp(b->shader, AGX_SIZE_32);
+   agx_mov_imm_to(b, index, 7);
+   agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+   agx_atomic_to(b, result, value, agx_uniform(0, AGX_SIZE_64), index,
+                 AGX_ATOMIC_OPC_ADD);
+
+   /* Keep the address index live after the atomic.  A pack-time value copy
+    * into the result would corrupt it; the pre-RA two-address legalization
+    * must instead tie only the dedicated update temporary and result. */
+   agx_index sum = agx_temp(b->shader, AGX_SIZE_32);
+   agx_iadd_to(b, sum, result, index, 0);
+   agx_stop(b);
+
+   ASSERT_TRUE(agx_lower_agx3_device_atomic_sources(b->shader));
+   agx_pressure_schedule(b->shader);
+   agx_ra(b->shader);
+
+   agx_instr *atomic = NULL;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op == AGX_OPCODE_ATOMIC)
+         atomic = I;
+   }
+   ASSERT_NE(atomic, nullptr);
+   ASSERT_EQ(atomic->dest[0].type, AGX_INDEX_REGISTER);
+   ASSERT_EQ(atomic->src[0].type, AGX_INDEX_REGISTER);
+   EXPECT_EQ(atomic->dest[0].value, atomic->src[0].value);
+   EXPECT_NE(atomic->dest[0].value, atomic->src[2].value);
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, LocalAtomicScalarZeroAddress)
 {
    for (int e = 0; e < 2; ++e) {

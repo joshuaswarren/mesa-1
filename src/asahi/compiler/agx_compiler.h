@@ -1057,6 +1057,11 @@ void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
+
+/* AGX3b device atomics return through their value register.  Legalize the
+ * SSA three-address form before RA so the allocator can enforce that physical
+ * two-address ABI without clobbering the independently evaluated index. */
+bool agx_lower_agx3_device_atomic_sources(agx_context *ctx);
 void agx_lower_64bit_postra(agx_context *ctx);
 void agx_insert_waits(agx_context *ctx);
 void agx_opt_empty_else(agx_context *ctx);

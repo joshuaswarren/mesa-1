@@ -83,6 +83,30 @@ main(void)
    static const uint8_t b_ret[] =
       {0x67,0x11,0x54,0x00,0x00,0x80,0x01,0x00,0x00,0x42,0x00,0x00,0x20,0x00};
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, ret, b_ret, sizeof(b_ret)) == 0);
+
+   /* Fresh Apple G17P register-base fetch-add.  The single field16 value is
+    * both the update input and old-value result; index4 remains independent.
+    * The source pointer is retained for a second atomic and the update waits
+    * slot6, eliminating lifetime ambiguity from the native witness. */
+   struct agx3_device_atomic_desc g17p_reg_return = {
+      .op = AGX3_ATOMIC_ADD,
+      .value = 6,
+      .returns_value = true,
+      .result = 6,
+      .slot = 1,
+      .base_kind = AGX3_ATOMIC_BASE_REGISTER,
+      .base = 0,
+      .index_kind = AGX3_ATOMIC_INDEX_REGISTER,
+      .index = 4,
+      .index_shift = 2,
+      .wait_mask = 1u << 5,
+   };
+   static const uint8_t b_g17p_reg_return[] = {
+      0x67,0x01,0x56,0x00,0x00,0x80,0x01,0x81,0x00,0x02,0x00,0x00,0x60,0x03,
+   };
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, g17p_reg_return,
+                      b_g17p_reg_return, sizeof(b_g17p_reg_return)) == 0);
+
    ret.result = 4;
    ret.wait_mask = 0;
    static const uint8_t c_ret[] =

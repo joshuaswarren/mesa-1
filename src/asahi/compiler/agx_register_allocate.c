@@ -930,6 +930,22 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 
    unsigned align = count;
 
+   /* AGX3b atomicdev is physically two-address: field16 supplies the update
+    * value and receives the returned old value.  The legalization pass gives
+    * every returning scalar atomic a last-use value temporary.  Its region was
+    * freed by early-kill immediately above, so assign the destination there
+    * exactly.  If the source is unexpectedly still live, fall through and let
+    * the fail-closed packer reject the untied result. */
+   if (I->op == AGX_OPCODE_ATOMIC && d == 0 &&
+       rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->atomic_opc != AGX_ATOMIC_OPC_CMPXCHG &&
+       I->src[0].type == AGX_INDEX_NORMAL && !I->src[0].memory &&
+       I->src[0].size == idx.size) {
+      unsigned out;
+      if (try_coalesce_with(rctx, I->src[0], count, false, &out))
+         return out;
+   }
+
    if (dest_limit(rctx, I, d) < rctx->bound[cls])
       return find_regs(rctx, I, d, count, align);
 
