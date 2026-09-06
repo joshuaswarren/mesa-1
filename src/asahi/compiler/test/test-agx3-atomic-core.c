@@ -120,6 +120,35 @@ main(void)
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, xchg_used, b_xchg_masked,
                       sizeof(b_xchg_masked)) == 0);
 
+   /* Returned min/max use the standalone 0x56 family and keep f76/f27 clear
+    * under the same lane-zero control flow. */
+   struct agx3_device_atomic_desc returned_min = elected_used;
+   returned_min.op = AGX3_ATOMIC_UMIN;
+   returned_min.value = 2;
+   returned_min.result = 2;
+   returned_min.slot = 1;
+   returned_min.value_kill = false;
+   static const uint8_t b_returned_min[] =
+      {0x67,0x01,0x56,0x00,0x00,0x80,0x00,0x00,0x00,0x02,0x00,0x00,0x3a,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, returned_min,
+                      b_returned_min, sizeof(b_returned_min)) == 0);
+   returned_min.op = AGX3_ATOMIC_IMAX;
+   static const uint8_t b_returned_imax[] =
+      {0x67,0x01,0x56,0x00,0x00,0x80,0x00,0x00,0x00,0x02,0x00,0x00,0x28,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, returned_min,
+                      b_returned_imax, sizeof(b_returned_imax)) == 0);
+
+   /* Returned cmpxchg instead remains in the masked 0x54 family. */
+   struct agx3_device_atomic_desc returned_cmp = elected_used;
+   returned_cmp.op = AGX3_ATOMIC_CMPXCHG;
+   returned_cmp.value = 4;
+   returned_cmp.result = 4;
+   returned_cmp.slot = 1;
+   static const uint8_t b_returned_cmp[] =
+      {0x67,0x11,0x54,0x00,0x00,0x00,0x01,0x00,0x00,0x42,0x00,0x00,0x24,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, returned_cmp,
+                      b_returned_cmp, sizeof(b_returned_cmp)) == 0);
+
    struct agx3_device_atomic_desc x = base;
    x.op = AGX3_ATOMIC_XOR;
    static const uint8_t b_xor[] =

@@ -27,6 +27,14 @@ op_ok(enum agx3_atomic_op op)
    return op >= AGX3_ATOMIC_ADD && op <= AGX3_ATOMIC_XOR;
 }
 
+static bool
+standalone_return_form(const struct agx3_device_atomic_desc *d)
+{
+   return d->op == AGX3_ATOMIC_XCHG ||
+          (d->returns_value && d->op >= AGX3_ATOMIC_UMIN &&
+           d->op <= AGX3_ATOMIC_IMAX);
+}
+
 static unsigned
 append_waits(uint16_t wait_mask, struct agx3_field_kv *fields, unsigned n)
 {
@@ -135,9 +143,12 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
    if (d->index_kill)
       f[n++] = (struct agx3_field_kv)KV(41, 1);
 
-   /* The same physical field is also scoreboard slot 6/8.  Setting it for
-    * xchg/cmpxchg is independently witnessed even without an incoming wait. */
-   if (d->op == AGX3_ATOMIC_XCHG || d->op == AGX3_ATOMIC_CMPXCHG)
+   /* The same physical field is also scoreboard slot 6/8.  Xchg always uses
+    * the standalone family. Returned min/max join that family, while returned
+    * cmpxchg uses the masked arithmetic family. Non-returning cmpxchg remains
+    * independently witnessed in the standalone family. */
+   if (standalone_return_form(d) ||
+       (!d->returns_value && d->op == AGX3_ATOMIC_CMPXCHG))
       f[n++] = (struct agx3_field_kv)KV(
          enc == AGX_ISA_ENCODING_AGX3C ? 83 : 81, 1);
 
@@ -161,13 +172,13 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
          74, d->op == AGX3_ATOMIC_CMPXCHG ? 3 : 1);
    }
 
-   /* On AGX3b, f76 also selects the elected/partial-execution atomic form for
-    * arithmetic and cmpxchg.  Native returned xchg keeps its standalone form
-    * even inside the same compiler-generated first-lane block. */
+   /* On AGX3b, f76 also selects the elected/partial-execution arithmetic
+    * family. Native returned xchg/min/max keep their standalone form even
+    * inside the same compiler-generated first-lane block. */
    const uint16_t waits =
       d->wait_mask |
       ((enc == AGX_ISA_ENCODING_AGX3B && d->exec_masked &&
-        d->op != AGX3_ATOMIC_XCHG)
+        !standalone_return_form(d))
           ? 1
           : 0);
    n = append_waits(waits, f, n);
