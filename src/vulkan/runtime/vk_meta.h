@@ -389,6 +389,12 @@ void vk_meta_copy_buffer(struct vk_command_buffer *cmd,
                          struct vk_meta_device *meta,
                          const VkCopyBufferInfo2 *info);
 
+void vk_meta_copy_buffer_addresses(struct vk_command_buffer *cmd,
+                                   struct vk_meta_device *meta,
+                                   VkDeviceAddress src_addr,
+                                   VkDeviceAddress dst_addr,
+                                   VkDeviceSize size);
+
 void vk_meta_copy_image_to_buffer(
    struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    const VkCopyImageToBufferInfo2 *info,

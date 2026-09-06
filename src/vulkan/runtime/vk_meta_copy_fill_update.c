@@ -2412,9 +2412,11 @@ get_copy_buffer_pipeline(struct vk_device *device, struct vk_meta_device *meta,
                                     pipeline_out);
 }
 
-static void
-copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
-                   VkBuffer src, VkBuffer dst, const VkBufferCopy2 *region)
+void
+vk_meta_copy_buffer_addresses(struct vk_command_buffer *cmd,
+                              struct vk_meta_device *meta,
+                              VkDeviceAddress src_addr,
+                              VkDeviceAddress dst_addr, VkDeviceSize size)
 {
    struct vk_device *dev = cmd->base.device;
    const struct vk_physical_device *pdev = dev->physical;
@@ -2424,12 +2426,6 @@ copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    struct vk_meta_copy_buffer_key key = {
       .key_type = VK_META_OBJECT_KEY_COPY_BUFFER,
    };
-
-   VkDeviceSize size = region->size;
-   VkDeviceAddress src_addr =
-      vk_meta_buffer_address(dev, src, region->srcOffset, size);
-   VkDeviceAddress dst_addr =
-      vk_meta_buffer_address(dev, dst, region->dstOffset, size);
 
    /* Combine the size and src/dst address to extract the alignment. */
    uint64_t align = src_addr | dst_addr | size;
@@ -2479,6 +2475,19 @@ copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       dst_addr += args.size;
       size -= args.size;
    }
+}
+
+static void
+copy_buffer_region(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+                   VkBuffer src, VkBuffer dst, const VkBufferCopy2 *region)
+{
+   struct vk_device *dev = cmd->base.device;
+   VkDeviceAddress src_addr =
+      vk_meta_buffer_address(dev, src, region->srcOffset, region->size);
+   VkDeviceAddress dst_addr =
+      vk_meta_buffer_address(dev, dst, region->dstOffset, region->size);
+
+   vk_meta_copy_buffer_addresses(cmd, meta, src_addr, dst_addr, region->size);
 }
 
 void

@@ -295,6 +295,29 @@ ail_get_twiddled_block_B(const struct ail_layout *layout, unsigned level,
    return ail_get_layer_level_B(layout, z_px, level) + tile_offset_B;
 }
 
+/* Byte offset of one element in a GPU-tiled image. Coordinates are in format
+ * elements (compressed blocks for block formats), not pixels. */
+static inline uint32_t
+ail_get_tiled_element_B(const struct ail_layout *layout, unsigned level,
+                        uint32_t x_el, uint32_t y_el, uint32_t z_px)
+{
+   assert(layout->tiling == AIL_TILING_GPU);
+   assert(level < layout->levels);
+
+   const struct ail_tile tile = layout->tilesize_el[level];
+   const unsigned tiles_per_row =
+      DIV_ROUND_UP(layout->stride_el[level], tile.width_el);
+   const unsigned tile_idx =
+      (y_el / tile.height_el) * tiles_per_row + (x_el / tile.width_el);
+   const unsigned in_tile =
+      ail_space_bits(MOD_POT(x_el, tile.width_el)) |
+      (ail_space_bits(MOD_POT(y_el, tile.height_el)) << 1);
+
+   return ail_get_layer_level_B(layout, z_px, level) +
+          (tile_idx * tile.width_el * tile.height_el + in_tile) *
+             ail_get_blocksize_B(layout);
+}
+
 static inline unsigned
 ail_metadata_width_tl(struct ail_layout *layout, unsigned level)
 {

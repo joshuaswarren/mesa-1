@@ -89,6 +89,10 @@ ref_access_tiled(uint8_t *tiled, uint8_t *linear, struct ail_layout *layout,
          unsigned twiddled_offs_B =
             blocksize_B * tiled_offset_el(layout, 0, tiled_x_el, tiled_y_el);
 
+         EXPECT_EQ(ail_get_tiled_element_B(layout, 0, tiled_x_el, tiled_y_el,
+                                           0),
+                   twiddled_offs_B);
+
          /* While we're at it, check that ail_get_twiddled_block_B does the
           * right thing where it is defined (at tile boundaries). We can't
           * otherwise use it here as it is part of the routine under test.

@@ -1700,6 +1700,100 @@ hk_g17p_copy_buffer_to_image_supported(
 }
 
 static bool
+hk_g17p_block_upload_format(VkFormat format)
+{
+   return format == VK_FORMAT_ASTC_4x4_UNORM_BLOCK ||
+          format == VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+}
+
+static bool
+hk_g17p_copy_compressed_buffer_to_image(
+   struct hk_cmd_buffer *cmd, struct hk_image *image,
+   const VkCopyBufferToImageInfo2 *info)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (!hk_g17p_block_upload_format(image->vk.format) ||
+       image->plane_count != 1 || image->vk.image_type != VK_IMAGE_TYPE_2D ||
+       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       image->planes[0].layout.tiling != AIL_TILING_GPU ||
+       info->dstImageLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+      return false;
+
+   VK_FROM_HANDLE(hk_buffer, buffer, info->srcBuffer);
+   const enum pipe_format format = hk_format_to_pipe_format(image->vk.format);
+   const uint32_t block_w = util_format_get_blockwidth(format);
+   const uint32_t block_h = util_format_get_blockheight(format);
+   const uint32_t block_B = util_format_get_blocksize(format);
+   if (block_w != 4 || block_h != 4 || block_B != 16)
+      return false;
+
+   for (unsigned r = 0; r < info->regionCount; ++r) {
+      const VkBufferImageCopy2 *region = &info->pRegions[r];
+      const uint32_t level = region->imageSubresource.mipLevel;
+      const uint32_t layers = vk_image_subresource_layer_count(
+         &image->vk, &region->imageSubresource);
+      const uint32_t mip_w = u_minify(image->vk.extent.width, level);
+      const uint32_t mip_h = u_minify(image->vk.extent.height, level);
+      const uint32_t x = region->imageOffset.x;
+      const uint32_t y = region->imageOffset.y;
+      const uint32_t width = region->imageExtent.width;
+      const uint32_t height = region->imageExtent.height;
+      const uint32_t row_px = region->bufferRowLength ?
+                                 region->bufferRowLength : width;
+      const uint32_t image_h_px = region->bufferImageHeight ?
+                                     region->bufferImageHeight : height;
+
+      if (region->imageSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+          level >= image->vk.mip_levels || layers == 0 ||
+          region->imageSubresource.baseArrayLayer >= image->vk.array_layers ||
+          layers > image->vk.array_layers -
+                      region->imageSubresource.baseArrayLayer ||
+          region->imageOffset.x < 0 || region->imageOffset.y < 0 ||
+          region->imageOffset.z != 0 || region->imageExtent.depth != 1 ||
+          !width || !height || x >= mip_w || y >= mip_h ||
+          width > mip_w - x || height > mip_h - y ||
+          (x % block_w) || (y % block_h) ||
+          ((width % block_w) && x + width != mip_w) ||
+          ((height % block_h) && y + height != mip_h) ||
+          row_px < width || image_h_px < height ||
+          (region->bufferOffset % block_B))
+         return false;
+
+      const uint32_t blocks_x = util_format_get_nblocksx(format, width);
+      const uint32_t blocks_y = util_format_get_nblocksy(format, height);
+      const uint64_t src_row_B =
+         (uint64_t)util_format_get_nblocksx(format, row_px) * block_B;
+      const uint64_t src_layer_B =
+         (uint64_t)util_format_get_nblocksy(format, image_h_px) * src_row_B;
+      const uint64_t base_src =
+         hk_buffer_address_ro(buffer, region->bufferOffset);
+      const uint64_t base_dst = hk_image_base_address(image, 0);
+      const uint32_t base_x_el = x / block_w;
+      const uint32_t base_y_el = y / block_h;
+
+      for (uint32_t layer = 0; layer < layers; ++layer) {
+         const uint32_t dst_layer =
+            region->imageSubresource.baseArrayLayer + layer;
+         for (uint32_t by = 0; by < blocks_y; ++by) {
+            for (uint32_t bx = 0; bx < blocks_x; ++bx) {
+               const uint64_t src = base_src + layer * src_layer_B +
+                                    by * src_row_B + bx * block_B;
+               const uint64_t dst = base_dst + ail_get_tiled_element_B(
+                  &image->planes[0].layout, level, base_x_el + bx,
+                  base_y_el + by, dst_layer);
+               vk_meta_copy_buffer_addresses(&cmd->vk, &dev->meta, src, dst,
+                                             block_B);
+               if (vk_command_buffer_has_error(&cmd->vk))
+                  return true;
+            }
+         }
+      }
+   }
+
+   return true;
+}
+
+static bool
 hk_bind_point(bool gfx)
 {
    return gfx ? VK_PIPELINE_BIND_POINT_GRAPHICS
@@ -1716,6 +1810,16 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    if (dev->dev.chip == AGX_CHIP_G17P) {
+      if (hk_g17p_block_upload_format(dst_image->vk.format)) {
+         struct hk_meta_save save;
+         hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         if (!hk_g17p_copy_compressed_buffer_to_image(
+                cmd, dst_image, pCopyBufferToImageInfo))
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+         hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         return;
+      }
       if (!hk_g17p_copy_buffer_to_image_supported(
              dev, dst_image, pCopyBufferToImageInfo)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
