@@ -588,6 +588,18 @@ test_float_compare_select(void)
    exact(out,len,"02011d03a2ff03c02080");
    assert(agx3_alu_fcmp_select_imm(AGX_ISA_ENCODING_AGX3B,8,src,live,1,255,0,true,false,32,out,&len));
    exact(out,len,"42010503a2ff03c02080");
+   const uint16_t mixed_src[] = {8, 10, 6, 4};
+   const enum agx3_alu_hint mixed_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_fcmp_select_f32_f16(
+      AGX_ISA_ENCODING_AGX3B, 4, mixed_src, mixed_hints, 0, true, 0,
+      out, &len));
+   exact(out, len, "2289278a05860000");
+   assert(!agx3_alu_fcmp_select_f32_f16(
+      AGX_ISA_ENCODING_AGX3C, 4, mixed_src, mixed_hints, 0, true, 0,
+      out, &len));
    assert(agx3_alu_fcmp_select_imm(AGX_ISA_ENCODING_AGX3B,0,src,dead,5,255,0,true,false,32,out,&len));
    exact(out,len,"02011d03a6ff02c02080");
    assert(agx3_alu_fcmp_select_imm(AGX_ISA_ENCODING_AGX3B,8,src,live,5,255,0,true,false,32,out,&len));

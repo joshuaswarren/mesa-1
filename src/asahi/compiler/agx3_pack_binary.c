@@ -4423,8 +4423,42 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         /* Compare against literal floating zero and materialize a narrow
-          * integer boolean using the same native FSEL instruction. */
+         /* WBOIT's infinity repair compares a full maximum magnitude against
+          * half +inf and selects between full colour channels. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             I->fcond == AGX_FCOND_EQ && !I->saturate &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
+             agx3_src_is_register(I->src[1]) && !I->src[1].memory &&
+             I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1 &&
+             agx3_vary_reg32(I->src[2]) && agx3_vary_reg32(I->src[3]) &&
+             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1) {
+            uint16_t src[4];
+            enum agx3_alu_hint hints[4];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            bool invalid = false;
+            for (unsigned i = 0; i < 4; ++i) {
+               invalid |= I->src[i].abs || I->src[i].neg || I->src[i].kill ||
+                          (I->src[i].cache && I->src[i].discard);
+               src[i] = I->src[i].value;
+               hints[i] = agx3_post_ra_hint(I->src[i]);
+            }
+            uint16_t fsel_wait = wait;
+            if (fsel_wait != 0 && fsel_wait != 32) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+            if (invalid ||
+                !agx3_alu_fcmp_select_f32_f16(
+                   enc, I->dest[0].value, src, hints, I->fcond,
+                   I->dest[0].cache, fsel_wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests==1 && I->nr_srcs==4 &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory && agx_channels(I->dest[0])==1 &&

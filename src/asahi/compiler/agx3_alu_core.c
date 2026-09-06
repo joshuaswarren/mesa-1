@@ -863,6 +863,53 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
+bool
+agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
+                             const uint16_t src[4],
+                             const enum agx3_alu_hint hints[4],
+                             unsigned condition, bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !hints ||
+       dest >= 256 || (dest & 1) || condition != 0 ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+
+   for (unsigned i = 0; i < 4; ++i) {
+      if (src[i] >= 256 || (i != 1 && (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   /* Full/half comparison with two full-register alternatives. The operand
+    * width and routing fields are shared with the native mixed comparison and
+    * all-register FSEL witnesses already used by the adjacent encoders. */
+   const struct agx3_field_kv base[] = {
+      {10, 2}, {11, 2}, {42, 2}, {43, 2}, {59, 2},
+      {60, 1}, {76, 2}, {77, 2}, {93, 2}, {94, 2},
+   };
+   struct agx3_field_kv fields[16] = {
+      {3, dest}, {12, dest_cache}, {35, src[0]}, {52, src[1]},
+      {69, src[2]}, {86, src[3]}, {110, condition}, {107, wait_mask == 32},
+   };
+   const unsigned cache[] = {44, 61, 78, 95};
+   const unsigned discard[] = {46, 63, 80, 97};
+   unsigned n = 8;
+   for (unsigned i = 0; i < 4; ++i) {
+      fields[n++] = (struct agx3_field_kv){cache[i],
+                                           hints[i] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){discard[i],
+                                           hints[i] == AGX3_ALU_HINT_DISCARD};
+   }
+
+   for (unsigned ep = 0; ep < 28; ++ep) {
+      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, n, out, len))
+         return true;
+   }
+   return false;
+}
+
 /* Native float32 multiplication rounds directly to the half destination. */
 bool
 agx3_alu_fmul_narrow(enum agx_isa_encoding enc, uint16_t dest,

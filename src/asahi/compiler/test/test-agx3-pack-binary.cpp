@@ -344,6 +344,29 @@ TEST_F(AGX3PackBinary, FabsMaterializationKeepsNegativeZeroAndWait)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, WboitInfinityRepairUsesMixedWidthFsel)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index compare = agx_register(8, AGX_SIZE_32);
+   agx_index infinity = agx_register(10, AGX_SIZE_16);
+   agx_index if_true = agx_register(6, AGX_SIZE_32);
+   agx_index if_false = agx_register(4, AGX_SIZE_32);
+   compare.cache = infinity.cache = if_true.cache = true;
+   if_false.discard = true;
+   agx_index dest = agx_register(4, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fcmpsel_to(b, dest, compare, infinity, if_true, if_false,
+                  AGX_FCOND_EQ);
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x22, 0x89, 0x27, 0x8a, 0x05, 0x86, 0x00, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
