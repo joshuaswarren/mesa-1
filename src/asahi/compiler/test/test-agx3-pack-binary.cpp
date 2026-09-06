@@ -424,7 +424,9 @@ TEST_F(AGX3PackBinary, UpdateLightmapNativeIntegerAndMaskForms)
 
    agx_index r13 = agx_register(26, AGX_SIZE_32);
    r13.cache = true;
-   agx_ffs_to(b, r13, r13);
+   agx_index r12 = agx_register(24, AGX_SIZE_32);
+   r12.cache = true;
+   agx_ffs_to(b, r13, r12);
 
    agx_index r10 = agx_register(20, AGX_SIZE_32);
    agx_index r3 = agx_register(6, AGX_SIZE_32);
@@ -441,7 +443,7 @@ TEST_F(AGX3PackBinary, UpdateLightmapNativeIntegerAndMaskForms)
 
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    std::vector<uint8_t> want;
-   ASSERT_TRUE(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 26,
+   ASSERT_TRUE(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 24,
                                  AGX3_ALU_HINT_CACHE, true, 1, bytes, &len));
    append(want, bytes, len);
    const uint16_t bit_src[] = {20, 6};

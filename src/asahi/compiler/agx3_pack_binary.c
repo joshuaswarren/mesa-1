@@ -5719,7 +5719,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index dest = I->dest[0], src = I->src[0];
             if (!agx3_vary_reg32(dest) || !agx3_vary_reg32(src) ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                src.abs || src.neg)
+                dest.value == src.value || src.abs || src.neg)
                AGX3_REFUSE(I);
             /* Apple's G17P clz FT1 carries wait0 and the cached destination
              * form (op-enable 3). The uncached/op-enable-2 combination with

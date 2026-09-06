@@ -1267,7 +1267,14 @@ agx_ra_assign_local(struct ra_ctx *rctx)
       /* Search for regions of contiguous killed sources to early-kill. */
       rctx->early_killed = false;
 
-      if (I->nr_dests == 1) {
+      /* G17P FT1's completed native form requires distinct source and
+       * destination registers. Keep its last-use source occupied until after
+       * destination allocation so generic early-kill cannot coalesce them. */
+      const bool g17p_ft1 =
+         rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_FFS;
+
+      if (I->nr_dests == 1 && !g17p_ft1) {
          unsigned first_src = 0;
          unsigned end = 0;
          unsigned start = 0;
