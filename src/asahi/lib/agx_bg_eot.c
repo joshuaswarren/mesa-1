@@ -172,7 +172,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
       unsigned bindless_base = 0;
       NIR_PASS(_, shader, agx_nir_lower_tilebuffer, tib, NULL, &bindless_base,
-               NULL, NULL, false);
+               NULL, NULL, false, cache->dev->chip == AGX_CHIP_G17P);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
       NIR_PASS(_, shader, agx_nir_lower_texture);

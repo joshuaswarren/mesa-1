@@ -9,6 +9,8 @@
 #include "util/macros.h"
 #include "agx_nir_format_helpers.h"
 #include "agx_tilebuffer.h"
+#include "compiler/nir/nir_format_convert.h"
+#include "layout.h"
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builder_opcodes.h"
@@ -25,7 +27,36 @@ struct ctx {
    uint8_t outputs_written;
    nir_def *write_samples;
    bool preserve_zero_mask;
+   bool lower_srgb;
 };
+
+static nir_def *
+convert_srgb(nir_builder *b, nir_def *value, unsigned comps, bool encode)
+{
+   nir_def *channels[4];
+   const unsigned bit_size = value->bit_size;
+   const unsigned color_comps = MIN2(comps, 3);
+   nir_def *rgb = nir_trim_vector(b, value, color_comps);
+   if (bit_size != 32)
+      rgb = nir_f2f32(b, rgb);
+
+   rgb = encode ? nir_format_linear_to_srgb(b, rgb)
+                : nir_format_srgb_to_linear(b, rgb);
+
+   if (!encode && bit_size != 32)
+      rgb = nir_f2f16(b, rgb);
+
+   for (unsigned i = 0; i < comps; ++i) {
+      if (i < color_comps) {
+         channels[i] = nir_channel(b, rgb, i);
+      } else {
+         nir_def *alpha = nir_channel(b, value, i);
+         channels[i] = encode && bit_size != 32 ? nir_f2f32(b, alpha) : alpha;
+      }
+   }
+
+   return nir_vec(b, channels, comps);
+}
 
 static void
 store_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
@@ -311,10 +342,17 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
        * a real load/store pair so fragment and query side effects still run. */
       if (!write_mask) {
          if (ctx->preserve_zero_mask && !tib->spilled[rt]) {
+            const enum pipe_format preserve_format =
+               ctx->lower_srgb && util_format_is_srgb(logical_format)
+                  ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
+                  : format;
             nir_def *value = load_tilebuffer(
-               b, tib, comps, intr->src[0].ssa->bit_size, rt, format,
+               b, tib, comps,
+               ctx->lower_srgb && util_format_is_srgb(logical_format)
+                  ? 32 : intr->src[0].ssa->bit_size,
+               rt, preserve_format,
                logical_format);
-            store_tilebuffer(b, tib, format, logical_format, rt, value,
+            store_tilebuffer(b, tib, preserve_format, logical_format, rt, value,
                              ctx->write_samples, BITFIELD_MASK(comps));
          }
          return true;
@@ -330,6 +368,11 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                       rt, value, ctx->write_samples);
          ctx->any_memory_stores = true;
       } else {
+         if (ctx->lower_srgb && util_format_is_srgb(logical_format)) {
+            value = convert_srgb(b, value, comps, true);
+            format = (enum pipe_format)AIL_ISA_FORMAT_U8NORM;
+         }
+
          store_tilebuffer(b, tib, format, logical_format, rt, value,
                           ctx->write_samples, write_mask);
       }
@@ -348,8 +391,20 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          def = load_memory(b, ctx->bindless_base, tib->nr_samples,
                            intr->num_components, bit_size, rt, logical_format);
       } else {
-         def = load_tilebuffer(b, tib, intr->num_components, bit_size, rt,
-                               format, logical_format);
+         const bool lower_srgb =
+            ctx->lower_srgb && util_format_is_srgb(logical_format);
+         def = load_tilebuffer(b, tib, intr->num_components,
+                               lower_srgb ? 32 : bit_size, rt,
+                               lower_srgb
+                                  ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
+                                  : format,
+                               logical_format);
+
+         if (lower_srgb) {
+            def = convert_srgb(b, def, intr->num_components, false);
+            if (bit_size != 32)
+               def = nir_f2f16(b, def);
+         }
       }
 
       nir_def_rewrite_uses(&intr->def, def);
@@ -362,7 +417,7 @@ bool
 agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
                          uint8_t *colormasks, unsigned *bindless_base,
                          nir_def *write_samples, bool *translucent,
-                         bool preserve_zero_mask)
+                         bool preserve_zero_mask, bool lower_srgb)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -372,6 +427,7 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
       .translucent = translucent,
       .write_samples = write_samples,
       .preserve_zero_mask = preserve_zero_mask,
+      .lower_srgb = lower_srgb,
    };
 
    /* Allocate 1 texture + 1 PBE descriptor for each spilled descriptor */

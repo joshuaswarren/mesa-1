@@ -1653,7 +1653,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                                   (2 * BITSET_LAST_BIT(nir->info.images_used));
          unsigned rt_spill = rt_spill_base;
          NIR_PASS(_, nir, agx_nir_lower_tilebuffer, &tib, NULL, &rt_spill, NULL,
-                  &translucent, false);
+                  &translucent, false, dev->chip == AGX_CHIP_G17P);
       }
 
       if (nir->info.fs.uses_sample_shading) {

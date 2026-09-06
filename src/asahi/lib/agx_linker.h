@@ -291,6 +291,7 @@ struct agx_fs_epilog_key {
    uint8_t nr_samples;
    bool force_small_tile;
    bool preserve_zero_mask;
+   bool lower_srgb;
 };
 
 void agx_nir_vs_prolog(struct nir_builder *b, const void *key_);

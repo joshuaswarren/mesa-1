@@ -298,7 +298,7 @@ main(int argc, char **argv)
 
       unsigned bindless_base = 0;
       NIR_PASS(_, nir, agx_nir_lower_tilebuffer, &tib, NULL, &bindless_base,
-               NULL, NULL, false);
+               NULL, NULL, false, false);
       /* Depth/stencil-ref writes become zs_emit, a coverage write
        * becomes demote_samples, and discards become sample_mask writes.
        * hk orders these the same way (hk_shader.c): zs_emit before the
