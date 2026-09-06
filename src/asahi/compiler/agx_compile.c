@@ -2479,7 +2479,9 @@ agx_emit_g17p_ufind_msb(agx_builder *b, agx_index dst, agx_index value)
    /* Native G17P computes clz with FT1 plus correction; FT1 alone is not
     * ufind_msb (in particular, it returns -1 for 0x80000000). Until that
     * correction is represented in the IR, use a fixed binary search made
-    * from already-qualified unsigned selects and logical shifts. */
+    * from the equality select and logical shift forms exercised by public
+    * shaders.  Select the zero path on equality so this does not depend on
+    * the still-unqualified ordered unsigned-select condition. */
    assert(value.size == AGX_SIZE_32 && dst.size == AGX_SIZE_32);
    agx_index scan = value;
    agx_index result = agx_mov_imm(b, 32, 0);
@@ -2490,15 +2492,15 @@ agx_emit_g17p_ufind_msb(agx_builder *b, agx_index dst, agx_index value)
       const unsigned shift = shifts[i];
       agx_index high =
          agx_ushr(b, scan, agx_immediate((0u - shift) & 31u));
-      agx_index add = agx_icmpsel(b, high, zero, agx_immediate(shift), zero,
-                                  AGX_ICOND_UGT);
-      scan = agx_icmpsel(b, high, zero, high, scan, AGX_ICOND_UGT);
+      agx_index add = agx_icmpsel(b, high, zero, zero,
+                                  agx_immediate(shift), AGX_ICOND_UEQ);
+      scan = agx_icmpsel(b, high, zero, scan, high, AGX_ICOND_UEQ);
       result = agx_iadd(b, result, add, 0);
    }
 
    agx_index minus_one = agx_mov_imm(b, 32, UINT32_MAX);
-   return agx_icmpsel_to(b, dst, value, zero, result, minus_one,
-                         AGX_ICOND_UGT);
+   return agx_icmpsel_to(b, dst, value, zero, minus_one, result,
+                         AGX_ICOND_UEQ);
 }
 
 static agx_instr *
