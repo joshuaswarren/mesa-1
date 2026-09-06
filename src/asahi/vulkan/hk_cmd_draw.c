@@ -5164,7 +5164,7 @@ hk_CmdDrawMultiIndexedEXT(VkCommandBuffer commandBuffer, uint32_t drawCount,
                           uint32_t stride, const int32_t *pVertexOffset)
 {
    for (unsigned i = 0; i < drawCount; ++i) {
-      const uint32_t vertex_offset =
+      const int32_t vertex_offset =
          pVertexOffset != NULL ? *pVertexOffset : pIndexInfo->vertexOffset;
 
       hk_draw_indexed(commandBuffer, i, pIndexInfo->indexCount, instanceCount,
