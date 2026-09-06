@@ -1189,6 +1189,44 @@ TEST_F(AGX3PackBinary, BallotCompareZero)
    }
 }
 
+TEST_F(AGX3PackBinary, BallotWaitsForDeviceLoad)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   const agx_index value = agx_register(4, AGX_SIZE_32);
+   agx_device_load_to(b, value, agx_register(8, AGX_SIZE_64),
+                      agx_register(12, AGX_SIZE_32), AGX_FORMAT_I32, 1, 2,
+                      false);
+   agx_icmp_ballot_to(b, agx_register(6, AGX_SIZE_32), value, agx_zero(),
+                      AGX_ICOND_UEQ, false);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+   /* Device loads use slot6. Retire it through the byte-grounded identity
+    * prelude because the native ballot has no scoreboard field. */
+   ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
+                                0, 0, 0, 0, 0, 1u << 5, bytes, &length));
+   append(want, bytes, length);
+
+   const struct agx3_subgroup_ballot_desc ballot = {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .dest = 6,
+      .src = 4,
+      .condition = 4,
+   };
+   ASSERT_TRUE(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &ballot,
+                                            bytes, &length));
+   append(want, bytes, length);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+
+   const std::vector<uint8_t> got = pack(b);
+   ASSERT_GE(got.size(), want.size());
+   const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
+   EXPECT_EQ(tail, want);
+}
+
 static enum agx_simd_op
 mesa_reduce_op(unsigned op)
 {

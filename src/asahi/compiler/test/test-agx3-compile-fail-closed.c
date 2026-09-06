@@ -338,6 +338,50 @@ check_subgroup_multiply_compute(void)
 }
 
 static bool
+check_device_ballot_compute(enum agx_isa_encoding encoding)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 device-load ballot");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *input_address = nir_imm_int64(&b, 0x1000);
+   nir_def *output_address = nir_imm_int64(&b, 0x2000);
+   nir_def *value = nir_load_global(
+      &b, 1, 32, input_address, .align_mul = sizeof(uint32_t));
+   nir_def *mask = nir_ballot(&b, 1, 32, nir_ine_imm(&b, value, 0));
+   nir_store_global(&b, mask, output_address,
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = encoding;
+   struct agx_shader_part part = {0};
+   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+      fprintf(stderr, "AGX3 device-load ballot shader was rejected\n");
+      ralloc_free(b.shader);
+      return false;
+   }
+
+   const bool valid =
+      part.binary != NULL && part.info.binary_size > sizeof(end) &&
+      part.info.main_offset == 0 &&
+      part.info.main_size == part.info.binary_size &&
+      part.info.stats.instrs >= 5 &&
+      memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
+             end, sizeof(end)) == 0;
+   if (!valid)
+      fprintf(stderr, "AGX3 device-load ballot metadata/binary mismatch\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_device_rmw_compute(enum agx_isa_encoding encoding)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
@@ -1064,6 +1108,15 @@ main(int argc, char **argv)
       return valid ? 0 : 1;
    }
 
+   if (argc == 2 && !strcmp(argv[1], "--device-ballot-only")) {
+      const bool valid =
+         check_device_ballot_compute(AGX_ISA_ENCODING_AGX3B) &&
+         check_device_ballot_compute(AGX_ISA_ENCODING_AGX3C);
+      fprintf(stderr, "AGX3 device-load ballot compute: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -1107,6 +1160,8 @@ main(int argc, char **argv)
       if (!check_local_id_compute(encodings[i]))
          return 1;
       if (!check_subgroup_id_compute(encodings[i]))
+         return 1;
+      if (!check_device_ballot_compute(encodings[i]))
          return 1;
       if (!check_device_rmw_compute(encodings[i]))
          return 1;

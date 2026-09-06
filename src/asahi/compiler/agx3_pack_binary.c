@@ -2366,6 +2366,14 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       }
    }
 
+   /* The native ballot itself has no witnessed scoreboard field.  A ballot
+    * predicate may still come directly from an asynchronous SSBO/device
+    * load, so retire those exact producer slots with the existing synchronous
+    * identity prelude before issuing the unchanged no-wait ballot. */
+   if (wait_mask != 0 &&
+       !agx3_retire_slots_noop(emission, enc, wait_mask))
+      return false;
+
    const struct agx3_subgroup_ballot_desc d = {
       .quad = quad,
       .type = is_float ? AGX3_SUBGROUP_BALLOT_FLOAT
@@ -2374,7 +2382,7 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       .src = I->src[0].value,
       .condition = condition,
       .invert = I->invert_cond,
-      .wait_mask = wait_mask,
+      .wait_mask = 0,
    };
    uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    return agx3_subgroup_encode_ballot(enc, &d, bytes, &length) &&
