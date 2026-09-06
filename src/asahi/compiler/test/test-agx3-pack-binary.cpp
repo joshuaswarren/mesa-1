@@ -367,6 +367,27 @@ TEST_F(AGX3PackBinary, WboitInfinityRepairUsesMixedWidthFsel)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index compare = agx_register(46, AGX_SIZE_32);
+   agx_index threshold = agx_register(52, AGX_SIZE_16);
+   agx_index if_true = agx_register(26, AGX_SIZE_32);
+   agx_index if_false = agx_register(36, AGX_SIZE_32);
+   compare.cache = threshold.cache = if_true.cache = true;
+   agx_index dest = agx_register(36, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fcmpsel_to(b, dest, compare, threshold, if_true, if_false,
+                  AGX_FCOND_LT);
+   agx_stop(b);
+
+   const uint8_t native[] = {
+      0x22, 0xaf, 0x67, 0xb4, 0x02, 0x9a, 0x03, 0x00, 0x00, 0x24,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), std::vector<uint8_t>(native, native + sizeof(native)));
+}
+
 TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

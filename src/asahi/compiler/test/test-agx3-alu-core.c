@@ -707,6 +707,18 @@ test_float_compare_select(void)
       AGX_ISA_ENCODING_AGX3B, 4, mixed_src, mixed_hints, 0, true, 0,
       out, &len));
    exact(out, len, "2289278a05860000");
+   const uint16_t lightmap_src[] = {46, 52, 26, 36};
+   const enum agx3_alu_hint lightmap_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE,
+   };
+   assert(agx3_alu_fcmp_select_f32_f16(
+      AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints,
+      1, true, 0, out, &len));
+   exact(out, len, "22af67b4029a03000024");
+   assert(!agx3_alu_fcmp_select_f32_f16(
+      AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints,
+      2, true, 0, out, &len));
    assert(!agx3_alu_fcmp_select_f32_f16(
       AGX_ISA_ENCODING_AGX3C, 4, mixed_src, mixed_hints, 0, true, 0,
       out, &len));

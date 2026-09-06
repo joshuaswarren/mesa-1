@@ -1013,7 +1013,8 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !hints ||
-       dest >= 256 || (dest & 1) || condition != 0 ||
+       dest >= 256 || (dest & 1) ||
+       (condition != 0 && condition != 1) ||
        (wait_mask != 0 && wait_mask != 32))
       return false;
 

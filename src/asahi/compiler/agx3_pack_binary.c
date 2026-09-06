@@ -4499,11 +4499,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         /* WBOIT's infinity repair compares a full maximum magnitude against
-          * half +inf and selects between full colour channels. */
+         /* Full/half comparisons select between full-register alternatives.
+          * WBOIT uses EQ against half +inf; update_lightmap uses ordered LT
+          * against a half threshold. The condition selector is orthogonal to
+          * the native mixed-width routing and is byte-grounded for both. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
-             I->fcond == AGX_FCOND_EQ && !I->saturate &&
+             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT) &&
+             !I->saturate &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
              agx3_vary_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
              agx3_src_is_register(I->src[1]) && !I->src[1].memory &&
