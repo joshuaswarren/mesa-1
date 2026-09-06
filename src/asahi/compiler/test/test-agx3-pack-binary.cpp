@@ -4842,7 +4842,6 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
-
 TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -4906,7 +4905,7 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    EXPECT_TRUE(pack(bad, false).empty());
 }
 
-TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWitnessAndRefusesOtherWaits)
+TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
 {
    static const uint8_t native[AGX3_IMAGE_WRITE_LENGTH] = {
       0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
@@ -4919,7 +4918,12 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWitnessAndRefusesOtherWaits
    ASSERT_EQ(len, sizeof(native));
    EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
 
-   for (unsigned wait : {0u, 2u, 3u, 0x40u}) {
+   ASSERT_TRUE(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, false, bytes, &len));
+   ASSERT_EQ(len, sizeof(native));
+   EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
+
+   for (unsigned wait : {2u, 3u, 0x40u}) {
       memset(bytes, 0xa5, sizeof(bytes));
       len = 0xa5;
       EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(

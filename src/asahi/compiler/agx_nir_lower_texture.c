@@ -655,11 +655,16 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
    bool array = nir_intrinsic_image_array(intr);
    unsigned size_components = nir_image_intrinsic_coord_components(intr);
+   const bool lower_2d = data && *(const bool *)data &&
+                         dim == GLSL_SAMPLER_DIM_2D && !array;
+
+   if (lower_2d)
+      size_components = 2;
 
    nir_def *deref = intr->src[0].ssa;
    nir_def *coord = intr->src[1].ssa;
 
-   if (dim != GLSL_SAMPLER_DIM_BUF &&
+   if (!lower_2d && dim != GLSL_SAMPLER_DIM_BUF &&
        !(dim == GLSL_SAMPLER_DIM_MS &&
          intr->intrinsic == nir_intrinsic_image_deref_store))
       return false;
@@ -668,7 +673,9 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    nir_def *size =
       nir_image_deref_size(b, size_components, 32, deref, nir_imm_int(b, 0),
                            .image_dim = dim, .image_array = array);
-   nir_def *oob = nir_bany(b, nir_uge(b, coord, size));
+   nir_def *checked_coord =
+      lower_2d ? nir_trim_vector(b, coord, size_components) : coord;
+   nir_def *oob = nir_bany(b, nir_uge(b, checked_coord, size));
 
    /* Bounds check the sample */
    if (dim == GLSL_SAMPLER_DIM_MS) {
@@ -692,6 +699,19 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
       nir_bcsel(b, oob, nir_imm_int(b, 0xFFF0), nir_channel(b, coord, c));
 
    nir_src_rewrite(&intr->src[1], nir_vector_insert_imm(b, coord, r, c));
+
+   /* G17P does not return zero for every far-out coordinate encoding.  Keep
+    * the hardware access itself in-bounds-safe, then make robustness2's load
+    * value explicit from the same bounds predicate. */
+   if (lower_2d && intr->intrinsic == nir_intrinsic_image_deref_load) {
+      b->cursor = nir_after_instr(&intr->instr);
+      nir_def *robust = nir_bcsel(
+         b, oob, nir_imm_zero(b, intr->def.num_components,
+                              intr->def.bit_size),
+         &intr->def);
+      nir_def_rewrite_uses_after(&intr->def, robust);
+   }
+
    return true;
 }
 
@@ -705,10 +725,19 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
 bool
 agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
 {
+   return agx_nir_lower_texture_early_with_2d_robustness(
+      s, support_lod_bias, false);
+}
+
+bool
+agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
+                                               bool support_lod_bias,
+                                               bool lower_2d_robustness)
+{
    bool progress = false;
 
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_robustness,
-            nir_metadata_control_flow, NULL);
+            nir_metadata_control_flow, &lower_2d_robustness);
 
    nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0,

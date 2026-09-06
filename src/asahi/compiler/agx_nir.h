@@ -30,6 +30,9 @@ bool agx_nir_lower_subgroups(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
+bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
+                                                    bool support_lod_bias,
+                                                    bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);

@@ -577,6 +577,51 @@ g17p_has_bindless_texture_access(const nir_shader *shader)
    return false;
 }
 
+/* A robustness bounds check lowers imageSize() into a descriptor crawl before
+ * storage-image specialization runs.  The load/store handles are removed by
+ * the specialization, but that read-only crawl still owns a bindless image
+ * handle.  Admit only the same constant texture descriptor and only when every
+ * use is the compiler's descriptor-address intrinsic; any residual texture,
+ * sampler, or independently indexed image access still fails closed. */
+static bool
+g17p_has_unsupported_storage_descriptor_access(const nir_shader *shader,
+                                                uint32_t texture_offset_B)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_bindless_sampler_agx)
+               return true;
+            if (intr->intrinsic != nir_intrinsic_bindless_image_agx)
+               continue;
+
+            if (nir_intrinsic_desc_set(intr) != 0 ||
+                !nir_src_is_const(intr->src[0]) ||
+                nir_src_as_uint(intr->src[0]) != texture_offset_B)
+               return true;
+
+            nir_foreach_use(use, &intr->def) {
+               nir_instr *parent = nir_src_parent_instr(use);
+               if (parent->type != nir_instr_type_intrinsic)
+                  return true;
+
+               nir_intrinsic_instr *user = nir_instr_as_intrinsic(parent);
+               if (user->intrinsic !=
+                      nir_intrinsic_load_from_texture_handle_agx ||
+                   user->def.num_components != 1 || user->def.bit_size != 64)
+                  return true;
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
 bool
 agx_nir_lower_g17p_txf(nir_shader *shader,
                         struct agx_g17p_txf_binding *binding)
@@ -745,6 +790,44 @@ g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
             (ACCESS_COHERENT | ACCESS_VOLATILE));
 }
 
+static bool
+g17p_storage_zero_select_from_load(nir_def *value, nir_def *load,
+                                   unsigned component)
+{
+   nir_alu_instr *select = nir_def_as_alu_or_null(value);
+   if (!select || select->op != nir_op_bcsel ||
+       select->src[2].src.ssa != load ||
+       select->src[2].swizzle[0] != component)
+      return false;
+
+   nir_def *zero = select->src[1].src.ssa;
+   for (unsigned c = 0; c < zero->num_components; ++c) {
+      if (!nir_scalar_is_zero(nir_scalar_resolved(zero, c)))
+         return false;
+   }
+
+   return true;
+}
+
+static bool
+g17p_storage_value_from_load(nir_def *value, nir_def *load)
+{
+   if (value == load)
+      return true;
+
+   nir_alu_instr *vec = nir_def_as_alu_or_null(value);
+   if (!vec || vec->op != nir_op_vec4 || value->num_components != 4 ||
+       load->num_components != 4)
+      return false;
+
+   for (unsigned c = 0; c < 4; ++c) {
+      if (!g17p_storage_zero_select_from_load(vec->src[c].src.ssa, load, c))
+         return false;
+   }
+
+   return true;
+}
+
 bool
 agx_nir_lower_g17p_storage_image(
    nir_shader *shader, struct agx_g17p_storage_image_binding *binding)
@@ -790,7 +873,8 @@ agx_nir_lower_g17p_storage_image(
    /* A Gen9 storage descriptor is texture32 followed by PBE32. Requiring this
     * exact pair proves both operations name the same API image. */
    if (impl_count != 1 || block_count != 1 || !load || !store ||
-       store->src[3].ssa != &load->def || (texture_offset_B & 7) != 0 ||
+       !g17p_storage_value_from_load(store->src[3].ssa, &load->def) ||
+       (texture_offset_B & 7) != 0 ||
        pbe_offset_B != texture_offset_B + 32)
       return false;
 
@@ -812,7 +896,8 @@ agx_nir_lower_g17p_storage_image(
    }
 
    NIR_PASS(_, shader, nir_opt_dce);
-   if (g17p_has_bindless_texture_access(shader))
+   if (g17p_has_unsupported_storage_descriptor_access(shader,
+                                                       texture_offset_B))
       return false;
 
    *binding = (struct agx_g17p_storage_image_binding){

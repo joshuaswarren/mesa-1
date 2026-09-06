@@ -366,7 +366,11 @@ agx3_tex_encode_image_write_rgba8_2d(
 
    memset(out, 0, AGX3_IMAGE_WRITE_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || wait_mask != 1 ||
+   /* This argument is the dependency consumed by the first data-staging COPY,
+    * not an imgwci field. The fixed native instruction always waits for the
+    * staging-slot2 writes, so both an outstanding slot1 producer and data
+    * already retired by an earlier consumer use the same grounded bytes. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || (wait_mask & ~1u) != 0 ||
        !((image_index == 0 && !normalized) ||
          (image_index == 1 && normalized)))
       return false;

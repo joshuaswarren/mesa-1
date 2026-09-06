@@ -868,11 +868,13 @@ agx3_emit_image_coord(struct util_dynarray *emission,
           len == sizeof(bytes) && agx3_append(emission, bytes, len);
 }
 
-/* Two bounded public storage-image state classes: noncoherent 2D RGBA8UI
- * state0, and normalized formatted-float state1. The latter is format-generic:
- * the PBE descriptor selects RGBA8 versus RGB10A2 packing. The four slot2
- * COPYs route the packed vec4 into the exact imgwci data lanes; the first COPY
- * consumes any producer dependency, and native imgwci waits for staging slot2.
+/* Two bounded public storage-image forms: noncoherent 2D RGBA8UI state0 fed
+ * by one image load, and normalized formatted-float state1 fed by one
+ * explicit-LOD sample. The PBE descriptor selects RGBA8 versus RGB10A2.
+ * The four slot2 COPYs route the packed vec4 into the exact imgwci data lanes.
+ * The first COPY consumes the one-shot texture dependency when it is still
+ * outstanding. An intervening bounds consumer may already have retired that
+ * producer; either way native imgwci waits for the new staging-slot2 writes.
  * Validation happens before the first append, so a refusal leaves the output
  * transaction untouched. */
 static bool
@@ -884,7 +886,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                            I->format == AGX_FORMAT_RGB10A2;
    if (enc != AGX_ISA_ENCODING_AGX3B || I->nr_dests != 0 ||
        I->nr_srcs != 5 ||
-       I->dim != AGX_DIM_2D || I->coherent ||
+       I->dim != AGX_DIM_2D || I->coherent || (wait_mask & ~1u) != 0 ||
        !agx3_tex_plain_reg(I->src[0]) || I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != 4 || (I->src[0].value & 1) ||
        I->src[0].value > 248 || !agx3_tex_plain_reg(I->src[1]) ||

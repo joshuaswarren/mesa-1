@@ -1393,6 +1393,13 @@ build_cs_storage_image(unsigned mode)
       &b, nir_imm_int(&b, 64), .desc_set = 0);
    nir_def *pbe = nir_bindless_image_agx(
       &b, nir_imm_int(&b, 96), .desc_set = 0);
+   if (mode == 4) {
+      nir_def *descriptor = nir_load_from_texture_handle_agx(&b, texture);
+      nir_def *width = nir_load_global_constant(
+         &b, 1, 32, descriptor, .align_mul = 4);
+      coord = nir_vec4(&b, nir_iand(&b, nir_channel(&b, gid, 0), width),
+                       nir_channel(&b, gid, 1), zero, zero);
+   }
    nir_def *value = nir_bindless_image_load(
       &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
       .image_array = false, .format = format, .access = ACCESS_RESTRICT);
@@ -1405,7 +1412,7 @@ build_cs_storage_image(unsigned mode)
 static bool
 test_storage_image_lowering(void)
 {
-   for (unsigned mode = 0; mode < 4; ++mode) {
+   for (unsigned mode = 0; mode < 5; ++mode) {
       nir_shader *nir = build_cs_storage_image(mode);
       struct agx_g17p_storage_image_binding binding = {
          .texture_offset_B = UINT32_MAX,
@@ -1430,9 +1437,10 @@ test_storage_image_lowering(void)
          }
       }
 
-      const bool ok = mode == 0
+      const bool ok = mode == 0 || mode == 4
          ? lowered && binding.texture_offset_B == 64 &&
-              binding.pbe_offset_B == 96 && bindless_handles == 0 &&
+              binding.pbe_offset_B == 96 &&
+              bindless_handles == (mode == 4 ? 1 : 0) &&
               bindless_ops == 0 && ordinary_loads == 1 && ordinary_stores == 1
          : !lowered && binding.texture_offset_B == UINT32_MAX &&
               binding.pbe_offset_B == UINT32_MAX && bindless_handles == 2 &&
