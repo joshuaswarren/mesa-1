@@ -38,6 +38,12 @@ check_local(enum agx_isa_encoding enc, struct agx3_local_atomic_desc d,
    uint8_t len = 0;
    CHECK(agx3_atomic_encode_local(enc, &d, bytes, &len));
    CHECK(len == expected_len);
+   if (memcmp(bytes, expected, len) != 0) {
+      fprintf(stderr, "local atomic got: ");
+      for (unsigned i = 0; i < len; ++i)
+         fprintf(stderr, "%02x", bytes[i]);
+      fprintf(stderr, "\n");
+   }
    CHECK(memcmp(bytes, expected, len) == 0);
    return 0;
 }
@@ -124,7 +130,9 @@ main(void)
       .value = 4,
       .result = 6,
       .value_kill = true,
+      .returns_value = true,
       .slot = 1,
+      .address_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
    };
    static const uint8_t b_tg_add[] =
       {0x67,0x03,0x54,0x03,0x00,0x02,0x00,0x00,0x22,0x00,0x00,0x04};
@@ -158,6 +166,35 @@ main(void)
    CHECK(check_local(AGX_ISA_ENCODING_AGX3C, local, c_tg_cas,
                      sizeof(c_tg_cas)) == 0);
 
+   /* Own Metal source, compiled by Apple's offline G17P translator.  These
+    * are the no-result OR forms for words[0], words[2], and an inttoptr byte
+    * address held in r1. */
+   struct agx3_local_atomic_desc local_void = {
+      .op = AGX3_ATOMIC_OR,
+      .value = 0,
+      .value_kill = true,
+      .address_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
+   };
+   static const uint8_t b_tg_void_0[] =
+      {0x67,0x03,0x54,0x00,0x00,0x00,0x00,0x00,0x20,0x00,0x80,0x05};
+   CHECK(check_local(AGX_ISA_ENCODING_AGX3B, local_void, b_tg_void_0,
+                     sizeof(b_tg_void_0)) == 0);
+
+   local_void.address = 8;
+   static const uint8_t b_tg_void_8[] =
+      {0x67,0x03,0x54,0x00,0x00,0x00,0x00,0x00,0x20,0x02,0x80,0x05};
+   CHECK(check_local(AGX_ISA_ENCODING_AGX3B, local_void, b_tg_void_8,
+                     sizeof(b_tg_void_8)) == 0);
+
+   local_void.value_kill = false;
+   local_void.address_kind = AGX3_ATOMIC_INDEX_REGISTER;
+   local_void.address = 2;
+   local_void.address_kill = true;
+   static const uint8_t b_tg_void_reg[] =
+      {0x67,0x03,0x54,0x00,0x01,0x00,0x00,0x00,0x10,0x00,0x80,0x25};
+   CHECK(check_local(AGX_ISA_ENCODING_AGX3B, local_void, b_tg_void_reg,
+                     sizeof(b_tg_void_reg)) == 0);
+
    /* Fail closed on the ungrounded and structurally invalid axes. */
    uint8_t bytes[AGX3_ATOMIC_MAX_LENGTH];
    uint8_t len = 0;
@@ -174,6 +211,13 @@ main(void)
    bad.index_kind = AGX3_ATOMIC_INDEX_REGISTER;
    bad.index = 3;
    CHECK(!agx3_atomic_encode_device(AGX_ISA_ENCODING_AGX3C, &bad, bytes, &len));
+
+   local_void.address = 192;
+   CHECK(!agx3_atomic_encode_local(AGX_ISA_ENCODING_AGX3B, &local_void,
+                                   bytes, &len));
+   local_void.address = 2;
+   CHECK(!agx3_atomic_encode_local(AGX_ISA_ENCODING_AGX3C, &local_void,
+                                   bytes, &len));
 
    printf("agx3_atomic_core: %u checks passed\n", checks);
    return 0;

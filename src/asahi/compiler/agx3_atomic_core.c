@@ -171,29 +171,61 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
                          uint8_t out[AGX3_ATOMIC_MAX_LENGTH], uint8_t *len)
 {
    if (!encoding_ok(enc) || d == NULL || out == NULL || len == NULL ||
-       !op_ok(d->op) || d->value > 191 || d->result > 191 || d->slot < 1 ||
-       d->slot > slot_count(enc) ||
+       !op_ok(d->op) || d->value > 191 ||
        (d->wait_mask & ~((1u << slot_count(enc)) - 1u)))
       return false;
 
+   if (d->returns_value) {
+      if (d->result > 191 || d->slot < 1 || d->slot > slot_count(enc) ||
+          d->address_kind != AGX3_ATOMIC_INDEX_IMMEDIATE ||
+          d->address != 0 || d->address_kill)
+         return false;
+   } else {
+      /* The no-result and addressed forms are isolated on AGX3b. */
+      if (enc != AGX_ISA_ENCODING_AGX3B || d->slot != 0)
+         return false;
+
+      if (d->address_kind == AGX3_ATOMIC_INDEX_IMMEDIATE) {
+         if (d->address_kill || (d->address & 3) != 0)
+            return false;
+      } else if (d->address_kind == AGX3_ATOMIC_INDEX_REGISTER) {
+         if (d->address > 191)
+            return false;
+      } else {
+         return false;
+      }
+   }
+
    struct agx3_field_kv f[40];
    unsigned n = 0;
-   f[n++] = (struct agx3_field_kv)KV(2, d->result);
-   f[n++] = (struct agx3_field_kv)KV(9, 2);
    f[n++] = (struct agx3_field_kv)KV(10, 2);
-   f[n++] = (struct agx3_field_kv)KV(12, d->slot);
    f[n++] = (struct agx3_field_kv)KV(16, d->value);
    f[n++] = (struct agx3_field_kv)KV(23, 2);
    f[n++] = (struct agx3_field_kv)KV(24, 2);
    f[n++] = (struct agx3_field_kv)KV(27, d->value_kill ? 1 : 0);
    f[n++] = (struct agx3_field_kv)KV(37, 1);
    f[n++] = (struct agx3_field_kv)KV(38, 1);
-   f[n++] = (struct agx3_field_kv)KV(52, 1);
    f[n++] = (struct agx3_field_kv)KV(53, 1);
    f[n++] = (struct agx3_field_kv)KV(68, 1);
    f[n++] = (struct agx3_field_kv)KV(84, d->op);
-   f[n++] = (struct agx3_field_kv)KV(85, 1);
    f[n++] = (struct agx3_field_kv)KV(86, 1);
+
+   if (d->address_kind == AGX3_ATOMIC_INDEX_REGISTER) {
+      f[n++] = (struct agx3_field_kv)KV(52, 2);
+      f[n++] = (struct agx3_field_kv)KV(45, d->address);
+      if (d->address_kill)
+         f[n++] = (struct agx3_field_kv)KV(56, 1);
+   } else {
+      f[n++] = (struct agx3_field_kv)KV(52, 1);
+      f[n++] = (struct agx3_field_kv)KV(89, d->address);
+   }
+
+   if (d->returns_value) {
+      f[n++] = (struct agx3_field_kv)KV(2, d->result);
+      f[n++] = (struct agx3_field_kv)KV(9, 2);
+      f[n++] = (struct agx3_field_kv)KV(12, d->slot);
+      f[n++] = (struct agx3_field_kv)KV(85, 1);
+   }
 
    if (d->op == AGX3_ATOMIC_XCHG || d->op == AGX3_ATOMIC_CMPXCHG)
       f[n++] = (struct agx3_field_kv)KV(

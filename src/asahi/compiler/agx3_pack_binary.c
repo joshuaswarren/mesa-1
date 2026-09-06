@@ -1840,9 +1840,10 @@ agx3_translate_device_atomic(const agx_instr *I,
    return true;
 }
 
-/* Only Apple's directly witnessed scalar shared-variable form is selected:
- * returning 32-bit atomics at local address zero.  Dynamic/shared-array
- * addressing remains closed until its operand field is isolated. */
+/* Apple's AGX3b no-result form accepts either a literal byte displacement or
+ * a 16-bit GPR containing the byte address.  This is the shape produced by
+ * Vulkan shared atomics after agx_compile folds the index into the base.
+ * Returned atomics retain the cross-generation address-zero restriction. */
 static bool
 agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
                             uint16_t wait_mask,
@@ -1850,29 +1851,49 @@ agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
 {
    memset(d, 0, sizeof(*d));
    if (I->op != AGX_OPCODE_LOCAL_ATOMIC || I->nr_dests != 1 ||
-       I->nr_srcs != 3 || agx_is_null(I->dest[0]) ||
+       I->nr_srcs != 3 ||
        !agx3_map_atomic_op(I->atomic_opc, &d->op))
       return false;
 
    const unsigned value_channels =
       d->op == AGX3_ATOMIC_CMPXCHG ? 2 : 1;
-   if (!agx3_atomic_plain_reg(I->src[0], AGX_SIZE_32, value_channels) ||
-       !agx3_atomic_plain_reg(I->dest[0], AGX_SIZE_32, 1))
+   if (!agx3_atomic_plain_reg(I->src[0], AGX_SIZE_32, value_channels))
       return false;
 
-   const agx_index base = I->src[1], index = I->src[2];
-   if (base.type != AGX_INDEX_IMMEDIATE || base.value != 0 ||
-       base.size != AGX_SIZE_16 || base.memory || base.abs || base.neg ||
-       base.cache || base.discard || base.kill ||
-       index.type != AGX_INDEX_IMMEDIATE || index.value != 0 ||
+   d->returns_value = !agx_is_null(I->dest[0]);
+   if (d->returns_value) {
+      if (!agx3_atomic_plain_reg(I->dest[0], AGX_SIZE_32, 1))
+         return false;
+      d->result = I->dest[0].value;
+      d->slot = slot;
+   } else if (slot != 0) {
+      return false;
+   }
+
+   const agx_index index = I->src[2];
+   if (index.type != AGX_INDEX_IMMEDIATE || index.value != 0 ||
        index.size != AGX_SIZE_16 || index.memory || index.abs || index.neg ||
        index.cache || index.discard || index.kill)
       return false;
 
+   const agx_index base = I->src[1];
+   if (base.size != AGX_SIZE_16 || base.memory || base.abs || base.neg)
+      return false;
+   if (base.type == AGX_INDEX_IMMEDIATE && base.value <= UINT16_MAX &&
+       (base.value & 3) == 0 && !base.cache && !base.discard && !base.kill) {
+      d->address_kind = AGX3_ATOMIC_INDEX_IMMEDIATE;
+      d->address = base.value;
+   } else if (agx3_src_is_register(base) && base.value <= 191 &&
+              !(base.cache && base.discard)) {
+      d->address_kind = AGX3_ATOMIC_INDEX_REGISTER;
+      d->address = base.value;
+      d->address_kill = base.kill;
+   } else {
+      return false;
+   }
+
    d->value = I->src[0].value;
-   d->result = I->dest[0].value;
    d->value_kill = I->src[0].discard;
-   d->slot = slot;
    d->wait_mask = wait_mask;
    return true;
 }
