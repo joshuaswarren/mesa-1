@@ -2474,6 +2474,34 @@ agx_coerce_f16_src(agx_builder *b, agx_index src)
 }
 
 static agx_instr *
+agx_emit_g17p_ufind_msb(agx_builder *b, agx_index dst, agx_index value)
+{
+   /* Native G17P computes clz with FT1 plus correction; FT1 alone is not
+    * ufind_msb (in particular, it returns -1 for 0x80000000). Until that
+    * correction is represented in the IR, use a fixed binary search made
+    * from already-qualified unsigned selects and logical shifts. */
+   assert(value.size == AGX_SIZE_32 && dst.size == AGX_SIZE_32);
+   agx_index scan = value;
+   agx_index result = agx_mov_imm(b, 32, 0);
+   agx_index zero = agx_immediate(0);
+   static const unsigned shifts[] = {16, 8, 4, 2, 1};
+
+   for (unsigned i = 0; i < ARRAY_SIZE(shifts); ++i) {
+      const unsigned shift = shifts[i];
+      agx_index high =
+         agx_ushr(b, scan, agx_immediate((0u - shift) & 31u));
+      agx_index add = agx_icmpsel(b, high, zero, agx_immediate(shift), zero,
+                                  AGX_ICOND_UGT);
+      scan = agx_icmpsel(b, high, zero, high, scan, AGX_ICOND_UGT);
+      result = agx_iadd(b, result, add, 0);
+   }
+
+   agx_index minus_one = agx_mov_imm(b, 32, UINT32_MAX);
+   return agx_icmpsel_to(b, dst, value, zero, result, minus_one,
+                         AGX_ICOND_UGT);
+}
+
+static agx_instr *
 agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 {
    unsigned srcs = nir_op_infos[instr->op].num_inputs;
@@ -2521,7 +2549,11 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(u2u32, mov);
       UNOP(bitfield_reverse, bitrev);
       UNOP(bit_count, popcount);
-      UNOP(ufind_msb, ffs);
+   case nir_op_ufind_msb:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          src_sz == 32)
+         return agx_emit_g17p_ufind_msb(b, dst, s0);
+      return agx_ffs_to(b, dst, s0);
       BINOP(iand, and);
       BINOP(ior, or);
       BINOP(ixor, xor);
