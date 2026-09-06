@@ -1274,7 +1274,16 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FFS;
 
-      if (I->nr_dests == 1 && !g17p_ft1) {
+      /* A G17P register-boundary SRL may overwrite its value when that value
+       * dies, as in Apple's native tied witness, but it must not overwrite
+       * the boundary operand itself. Keep a killed boundary allocated until
+       * the destination has been placed. */
+      const bool g17p_srl_boundary =
+         rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_BFEIL && I->nr_srcs == 3 &&
+         I->src[2].type == AGX_INDEX_NORMAL && I->src[2].kill;
+
+      if (I->nr_dests == 1 && !g17p_ft1 && !g17p_srl_boundary) {
          unsigned first_src = 0;
          unsigned end = 0;
          unsigned start = 0;
