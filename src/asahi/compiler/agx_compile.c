@@ -2474,18 +2474,6 @@ agx_coerce_f16_src(agx_builder *b, agx_index src)
 }
 
 static agx_instr *
-agx_emit_g17p_ufind_msb(agx_builder *b, agx_index dst, agx_index value)
-{
-   /* Apple's G17P clz is FT1 followed by its integer correction: FT1 is
-    * clz - 1 (the exact hardware result for 0x80000000 is -1). Therefore
-    * ufind_msb = 31 - clz = 30 - FT1. This also produces -1 for zero. */
-   assert(value.size == AGX_SIZE_32 && dst.size == AGX_SIZE_32);
-   agx_index ft1 = agx_ffs(b, value);
-   agx_index thirty = agx_mov_imm(b, 32, 30);
-   return agx_iadd_to(b, dst, thirty, agx_neg(ft1), 0);
-}
-
-static agx_instr *
 agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 {
    unsigned srcs = nir_op_infos[instr->op].num_inputs;
@@ -2534,9 +2522,6 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(bitfield_reverse, bitrev);
       UNOP(bit_count, popcount);
    case nir_op_ufind_msb:
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          src_sz == 32)
-         return agx_emit_g17p_ufind_msb(b, dst, s0);
       return agx_ffs_to(b, dst, s0);
       BINOP(iand, and);
       BINOP(ior, or);

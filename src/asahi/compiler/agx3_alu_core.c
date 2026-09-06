@@ -8,13 +8,14 @@
 #include <string.h>
 
 bool
-agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t reg,
+agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  enum agx3_alu_hint hint, bool dest_cache,
                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                  uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || reg >= 256 ||
-       (reg & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || ((dest | src) & 1) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
       return false;
 
@@ -22,14 +23,13 @@ agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t reg,
     *   a705560202004c04  ft1 r1, wait0
     * A live ALU chain independently grounds destination/source caching:
     *   a705540003005c04  ft1 $r0, $r0
-    * Apple's clz lowering grounds last-use plus wait0:
-    *   a705560603004e04  ft1 $r3, ^r3, wait0
-    * The operation is tied: field2 is both destination and source. */
+    * Apple's clz lowering grounds independent destination/source plus wait0:
+    *   a705560603044e04  ft1 $r3, ^r2, wait0 */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {23, 2}, {24, 2},
    };
    struct agx3_field_kv fields[11] = {
-      {2, reg},
+      {2, dest},
       {11, dest_cache},
       {25, hint == AGX3_ALU_HINT_DISCARD},
       {27, hint == AGX3_ALU_HINT_CACHE},
@@ -39,7 +39,15 @@ agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t reg,
       fields[n++] = (struct agx3_field_kv){36 + slot,
                                           !!(wait_mask & (1u << slot))};
 
-   return agx3_bind_compose(enc, "ft1", 0, base, 4, fields, n, out, len);
+   if (!agx3_bind_compose(enc, "ft1", 0, base, 4, fields, n, out, len))
+      return false;
+
+   /* The recovered composer form fixes the independent source byte to zero,
+    * but fresh Apple clz kernels vary it directly with the source half:
+    * a705560603004e04 (src half0) -> a705560603044e04 (src half4).
+    * The full byte is the source field and every admitted register is even. */
+   out[5] = (uint8_t)src;
+   return true;
 }
 
 bool

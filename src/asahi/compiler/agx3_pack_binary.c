@@ -5719,10 +5719,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index dest = I->dest[0], src = I->src[0];
             if (!agx3_vary_reg32(dest) || !agx3_vary_reg32(src) ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                dest.value != src.value || src.abs || src.neg)
+                src.abs || src.neg)
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            if (!agx3_alu_ft1_u32(enc, dest.value, agx3_post_ra_hint(src),
+            if (!agx3_alu_ft1_u32(enc, dest.value, src.value,
+                                  agx3_post_ra_hint(src),
                                   dest.cache, wait, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);

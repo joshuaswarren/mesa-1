@@ -154,12 +154,12 @@ bool agx3_alu_u16_to_f32(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t src, enum agx3_alu_hint hint, uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-/* G17P's tied-register find-top-one operation.  This is the native operation
+/* G17P's find-top-one operation.  This is the native operation
  * selected for llvm.agx2.ft1 and is the direct hardware implementation of
  * Mesa's ufind_msb/FFS instruction.  The zero input result is -1, matching
  * NIR.  Only the witnessed f32-width register form and its native
  * cache/discard and six dependency-wait axes are admitted. */
-bool agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t reg,
+bool agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      enum agx3_alu_hint hint, bool dest_cache,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);

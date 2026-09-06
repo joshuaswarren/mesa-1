@@ -16,41 +16,46 @@ static void
 test_native_ft1(void)
 {
    static const struct {
-      uint16_t reg, wait;
+      uint16_t dest, src, wait;
       enum agx3_alu_hint hint;
       bool dest_cache;
       uint8_t bytes[8];
    } witnesses[] = {
-      {2, 1, AGX3_ALU_HINT_NONE, false,
+      {2, 0, 1, AGX3_ALU_HINT_NONE, false,
        {0xa7, 0x05, 0x56, 0x02, 0x02, 0x00, 0x4c, 0x04}},
-      {0, 0, AGX3_ALU_HINT_CACHE, true,
+      {0, 0, 0, AGX3_ALU_HINT_CACHE, true,
        {0xa7, 0x05, 0x54, 0x00, 0x03, 0x00, 0x5c, 0x04}},
-      {6, 1, AGX3_ALU_HINT_DISCARD, true,
+      {6, 0, 1, AGX3_ALU_HINT_DISCARD, true,
        {0xa7, 0x05, 0x56, 0x06, 0x03, 0x00, 0x4e, 0x04}},
+      {6, 4, 1, AGX3_ALU_HINT_DISCARD, true,
+       {0xa7, 0x05, 0x56, 0x06, 0x03, 0x04, 0x4e, 0x04}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
-      assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, witnesses[i].reg,
+      assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, witnesses[i].dest,
+                              witnesses[i].src,
                               witnesses[i].hint, witnesses[i].dest_cache,
                               witnesses[i].wait, bytes, &len));
       assert(len == 8 && !memcmp(bytes, witnesses[i].bytes, len));
    }
 
    /* This exact post-RA shape is the vkQuake update_lightmap use. */
-   assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+   assert(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 26,
                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
    assert(len == 8 &&
           !memcmp(bytes,
                   (uint8_t[]){0xa7, 0x05, 0x54, 0x1a,
-                              0x03, 0x00, 0x5c, 0x04},
+                              0x03, 0x1a, 0x5c, 0x04},
                   8));
 
-   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3C, 26,
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3C, 26, 26,
                             AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
-   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 27,
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 27, 26,
                             AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
-   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 26,
                             AGX3_ALU_HINT_CACHE, true, 64, bytes, &len));
+   assert(!agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 27,
+                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
 }
 
 static void

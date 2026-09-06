@@ -441,7 +441,7 @@ TEST_F(AGX3PackBinary, UpdateLightmapNativeIntegerAndMaskForms)
 
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    std::vector<uint8_t> want;
-   ASSERT_TRUE(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26,
+   ASSERT_TRUE(agx3_alu_ft1_u32(AGX_ISA_ENCODING_AGX3B, 26, 26,
                                  AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
    append(want, bytes, len);
    const uint16_t bit_src[] = {20, 6};
