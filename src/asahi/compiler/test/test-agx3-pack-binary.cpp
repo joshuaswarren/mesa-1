@@ -572,6 +572,35 @@ TEST_F(AGX3PackBinary, DeviceAtomicUsesNativeMaskedExecutionMode)
    EXPECT_EQ(want[1], 0x11);
 }
 
+TEST_F(AGX3PackBinary, DeviceAtomicInPlaceReturnDiscardsConsumedValue)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index value = agx_mov_imm(b, 32, 7);
+   agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+   agx_atomic_to(b, result, value, agx_uniform(0, AGX_SIZE_64),
+                 agx_immediate(0), AGX_ATOMIC_OPC_ADD);
+   agx_stop(b);
+
+   agx_ra(b->shader);
+
+   unsigned atomics = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_ATOMIC)
+         continue;
+
+      ++atomics;
+      EXPECT_EQ(I->src[0].type, AGX_INDEX_REGISTER);
+      EXPECT_EQ(I->dest[0].type, AGX_INDEX_REGISTER);
+      EXPECT_EQ(I->src[0].value, I->dest[0].value);
+      EXPECT_TRUE(I->src[0].discard);
+   }
+   EXPECT_EQ(atomics, 1u);
+}
+
 TEST_F(AGX3PackBinary, DeviceAtomicFoldsElementOffsetToBytes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

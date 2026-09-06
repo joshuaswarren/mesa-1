@@ -1728,6 +1728,15 @@ agx_ra(agx_context *ctx)
          agx_replace_src(ins, s, agx_as_register(ins->src[s]));
       }
 
+      /* The native AGX3b in-place return form marks its consumed value
+       * operand discardable.  RA has made that operand private and coalesced
+       * it with the destination above.  Set the physical hint only after SSA
+       * lowering, which intentionally strips SSA liveness flags. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          ins->op == AGX_OPCODE_ATOMIC && ins->nr_dests == 1 &&
+          !agx_is_null(ins->dest[0]))
+         ins->src[0].discard = true;
+
       /* Lower away RA pseudo-instructions */
       agx_builder b = agx_init_builder(ctx, agx_after_instr(ins));
 

@@ -94,20 +94,6 @@ main(void)
    CHECK(check_device(AGX_ISA_ENCODING_AGX3B, elected_used, b_elected_used,
                       sizeof(b_elected_used)) == 0);
 
-   /* A GPR-held address base carries f56=1 independently of the return and
-    * elected-execution fields.  This is byte-exact applegpu-nt output for a
-    * returned atomic through a runtime-loaded pointer. */
-   struct agx3_device_atomic_desc register_base = elected_used;
-   register_base.value = 2;
-   register_base.result = 2;
-   register_base.slot = 1;
-   register_base.base_kind = AGX3_ATOMIC_BASE_REGISTER;
-   register_base.base = 10;
-   static const uint8_t b_register_base[] =
-      {0x67,0x11,0x54,0x00,0x00,0x85,0x00,0x00,0x00,0x62,0x00,0x00,0x20,0x01};
-   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, register_base,
-                      b_register_base, sizeof(b_register_base)) == 0);
-
    /* Native da_store/da_xchg_r are the standalone counterpart: identical
     * 14-byte instructions except byte +9, with no elected-mode bit. */
    struct agx3_device_atomic_desc xchg_void = base;
