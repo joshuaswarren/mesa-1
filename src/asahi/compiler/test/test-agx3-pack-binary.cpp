@@ -4406,6 +4406,70 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
+
+TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(120, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_register(12, AGX_SIZE_64), agx_register(16, AGX_SIZE_64),
+      agx_null(), AGX_DIM_2D_ARRAY, AGX_LOD_MODE_AUTO_LOD, 0, false,
+      false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 120, 6, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 122, 6, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 124, 6, 0, false, false,
+                                          bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1u << 5;
+   d.final = true;
+   d.array = true;
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 12;
+   d.sampler_value = 16;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1, bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(enc);
+   bad->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index wrapped = agx_register(124, AGX_SIZE_32);
+   wrapped.channels_m1 = 2;
+   I = agx_texture_sample_to(
+      bad, dest, wrapped, agx_immediate(0), agx_immediate(0),
+      agx_register(12, AGX_SIZE_64), agx_register(16, AGX_SIZE_64),
+      agx_null(), AGX_DIM_2D_ARRAY, AGX_LOD_MODE_AUTO_LOD, 0, false,
+      false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(bad);
+   EXPECT_TRUE(pack(bad, false).empty());
+}
+
 TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWitnessAndRefusesOtherWaits)
 {
    static const uint8_t native[AGX3_IMAGE_WRITE_LENGTH] = {

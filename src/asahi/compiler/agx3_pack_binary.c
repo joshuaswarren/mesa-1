@@ -972,6 +972,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
+   /* Array coordinates are copied to the fixed staging bank before SMP, so
+    * their source only needs to fit the COPY/PACK_SMPIR 7-bit half-register
+    * fields. The third scalar must not wrap that field. Plain 2D samples name
+    * the coordinate directly in SMP and retain its narrower bound. */
+   const unsigned max_coord = array ? 120 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -981,7 +986,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != (array ? 3 : 2) ||
-       (I->src[0].value & 3) || I->src[0].value > 60 ||
+       (I->src[0].value & 3) || I->src[0].value > max_coord ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
        (immediate && (I->src[3].value > 15 || I->src[4].value > 15)) ||
        I->src[3].memory || I->src[3].abs || I->src[3].neg ||
