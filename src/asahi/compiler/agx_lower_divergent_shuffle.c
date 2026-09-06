@@ -38,7 +38,14 @@ void
 agx_lower_divergent_shuffle(agx_context *ctx)
 {
    agx_builder b = agx_init_builder(ctx, agx_before_function(ctx));
-   agx_index scratch = agx_register(1, AGX_SIZE_16);
+   const bool agx3 = ctx->key != NULL &&
+                     ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+
+   /* AGX2 consumes a half-register lane selector. AGX3's native register-lane
+    * shuffle consumes a 32-bit register, and RA already reserves both r0
+    * halves for control flow plus this divergent-shuffle workaround. */
+   agx_index scratch = agx3 ? agx_register(0, AGX_SIZE_32)
+                            : agx_register(1, AGX_SIZE_16);
 
    assert(ctx->any_quad_divergent_shuffle);
    agx_mov_imm_to(&b, scratch, 0);
