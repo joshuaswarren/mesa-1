@@ -3288,12 +3288,17 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    ctx->break_block = agx_create_block(ctx);
    agx_block *loop_header = agx_create_block(ctx);
 
-   /* If we are emitting a loop inside other control flow, there might be
-    * threads masked off (TODO: divergence analysis), so push_exec them so
-    * we get the lower nesting count values to ourselves.
+   /* AGX3's witnessed loop sequence starts with cndst even at top level:
+    * cndst opens the architectural exec-mask levels which break-if's cndlt
+    * mutates and the loop footer's cndend pops.  Entering a top-level loop
+    * without it happens to match the legacy nesting-counter model, but leaves
+    * cndlt without a corresponding stack frame and can spin after a true
+    * break condition.  AGX2 only needs push_exec when enclosing control flow
+    * may already have masked threads.
     */
    agx_builder _b = agx_init_builder(ctx, agx_after_block(ctx->current_block));
-   if (ctx->total_nesting > 1)
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 ||
+       ctx->total_nesting > 1)
       agx_push_exec(&_b, 1);
 
    /* Fallthrough to loop header */

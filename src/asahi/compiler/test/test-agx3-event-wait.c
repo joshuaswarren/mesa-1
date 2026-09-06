@@ -16,6 +16,7 @@ int
 main(void)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   static const uint8_t loop_entry[] = {0x0f, 0x05, 0x54, 0x1a};
 
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 event wait");
@@ -52,10 +53,20 @@ main(void)
       memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
              end, sizeof(end)) == 0;
 
-   if (!valid)
+   bool has_loop_entry = false;
+   for (unsigned i = 0;
+        part.binary && i + sizeof(loop_entry) <= part.info.binary_size; ++i) {
+      if (memcmp((const uint8_t *)part.binary + i, loop_entry,
+                 sizeof(loop_entry)) == 0) {
+         has_loop_entry = true;
+         break;
+      }
+   }
+
+   if (!valid || !has_loop_entry)
       fprintf(stderr, "AGX3b event-wait poll was not encoded safely\n");
 
    free(part.binary);
    ralloc_free(b.shader);
-   return valid ? 0 : 1;
+   return valid && has_loop_entry ? 0 : 1;
 }
