@@ -47,3 +47,29 @@ hk_g17p_buffer_to_image_copy_supported(
           (copy->buffer_image_height == 0 ||
            copy->buffer_image_height >= copy->copy_extent.height);
 }
+
+bool
+hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
+                         VkImageType dst_type, uint32_t src_layers,
+                         uint32_t dst_layers, const VkImageCopy2 *region,
+                         uint32_t slice, VkImageCopy2 *out)
+{
+   if (out)
+      *out = (VkImageCopy2){0};
+
+   if (chip != AGX_CHIP_G17P || !region || !out ||
+       src_type != VK_IMAGE_TYPE_2D || dst_type != VK_IMAGE_TYPE_2D ||
+       src_layers == 0 || src_layers != dst_layers || slice >= src_layers ||
+       region->extent.depth != 1 ||
+       slice > UINT32_MAX - region->srcSubresource.baseArrayLayer ||
+       slice > UINT32_MAX - region->dstSubresource.baseArrayLayer)
+      return false;
+
+   *out = *region;
+   out->extent.depth = 1;
+   out->srcSubresource.baseArrayLayer += slice;
+   out->srcSubresource.layerCount = 1;
+   out->dstSubresource.baseArrayLayer += slice;
+   out->dstSubresource.layerCount = 1;
+   return true;
+}

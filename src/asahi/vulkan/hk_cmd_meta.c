@@ -1657,8 +1657,44 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
       struct vk_meta_copy_image_properties dst_props =
          hk_meta_copy_get_image_properties(dst_image);
 
-      vk_meta_copy_image(&cmd->vk, &dev->meta, pCopyImageInfo, &src_props,
-                         &dst_props, bind_point);
+      if (dev->dev.chip == AGX_CHIP_G17P) {
+         /* The qualified HAL200 BG/EOT contract is single-layer.  Preserve
+          * arbitrary mip and rectangle selection while expanding 2D-array
+          * regions into the same sequence of per-layer native meta draws. */
+         for (uint32_t r = 0; r < pCopyImageInfo->regionCount; ++r) {
+            const VkImageCopy2 *region = &pCopyImageInfo->pRegions[r];
+            const uint32_t src_slices = vk_image_subresource_layer_count(
+               &src_image->vk, &region->srcSubresource);
+            const uint32_t dst_slices = vk_image_subresource_layer_count(
+               &dst_image->vk, &region->dstSubresource);
+
+            for (uint32_t slice = 0; slice < src_slices; ++slice) {
+               VkImageCopy2 one;
+               if (!hk_g17p_image_copy_slice(
+                      dev->dev.chip, src_image->vk.image_type,
+                      dst_image->vk.image_type, src_slices, dst_slices,
+                      region, slice, &one)) {
+                  vk_command_buffer_set_error(&cmd->vk,
+                                              VK_ERROR_FEATURE_NOT_PRESENT);
+                  break;
+               }
+
+               VkCopyImageInfo2 info = *pCopyImageInfo;
+               info.regionCount = 1;
+               info.pRegions = &one;
+               vk_meta_copy_image(&cmd->vk, &dev->meta, &info, &src_props,
+                                  &dst_props, bind_point);
+               if (vk_command_buffer_has_error(&cmd->vk))
+                  break;
+            }
+
+            if (vk_command_buffer_has_error(&cmd->vk))
+               break;
+         }
+      } else {
+         vk_meta_copy_image(&cmd->vk, &dev->meta, pCopyImageInfo, &src_props,
+                            &dst_props, bind_point);
+      }
    } else {
       hk_meta_copy_image2(&cmd->vk, &dev->meta, pCopyImageInfo);
    }

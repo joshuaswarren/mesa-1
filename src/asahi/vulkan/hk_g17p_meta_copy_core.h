@@ -37,3 +37,12 @@ struct hk_g17p_buffer_to_image_copy {
  * passes without changing source layout or copying index/pixel data. */
 bool hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy);
+
+/* HAL200's qualified tile programs are single-layer.  Convert one layer of a
+ * valid 2D-array image copy without changing its rectangle or mip levels.
+ * The resolved source/destination layer counts must describe the same copy. */
+bool hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
+                              VkImageType dst_type, uint32_t src_layers,
+                              uint32_t dst_layers,
+                              const VkImageCopy2 *region, uint32_t slice,
+                              VkImageCopy2 *out);
