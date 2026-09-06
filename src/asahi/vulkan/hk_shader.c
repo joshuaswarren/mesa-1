@@ -1849,6 +1849,25 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       shaders[i] = nir;
    }
 
+   /* A complete raster pipeline without a fragment shader cannot consume
+    * user varyings.  Remove them before AGX assigns the unlinked UVS layout,
+    * while preserving fixed-function outputs such as position and any XFB
+    * writes.  Besides avoiding pointless vertex work, this keeps the G17P
+    * backend on its native immediate-index UVSW form; the dynamic UVS index
+    * is only needed when a later fragment shader may still choose the
+    * interpolation-class ordering.
+    *
+    * Do not apply this to pipeline libraries: their pre-raster shader can be
+    * linked with a fragment library later. */
+   if (dev->dev.chip == AGX_CHIP_G17P && state && shader_count > 0 &&
+       !(state->pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) &&
+       !(state->shader_stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+      nir_shader *last = shaders[shader_count - 1];
+      if (last->info.stage <= MESA_SHADER_GEOMETRY)
+         NIR_PASS(_, last, nir_remove_outputs, MESA_SHADER_FRAGMENT,
+                  BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32), 0);
+   }
+
    nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
                          nir_opts, NULL);
 
