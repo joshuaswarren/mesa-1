@@ -1229,8 +1229,9 @@ test_indexed_fetch_sets(void)
       tex->op=i ? nir_texop_txf : nir_texop_tex;
       tex->sampler_dim=GLSL_SAMPLER_DIM_2D;
       tex->dest_type=nir_type_float32;
-      tex->is_array=i==2;tex->coord_components=tex->is_array?3:2;
-      tex->src[0]=nir_tex_src_for_ssa(nir_tex_src_coord,
+      tex->is_array=i==2;
+      tex->coord_components=i==1?1:(tex->is_array?3:2);
+      tex->src[0]=nir_tex_src_for_ssa(i==1?nir_tex_src_backend1:nir_tex_src_coord,
          i ? (i==2 ? nir_imm_ivec3(&b,3,4,1) : nir_imm_ivec2(&b,3,4))
            : nir_imm_vec2(&b,.25,.75));
       tex->src[1]=nir_tex_src_for_ssa(nir_tex_src_texture_handle,image);

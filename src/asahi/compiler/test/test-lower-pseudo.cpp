@@ -36,12 +36,29 @@ TEST_F(LowerPseudo, Move)
    CASE(agx_mov_to(b, wx, wy), agx_bitop_to(b, wx, wy, agx_zero(), 0xA));
 }
 
+TEST_F(LowerPseudo, Agx3ImmediateMove)
+{
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   actual->shader->key = &key;
+   agx_mov_to(actual, wx, agx_immediate(7));
+
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   expected->shader->key = &key;
+   agx_mov_imm_to(expected, wx, 7);
+
+   agx_lower_pseudo(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(LowerPseudo, Not)
 {
    CASE(agx_not_to(b, wx, wy), agx_bitop_to(b, wx, wy, agx_zero(), 0x5));
 }
 
-TEST_F(LowerPseudo, PreservesAgx3ArchitecturalControlFlow)
+TEST_F(LowerPseudo, LowersAgx3UnconditionalBreak)
 {
    agx_shader_key key = {};
    key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
@@ -50,13 +67,14 @@ TEST_F(LowerPseudo, PreservesAgx3ArchitecturalControlFlow)
    actual->shader->key = &key;
    agx_begin_cf(actual);
    agx_break_if_icmp(actual, wx, wy, 1, false, AGX_ICOND_ULT, NULL);
-   agx_break(actual, 1, NULL);
+   agx_break(actual, 2, NULL);
 
    agx_builder *expected = agx_test_builder(mem_ctx);
    expected->shader->key = &key;
    agx_begin_cf(expected);
    agx_break_if_icmp(expected, wx, wy, 1, false, AGX_ICOND_ULT, NULL);
-   agx_break(expected, 1, NULL);
+   agx_index r0l = agx_register(0, AGX_SIZE_16);
+   agx_break_if_icmp(expected, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
 
    agx_lower_pseudo(actual->shader);
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);

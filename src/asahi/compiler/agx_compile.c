@@ -2377,11 +2377,38 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      /* The grounded immediate-multiplier IMAD has either no addend or a
+       * nonnegative byte addend. Split `a * byte - byte` into the witnessed
+       * pure multiply followed by the witnessed subtract-immediate form. */
+      if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs == 3 &&
+          I->dest[0].size == AGX_SIZE_32 && I->shift == 0 &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
+          !I->src[1].neg && I->src[1].value <= UINT8_MAX &&
+          I->src[2].type == AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
+          I->src[2].neg && I->src[2].value <= UINT8_MAX) {
+         agx_index product = agx_temp(ctx, AGX_SIZE_32);
+         agx_imad_to(&b, product, I->src[0], I->src[1], agx_zero(), 0);
+         I->op = AGX_OPCODE_IADD;
+         I->src[0] = product;
+         I->src[1] = I->src[2];
+         I->nr_srcs = 2;
+      }
+
       if ((I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL) &&
           I->nr_dests == 1 && I->nr_srcs == 3 &&
           I->dest[0].size == AGX_SIZE_32 &&
           I->src[2].type == AGX_INDEX_IMMEDIATE) {
          I->src[2] = agx_mov_imm(&b, 32, I->src[2].value);
+      }
+
+      /* G17P's register-selected shift has no immediate value operand.  NIR
+       * uses BFI(0, 1, shift) for 1u << shift, so materialize that value just
+       * like the variable shift amount above. */
+      if ((I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL) &&
+          I->nr_dests == 1 && I->nr_srcs == 3 &&
+          I->dest[0].size == AGX_SIZE_32 &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE) {
+         I->src[1] = agx_mov_imm(&b, 32, I->src[1].value);
       } else if (I->op == AGX_OPCODE_BITOP && I->nr_dests == 1 &&
                  (I->dest[0].size == AGX_SIZE_32 ||
                   (I->dest[0].size == AGX_SIZE_16 &&

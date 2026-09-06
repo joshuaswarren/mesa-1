@@ -252,25 +252,38 @@ agx_nir_lower_g17p_combined_sampler(
 static bool
 g17p_indexed_fetch_shape(const nir_tex_instr *tex)
 {
+   int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   if (coord < 0)
+      coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+
+   /* Buffer textures are lowered to a 2D hardware texture before this pass.
+    * That lowering deliberately preserves coord_components == 1 while its
+    * backend coordinate is the remapped vec2.  Admit exactly that canonical
+    * mismatch alongside ordinary 2D/2D-array fetches.
+    */
+   const bool lowered_buffer =
+      tex->sampler_dim == GLSL_SAMPLER_DIM_2D && !tex->is_array &&
+      tex->coord_components == 1 && coord >= 0 &&
+      tex->src[coord].src.ssa->num_components == 2;
+
    if (tex->op != nir_texop_txf || tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
        tex->is_shadow || tex->is_sparse || tex->texture_index ||
        tex->sampler_index || tex->def.bit_size != 32 ||
        tex->def.num_components != 4 ||
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
-       tex->coord_components != (tex->is_array ? 3 : 2) ||
+       (!lowered_buffer &&
+        tex->coord_components != (tex->is_array ? 3 : 2)) ||
        (tex->backend_flags & ~AGX_TEXTURE_FLAG_NO_CLAMP))
       return false;
    const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
    const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
-   int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
-   if (coord < 0)
-      coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
    return handle >= 0 && lod >= 0 && coord >= 0 && tex->num_srcs == 3 &&
       nir_src_is_const(tex->src[lod].src) &&
       nir_src_as_uint(tex->src[lod].src) == 0 &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
-      nir_src_num_components(tex->src[coord].src) == tex->coord_components;
+      nir_src_num_components(tex->src[coord].src) ==
+         (lowered_buffer ? 2 : tex->coord_components);
 }
 
 /* Descriptor lowering normally wraps the software heap index in a bindless

@@ -4818,6 +4818,29 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A narrowing integer move copies the low half of its 32-bit
+          * source. The same native 16-bit COPY used above names that low half
+          * directly, so no arithmetic conversion or new encoding is needed. */
+         if (I->op == AGX_OPCODE_BITOP &&
+             (I->truth_table & 0xfu) == AGX3_SEL_TT_MOV &&
+             I->nr_dests == 1 && I->nr_srcs == 2 &&
+             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
+             !I->src[0].abs && !I->src[0].neg &&
+             I->src[0].size == AGX_SIZE_32 && agx_channels(I->src[0]) == 1 &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value == 0 &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1) {
+            uint8_t bytes[AGX3_COPY_MAX_LENGTH];
+            uint8_t len = 0;
+            if (!agx3_copy_encode_reg16(enc, I->dest[0].value,
+                                        I->src[0].value, I->dest[0].cache,
+                                        I->src[0].cache, I->src[0].discard,
+                                        wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /*
           * The same lowering at 16 bits, register to register: Mesa keeps
           * booleans in halves and the select core's 32-bit `iadd d, s, #0`

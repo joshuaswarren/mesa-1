@@ -80,6 +80,8 @@ lower(agx_builder *b, agx_instr *I)
 
    /* Various instructions are implemented as bitwise truth tables */
    case AGX_OPCODE_MOV:
+      if (agx3 && I->src[0].type == AGX_INDEX_IMMEDIATE)
+         return agx_mov_imm_to(b, I->dest[0], I->src[0].value);
       return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), UTIL_LUT2(a));
 
    case AGX_OPCODE_NOT:
@@ -118,11 +120,23 @@ lower(agx_builder *b, agx_instr *I)
       return agx_mov_imm_to(b, agx_register(0, AGX_SIZE_16), 0);
 
    case AGX_OPCODE_BREAK:
-      /* An unconditional AGX3 break is not grounded. Preserve it so the AGX3
-       * packer rejects the shader; lowering it through r0l would create a
-       * legal-looking instruction stream with the wrong execution model. */
-      if (agx3)
-         return NULL;
+      if (agx3) {
+         /* AGX3 has no witnessed unconditional break instruction. Break on
+          * the integer identity r0l == r0l instead, using the grounded
+          * compare+cndlt sequence without clobbering a post-RA register.
+          *
+          * A depth-2 BREAK is the unfused form produced for a loop break in
+          * one enclosing if. agx_opt_break_if proves that folding away that
+          * if subtracts one from the nesting depth, so its always-true fused
+          * form is the same depth-1 BREAK_IF accepted here. Deeper forms stay
+          * fail-closed until an equivalent nested witness exists. */
+         if (I->nest > 2)
+            return NULL;
+
+         agx_index r0l = agx_register(0, AGX_SIZE_16);
+         return agx_break_if_icmp(b, r0l, r0l, 1, false, AGX_ICOND_UEQ,
+                                  I->target);
+      }
       agx_mov_imm_to(b, agx_register(0, AGX_SIZE_16), I->nest);
       return agx_pop_exec(b, 0);
 

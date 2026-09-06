@@ -570,6 +570,26 @@ TEST_F(AGX3PackBinary, LocalAtomicScalarZeroAddress)
    }
 }
 
+TEST_F(AGX3PackBinary, NarrowingMoveUsesLowHalfCopy)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_bitop_to(b, agx_register(1, AGX_SIZE_16),
+                agx_register(8, AGX_SIZE_32), agx_zero(), UTIL_LUT2(a));
+   agx_stop(b);
+
+   uint8_t copy[AGX3_COPY_MAX_LENGTH], copy_len = 0;
+   ASSERT_TRUE(agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B, 1, 8,
+                                      false, false, false, 0,
+                                      copy, &copy_len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+
+   std::vector<uint8_t> want;
+   append(want, copy, copy_len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, AtomicsRefuseUngroundedStructuralAxes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
