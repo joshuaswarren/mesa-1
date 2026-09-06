@@ -127,6 +127,8 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
 
    f[n++] = (struct agx3_field_kv)KV(
       d->base_kind == AGX3_ATOMIC_BASE_UNIFORM ? 46 : 45, d->base);
+   if (d->base_kind == AGX3_ATOMIC_BASE_REGISTER)
+      f[n++] = (struct agx3_field_kv)KV(56, 1);
    f[n++] = (struct agx3_field_kv)KV(
       d->index_kind == AGX3_ATOMIC_INDEX_IMMEDIATE
          ? 29
