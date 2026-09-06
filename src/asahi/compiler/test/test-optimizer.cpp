@@ -134,6 +134,31 @@ TEST_F(Optimizer, G17PPreservesNarrowingAfterAdd)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+TEST_F(Optimizer, G17PPreservesTiedConstantFmax)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index minus_one = agx_mov_imm(actual, 32, 0xbf800000);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(actual, out, wx, minus_one, wx, minus_one,
+                  AGX_FCOND_GTN);
+   agx_unit_test(actual, out);
+
+   minus_one = agx_mov_imm(expected, 32, 0xbf800000);
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(expected, out, wx, minus_one, wx, minus_one,
+                  AGX_FCOND_GTN);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(Optimizer, FusedFABSNEG)
 {
    CASE32(agx_fadd_to(b, out, agx_fmov(b, agx_abs(wx)), wy),
