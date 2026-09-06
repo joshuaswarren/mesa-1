@@ -2535,7 +2535,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       }
       if ((!unconditional_break && (I->src[0].kill || I->src[1].kill)) ||
           !agx3_cf_map_icond(I->icond, &condition) ||
-          !agx3_cf_icmp_reg16(enc, condition, flag_slot, src, hints, 0, bytes, &len))
+          !agx3_cf_icmp_reg16(enc, condition, flag_slot, src, hints, 0, bytes,
+                              &len))
          return false;
       return agx3_append(emission, bytes, len);
    }
@@ -2807,7 +2808,13 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * flow fail-closed. */
       if (wait_mask != 0)
          return -1;
-      if ((is_if && I->nest != 1) || (is_break_if && I->nest != 1))
+      /* CNDLT's native operation owns two architectural exec-mask levels.
+       * Mesa's ordinary fused loop break arrives with nest=1; a break from
+       * the loop's final nested block arrives with nest=2 and uses the same
+       * compare+CNDLT transition before the shared backedge/CNDEND(2) footer.
+       * Deeper exits need an independently grounded unwind sequence. */
+      if ((is_if && I->nest != 1) ||
+          (is_break_if && (I->nest == 0 || I->nest > 2)))
          return -1;
 
       bool invert = I->invert_cond;

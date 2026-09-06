@@ -4341,15 +4341,26 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
 TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_push_exec(b, 1);
+   agx_block *body = agx_test_block(b->shader);
+   agx_block *after = agx_test_block(b->shader);
+   agx_builder lb = agx_init_builder(b->shader, agx_after_block(body));
    agx_index r0l = agx_register(0, AGX_SIZE_16);
    r0l.cache = true;
    r0l.kill = true;
-   agx_break_if_icmp(b, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
-   agx_stop(b);
+   agx_break_if_icmp(&lb, r0l, r0l, 2, false, AGX_ICOND_UEQ, after);
+   agx_jmp_exec_any(&lb, body);
+   agx_pop_exec(&lb, 1);
+   agx_builder ab = agx_init_builder(b->shader, agx_after_block(after));
+   agx_stop(&ab);
 
    uint8_t bytes[AGX3_CF_MAX_LENGTH];
    uint8_t len = 0;
    std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 6, false, 2, bytes,
+                             &len));
+   append(want, bytes, len);
+   const size_t body_offset = want.size();
    const uint16_t src[] = {0, 0};
    const struct agx3_cf_source_hints live[] = {
       {false, false}, {false, false},
@@ -4359,6 +4370,13 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
                                   bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 0, false, bytes, &len));
+   append(want, bytes, len);
+   const size_t branch_offset = want.size();
+   ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
+   ASSERT_TRUE(agx3_cf_patch_branch(AGX_ISA_ENCODING_AGX3B, false, bytes,
+                                    body_offset - branch_offset));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_cf_cndend(AGX_ISA_ENCODING_AGX3B, 2, bytes, &len));
    append(want, bytes, len);
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
