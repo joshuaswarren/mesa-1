@@ -698,7 +698,11 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
       nir_scalar s = nir_scalar_resolved(vec, c);
-      if (loc == 0 && c == 3 && nir_scalar_is_const(s) &&
+      /* G17P's mixed-width MRT epilog cannot materialize the elided alpha
+       * through AGX2's 16-bit immediate move. Keep it in the ordinary export
+       * ABI, which is also what native multi-target shaders use. */
+      if (!ctx->preserve_early_demote && loc == 0 && c == 3 &&
+          nir_scalar_is_const(s) &&
           nir_scalar_as_uint(s) == one_f) {
 
          info->loc0_w_1 = true;
