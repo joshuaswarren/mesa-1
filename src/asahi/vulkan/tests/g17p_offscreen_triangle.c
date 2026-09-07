@@ -206,7 +206,12 @@
 #define G17P_EXPLICIT_GRADIENT 0
 #endif
 
+#ifndef G17P_TEXTURE_GATHER
+#define G17P_TEXTURE_GATHER 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
+#define G17P_TEXTURE_ORACLE (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER)
 
 #if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
@@ -264,6 +269,11 @@
 #include "g17p_vulkan_texture_grad_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texture_grad_frag_spv
+#elif G17P_TEXTURE_GATHER
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_texture_gather_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texture_gather_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -797,6 +807,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TEXTURE_GATHER
+#define PROBE_NAME "g17p-vulkan-texture-gather"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1063,7 +1078,7 @@ VK_FN(vkBindBufferMemory);
 VK_FN(vkBindImageMemory);
 VK_FN(vkMapMemory);
 VK_FN(vkCreateImageView);
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
 VK_FN(vkCreateSampler);
 VK_FN(vkCreateDescriptorSetLayout);
 VK_FN(vkCreateDescriptorPool);
@@ -1079,7 +1094,7 @@ VK_FN(vkCreateCommandPool);
 VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyBufferToImage);
 VK_FN(vkCmdBindDescriptorSets);
@@ -1193,7 +1208,7 @@ has_device_extension(VkPhysicalDevice physical, const char *name)
 #endif
 
 #if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || G17P_INSTANCE_RATE || \
-   G17P_VERTEX_FORMAT || G17P_LOD_ORACLE
+   G17P_VERTEX_FORMAT || G17P_TEXTURE_ORACLE
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1259,7 +1274,11 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_GATHER
+   /* For P=(0.5,0.5) on mip 0, gather returns the red component from
+    * (31,32), (32,32), (32,31), (31,31), in that order. */
+   static const uint8_t expected[4] = {170, 255, 85, 0};
+#elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
     * The red mip 0 and blue mip 2 catch under- and overestimated LOD. */
@@ -1398,6 +1417,8 @@ main(void)
        getenv("G17P_IMPLICIT_LOD_RECORD_ONLY") != NULL) ||
       (G17P_EXPLICIT_GRADIENT &&
        getenv("G17P_TEXTURE_GRAD_RECORD_ONLY") != NULL) ||
+      (G17P_TEXTURE_GATHER &&
+       getenv("G17P_TEXTURE_GATHER_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -1588,7 +1609,7 @@ main(void)
        required_format)
       die("target optimal images lack color-attachment or transfer-src support");
 
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    VkFormatProperties texture_format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
                                        &texture_format_properties);
@@ -1671,7 +1692,7 @@ main(void)
    LOAD_DEVICE(device, vkBindImageMemory);
    LOAD_DEVICE(device, vkMapMemory);
    LOAD_DEVICE(device, vkCreateImageView);
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    LOAD_DEVICE(device, vkCreateSampler);
    LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
    LOAD_DEVICE(device, vkCreateDescriptorPool);
@@ -1687,7 +1708,7 @@ main(void)
    LOAD_DEVICE(device, vkAllocateCommandBuffers);
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
@@ -1868,7 +1889,7 @@ main(void)
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "restart vertex buffer");
    memcpy(vertex.map, vertex_expected, RESTART_VERTEX_BUFFER_BYTES);
    VkBuffer vertex_buffer = vertex.buffer;
-#elif G17P_LOD_ORACLE
+#elif G17P_TEXTURE_ORACLE
    enum {
       TEXTURE_VERTEX_OFFSET = 64,
       TEXTURE_VERTEX_SUFFIX_BYTES = 64,
@@ -1887,7 +1908,7 @@ main(void)
           sizeof(vertices));
    struct mapped_buffer texture_vertex = create_mapped_buffer(
       device, &memory_properties, sizeof(texture_vertex_expected),
-      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "implicit-LOD vertex buffer");
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "texture-oracle vertex buffer");
    memcpy(texture_vertex.map, texture_vertex_expected,
           sizeof(texture_vertex_expected));
    VkBuffer vertex_buffer = texture_vertex.buffer;
@@ -2033,7 +2054,7 @@ main(void)
           sizeof(restart_index_expected));
 #endif
 
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    enum {
       TEXTURE_WIDTH = 64,
       TEXTURE_HEIGHT = 64,
@@ -2064,9 +2085,28 @@ main(void)
       for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel)
          memcpy(dst + pixel * 4, mip_colours[level], 4);
    }
+#if G17P_TEXTURE_GATHER
+   struct gather_texel {
+      unsigned x, y;
+      uint8_t red;
+   };
+   static const struct gather_texel gather_texels[] = {
+      {31, 31, 0},
+      {32, 31, 85},
+      {31, 32, 170},
+      {32, 32, 255},
+   };
+   for (unsigned i = 0; i < sizeof(gather_texels) / sizeof(gather_texels[0]);
+        ++i) {
+      const struct gather_texel *texel = &gather_texels[i];
+      texture_upload_expected[TEXTURE_GUARD_BYTES +
+                              (texel->y * TEXTURE_WIDTH + texel->x) * 4] =
+         texel->red;
+   }
+#endif
    struct mapped_buffer texture_upload = create_mapped_buffer(
       device, &memory_properties, sizeof(texture_upload_expected),
-      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "implicit-LOD texture upload");
+      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture-oracle upload");
    memcpy(texture_upload.map, texture_upload_expected,
           sizeof(texture_upload_expected));
 
@@ -2212,7 +2252,7 @@ main(void)
    check(vkCreateImageView(device, &view_info, NULL, &view),
          "vkCreateImageView");
 
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    const VkImageViewCreateInfo texture_view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = texture,
@@ -2401,7 +2441,7 @@ main(void)
 
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
       .setLayoutCount = 1,
       .pSetLayouts = &set_layout,
 #endif
@@ -2604,7 +2644,7 @@ main(void)
    };
    check(vkBeginCommandBuffer(command_buffer, &begin_info),
          "vkBeginCommandBuffer");
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    VkImageMemoryBarrier texture_barrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
       .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -2674,7 +2714,7 @@ main(void)
                         VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
 #endif
@@ -2691,7 +2731,7 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 2, vertex_buffers,
                           vertex_offsets);
 #else
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    const VkDeviceSize vertex_offset = TEXTURE_VERTEX_OFFSET;
 #elif G17P_INDEX_RESTART
    const VkDeviceSize vertex_offset = RESTART_VERTEX_OFFSET;
@@ -2757,7 +2797,7 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_LOD_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
+#if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_RG16_UNORM ||                                                  \
@@ -2837,7 +2877,7 @@ main(void)
        !verify_upload(&restart_index, restart_index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    if (!verify_upload(&texture_vertex, texture_vertex_expected,
                       "vertex input") ||
        !verify_upload(&texture_upload, texture_upload_expected,
@@ -2845,7 +2885,7 @@ main(void)
       return EXIT_FAILURE;
 #endif
 
-#if G17P_LOD_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
+#if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
@@ -2887,7 +2927,7 @@ main(void)
        !verify_upload(&restart_index, restart_index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
-#if G17P_LOD_ORACLE
+#if G17P_TEXTURE_ORACLE
    if (!verify_upload(&texture_vertex, texture_vertex_expected,
                       "vertex input") ||
        !verify_upload(&texture_upload, texture_upload_expected,
@@ -2908,6 +2948,11 @@ main(void)
                      "immediately/3s, distinct red/green/blue mips and all "
                      "source/readback guards unchanged, checksum %016" PRIx64
                      "\n",
+          checksum);
+#elif G17P_TEXTURE_GATHER
+   printf(PROBE_NAME ": PASS — textureGather red-component footprint and "
+                     "lane order exact immediately/3s, all source/readback "
+                     "guards unchanged, checksum %016" PRIx64 "\n",
           checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "

@@ -545,6 +545,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-texture-gather',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_GATHER=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-bc1-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),
       include_directories : [inc_include],
