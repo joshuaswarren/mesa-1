@@ -779,10 +779,16 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       return 1;
    }
 
-   /* Only the two normalized 8-bit formats are witnessed. sRGB needs an
-    * encode `fltnorm` has no field for, and every wider format stores its
-    * channels unpacked. */
-   if (format != AGX_FORMAT_U8NORM && format != AGX_FORMAT_S8NORM)
+   const bool norm8 =
+      format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
+   const bool norm16 =
+      format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
+
+   /* Fresh Apple G17P R16Unorm/R16Snorm pipelines use the same conversion
+    * opcode with format modes 2/3 and one instruction per 16-bit channel.
+    * Keep AGX3c closed until an equivalent native witness exists. */
+   if (!norm8 &&
+       !(norm16 && b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B))
       return 0;
 
    if (nr_channels < 1 || nr_channels > 4)
@@ -796,13 +802,23 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
 
    unsigned n = 0;
    for (unsigned i = 0; i < nr_channels; i += 2) {
+      const unsigned lanes = MIN2(2u, nr_channels - i);
       const agx_index hi =
-         (i + 1 < nr_channels) ? channels[i + 1] : agx_null();
+         (lanes == 2) ? channels[i + 1] : agx_null();
       /* The destination is a 16-bit half, not the sources' 32 bits, so the
        * generated temp-allocating helper cannot be used here. */
       agx_index dest = agx_temp(b->shader, AGX_SIZE_16);
+      if (norm16)
+         dest.channels_m1 = lanes - 1;
       agx_fltnorm_agx3_to(b, dest, channels[i], hi, format);
-      packed[n++] = dest;
+      if (norm16) {
+         agx_index halves[2] = {agx_null()};
+         agx_emit_split(b, halves, dest, lanes);
+         for (unsigned c = 0; c < lanes; ++c)
+            packed[n++] = halves[c];
+      } else {
+         packed[n++] = dest;
+      }
    }
    return n;
 }
@@ -956,29 +972,42 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
       agx_emit_cached_split(b, dest, 4);
       return true;
    }
-   if (format != AGX_FORMAT_U8NORM && format != AGX_FORMAT_S8NORM)
+   const bool norm8 =
+      format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
+   const bool norm16 =
+      format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
+   if (!norm8 &&
+       !(norm16 && b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B))
       return false;
    if (nr_comps < 1 || nr_comps > 4 || dest.size != AGX_SIZE_32)
       return false;
 
-   const unsigned nr_packed = DIV_ROUND_UP(nr_comps, 2);
+   const unsigned loaded_channels =
+      norm16 ? nr_comps : DIV_ROUND_UP(nr_comps, 2);
 
    agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
-   packed.channels_m1 = nr_packed - 1;
+   packed.channels_m1 = loaded_channels - 1;
    agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(), format,
                   BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
 
    agx_index halves[4] = {agx_null()};
-   agx_emit_split(b, halves, packed, nr_packed);
+   agx_emit_split(b, halves, packed, loaded_channels);
 
    agx_index channels[4] = {agx_null()};
-   for (unsigned i = 0; i < nr_packed; ++i) {
+   const unsigned conversions = DIV_ROUND_UP(nr_comps, 2);
+   for (unsigned i = 0; i < conversions; ++i) {
       /* One unpack per packed register; each yields a 32-bit pair, which the
        * split below turns back into the two scalar channels. */
       agx_index pair = agx_temp(b->shader, AGX_SIZE_32);
       const unsigned lanes = MIN2(2u, nr_comps - i * 2);
       pair.channels_m1 = lanes - 1;
-      agx_normflt_agx3_to(b, pair, halves[i], format);
+      agx_index source = halves[i];
+      if (norm16) {
+         source = agx_temp(b->shader, AGX_SIZE_16);
+         source.channels_m1 = lanes - 1;
+         agx_emit_collect_to(b, source, lanes, &halves[i * 2]);
+      }
+      agx_normflt_agx3_to(b, pair, source, format);
 
       agx_index unpacked[2] = {agx_null()};
       agx_emit_split(b, unpacked, pair, lanes);

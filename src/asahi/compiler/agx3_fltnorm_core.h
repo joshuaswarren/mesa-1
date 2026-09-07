@@ -31,8 +31,8 @@
  *   f25 / f27  = source-0 liveness pair, only for a register source:
  *                f27 = 1 last use, f25 = 1 still live
  *   f42 / f44  = the same pair for source 1
- *   f58 = 1 signed-normalized, 0 unsigned-normalized (fn_snorm vs fn_rgba
- *         differ in exactly this bit)
+ *   f58 = normalized format: U8=0, S8=1, U16=2, S16=3. Fresh native
+ *         R16Unorm/R16Snorm pipelines establish the upper width bit.
  *   f59 = 1 two packed lanes. A single-component target instead sets f59 = 0,
  *         f40 = 0, f41 = 1 and has no second source (probe fn_r).
  *   f50 + (slot - 1) = the per-slot wait mask, as in every other AGX3b form.
@@ -152,6 +152,7 @@ struct agx3_fltnorm_desc {
    struct agx3_fltnorm_src src[2];
    bool two_lanes;                /* pack both sources; false = one lane */
    bool snorm;                    /* signed-normalized target */
+   bool is_16bit;                 /* 16-bit normalized lane, G17P only */
    uint16_t wait_mask;            /* bit i waits scoreboard slot i + 1 */
    bool first_instruction;       /* G17P f68, first main instruction only */
 };
@@ -238,6 +239,8 @@ struct agx3_normflt_desc {
    bool dest_hint;     /* f11; set in every witness */
    uint16_t src;       /* 16-bit register holding the packed lanes */
    bool two_lanes;     /* unpack both bytes; false = one lane */
+   bool snorm;         /* signed-normalized source */
+   bool is_16bit;      /* 16-bit normalized lane, G17P only */
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };
 

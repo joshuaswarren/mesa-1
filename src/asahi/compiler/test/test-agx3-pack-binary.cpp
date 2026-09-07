@@ -4259,6 +4259,56 @@ TEST_F(AGX3PackBinary, G17PFltnormStartMatchesNativeF32Uniforms)
    EXPECT_EQ(pack(b), native);
 }
 
+TEST_F(AGX3PackBinary, G17PNormalized16MatchesNativeColourPrograms)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+
+   {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_fltnorm_agx3_to(b, agx_register(0, AGX_SIZE_16),
+                          agx_immediate_f(1.0f), agx_null(),
+                          AGX_FORMAT_U16NORM);
+      agx_stop(b);
+      const std::vector<uint8_t> native = {
+         0x97,0x0c,0x54,0x00,0x02,0x60,0x00,0x10,0x04,0x80,
+         0x0e,0x00,0x00,0x00,
+      };
+      EXPECT_EQ(pack(b), native);
+   }
+
+   {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index pair = agx_register(0, AGX_SIZE_16);
+      pair.channels_m1 = 1;
+      agx_fltnorm_agx3_to(b, pair, agx_immediate_f(1.0f),
+                          agx_immediate_f(0.5f), AGX_FORMAT_U16NORM);
+      agx_stop(b);
+      const std::vector<uint8_t> native = {
+         0x97,0x0c,0x54,0x00,0x02,0x60,0x80,0x50,0x04,0x88,
+         0x0e,0x00,0x00,0x00,
+      };
+      EXPECT_EQ(pack(b), native);
+   }
+
+   for (bool snorm : {false, true}) {
+      struct agx3_normflt_desc d = {};
+      d.dest = 2;
+      d.dest_hint = true;
+      d.src = 2;
+      d.is_16bit = true;
+      d.snorm = snorm;
+      d.wait_mask = 1u << 5;
+      uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_normflt_encode(enc, &d, bytes, &len));
+      const std::vector<uint8_t> native = snorm
+         ? std::vector<uint8_t>{0x17,0x04,0x56,0x02,0x01,0x04,0x14,0x2a}
+         : std::vector<uint8_t>{0x17,0x04,0x56,0x02,0x01,0x04,0x14,0x4a};
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len), native);
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PFltnormStartIsPositionNotFirstUniformRead)
 {
    for (bool preceding : {false, true}) {

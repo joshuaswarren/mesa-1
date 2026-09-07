@@ -375,6 +375,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          cache->dev->chip == AGX_CHIP_G17P &&
          (key->tib.logical_format[0] == PIPE_FORMAT_R16_UNORM ||
           key->tib.logical_format[0] == PIPE_FORMAT_R16_SNORM ||
+          key->tib.logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
+          key->tib.logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
           key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM),
       .g17p_rt0_eot_i16_signed_two_words =
          cache->dev->chip == AGX_CHIP_G17P &&

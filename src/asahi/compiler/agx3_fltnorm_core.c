@@ -101,6 +101,8 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
       return false;
    if (d->two_lanes != (d->src[1].kind != AGX3_FLTNORM_SRC_NONE))
       return false;
+   if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
 
    static const struct src_fields s0 = {
       .f_kind = 23, .f_imm = 15, .f_reg = 16, .f_uniform = 17,
@@ -125,7 +127,8 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
-   ov[n++] = (struct agx3_field_kv)KV(58, d->snorm ? 1 : 0);
+   ov[n++] =
+      (struct agx3_field_kv)KV(58, (d->is_16bit ? 2 : 0) | (d->snorm ? 1 : 0));
    ov[n++] = (struct agx3_field_kv)KV(59, d->two_lanes ? 1 : 0);
    if (d->first_instruction)
       ov[n++] = (struct agx3_field_kv)KV(68, 1);
@@ -202,7 +205,7 @@ agx3_fuse_colour_parts(const struct agx3_colour_link_info *main,
    unsigned offset = 0, used = 0;
    for (unsigned i = 0; i < 2; ++i) {
       struct agx3_fltnorm_desc d = epilog->packs[i];
-      if (!d.two_lanes || d.snorm || d.wait_mask ||
+      if (!d.two_lanes || d.snorm || d.is_16bit || d.wait_mask ||
           d.dest != epilog->store_reg + i)
          return false;
       /* A pack must not overwrite a register whose exported value a later
@@ -367,6 +370,8 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
 
    if (!enc_ok(enc) || (d->dest & 1) || d->dest >= 256 || d->src >= 256)
       return false;
+   if (d->is_16bit && enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
    if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;
 
@@ -390,6 +395,8 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(18, d->src);
    ov[n++] = (struct agx3_field_kv)KV(41, d->two_lanes ? 1 : 0);
+   ov[n++] =
+      (struct agx3_field_kv)KV(40, (d->is_16bit ? 2 : 0) | (d->snorm ? 1 : 0));
 
    for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))

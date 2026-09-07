@@ -203,6 +203,11 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
    case AGX_OPCODE_UNPACK_RGB10A2_AGX3:
       return agx_channels(I->dest[d]) * size;
 
+   /* U16/S16 fltnorm writes one 16-bit register per converted lane. U8/S8
+    * retains the scalar packed-byte destination. */
+   case AGX_OPCODE_FLTNORM_AGX3:
+      return agx_channels(I->dest[d]) * size;
+
    case AGX_OPCODE_LDCF:
       return 6;
    case AGX_OPCODE_COLLECT:
@@ -377,6 +382,13 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          return agx_coordinate_registers(I, I->src[3].size);
       else
          return size;
+
+   case AGX_OPCODE_NORMFLT_AGX3:
+      if (s == 0 &&
+          (I->format == AGX_FORMAT_U16NORM ||
+           I->format == AGX_FORMAT_S16NORM))
+         return agx_channels(I->dest[0]);
+      return size;
 
    case AGX_OPCODE_ATOMIC:
    case AGX_OPCODE_LOCAL_ATOMIC:
