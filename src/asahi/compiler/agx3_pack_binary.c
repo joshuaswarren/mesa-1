@@ -4827,16 +4827,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           */
          if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs >= 3 &&
              I->shift == 0 && agx3_src_is_register(I->dest[0]) &&
-             !I->dest[0].memory && I->dest[0].size == AGX_SIZE_32 &&
+             !I->dest[0].memory &&
+             (I->dest[0].size == AGX_SIZE_32 ||
+              I->dest[0].size == AGX_SIZE_64) &&
              agx_channels(I->dest[0]) == 1) {
             const agx_index a = I->src[0], m = I->src[1], c = I->src[2];
+
+            /*
+             * 32x32 -> 64. This is how `umul_high`, `imul_high` and NIR's
+             * `*mul_2x32_64` all reach the backend, and therefore how every
+             * integer division by a non-constant does. The source-size
+             * convention is the one agx_pack.c already uses for AGX2: an
+             * operand narrower than the result is zero-extended when it
+             * carries `abs` and sign-extended otherwise, which maps onto the
+             * per-slot sign-extend bits f28/f43/f58.
+             */
+            const bool wide = I->dest[0].size == AGX_SIZE_64;
 
             /* The multiplier is either an 8-bit immediate or a 32-bit
              * register; both are witnessed (test-agx3-iadd-core.c). */
             const bool mult_imm = m.type == AGX_INDEX_IMMEDIATE && !m.abs &&
                                   !m.neg && m.value <= 0xff;
             const bool mult_reg = agx3_src_is_register(m) && !m.memory &&
-                                  !m.abs && !m.neg && m.size == AGX_SIZE_32 &&
+                                  (wide || !m.abs) && !m.neg &&
+                                  m.size == AGX_SIZE_32 &&
                                   agx_channels(m) == 1;
 
             /* An immediate-zero addend is the pure-multiply form, whose
@@ -4851,30 +4865,38 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                no_addend || addend_imm ||
                (agx3_src_is_register(c) && !c.memory &&
                 agx_channels(c) == 1 && !(c.abs && c.neg) &&
-                (c.size == AGX_SIZE_32 ||
+                (c.size == AGX_SIZE_32 || (wide && c.size == AGX_SIZE_64) ||
                  (c.size == AGX_SIZE_16 && (c.abs || c.neg))));
+            const bool addend_reg = !no_addend && !addend_imm;
 
-            if (agx3_src_is_register(a) && !a.memory && !a.abs && !a.neg &&
-                a.size == AGX_SIZE_32 && agx_channels(a) == 1 &&
+            if (agx3_src_is_register(a) && !a.memory && (wide || !a.abs) &&
+                !a.neg && a.size == AGX_SIZE_32 && agx_channels(a) == 1 &&
                 (mult_imm || mult_reg) && addend_ok) {
                const struct agx3_imad_desc d = {
                   .dest = I->dest[0].value,
+                  .dest_64 = wide,
+                  .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
+                  .src_a_sign_extend = wide && !a.abs,
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
                   .multiplier_kill = mult_reg && m.discard,
                   .multiplier_cache = mult_reg && m.cache,
+                  .multiplier_sign_extend = wide && mult_reg && !m.abs,
                   .src_a_kill = a.discard,
                   .src_a_cache = a.cache,
-                  .src_c_kill = !no_addend && !addend_imm && c.discard,
-                  .src_c_cache = !no_addend && !addend_imm && c.cache,
+                  .src_c_kill = addend_reg && c.discard,
+                  .src_c_cache = addend_reg && c.cache,
                   .no_addend = no_addend,
                   .addend_is_immediate = addend_imm,
                   .addend_immediate = addend_imm ? c.value : 0,
-                  .src_c = (no_addend || addend_imm) ? 0 : c.value,
-                  .src_c_16 = !no_addend && !addend_imm && c.size == AGX_SIZE_16,
-                  .src_c_sign_extend = !no_addend && !addend_imm && c.neg,
+                  .src_c = addend_reg ? c.value : 0,
+                  .src_c_16 = addend_reg && c.size == AGX_SIZE_16,
+                  .src_c_64 = addend_reg && c.size == AGX_SIZE_64,
+                  .src_c_sign_extend =
+                     addend_reg && (wide ? (c.size != AGX_SIZE_64 && !c.abs)
+                                         : c.neg),
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -4883,23 +4905,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    agx3_append(emission, bytes, len))
                   continue;
             }
-         }
-
-         if (I->op == AGX_OPCODE_IMUL_HIGH_DIV3_AGX3 && I->nr_dests == 1 &&
-             I->nr_srcs == 1 && agx3_src_is_register(I->dest[0]) &&
-             I->dest[0].size == AGX_SIZE_32 &&
-             agx_channels(I->dest[0]) == 1 &&
-             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
-             !I->src[0].abs && !I->src[0].neg &&
-             I->src[0].size == AGX_SIZE_32 &&
-             agx_channels(I->src[0]) == 1) {
-            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_imul_high_div3(
-                   enc, I->dest[0].value, I->src[0].value,
-                   agx3_post_ra_hint(I->src[0]), wait, bytes, &len) ||
-                !agx3_append(emission, bytes, len))
-               AGX3_REFUSE(I);
-            continue;
          }
 
          /* Native tied half comparison/selection is scalar fmin/fmax. */

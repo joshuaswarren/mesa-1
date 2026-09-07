@@ -845,20 +845,47 @@ TEST_F(AGX3PackBinary, FaddOneMinusAbsMatchesNativeLiveForm)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, SignedMulHighDiv3MatchesNativeVertexWitness)
+/*
+ * 32x32 -> 64. Both halves of the product are written, so this is the shape
+ * `umul_high`/`imul_high` and NIR's `*mul_2x32_64` all reach the backend as.
+ * The AGX2 source convention carries over: `abs` on an operand narrower than
+ * the destination means zero-extend, its absence means sign-extend, which is
+ * what the per-slot f28/f43 bits encode.
+ */
+TEST_F(AGX3PackBinary, WideSignedMultiplyMatchesNativeWitness)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
-   agx_get_sr_to(b, agx_register(4, AGX_SIZE_32), AGX_SR_VERTEX_ID);
-   agx_index source = agx_register(4, AGX_SIZE_32);
-   source.cache = true;
-   agx_imul_high_div3_agx3_to(b, agx_register(0, AGX_SIZE_32), source);
+   agx_index a = agx_register(0, AGX_SIZE_32);
+   agx_index m = agx_register(2, AGX_SIZE_32);
+   a.discard = true;
+   m.discard = true;
+   agx_imad_to(b, agx_register(0, AGX_SIZE_64), a, m, agx_zero(), 0);
    agx_stop(b);
 
    std::vector<uint8_t> want = {
-      0x2c, 0xdd, 0x10, 0x06,
-      0x9f, 0x10, 0x54, 0x00, 0x03, 0x08, 0x02, 0x00,
-      0xe0, 0x24, 0x16, 0x00,
+      0x9f, 0x00, 0x54, 0x00, 0x02, 0x00, 0x08, 0x00,
+      0xe0, 0x26, 0x1e, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, WideUnsignedMultiplyZeroExtendsBothOperands)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index a = agx_register(0, AGX_SIZE_32);
+   agx_index m = agx_register(2, AGX_SIZE_32);
+   a.discard = true;
+   m.discard = true;
+   agx_imad_to(b, agx_register(0, AGX_SIZE_64), agx_abs(a), agx_abs(m),
+               agx_zero(), 0);
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x9f, 0x00, 0x54, 0x00, 0x02, 0x00, 0x08, 0x00,
+      0xe0, 0x26, 0x0a, 0x00,
       0x0e, 0x00, 0x00, 0x00,
    };
    EXPECT_EQ(pack(b), want);

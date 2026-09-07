@@ -137,31 +137,51 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
-   if ((d->dest & 1) || d->dest + 2 > 256)
+   /* A 64-bit product is a register pair: four halves, 32-bit aligned. */
+   if ((d->dest & 1) || d->dest + (d->dest_64 ? 4u : 2u) > 256)
       return false;
    if ((d->src_a_kill && d->src_a_cache) ||
        (d->multiplier_kill && d->multiplier_cache) ||
        (d->src_c_kill && d->src_c_cache))
       return false;
 
-   if ((d->src_a & 1) || d->src_a + 2 > 256)
+   if (d->src_a_16 ? (d->src_a >= 256) : ((d->src_a & 1) || d->src_a + 2 > 256))
       return false;
    if (d->addend_is_immediate &&
        (d->no_addend || d->multiplier_is_register || d->addend_immediate > 255 ||
-        d->src_c || d->src_c_16 || d->src_c_sign_extend ||
+        d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend ||
         d->src_c_cache || d->src_c_kill))
       return false;
-   if (!d->no_addend && !d->addend_is_immediate && (d->src_c_16 ? (d->src_c >= 256)
-                                     : ((d->src_c & 1) || d->src_c + 2 > 256)))
+   if (d->src_c_16 && d->src_c_64)
+      return false;
+   if (!d->no_addend && !d->addend_is_immediate &&
+       (d->src_c_16 ? (d->src_c >= 256)
+                    : ((d->src_c & 1) ||
+                       d->src_c + (d->src_c_64 ? 4u : 2u) > 256)))
       return false;
    /* A pure multiply has no addend to widen or sign-extend. */
-   if (d->no_addend && (d->src_c || d->src_c_16 || d->src_c_sign_extend))
+   if (d->no_addend &&
+       (d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend))
+      return false;
+   /*
+    * Sign extension is a property of widening an operand into a wider result.
+    * A 32-bit product does not widen anything, so refuse the bits there rather
+    * than dropping them: an unwitnessed combination must fail closed.
+    */
+   if (!d->dest_64 && (d->src_a_sign_extend || d->multiplier_sign_extend))
+      return false;
+   /* The 8-bit immediate multiplier has no sign-extend bit of its own. */
+   if (!d->multiplier_is_register && d->multiplier_sign_extend)
+      return false;
+   if (!d->multiplier_is_register && d->multiplier_16)
       return false;
    if (d->wait_mask >= (1u << 6))
       return false;
 
    if (d->multiplier_is_register &&
-       ((d->multiplier_reg & 1) || d->multiplier_reg + 2 > 256))
+       (d->multiplier_16 ? (d->multiplier_reg >= 256)
+                         : ((d->multiplier_reg & 1) ||
+                            d->multiplier_reg + 2 > 256)))
       return false;
 
    /*
@@ -170,23 +190,25 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     * exactly as Apple emits it and as every register-slot-B `imadd` in the
     * command-stream corpus does.
     */
+   const uint64_t dest_width = d->dest_64 ? 3 : 2;
+   const uint64_t src_a_width = d->src_a_16 ? 1 : 2;
+   const uint64_t mult_width = d->multiplier_16 ? 1 : 2;
    const struct agx3_field_kv baseline_imm[] = {
-      KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, 2),
+      KV(9, 2),  KV(10, dest_width), KV(23, 2), KV(24, src_a_width),
       KV(38, 1), KV(39, 1), KV(53, 2),
    };
    const struct agx3_field_kv baseline_reg[] = {
-      KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, 2),
-      KV(38, 2), KV(39, 2), KV(53, 2),
+      KV(9, 2),  KV(10, dest_width), KV(23, 2), KV(24, src_a_width),
+      KV(38, 2), KV(39, mult_width), KV(53, 2),
    };
-   /* Pure multiply: no addend field, f11 set, and f53 drops to 1. */
+   /* Pure multiply: no addend field, and f53 drops to 1. */
    const struct agx3_field_kv baseline_reg_nc[] = {
-      KV(9, 2),  KV(10, 2), KV(11, 1), KV(23, 2),
-      KV(24, 2),  KV(38, 2), KV(39, 2), KV(53, 1),
+      KV(9, 2),  KV(10, dest_width), KV(23, 2),
+      KV(24, src_a_width),  KV(38, 2), KV(39, mult_width), KV(53, 1),
    };
-   /* Native mul37/mul255 use an immediate multiplier and absent addend;
-    * unlike the register variant, their destination hint f11 is clear. */
+   /* Native mul37/mul255 use an immediate multiplier and absent addend. */
    const struct agx3_field_kv baseline_imm_nc[] = {
-      KV(9, 2), KV(10, 2), KV(23, 2), KV(24, 2),
+      KV(9, 2), KV(10, dest_width), KV(23, 2), KV(24, src_a_width),
       KV(38, 1), KV(39, 1), KV(53, 1),
    };
    const bool immediate_c = d->no_addend || d->addend_is_immediate;
@@ -201,17 +223,22 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          ? (sizeof(baseline_reg) / sizeof(baseline_reg[0]))
          : (sizeof(baseline_imm) / sizeof(baseline_imm[0]));
 
-   struct agx3_field_kv ov[20];
+   struct agx3_field_kv ov[24];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
+   ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache);
    ov[n++] = (struct agx3_field_kv)KV(16, d->src_a);
    ov[n++] = (struct agx3_field_kv)KV(25, d->src_a_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, d->src_a_kill);
+   if (d->src_a_sign_extend)
+      ov[n++] = (struct agx3_field_kv)KV(28, 1);
    if (d->multiplier_is_register) {
       ov[n++] = (struct agx3_field_kv)KV(31, d->multiplier_reg);
       /* f42 is the multiplier's last-use hint, not a baseline bit. */
       ov[n++] = (struct agx3_field_kv)KV(42, d->multiplier_kill ? 1 : 0);
       ov[n++] = (struct agx3_field_kv)KV(40, d->multiplier_cache);
+      if (d->multiplier_sign_extend)
+         ov[n++] = (struct agx3_field_kv)KV(43, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(30, d->multiplier);
@@ -223,7 +250,8 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(46, d->src_c);
       ov[n++] = (struct agx3_field_kv)KV(55, d->src_c_cache);
       ov[n++] = (struct agx3_field_kv)KV(57, d->src_c_kill);
-      ov[n++] = (struct agx3_field_kv)KV(54, d->src_c_16 ? 1 : 2);
+      ov[n++] = (struct agx3_field_kv)KV(
+         54, d->src_c_64 ? 3 : (d->src_c_16 ? 1 : 2));
    }
    if (d->src_c_sign_extend)
       ov[n++] = (struct agx3_field_kv)KV(58, 1);

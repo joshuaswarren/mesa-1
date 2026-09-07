@@ -102,8 +102,10 @@ bool agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
  *   f2   destination           f16  slot-A register
  *   f30  slot-B immediate      (kind fields f38 = f39 = 1)
  *   f46  slot-C register
- *   f54  slot-C width          2 = 32-bit, 1 = 16-bit
+ *   f54  slot-C width          1 = 16-bit, 2 = 32-bit, 3 = 64-bit
  *   f58  slot-C sign-extend    `short` sets it, `ushort` does not
+ *   f10  destination width     2 = 32-bit, 3 = 64-bit register pair
+ *   f11  destination cache hint
  *   f60..f65  scoreboard wait, slots 1..6
  *
  * Native reused-input variants establish per-source cache/discard hints:
@@ -112,9 +114,36 @@ bool agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
  * shift dropped -- which is exactly the silent failure this replaces.
  */
 struct agx3_imad_desc {
-   uint16_t dest;      /* 32-bit register half */
+   uint16_t dest;      /* 32-bit register half, or the low half of a pair */
+   /*
+    * 32x32 -> 64. The destination width selector f10 moves from 2 to 3 and the
+    * destination becomes a register pair; each narrower operand is then widened
+    * according to its own sign-extend bit. This is the only wide integer
+    * multiply the hardware has: `umul_high`/`imul_high` are this instruction
+    * with the low word left unread, and Apple's own `mulhi` kernels compile to
+    * bytes identical to its `(ulong)a * (ulong)b` kernels.
+    *
+    * The pair is 32-bit aligned, not 64-bit aligned: Apple places one at half
+    * 18. It occupies four halves, so the last encodable destination is 252.
+    */
+   bool dest_64;
+   /*
+    * f11, the destination's register-cache hint: set when a following ALU
+    * instruction reads the result, clear when only a store does. Apple's own
+    * 32-bit pure multiply carries it in one kernel and not in the other, so it
+    * is per-instruction and belongs to liveness (agx_opt_register_cache), not
+    * to any form's baseline.
+    */
+   bool dest_cache;
    uint16_t src_a;     /* multiplicand register half */
    bool src_a_kill, src_a_cache;
+   bool src_a_16;      /* multiplicand is a single 16-bit half */
+   /*
+    * f28: widen the multiplicand by sign rather than by zero. Only meaningful
+    * when the operand is narrower than the product, so a 32-bit multiply
+    * rejects it.
+    */
+   bool src_a_sign_extend;
    uint8_t multiplier; /* constant multiplied by src_a (immediate form) */
    /*
     * Register multiplier. When set, src_a is multiplied by the 32-bit
@@ -129,6 +158,8 @@ struct agx3_imad_desc {
    uint16_t multiplier_reg;
    bool multiplier_kill; /* f42: last use of the multiplier register */
    bool multiplier_cache;
+   bool multiplier_16;   /* multiplier register is a single 16-bit half */
+   bool multiplier_sign_extend; /* f43, the slot-B counterpart of f28 */
    bool addend_is_immediate;
    uint16_t addend_immediate; /* native slot-C unsigned8 immediate */
    uint16_t src_c;     /* addend register half */
@@ -143,6 +174,7 @@ struct agx3_imad_desc {
     */
    bool no_addend;
    bool src_c_16;      /* addend is a single 16-bit half */
+   bool src_c_64;      /* addend is a 64-bit register pair (slot-C width 3) */
    bool src_c_sign_extend; /* narrow addend is sign- rather than zero-extended */
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };

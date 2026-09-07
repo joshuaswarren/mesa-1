@@ -4426,10 +4426,6 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);
-   if (agx_optimize_g17p_imul_high_div3(ctx)) {
-      agx_validate(ctx, "agx_optimize_g17p_imul_high_div3");
-      AGX_PASS(ctx, agx_dce, true);
-   }
 
    AGX_PASS(ctx, agx_lower_agx3_device_atomic_sources);
 
@@ -4899,11 +4895,19 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    const bool is_g17p = key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
 
    /* AGX2 has native 64-bit add and 32x32->64 multiply forms, so the shared
-    * compiler options preserve them.  G17P has neither form grounded: lower
-    * add to low/add, carry, high/add and lower multiply-high to the standard
-    * 16-bit partial-product sequence.  Keep the override local to this
-    * compile so the other encodings retain their paths and frontends continue
-    * sharing agx_nir_options. */
+    * compiler options preserve them.  G17P has no grounded 64-bit add, so
+    * lower it to low/add, carry, high/add.
+    *
+    * G17P's 32x32->64 multiply IS grounded (agx3_iadd_core.h, dest_64), but a
+    * full 64x64->64 multiply still needs several of them plus the carry
+    * arithmetic, which is what agx_nir_lower_imul64 builds out of 32-bit
+    * pieces.  Keep that lowering; the only cost of leaving it alone is that
+    * its inner high-word multiply is expanded in software rather than using
+    * one wide imad.  Changing that is a codegen optimisation and belongs with
+    * a hardware measurement, not with enabling the instruction.
+    *
+    * Keep the override local to this compile so the other encodings retain
+    * their paths and frontends continue sharing agx_nir_options. */
    const nir_shader_compiler_options *original_options = nir->options;
    nir_shader_compiler_options agx3_options;
    if (is_g17p) {

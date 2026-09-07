@@ -103,12 +103,19 @@ test_apple_shift_witnesses(void)
       CHECK(len == sizeof(want) && memcmp(out, want, sizeof(want)) == 0);
    }
 
-   /* imad_s1..s3: the pure multiply, identical for every shift. */
+   /* imad_s1..s3: the pure multiply, identical for every shift.
+    *
+    * The product feeds the shifted add below, so its destination carries the
+    * register-cache hint. That bit (f11) is not a baseline constant: Apple's
+    * `o[0] = a[i] * b[i]`, whose product is consumed only by a store, is the
+    * same instruction with the bit clear (test-agx3-wide-imad.c, umul_narrow).
+    */
    {
       static const uint8_t want[] = {0x9f, 0x00, 0x56, 0x00, 0x03, 0x10,
                                      0x00, 0x00, 0xd0, 0x26, 0x0a, 0x00};
       struct agx3_imad_desc d = {
-         .dest = 0, .src_a = 8, .multiplier_is_register = true,
+         .dest = 0, .dest_cache = true, .src_a = 8,
+         .multiplier_is_register = true,
          .multiplier_reg = 0, .multiplier_kill = true, .no_addend = true,
          .src_a_kill = true,
          .wait_mask = 1u << 5,
