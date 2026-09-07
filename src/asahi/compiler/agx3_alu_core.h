@@ -266,6 +266,30 @@ bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                    uint8_t *len);
 
+/*
+ * Full-precision reciprocal and reciprocal square root.
+ *
+ * These are the same two Apple forms the half encoders above use; f26 selects
+ * the source width (1 = one 16-bit half, 2 = a 32-bit pair) and, for rsqrt,
+ * f10 selects the destination's. Only the half widths were wired up, so every
+ * fragment shader containing a float divide or a normalize() -- which NIR
+ * lowers to frcp / frsq on 32-bit values -- was refused outright.
+ *
+ * Witnessed byte-exactly against applegpu_g17p:
+ *   o[i] = 1.0f / a[i]    af 00 56 00 02 00 10 48 20 00
+ *   o[i] = rsqrt(a[i])    af 01 56 00 02 00 b0 40 00 00
+ * both with the loaded source dead (f29 = 1) and waiting the load's slot 6.
+ */
+bool agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len);
+
+bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],
                                   const enum agx3_alu_hint hints[4],

@@ -4663,37 +4663,50 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Reciprocal, at either width. Only the half form was wired up, so a
+          * 32-bit float divide -- which NIR lowers to frcp -- refused the
+          * whole shader. f26 selects the source width; the 32-bit encoding is
+          * witnessed against Apple's own `1.0f / a[i]` (agx3_alu_core.h). */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_RCP &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest=I->dest[0], src=I->src[0];
+            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
-                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
+                agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != AGX_SIZE_16 || agx_channels(src) != 1 ||
+                src.size != dest.size || agx_channels(src) != 1 ||
                 src.abs || src.neg || src.kill || (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if (!agx3_alu_hrcp(enc,dest.value,src.value,agx3_post_ra_hint(src),
-                               dest.cache,wait,bytes,&len) ||
+            if (!(half ? agx3_alu_hrcp : agx3_alu_f32rcp)(
+                   enc,dest.value,src.value,agx3_post_ra_hint(src),
+                   dest.cache,wait,bytes,&len) ||
                 !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;
          }
 
+         /* Reciprocal square root, at either width. normalize() lowers to a
+          * 32-bit frsq, so the half-only gate refused every shader that
+          * normalizes a vector. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_RSQRT &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
+            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
-                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
+                agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != AGX_SIZE_16 || agx_channels(src) != 1 ||
+                src.size != dest.size || agx_channels(src) != 1 ||
                 src.abs || src.neg || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_hrsqrt(enc, dest.value, src.value,
-                                 agx3_post_ra_hint(src), dest.cache, wait,
-                                 bytes, &len) ||
+            if (!(half ? agx3_alu_hrsqrt : agx3_alu_f32rsqrt)(
+                   enc, dest.value, src.value,
+                   agx3_post_ra_hint(src), dest.cache, wait,
+                   bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

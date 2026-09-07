@@ -58,6 +58,53 @@ test_native_ft1(void)
                             AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
 }
 
+/*
+ * Full-precision reciprocal and reciprocal square root.
+ *
+ * Only the half forms were wired up, so a 32-bit float divide or a
+ * normalize() -- which NIR lowers to frcp / frsq on 32-bit values -- refused
+ * the whole shader out of agx3_pack_binary. Both vectors are Apple's own,
+ * from `metal-nt -N compute.mtlp -arch applegpu_g17p`:
+ *
+ *   o[i] = 1.0f / a[i]    af 00 56 00 02 00 10 48 20 00
+ *   o[i] = rsqrt(a[i])    af 01 56 00 02 00 b0 40 00 00
+ *
+ * In both, the loaded source is dead (f29 = 1) and the instruction waits the
+ * load's scoreboard slot 6.
+ */
+static void
+test_native_f32_rcp_rsqrt(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   static const uint8_t rcp[] = {0xaf, 0x00, 0x56, 0x00, 0x02,
+                                 0x00, 0x10, 0x48, 0x20, 0x00};
+   assert(agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                          AGX3_ALU_HINT_DISCARD, false, 1u << 5, bytes, &len));
+   assert(len == sizeof(rcp) && !memcmp(bytes, rcp, len));
+
+   static const uint8_t rsq[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                 0x00, 0xb0, 0x40, 0x00, 0x00};
+   assert(agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, bytes,
+                            &len));
+   assert(len == sizeof(rsq) && !memcmp(bytes, rsq, len));
+
+   /* The half and the 32-bit form are distinct encodings, not aliases. */
+   uint8_t half[AGX3_ALU_MAX_LENGTH], hlen;
+   assert(agx3_alu_hrcp(AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_DISCARD,
+                        false, 1u << 5, half, &hlen));
+   assert(hlen != len || memcmp(half, rcp, len) != 0);
+
+   /* A 32-bit operand pair is aligned, and only AGX3b is witnessed. */
+   assert(!agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3B, 1, 0, AGX3_ALU_HINT_NONE,
+                           false, 0, bytes, &len));
+   assert(!agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3B, 0, 1, AGX3_ALU_HINT_NONE,
+                             false, 0, bytes, &len));
+   assert(!agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
+                           false, 0, bytes, &len));
+}
+
 static void
 test_native_bit_andc(void)
 {
@@ -1626,6 +1673,7 @@ int main(void){
    test_native_minifloat_half_select();
    test_native_bit_andc();
    test_native_ft1();
+   test_native_f32_rcp_rsqrt();
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_add();
