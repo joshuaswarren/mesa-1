@@ -198,7 +198,7 @@
 #define G17P_VERTEX_FORMAT 0
 #endif
 
-#if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 2
+#if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
 #endif
 
@@ -238,6 +238,12 @@
 #define G17P_VERT_SPV g17p_vulkan_vertex_sint_vert_spv
 #define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
 #define VERTEX_INPUT_FORMAT VK_FORMAT_R16G16_SINT
+#elif G17P_VERTEX_FORMAT == 3
+#include "g17p_wsi_triangle_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#define VERTEX_INPUT_FORMAT VK_FORMAT_R16G16_SFLOAT
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -768,6 +774,11 @@
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 2
 #define PROBE_NAME "g17p-vulkan-vertex-rg16-sint"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 3
+#define PROBE_NAME "g17p-vulkan-vertex-rg16-sfloat"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
@@ -1643,8 +1654,11 @@ main(void)
 #if G17P_VERTEX_FORMAT == 1
       VERTEX_FORMAT_STRIDE = 13,
       VERTEX_FORMAT_ATTRIBUTE_OFFSET = 5,
-#else
+#elif G17P_VERTEX_FORMAT == 2
       VERTEX_FORMAT_STRIDE = 14,
+      VERTEX_FORMAT_ATTRIBUTE_OFFSET = 6,
+#else
+      VERTEX_FORMAT_STRIDE = 10,
       VERTEX_FORMAT_ATTRIBUTE_OFFSET = 6,
 #endif
       VERTEX_FORMAT_COUNT = 3,
@@ -1662,11 +1676,17 @@ main(void)
       {255, 0, 0x6a, 0x91},
       {0, 255, 0xbd, 0x4e},
    };
-#else
+#elif G17P_VERTEX_FORMAT == 2
    static const int16_t packed_positions[VERTEX_FORMAT_COUNT][2] = {
       {-1, -1},
       {3, -1},
       {-1, 3},
+   };
+#else
+   static const uint16_t packed_positions[VERTEX_FORMAT_COUNT][2] = {
+      {0xbc00, 0xbc00},
+      {0x4200, 0xbc00},
+      {0xbc00, 0x4200},
    };
 #endif
    for (uint32_t i = 0; i < VERTEX_FORMAT_COUNT; ++i) {
@@ -2562,6 +2582,12 @@ main(void)
 #elif G17P_VERTEX_FORMAT == 2
    printf(PROBE_NAME ": PASS — RG16 SINT integer vertex input exact "
                      "immediately/3s, binding 3, offset 64, stride 14, "
+                     "attribute offset 6, all source/readback guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_VERTEX_FORMAT == 3
+   printf(PROBE_NAME ": PASS — RG16 SFLOAT vertex conversion exact "
+                     "immediately/3s, binding 3, offset 64, stride 10, "
                      "attribute offset 6, all source/readback guards "
                      "unchanged, checksum %016" PRIx64 "\n",
           checksum);
