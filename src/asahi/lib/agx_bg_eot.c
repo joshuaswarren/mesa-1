@@ -501,8 +501,14 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       ralloc(cache->ht, struct agx_precompiled_shader);
 
    const uint32_t *bin = cache->dev->libagx_programs[program];
+   if (!bin) {
+      ralloc_free(p);
+      return NULL;
+   }
    const struct agx_precompiled_kernel_info *info = (void *)bin;
    const void *binary = (const uint8_t *)bin + sizeof(*info);
+
+   p->info = *info;
 
    assert(info->main_offset == 0 || program != LIBAGX_HELPER);
 
@@ -510,8 +516,52 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       agx_workgroup(info->workgroup_size[0], info->workgroup_size[1],
                     info->workgroup_size[2]);
 
-   p->ptr = agx_pool_upload_aligned_with_bo(&cache->pool, binary,
-                                            info->binary_size, 128, &p->bo);
+   if (cache->dev->chip == AGX_CHIP_G17P) {
+      const size_t lead_size = 0x340;
+      const size_t main_span = MAX2(info->main_size, info->binary_size);
+      const size_t block_size = agx3_code_block_size(main_span);
+      if (!block_size || block_size > SIZE_MAX - lead_size ||
+          info->main_offset > info->binary_size ||
+          info->main_size > info->binary_size - info->main_offset ||
+          info->preamble_offset || info->nr_preamble_gprs ||
+          info->rodata.size_16) {
+         ralloc_free(p);
+         return NULL;
+      }
+
+      const size_t size = lead_size + block_size;
+      uint8_t *image = malloc(size);
+      if (!image) {
+         ralloc_free(p);
+         return NULL;
+      }
+      agx3_build_container_lead(image);
+      const bool built = agx3_build_code_block(
+         image + lead_size, block_size,
+         (const uint8_t *)binary + info->main_offset, info->main_size,
+         main_span, NULL, false);
+      p->ptr = built
+         ? agx_pool_upload_aligned_with_bo(&cache->pool, image, size, 128,
+                                           &p->bo)
+         : 0;
+      p->entry_offset = lead_size + AGX3_CODE_BLOCK_ENTRY_OFFSET;
+      free(image);
+   } else {
+      p->ptr = agx_pool_upload_aligned_with_bo(
+         &cache->pool, binary, info->binary_size, 128, &p->bo);
+      p->entry_offset = info->main_offset;
+   }
+   if (!p->ptr) {
+      ralloc_free(p);
+      return NULL;
+   }
+
+   if (cache->dev->chip == AGX_CHIP_G17P) {
+      /* HAL200 consumes the CODE entry through a dispatch-local Ioto program;
+       * none of the legacy USC launch words below are part of that ABI. */
+      p_atomic_set(&cache->precomp[program], p);
+      return p;
+   }
 
    /* Bake launch */
    agx_pack(&p->b.launch, CDM_LAUNCH_WORD_0, cfg) {

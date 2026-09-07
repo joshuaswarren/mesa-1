@@ -195,6 +195,8 @@ struct agx_precompiled_kernel_info {
    uint16_t local_size;
    uint16_t imageblock_stride;
    bool uses_txf;
+   bool agx3_staging_known;
+   uint16_t agx3_staging_halfs;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -217,6 +219,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .local_size = info->local_size,
       .imageblock_stride = info->imageblock_stride,
       .uses_txf = info->uses_txf,
+      .agx3_staging_known = info->agx3_staging_known,
+      .agx3_staging_halfs = info->agx3_staging_halfs,
    };
 }
 

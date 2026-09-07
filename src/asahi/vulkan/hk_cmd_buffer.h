@@ -976,6 +976,10 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                          enum agx_barrier barrier, enum libagx_program idx,
                          void *data, size_t data_size);
+void hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                              enum agx_barrier barrier,
+                              enum libagx_program idx, const void *data,
+                              size_t data_size);
 
 #define MESA_DISPATCH_PRECOMP hk_dispatch_precomp
 

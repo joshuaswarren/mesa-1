@@ -24,7 +24,7 @@
 #include "util/macros.h"
 #include <sys/mman.h>
 
-const char *targets[] = {"g13g", "g13x"};
+const char *targets[] = {"g13g", "g13x", "g17p"};
 
 #define foreach_target(target)                                                 \
    for (const char **target = &targets[0];                                     \
@@ -231,6 +231,16 @@ remap_variant(nir_function *func, unsigned variant, const char *target)
       return target;
 }
 
+static bool
+target_supports_program(const char *target, const nir_function *func)
+{
+   /* AGX3 internal programs need both native machine code and the HAL200
+    * Ioto/CDM launch contract.  Qualify the single Apple-witnessed kernel;
+    * every other slot in libagx_g17p remains NULL and fails closed. */
+   return strcmp(target, "g17p") ||
+          !strcmp(func->name, "libagx_fill_uint4");
+}
+
 static nir_def *
 load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
                   unsigned offset_B)
@@ -332,6 +342,9 @@ main(int argc, char **argv)
 
          foreach_target(target)
          {
+            if (!target_supports_program(*target, libfunc))
+               continue;
+
             /* Skip unused variants */
             if (strcmp(*target, remap_variant(libfunc, v, *target)))
                continue;
@@ -349,7 +362,12 @@ main(int argc, char **argv)
 
                .reserved_preamble = layout.size_B / 2,
                .is_helper = is_helper,
+               .no_preamble = !strcmp(*target, "g17p"),
             };
+
+            key.dev.encoding = !strcmp(*target, "g17p")
+                                  ? AGX_ISA_ENCODING_AGX3B
+                                  : AGX_ISA_ENCODING_AGX2;
 
             if (has_atomic) {
                key.dev.needs_g13x_coherency =
@@ -357,7 +375,12 @@ main(int argc, char **argv)
             }
 
             nir_shader *clone = nir_shader_clone(NULL, s);
-            agx_compile_shader_nir(clone, &key, &compiled);
+            if (!agx_compile_shader_nir(clone, &key, &compiled)) {
+               fprintf(stderr, "Failed to compile %s for %s\n",
+                       libfunc->name, *target);
+               ralloc_free(clone);
+               return 1;
+            }
             print_shader(fp_c, libfunc->name, *target, v, &compiled);
             free(compiled.binary);
             ralloc_free(clone);
@@ -380,7 +403,15 @@ main(int argc, char **argv)
    foreach_target(target)
    {
       nir_precomp_print_extern_binary_map(fp_h, "libagx", *target);
-      nir_precomp_print_binary_map(fp_c, nir, "libagx", *target, remap_variant);
+      if (strcmp(*target, "g17p")) {
+         nir_precomp_print_binary_map(fp_c, nir, "libagx", *target,
+                                      remap_variant);
+      } else {
+         fprintf(fp_c,
+                 "const uint32_t *libagx_g17p[LIBAGX_NUM_PROGRAMS] = {\n"
+                 "    [LIBAGX_FILL_UINT4] = libagx_fill_uint4_0_g17p,\n"
+                 "};\n\n");
+      }
    }
 
    glsl_type_singleton_decref();

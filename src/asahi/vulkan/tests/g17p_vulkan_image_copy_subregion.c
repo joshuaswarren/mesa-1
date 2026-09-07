@@ -11,7 +11,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef G17P_CLEAR_IMAGE
+#define TEST_NAME "g17p-vulkan-clear-image"
+#else
 #define TEST_NAME "g17p-vulkan-image-copy-subregion"
+#endif
 #define T8140_DEVICE_ID 0x8140
 #define WIDTH 32u
 #define HEIGHT 24u
@@ -53,6 +57,7 @@ VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyBufferToImage);
+VK_FN(vkCmdClearColorImage);
 VK_FN(vkCmdCopyImage);
 VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkEndCommandBuffer);
@@ -202,7 +207,7 @@ verify(const struct mapped_buffer *upload,
        const uint8_t upload_expected[UPLOAD_BYTES],
        const struct mapped_buffer *destination_upload,
        const uint8_t destination_upload_expected[DESTINATION_UPLOAD_BYTES],
-       const struct mapped_buffer *readback)
+       const struct mapped_buffer *readback, bool clear_image)
 {
    if (memcmp(upload->map, upload_expected, UPLOAD_BYTES) != 0) {
       for (size_t i = 0; i < UPLOAD_BYTES; ++i) {
@@ -236,8 +241,12 @@ verify(const struct mapped_buffer *upload,
    for (uint32_t y = 0; y < HEIGHT; ++y) {
       for (uint32_t x = 0; x < WIDTH; ++x) {
          uint8_t expected[4] = {0, 0, 0, 255};
-         if (x >= 11 && x < 24 && y >= 4 && y < 19)
+         if (clear_image) {
+            expected[0] = 255;
+            expected[2] = 255;
+         } else if (x >= 11 && x < 24 && y >= 4 && y < 19) {
             source_pixel(5 + x - 11, 3 + y - 4, expected);
+         }
          const uint8_t *actual = pixels + (y * WIDTH + x) * 4u;
          if (memcmp(actual, expected, 4) != 0) {
             fprintf(stderr,
@@ -255,6 +264,11 @@ verify(const struct mapped_buffer *upload,
 int
 main(int argc, char **argv)
 {
+#ifdef G17P_CLEAR_IMAGE
+   const bool clear_image = true;
+#else
+   const bool clear_image = false;
+#endif
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
    if (argc > 2 || (argc == 2 && !record_only))
       die("usage: " TEST_NAME " [--record-only]");
@@ -378,6 +392,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
+   LOAD_DEVICE(device, vkCmdClearColorImage);
    LOAD_DEVICE(device, vkCmdCopyImage);
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkEndCommandBuffer);
@@ -535,9 +550,18 @@ main(int argc, char **argv)
       .dstOffset = {11, 4, 0},
       .extent = {13, 15, 1},
    };
-   vkCmdCopyImage(command, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                  destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                  &image_copy);
+   if (clear_image) {
+      const VkClearColorValue magenta = {
+         .float32 = {1.0f, 0.0f, 1.0f, 1.0f},
+      };
+      vkCmdClearColorImage(command, destination.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
+                           &range);
+   } else {
+      vkCmdCopyImage(command, source.image,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination.image,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_copy);
+   }
 
    const VkImageMemoryBarrier destination_ready = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -581,8 +605,12 @@ main(int argc, char **argv)
 
    VkFence fence = VK_NULL_HANDLE;
    if (record_only) {
-      printf(TEST_NAME ": RECORD PASS — padded upload, nonzero image "
-                       "subregion copy and guarded readback recorded\n");
+      if (clear_image)
+         printf(TEST_NAME ": RECORD PASS — RGBA8 optimal image clear and "
+                          "guarded readback recorded\n");
+      else
+         printf(TEST_NAME ": RECORD PASS — padded upload, nonzero image "
+                          "subregion copy and guarded readback recorded\n");
       goto cleanup;
    }
 
@@ -602,11 +630,11 @@ main(int argc, char **argv)
       die("vkWaitForFences timed out after three seconds");
    check(waited, "vkWaitForFences");
    if (!verify(&upload, upload_expected, &destination_upload,
-               destination_upload_expected, &readback))
+               destination_upload_expected, &readback, clear_image))
       return EXIT_FAILURE;
    sleep(3);
    if (!verify(&upload, upload_expected, &destination_upload,
-               destination_upload_expected, &readback))
+               destination_upload_expected, &readback, clear_image))
       return EXIT_FAILURE;
 
    uint64_t checksum = UINT64_C(1469598103934665603);
@@ -614,10 +642,16 @@ main(int argc, char **argv)
       checksum ^= readback.map[GUARD_BYTES + i];
       checksum *= UINT64_C(1099511628211);
    }
-   printf(TEST_NAME ": PASS — 13x15 source(5,3) to destination(11,4) "
-                    "exact immediately/3s; both uploads and 384 guard bytes "
-                    "unchanged, checksum %016" PRIx64 "\n",
-          checksum);
+   if (clear_image)
+      printf(TEST_NAME ": PASS — exact magenta RGBA8 clear immediately/3s; "
+                       "both uploads and 384 guard bytes unchanged, checksum "
+                       "%016" PRIx64 "\n",
+             checksum);
+   else
+      printf(TEST_NAME ": PASS — 13x15 source(5,3) to destination(11,4) "
+                       "exact immediately/3s; both uploads and 384 guard "
+                       "bytes unchanged, checksum %016" PRIx64 "\n",
+             checksum);
 
 cleanup:
    if (fence != VK_NULL_HANDLE)

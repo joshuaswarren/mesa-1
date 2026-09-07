@@ -296,40 +296,24 @@ hk_g17p_compute_uniform_ranges(
  * *out is meaningless.
  */
 static bool
-hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
-                              struct hk_linked_shader *linked,
-                              uint64_t root_ptr, uint64_t texture_pointers,
-                              enum agx_ioto_g17p_compute_ldshdr_f1 kind,
-                              const char *trace,
-                              struct agx3_ioto_uniform_range ranges[3],
-                              size_t *range_count_out,
-                              struct agx_bo **program_bo_out,
-                              struct hk_agx3_g17p_compute_program *out)
+hk_g17p_build_compute_program_raw(
+   struct hk_cmd_buffer *cmd, uint64_t shader_va,
+   uint32_t shader_binary_size, uint32_t scratch_size, uint16_t nr_gprs,
+   bool compiler_d_valid, uint32_t compiler_d,
+   uint32_t threadgroup_memory_size_B,
+   const struct agx3_cdm_direct_template_sources *launch_sources,
+   enum agx_ioto_g17p_compute_ldshdr_f1 kind, const char *trace,
+   const struct agx3_ioto_uniform_range *ranges, size_t range_count,
+   struct agx_bo **program_bo_out,
+   struct hk_agx3_g17p_compute_program *out)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   size_t range_count;
-   if (!hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
-                                      ranges, &range_count)) {
+   if (!shader_va || !shader_binary_size || !nr_gprs || !compiler_d_valid ||
+       !launch_sources || !program_bo_out || !out ||
+       (range_count && !ranges)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
    }
-
-   struct agx3_cdm_direct_template_sources launch_sources;
-   if (!agx3_cdm_direct_template_sources_compute(
-          s->b.info.uses_resource_info_query,
-          s->b.info.uses_ray_traversal,
-          s->b.info.ray_traversal_depth_nonzero, &launch_sources)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return false;
-   }
-
-   /* The recorded Ioto program dereferences these executable/constant BOs
-    * after vkQueueSubmit returns. Their originating pipeline need not remain
-    * alive after command recording, so the command buffer owns references.
-    */
-   hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
-   if (s->b.info.rodata.size_16 != 0)
-      hk_cmd_buffer_retain_bo(cmd, s->bo);
 
    struct agx_bo *program_bo = agx_bo_create(
       &dev->dev, HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE,
@@ -358,15 +342,15 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
     * where both numbers are known, instead of letting the GPU discover it.
     */
    if (!agx_va_in_usc_window(&dev->dev, program_bo->va->addr) ||
-       !agx_va_in_usc_window(&dev->dev,
-                             linked->b.bo->va->addr + linked->b.entry_offset)) {
+       !agx_va_in_usc_window(&dev->dev, shader_va) ||
+       shader_binary_size >
+          AGX_USC_WINDOW_SIZE - (shader_va - dev->dev.shader_base)) {
       mesa_loge("G17P dispatch: exec pointer outside the USC window "
                 "[%" PRIx64 ", %" PRIx64 "): program=%" PRIx64
                 " shader=%" PRIx64 "\n",
                 dev->dev.shader_base,
                 dev->dev.shader_base + AGX_USC_WINDOW_SIZE,
-                program_bo->va->addr,
-                linked->b.bo->va->addr + linked->b.entry_offset);
+                program_bo->va->addr, shader_va);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
       return false;
    }
@@ -375,18 +359,16 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       .program_va = program_bo->va->addr,
       /* The container's entry point, not the allocation base: the
        * shader loader reads the block-size dword at entry - 0x80. */
-      .shader_va = linked->b.bo->va->addr + linked->b.entry_offset,
+      .shader_va = shader_va,
       .uniform_ranges = ranges,
       .uniform_range_count = range_count,
-      .shader_binary_size = linked->b.size,
-      .scratch_size = linked->b.scratch_size,
-      .nr_gprs = linked->b.nr_gprs,
-      .compiler_d_valid = s->b.info.agx3_staging_known,
-      .compiler_d = (uint32_t)s->b.info.agx3_staging_halfs * 2,
-      .threadgroup_memory_size_B = s->b.info.local_size
-         ? MAX2(256u, ALIGN_POT(s->b.info.local_size, 64u))
-         : 0,
-      .launch_sources = launch_sources,
+      .shader_binary_size = shader_binary_size,
+      .scratch_size = scratch_size,
+      .nr_gprs = nr_gprs,
+      .compiler_d_valid = compiler_d_valid,
+      .compiler_d = compiler_d,
+      .threadgroup_memory_size_B = threadgroup_memory_size_B,
+      .launch_sources = *launch_sources,
       .ldshdr_f1 = kind,
    };
    if (!hk_agx3_g17p_compute_program_generate(dev->dev.chip, &desc, out)) {
@@ -399,13 +381,143 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return false;
    }
-   *range_count_out = range_count;
    *program_bo_out = program_bo;
    if (trace && hk_g17p_launch_trace_enabled())
       fprintf(stderr, "G17P program[%s]: kind=%u va=%" PRIx64 " len=%u\n",
               trace, (unsigned)kind, program_bo->va->addr,
               (unsigned)out->length);
    return true;
+}
+
+static bool
+hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
+                              struct hk_linked_shader *linked,
+                              uint64_t root_ptr, uint64_t texture_pointers,
+                              enum agx_ioto_g17p_compute_ldshdr_f1 kind,
+                              const char *trace,
+                              struct agx3_ioto_uniform_range ranges[3],
+                              size_t *range_count_out,
+                              struct agx_bo **program_bo_out,
+                              struct hk_agx3_g17p_compute_program *out)
+{
+   size_t range_count;
+   if (!hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
+                                       &range_count)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(
+          s->b.info.uses_resource_info_query,
+          s->b.info.uses_ray_traversal,
+          s->b.info.ray_traversal_depth_nonzero, &launch_sources)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   /* The recorded Ioto program dereferences these executable/constant BOs
+    * after vkQueueSubmit returns. Their originating pipeline need not remain
+    * alive after command recording, so the command buffer owns references. */
+   hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
+   if (s->b.info.rodata.size_16 != 0)
+      hk_cmd_buffer_retain_bo(cmd, s->bo);
+
+   const bool ok = hk_g17p_build_compute_program_raw(
+      cmd, linked->b.bo->va->addr + linked->b.entry_offset, linked->b.size,
+      linked->b.scratch_size, linked->b.nr_gprs,
+      s->b.info.agx3_staging_known,
+      (uint32_t)s->b.info.agx3_staging_halfs * 2,
+      s->b.info.local_size ? MAX2(256u, ALIGN_POT(s->b.info.local_size, 64u))
+                           : 0,
+      &launch_sources, kind, trace, ranges, range_count, program_bo_out, out);
+   if (ok)
+      *range_count_out = range_count;
+   return ok;
+}
+
+void
+hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
+                         enum agx_barrier barrier, enum libagx_program idx,
+                         const void *data, size_t data_size)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if ((unsigned)idx >= LIBAGX_NUM_PROGRAMS) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   struct agx_precompiled_shader *prog =
+      agx_get_precompiled(&dev->bg_eot, idx);
+   if (dev->dev.chip != AGX_CHIP_G17P || !prog || !prog->bo ||
+       !prog->info.main_size || !prog->info.nr_gprs ||
+       prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
+       !prog->info.agx3_staging_known ||
+       !data || !data_size || data_size > UINT16_MAX * 2u ||
+       prog->entry_offset > UINT64_MAX - prog->ptr ||
+       prog->b.workgroup.x == 0 || prog->b.workgroup.y == 0 ||
+       prog->b.workgroup.z == 0 || agx_is_indirect(grid)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   if (grid.count[0] == 0 || grid.count[1] == 0 || grid.count[2] == 0)
+      return;
+
+   struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
+                           : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
+                                                    : &cmd->current_cs.cs;
+   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(cmd, target, true);
+   if (!cs)
+      return;
+
+   const uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);
+   if (!uploaded_data) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
+   }
+   const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0,
+      .size_halfs = DIV_ROUND_UP(data_size, 2),
+      .address = uploaded_data,
+   };
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                  &launch_sources)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   struct agx_bo *program_bo;
+   struct hk_agx3_g17p_compute_program program;
+   if (!hk_g17p_build_compute_program_raw(
+          cmd, prog->ptr + prog->entry_offset, prog->info.main_size, 0,
+          prog->info.nr_gprs, true,
+          (uint32_t)prog->info.agx3_staging_halfs * 2, 0, &launch_sources,
+          AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3, "precompiled", &range,
+          1, &program_bo, &program))
+      return;
+
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {prog->b.workgroup.x, prog->b.workgroup.y,
+                     prog->b.workgroup.z},
+      .dimensions = grid.count[2] != 1 || prog->b.workgroup.z != 1
+                       ? 3
+                    : grid.count[1] != 1 || prog->b.workgroup.y != 1 ? 2 : 1,
+   };
+
+   hk_ensure_cs_has_space(cmd, cs, 0x2000);
+   struct agx3_compute_dispatch_sink sink = {
+      .data = (uint8_t *)cs->current,
+      .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
+   };
+   if (!hk_agx3_g17p_native_compute_dispatch_append(&program.launch, &direct,
+                                                     &sink)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+   cs->stats.cmds++;
 }
 
 void

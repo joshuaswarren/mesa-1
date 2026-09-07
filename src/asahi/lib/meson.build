@@ -265,6 +265,18 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-precompiled-fill',
+    executable(
+      'asahi-g17p-precompiled-fill',
+      files('tests/test-g17p-precompiled-fill.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx_shaders_h],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-agx-linker-container',
     executable(
       'asahi-agx-linker-container',

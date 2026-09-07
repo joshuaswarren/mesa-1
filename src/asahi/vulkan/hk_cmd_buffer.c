@@ -1461,6 +1461,11 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                     void *data, size_t data_size)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      hk_dispatch_precomp_g17p(cmd, grid, barrier, idx, data, data_size);
+      return;
+   }
+
    struct agx_precompiled_shader *prog = agx_get_precompiled(&dev->bg_eot, idx);
    if (!prog) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

@@ -16,6 +16,8 @@ struct agx_precompiled_shader {
    struct agx_shader b;
    struct agx_bo *bo;
    uint64_t ptr;
+   uint32_t entry_offset;
+   struct agx_precompiled_kernel_info info;
 };
 
 struct agx_bg_eot_cache {

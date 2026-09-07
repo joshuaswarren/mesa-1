@@ -1180,6 +1180,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
          dev->libagx_programs = libagx_g13x;
       else
          dev->libagx_programs = libagx_g13g;
+   } else if (dev->chip == AGX_CHIP_G17P) {
+      dev->libagx_programs = libagx_g17p;
    } else {
       dev->libagx_programs = NULL;
    }
