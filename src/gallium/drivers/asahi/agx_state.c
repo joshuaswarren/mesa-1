@@ -1044,7 +1044,10 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
       }
    }
 
-   agx_ppp_fini(out, &ppp);
+   bool emitted =
+      agx_ppp_fini(agx_device(batch->ctx->base.screen)->chip, out, &ppp);
+   assert(emitted);
+   (void)emitted;
 }
 
 static void
@@ -3459,7 +3462,10 @@ agx_batch_init_state(struct agx_batch *batch)
    agx_ppp_push(&ppp, VARYING_2, cfg);
    /* clang-format on */
 
-   agx_ppp_fini(&out, &ppp);
+   bool emitted =
+      agx_ppp_fini(agx_device(batch->ctx->base.screen)->chip, &out, &ppp);
+   assert(emitted);
+   (void)emitted;
    batch->vdm.current = out;
 
    /* Mark it as initialized now, since agx_batch_writes() will check this. */
@@ -3829,7 +3835,9 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
          cfg.count = vs->uvs.size;
    }
 
-   agx_ppp_fini(&out, &ppp);
+   bool emitted = agx_ppp_fini(dev->chip, &out, &ppp);
+   assert(emitted);
+   (void)emitted;
    ppp_updates++;
 
    assert(ppp_updates <= MAX_PPP_UPDATES);
