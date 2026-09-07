@@ -16,11 +16,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#ifdef G17P_NULL_DESCRIPTOR
+#include "g17p_vulkan_null_descriptor_spv.h"
+#define COMPUTE_SPV g17p_vulkan_null_descriptor_spv
+#define TEST_NAME "g17p-vulkan-null-descriptor"
+#else
 #include "g17p_vulkan_compute_min_spv.h"
+#define COMPUTE_SPV g17p_vulkan_compute_min_spv
+#define TEST_NAME "g17p-vulkan-compute-min"
+#endif
 
 #define T8140_DEVICE_ID 0x8140
 #define ELEMENT_COUNT   32
+#ifdef G17P_NULL_DESCRIPTOR
+#define GUARD_COUNT 32
+#else
+#define GUARD_COUNT 0
+#endif
 
 /* Distinct per element and distinguishable from both 0 and any plausible
  * shader result. */
@@ -34,6 +48,7 @@ VK_FN(vkCreateInstance);
 VK_FN(vkDestroyInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceProperties);
+VK_FN(vkGetPhysicalDeviceFeatures2);
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 VK_FN(vkCreateDevice);
@@ -76,7 +91,7 @@ VK_FN(vkWaitForFences);
 static void
 die(const char *what)
 {
-   fprintf(stderr, "g17p-vulkan-compute-min: %s\n", what);
+   fprintf(stderr, TEST_NAME ": %s\n", what);
    exit(EXIT_FAILURE);
 }
 
@@ -84,7 +99,7 @@ static void
 check(VkResult result, const char *what)
 {
    if (result != VK_SUCCESS) {
-      fprintf(stderr, "g17p-vulkan-compute-min: %s returned %d\n", what, result);
+      fprintf(stderr, TEST_NAME ": %s returned %d\n", what, result);
       exit(EXIT_FAILURE);
    }
 }
@@ -125,8 +140,12 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+   const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
+   if (argc > 2 || (argc == 2 && !record_only))
+      die("usage: " TEST_NAME " [--record-only]");
+
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -157,6 +176,7 @@ main(void)
    LOAD_INSTANCE(instance, vkDestroyInstance);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceQueueFamilyProperties);
    LOAD_INSTANCE(instance, vkCreateDevice);
@@ -217,8 +237,33 @@ main(void)
       .queueCount = 1,
       .pQueuePriorities = &priority,
    };
+#ifdef G17P_NULL_DESCRIPTOR
+   VkPhysicalDeviceRobustness2FeaturesEXT available_robustness2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 available_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_robustness2,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available_features);
+   if (!available_robustness2.nullDescriptor)
+      die("nullDescriptor is not advertised");
+
+   const VkPhysicalDeviceRobustness2FeaturesEXT enabled_robustness2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+      .nullDescriptor = VK_TRUE,
+   };
+   const char *const enabled_extensions[] = {
+      VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+#ifdef G17P_NULL_DESCRIPTOR
+      .pNext = &enabled_robustness2,
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = enabled_extensions,
+#endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
    };
@@ -265,7 +310,9 @@ main(void)
    VkQueue queue;
    vkGetDeviceQueue(device, queue_family, 0, &queue);
 
-   const VkDeviceSize buffer_size = ELEMENT_COUNT * sizeof(uint32_t);
+   const VkDeviceSize payload_size = ELEMENT_COUNT * sizeof(uint32_t);
+   const VkDeviceSize buffer_size =
+      (ELEMENT_COUNT + GUARD_COUNT) * sizeof(uint32_t);
    const VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = buffer_size,
@@ -303,34 +350,62 @@ main(void)
     * zero", and that ambiguity is exactly what stalled the last round: every
     * element read back as 0, which is also what an untouched buffer looks
     * like. With the sentinel the readback classifies itself. */
-   for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
+   for (uint32_t i = 0; i < ELEMENT_COUNT + GUARD_COUNT; ++i)
       mapped[i] = SENTINEL(i);
 
-   const VkDescriptorSetLayoutBinding binding = {
-      .binding = 0,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+#ifdef G17P_NULL_DESCRIPTOR
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 2,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+#endif
    };
    const VkDescriptorSetLayoutCreateInfo set_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 1,
-      .pBindings = &binding,
+      .bindingCount = sizeof(bindings) / sizeof(bindings[0]),
+      .pBindings = bindings,
    };
    VkDescriptorSetLayout set_layout;
    check(vkCreateDescriptorSetLayout(device, &set_layout_info, NULL,
                                      &set_layout),
          "vkCreateDescriptorSetLayout");
 
-   const VkDescriptorPoolSize pool_size = {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 1,
+   const VkDescriptorPoolSize pool_sizes[] = {
+      {
+         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+#ifdef G17P_NULL_DESCRIPTOR
+         .descriptorCount = 2,
+#else
+         .descriptorCount = 1,
+#endif
+      },
+#ifdef G17P_NULL_DESCRIPTOR
+      {
+         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         .descriptorCount = 1,
+      },
+#endif
    };
    const VkDescriptorPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = 1,
-      .poolSizeCount = 1,
-      .pPoolSizes = &pool_size,
+      .poolSizeCount = sizeof(pool_sizes) / sizeof(pool_sizes[0]),
+      .pPoolSizes = pool_sizes,
    };
    VkDescriptorPool descriptor_pool;
    check(vkCreateDescriptorPool(device, &pool_info, NULL, &descriptor_pool),
@@ -345,25 +420,53 @@ main(void)
    VkDescriptorSet descriptor_set;
    check(vkAllocateDescriptorSets(device, &set_info, &descriptor_set),
          "vkAllocateDescriptorSets");
-   const VkDescriptorBufferInfo descriptor_buffer = {
-      .buffer = buffer,
-      .offset = 0,
-      .range = buffer_size,
+   const VkDescriptorBufferInfo descriptor_buffers[] = {
+#ifdef G17P_NULL_DESCRIPTOR
+      {
+         .buffer = VK_NULL_HANDLE,
+         .offset = 0,
+         .range = VK_WHOLE_SIZE,
+      },
+#endif
+      {
+         .buffer = buffer,
+         .offset = 0,
+         .range = payload_size,
+      },
+#ifdef G17P_NULL_DESCRIPTOR
+      {
+         .buffer = VK_NULL_HANDLE,
+         .offset = 0,
+         .range = VK_WHOLE_SIZE,
+      },
+#endif
    };
-   const VkWriteDescriptorSet descriptor_write = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = descriptor_set,
-      .dstBinding = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo = &descriptor_buffer,
-   };
-   vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, NULL);
+   VkWriteDescriptorSet descriptor_writes[
+      sizeof(descriptor_buffers) / sizeof(descriptor_buffers[0])];
+   for (uint32_t i = 0;
+        i < sizeof(descriptor_buffers) / sizeof(descriptor_buffers[0]); ++i) {
+      descriptor_writes[i] = (VkWriteDescriptorSet){
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = descriptor_set,
+         .dstBinding = i,
+         .descriptorCount = 1,
+#ifdef G17P_NULL_DESCRIPTOR
+         .descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                  : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+#else
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+#endif
+         .pBufferInfo = &descriptor_buffers[i],
+      };
+   }
+   vkUpdateDescriptorSets(
+      device, sizeof(descriptor_writes) / sizeof(descriptor_writes[0]),
+      descriptor_writes, 0, NULL);
 
    const VkShaderModuleCreateInfo shader_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_vulkan_compute_min_spv),
-      .pCode = g17p_vulkan_compute_min_spv,
+      .codeSize = sizeof(COMPUTE_SPV),
+      .pCode = COMPUTE_SPV,
    };
    VkShaderModule shader;
    check(vkCreateShaderModule(device, &shader_info, NULL, &shader),
@@ -435,6 +538,14 @@ main(void)
                         &host_barrier, 0, NULL);
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
+   if (record_only) {
+      printf(TEST_NAME ": RECORD PASS — null SSBO load/store and UBO load "
+                       "descriptor update, pipeline, dispatch and EndCB "
+                       "accepted on queue %u (flags %#x)\n",
+             queue_family, queue_flags);
+      goto cleanup;
+   }
+
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
    };
@@ -451,7 +562,11 @@ main(void)
 
    unsigned untouched = 0, zeroed = 0, wrong = 0, first_bad = UINT32_MAX;
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
+#ifdef G17P_NULL_DESCRIPTOR
+      const uint32_t expected = UINT32_C(0x6d000000) + i;
+#else
       const uint32_t expected = UINT32_C(0x12340000) + i;
+#endif
       if (mapped[i] == expected)
          continue;
       if (first_bad == UINT32_MAX)
@@ -466,35 +581,40 @@ main(void)
 
    if (untouched || zeroed || wrong) {
       fprintf(stderr,
-              "g17p-vulkan-compute-min: FAIL untouched=%u zeroed=%u wrong=%u of %u\n"
-              "g17p-vulkan-compute-min:   value[%u] is %#x, expected %#x "
+              TEST_NAME ": FAIL untouched=%u zeroed=%u wrong=%u of %u\n"
+              TEST_NAME ":   value[%u] is %#x, expected %#x "
               "(sentinel would be %#x)\n",
               untouched, zeroed, wrong, ELEMENT_COUNT, first_bad,
-              mapped[first_bad], UINT32_C(0x12340000) + first_bad,
+              mapped[first_bad],
+#ifdef G17P_NULL_DESCRIPTOR
+              UINT32_C(0x6d000000) + first_bad,
+#else
+              UINT32_C(0x12340000) + first_bad,
+#endif
               SENTINEL(first_bad));
       /* The classification is the whole point, so spell it out. */
       if (untouched == ELEMENT_COUNT)
          fprintf(stderr,
-                 "g17p-vulkan-compute-min:   -> the store never executed: every "
+                 TEST_NAME ":   -> the store never executed: every "
                  "element still holds its prefill sentinel. The dispatch did "
                  "not run (or ran and was discarded); this is NOT a shader "
                  "arithmetic bug.\n");
       else if (zeroed == ELEMENT_COUNT)
          fprintf(stderr,
-                 "g17p-vulkan-compute-min:   -> the buffer was zeroed by something "
+                 TEST_NAME ":   -> the buffer was zeroed by something "
                  "other than this shader; the store wrote 0 or the memory was "
                  "clobbered.\n");
       else if (wrong)
          fprintf(stderr,
-                 "g17p-vulkan-compute-min:   -> the store DID execute; the value "
+                 TEST_NAME ":   -> the store DID execute; the value "
                  "is wrong, so the arithmetic or the constant-data load is at "
                  "fault.\n");
       /* "Wrote nothing" and "wrote somewhere else" have completely different
        * causes, and reporting only element 0 cannot tell them apart. Dump the
        * whole buffer so a store landing at a wrong offset is visible. */
-      fprintf(stderr, "g17p-vulkan-compute-min:   buffer:\n");
+      fprintf(stderr, TEST_NAME ":   buffer:\n");
       for (uint32_t i = 0; i < ELEMENT_COUNT; i += 8) {
-         fprintf(stderr, "g17p-vulkan-compute-min:     [%2u] ", i);
+         fprintf(stderr, TEST_NAME ":     [%2u] ", i);
          for (uint32_t j = 0; j < 8 && i + j < ELEMENT_COUNT; ++j)
             fprintf(stderr, "%08x ", mapped[i + j]);
          fprintf(stderr, "\n");
@@ -502,11 +622,33 @@ main(void)
       return EXIT_FAILURE;
    }
 
+#ifdef G17P_NULL_DESCRIPTOR
+   for (uint32_t i = ELEMENT_COUNT; i < ELEMENT_COUNT + GUARD_COUNT; ++i) {
+      if (mapped[i] != SENTINEL(i))
+         die("output guard changed");
+   }
+
+   sleep(3);
+   for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
+      if (mapped[i] != UINT32_C(0x6d000000) + i)
+         die("null-load result changed after three seconds");
+   }
+   for (uint32_t i = ELEMENT_COUNT; i < ELEMENT_COUNT + GUARD_COUNT; ++i) {
+      if (mapped[i] != SENTINEL(i))
+         die("output guard changed after three seconds");
+   }
+
+   printf(TEST_NAME ": PASS — 32 null SSBO/UBO loads returned zero, null "
+                    "SSBO stores were discarded, exact output and 32 guards "
+                    "stable for three seconds\n");
+#else
    printf("g17p-vulkan-compute-min: PASS — 32 buffer writes on queue family %u "
           "(flags %#x, private G17P compute route)\n",
           queue_family, queue_flags);
+#endif
 
    vkDestroyFence(device, fence, NULL);
+cleanup:
    vkDestroyCommandPool(device, command_pool, NULL);
    vkDestroyPipeline(device, pipeline, NULL);
    vkDestroyPipelineLayout(device, pipeline_layout, NULL);

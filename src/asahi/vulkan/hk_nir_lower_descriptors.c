@@ -935,8 +935,10 @@ hk_nir_lower_descriptors(nir_shader *nir,
 
          rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT,
 
-      .ssbo_addr_format = hk_buffer_addr_format(rs->storage_buffers),
-      .ubo_addr_format = hk_buffer_addr_format(rs->uniform_buffers),
+      .ssbo_addr_format = hk_buffer_addr_format(
+         rs->storage_buffers, rs->null_storage_buffer_descriptor),
+      .ubo_addr_format = hk_buffer_addr_format(
+         rs->uniform_buffers, rs->null_uniform_buffer_descriptor),
    };
 
    assert(set_layout_count <= HK_MAX_SETS);

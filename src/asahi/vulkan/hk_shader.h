@@ -353,8 +353,16 @@ uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev);
 
 static inline nir_address_format
-hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
+hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness,
+                      bool null_descriptor)
 {
+   /* A null buffer descriptor has a zero range.  Preserve that range through
+    * explicit-I/O lowering even when ordinary robustness is disabled so null
+    * loads return zero and null stores are discarded before touching the
+    * read-only zero page. */
+   if (null_descriptor)
+      return nir_address_format_64bit_bounded_global;
+
    switch (robustness) {
    case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT:
       return nir_address_format_64bit_global_32bit_offset;

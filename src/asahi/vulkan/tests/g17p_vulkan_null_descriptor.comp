@@ -1,0 +1,29 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer NullStorage {
+   uint values[];
+} null_storage;
+
+layout(set = 0, binding = 1, std430) buffer Output {
+   uint values[];
+} output_buffer;
+
+layout(set = 0, binding = 2, std140) uniform NullUniform {
+   uvec4 value;
+} null_uniform;
+
+void
+main()
+{
+   uint index = gl_GlobalInvocationID.x;
+   uint ssbo_value = null_storage.values[index];
+   uint ubo_value = null_uniform.value.x;
+
+   /* This store must be discarded.  Keeping a real output after it proves
+    * that the null store did not terminate or fault the invocation. */
+   null_storage.values[index] = 0xbad00000u + index;
+   output_buffer.values[index] =
+      ssbo_value ^ ubo_value ^ (0x6d000000u + index);
+}

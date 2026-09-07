@@ -4,6 +4,7 @@
  */
 
 #include "hk_cmd_buffer.h"
+#include "hk_buffer.h"
 #include "hk_shader.h"
 
 #include "nir_builder.h"
@@ -31,6 +32,19 @@ source_is_constant(nir_src src, uint64_t expected)
 int
 main(void)
 {
+   assert(hk_buffer_addr_format(
+             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, false) ==
+          nir_address_format_64bit_global_32bit_offset);
+   assert(hk_buffer_addr_format(
+             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, true) ==
+          nir_address_format_64bit_bounded_global);
+   assert(hk_buffer_addr_format(
+             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT,
+             false) == nir_address_format_64bit_bounded_global);
+   const struct hk_addr_range null_buffer =
+      hk_buffer_addr_range(NULL, 0, VK_WHOLE_SIZE, true);
+   assert(null_buffer.addr == AGX_ZERO_PAGE_ADDRESS && null_buffer.range == 0);
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, NULL, "Honeykrisp runtime printf address");
    nir_def *address = nir_load_printf_buffer_address(&b, 64);

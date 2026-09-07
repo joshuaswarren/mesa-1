@@ -615,6 +615,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-null-descriptor',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_NULL_DESCRIPTOR=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-compute-count',
       files('tests/g17p_vulkan_compute_count.c'),
       include_directories : [inc_include],

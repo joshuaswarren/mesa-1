@@ -117,9 +117,11 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      const struct vk_pipeline_robustness_state *rs)
 {
    return (struct spirv_to_nir_options){
-      .ssbo_addr_format = hk_buffer_addr_format(rs->storage_buffers),
+      .ssbo_addr_format = hk_buffer_addr_format(
+         rs->storage_buffers, rs->null_storage_buffer_descriptor),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
-      .ubo_addr_format = hk_buffer_addr_format(rs->uniform_buffers),
+      .ubo_addr_format = hk_buffer_addr_format(
+         rs->uniform_buffers, rs->null_uniform_buffer_descriptor),
       .shared_addr_format = nir_address_format_32bit_offset,
       .min_ssbo_alignment = HK_MIN_SSBO_ALIGNMENT,
       .min_ubo_alignment = HK_MIN_UBO_ALIGNMENT,
@@ -876,9 +878,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
-            hk_buffer_addr_format(rs->storage_buffers));
+            hk_buffer_addr_format(rs->storage_buffers,
+                                  rs->null_storage_buffer_descriptor));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
-            hk_buffer_addr_format(rs->uniform_buffers));
+            hk_buffer_addr_format(rs->uniform_buffers,
+                                  rs->null_uniform_buffer_descriptor));
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for
