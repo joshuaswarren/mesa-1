@@ -134,6 +134,35 @@ TEST_F(Optimizer, G17PPreservesNarrowingAfterAdd)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+TEST_F(Optimizer, G17PPreservesHalfWidenBeforeFltnorm)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index lo = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_index hi = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fmov_to(actual, lo, hx);
+   agx_fmov_to(actual, hi, hy);
+   agx_index packed = agx_temp(actual->shader, AGX_SIZE_16);
+   agx_fltnorm_agx3_to(actual, packed, lo, hi, AGX_FORMAT_U8NORM);
+   agx_unit_test(actual, packed);
+
+   lo = agx_temp(expected->shader, AGX_SIZE_32);
+   hi = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fmov_to(expected, lo, hx);
+   agx_fmov_to(expected, hi, hy);
+   packed = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_fltnorm_agx3_to(expected, packed, lo, hi, AGX_FORMAT_U8NORM);
+   agx_unit_test(expected, packed);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 /*
  * A tied fcmpsel with a GTN or LTN condition is G17P's native minimum or
  * maximum, and Apple's encoding carries the constant operand as one minifloat

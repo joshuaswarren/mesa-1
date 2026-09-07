@@ -728,6 +728,52 @@ test_g17p_background_f16_clear_narrowing(void)
    return ok;
 }
 
+static nir_shader *
+build_half_norm8_epilog(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P half ABI normalized epilog");
+   nir_def *colour = nir_load_exported_agx(
+      &b, 4, 16, .base = AGX_ABI_FOUT_COLOUR(0));
+   nir_store_local_pixel_agx(
+      &b, colour, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+      .base = 0, .write_mask = 0xf, .format = PIPE_FORMAT_R8_UNORM);
+   return fs_finish(&b);
+}
+
+static bool
+test_g17p_half_norm8_epilog(void)
+{
+   static const uint8_t expected[] = {
+      0x09,0x0a,0x1c,0x81,0x08,0x02,
+      0x19,0x0a,0x1c,0x81,0x00,0x02,
+      0x97,0x04,0x54,0x01,0x02,0x04,0x02,0x54,0x44,0xc2,
+      0x19,0x08,0x1c,0x81,0x08,0x02,
+      0x29,0x08,0x1c,0x81,0x00,0x02,
+      0x97,0x04,0x54,0x00,0x02,0x08,0x0a,0x54,0x44,0xc2,
+      0x87,0x02,0x54,0x00,0x06,0x00,
+      0x87,0x02,0x54,0x0c,0x08,0x00,
+      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x0c,0x02,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   nir_shader *nir = build_half_norm8_epilog();
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(nir, &key, &part);
+   bool ok = compiled && part.binary != NULL &&
+             part.info.binary_size == sizeof(expected) &&
+             memcmp(part.binary, expected, sizeof(expected)) == 0;
+
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
 static bool
 test_g17p_background_reload_staging(void)
 {
@@ -2802,6 +2848,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--half-norm8-epilog-only")) {
+      const bool ok = test_g17p_half_norm8_epilog();
+      fprintf(stderr, "G17P half ABI normalized epilog: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--storage-image-lowering-only")) {
       const bool ok = test_storage_image_lowering();
       fprintf(stderr, "G17P bounded RGBA8UI storage-image lowering: %s\n",
@@ -2895,6 +2947,8 @@ main(int argc, char **argv)
    if (!test_g17p_background_clear())
       all_ok = false;
    if (!test_g17p_background_f16_clear_narrowing())
+      all_ok = false;
+   if (!test_g17p_half_norm8_epilog())
       all_ok = false;
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {

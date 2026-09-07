@@ -794,23 +794,34 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
    if (nr_channels < 1 || nr_channels > 4)
       return 0;
 
-   /* Every fltnorm witness takes 32-bit float sources. */
+   /* Every fltnorm witness takes 32-bit float sources. A linked fragment
+    * epilog may receive normalized colour through the 16-bit export ABI, so
+    * reproduce Apple's native half-to-float conversion before packing. */
+   agx_index pack_sources[4];
    for (unsigned i = 0; i < nr_channels; ++i) {
-      if (channels[i].size != AGX_SIZE_32)
+      if (channels[i].size == AGX_SIZE_32) {
+         pack_sources[i] = channels[i];
+      } else if (norm8 &&
+                 b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                 channels[i].size == AGX_SIZE_16) {
+         pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, pack_sources[i], channels[i]);
+      } else {
          return 0;
+      }
    }
 
    unsigned n = 0;
    for (unsigned i = 0; i < nr_channels; i += 2) {
       const unsigned lanes = MIN2(2u, nr_channels - i);
       const agx_index hi =
-         (lanes == 2) ? channels[i + 1] : agx_null();
+         (lanes == 2) ? pack_sources[i + 1] : agx_null();
       /* The destination is a 16-bit half, not the sources' 32 bits, so the
        * generated temp-allocating helper cannot be used here. */
       agx_index dest = agx_temp(b->shader, AGX_SIZE_16);
       if (norm16)
          dest.channels_m1 = lanes - 1;
-      agx_fltnorm_agx3_to(b, dest, channels[i], hi, format);
+      agx_fltnorm_agx3_to(b, dest, pack_sources[i], hi, format);
       if (norm16) {
          agx_index halves[2] = {agx_null()};
          agx_emit_split(b, halves, dest, lanes);
