@@ -1053,6 +1053,40 @@ TEST_F(AGX3PackBinary, SignedReduceWaitsForDeviceLoad)
    }
 }
 
+TEST_F(AGX3PackBinary, SignedAddPrefixWaitsForDeviceLoad)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   const agx_index value = agx_register(4, AGX_SIZE_32);
+   agx_device_load_to(b, value, agx_register(8, AGX_SIZE_64),
+                      agx_register(12, AGX_SIZE_32), AGX_FORMAT_I32, 1, 2,
+                      false);
+   agx_simd_prefix_to(b, agx_register(6, AGX_SIZE_32), value,
+                      AGX_SIMD_OP_IADD);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+   std::vector<uint8_t> want;
+   const struct agx3_subgroup_reduce_desc prefix = {
+      .prefix = true,
+      .op = AGX3_SUBGROUP_REDUCE_IADD,
+      .dest = 6,
+      .src = 4,
+      /* G17P device loads use the native preferred slot 6. */
+      .wait_mask = 1u << 5,
+   };
+   ASSERT_TRUE(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &prefix,
+                                             bytes, &length));
+   append(want, bytes, length);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+
+   const std::vector<uint8_t> got = pack(b);
+   ASSERT_GE(got.size(), want.size());
+   const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
+   EXPECT_EQ(tail, want);
+}
+
 static void
 build_shuffle(agx_builder *b, bool quad, unsigned op, agx_index dest,
               agx_index src, agx_index lane)
