@@ -525,6 +525,15 @@ vk_common_CmdBindPipeline(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(vk_command_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(vk_pipeline, pipeline, _pipeline);
 
+   /* A failed pipeline creation returns VK_NULL_HANDLE. Applications must not
+    * bind it, but translation layers may discover an asynchronous compiler
+    * failure only while recording. Preserve the command-buffer error path
+    * instead of turning that secondary API misuse into a null dereference. */
+   if (unlikely(pipeline == NULL)) {
+      vk_command_buffer_set_error(cmd_buffer, VK_ERROR_UNKNOWN);
+      return;
+   }
+
    assert(pipeline->bind_point == pipelineBindPoint);
 
    pipeline->ops->cmd_bind(cmd_buffer, pipeline);
