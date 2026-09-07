@@ -279,6 +279,12 @@ bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH],
                                   uint8_t *len);
 
+/* Native scalar half reciprocal square root. */
+bool agx3_alu_hrsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len);
+
 /* Native square-root step, multiplied by the input by common Mesa lowering. */
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
