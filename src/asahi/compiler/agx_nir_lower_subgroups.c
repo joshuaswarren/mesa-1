@@ -192,9 +192,16 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 }
 
+struct agx_subgroup_lower_options {
+   bool g17p_clustered_float;
+};
+
 static bool
-lower_subgroup_filter(const nir_intrinsic_instr *intr, UNUSED const void *data)
+lower_subgroup_filter(const nir_intrinsic_instr *intr, const void *data)
 {
+   const struct agx_subgroup_lower_options *agx_options = data;
+   unsigned cluster = 0;
+
    /* Use default behaviour for everything but scans */
    if (intr->intrinsic != nir_intrinsic_exclusive_scan &&
        intr->intrinsic != nir_intrinsic_inclusive_scan &&
@@ -206,16 +213,22 @@ lower_subgroup_filter(const nir_intrinsic_instr *intr, UNUSED const void *data)
 
    /* Hardware supports quad ops but no other support clustered reductions. */
    if (nir_intrinsic_has_cluster_size(intr)) {
-      unsigned cluster = nir_intrinsic_cluster_size(intr);
+      cluster = nir_intrinsic_cluster_size(intr);
       if (cluster && cluster != 4 && cluster < 32)
          return true;
    }
 
    switch (nir_intrinsic_reduction_op(intr)) {
    case nir_op_imul:
+      return true;
+
    case nir_op_fmin:
    case nir_op_fmax:
-      /* no hardware scan for this opcode, always lower it */
+      /* Fresh G17P witnesses pin the native qRedfmin/qRedfmax forms. Keep
+       * every other target and non-quad shape on the established common
+       * lowering path. */
+      if (agx_options->g17p_clustered_float && cluster == 4)
+         return false;
       return true;
 
    case nir_op_iadd:
@@ -233,12 +246,17 @@ lower_subgroup_filter(const nir_intrinsic_instr *intr, UNUSED const void *data)
    }
 }
 
-bool
-agx_nir_lower_subgroups(nir_shader *s)
+static bool
+agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
 {
+   const struct agx_subgroup_lower_options agx_options = {
+      .g17p_clustered_float = g17p_clustered_float,
+   };
+
    /* First, do as much common lowering as we can */
    nir_lower_subgroups_options opts = {
       .filter = lower_subgroup_filter,
+      .filter_data = &agx_options,
       .lower_inverse_ballot = true,
       .lower_to_scalar = true,
       .lower_relative_shuffle = true,
@@ -258,4 +276,16 @@ agx_nir_lower_subgroups(nir_shader *s)
       nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow, NULL);
 
    return progress;
+}
+
+bool
+agx_nir_lower_subgroups(nir_shader *s)
+{
+   return agx_nir_lower_subgroups_internal(s, false);
+}
+
+bool
+agx_nir_lower_subgroups_g17p(nir_shader *s)
+{
+   return agx_nir_lower_subgroups_internal(s, true);
 }

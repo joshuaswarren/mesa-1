@@ -197,7 +197,10 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
       NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
 
    /* Optimize but allow copies because we haven't lowered them yet */
-   agx_preprocess_nir(nir);
+   if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -950,7 +953,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             agx_chip_descriptor_generation(dev->dev.chip));
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 
-   agx_preprocess_nir(nir);
+   if (dev->dev.chip == AGX_CHIP_G17P)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
 
    nir_opt_peephole_select_options peephole_select_options = {
       .limit = 0,

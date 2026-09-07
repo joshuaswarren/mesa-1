@@ -3776,7 +3776,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
 
    NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
    if (progress) {
-      NIR_PASS(_, nir, agx_nir_lower_subgroups);
+      if (byte_indices)
+         NIR_PASS(_, nir, agx_nir_lower_subgroups_g17p);
+      else
+         NIR_PASS(_, nir, agx_nir_lower_subgroups);
    }
 
    /* The above create operations that need lowering/optimizing */
@@ -4590,9 +4593,9 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
    return true;
 }
 
-/* Preprocess NIR independent of shader state */
-void
-agx_preprocess_nir(nir_shader *nir)
+/* Shared preprocessing with target-bounded subgroup choices. */
+static void
+agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
 {
    if (!nir)
       return;
@@ -4624,7 +4627,10 @@ agx_preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, agx_lower_sincos);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_lower_front_face,
             nir_metadata_control_flow, NULL);
-   NIR_PASS(_, nir, agx_nir_lower_subgroups);
+   if (g17p)
+      NIR_PASS(_, nir, agx_nir_lower_subgroups_g17p);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_subgroups);
    NIR_PASS(_, nir, nir_lower_all_phis_to_scalar);
 
    /* After lowering, run through the standard suite of NIR optimizations. We
@@ -4664,6 +4670,18 @@ agx_preprocess_nir(nir_shader *nir)
    NIR_PASS(_, nir, nir_opt_sink, move_all);
    NIR_PASS(_, nir, nir_opt_move, move_all);
    NIR_PASS(_, nir, agx_nir_lower_shared_bitsize);
+}
+
+void
+agx_preprocess_nir(nir_shader *nir)
+{
+   agx_preprocess_nir_internal(nir, false);
+}
+
+void
+agx_preprocess_nir_g17p(nir_shader *nir)
+{
+   agx_preprocess_nir_internal(nir, true);
 }
 
 static bool
