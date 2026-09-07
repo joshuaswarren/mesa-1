@@ -177,6 +177,15 @@
 #define G17P_RGBA32_SFLOAT 0
 #endif
 
+/* 1 = vkCmdDrawIndirect, 2 = vkCmdDrawIndexedIndirect. */
+#ifndef G17P_INDIRECT_DRAW
+#define G17P_INDIRECT_DRAW 0
+#endif
+
+#if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 2
+#error "select a valid G17P indirect draw oracle"
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -195,7 +204,12 @@
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_A2R10G10B10_UNORM
+#if G17P_INDIRECT_DRAW
+#include "g17p_vulkan_indirect_draw_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_indirect_draw_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#elif G17P_A2R10G10B10_UNORM
 #include "g17p_vulkan_a2r10g10b10_unorm_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -386,7 +400,10 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 
-#if G17P_A2R10G10B10_UNORM
+#if G17P_INDIRECT_DRAW
+#define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#define IMAGE_PIXEL_BYTES 4
+#elif G17P_A2R10G10B10_UNORM
 #define IMAGE_FORMAT VK_FORMAT_A2R10G10B10_UNORM_PACK32
 #define IMAGE_PIXEL_BYTES 4
 #define READBACK_GUARD_BYTES 64
@@ -705,7 +722,17 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_A2R10G10B10_UNORM
+#if G17P_INDIRECT_DRAW == 1
+#define PROBE_NAME "g17p-vulkan-draw-indirect"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INDIRECT_DRAW == 2
+#define PROBE_NAME "g17p-vulkan-draw-indexed-indirect"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_A2R10G10B10_UNORM
 #define PROBE_NAME "g17p-vulkan-a2r10g10b10-unorm"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -915,7 +942,7 @@ VK_FN(vkGetInstanceProcAddr);
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_INDIRECT_DRAW
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 VK_FN(vkGetPhysicalDeviceProperties);
@@ -945,6 +972,11 @@ VK_FN(vkCmdBeginRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
+#if G17P_INDIRECT_DRAW
+VK_FN(vkCmdDrawIndirect);
+VK_FN(vkCmdDrawIndexedIndirect);
+VK_FN(vkCmdBindIndexBuffer);
+#endif
 VK_FN(vkCmdEndRenderPass);
 #if G17P_HOST_IMAGE_COPY
 VK_FN(vkCopyImageToMemoryEXT);
@@ -1017,6 +1049,60 @@ fnv1a64(const uint8_t *bytes, size_t size)
    }
    return hash;
 }
+
+#if G17P_INDIRECT_DRAW
+struct mapped_buffer {
+   VkBuffer buffer;
+   VkDeviceMemory memory;
+   uint8_t *map;
+   size_t size;
+};
+
+static struct mapped_buffer
+create_mapped_buffer(VkDevice device,
+                     const VkPhysicalDeviceMemoryProperties *memory_properties,
+                     size_t size, VkBufferUsageFlags usage, const char *name)
+{
+   const VkBufferCreateInfo buffer_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = size,
+      .usage = usage,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   struct mapped_buffer out = {.size = size};
+   check(vkCreateBuffer(device, &buffer_info, NULL, &out.buffer), name);
+
+   VkMemoryRequirements requirements;
+   vkGetBufferMemoryRequirements(device, out.buffer, &requirements);
+   const VkMemoryAllocateInfo memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = find_memory_type(
+         memory_properties, requirements.memoryTypeBits,
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+   };
+   check(vkAllocateMemory(device, &memory_info, NULL, &out.memory), name);
+   check(vkBindBufferMemory(device, out.buffer, out.memory, 0), name);
+   check(vkMapMemory(device, out.memory, 0, size, 0, (void **)&out.map), name);
+   return out;
+}
+
+static bool
+verify_upload(const struct mapped_buffer *buffer, const uint8_t *expected,
+              const char *name)
+{
+   for (size_t i = 0; i < buffer->size; ++i) {
+      if (buffer->map[i] != expected[i]) {
+         fprintf(stderr,
+                 PROBE_NAME ": %s byte %zu changed: got 0x%02x, expected 0x%02x\n",
+                 name, i, buffer->map[i], expected[i]);
+         return false;
+      }
+   }
+   return true;
+}
+#endif
 
 static bool
 verify_readback(const uint8_t *map)
@@ -1160,6 +1246,7 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
@@ -1238,7 +1325,7 @@ main(void)
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_INDIRECT_DRAW
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
@@ -1307,6 +1394,16 @@ main(void)
       die("T8140/G17P does not advertise storageInputOutput16");
 #endif
 
+#if G17P_INDIRECT_DRAW
+   VkPhysicalDeviceFeatures2 indirect_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &indirect_available);
+   if (!indirect_available.features.drawIndirectFirstInstance ||
+       !indirect_available.features.multiDrawIndirect)
+      die("required core indirect-draw features are not advertised");
+#endif
+
    if (!(properties.limits.framebufferColorSampleCounts &
          (VkSampleCountFlags)G17P_MSAA_SAMPLES))
       die("requested color sample count is not advertised");
@@ -1346,6 +1443,12 @@ main(void)
       .storageInputOutput16 = VK_TRUE,
    };
 #endif
+#if G17P_INDIRECT_DRAW
+   const VkPhysicalDeviceFeatures indirect_enabled = {
+      .multiDrawIndirect = VK_TRUE,
+      .drawIndirectFirstInstance = VK_TRUE,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_F16_IO
@@ -1355,6 +1458,9 @@ main(void)
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
+#if G17P_INDIRECT_DRAW
+      .pEnabledFeatures = &indirect_enabled,
+#endif
 #if G17P_HOST_IMAGE_COPY
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
@@ -1386,6 +1492,11 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
+#if G17P_INDIRECT_DRAW
+   LOAD_DEVICE(device, vkCmdDrawIndirect);
+   LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
+   LOAD_DEVICE(device, vkCmdBindIndexBuffer);
+#endif
    LOAD_DEVICE(device, vkCmdEndRenderPass);
 #if G17P_HOST_IMAGE_COPY
    LOAD_DEVICE(device, vkCopyImageToMemoryEXT);
@@ -1403,11 +1514,24 @@ main(void)
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
 
+#if G17P_INDIRECT_DRAW
+   /* The first three vertices are deliberately degenerate.  A zero/wrong
+    * firstVertex, firstIndex, or baseVertex therefore cannot paint the image. */
+   static const float vertices[][2] = {
+      {0.0f, 0.0f},
+      {0.0f, 0.0f},
+      {0.0f, 0.0f},
+      {-1.0f, -1.0f},
+      {3.0f, -1.0f},
+      {-1.0f, 3.0f},
+   };
+#else
    static const float vertices[][2] = {
       {-1.0f, -1.0f},
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+#endif
    const VkBufferCreateInfo vertex_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = sizeof(vertices),
@@ -1438,6 +1562,69 @@ main(void)
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+
+#if G17P_INDIRECT_DRAW
+   enum {
+      INDIRECT_COMMAND_OFFSET = 64,
+      INDIRECT_COMMAND_STRIDE = 32,
+      INDIRECT_SUFFIX_BYTES = 64,
+   };
+#if G17P_INDIRECT_DRAW == 1
+   const VkDrawIndirectCommand indirect_command = {
+      .vertexCount = 3,
+      .instanceCount = 1,
+      .firstVertex = 3,
+      .firstInstance = 5,
+   };
+#else
+   const VkDrawIndexedIndirectCommand indirect_command = {
+      .indexCount = 3,
+      .instanceCount = 1,
+      .firstIndex = 3,
+      .vertexOffset = 2,
+      .firstInstance = 5,
+   };
+#endif
+   uint8_t indirect_expected[INDIRECT_COMMAND_OFFSET +
+                             INDIRECT_COMMAND_STRIDE +
+                             sizeof(indirect_command) +
+                             INDIRECT_SUFFIX_BYTES];
+   memset(indirect_expected, 0xa5, sizeof(indirect_expected));
+   /* If the implementation loses the API offset, both records at the buffer
+    * base are harmless zero draws. At the requested offset, the first record
+    * is also zero and only the second, stride-selected record may paint. */
+   memset(indirect_expected, 0, sizeof(indirect_command));
+   memset(indirect_expected + INDIRECT_COMMAND_STRIDE, 0,
+          sizeof(indirect_command));
+   memset(indirect_expected + INDIRECT_COMMAND_OFFSET, 0,
+          sizeof(indirect_command));
+   memcpy(indirect_expected + INDIRECT_COMMAND_OFFSET +
+             INDIRECT_COMMAND_STRIDE,
+          &indirect_command, sizeof(indirect_command));
+   struct mapped_buffer indirect = create_mapped_buffer(
+      device, &memory_properties, sizeof(indirect_expected),
+      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, "indirect buffer");
+   memcpy(indirect.map, indirect_expected, sizeof(indirect_expected));
+
+#if G17P_INDIRECT_DRAW == 2
+   enum {
+      INDEX_BUFFER_OFFSET = 64,
+      INDEX_SUFFIX_BYTES = 64,
+   };
+   static const uint16_t indices[] = {0, 0, 0, 1, 2, 3};
+   uint8_t index_expected[INDEX_BUFFER_OFFSET + sizeof(indices) +
+                          INDEX_SUFFIX_BYTES];
+   memset(index_expected, 0xa5, sizeof(index_expected));
+   /* Ignoring either the binding offset or firstIndex selects only zero
+    * indices, yielding a degenerate triangle instead of an out-of-range read. */
+   memset(index_expected, 0, sizeof(indices));
+   memcpy(index_expected + INDEX_BUFFER_OFFSET, indices, sizeof(indices));
+   struct mapped_buffer index = create_mapped_buffer(
+      device, &memory_properties, sizeof(index_expected),
+      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "index buffer");
+   memcpy(index.map, index_expected, sizeof(index_expected));
+#endif
+#endif
 
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1813,7 +2000,18 @@ main(void)
    const VkDeviceSize vertex_offset = 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
+#if G17P_INDIRECT_DRAW == 1
+   vkCmdDrawIndirect(command_buffer, indirect.buffer, INDIRECT_COMMAND_OFFSET,
+                     2, INDIRECT_COMMAND_STRIDE);
+#elif G17P_INDIRECT_DRAW == 2
+   vkCmdBindIndexBuffer(command_buffer, index.buffer, INDEX_BUFFER_OFFSET,
+                        VK_INDEX_TYPE_UINT16);
+   vkCmdDrawIndexedIndirect(command_buffer, indirect.buffer,
+                            INDIRECT_COMMAND_OFFSET, 2,
+                            INDIRECT_COMMAND_STRIDE);
+#else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#endif
    vkCmdEndRenderPass(command_buffer);
 
 #if !G17P_HOST_IMAGE_COPY
@@ -1850,7 +2048,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||            \
+#if G17P_INDIRECT_DRAW || G17P_F16_IO || G17P_RG16_UNORM ||           \
+   G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
    G17P_R32_SINT || G17P_RG16_UINT || G17P_RG16_SINT ||               \
    G17P_RG32_SINT || G17P_RG32_SFLOAT || G17P_RG8_UINT ||             \
@@ -1903,7 +2102,17 @@ main(void)
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 
-#if G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
+#if G17P_INDIRECT_DRAW
+   if (!verify_upload(&indirect, indirect_expected, "indirect input"))
+      return EXIT_FAILURE;
+#if G17P_INDIRECT_DRAW == 2
+   if (!verify_upload(&index, index_expected, "index input"))
+      return EXIT_FAILURE;
+#endif
+#endif
+
+#if G17P_INDIRECT_DRAW || G17P_MSAA_SAMPLES == 2 || G17P_F16_IO ||      \
+   G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \
@@ -1919,10 +2128,31 @@ main(void)
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
+#if G17P_INDIRECT_DRAW
+   if (!verify_upload(&indirect, indirect_expected, "indirect input"))
+      return EXIT_FAILURE;
+#if G17P_INDIRECT_DRAW == 2
+   if (!verify_upload(&index, index_expected, "index input"))
+      return EXIT_FAILURE;
+#endif
+#endif
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_A2R10G10B10_UNORM
+#if G17P_INDIRECT_DRAW == 1
+   printf(PROBE_NAME ": PASS — vkCmdDrawIndirect exact immediately/3s, "
+                     "two records/stride, nonzero command offset/firstVertex/"
+                     "firstInstance, "
+                     "256 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_INDIRECT_DRAW == 2
+   printf(PROBE_NAME ": PASS — vkCmdDrawIndexedIndirect exact immediately/3s, "
+                     "two records/stride, nonzero command/index offsets, "
+                     "firstIndex/baseVertex/firstInstance, 384 guard bytes "
+                     "unchanged, checksum "
+                     "%016" PRIx64 "\n",
+          checksum);
+#elif G17P_A2R10G10B10_UNORM
    printf(PROBE_NAME ": PASS — %ux%u A2R10G10B10 UNORM exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
