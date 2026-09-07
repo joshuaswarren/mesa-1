@@ -1220,6 +1220,21 @@ static void test_native_select_reg_imm(void)
    puts("Native absolute-comparison FSEL: nine exact G17P vectors PASS");
 }
 
+static void test_native_half_min(void)
+{
+   const uint16_t src[] = {2, 3, 2, 3};
+   for (unsigned live = 0; live < 2; ++live) {
+      const enum agx3_alu_hint hint =
+         live ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD;
+      const enum agx3_alu_hint hints[] = {hint, hint, hint, hint};
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B, live ? 0 : 2,
+                               src, hints, live, 0, bytes, &len));
+      exact(bytes, len, live ? "0a82248211c0" : "12021c0211c0");
+   }
+   puts("Native half minimum: two complete Apple retained/dead FSEL vectors PASS");
+}
+
 static void test_native_high_float_registers(void)
 {
    /* Original native80-value kernels force retained ALU values into the upper
@@ -1267,6 +1282,7 @@ int main(void){
    test_native_narrow_multiply();
    test_native_sqrt_step();
    test_native_select_reg_imm();
+   test_native_half_min();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();

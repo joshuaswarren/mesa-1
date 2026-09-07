@@ -4590,6 +4590,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Native tied half comparison/selection is scalar fmin. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             I->fcond == AGX_FCOND_LTN && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
+             I->src[0].value == I->src[2].value &&
+             I->src[1].value == I->src[3].value) {
+            uint16_t src[4];
+            enum agx3_alu_hint hints[4];
+            bool invalid = false;
+            for (unsigned i = 0; i < 4; ++i) {
+               const agx_index x = I->src[i];
+               invalid |= !agx3_src_is_register(x) || x.memory ||
+                  x.size != AGX_SIZE_16 || agx_channels(x) != 1 ||
+                  x.abs || x.neg || x.kill || (x.cache && x.discard);
+               src[i] = x.value;
+               hints[i] = agx3_post_ra_hint(x);
+            }
+            if (invalid || (wait != 0 && wait != 32))
+               AGX3_REFUSE(I);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_fmin_half(enc, I->dest[0].value, src, hints,
+                                    I->dest[0].cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Native mixed-width comparison against floating zero with full
           * float alternatives. Keep the half comparator in its assigned half
           * register; neither widening nor a separate comparison is needed. */

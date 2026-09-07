@@ -237,6 +237,12 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+bool agx3_alu_fmin_half(enum agx_isa_encoding enc, uint16_t dest,
+                        const uint16_t src[4],
+                        const enum agx3_alu_hint hints[4], bool dest_cache,
+                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                        uint8_t *len);
+
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],
                                   const enum agx3_alu_hint hints[4],
