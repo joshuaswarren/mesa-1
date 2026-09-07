@@ -198,6 +198,10 @@
 #define G17P_VERTEX_FORMAT 0
 #endif
 
+#ifndef G17P_IMPLICIT_LOD
+#define G17P_IMPLICIT_LOD 0
+#endif
+
 #if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
 #endif
@@ -244,6 +248,11 @@
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
 #define VERTEX_INPUT_FORMAT VK_FORMAT_R16G16_SFLOAT
+#elif G17P_IMPLICIT_LOD
+#include "g17p_vulkan_implicit_lod_frag.h"
+#include "g17p_vulkan_implicit_lod_vert.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_implicit_lod_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -767,7 +776,12 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_VERTEX_FORMAT == 1
+#if G17P_IMPLICIT_LOD
+#define PROBE_NAME "g17p-vulkan-implicit-lod"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -1033,6 +1047,13 @@ VK_FN(vkBindBufferMemory);
 VK_FN(vkBindImageMemory);
 VK_FN(vkMapMemory);
 VK_FN(vkCreateImageView);
+#if G17P_IMPLICIT_LOD
+VK_FN(vkCreateSampler);
+VK_FN(vkCreateDescriptorSetLayout);
+VK_FN(vkCreateDescriptorPool);
+VK_FN(vkAllocateDescriptorSets);
+VK_FN(vkUpdateDescriptorSets);
+#endif
 VK_FN(vkCreateRenderPass);
 VK_FN(vkCreateShaderModule);
 VK_FN(vkCreatePipelineLayout);
@@ -1042,6 +1063,11 @@ VK_FN(vkCreateCommandPool);
 VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
+#if G17P_IMPLICIT_LOD
+VK_FN(vkCmdPipelineBarrier);
+VK_FN(vkCmdCopyBufferToImage);
+VK_FN(vkCmdBindDescriptorSets);
+#endif
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
@@ -1151,7 +1177,7 @@ has_device_extension(VkPhysicalDevice physical, const char *name)
 #endif
 
 #if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || G17P_INSTANCE_RATE || \
-   G17P_VERTEX_FORMAT
+   G17P_VERTEX_FORMAT || G17P_IMPLICIT_LOD
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1217,7 +1243,12 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_A2R10G10B10_UNORM
+#if G17P_IMPLICIT_LOD
+   /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
+    * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
+    * The red mip 0 and blue mip 2 catch under- and overestimated LOD. */
+   static const uint8_t expected[4] = {0, 255, 0, 255};
+#elif G17P_A2R10G10B10_UNORM
    static const uint8_t expected[4] = {0xab, 0xab, 0x5a, 0x95};
 #elif G17P_RGBA32_SFLOAT
    static const uint8_t expected[16] = {
@@ -1347,6 +1378,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_IMPLICIT_LOD &&
+       getenv("G17P_IMPLICIT_LOD_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -1537,6 +1570,18 @@ main(void)
        required_format)
       die("target optimal images lack color-attachment or transfer-src support");
 
+#if G17P_IMPLICIT_LOD
+   VkFormatProperties texture_format_properties;
+   vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
+                                       &texture_format_properties);
+   const VkFormatFeatureFlags required_texture_format =
+      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+   if ((texture_format_properties.optimalTilingFeatures &
+        required_texture_format) != required_texture_format)
+      die("RGBA8 optimal images lack sampled/upload support");
+#endif
+
 #if G17P_VERTEX_FORMAT
    VkFormatProperties vertex_format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VERTEX_INPUT_FORMAT,
@@ -1608,6 +1653,13 @@ main(void)
    LOAD_DEVICE(device, vkBindImageMemory);
    LOAD_DEVICE(device, vkMapMemory);
    LOAD_DEVICE(device, vkCreateImageView);
+#if G17P_IMPLICIT_LOD
+   LOAD_DEVICE(device, vkCreateSampler);
+   LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
+   LOAD_DEVICE(device, vkCreateDescriptorPool);
+   LOAD_DEVICE(device, vkAllocateDescriptorSets);
+   LOAD_DEVICE(device, vkUpdateDescriptorSets);
+#endif
    LOAD_DEVICE(device, vkCreateRenderPass);
    LOAD_DEVICE(device, vkCreateShaderModule);
    LOAD_DEVICE(device, vkCreatePipelineLayout);
@@ -1617,6 +1669,11 @@ main(void)
    LOAD_DEVICE(device, vkAllocateCommandBuffers);
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
+#if G17P_IMPLICIT_LOD
+   LOAD_DEVICE(device, vkCmdPipelineBarrier);
+   LOAD_DEVICE(device, vkCmdCopyBufferToImage);
+   LOAD_DEVICE(device, vkCmdBindDescriptorSets);
+#endif
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
@@ -1793,6 +1850,29 @@ main(void)
       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "restart vertex buffer");
    memcpy(vertex.map, vertex_expected, RESTART_VERTEX_BUFFER_BYTES);
    VkBuffer vertex_buffer = vertex.buffer;
+#elif G17P_IMPLICIT_LOD
+   enum {
+      TEXTURE_VERTEX_OFFSET = 64,
+      TEXTURE_VERTEX_SUFFIX_BYTES = 64,
+      TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_OFFSET +
+                             3 * 2 * sizeof(float) +
+                             TEXTURE_VERTEX_SUFFIX_BYTES,
+   };
+   static const float vertices[][2] = {
+      {-1.0f, -1.0f},
+      {3.0f, -1.0f},
+      {-1.0f, 3.0f},
+   };
+   uint8_t texture_vertex_expected[TEXTURE_VERTEX_BYTES];
+   memset(texture_vertex_expected, 0xa5, sizeof(texture_vertex_expected));
+   memcpy(texture_vertex_expected + TEXTURE_VERTEX_OFFSET, vertices,
+          sizeof(vertices));
+   struct mapped_buffer texture_vertex = create_mapped_buffer(
+      device, &memory_properties, sizeof(texture_vertex_expected),
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "implicit-LOD vertex buffer");
+   memcpy(texture_vertex.map, texture_vertex_expected,
+          sizeof(texture_vertex_expected));
+   VkBuffer vertex_buffer = texture_vertex.buffer;
 #else
 #if G17P_INDIRECT_DRAW
    /* The first three vertices are deliberately degenerate.  A zero/wrong
@@ -1935,6 +2015,75 @@ main(void)
           sizeof(restart_index_expected));
 #endif
 
+#if G17P_IMPLICIT_LOD
+   enum {
+      TEXTURE_WIDTH = 64,
+      TEXTURE_HEIGHT = 64,
+      TEXTURE_LEVELS = 3,
+      TEXTURE_GUARD_BYTES = 64,
+      TEXTURE_LEVEL0_BYTES = 64 * 64 * 4,
+      TEXTURE_LEVEL1_BYTES = 32 * 32 * 4,
+      TEXTURE_LEVEL2_BYTES = 16 * 16 * 4,
+      TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
+                           TEXTURE_LEVEL2_BYTES,
+      TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
+   };
+   uint8_t texture_upload_expected[TEXTURE_UPLOAD_BYTES];
+   memset(texture_upload_expected, 0xa5, sizeof(texture_upload_expected));
+   static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
+      {0xff, 0x00, 0x00, 0xff},
+      {0x00, 0xff, 0x00, 0xff},
+      {0x00, 0x00, 0xff, 0xff},
+   };
+   const size_t mip_offsets[TEXTURE_LEVELS] = {
+      TEXTURE_GUARD_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES,
+   };
+   const size_t mip_pixels[TEXTURE_LEVELS] = {64 * 64, 32 * 32, 16 * 16};
+   for (unsigned level = 0; level < TEXTURE_LEVELS; ++level) {
+      uint8_t *dst = texture_upload_expected + mip_offsets[level];
+      for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel)
+         memcpy(dst + pixel * 4, mip_colours[level], 4);
+   }
+   struct mapped_buffer texture_upload = create_mapped_buffer(
+      device, &memory_properties, sizeof(texture_upload_expected),
+      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "implicit-LOD texture upload");
+   memcpy(texture_upload.map, texture_upload_expected,
+          sizeof(texture_upload_expected));
+
+   const VkImageCreateInfo texture_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .extent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
+      .mipLevels = TEXTURE_LEVELS,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+   VkImage texture;
+   check(vkCreateImage(device, &texture_info, NULL, &texture),
+         "vkCreateImage(texture)");
+   VkMemoryRequirements texture_requirements;
+   vkGetImageMemoryRequirements(device, texture, &texture_requirements);
+   const VkMemoryAllocateInfo texture_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = texture_requirements.size,
+      .memoryTypeIndex = find_memory_type(
+         &memory_properties, texture_requirements.memoryTypeBits,
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+   };
+   VkDeviceMemory texture_memory;
+   check(vkAllocateMemory(device, &texture_memory_info, NULL, &texture_memory),
+         "vkAllocateMemory(texture)");
+   check(vkBindImageMemory(device, texture, texture_memory, 0),
+         "vkBindImageMemory(texture)");
+#endif
+
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
@@ -2045,6 +2194,90 @@ main(void)
    check(vkCreateImageView(device, &view_info, NULL, &view),
          "vkCreateImageView");
 
+#if G17P_IMPLICIT_LOD
+   const VkImageViewCreateInfo texture_view_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = texture,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .levelCount = TEXTURE_LEVELS,
+         .layerCount = 1,
+      },
+   };
+   VkImageView texture_view;
+   check(vkCreateImageView(device, &texture_view_info, NULL, &texture_view),
+         "vkCreateImageView(texture)");
+   const VkSamplerCreateInfo sampler_info = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_NEAREST,
+      .minFilter = VK_FILTER_NEAREST,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .minLod = 0.0f,
+      .maxLod = 2.0f,
+   };
+   VkSampler sampler;
+   check(vkCreateSampler(device, &sampler_info, NULL, &sampler),
+         "vkCreateSampler");
+   const VkDescriptorSetLayoutBinding sampler_binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+   };
+   const VkDescriptorSetLayoutCreateInfo set_layout_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 1,
+      .pBindings = &sampler_binding,
+   };
+   VkDescriptorSetLayout set_layout;
+   check(vkCreateDescriptorSetLayout(device, &set_layout_info, NULL,
+                                     &set_layout),
+         "vkCreateDescriptorSetLayout");
+   const VkDescriptorPoolSize pool_size = {
+      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1,
+   };
+   const VkDescriptorPoolCreateInfo descriptor_pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = 1,
+      .pPoolSizes = &pool_size,
+   };
+   VkDescriptorPool descriptor_pool;
+   check(vkCreateDescriptorPool(device, &descriptor_pool_info, NULL,
+                                &descriptor_pool),
+         "vkCreateDescriptorPool");
+   const VkDescriptorSetAllocateInfo set_allocate_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = descriptor_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &set_layout,
+   };
+   VkDescriptorSet descriptor_set;
+   check(vkAllocateDescriptorSets(device, &set_allocate_info,
+                                  &descriptor_set),
+         "vkAllocateDescriptorSets");
+   const VkDescriptorImageInfo descriptor_image = {
+      .sampler = sampler,
+      .imageView = texture_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+   };
+   const VkWriteDescriptorSet descriptor_write = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = descriptor_set,
+      .dstBinding = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo = &descriptor_image,
+   };
+   vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, NULL);
+#endif
+
 #if G17P_MSAA_SAMPLES == 2
    VkImageViewCreateInfo msaa_view_info = view_info;
    msaa_view_info.image = msaa_image;
@@ -2150,6 +2383,10 @@ main(void)
 
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+#if G17P_IMPLICIT_LOD
+      .setLayoutCount = 1,
+      .pSetLayouts = &set_layout,
+#endif
    };
    VkPipelineLayout pipeline_layout;
    check(vkCreatePipelineLayout(device, &layout_info, NULL, &pipeline_layout),
@@ -2349,6 +2586,53 @@ main(void)
    };
    check(vkBeginCommandBuffer(command_buffer, &begin_info),
          "vkBeginCommandBuffer");
+#if G17P_IMPLICIT_LOD
+   VkImageMemoryBarrier texture_barrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = texture,
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .levelCount = TEXTURE_LEVELS,
+         .layerCount = 1,
+      },
+   };
+   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+                        1, &texture_barrier);
+   const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES,
+         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+         .imageExtent = {64, 64, 1},
+      },
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
+         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 0, 1},
+         .imageExtent = {32, 32, 1},
+      },
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES +
+                         TEXTURE_LEVEL1_BYTES,
+         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 0, 1},
+         .imageExtent = {16, 16, 1},
+      },
+   };
+   vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          TEXTURE_LEVELS, texture_copies);
+   texture_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+   texture_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+   texture_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+   texture_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
+                        NULL, 1, &texture_barrier);
+#endif
 #if G17P_R32_SINT || G17P_RG16_SINT || G17P_RG32_SINT ||              \
    G17P_RG8_SINT || G17P_RGBA8_SINT || G17P_R8_SINT ||                \
    G17P_RGBA16_SINT || G17P_RGBA32_SINT || G17P_R16_SINT
@@ -2372,6 +2656,10 @@ main(void)
                         VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
+#if G17P_IMPLICIT_LOD
+   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+#endif
 #if G17P_VERTEX_FORMAT
    const VkDeviceSize vertex_format_offset = VERTEX_FORMAT_BIND_OFFSET;
    vkCmdBindVertexBuffers(command_buffer, VERTEX_FORMAT_BINDING, 1,
@@ -2385,7 +2673,9 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 2, vertex_buffers,
                           vertex_offsets);
 #else
-#if G17P_INDEX_RESTART
+#if G17P_IMPLICIT_LOD
+   const VkDeviceSize vertex_offset = TEXTURE_VERTEX_OFFSET;
+#elif G17P_INDEX_RESTART
    const VkDeviceSize vertex_offset = RESTART_VERTEX_OFFSET;
 #else
    const VkDeviceSize vertex_offset = 0;
@@ -2449,7 +2739,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE || G17P_INDEX_RESTART ||  \
+#if G17P_IMPLICIT_LOD || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
+   G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_RG16_UNORM ||                                                  \
    G17P_RGBA16_UNORM ||                                                \
@@ -2528,8 +2819,16 @@ main(void)
        !verify_upload(&restart_index, restart_index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
+#if G17P_IMPLICIT_LOD
+   if (!verify_upload(&texture_vertex, texture_vertex_expected,
+                      "vertex input") ||
+       !verify_upload(&texture_upload, texture_upload_expected,
+                      "texture upload"))
+      return EXIT_FAILURE;
+#endif
 
-#if G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE || G17P_INDEX_RESTART ||    \
+#if G17P_IMPLICIT_LOD || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
+   G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
@@ -2570,10 +2869,23 @@ main(void)
        !verify_upload(&restart_index, restart_index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
+#if G17P_IMPLICIT_LOD
+   if (!verify_upload(&texture_vertex, texture_vertex_expected,
+                      "vertex input") ||
+       !verify_upload(&texture_upload, texture_upload_expected,
+                      "texture upload"))
+      return EXIT_FAILURE;
+#endif
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_VERTEX_FORMAT == 1
+#if G17P_IMPLICIT_LOD
+   printf(PROBE_NAME ": PASS — implicit derivative LOD selected exact mip 1 "
+                     "immediately/3s, distinct red/green/blue mips and all "
+                     "source/readback guards unchanged, checksum %016" PRIx64
+                     "\n",
+          checksum);
+#elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
                      "immediately/3s, binding 3, offset 64, stride 13, "
                      "attribute offset 5, all source/readback guards "
