@@ -130,6 +130,7 @@ TEST_F(AGX3PackBinary, StraightLineALU)
 
 TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 {
+   key.g17p_rt0_eot_words = 1;
    static const uint8_t native[] = {
       0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
       0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
@@ -166,6 +167,7 @@ TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 
 TEST_F(AGX3PackBinary, G17PF16EOTUsesExactNativeI16Program)
 {
+   key.g17p_rt0_eot_words = 1;
    static const uint8_t native[] = {
       0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
       0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,

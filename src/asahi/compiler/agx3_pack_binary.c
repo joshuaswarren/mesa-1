@@ -3336,8 +3336,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
       }
 
       return (ctx->key->g17p_rt0_eot_words == 1 ||
-              ctx->key->g17p_rt0_eot_words == 2 ||
-              ctx->key->g17p_rt0_eot_words == 4)
+              ctx->key->g17p_rt0_eot_words == 2)
                 ? AGX3_G17P_RT0_EOT_I32
                 : AGX3_G17P_RT0_EOT_NONE;
    }
