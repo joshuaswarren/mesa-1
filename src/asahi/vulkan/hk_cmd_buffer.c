@@ -416,6 +416,21 @@ hk_g17p_launch_trace_enabled(void)
    return enabled != 0;
 }
 
+/*
+ * Per-submission and per-allocation address tracing. These fire on every queue
+ * submit and every command BO, so at desktop frame rates they cost an unbuffered
+ * stderr write per frame and bury everything else in the journal. They stay
+ * available, they just are not the default any more.
+ */
+bool
+hk_g17p_verbose_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_VERBOSE", false);
+   return enabled != 0;
+}
+
 /* Single line, distinct tag. The multi-line dump below has twice been reported
  * as "only the header printed", so anything that must not be lost in a log
  * filter goes through this instead. */

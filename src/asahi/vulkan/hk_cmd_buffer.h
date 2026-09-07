@@ -752,6 +752,7 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
 bool hk_g17p_launch_trace_enabled(void);
+bool hk_g17p_verbose_enabled(void);
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
                            size_t len);
 void hk_g17p_trace_line(const char *label, uint64_t base, const void *data,

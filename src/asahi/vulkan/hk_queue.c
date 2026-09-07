@@ -288,7 +288,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       }
    }
 
-   if (hk_g17p_vdm_low_window_enabled(&dev->dev)) {
+   if (hk_g17p_vdm_low_window_enabled(&dev->dev) && hk_g17p_verbose_enabled()) {
       fprintf(stderr,
               "asahi: G17P VDM submit full=%#llx alias=%#llx low=%#llx\n",
               (unsigned long long)submitted_full,
