@@ -1468,6 +1468,39 @@ TEST_F(AGX3PackBinary, SimdReductionsAndExactPrefixes)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PClusteredIntegerMinMax)
+{
+   for (unsigned op : {AGX3_SUBGROUP_REDUCE_SMIN,
+                       AGX3_SUBGROUP_REDUCE_SMAX,
+                       AGX3_SUBGROUP_REDUCE_UMIN,
+                       AGX3_SUBGROUP_REDUCE_UMAX}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_quad_reduce_to(b, agx_register(4, AGX_SIZE_32),
+                         agx_register(2, AGX_SIZE_32), mesa_reduce_op(op));
+      agx_stop(b);
+
+      const struct agx3_subgroup_reduce_desc d = {
+         .quad = true,
+         .op = (enum agx3_subgroup_reduce_op)op,
+         .dest = 4,
+         .src = 2,
+         .src_live = true,
+      };
+      uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d,
+                                               subgroup, &subgroup_len));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      std::vector<uint8_t> want;
+      append(want, subgroup, subgroup_len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+
+      ASSERT_FALSE(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d,
+                                                subgroup, &subgroup_len));
+   }
+}
+
 TEST_F(AGX3PackBinary, SubgroupUnknownAxesFailClosed)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

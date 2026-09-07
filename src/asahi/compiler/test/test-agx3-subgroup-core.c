@@ -264,6 +264,21 @@ test_reduce_vectors(void)
    static const uint8_t smax_wait6_b[] = {
       0xbf, 0x02, 0x56, 0x00, 0x02, 0x00, 0x14, 0x07,
    };
+   static const uint8_t qiadd_live_wait6_b[] = {
+      0xb7, 0x01, 0x56, 0x00, 0x02, 0x0c, 0x16, 0x01,
+   };
+   static const uint8_t qumin_live_b[] = {
+      0x37, 0x03, 0x54, 0x02, 0x02, 0x0c, 0x16, 0x01,
+   };
+   static const uint8_t qumax_live_b[] = {
+      0xb7, 0x03, 0x54, 0x04, 0x02, 0x0c, 0x16, 0x01,
+   };
+   static const uint8_t qsmin_live_wait6_b[] = {
+      0x37, 0x02, 0x56, 0x00, 0x02, 0x04, 0x16, 0x05,
+   };
+   static const uint8_t qsmax_final_b[] = {
+      0xb7, 0x02, 0x54, 0x02, 0x02, 0x04, 0x14, 0x07,
+   };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    struct agx3_subgroup_reduce_desc d = {
       .op = AGX3_SUBGROUP_REDUCE_FADD,
@@ -328,6 +343,50 @@ test_reduce_vectors(void)
    CHECK(bytes_equal(out, length, prefix_iadd_b, sizeof(prefix_iadd_b)));
    CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, prefix_iadd_c, sizeof(prefix_iadd_c)));
+
+   d = (struct agx3_subgroup_reduce_desc){
+      .quad = true,
+      .op = AGX3_SUBGROUP_REDUCE_IADD,
+      .src = 6,
+      .wait_mask = 1u << 5,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qiadd_live_wait6_b,
+                     sizeof(qiadd_live_wait6_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_UMIN;
+   d.dest = 2;
+   d.wait_mask = 0;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qumin_live_b, sizeof(qumin_live_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_UMAX;
+   d.dest = 4;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qumax_live_b, sizeof(qumax_live_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_SMIN;
+   d.dest = 0;
+   d.src = 2;
+   d.wait_mask = 1u << 5;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qsmin_live_wait6_b,
+                     sizeof(qsmin_live_wait6_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_SMAX;
+   d.dest = 2;
+   d.wait_mask = 0;
+   d.src_live = false;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qsmax_final_b, sizeof(qsmax_final_b)));
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out,
+                                       &length));
    return 0;
 }
 

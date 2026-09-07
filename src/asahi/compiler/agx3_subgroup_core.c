@@ -270,10 +270,10 @@ static const struct reduce_form reduce_forms[AGX3_SUBGROUP_REDUCE_NUM] = {
    [AGX3_SUBGROUP_REDUCE_FMIN] = {"sRedfmin", "qRedfmin", 175, 129, true, 0},
    [AGX3_SUBGROUP_REDUCE_FMAX] = {"sRedfmax", "qRedfmax", 174, 128, true, 0},
    [AGX3_SUBGROUP_REDUCE_IADD] = {"sRediadd", "qRediadd", 176, 130, false, 0},
-   [AGX3_SUBGROUP_REDUCE_SMIN] = {"sRedsmin", "", 179, 0, false, 1},
-   [AGX3_SUBGROUP_REDUCE_SMAX] = {"sRedsmax", "", 178, 0, false, 1},
-   [AGX3_SUBGROUP_REDUCE_UMIN] = {"sRedumin", "", 181, 0, false, 2},
-   [AGX3_SUBGROUP_REDUCE_UMAX] = {"sRedumax", "", 180, 0, false, 2},
+   [AGX3_SUBGROUP_REDUCE_SMIN] = {"sRedsmin", "qRedsmin", 179, 0, false, 1},
+   [AGX3_SUBGROUP_REDUCE_SMAX] = {"sRedsmax", "qRedsmax", 178, 0, false, 1},
+   [AGX3_SUBGROUP_REDUCE_UMIN] = {"sRedumin", "qRedumin", 181, 0, false, 2},
+   [AGX3_SUBGROUP_REDUCE_UMAX] = {"sRedumax", "qRedumax", 180, 0, false, 2},
 };
 
 bool
@@ -291,6 +291,11 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    const struct reduce_form *f = &reduce_forms[d->op];
    const char *mnemonic = d->quad ? f->quad : f->simd;
    if (mnemonic == NULL || mnemonic[0] == '\0')
+      return false;
+   /* The newly recovered integer min/max quad words are G17P/AGX3b
+    * witnesses. Preserve the existing AGX3c boundary until independently
+    * captured on that encoding. */
+   if (d->quad && is_c(enc) && d->op >= AGX3_SUBGROUP_REDUCE_SMIN)
       return false;
    if (d->prefix && (d->quad || (d->op != AGX3_SUBGROUP_REDUCE_FADD &&
                                  d->op != AGX3_SUBGROUP_REDUCE_FMUL &&
@@ -317,7 +322,7 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    } else {
       ADD_FIELD(23, 2);
       ADD_FIELD(24, 2);
-      ADD_FIELD(27, 1);
+      ADD_FIELD(!is_c(enc) && d->quad && d->src_live ? 25 : 27, 1);
       if (f->integer_class == 1)
          ADD_FIELD(28, 1);
       if (is_c(enc)) {
@@ -377,8 +382,8 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv){2, d->dest};
    ov[n++] = (struct agx3_field_kv){f->is_float ? 18u : 16u, d->src};
    ov[n++] = (struct agx3_field_kv){11, d->dest_hint ? 1u : 0u};
-   /* Float reductions pick between the two source-liveness bits; the integer
-    * families carry f27 unconditionally and have no such pair. */
+   /* Float and G17P quad integer reductions pick between their witnessed
+    * source-liveness bits. Other integer families retain the pinned f27. */
    if (f->is_float && d->src_live)
       ov[n++] = (struct agx3_field_kv){27, 1};
    return agx3_bind_compose(enc, mnemonic, 0, base, nb, ov, n, out, length);
