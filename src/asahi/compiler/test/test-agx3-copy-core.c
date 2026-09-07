@@ -11,6 +11,8 @@
 
 #include "agx3_copy_core.h"
 
+#include "util/macros.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -133,11 +135,62 @@ main(void)
       }
    }
 
+   /* The 16-bit uniform-to-register move, byte-exact against the two agx3b
+    * copy.ep0 instructions in the Apple corpus that carry f9=2, f10=1,
+    * f23=3, f24=1 -- the form the 32-bit encoder below deliberately refuses.
+    * Without this, agx_lower_uniform_sources()'s 16-bit move stayed a bitop
+    * with a uniform source and the packer refused the whole shader, which is
+    * what u_blitter's texel-fetch program hit on G17P.
+    */
+   {
+      static const struct {
+         uint16_t dest, uniform;
+         uint8_t bytes[4];
+      } uni16[] = {
+         {7, 114, {0x33, 0x72, 0x21, 0x09}},
+         {3, 114, {0x13, 0x72, 0x21, 0x09}},
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(uni16); ++i) {
+         uint8_t o[AGX3_COPY_MAX_LENGTH];
+         uint8_t l = 0;
+         CHECK(agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B,
+                                                 uni16[i].dest,
+                                                 uni16[i].uniform, true, o,
+                                                 &l));
+         CHECK(l == 4);
+         CHECK(memcmp(o, uni16[i].bytes, 4) == 0);
+      }
+
+      /* An odd destination half needs no separate encoding point, and the
+       * cache hint is an independent bit, exactly as in the register form. */
+      uint8_t o[AGX3_COPY_MAX_LENGTH];
+      uint8_t l = 0;
+      CHECK(agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B, 5, 19,
+                                              false, o, &l));
+      CHECK(l == 4);
+      uint8_t cached[AGX3_COPY_MAX_LENGTH];
+      uint8_t cached_len = 0;
+      CHECK(agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B, 5, 19,
+                                              true, cached, &cached_len));
+      CHECK(cached_len == 4 && memcmp(o, cached, 4) != 0);
+
+      /* Fail closed outside the witnessed domain. */
+      CHECK(!agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B, 128, 5,
+                                               true, o, &l));
+      CHECK(!agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B, 0, 512,
+                                               true, o, &l));
+      CHECK(!agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3C, 7, 114,
+                                               true, o, &l));
+      CHECK(!agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX2, 7, 114,
+                                               true, o, &l));
+   }
+
    /* Fail closed outside the witnessed domain. */
    uint8_t out[AGX3_COPY_MAX_LENGTH];
    uint8_t len = 0;
 
-   /* A 16-bit half of either file is a different form (Apple sets f11). */
+   /* A 16-bit half of either file is a different form (Apple sets f11), which
+    * agx3_copy_encode_uniform_to_reg16() above encodes. */
    CHECK(!agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3B, 7, 114,
                                             out, &len));
    CHECK(!agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3B, 8, 115,

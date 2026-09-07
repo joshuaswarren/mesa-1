@@ -87,6 +87,34 @@ bool agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
                                        uint8_t out[AGX3_COPY_MAX_LENGTH],
                                        uint8_t *len);
 
+/*
+ * Encode `copy dest16, uniform16` -- the same move at 16 bits.
+ *
+ * Mesa keeps booleans and half-precision values in 16-bit halves, and
+ * agx_lower_uniform_sources() materializes a move for every generic-ALU
+ * uniform source. At 32 bits that move reaches
+ * agx3_copy_encode_uniform_to_reg32(); at 16 bits it had no encoder, so it
+ * stayed a `bitop` with a uniform source and the packer refused the whole
+ * shader. That is what u_blitter's texel-fetch program hit on G17P.
+ *
+ * This is a distinct AGX3b form, not the 32-bit one narrowed: it combines the
+ * uniform source selector f23 = 3 + f17 that the 32-bit uniform copy uses
+ * with the 16-bit widths f10 = f24 = 1 that agx3_copy_encode_reg16() uses,
+ * and Apple sets f11. Both halves are witnessed together in the corpus --
+ * test/agx3_compose_corpus_vectors.c carries two agx3b copy.ep0 instructions
+ * with exactly f9 = 2, f10 = 1, f23 = 3, f24 = 1, and
+ * test/test-agx3-copy-core.c pins their bytes.
+ *
+ * Like the 32-bit uniform form, the witnesses carry no wait bits, so the
+ * caller retires a pending producer through the grounded band no-op rather
+ * than having scoreboard bits invented for a form with none in the corpus.
+ */
+bool agx3_copy_encode_uniform_to_reg16(enum agx_isa_encoding encoding,
+                                       uint16_t dest_half,
+                                       uint16_t uniform_half, bool dest_cache,
+                                       uint8_t out[AGX3_COPY_MAX_LENGTH],
+                                       uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

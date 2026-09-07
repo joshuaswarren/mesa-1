@@ -38,6 +38,7 @@ extern "C" {
 #include "agx3_tex_core.h"
 #include "agx3_tile_core.h"
 #include "agx3_pixel_core.h"
+#include "agx3_select_core.h"
 #include "agx3_vary_core.h"
 
 /* agx_nir_lower_tilebuffer's ALL_SAMPLES: the pixel-rate sample mask, and the
@@ -4953,6 +4954,40 @@ TEST_F(AGX3PackBinary, LocalIndexZeroExtendUsesCopyAndClear)
       ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want) << "source half=" << source;
+   }
+}
+
+/*
+ * agx_lower_uniform_sources() materializes a move for every generic-ALU
+ * uniform source. At 32 bits it reached agx3_copy_encode_uniform_to_reg32();
+ * at 16 bits it had no encoder, so it stayed a bitop reading the uniform file
+ * and the packer refused the whole shader. u_blitter's pass-through vertex
+ * shader hits exactly that (`mov u9h` for the clip-Z coefficient), so before
+ * this every native-Gallium blit on G17P refused its vertex program.
+ */
+TEST_F(AGX3PackBinary, G17PUniformHalfMoveUsesNativeCopy)
+{
+   for (unsigned uniform : {0u, 19u, 511u}) {
+      for (bool cache : {false, true}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_index dest = agx_register(2, AGX_SIZE_16);
+         dest.cache = cache;
+         /* agx_lower_pseudo() turns a MOV into exactly this bitop. */
+         agx_bitop_to(b, dest, agx_uniform(uniform, AGX_SIZE_16), agx_zero(),
+                      AGX3_SEL_TT_MOV);
+         agx_stop(b);
+
+         uint8_t bytes[AGX3_COPY_MAX_LENGTH], len = 0;
+         std::vector<uint8_t> want;
+         ASSERT_TRUE(agx3_copy_encode_uniform_to_reg16(
+            AGX_ISA_ENCODING_AGX3B, 2, uniform, cache, bytes, &len));
+         append(want, bytes, len);
+         struct agx3_encoded_end end;
+         ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+         append(want, end.bytes, end.length);
+         EXPECT_EQ(pack(b), want)
+            << "uniform half=" << uniform << " cache=" << cache;
+      }
    }
 }
 

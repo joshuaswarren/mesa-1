@@ -5928,6 +5928,38 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* The same move at 16 bits. Mesa keeps booleans and halves in
+          * 16-bit registers, so agx_lower_uniform_sources() emits this shape
+          * for every narrow generic-ALU uniform source; without an encoder
+          * it stayed a bitop reading the uniform file and the packer refused
+          * the whole shader. Apple's own corpus carries the form, and it
+          * likewise has no wait field, so retire through the grounded band
+          * no-op first. */
+         if (I->op == AGX_OPCODE_BITOP &&
+             (I->truth_table & 0xfu) == AGX3_SEL_TT_MOV &&
+             I->nr_dests == 1 && I->nr_srcs == 2 &&
+             I->src[0].type == AGX_INDEX_UNIFORM && !I->src[0].memory &&
+             !I->src[0].abs && !I->src[0].neg &&
+             I->src[0].size == AGX_SIZE_16 && agx_channels(I->src[0]) == 1 &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value == 0 &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1) {
+            uint8_t bytes[AGX3_COPY_MAX_LENGTH];
+            uint8_t len = 0;
+            const bool retired =
+               wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
+            if (!retired ||
+                !agx3_copy_encode_uniform_to_reg16(enc, I->dest[0].value,
+                                                   I->src[0].value,
+                                                   I->dest[0].cache, bytes,
+                                                   &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            outstanding &= (uint16_t)~wait;
+            continue;
+         }
+
          /*
           * Fused integer compare-select. agx_lower_pseudo() turns every
           * AGX_OPCODE_ICMP into one of these, so without it no shader with an
