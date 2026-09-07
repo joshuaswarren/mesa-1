@@ -1440,6 +1440,14 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        * (which needs no hardware -- it runs under the G17P drm-shim) and the
        * two traps that make the bisect lie are in
        * src/asahi/isa/README-agx3-packer-limits.md. */
+      /* vk_errorf alone is invisible unless the application enabled debug
+       * logging, so a refused shader reaches the application as a bare
+       * VkResult and it typically crashes binding the pipeline that was never
+       * created. Name the stage unconditionally: this is a driver gap, and
+       * whoever hits it needs to know which shader hit it. */
+      mesa_loge("AGX backend cannot encode %s shader for %s",
+                _mesa_shader_stage_to_string(sw_stage),
+                agx_chip_name(dev->dev.chip));
       ralloc_free(nir);
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                        "AGX backend cannot encode shader for %s",
