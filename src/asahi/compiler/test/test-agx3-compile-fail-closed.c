@@ -845,23 +845,14 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
    return valid;
 }
 
-/*
- * Fail-closed companion to check_constant_data_compute(): the same shader with
- * key.no_preamble cleared must be *refused*, not miscompiled.
- *
- * agx_nir_opt_preamble hoists the uniform-invariant root and descriptor-set
- * loads into a generated preamble, whose results are written back with
- * uniform_store -- and agx3_pack_binary has no grounded AGX3 encoding for that
- * opcode, so it takes the AGX3_REFUSE fallthrough.  hk_compile_shader() avoids
- * this by setting .no_preamble for AGX_CHIP_G17P (hk_shader.c:1249); that one
- * line is load-bearing for every G17P shader that reads a descriptor, so lock
- * the coupling down here.
- */
+/* The generated preamble writes a 64-bit address back to two consecutive
+ * uniform dwords. Each dword uses Apple's byte-exact reg-to-uniform copy form;
+ * this checks the complete compiler path which Gallium's blitter VS needs. */
 static bool
-check_preamble_refused_compute(enum agx_isa_encoding encoding)
+check_preamble_compute(enum agx_isa_encoding encoding)
 {
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 preamble refusal");
+      MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 generated preamble");
    b.shader->info.workgroup_size[0] = 32;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
@@ -884,29 +875,18 @@ check_preamble_refused_compute(enum agx_isa_encoding encoding)
    key.has_scratch = true;
    key.promote_constants = true;
    key.promote_textures = true;
-   /* Deliberately NOT set: key.no_preamble. */
-   struct agx_shader_part part;
-   memset(&part, 0xa5, sizeof(part));
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = encoding == AGX_ISA_ENCODING_AGX3B
+                         ? compiled && part.binary != NULL &&
+                              part.info.has_preamble && part.info.binary_size > 8
+                         : !compiled && part.binary == NULL;
+   if (!valid)
+      fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");
 
-   if (agx_compile_shader_nir(b.shader, &key, &part)) {
-      fprintf(stderr,
-              "AGX3 accepted a generated preamble; uniform_store is now "
-              "grounded, so hk_shader.c may stop forcing no_preamble on "
-              "G17P -- update both together\n");
-      free(part.binary);
-      ralloc_free(b.shader);
-      return false;
-   }
-
-   const uint8_t zero[sizeof(part)] = {0};
-   if (memcmp(&part, zero, sizeof(part)) != 0) {
-      fprintf(stderr, "AGX3 preamble rejection did not clear compiler output\n");
-      ralloc_free(b.shader);
-      return false;
-   }
-
+   free(part.binary);
    ralloc_free(b.shader);
-   return true;
+   return valid;
 }
 
 /*
@@ -1853,7 +1833,7 @@ main(int argc, char **argv)
       if (!check_constant_data_compute(encodings[i], false) ||
           !check_constant_data_compute(encodings[i], true))
          return 1;
-      if (!check_preamble_refused_compute(encodings[i]))
+      if (!check_preamble_compute(encodings[i]))
          return 1;
       if (!check_constant_array_ordering(encodings[i], true) ||
           !check_constant_array_ordering(encodings[i], false))

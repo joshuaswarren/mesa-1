@@ -4668,21 +4668,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * byte-exactly against a write to uniform half 24; see
           * agx3_copy_core.h.
           *
-          * Only the single 32-bit component is grounded: Apple's witnesses
-          * are one uniform half per copy, and a wider mask would be an
-          * assumption about how the halves are strided.
+          * Each emitted copy is one grounded 32-bit component. A scalar
+          * 64-bit value is therefore two consecutive witnessed copies, just
+          * like a two-component 32-bit value; no unobserved wide form is used.
           */
          if (I->op == AGX_OPCODE_UNIFORM_STORE && I->nr_srcs == 2 &&
              (I->mask == 1 || I->mask == 3 || I->mask == 7 ||
               I->mask == 15)) {
             const agx_index value = I->src[0], index = I->src[1];
             const unsigned components = util_bitcount(I->mask);
+            const bool scalar64 = value.size == AGX_SIZE_64 && I->mask == 1 &&
+                                  agx_channels(value) == 1 &&
+                                  (value.value & 3) == 0;
+            const bool vector32 = value.size == AGX_SIZE_32 &&
+                                  agx_channels(value) == components;
+            const unsigned dwords = scalar64 ? 2 : components;
 
             if (agx3_src_is_register(value) && !value.memory && !value.abs &&
-                !value.neg && value.size == AGX_SIZE_32 &&
-                agx_channels(value) == components &&
+                !value.neg && (scalar64 || vector32) &&
                 index.type == AGX_INDEX_IMMEDIATE && !index.abs &&
-                !index.neg && index.value + 2 * components <= 512) {
+                !index.neg && index.value + 2 * dwords <= 512) {
                /*
                 * Apple's witnessed uniform write carries no wait bits, and
                 * the wait bank for this form is not witnessed, so retire any
@@ -4696,10 +4701,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 */
                bool ok = wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
 
-               for (unsigned i = 0; ok && i < components; ++i) {
+               for (unsigned i = 0; ok && i < dwords; ++i) {
                   uint8_t bytes[AGX3_COPY_MAX_LENGTH];
                   uint8_t len = 0;
-                  const bool last = i + 1 == components;
+                  const bool last = i + 1 == dwords;
                   ok = agx3_copy_encode_reg_to_uniform(
                           enc, index.value + 2 * i, value.value + 2 * i,
                           last && value.kill, bytes, &len) &&

@@ -34,7 +34,7 @@
 #define AGX_ABI_VUNI_DRAW_ID(nr_vbos) (AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos) + 4)
 
 #define AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos)                                    \
-   (AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos) + 8)
+   ALIGN_POT(AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos) + 8, 4)
 
 #define AGX_ABI_VUNI_COUNT_GL(nr_vbos, sw)                                     \
    (sw ? (AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos) + 4)                             \

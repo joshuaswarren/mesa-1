@@ -2782,9 +2782,32 @@ test_g17p_half2_varying(void)
    return run_case(&c, AGX_ISA_ENCODING_AGX3B);
 }
 
+static bool
+test_g17p_gallium_vertex_param_abi(void)
+{
+   /* LDDEV uniform bases are 64-bit pointers and therefore 4-half aligned.
+    * Odd VBO counts used to place the software-vertex parameter pointer at
+    * half 14, which made Gallium's internal blitter VS fail compilation.
+    */
+   for (unsigned nr_vbos = 0; nr_vbos < 8; ++nr_vbos) {
+      const unsigned base = AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos);
+      if ((base & 3) || AGX_ABI_VUNI_COUNT_GL(nr_vbos, true) < base + 4)
+         return false;
+   }
+
+   return AGX_ABI_VUNI_VERTEX_PARAMS(1) == 16 &&
+          AGX_ABI_VUNI_VERTEX_PARAMS(2) == 20;
+}
+
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--gallium-vp-abi-only")) {
+      const bool ok = test_g17p_gallium_vertex_param_abi();
+      fprintf(stderr, "G17P Gallium vertex-parameter ABI alignment: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--half-vbo-only")) {
       const bool ok = test_g17p_half2_varying();
       fprintf(stderr, "G17P R16G16_SFLOAT vertex attribute: %s\n",
@@ -2886,6 +2909,11 @@ main(int argc, char **argv)
                  test_custom_border_samplers(true, 0) &&
                  test_custom_border_samplers(true, 1) &&
                  test_custom_border_samplers(true, 2);
+
+   if (!test_g17p_gallium_vertex_param_abi()) {
+      fputs("Gallium vertex-parameter ABI is not LDDEV aligned\n", stderr);
+      all_ok = false;
+   }
 
    if (!test_texture_index_abis()) {
       fputs("legacy and compact-native sampler index ABIs conflated\n", stderr);
