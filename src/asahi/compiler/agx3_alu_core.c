@@ -1897,6 +1897,44 @@ agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
+bool
+agx3_alu_hmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, uint16_t immediate,
+                        enum agx3_alu_hint hint, bool dest_cache,
+                        uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || immediate > UINT8_MAX ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Fresh G17P Metal witnesses place the minifloat in field16, retain the
+    * ordinary half register/lifetime fields, and carry all six wait bits. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {24, 1}, {25, 1}, {41, 2}, {42, 1},
+   };
+   struct agx3_field_kv fields[12] = {
+      {2, dest},
+      {16, immediate},
+      {34, src},
+      {11, dest_cache},
+      {43, hint == AGX3_ALU_HINT_CACHE},
+      {45, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned i = 0; i < 6; ++i)
+      fields[6 + i] = (struct agx3_field_kv){51 + i,
+                                            !!(wait_mask & (1u << i))};
+
+   for (unsigned ep = 0; ep < 2; ++ep)
+      if (agx3_bind_compose(enc, "f16mul", ep, base, 6, fields, 12, out,
+                            len))
+         return true;
+
+   return false;
+}
+
 /* Scalar half add uses the register, lifetime and six-slot wait fields pinned
  * by fresh G17P add_dead/add_live Metal witnesses. */
 bool

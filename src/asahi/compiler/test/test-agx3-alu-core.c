@@ -1343,6 +1343,46 @@ static void test_native_half_multiply(void)
    puts("Native half multiply: two complete Apple live/dead vectors PASS");
 }
 
+static void test_native_half_multiply_minifloat(void)
+{
+   static const struct {
+      uint16_t dest, src, immediate, wait;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      const char *bytes;
+   } vectors[] = {
+      /* Fresh applegpu_g17p Metal output: *2, *4, *0.5 and *-2. */
+      {2, 2, 0x40, 32, AGX3_ALU_HINT_DISCARD, false, "10c0150280c0"},
+      {2, 2, 0x40, 0, AGX3_ALU_HINT_DISCARD, false, "10c015028000"},
+      {2, 2, 0x50, 32, AGX3_ALU_HINT_DISCARD, false, "10d0150280c0"},
+      {2, 2, 0x20, 32, AGX3_ALU_HINT_DISCARD, false, "10a0150280c0"},
+      {2, 2, 0xc0, 32, AGX3_ALU_HINT_DISCARD, false, "10c01d0280c0"},
+      /* Odd retained source and cached destination are independent axes. */
+      {2, 3, 0x40, 32, AGX3_ALU_HINT_NONE, false, "10c0050380c0"},
+      {3, 2, 0x50, 32, AGX3_ALU_HINT_NONE, false, "18d0050280c0"},
+      {2, 2, 0x50, 32, AGX3_ALU_HINT_DISCARD, true, "10d0350280c0"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_hmul_minifloat(
+         AGX_ISA_ENCODING_AGX3B, vectors[i].dest, vectors[i].src,
+         vectors[i].immediate, vectors[i].hint, vectors[i].dest_cache,
+         vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   assert(!agx3_alu_hmul_minifloat(
+      AGX_ISA_ENCODING_AGX3C, 2, 2, 0x40, AGX3_ALU_HINT_DISCARD, false, 32,
+      bytes, &len));
+   assert(!agx3_alu_hmul_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x100, AGX3_ALU_HINT_DISCARD, false, 32,
+      bytes, &len));
+   assert(!agx3_alu_hmul_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x40, AGX3_ALU_HINT_DISCARD, false, 64,
+      bytes, &len));
+   puts("Native half/minifloat multiply: eight exact Apple vectors and bounds PASS");
+}
+
 static void test_native_half_add(void)
 {
    {
@@ -2204,6 +2244,7 @@ int main(void){
    test_native_widen_half();
    test_native_half_add();
    test_native_half_multiply();
+   test_native_half_multiply_minifloat();
    test_native_half_fma();
    test_native_narrow_multiply();
    test_native_sqrt_step();

@@ -712,6 +712,31 @@ TEST_F(AGX3PackBinary, HalfUVRefusesUngroundedModes)
    }
 }
 
+TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
+{
+   for (unsigned i = 0; i < 2; ++i) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index src = agx_register(2, AGX_SIZE_16);
+      src.discard = true;
+      agx_index dest = agx_register(2, AGX_SIZE_16);
+      agx_hmul_to(b, dest, src, agx_immediate(i ? 0x50 : 0x40));
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t times2[] = {0x10, 0xc0, 0x15, 0x02, 0x80, 0x00};
+      const uint8_t times4[] = {0x10, 0xd0, 0x15, 0x02, 0x80, 0x00};
+      ASSERT_EQ(code.size(), 10u);
+      EXPECT_EQ(memcmp(code.data(), i ? times4 : times2, 6), 0);
+   }
+
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index modified = agx_register(2, AGX_SIZE_16);
+   modified.abs = true;
+   agx_hmul_to(b, agx_register(2, AGX_SIZE_16), modified,
+               agx_immediate(0x40));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

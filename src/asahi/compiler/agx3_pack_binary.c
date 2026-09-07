@@ -6440,6 +6440,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_src_is_register(I->src[0]) &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE) {
+            agx_index dst = I->dest[0], src = I->src[0], imm = I->src[1];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_src_is_register(dst) || dst.memory ||
+                dst.size != AGX_SIZE_16 || agx_channels(dst) != 1 ||
+                src.memory || src.size != AGX_SIZE_16 ||
+                agx_channels(src) != 1 || src.abs || src.neg || src.kill ||
+                (src.cache && src.discard) || imm.memory || imm.abs ||
+                imm.neg ||
+                !agx3_alu_hmul_minifloat(
+                   enc, dst.value, src.value, imm.value,
+                   agx3_post_ra_hint(src), dst.cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate) {
             uint16_t src[2]; enum agx3_alu_hint hints[2];
             agx_index dst=I->dest[0];
