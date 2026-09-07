@@ -3140,7 +3140,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
  * the same one-word program for signed RG16 while PBE describes signedness.
  * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
- * uses selector 0x15, shared physically with two-word RGBA16 key0x10020c00.
+ * and R16G16_SINT key0x08020800 use selector 0x15, shared physically with
+ * two-word RGBA16 key0x10020c00.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3540,6 +3541,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
          0xa8, 0x75, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
       }, {
+         /* Native RG16 integer keys0x08020900/0x08020800. */
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
          0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,

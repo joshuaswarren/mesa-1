@@ -128,7 +128,7 @@ TEST_F(AGX3PackBinary, StraightLineALU)
    }
 }
 
-TEST_F(AGX3PackBinary, G17PRG16UintEOTUsesExactNativeI16Program)
+TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 {
    static const uint8_t native[] = {
       0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
