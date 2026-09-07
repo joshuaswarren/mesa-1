@@ -500,23 +500,27 @@ agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
 {
    /* This is the exact second half of Apple's scalar half sqrt sequence.
     * Field10 selects the half destination, including odd half registers.
-    * The f32 step is consumed, while the original half may remain live. */
+    * The f32 step is consumed, while the original half may remain live. The
+    * sampled-texture form uses the native f32mul long endpoint's slot-1 wait. */
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
        f32 >= 256 || f16 >= 256 || (f32 & 1) ||
        hint32 != AGX3_ALU_HINT_DISCARD ||
        (hint16 != AGX3_ALU_HINT_NONE && hint16 != AGX3_ALU_HINT_DISCARD) ||
-       wait_mask)
+       wait_mask > 1)
       return false;
 
    const struct agx3_field_kv base[] = {
       {9,2},{10,1},{25,2},{26,2},{42,2},{43,1},{60,2},{74,2},
    };
-   const struct agx3_field_kv fields[] = {
+   struct agx3_field_kv fields[7] = {
       {2,dest}, {18,f32}, {35,f16}, {11,dest_cache}, {29,1},
       {46,hint16 == AGX3_ALU_HINT_DISCARD},
    };
+   unsigned n = 6;
+   if (wait_mask)
+      fields[n++] = (struct agx3_field_kv){80, 1};
    for (unsigned ep = 0; ep < 2; ++ep)
-      if (agx3_bind_compose(enc, "f32mul", ep, base, 8, fields, 6,
+      if (agx3_bind_compose(enc, "f32mul", ep, base, 8, fields, n,
                             out, len))
          return true;
    return false;

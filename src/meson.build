@@ -153,6 +153,9 @@ endif
 if with_egl
   subdir('egl')
 endif
+if with_tests and with_gallium_asahi and with_egl and with_gles2 and with_tools.contains('drm-shim')
+  subdir('asahi/gl-tests')
+endif
 if with_gallium
   if with_glx == 'dri' or with_platform_x11 or with_platform_xcb
     subdir('gallium/targets/dril')

@@ -1460,6 +1460,14 @@ static void test_native_half_sqrt(void)
       AGX_ISA_ENCODING_AGX3B, 2, 4, 2, AGX3_ALU_HINT_DISCARD,
       AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
    exact(bytes, len, "11053902");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 8, 4, 0, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   exact(bytes, len, "41051900");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 8, 4, 0, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+   exact(bytes, len, "41051d000020");
 
    memset(bytes, 0xa5, sizeof(bytes));
    assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3C, 2, 4,
@@ -1492,7 +1500,7 @@ static void test_native_half_sqrt(void)
    for (unsigned i = 0; i < sizeof(bytes); ++i)
       assert(bytes[i] == 0xa5);
 
-   puts("Native half sqrt: seven exact Apple step/multiply vectors and narrow refusal guards PASS");
+   puts("Native half sqrt: nine exact Apple-derived step/multiply vectors and narrow refusal guards PASS");
 }
 
 static void test_native_select_reg_imm(void)
