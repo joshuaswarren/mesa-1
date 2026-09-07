@@ -129,6 +129,23 @@ main(void)
    KEEP_ARRAY(width, 0);
    KEEP_ARRAY(height, 16385);
 #undef KEEP_ARRAY
-   puts("G17P full-frame scissor: full/crop/full packets, retained arrays and indices pass");
+
+   /* hk_g17p_bind_tail may only build one viewport transform and one region
+    * clip, from element zero. Anything above that used to be dropped without
+    * a word; it must now be refused. Zero stays admitted: it is the legal
+    * "no viewport bound yet" state the bind tail already handles. */
+   assert(hk_g17p_single_viewport_state(0, 0));
+   assert(hk_g17p_single_viewport_state(1, 0));
+   assert(hk_g17p_single_viewport_state(0, 1));
+   assert(hk_g17p_single_viewport_state(1, 1));
+   assert(!hk_g17p_single_viewport_state(2, 1));
+   assert(!hk_g17p_single_viewport_state(1, 2));
+   assert(!hk_g17p_single_viewport_state(2, 2));
+   assert(!hk_g17p_single_viewport_state(16, 16));
+   assert(!hk_g17p_single_viewport_state(UINT32_MAX, 1));
+   assert(!hk_g17p_single_viewport_state(1, UINT32_MAX));
+
+   puts("G17P full-frame scissor: full/crop/full packets, retained arrays, "
+        "indices and the single-viewport gate pass");
    return 0;
 }

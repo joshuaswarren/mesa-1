@@ -1439,19 +1439,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       simple_mtx_unlock(lock);
 
    if (!compiled) {
-      /* On G17P this is currently the single biggest functional gap in the
-       * driver, and it is not a shader-specific accident: the AGX3 packer
-       * encodes AT MOST ONE SSBO ACCESS PER SHADER and no atomics at all.
-       * One store encodes; one load plus one store does not; two stores do
-       * not.  Uniform/`load_preamble` reads and constant-data (rodata) loads
-       * do not count against it.
+      /* On G17P a refusal here is a missing AGX3 *instruction encoding*, and
+       * it fails the whole shader closed.  The per-shader SSBO access limit
+       * and the atomic limit that this comment used to describe are GONE --
+       * src/asahi/isa/README-agx3-packer-limits.md retracts them, and its
+       * current matrix records what is actually left.
        *
-       * That means no real compute workload compiles, and a conformance run
-       * is blocked behind this regardless of the command-stream, launch and
-       * memory work being correct.  The measured matrix, the reproduction
-       * (which needs no hardware -- it runs under the G17P drm-shim) and the
-       * two traps that make the bisect lie are in
-       * src/asahi/isa/README-agx3-packer-limits.md. */
+       * `AGX_MESA_DEBUG=shaders` makes the packer name the instruction it
+       * refused, which is the only practical way to attribute one of these:
+       *
+       *    agx3_pack_binary.c:6740: no grounded AGX3 encoding for imad
+       *      [d16:reg1 s0=16:reg1 s1=16:imm7 s2=16:imm3]
+       *
+       * The reproduction needs no hardware -- it runs under the G17P
+       * drm-shim.  src/asahi/isa/probes/game/ plus g17p-vulkan-feature-probe
+       * cover the encodings that translation layers depend on. */
       /* vk_errorf alone is invisible unless the application enabled debug
        * logging, so a refused shader reaches the application as a bare
        * VkResult and it typically crashes binding the pipeline that was never

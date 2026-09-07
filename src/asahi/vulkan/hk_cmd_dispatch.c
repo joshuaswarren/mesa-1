@@ -461,8 +461,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (s->data_size != 0) {
       const uint64_t constant_data = hk_pool_upload(
          cmd, s->data_ptr, s->data_size, HK_MIN_UBO_ALIGNMENT);
-      if (!constant_data)
+      if (!constant_data) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
+      }
 
       cmd->state.cs.descriptors.root.cs.constant_data_addr = constant_data;
    } else {
@@ -471,8 +473,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    const uint64_t root_ptr =
       hk_cmd_buffer_upload_root(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
-   if (!root_ptr)
+   if (!root_ptr) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
+   }
 
    uint64_t texture_pointers = 0;
    if (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid ||
@@ -526,8 +530,11 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          }
          texture_pointers = hk_pool_upload(
             cmd, pointers, pointer_count * sizeof(pointers[0]), 8);
-         if (!texture_pointers)
+         if (!texture_pointers) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
+         }
       } else if (s->info.agx3_sampled_storage_valid) {
          const struct agx_g17p_sampled_storage_binding *binding =
             &s->info.agx3_sampled_storage;
@@ -588,8 +595,11 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          }
 
          texture_pointers = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
-         if (!texture_pointers)
+         if (!texture_pointers) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
+         }
       } else {
       const uint64_t set_address = descriptors->root.sets[0];
       const uint32_t set_size = descriptors->set_sizes[0];
@@ -647,8 +657,11 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          const uint64_t access_control =
             hk_pool_upload(cmd, native_read_write_control,
                            sizeof(native_read_write_control), 32);
-         if (!access_control)
+         if (!access_control) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
+         }
 
          pointers[0] = set_address +
                        s->info.agx3_storage_image.texture_offset_B;
@@ -678,8 +691,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          s->info.agx3_storage_image_valid ? 4 : 2;
       texture_pointers =
          hk_pool_upload(cmd, pointers, pointer_count * sizeof(pointers[0]), 8);
-      if (!texture_pointers)
+      if (!texture_pointers) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
+      }
       }
    }
 

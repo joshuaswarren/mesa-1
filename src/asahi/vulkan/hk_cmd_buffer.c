@@ -1690,8 +1690,15 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 
       struct agx_ptr T =
          hk_pool_vdm_alloc(cmd, initial.length, AGX_PPP_HEADER_ALIGN);
-      if (!T.cpu)
+      if (!T.cpu) {
+         /* Returning without an error left the control stream stopped after
+          * the VDM barrier, short of HK_G17P_VDM_INITIAL_SIZE, with the
+          * command buffer still reporting VK_SUCCESS.  Every following draw
+          * then appended to a half-built prelude, and the size assert below
+          * aborts a debug build instead of reporting anything. */
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
+      }
 
       memcpy(T.cpu, initial.bytes, initial.length);
       if (!agx_ppp_emit_state(dev->dev.chip, &map, T.gpu, initial.length)) {

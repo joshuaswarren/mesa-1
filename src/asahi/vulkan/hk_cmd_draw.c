@@ -3066,6 +3066,13 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .cull2_raw = UINT32_C(0x80),
    };
 
+   /* Everything below builds one viewport transform and one region clip from
+    * element zero.  Refuse rather than render the remaining viewports and
+    * scissors through viewport 0 without saying so. */
+   if (!hk_g17p_single_viewport_state(dyn->vp.viewport_count,
+                                      dyn->vp.scissor_count))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
    struct agx_ppp_viewport_payload_fields viewport_fields = {
       .viewport_count = 1,
    };

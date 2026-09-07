@@ -721,6 +721,36 @@ hk_get_device_features(
       features->multiview = false;
       features->transformFeedback = false;
       features->geometryStreams = false;
+      /* vkCmdDrawIndirectCount/vkCmdDrawIndexedIndirectCount reach
+       * libagx_predicate_indirect, and every libagx precompiled kernel is
+       * dispatched through hk_dispatch_precomp() -> hk_dispatch_with_usc_launch(),
+       * which refuses AGX_CS_GENERATION_HAL200 outright: `usc` names an AGX2
+       * USC block and an AGX3 direct launch needs a dispatch-local Ioto
+       * program VA instead.  So the count form is not merely untested here,
+       * it fails every time, and it fails at vkEndCommandBuffer rather than
+       * at device selection.  Direct and indirect draws without a count
+       * buffer keep their native HAL200 path and stay advertised.  Re-enable
+       * this with the Ioto meta-kernel launch, not before. */
+      features->drawIndirectCount = false;
+      /* hk_agx3_g17p_rt0_tile_layout_supported() refuses any tilebuffer
+       * layout with `layered` set, so a render pass with more than one layer
+       * has no BG/EOT program and is refused at vkCmdBeginRendering.  Writing
+       * gl_Layer is meaningless without one.  maxFramebufferLayers drops to 1
+       * alongside it in hk_get_device_properties(); this is unimplemented,
+       * not hardware-impossible -- it needs layered BG/EOT programs. */
+      features->shaderOutputLayer = false;
+      /* hk_g17p_bind_tail builds one viewport transform and one region clip
+       * from dyn->vp.viewports[0] / dyn->vp.scissors[0], and the native
+       * vertex-state update that would select among several has no witness
+       * for how the vertex program names one.  Advertising multiViewport
+       * here made every draw of a multi-viewport pipeline render through
+       * viewport 0 with nothing reported.  maxViewports drops to 1 with it,
+       * as the spec requires when this feature is false. */
+      features->multiViewport = false;
+      /* VK_KHR_shader_quad_control's whole subject is the quad operations,
+       * and quad_shuffle_xor has no grounded AGX3 encoding.  See the
+       * subgroupSupportedOperations block in hk_get_device_properties(). */
+      features->shaderQuadControl = false;
       /* HAL200's native storage-image fetch is memory-safe, but its TEX
        * descriptor does not bounds-check against the Vulkan image view.
        * Hardware qualification returned adjacent in-image texels for both
@@ -1135,6 +1165,41 @@ hk_get_device_properties(const struct agx_device *dev,
    };
 
    if (dev->chip == AGX_CHIP_G17P) {
+      /* Required pairing for features->multiViewport == false. */
+      properties->maxViewports = 1;
+
+      /* Pairs with features->shaderOutputLayer == false: the G17P tile layout
+       * has no layered form, so one layer is all a render pass can bind.
+       * Reporting 2048 here let an application build a layered framebuffer
+       * that vkCmdBeginRendering then refused. */
+      properties->maxFramebufferLayers = 1;
+
+      /* Measured per operation under the G17P drm-shim with
+       * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
+       *
+       *   BASIC             g22_subgroup_basic          encodes
+       *   VOTE              g21_subgroup_vote           REFUSED, icmp_ballot
+       *   BALLOT            g05_subgroup_ballot         REFUSED, icmp_ballot
+       *   ARITHMETIC        g06_subgroup_arith          encodes
+       *   SHUFFLE           g07_subgroup_shuffle        encodes
+       *   SHUFFLE_RELATIVE  g25_subgroup_shuffle_rel    encodes
+       *   CLUSTERED         g23_subgroup_clustered      encodes
+       *   QUAD              g08_subgroup_quad           REFUSED, quad_shuffle_xor
+       *   ROTATE/CLUSTERED  g24_subgroup_rotate         encodes
+       *
+       * subgroupAll/subgroupAny lower onto the same icmp_ballot as
+       * subgroupBallot, so VOTE falls with BALLOT.  Neither icmp_ballot nor
+       * quad_shuffle_xor has a grounded AGX3 encoding, so a shader using one
+       * is refused whole at vkCreateComputePipelines.
+       *
+       * Translation layers read this mask and emit a scalar fallback for a
+       * missing bit, so removing the three we cannot encode turns a
+       * mid-run pipeline failure into working, slower code. */
+      properties->subgroupSupportedOperations &=
+         ~(VkSubgroupFeatureFlags)(VK_SUBGROUP_FEATURE_VOTE_BIT |
+                                   VK_SUBGROUP_FEATURE_BALLOT_BIT |
+                                   VK_SUBGROUP_FEATURE_QUAD_BIT);
+      properties->subgroupQuadOperationsInAllStages = false;
       properties->advancedBlendMaxColorAttachments = 0;
       properties->advancedBlendIndependentBlend = false;
       properties->advancedBlendNonPremultipliedSrcColor = false;
@@ -1385,6 +1450,20 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
     * the compiler until its fragment tile protocol is hardware-qualified. */
    if (pdev->dev.chip == AGX_CHIP_G17P)
       supported_extensions.EXT_blend_operation_advanced = false;
+
+   /* These three exist only to expose subgroup operations that the AGX3
+    * packer has no grounded encoding for -- icmp_ballot for ballot and vote,
+    * quad_shuffle_xor for the quad group.  A shader using any of them is
+    * refused whole at pipeline creation, so advertising the extension turns a
+    * capability query the application would have handled into a failure it
+    * cannot.  Kept together with the subgroupSupportedOperations mask in
+    * hk_get_device_properties(), which carries the per-operation
+    * measurements. */
+   if (pdev->dev.chip == AGX_CHIP_G17P) {
+      supported_extensions.EXT_shader_subgroup_ballot = false;
+      supported_extensions.EXT_shader_subgroup_vote = false;
+      supported_extensions.KHR_shader_quad_control = false;
+   }
 
    struct vk_features supported_features;
    hk_get_device_features(&pdev->dev, instance, &supported_extensions,

@@ -1021,6 +1021,19 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Game-feature probe: enables every advertised Vulkan 1.1/1.2/1.3
+    # feature, then compiles AND records a dispatch for each SPIR-V module.
+    # The record half is what catches a feature the compiler accepts but the
+    # G17P native admission gates refuse at vkEndCommandBuffer.
+    executable(
+      'g17p-vulkan-feature-probe',
+      files('tests/g17p_vulkan_feature_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-compute-min',
       files('tests/g17p_vulkan_compute_min.c'),
