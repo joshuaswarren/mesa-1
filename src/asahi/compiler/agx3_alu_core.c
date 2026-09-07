@@ -1531,6 +1531,55 @@ agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 11, out, len);
 }
 
+/*
+ * The 32-bit log2/exp2 pair. Field-for-field the half forms below with f10 and
+ * f26 raised from 1 to 2, and with all six wait slots reachable rather than
+ * only slot 6, which is the same relationship f32rsqrt has to hrsqrt.
+ */
+static bool
+agx3_alu_f32_unop(enum agx_isa_encoding enc, const char *mnemonic,
+                  uint16_t dest, uint16_t src, enum agx3_alu_hint hint,
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (dest & 1) || (src & 1) ||
+       (wait_mask & ~UINT16_C(0x3f)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {25, 2}, {26, 2},
+   };
+   struct agx3_field_kv fields[11] = {
+      {2, dest}, {18, src}, {11, dest_cache},
+      {27, hint == AGX3_ALU_HINT_CACHE},
+      {29, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned i = 0; i < 6; ++i)
+      fields[5 + i] =
+         (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
+   return agx3_bind_compose(enc, mnemonic, 0, base, 4, fields, 11, out, len);
+}
+
+bool
+agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_unop(enc, "f32log2", dest, src, hint, dest_cache,
+                            wait_mask, out, len);
+}
+
+bool
+agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_unop(enc, "f32exp2", dest, src, hint, dest_cache,
+                            wait_mask, out, len);
+}
+
 bool
 agx3_alu_hrsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                 enum agx3_alu_hint hint, bool dest_cache,

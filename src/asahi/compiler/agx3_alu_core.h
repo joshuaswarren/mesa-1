@@ -345,6 +345,43 @@ bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                        uint8_t *len);
 
+/*
+ * Full-precision base-2 logarithm and exponential.
+ *
+ * The same two Apple forms as the half encoders below, with both width
+ * selectors raised: f10 for the destination and f26 for the source, 1 for one
+ * 16-bit half and 2 for a 32-bit pair, exactly as reciprocal square root does
+ * it. Only the half widths were wired up, so every 32-bit log2 or exp2 was
+ * refused -- and with them every `pow`, which NIR lowers to
+ * fexp2(fmul(y, flog2(x))). That is what an sRGB fragment epilog is made of.
+ *
+ * Witnessed byte-exactly against applegpu_g17p over ten compute kernels:
+ *   o[i] = log2(a[i])                      2f 02 56 00 02 00 b0 40 00 00
+ *   o[i] = exp2(a[i])                      af 02 56 00 02 00 b0 40 00 00
+ *   l = log2(a[i]); o[i] = exp2(l) + l     2f 02 56 04 03 00 92 40 00 00
+ *   l = log2(a[i]); o[i] = exp2(l * b[i])  2f 02 56 00 03 00 b0 40 00 00
+ *                                          af 02 54 00 02 00 b0 40 00 00
+ *
+ * One further bit, f30 at bit 63, is deliberately not modelled. Across
+ * nineteen witnesses it is set on exactly one shape: the `f32log2` of Metal's
+ * `pow(x, y)` built-in, whose result is defined for a negative base with an
+ * integral exponent and for a zero base. `powr(x, y)`, which promises a
+ * non-negative base, leaves it clear, and so does the hand-written
+ * exp2(log2(x) * y) -- which is byte-identical to the built-in's log2 apart
+ * from that one bit, and is exactly the shape NIR produces. So the encodings
+ * below are Apple's for every shape this compiler can emit; f30 belongs to a
+ * domain rule the lowered form does not carry.
+ */
+bool agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
+bool agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],
                                   const enum agx3_alu_hint hints[4],

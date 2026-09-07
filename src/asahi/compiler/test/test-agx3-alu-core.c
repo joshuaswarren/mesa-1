@@ -105,6 +105,90 @@ test_native_f32_rcp_rsqrt(void)
                            false, 0, bytes, &len));
 }
 
+/*
+ * Full-precision base-2 logarithm and exponential.
+ *
+ * Only the half forms were wired up, so every 32-bit log2 or exp2 refused the
+ * whole shader -- and with them every pow(), which NIR lowers to
+ * fexp2(fmul(y, flog2(x))). An sRGB fragment epilog is made of exactly that,
+ * which is why `asahi-g17p-srgb-epilog` could not compile and why a G17P
+ * fragment shader writing an sRGB swapchain was refused outright.
+ *
+ * Ten vectors, all Apple's own from `metal-nt -arch applegpu_g17p` over three
+ * probe sets. They vary the operand registers, the source lifetime, the
+ * destination cache bit and the wait mask independently, so the table pins the
+ * fields rather than merely covering the instruction.
+ */
+static void
+test_native_f32_log2_exp2(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   static const struct {
+      const char *what;
+      bool exp2;
+      uint16_t dest, src;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      uint8_t bytes[10];
+   } vectors[] = {
+      {"log2(a[i])", false, 0, 0, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+       {0x2f, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"exp2(a[i])", true, 0, 0, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+       {0xaf, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"log2 kept live for two readers", false, 4, 0, AGX3_ALU_HINT_CACHE,
+       true, 1u << 5,
+       {0x2f, 0x02, 0x56, 0x04, 0x03, 0x00, 0x92, 0x40, 0x00, 0x00}},
+      {"exp2 of a multiply, pow()", true, 8, 6, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0xaf, 0x02, 0x54, 0x08, 0x03, 0x0c, 0xb0, 0x40, 0x00, 0x00}},
+      {"exp2 in an sRGB encode", true, 4, 4, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0xaf, 0x02, 0x54, 0x04, 0x03, 0x08, 0xb0, 0x40, 0x00, 0x00}},
+      /* exp2(log2(x) * y) spelled out: the shape NIR lowers fpow to, and the
+       * one an sRGB epilog is built from. */
+      {"log2 of a hand-written pow", false, 0, 0, AGX3_ALU_HINT_DISCARD, true,
+       1u << 5,
+       {0x2f, 0x02, 0x56, 0x00, 0x03, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"exp2 of a hand-written pow", true, 0, 0, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0xaf, 0x02, 0x54, 0x00, 0x03, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"exp2 of powr()", true, 0, 0, AGX3_ALU_HINT_DISCARD, false, 0,
+       {0xaf, 0x02, 0x54, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"log2 with no wait", false, 0, 0, AGX3_ALU_HINT_DISCARD, false, 0,
+       {0x2f, 0x02, 0x54, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"log2 of powr()", false, 4, 4, AGX3_ALU_HINT_DISCARD, true, 1u << 5,
+       {0x2f, 0x02, 0x56, 0x04, 0x03, 0x08, 0xb0, 0x40, 0x00, 0x00}},
+   };
+
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert((vectors[i].exp2 ? agx3_alu_f32exp2 : agx3_alu_f32log2)(
+         AGX_ISA_ENCODING_AGX3B, vectors[i].dest, vectors[i].src,
+         vectors[i].hint, vectors[i].dest_cache, vectors[i].wait, bytes,
+         &len));
+      assert(len == sizeof(vectors[i].bytes));
+      assert(!memcmp(bytes, vectors[i].bytes, len));
+   }
+
+   /* The half and the 32-bit form are distinct encodings, not aliases: the
+    * two width selectors are the whole difference. */
+   uint8_t half[AGX3_ALU_MAX_LENGTH], hlen;
+   assert(agx3_alu_hlog2(AGX_ISA_ENCODING_AGX3B, 2, 2, AGX3_ALU_HINT_DISCARD,
+                         false, 1u << 5, half, &hlen));
+   assert(agx3_alu_f32log2(AGX_ISA_ENCODING_AGX3B, 2, 2, AGX3_ALU_HINT_DISCARD,
+                           false, 1u << 5, bytes, &len));
+   assert(hlen == len && memcmp(half, bytes, len) != 0);
+
+   /* A 32-bit operand pair is aligned, only AGX3b is witnessed, and the wait
+    * mask has six slots. */
+   assert(!agx3_alu_f32log2(AGX_ISA_ENCODING_AGX3B, 1, 0, AGX3_ALU_HINT_NONE,
+                            false, 0, bytes, &len));
+   assert(!agx3_alu_f32exp2(AGX_ISA_ENCODING_AGX3B, 0, 1, AGX3_ALU_HINT_NONE,
+                            false, 0, bytes, &len));
+   assert(!agx3_alu_f32log2(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
+                            false, 0, bytes, &len));
+   assert(!agx3_alu_f32exp2(AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE,
+                            false, 1u << 6, bytes, &len));
+}
+
 static void
 test_native_bit_andc(void)
 {
@@ -1895,6 +1979,7 @@ int main(void){
    test_native_bit_andc();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
+   test_native_f32_log2_exp2();
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_add();
