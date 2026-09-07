@@ -768,6 +768,26 @@ main(void)
    assert(memcmp(&native_pbe, gen9_r8_snorm_pbe,
                  sizeof(gen9_r8_snorm_pbe)) == 0);
 
+   /* Actual G17P MTL94 is BGR10A2 UNORM: channels0x26, type0, four bytes
+    * per pixel and the exact B/G/R/A PBE composition. */
+   static const uint8_t gen9_bgr10a2_unorm_pbe[32] = {
+      0xa2, 0x09, 0xc6, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R10G10B10A2;
+   pbe.type = AGX_TEXTURE_TYPE_UNORM;
+   pbe.swizzle_r = AGX_CHANNEL_B;
+   pbe.swizzle_g = AGX_CHANNEL_G;
+   pbe.swizzle_b = AGX_CHANNEL_R;
+   pbe.swizzle_a = AGX_CHANNEL_A;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_bgr10a2_unorm_pbe,
+                 sizeof(gen9_bgr10a2_unorm_pbe)) == 0);
+   pbe.swizzle_r = AGX_CHANNEL_R;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+
    /* Actual G17P UMD table entry for MTL format73 (RGBA8_UINT) resolves to
     * channels0x28, UINT type2 and four bytes per pixel. */
    static const uint8_t gen9_rgba8_uint_pbe[32] = {

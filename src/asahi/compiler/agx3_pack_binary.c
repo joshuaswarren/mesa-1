@@ -3144,7 +3144,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * preceding pack_imgwir and coordinate-select sequence is part of its ABI.
  * Fresh native RGB10A2 key0x10021300 emits the identical physical program:
  * its normalized conversion happens before W32 tile storage; PBE describes
- * the destination format. RG16 UNORM is likewise one 32-bit imageblock word,
+ * A2B10G10R10 versus A2R10G10B10 channel order. RG16 UNORM is likewise one
+ * 32-bit imageblock word,
  * with its two U16-normalized lanes described by PBE. Fresh Apple G17P
  * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
  * the same one-word program for signed RG16 while PBE describes signedness.
