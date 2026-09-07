@@ -605,6 +605,26 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P two-word RG32 SFLOAT output.
+    executable(
+      'g17p-vulkan-rg32-sfloat',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RG32_SFLOAT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # F01b public Vulkan oracle for exact G17P R8G8 UINT colour storage.
+    executable(
+      'g17p-vulkan-rg8-uint',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RG8_UINT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for the exact G17P R32 SINT colour path.
     executable(
       'g17p-vulkan-r32-sint',
