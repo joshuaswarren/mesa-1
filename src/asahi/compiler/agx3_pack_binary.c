@@ -3329,7 +3329,10 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             outputs |= UINT64_C(1) << I->src[0].value;
             break;
          case AGX_OPCODE_GET_SR:
-            if (I->sr != AGX_SR_VERTEX_ID)
+            /* Native vertex programs use both IDs as ordinary scalar
+             * producers ahead of their terminal UVS bundle. The SR encoder
+             * independently validates the witnessed hardware number/width. */
+            if (I->sr != AGX_SR_VERTEX_ID && I->sr != AGX_SR_INSTANCE_ID)
                return 0;
             break;
          default:

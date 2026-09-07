@@ -5139,6 +5139,27 @@ TEST_F(AGX3PackBinary, VertexTerminalOutputsCrossDirectEmptyFallthrough)
    EXPECT_FALSE(pack(b).empty());
 }
 
+TEST_F(AGX3PackBinary, VertexInstanceIdWithWideSingleBlockOutputs)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index instance = agx_temp(b->shader, AGX_SIZE_32);
+   agx_index vertex = agx_temp(b->shader, AGX_SIZE_32);
+   agx_get_sr_to(b, instance, AGX_SR_INSTANCE_ID);
+   agx_get_sr_to(b, vertex, AGX_SR_VERTEX_ID);
+   for (unsigned c : {8u, 9u, 10u, 11u, 4u, 5u, 6u, 7u, 0u, 1u, 2u, 3u})
+      agx_st_vary(b, agx_immediate(c), c & 1 ? instance : vertex);
+   agx_stop(b);
+
+   agx_pressure_schedule(b->shader);
+   ASSERT_TRUE(agx3_sink_vertex_outputs(b->shader));
+   agx_ra(b->shader);
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, VertexOutputCannotMoveAcrossControlFlow)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
