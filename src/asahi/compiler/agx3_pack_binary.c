@@ -3165,8 +3165,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * R8G8_UINT key0x08020500 and R8G8_SINT
  * key0x08020400 use one I8
  * imageblock word and selector 0x55. R8G8B8A8_UINT/SINT use the same I8
- * builtin with four attachment components. R8_SNORM, R8G8_SNORM and
- * R8G8B8A8_SNORM attachment fields format2/layout2 with one, two or four components emit the
+ * builtin with four attachment components. R8_UNORM uses format3/layout2
+ * with one component. R8_SNORM, R8G8_SNORM and R8G8B8A8_SNORM attachment
+ * fields use format2/layout2 with one, two or four components. They emit the
  * normalized program below, matching the exact U8NORM bytes.
  * R16_UNORM format7 and R16_SNORM/R16G16B16A16_SNORM format6 attachment
  * fields use layout2 with one or four components. All emit a distinct
