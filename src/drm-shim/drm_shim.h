@@ -104,6 +104,7 @@ struct shim_fd *drm_shim_fd_lookup(int fd);
 void drm_shim_prime_fd_register(int fd, struct shim_bo *bo);
 struct shim_bo *drm_shim_prime_fd_lookup(int fd);
 void drm_shim_prime_fd_unregister(int fd);
+int drm_shim_prime_ioctl(int fd, unsigned long request, void *arg);
 int drm_shim_ioctl(int fd, unsigned long request, void *arg);
 void *drm_shim_mmap(struct shim_fd *shim_fd, size_t length, int prot, int flags,
                     int fd, off64_t offset);

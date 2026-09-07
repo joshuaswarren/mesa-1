@@ -30,6 +30,7 @@
 #include <c11/threads.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <linux/memfd.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -229,6 +230,50 @@ drm_shim_prime_fd_unregister(int fd)
 
    if (bo)
       drm_shim_bo_put(bo);
+}
+
+int
+drm_shim_prime_ioctl(int fd, unsigned long request, void *arg)
+{
+   struct shim_bo *bo = drm_shim_prime_fd_lookup(fd);
+   if (!bo)
+      return -EBADF;
+   drm_shim_bo_put(bo);
+
+   switch (request) {
+   case DMA_BUF_IOCTL_SYNC: {
+      const struct dma_buf_sync *sync = arg;
+      if (!sync)
+         return -EINVAL;
+      const uint64_t access = sync->flags & DMA_BUF_SYNC_RW;
+      const uint64_t phase = sync->flags & (DMA_BUF_SYNC_START |
+                                             DMA_BUF_SYNC_END);
+      const uint64_t known = DMA_BUF_SYNC_RW | DMA_BUF_SYNC_START |
+                             DMA_BUF_SYNC_END;
+      return access && (phase == DMA_BUF_SYNC_START ||
+                        phase == DMA_BUF_SYNC_END) && !(sync->flags & ~known)
+                ? 0
+                : -EINVAL;
+   }
+   case DMA_BUF_IOCTL_EXPORT_SYNC_FILE: {
+      struct dma_buf_export_sync_file *export = arg;
+      if (!export || !(export->flags & DMA_BUF_SYNC_RW) ||
+          (export->flags & ~DMA_BUF_SYNC_RW))
+         return -EINVAL;
+      export->fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+      return export->fd < 0 ? -errno : 0;
+   }
+   case DMA_BUF_IOCTL_IMPORT_SYNC_FILE: {
+      const struct dma_buf_import_sync_file *import = arg;
+      return import && import->fd >= 0 &&
+                    (import->flags & DMA_BUF_SYNC_RW) &&
+                    !(import->flags & ~DMA_BUF_SYNC_RW)
+                ? 0
+                : -EINVAL;
+   }
+   default:
+      return -ENOTTY;
+   }
 }
 
 /* ioctl used by drmGetVersion() */

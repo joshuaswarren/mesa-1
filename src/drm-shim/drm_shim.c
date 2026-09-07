@@ -785,8 +785,13 @@ ioctl(int fd, unsigned long request, ...)
    va_end(ap);
 
    struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
-   if (!shim_fd)
-      return real_ioctl(fd, request, arg);
+   if (!shim_fd) {
+      struct shim_bo *prime_bo = drm_shim_prime_fd_lookup(fd);
+      if (!prime_bo)
+         return real_ioctl(fd, request, arg);
+      drm_shim_bo_put(prime_bo);
+      return drm_shim_prime_ioctl(fd, request, arg);
+   }
 
    return drm_shim_ioctl(fd, request, arg);
 }

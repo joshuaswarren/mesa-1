@@ -83,3 +83,27 @@ run_target(
     gbm_share,
   ],
 )
+
+egl_dmabuf_image = executable(
+  'asahi-g17p-egl-dmabuf-image',
+  files('test-g17p-egl-dmabuf-image.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+    dep_gbm,
+    dep_libdrm,
+  ],
+  build_by_default : false,
+)
+
+run_target(
+  'asahi-g17p-egl-dmabuf-image-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_dmabuf_image,
+  ],
+)
