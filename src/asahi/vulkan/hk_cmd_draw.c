@@ -3188,24 +3188,16 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       secondary_fields.words[0] |= UINT32_C(1) << 26;
    /* Native458934..45896c retains both stencil-control bits in the
     * same per-draw record as depth. No extra state allocation or launch. */
-   if (gfx->occlusion.mode != AGX_VISIBILITY_MODE_NONE &&
-       gfx->occlusion.mode != AGX_VISIBILITY_MODE_COUNTING &&
-       gfx->occlusion.mode != AGX_VISIBILITY_MODE_BOOLEAN)
+   uint32_t fragment_control = raster_state.fragment_control |
+      (stencil_test ? UINT32_C(0x000c0000) : 0);
+   uint32_t occlusion_query;
+   if (!agx_ppp_hal200_occlusion_pack(
+          dev->dev.chip, gfx->occlusion.mode, gfx->occlusion.index,
+          fragment_control, &fragment_control, &occlusion_query))
       return hk_g17p_bind_tail_refused(__LINE__);
-   if (gfx->occlusion.index >= AGX_MAX_OCCLUSION_QUERIES)
-      return hk_g17p_bind_tail_refused(__LINE__);
-
-   /* HAL200 retained the legacy semantic bit positions inside its fixed
-    * PRIMARY_FACE record: visibility mode is fragment-control[15:14], while
-    * the final word selects a 64-bit counter from ISP_OCLQRY_BASE.  The native
-    * bind path replaces the legacy PPP update wholesale, so both fields must
-    * be folded into this per-draw record here. */
-   const uint32_t fragment_control = raster_state.fragment_control |
-      (stencil_test ? UINT32_C(0x000c0000) : 0) |
-      ((uint32_t)gfx->occlusion.mode << 14);
    output_fields.words[5] = fragment_control;
    primary_fields.words[0] = fragment_control;
-   primary_fields.words[5] = gfx->occlusion.index << 17;
+   primary_fields.words[5] = occlusion_query;
    if (!agx_ppp_hal200_fragment_core_pack(dev->dev.chip, &fs_fields,
                                           &fs_record) ||
        !agx_ppp_hal200_graphics_core_pack(

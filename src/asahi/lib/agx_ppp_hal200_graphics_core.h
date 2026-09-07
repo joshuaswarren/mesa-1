@@ -61,6 +61,14 @@ bool agx_ppp_hal200_rasterizer_discard_pack(
    enum agx_chip chip, bool discard, uint32_t secondary_original,
    uint32_t cull_original, uint32_t *secondary_out, uint32_t *cull_out);
 
+/* Native G17P visibility state: mode occupies fragment-control bits14..15;
+ * the 64-bit counter byte offset is encoded as byteOffset<<14. */
+bool agx_ppp_hal200_occlusion_pack(enum agx_chip chip, unsigned mode,
+                                  unsigned index,
+                                  uint32_t original_fragment_control,
+                                  uint32_t *fragment_control,
+                                  uint32_t *query_offset);
+
 struct agx_ppp_hal200_graphics_core {
    uint8_t bytes[AGX_PPP_HAL200_GRAPHICS_MAX_LENGTH];
    uint8_t length;

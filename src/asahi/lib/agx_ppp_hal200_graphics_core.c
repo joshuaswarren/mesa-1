@@ -61,6 +61,23 @@ agx_ppp_hal200_rasterizer_discard_pack(
    return true;
 }
 
+bool
+agx_ppp_hal200_occlusion_pack(enum agx_chip chip, unsigned mode,
+                              unsigned index,
+                              uint32_t original_fragment_control,
+                              uint32_t *fragment_control,
+                              uint32_t *query_offset)
+{
+   if (chip != AGX_CHIP_G17P || (mode != 0 && mode != 2 && mode != 3) ||
+       index >= 32768 || !fragment_control || !query_offset)
+      return false;
+
+   *fragment_control =
+      (original_fragment_control & ~UINT32_C(0xc000)) | (mode << 14);
+   *query_offset = index << 17;
+   return true;
+}
+
 static void
 store_le32(uint8_t *dst, uint32_t value)
 {

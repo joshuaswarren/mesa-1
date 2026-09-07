@@ -30,6 +30,35 @@ check(enum agx_ppp_hal200_graphics_bundle bundle, const uint32_t *words,
 int
 main(void)
 {
+   for (unsigned mode = 0; mode < 4; ++mode) {
+      uint32_t control = UINT32_C(0xdead3eef);
+      uint32_t offset = UINT32_C(0xdeadbeef);
+      const bool valid = mode != 1;
+      assert(agx_ppp_hal200_occlusion_pack(
+                AGX_CHIP_G17P, mode, 0x7fff, UINT32_C(0x1234ffff),
+                &control, &offset) == valid);
+      if (valid) {
+         assert(control == ((UINT32_C(0x1234ffff) & ~UINT32_C(0xc000)) |
+                            (mode << 14)));
+         assert(offset == UINT32_C(0xfffe0000));
+      } else {
+         assert(control == UINT32_C(0xdead3eef));
+         assert(offset == UINT32_C(0xdeadbeef));
+      }
+   }
+   uint32_t unchanged_control = UINT32_C(0xdead3eef);
+   uint32_t unchanged_offset = UINT32_C(0xdeadbeef);
+   assert(!agx_ppp_hal200_occlusion_pack(
+      AGX_CHIP_G17G, 2, 0, 0, &unchanged_control, &unchanged_offset));
+   assert(!agx_ppp_hal200_occlusion_pack(
+      AGX_CHIP_G17P, 2, 32768, 0, &unchanged_control, &unchanged_offset));
+   assert(!agx_ppp_hal200_occlusion_pack(
+      AGX_CHIP_G17P, 2, 0, 0, NULL, &unchanged_offset));
+   assert(!agx_ppp_hal200_occlusion_pack(
+      AGX_CHIP_G17P, 2, 0, 0, &unchanged_control, NULL));
+   assert(unchanged_control == UINT32_C(0xdead3eef));
+   assert(unchanged_offset == UINT32_C(0xdeadbeef));
+
    /* Derived directly from native458898..45891c and vector constants
     * 811700/811710: asymmetric masks and distinct operations expose swaps. */
    assert(agx_ppp_hal200_stencil_pack(false, 0, 7, 6, 5, 0xaa, 0x55) == 0x0e000000);
