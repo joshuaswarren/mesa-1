@@ -2917,6 +2917,25 @@ hk_flush_index(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 static float hk_depth_bias_factor(VkFormat format, bool exact,
                                   bool force_unorm);
 
+/* Every refusal below is a real capability gap that silently drops the draw.
+ * Report the exact check that refused, once per site, so a failing
+ * application names a specific unimplemented G17P bind-tail field
+ * instead of a single opaque message. */
+static bool
+hk_g17p_bind_tail_refused(unsigned line)
+{
+   static uint32_t reported[64];
+   static unsigned nr_reported;
+   for (unsigned i = 0; i < nr_reported; ++i) {
+      if (reported[i] == line)
+         return false;
+   }
+   if (nr_reported < ARRAY_SIZE(reported))
+      reported[nr_reported++] = line;
+   mesa_loge("G17P native bind tail refused at hk_cmd_draw.c:%u", line);
+   return false;
+}
+
 static bool
 hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                               uint8_t **out)
@@ -2927,19 +2946,19 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const struct hk_rendering_state *render = &gfx->render;
 
    if (dev->dev.chip != AGX_CHIP_G17P || !out || !*out)
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
    struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
    if (!fs || !linked_fs)
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    const uint64_t fragment_program = hk_upload_usc_words(cmd, fs, linked_fs);
    if (!fragment_program || (fragment_program & UINT64_C(0x3f)) != 0 ||
        fragment_program >= (UINT64_C(1) << 48) ||
        !hk_g17p_smooth_varyings_supported(cmd, linked_fs) ||
        (linked_fs->b.cf.nr_bindings != 0) != (gfx->varyings != 0))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core fs_record;
    const struct agx_ppp_hal200_fragment_fields fs_fields = {
@@ -2959,7 +2978,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t output_size;
    if (!vs || !agx_ppp_hal200_output_size_pack(
                  vs->info.uvs.size, 0, &output_size))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core output_record;
    struct agx_ppp_hal200_graphics_fields output_fields = {
@@ -2994,7 +3013,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           dev->dev.chip, depth_test, dyn->ds.depth.write_enable,
           dyn->ds.depth.compare_op, primary_fields.words[3],
           &primary_fields.words[3]))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    const bool stencil_test = hk_stencil_test_enabled(cmd);
    const struct vk_stencil_test_face_state stencil_faces[2] = {
@@ -3025,21 +3044,21 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           dev->dev.chip, dyn->rs.cull_mode,
           dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
           cull_fields.words[0], &cull_fields.words[0]))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
    if (!agx_ppp_hal200_cull_provoking_pack(dev->dev.chip, gfx->provoking,
                                          cull_fields.words[0],
                                          &cull_fields.words[0]))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
    if (!agx_ppp_hal200_depth_clip_pack(
           dev->dev.chip,
           vk_rasterization_state_depth_clip_enable(&dyn->rs),
           cull_fields.words[0], &cull_fields.words[0]))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
    if (!agx_ppp_hal200_rasterizer_discard_pack(
           dev->dev.chip, hk_rast_discard(cmd), secondary_fields.words[0],
           cull_fields.words[0], &secondary_fields.words[0],
           &cull_fields.words[0]))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_w_clamp_cull2_core w_cull2_record;
    const struct agx_ppp_w_clamp_cull2_fields w_cull2_fields = {
@@ -3141,7 +3160,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct agx_ppp_hal200_raster_state raster_state;
    if (!agx_ppp_hal200_raster_state_build(dev->dev.chip, &raster_fields,
                                            &raster_state))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    /* Native update 0x46c6ac..0x46c6dc stores pass type at context+0x1f78.
     * The 0x46ff78 path emits it in SECONDARY header 0x02000048's first
@@ -3152,7 +3171,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (pass_type != AGX_PASS_TYPE_OPAQUE &&
        pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
        pass_type != AGX_PASS_TYPE_PUNCH_THROUGH)
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
    secondary_fields.words[0] |= pass_type << 29;
    /* Native46c674..46c694 forces bit26 for pass type2, before merging it
     * into the same SECONDARY payload. This prevents triangle merging from
@@ -3165,9 +3184,9 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (gfx->occlusion.mode != AGX_VISIBILITY_MODE_NONE &&
        gfx->occlusion.mode != AGX_VISIBILITY_MODE_COUNTING &&
        gfx->occlusion.mode != AGX_VISIBILITY_MODE_BOOLEAN)
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
    if (gfx->occlusion.index >= AGX_MAX_OCCLUSION_QUERIES)
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    /* HAL200 retained the legacy semantic bit positions inside its fixed
     * PRIMARY_FACE record: visibility mode is fragment-control[15:14], while
@@ -3196,7 +3215,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           &cull_record) ||
        !agx_ppp_w_clamp_cull2_core_pack(dev->dev.chip, &w_cull2_fields,
                                          &w_cull2_record))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    void *scissor = util_dynarray_grow_bytes(
       &cs->scissor, 1, sizeof(raster_state.scissor));
@@ -3245,7 +3264,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct agx_ppp_viewport_payload_core viewport_record;
    if (!agx_ppp_viewport_payload_core_pack(dev->dev.chip, &viewport_fields,
                                             &viewport_record))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    /* A VDM fetch happens after recording. Never point earlier draws at a
     * device-global record that another draw/CB can overwrite. This upload
@@ -3260,7 +3279,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                   gfx->linked_varyings.counts_32.opaque[0],
                                   gfx->linked_varyings.counts_16.opaque[0],
                                   &uploaded))
-      return false;
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    if (hk_g17p_launch_trace_enabled()) {
       hk_g17p_trace_line("hal200-bind-group", state.gpu, state.cpu,
