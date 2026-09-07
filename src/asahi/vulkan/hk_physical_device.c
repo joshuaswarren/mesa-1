@@ -1950,12 +1950,16 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       supported_extensions.KHR_ray_tracing_maintenance1 = native_rt;
       supported_extensions.KHR_pipeline_library = native_rt;
    }
+   /* Native cooperative matrix is M5-generation; AGX_SIMDMAT additionally
+    * exposes the G13 8x8x8 fp32 simd_matrix path. bfloat16 stays native-only:
+    * the G13 simd path has no bf16 configurations. */
+   bool native_coop_matrix = agx_chip_g17_m5(pdev->dev.chip) &&
+                             debug_get_bool_option("ASAHI_M5_COOPERATIVE_MATRIX", true);
    supported_extensions.KHR_cooperative_matrix =
-      agx_chip_g17_m5(pdev->dev.chip) &&
-      debug_get_bool_option("ASAHI_M5_COOPERATIVE_MATRIX", true);
+      native_coop_matrix || getenv("AGX_SIMDMAT") != NULL;
 
    supported_extensions.KHR_shader_bfloat16 =
-      supported_extensions.KHR_cooperative_matrix &&
+      native_coop_matrix &&
       debug_get_bool_option("ASAHI_M5_BFLOAT16", true);
 
    /* Hardware-qualified on M5 only. */
@@ -2374,7 +2378,8 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
    VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
                           pPropertyCount);
-   if (pdev->vk.supported_features.cooperativeMatrix) {
+   if (pdev->vk.supported_features.cooperativeMatrix &&
+       agx_chip_g17_m5(pdev->dev.chip)) {
       /* The order of this list is implementation-defined. List the 8x8x8
        * FP32 x FP32 configuration first: CTS
        * cooperative_matrix.op_constant_null steps through the device's
@@ -2433,6 +2438,24 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
             }
          }
       }
+   } else if (getenv("AGX_SIMDMAT")) {
+      /* Hardware 8x8x8 fp32 matrix MAC (simd_matrix_fmadd32), G13 only: the
+       * native path above owns M5-generation devices. */
+      vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p)
+      {
+         p->sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+         p->pNext = NULL;
+         p->MSize = 8;
+         p->NSize = 8;
+         p->KSize = 8;
+         p->AType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+         p->BType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+         p->CType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+         p->ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
+         p->saturatingAccumulation = VK_FALSE;
+         p->scope = VK_SCOPE_SUBGROUP_KHR;
+      }
    }
+
    return vk_outarray_status(&out);
 }
