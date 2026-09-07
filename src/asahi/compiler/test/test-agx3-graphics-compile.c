@@ -1454,6 +1454,87 @@ test_storage_image_lowering(void)
 }
 
 static nir_shader *
+build_cs_2d_image_access(bool store)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      store ? "AGX3 robust 2D image store" : "AGX3 robust 2D image load");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_variable *image = nir_variable_create(
+      b.shader, nir_var_image,
+      glsl_image_type(GLSL_SAMPLER_DIM_2D, false, GLSL_TYPE_UINT), "image");
+   image->data.image.format = PIPE_FORMAT_R8G8B8A8_UINT;
+   nir_def *deref = &nir_build_deref_var(&b, image)->def;
+   nir_def *gid = nir_load_global_invocation_id(&b, 32);
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *coord = nir_vec4(&b, nir_channel(&b, gid, 0),
+                             nir_channel(&b, gid, 1), zero, zero);
+
+   if (store) {
+      nir_image_deref_store(
+         &b, deref, coord, zero, nir_imm_ivec4(&b, 1, 2, 3, 4), zero,
+         .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+         .format = PIPE_FORMAT_R8G8B8A8_UINT, .access = ACCESS_RESTRICT,
+         .src_type = nir_type_uint32);
+   } else {
+      nir_def *value = nir_image_deref_load(
+         &b, 4, 32, deref, coord, zero, zero,
+         .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+         .format = PIPE_FORMAT_R8G8B8A8_UINT, .access = ACCESS_RESTRICT,
+         .dest_type = nir_type_uint32);
+
+      /* Keep the robust result live so the explicit zero select is part of
+       * the test's observable graph. */
+      nir_store_scratch(&b, value, nir_imm_int(&b, 0), .write_mask = 0xf,
+                        .align_mul = 16);
+   }
+
+   return b.shader;
+}
+
+static bool
+test_g17p_2d_robustness_scope(void)
+{
+   for (unsigned store = 0; store < 2; ++store) {
+      nir_shader *nir = build_cs_2d_image_access(store);
+      agx_nir_lower_texture_early_with_2d_robustness(nir, true, true);
+
+      unsigned loads = 0, stores = 0, sizes = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_image_deref_load:
+               loads++;
+               break;
+            case nir_intrinsic_image_deref_store:
+               stores++;
+               break;
+            case nir_intrinsic_image_deref_size:
+               sizes++;
+               break;
+            default:
+               break;
+            }
+         }
+      }
+
+      const bool ok = store ? loads == 0 && stores == 1 && sizes == 0
+                            : loads == 1 && stores == 0 && sizes == 1;
+      ralloc_free(nir);
+      if (!ok)
+         return false;
+   }
+
+   return true;
+}
+
+static nir_shader *
 build_cs_sampled_storage(unsigned mode)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -2365,6 +2446,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--2d-robustness-only")) {
+      const bool ok = test_g17p_2d_robustness_scope();
+      fprintf(stderr, "G17P 2D image robustness scope: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -2411,6 +2498,11 @@ main(int argc, char **argv)
 
    if (!test_g17p_cube_sample_lowering()) {
       fputs("cube-to-array sample lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_2d_robustness_scope()) {
+      fputs("2D image robustness scope mismatch\n", stderr);
       all_ok = false;
    }
 

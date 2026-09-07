@@ -655,7 +655,13 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
    enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
    bool array = nir_intrinsic_image_array(intr);
    unsigned size_components = nir_image_intrinsic_coord_components(intr);
+   /* G17P needs an explicit bounds predicate to make ordinary 2D image loads
+    * return zero.  Its ordinary 2D stores are already bounds-safe, and adding
+    * imageSize() to them leaves a redundant destination-descriptor crawl that
+    * prevents the native sampled-image-to-storage-image path from matching.
+    * Sparse-load residency semantics are not covered by this lowering. */
    const bool lower_2d = data && *(const bool *)data &&
+                         intr->intrinsic == nir_intrinsic_image_deref_load &&
                          dim == GLSL_SAMPLER_DIM_2D && !array;
 
    if (lower_2d)
