@@ -1643,6 +1643,14 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.sample_size_B == 8);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
 
+   enum pipe_format r16_unorm[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(r16_unorm, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+
    enum pipe_format r16_snorm[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16_SNORM,
    };

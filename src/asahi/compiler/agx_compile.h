@@ -347,6 +347,10 @@ struct agx_shader_key {
     * logical layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
 
+   /* Select the native normalized-16 imgwblk tail (0x95). Scalar R16 and
+    * RG16 are both one imageblock word, so word count alone is insufficient. */
+   bool g17p_rt0_eot_norm16_selector_95;
+
    /* Authorize the exact I32 G17P EOT builtin. Set only for logical formats
     * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;

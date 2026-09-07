@@ -3151,9 +3151,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * builtin with four attachment components. R8_SNORM, R8G8_SNORM and
  * R8G8B8A8_SNORM attachment fields format2/layout2 with one, two or four components emit the
  * normalized program below, matching the exact U8NORM bytes.
- * R16_SNORM and R16G16B16A16_SNORM attachment fields format6/layout2 with
- * one or four components emit a distinct normalized-16 program with selector
- * tail a895.
+ * R16_UNORM format7 and R16_SNORM/R16G16B16A16_SNORM format6 attachment
+ * fields use layout2 with one or four components. All emit a distinct
+ * normalized-16 program with selector tail a895.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3249,15 +3249,21 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
       return AGX3_G17P_RT0_EOT_NONE;
 
    if (store_format == AGX_FORMAT_S16NORM) {
+      if (ctx->key->g17p_rt0_eot_norm16_selector_95 &&
+          (ctx->key->g17p_rt0_eot_words == 1 ||
+           ctx->key->g17p_rt0_eot_words == 2))
+         return AGX3_G17P_RT0_EOT_NORM16;
       if (ctx->key->g17p_rt0_eot_words == 1)
          return AGX3_G17P_RT0_EOT_SELECTOR_75;
-      if (ctx->key->g17p_rt0_eot_words == 2)
-         return AGX3_G17P_RT0_EOT_NORM16;
 
       return AGX3_G17P_RT0_EOT_NONE;
    }
 
    if (store_format == AGX_FORMAT_U16NORM) {
+      if (ctx->key->g17p_rt0_eot_norm16_selector_95)
+         return ctx->key->g17p_rt0_eot_words == 1
+                   ? AGX3_G17P_RT0_EOT_NORM16
+                   : AGX3_G17P_RT0_EOT_NONE;
       if (ctx->key->g17p_rt0_eot_words == 1)
          return AGX3_G17P_RT0_EOT_SELECTOR_75;
       if (ctx->key->g17p_rt0_eot_words == 2)
