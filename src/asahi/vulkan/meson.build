@@ -988,6 +988,27 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Generic encodability probe: takes SPIR-V paths on the command line and
+    # reports whether vkCreateComputePipelines accepts each one. This is the
+    # tool that measures README-agx3-packer-limits.md's matrix.
+    executable(
+      'g17p-vulkan-graphics-probe',
+      files('tests/g17p_vulkan_graphics_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-pipeline-probe',
+      files('tests/g17p_vulkan_pipeline_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-compute-min',
       files('tests/g17p_vulkan_compute_min.c'),

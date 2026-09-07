@@ -1,32 +1,20 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
-**Status: BLOCKING, fix in flight.** No real compute workload could compile for
-G17P, and therefore neither could a conformance suite run. This is independent
-of the command-stream, launch and memory work — those now execute correctly.
+**Status: the SSBO limit below is GONE; fragment-side gaps remain.** Every row
+of the original matrix now compiles, including the ones marked **no**, and so
+do device atomics. The measurement that produced the matrix is preserved
+verbatim further down, because the *method* is what makes it re-runnable, and
+because the retraction it carries is still worth reading before theorising
+about a wrong value on this ISA.
 
-The matrix below was measured from the runtime side (Vulkan pipeline creation)
-against the tree as it stood before the compiler workstream began changing
-`src/asahi/compiler/agx3_pack_binary.c` and friends. A compiler-side fix for
-exactly this is now in flight in the same worktree — see
-`src/asahi/compiler/test/test-agx3-multi-store.c`, whose own header describes
-the same limit ("a single store encodes in every addressing form, but two
-stores together were refused"). That test and `test-agx3-compile-fail-closed.c`
-are currently red, so **a build taken while they are red carries half-finished
-codegen and must not be used to measure encodability, nor shipped as an
-artifact.** Re-measure once they go green; this file records what the limit
-*was* and how to test it, not a claim about today's tree.
+Measured 2026-09-07 under the G17P drm-shim, on the integration branch plus the
+two commits named in "What changed". No hardware.
 
-The gate is `agx_compile_shader_nir()` returning false, surfaced as
-`VK_ERROR_FEATURE_NOT_PRESENT` from `vkCreateComputePipelines` with
-"AGX backend cannot encode shader for G17P" (`hk_shader.c`, the
-`vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT, ...)` after
-`agx_compile_shader_nir`).
+## Current matrix
 
-## Measured matrix
-
-Bisected by compiling one-line GLSL variants and observing whether pipeline
-creation succeeds. No hardware required: this reproduces entirely under the
-G17P drm-shim (see "Reproducing" below), so it costs a laptop run, not a boot.
+`src/asahi/isa/probes/r*.comp` are the compute shapes; `f*.frag` plus
+`common.vert` are the fragment ones. Both sets are driven by the two probes
+described in "Reproducing".
 
 | shader body (one `main`, SSBO at set 0 binding 0)                  | encodes |
 | ------------------------------------------------------------------ | ------- |
@@ -35,112 +23,158 @@ G17P drm-shim (see "Reproducing" below), so it costs a laptop run, not a boot.
 | `values[gl_GlobalInvocationID.x] = 0x12340000u + gid;`              | yes     |
 | `values[gl_LocalInvocationID.x] = 0x44440000u + lid;`               | yes     |
 | `values[gl_WorkGroupID.x] = 0x11110000u + gid;`                     | yes     |
-| `if (g<16) values[g] = A; else values[g] = B;`                      | yes\*   |
-| `values[0] = A;` **and** `values[32u + g] = B;`                     | **no**  |
-| `values[w] = A;` **and** `values[32u + g] = B;`                     | **no**  |
-| `x = values[31u - g];` **then** `values[g] = 0x12340000u + x;`      | **no**  |
-| any `atomicAdd` / `atomicMax` / `atomicOr` on the SSBO              | **no**  |
+| `if (g<16) values[g] = A; else values[g] = B;`                      | yes     |
+| `values[0] = A;` **and** `values[32u + g] = B;`                     | yes     |
+| `values[w] = A;` **and** `values[32u + g] = B;`                     | yes     |
+| `x = values[31u - g];` **then** `values[g] = 0x12340000u + x;`      | yes     |
+| two loads and a store, four stores, in-place read-modify-write      | yes     |
+| `atomicAdd` / `atomicMax` / `atomicOr` / `atomicAnd` / `atomicXor`  | yes     |
+| `atomicMin` / `atomicExchange` / `atomicCompSwap`, indexed or not   | yes     |
+| an atomic whose return value is then stored                         | yes     |
+| shared-memory atomic with barriers                                  | yes     |
 
-\* NIR flattens the two branches into a single store with a selected value, so
-this is one store by the time the backend sees it — it is not a
-counter-example.
+Fragment shapes, same day, same build. These are what actually blocks vkcube
+and every textured draw:
 
-## The rule, as far as it is pinned
+| fragment body (`sampler2D tex` at binding 1)                       | encodes |
+| ------------------------------------------------------------------ | ------- |
+| `texture(tex, uv)`                                                  | yes     |
+| `texture(tex, uv) * interpolated_colour`                            | yes     |
+| `textureLod(tex, uv, 0.0)`, `textureProj`, `texelFetch`             | yes     |
+| `dFdx` on an interpolated value                                     | yes     |
+| `texture(tex, uv) / float(textureSize(tex, 0).x)`                   | yes\*   |
+| `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**  |
+| `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**  |
+| `if (x < 0.1) discard;`                                             | **no**  |
+| `max(dot(normalize(n), L), 0.0)` — any normalize/clamp lighting     | **no**  |
 
-**At most one SSBO access per shader.** Not "one store": a shader with one SSBO
-*load* and one SSBO *store* also fails. A `load_preamble` / uniform read does
-not count (every probe above performs two or three), and neither does a
-constant-data (rodata) load — `g17p_vulkan_compute.comp` reads a 65-element
-constant array and stores once, and that compiles and runs on hardware.
+\* This row was **no** until the 32-bit reciprocal was encoded; see below.
 
-**Atomics do not encode at all**, in any position.
+## The rule, as it stands now
 
-## Why it matters beyond conformance
-
-It also bounds what any *diagnostic* probe can express, which is easy to lose a
-day to. In particular:
-
-- An invocation counter is impossible — counting needs an atomic.
-- A probe cannot both write a fixed witness slot and exercise index-addressed
-  stores, because that is two SSBO accesses.
-- `g17p_vulkan_compute_count.comp` exists in the shape it does purely because
-  of this: every invocation stores to the *same* slot with its own ID as the
-  *value*, which is the most that one SSBO access can be made to reveal.
-
-## Worked example: two shaders, one instruction apart
-
-> **Caution:** the byte diff and the hardware behaviour table below are
-> observations and stand. The *interpretation* originally attached to them —
-> that the store's operand was unnamed and positional — is retracted; see the
-> retraction section that follows. The real cause was a missing
-> write-after-write hazard check.
-
-
-The clearest instance of the underlying defect, captured byte-exact from GPU
-memory (`HK_G17P_LAUNCH_TRACE=1`, shim, ICD `6f4d66bc`). Two compute shaders
-differing by one line of GLSL:
-
-```glsl
-/* min   */ output_buffer.values[gl_GlobalInvocationID.x] = 0x12340000u + gl_GlobalInvocationID.x;
-/* cover */ output_buffer.values[gl_GlobalInvocationID.x] = 0xcafe0000u;
-```
-
-Compiled output, aligned:
+There is no per-shader SSBO access limit and no atomic limit. What remains is
+a set of missing *instruction encodings*, each of which fails the whole shader
+closed. With `AGX_MESA_DEBUG=shaders` the packer names the one it refused:
 
 ```
-common prefix   47 bytes  67 00 54 00 ... 1c 80 02      descriptor loads, address
-                                                        computation, LDIMM opcode
-                                                        AND destination field
-min    middle   15 bytes  12 00 00 a0 01                rest of LDIMM imm (0x12340000)
-                          9f 01 56 02 02 04 00 a8 13 05 the iadd
-cover  middle    5 bytes  ca 00 00 f0 07                rest of LDIMM imm (0xcafe0000)
-common suffix   18 bytes  e7 20 54 02 04 00 20 00 11 00 00 90 18 00    the STORE
-                          0e 00 00 00                                  stop
+agx3_pack_binary.c:4253: no grounded AGX3 encoding for texture_sample
+agx3_pack_binary.c:4980: no grounded AGX3 encoding for fcmpsel
 ```
 
-Three facts, each checked rather than inferred:
+Known-missing, in the order they are worth doing:
 
-1. **The store is byte-for-byte identical in both** — same opcode, same operand
-   fields, same wait mask. Address computation is therefore not the variable.
-2. **Both LDIMMs encode their constant correctly.** The immediate's high byte
-   is at byte 3 (`12` / `ca`) and its low byte at bits 3..10 of the final
-   halfword: `0x34 << 3 == 0x1a0` and `0xfe << 3 == 0x7f0`, both matching. The
-   constant is *loaded* correctly in both shaders.
-3. The only structural difference is min's 10-byte `iadd`.
+- **`fcmpsel` with a 32-bit destination.** Every handler is gated on
+  `AGX_SIZE_16`. `max(x, 0.0)` on floats — so `normalize()`, `clamp()`,
+  `saturate()`, and `discard` — reaches the generic ALU fallback and is
+  refused. Apple's own bytes for the two shapes, from
+  `metal-nt -arch applegpu_g17p`:
 
-In min, the store's operands are produced by that `iadd`. In cover the `iadd`
-does not exist — there is no arithmetic to perform — **and the store was not
-re-encoded**. So cover's store issues naming a register that nothing in the
-shader ever writes, and reads whatever it happens to hold. This is the
-immediate-encoded-as-a-register defect in its purest form: a bare literal with
-no arithmetic at all, so the constant has no path to the store.
+  ```
+  max(a[i], b[i])    12 03 1e 05 00 c0
+  max(a[i], 0.0f)    12 03 0a 81 00 c2
+  ```
 
-The behavioural consequence, same ICD and same boot conditions:
+  Note it is a six-byte `fmax`, not an `fsel`: the 32-bit path is a compact
+  min/max form, and `agx3_pack_fmax_f32_reg_reg()` already exists for the
+  all-register case. What is missing is the mixed-width shape Mesa actually
+  produces (`fcmpsel d32, r32, h16, ...`), because NIR materialises the 0.0
+  in a 16-bit half.
 
-| probe | value expression                | result                          |
-| ----- | ------------------------------- | ------------------------------- |
-| min   | `0x12340000 + gid`              | runs; writes index 0, correct   |
-| full  | `0x12340000 + i + deltas[i]`    | runs; 8 of 32, `0x12340000+4*i` |
-| count | one slot, value `= id`          | runs; `values[0] = 0x00000000`  |
-| cover | bare literal `0xcafe0000`       | **GMMU fault, nothing written** |
+- **`texture_sample` with an LOD bias or explicit gradients.** Plain sample,
+  explicit LOD, projective and fetch all encode.
 
-All four are index-derived SSBO stores. The three that *compute* a value run;
-the one storing a bare literal faults — because computing a value is what
-causes an instruction to exist that writes the store's source register.
+## What changed, and how it was measured
 
-**Unproven, deliberately.** An unwritten source register explains a wrong
-*value* cleanly. It does not by itself explain a GMMU *fault*. The most
-plausible bridge is that the eliminated instruction also carried the scoreboard
-wait that made the address safe, so removing it let the store issue before its
-address had landed — but that has not been demonstrated, and it should not be
-repeated as though it had.
+Two compiler fixes, both grounded byte-exactly against Apple's own machine
+code (see "Getting Apple's own G17P encoding", below):
 
-**Use as a regression test.** Under corrected codegen the LDIMM's destination
-must be the store's source register (or the store re-encoded to match). That is
-checkable entirely under the shim with `HK_G17P_LAUNCH_TRACE=1` — dump the
-shader binary and confirm the prefix is followed by an LDIMM and a store that
-actually connect. No hardware, no boot. If they still do not connect, the fix
-is incomplete.
+1. **`iadd` with narrow register operands.** The register-slot-A form pinned
+   both operand widths to 32-bit, so `iadd d32, h_a, h_b` had no encoding at
+   all and every compute shader that sums `gl_LocalInvocationID`'s three
+   16-bit components was refused outright. f24 is slot A's width and f39 is
+   slot B's, on both encodings; f28 and f43 are their sign-extensions.
+
+2. **32-bit reciprocal and reciprocal square root.** `RCP` and `RSQRT`
+   accepted only 16-bit operands, so a float divide or a `normalize()` — both
+   of which NIR lowers to `frcp` / `frsq` on 32-bit values — refused the
+   shader. The forms were already in the table; only the half widths had an
+   encoder.
+
+Neither of these is the SSBO limit. The SSBO rows were already passing before
+this session's changes: the compiler-side work the previous revision of this
+file described as "in flight" landed, and nobody re-measured. The lesson is in
+"Two traps" below — a matrix is only true on the day it is run.
+
+## Reproducing
+
+Both probes are in-tree meson targets and need no hardware.
+
+```
+docker run --rm -v <repo>:/workspace -w /workspace/<mesa worktree> \
+  winunix-dev:mesa-f16-deps bash -lc '
+    meson setup build -Dvulkan-drivers=asahi -Dgallium-drivers= -Dplatforms= \
+      -Dbuild-tests=true -Dtools=drm-shim -Dbuildtype=debugoptimized
+    ninja -C build
+    cd src/asahi/isa/probes
+    for f in *.comp; do glslangValidator -V $f -o ${f%.comp}.spv; done
+    glslangValidator -V common.vert -o common.vert.spv
+    for f in *.frag; do glslangValidator -V $f -o ${f%.frag}.frag.spv; done
+
+    V=$PWD/../../../../build/src/asahi/vulkan
+    export LD_PRELOAD=$V/../drm-shim/libasahi_noop_drm_shim.so
+    export ASAHI_SHIM_CHIP=g17p
+    export VK_DRIVER_FILES=$V/asahi_devenv_icd.aarch64.json
+
+    $V/g17p-vulkan-pipeline-probe *.spv                 # compute matrix
+    $V/g17p-vulkan-graphics-probe common.vert.spv *.frag.spv   # fragment matrix'
+```
+
+Each line prints `ENCODES` or `REFUSED` with the `VkResult`; the exit status is
+the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
+the packer refused.
+
+Two traps, both of which produced wrong answers before being caught:
+
+- Use `asahi_devenv_icd.aarch64.json`, not `asahi_icd.aarch64.json`. The latter
+  points at the *installed* `/usr/lib` driver, so the loader silently runs some
+  other build and every result is about the wrong binary.
+- Rebuild with a bare `ninja -C <build>`. Naming the executable target skips
+  the regenerated SPIR-V header, so the previous shader keeps running and every
+  variant "fails" identically. On a Docker bind mount, `touch` the file you
+  edited first: ninja's mtime comparison can otherwise skip the rebuild and you
+  will measure the previous binary.
+
+## Standing defect: baseline wait and lifetime bits in `agx3_alu_compose()`
+
+Not fixed here, because fixing it changes the bytes of every wait-carrying ALU
+instruction in every shader and that cannot be validated without hardware.
+
+`agx3_alu_table.h` was extracted by decoding one witnessed Apple instruction
+per form, and each AGX3b entry ended up with that specimen's own scoreboard
+wait folded in as if it were a form constant — `iadd` and `isub` pin f50,
+`imadd` f65, `sll`/`srl` f60, `bit_and`/`bit_or`/`bit_xor` f49, and so on,
+each of which is that form's *last wait field*. `iadd` additionally pins
+f27 = 1, the slot-A last-use bit.
+
+`agx3_alu_compose()` copies the baseline verbatim, so:
+
+- every ALU it emits also waits scoreboard slot 6 (slot 8 on AGX3c), and a
+  genuine slot-6 wait is indistinguishable from none —
+  `agx3_alu_compose(IADD, wait = 0)` and `wait = 1u << 5` produce identical
+  bytes; and
+- every `iadd` it emits declares slot A dead, whether or not it is.
+
+Apple varies both bits per instruction. Its dependent add after a slot-6
+`lddev` is `9f 01 56 ...`; its add after a slot-1 `get_sr` is `9f 11 54 ...`;
+its `iadd` last-use byte is 0x11, 0x15 or 0x17 depending on which operands are
+actually dead. The over-wait is conservative and therefore harmless; the
+"slot A is dead" claim on a live register is not, and is the same class of
+error that `agx3_iadd_core.h`'s header warns about.
+
+The fix is small — skip baseline entries whose field appears in the form's
+`wait[]` list, which `agx3_alu_mod_*()` and `agx3_alu_bit_*()` already do —
+but it also requires re-baselining `test/agx3_alu_core_vectors.c` (a generated
+file) and a hardware run, so it is recorded here rather than applied.
 
 ## RETRACTED: the "positional data operand" model
 
@@ -166,9 +200,10 @@ of the **scoreboard wait mask** (slots 1-4 live in byte 1; slot 5 sets byte 2 to
 `0x55`, slot 6 to `0x56`). So the "undefined mode `0x55`" flagged here earlier
 is simply a store waiting on slot 5 — entirely legitimate.
 
-Our own data agrees once the fields are read correctly: `lid`'s store has byte
-3 = `0x06` (half 6 = r3) and its `iadd2` writes r3. The operand was named, and
-named correctly, all along.
+Byte 2 also carries one bit that is not a wait: AGX3b f79, the "last LDDEV of
+the stream" marker, which *clears* bit 4 (`0x54` -> `0x44`). Apple sets it on
+the final `lddev` and only the final one; a two-load kernel emits `0x54` then
+`0x44`.
 
 ### The real cause of the wrong values
 
@@ -193,11 +228,11 @@ The pass computed waits from **sources only** (read-after-write) and never
 checked destinations; worse, a synchronous write cleared the pending tag, so
 the in-flight load on that register was forgotten. Mesa's AGX2 pass has an
 explicit write-after-write block; the AGX3 port dropped it. Fixed by adding the
-destination check.
+destination check, which is in `agx3_slot_assign()` today.
 
 ### Why the wrong model looked so convincing
 
-The five-probe correlation in the worked example above is real: the probes
+The five-probe correlation in the original worked example is real: the probes
 whose value-producing op was adjacent to the store were exactly the ones with
 correct values. But adjacency was a *proxy*. What actually mattered was whether
 an async load was still in flight over the register holding the value, and
@@ -217,6 +252,32 @@ Three things should have lowered confidence at the time:
 
 **When a value is wrong on this ISA, read the encoder source or sweep one field
 at a time before theorising from a disassembler's field names.**
+
+## The original measurement, kept for its method
+
+The matrix below was measured from the runtime side (Vulkan pipeline creation)
+against the tree as it stood before the compiler workstream began changing
+`src/asahi/compiler/agx3_pack_binary.c` and friends.
+
+| shader body (one `main`, SSBO at set 0 binding 0)                  | encoded |
+| ------------------------------------------------------------------ | ------- |
+| `values[0] = A;` **and** `values[32u + g] = B;`                     | **no**  |
+| `values[w] = A;` **and** `values[32u + g] = B;`                     | **no**  |
+| `x = values[31u - g];` **then** `values[g] = 0x12340000u + x;`      | **no**  |
+| any `atomicAdd` / `atomicMax` / `atomicOr` on the SSBO              | **no**  |
+
+The rule was stated as "at most one SSBO access per shader", with
+`load_preamble` / uniform reads and constant-data (rodata) loads not counting,
+and atomics unencodable in any position. It bounded what a diagnostic probe
+could express, which is why `g17p_vulkan_compute_count.comp` has the shape it
+does: every invocation stores to the *same* slot with its own ID as the
+*value*, the most that one SSBO access can be made to reveal.
+
+`src/asahi/compiler/test/test-agx3-ssbo-multi-access.c` now owns every row of
+that matrix, so it cannot come back silently. Its store bytes are pinned
+against Apple's own two-store kernel: two consecutive `stdev` instructions both
+carry byte 1 = 0 and byte 2 = 0x54, i.e. a store signals no scoreboard slot and
+a second store does not wait on the first.
 
 ## Disassembling a G17P shader binary
 
@@ -238,36 +299,13 @@ python3 agxisa.py tokenize <raw hex of the shader binary>
 Shader bytes come from the driver: run a probe under the drm-shim with
 `HK_G17P_LAUNCH_TRACE=1` and `grep -A9 "shader-binary"`.
 
-```
-cover (70 bytes, CORRECT)
-67005400000000001dc00240020067005408010000005700004002001ca010469f50540002008010
-502b22001c8002ca0000f007e7205402040020001100009018000e000000
+## Getting Apple's own G17P encoding for any shape
 
-lid (62 bytes, ZERO)
-670054000100000017000040020024a410263c800244000020029f215606020c10a8130543042900
-43000001e7105406000420001100009018000e000000
-```
+The development Mac's Metal toolchain contains an offline AIR-to-native
+translator that targets `applegpu_g17p` directly, so an encoding question is a
+witness rather than an inference. See `README-metal-witness.md` next to this
+file for the harness; every byte quoted above came out of it.
 
-## Reproducing
-
-```
-docker run --rm -v <repo>:/workspace -w /workspace/<mesa worktree> \
-  mesabuild:meson-1.7.2-llvm18-wsi2 bash -lc '
-    apt-get update -qq && apt-get install -y -qq glslang-tools libvulkan1
-    # regenerate tests/g17p_vulkan_compute_count_spv.h from your .comp, then
-    ninja -C <build>
-    cd <build>/src/asahi/vulkan
-    LD_PRELOAD=$PWD/../drm-shim/libasahi_noop_drm_shim.so \
-    ASAHI_SHIM_CHIP=g17p \
-    VK_DRIVER_FILES=$PWD/asahi_devenv_icd.aarch64.json \
-      ./g17p-vulkan-compute-count'
-```
-
-Two traps, both of which produced wrong answers before being caught:
-
-- Use `asahi_devenv_icd.aarch64.json`, not `asahi_icd.aarch64.json`. The latter
-  points at the *installed* `/usr/lib` driver, so the loader silently runs some
-  other build and every result is about the wrong binary.
-- Rebuild with a bare `ninja -C <build>`. Naming the executable target skips
-  the regenerated SPIR-V header, so the previous shader keeps running and every
-  variant "fails" identically.
+The field semantics used here were each pinned by a controlled sweep over
+`agx3_bind_compose()`, one field at a time, against the Apple bytes — never by
+reading a field name out of a disassembler.
