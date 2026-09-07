@@ -1120,6 +1120,27 @@ agx3_alu_fmax_half(enum agx_isa_encoding enc, uint16_t dest,
                                wait_mask, out, len);
 }
 
+bool
+agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+              enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (wait_mask & ~UINT16_C(0x3f)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE)
+      return false;
+   const struct agx3_field_kv base[] = {
+      {9,2},{10,2},{25,2},{26,1},{43,2},
+   };
+   struct agx3_field_kv fields[11] = {
+      {2,dest},{18,src},{11,dest_cache},
+      {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned i=0;i<6;i++)
+      fields[5+i]=(struct agx3_field_kv){49+i,!!(wait_mask & (1u<<i))};
+   return agx3_bind_compose(enc,"f32rcp",0,base,5,fields,11,out,len);
+}
+
 /* Native float32 multiplication rounds directly to the half destination. */
 bool
 agx3_alu_fmul_narrow(enum agx_isa_encoding enc, uint16_t dest,

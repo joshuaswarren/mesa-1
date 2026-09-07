@@ -1278,6 +1278,27 @@ static void test_native_half_clamp(void)
    puts("Native half clamp: exact internal Apple FSEL plus canonical no-wait tail PASS");
 }
 
+static void test_native_half_reciprocal(void)
+{
+   static const struct {
+      uint16_t dest;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } cases[]={
+      {0,AGX3_ALU_HINT_CACHE,"af005600030602442000"},
+      {4,AGX3_ALU_HINT_DISCARD,"af005604030610442000"},
+   };
+   for (unsigned i=0;i<2;i++) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+      assert(agx3_alu_hrcp(AGX_ISA_ENCODING_AGX3B,cases[i].dest,3,
+                           cases[i].hint,true,32,bytes,&len));
+      exact(bytes,len,cases[i].bytes);
+      assert(!agx3_alu_hrcp(AGX_ISA_ENCODING_AGX3C,cases[i].dest,3,
+                            cases[i].hint,true,32,bytes,&len));
+   }
+   puts("Native half reciprocal: two complete Apple live/dead f32rcp vectors PASS");
+}
+
 static void test_native_high_float_registers(void)
 {
    /* Original native80-value kernels force retained ALU values into the upper
@@ -1328,6 +1349,7 @@ int main(void){
    test_native_half_min();
    test_native_half_max();
    test_native_half_clamp();
+   test_native_half_reciprocal();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();

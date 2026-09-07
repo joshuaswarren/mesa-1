@@ -5085,6 +5085,28 @@ TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
    EXPECT_EQ(memcmp(code.data(), expected_chain, sizeof(expected_chain)), 0);
 }
 
+TEST_F(AGX3PackBinary, HalfReciprocalRoutesNoWaitAndRefusesModifier)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(0, AGX_SIZE_16);
+   agx_index src = agx_register(3, AGX_SIZE_16);
+   dest.cache = src.cache = true;
+   agx_rcp_to(b, dest, src);
+   agx_stop(b);
+   const auto code = pack(b);
+   const uint8_t expected[] = {
+      0xaf,0x00,0x54,0x00,0x03,0x06,0x02,0x44,0x20,0x00,
+   };
+   ASSERT_EQ(code.size(), sizeof(expected) + 4);
+   EXPECT_EQ(memcmp(code.data(), expected, sizeof(expected)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src.neg = true;
+   agx_rcp_to(b, dest, src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)
 {
    for (unsigned mode = 0; mode < 3; ++mode) {
