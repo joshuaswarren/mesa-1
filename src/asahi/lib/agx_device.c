@@ -1007,7 +1007,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
       ALIGN_POT(MAX2(dev->params.vm_start, reservation), 0x100000000ull);
    uint64_t user_start;
    if (heap_below_usc) {
-      user_start = MAX2(low_floor, dev->shader_base / 2);
+      /* Bound by the NARROWER of the two G17P pointers, not by the USC
+       * window: the compact VDM pointer reaches 0x9000000000, but the
+       * absolute 36-bit shr(3) USC Texture/Sampler Buffer field stops at
+       * 2^39. Starting halfway through that aperture is as high as the split
+       * allows -- it needs size < start, and the sparse alias needs a second
+       * window of the same size -- and lands the alias exactly on the limit.
+       */
+      user_start = MAX2(low_floor, AGX_G17P_USER_LIMIT / 2);
    } else {
       user_start = dev->shader_base + shader_size;
    }
@@ -1037,10 +1044,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
       .kernel_end = dev->params.vm_end,
    };
 
-   /* G17P is bounded by the compact VDM aperture, which is below the USC
-    * window. Other chips retain the kernel-reported user limit. */
+   /* G17P is bounded by the narrower of the compact VDM aperture and the
+    * absolute USC texture/sampler table pointer, both of which sit below the
+    * USC window. Other chips retain the kernel-reported user limit. */
    const uint64_t user_limit =
-      heap_below_usc ? AGX_G17P_VDM_USER_LIMIT : vm_create.kernel_start;
+      heap_below_usc ? AGX_G17P_USER_LIMIT : vm_create.kernel_start;
    uint64_t user_size = user_limit - user_start;
 
    int ret = dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);

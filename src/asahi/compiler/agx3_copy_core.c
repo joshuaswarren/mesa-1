@@ -97,6 +97,34 @@ agx3_copy_encode_reg_to_uniform(enum agx_isa_encoding encoding,
 }
 
 bool
+agx3_copy_encode_uniform_to_reg16(enum agx_isa_encoding encoding,
+                                  uint16_t dest_half, uint16_t uniform_half,
+                                  bool dest_cache,
+                                  uint8_t out[AGX3_COPY_MAX_LENGTH],
+                                  uint8_t *len)
+{
+   /* Only AGX3b is witnessed; the AGX3c corpus has no 16-bit uniform copy. */
+   if (out == NULL || len == NULL || encoding != AGX_ISA_ENCODING_AGX3B ||
+       dest_half >= 128 || uniform_half >= 512)
+      return false;
+
+   /* The 16-bit widths of agx3_copy_encode_reg16() with the uniform source
+    * selector of agx3_copy_encode_uniform_to_reg32(). A 16-bit value is one
+    * half in either file, so neither index is aligned.
+    */
+   const struct agx3_field_kv baseline[] = {
+      KV(9, 2), KV(10, 1), KV(23, 3), KV(24, 1),
+   };
+   const struct agx3_field_kv overrides[] = {
+      KV(2, dest_half), KV(17, uniform_half), KV(11, dest_cache),
+   };
+
+   return agx3_bind_compose(encoding, "copy", 0, baseline,
+                            AGX3_COPY_ARRAY_SIZE(baseline), overrides,
+                            AGX3_COPY_ARRAY_SIZE(overrides), out, len);
+}
+
+bool
 agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
                                   uint16_t dest_half, uint16_t uniform_half,
                                   uint8_t out[AGX3_COPY_MAX_LENGTH],

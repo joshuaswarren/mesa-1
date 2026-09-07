@@ -6,6 +6,8 @@
 #include "agx_native_descriptor.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_pbe_agx3_core.h"
+#include "util/macros.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -118,8 +120,147 @@ test_feature_gates(void)
 
    CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_7));
    CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_8));
-   CHECK(!agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_9));
-   CHECK(!agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_10));
+   CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_9));
+   CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_10));
+   CHECK(!agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_UNKNOWN));
+}
+
+/* A plain 2D render target: exactly what the end-of-tile store binds. */
+static struct AGX_PBE
+render_target_pbe(void)
+{
+   struct AGX_PBE cfg = {AGX_PBE_header};
+   cfg.dimension = AGX_TEXTURE_DIMENSION_2D;
+   cfg.layout = AGX_LAYOUT_TWIDDLED;
+   cfg.channels = AGX_CHANNELS_R8G8B8A8;
+   cfg.type = AGX_TEXTURE_TYPE_UNORM;
+   cfg.swizzle_r = AGX_CHANNEL_R;
+   cfg.swizzle_g = AGX_CHANNEL_G;
+   cfg.swizzle_b = AGX_CHANNEL_B;
+   cfg.swizzle_a = AGX_CHANNEL_A;
+   cfg.width = 4;
+   cfg.height = 8;
+   cfg.buffer = UINT64_C(0x4000010000);
+   return cfg;
+}
+
+/*
+ * The AGX3 render-target store. Before this existed, agx_batch_upload_pbe()
+ * returned false for every Gen9/Gen10 image and the end-of-tile program's
+ * caller aborted the process through agx_native_descriptor_rejected(), so
+ * native Gallium could not store a single pixel on G17P.
+ */
+static void
+test_agx3_pbe(void)
+{
+   const struct AGX_PBE rt = render_target_pbe();
+   struct agx_gallium_pbe_descriptor native;
+
+   memset(&native, 0xa5, sizeof(native));
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &rt));
+
+   /* The Gen9 descriptor is the shared byte-grounded codec's, not a copy of
+    * the AGX2 packet: assert equality with it rather than restating bytes.
+    */
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = rt.layout,
+      .channels = rt.channels,
+      .type = rt.type,
+      .swizzle_r = rt.swizzle_r,
+      .swizzle_g = rt.swizzle_g,
+      .swizzle_b = rt.swizzle_b,
+      .swizzle_a = rt.swizzle_a,
+      .width = rt.width,
+      .height = rt.height,
+      .buffer = rt.buffer,
+      .stride_B = 0,
+      .page_aligned_layers = rt.page_aligned_layers,
+   };
+   struct agx_pbe_agx3_descriptor expected;
+   CHECK(agx_pbe_agx3_2d_mip_pack(AGX_PBE_AGX3_GENERATION_9, &fields, 0, 1,
+                                  &expected));
+   CHECK(memcmp(native.opaque, expected.bytes, sizeof(expected.bytes)) == 0);
+
+   /* A single-level 2D image happens to share its first words with the AGX2
+    * packet -- Gen9 keeps dimension, layout, channels, type, swizzles, width
+    * and the shifted address where Gen7 had them. The encodings are not the
+    * same thing, though: Gen9's mip extension has no AGX2 counterpart, and
+    * it is what makes a mipmapped render target encodable at all.
+    */
+   struct agx_gallium_pbe_descriptor agx2;
+   memset(&agx2, 0, sizeof(agx2));
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_7, &agx2, &rt));
+   CHECK(memcmp(native.opaque, agx2.opaque, AGX_PBE_LENGTH) == 0);
+
+   struct AGX_PBE mipped = rt;
+   mipped.level = 1;
+   mipped.levels = 4;
+   struct agx_gallium_pbe_descriptor native_mip;
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native_mip,
+                                     &mipped));
+   CHECK(memcmp(native_mip.opaque, native.opaque, sizeof(native.opaque)) != 0);
+
+   /* Gen10 has no mip extension: the same mipped image is refused there, and
+    * the single-level one still encodes. */
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10,
+                                      &native_mip, &mipped));
+   memset(&native, 0xa5, sizeof(native));
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
+                                     &rt));
+
+   /* The null descriptor must encode on AGX3 too -- unbound storage images
+    * write it, and a refusal there aborts the process.
+    */
+   memset(&native, 0xa5, sizeof(native));
+   CHECK(agx_gallium_set_null_native_pbe(AGX_DESCRIPTOR_GENERATION_9,
+                                         &native));
+   CHECK(agx_gallium_set_null_native_pbe(AGX_DESCRIPTOR_GENERATION_10,
+                                         &native));
+
+   /* Everything outside the recovered subset stays refused, writing zeroes
+    * rather than a half-encoded descriptor. Each of these is one axis away
+    * from the accepted render target above.
+    */
+   static const char *const names[] = {
+      "software sideband (image atomics)", "MSAA sideband", "layer stride",
+      "compressed",  "sRGB on store",      "extended word",
+      "array",       "multisampled",       "1D",
+      "sparse image mode",
+   };
+   struct AGX_PBE bad[ARRAY_SIZE(names)];
+   for (unsigned i = 0; i < ARRAY_SIZE(names); ++i)
+      bad[i] = rt;
+
+   bad[0].level_offset_sw = 0x80;
+   bad[1].aligned_width_msaa_sw = 64;
+   bad[2].layer_stride_sw = 0x4000;
+   bad[3].compressed = true;
+   bad[4].srgb = true;
+   bad[5].extended = true;
+   bad[6].layers = 2;
+   bad[7].samples = AGX_SAMPLE_COUNT_4;
+   bad[8].dimension = AGX_TEXTURE_DIMENSION_1D;
+   bad[9].mode = AGX_IMAGE_MODE_SPARSE;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(bad); ++i) {
+      memset(&native, 0xff, sizeof(native));
+      if (agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                      &bad[i])) {
+         fprintf(stderr, "AGX3 PBE accepted %s\n", names[i]);
+         exit(1);
+      }
+      ++checks;
+      CHECK(native.opaque[0] == 0 && native.opaque[7] == 0);
+
+      /* The same descriptor is still legal on AGX2, so these gates are
+       * about the missing Gen9 placement, not about the image itself. */
+      if (i < 3) {
+         struct agx_gallium_pbe_descriptor still_ok;
+         CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_7,
+                                           &still_ok, &bad[i]));
+      }
+   }
 }
 
 static void
@@ -290,15 +431,22 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_10, &native, &unsupported));
    CHECK(native.opaque[0] == 0 && native.opaque[7] == 0);
 
-   struct agx_pbe_packed pbe = {.opaque = {1, 2, 3, 4, 5, 6}};
+   /* AGX2 still packs the legacy 24-byte packet verbatim, and only those 24
+    * bytes: the AGX3 stride's tail is untouched. */
+   const struct AGX_PBE pbe_semantic = render_target_pbe();
+   struct agx_pbe_packed pbe;
+   AGX_PBE_pack(pbe.opaque, &pbe_semantic);
+
    struct agx_gallium_pbe_descriptor native_pbe;
    memset(&native_pbe, 0xa5, sizeof(native_pbe));
    CHECK(agx_gallium_pack_native_pbe(
-      AGX_DESCRIPTOR_GENERATION_8, &native_pbe, &pbe));
+      AGX_DESCRIPTOR_GENERATION_8, &native_pbe, &pbe_semantic));
    CHECK(memcmp(&native_pbe, &pbe, sizeof(pbe)) == 0);
    CHECK(native_pbe.opaque[6] == 0xa5a5a5a5 &&
          native_pbe.opaque[7] == 0xa5a5a5a5);
 
+   /* The AGX2 null PBE's bytes are unchanged by the AGX3 work: same 1D
+    * dimension, same everything. */
    struct agx_pbe_packed expected_null_pbe;
    agx_pack(&expected_null_pbe, PBE, cfg) {
       cfg.width = 1;
@@ -322,10 +470,20 @@ test_native_packers(void)
    CHECK(native_pbe.opaque[6] == 0xa5a5a5a5 &&
          native_pbe.opaque[7] == 0xa5a5a5a5);
 
+   /* A refused AGX3 descriptor leaves the whole native stride zeroed rather
+    * than a partially-written one. The render target above carries the
+    * software addressing sideband here, which Gen10 has no home for. */
+   struct AGX_PBE sideband = pbe_semantic;
+   sideband.level_offset_sw = 0x80;
    memset(&native_pbe, 0xff, sizeof(native_pbe));
    CHECK(!agx_gallium_pack_native_pbe(
-      AGX_DESCRIPTOR_GENERATION_10, &native_pbe, &pbe));
+      AGX_DESCRIPTOR_GENERATION_10, &native_pbe, &sideband));
    CHECK(native_pbe.opaque[0] == 0 && native_pbe.opaque[7] == 0);
+
+   /* An unknown generation has no descriptor at all: nothing is written and
+    * nothing is claimed. */
+   CHECK(!agx_gallium_pack_native_pbe(
+      AGX_DESCRIPTOR_GENERATION_UNKNOWN, &native_pbe, &pbe_semantic));
 }
 
 int
@@ -334,6 +492,7 @@ main(void)
    test_chip_routing();
    test_feature_gates();
    test_native_packers();
+   test_agx3_pbe();
    printf("Gallium AGX native descriptors: %u checks passed\n", checks);
    return 0;
 }

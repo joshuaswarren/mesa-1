@@ -7,6 +7,7 @@
 
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_pbe_agx3_core.h"
 
 #include <string.h>
 
@@ -191,11 +192,26 @@ agx_gallium_set_null_native_texture(
    return agx_gallium_pack_native_texture(generation, out, &semantic);
 }
 
+/* Map the descriptor-generation enum onto the shared codec's numeric
+ * generation. Zero means "no recovered AGX3 encoding". */
+static uint32_t
+agx_gallium_pbe_agx3_generation(enum agx_descriptor_generation generation)
+{
+   switch (generation) {
+   case AGX_DESCRIPTOR_GENERATION_9:
+      return AGX_PBE_AGX3_GENERATION_9;
+   case AGX_DESCRIPTOR_GENERATION_10:
+      return AGX_PBE_AGX3_GENERATION_10;
+   default:
+      return 0;
+   }
+}
+
 bool
 agx_gallium_pack_native_pbe(
    enum agx_descriptor_generation generation,
    struct agx_gallium_pbe_descriptor *out,
-   const struct agx_pbe_packed *legacy)
+   const struct AGX_PBE *legacy)
 {
    const unsigned descriptor_size =
       agx_gallium_pbe_descriptor_size(generation);
@@ -207,7 +223,76 @@ agx_gallium_pack_native_pbe(
    if (!agx_gallium_native_pbe_supported(generation))
       return false;
 
-   memcpy(out, legacy, AGX_PBE_LENGTH);
+   if (agx_gallium_descriptor_generation_is_agx2(generation)) {
+      AGX_PBE_pack(out->opaque, legacy);
+      return true;
+   }
+
+   const uint32_t agx3_generation =
+      agx_gallium_pbe_agx3_generation(generation);
+   if (!agx3_generation)
+      return false;
+
+   /* Exactly the subset agx_pbe_agx3_core.h documents as recovered, and the
+    * same gate hk_pack_native_pbe() applies field for field -- the one that
+    * already runs on this hardware through Honeykrisp. Every other axis
+    * (arrays, multisample, compression, sRGB-on-store, image mode, the
+    * extended word, and the software addressing sideband Gallium uses for
+    * image atomics, EMRT and spilled render targets) has no proven Gen9/Gen10
+    * placement, so refuse rather than drop the bits.
+    */
+   if (legacy->dimension != AGX_TEXTURE_DIMENSION_2D ||
+       (legacy->layout == AGX_LAYOUT_LINEAR &&
+        (agx3_generation != AGX_PBE_AGX3_GENERATION_9 || legacy->level != 0 ||
+         legacy->levels != 1 || legacy->unk_mipmapped)) ||
+       (legacy->layout != AGX_LAYOUT_LINEAR &&
+        legacy->layout != AGX_LAYOUT_TWIDDLED &&
+        legacy->layout != AGX_LAYOUT_GPU) ||
+       legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
+       legacy->samples != AGX_SAMPLE_COUNT_2 || legacy->compressed ||
+       legacy->mode != AGX_IMAGE_MODE_NORMAL || legacy->layers != 1 ||
+       (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
+        (legacy->level != 0 || legacy->levels != 1 ||
+         legacy->unk_mipmapped)) ||
+       legacy->srgb || legacy->extended ||
+       (legacy->layout == AGX_LAYOUT_LINEAR
+           ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
+           : legacy->stride != 0) ||
+       legacy->acceleration_buffer || legacy->depth_linear != 1 ||
+       legacy->layer_stride_linear || legacy->level_offset_sw ||
+       legacy->aligned_width_msaa_sw || legacy->sample_count_log2_sw ||
+       legacy->tile_width_sw != 1 || legacy->tile_height_sw != 1 ||
+       legacy->layer_stride_sw || legacy->buffer_offset_sw)
+      return false;
+
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = legacy->layout,
+      .channels = legacy->channels,
+      .type = legacy->type,
+      .swizzle_r = legacy->swizzle_r,
+      .swizzle_g = legacy->swizzle_g,
+      .swizzle_b = legacy->swizzle_b,
+      .swizzle_a = legacy->swizzle_a,
+      .width = legacy->width,
+      .height = legacy->height,
+      .buffer = legacy->buffer,
+      .stride_B =
+         legacy->layout == AGX_LAYOUT_LINEAR ? legacy->stride + 4 : 0,
+      .page_aligned_layers = legacy->page_aligned_layers,
+   };
+
+   struct agx_pbe_agx3_descriptor packed;
+   const bool valid =
+      agx3_generation == AGX_PBE_AGX3_GENERATION_9
+         ? agx_pbe_agx3_2d_mip_pack(agx3_generation, &fields, legacy->level,
+                                    legacy->levels, &packed)
+         : agx_pbe_agx3_2d_pack(agx3_generation, &fields, &packed);
+   if (!valid)
+      return false;
+
+   static_assert(sizeof(packed.bytes) == AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE,
+                 "the AGX3 PBE descriptor is the AGX3 descriptor stride");
+   memcpy(out->opaque, packed.bytes, sizeof(packed.bytes));
    return true;
 }
 
@@ -216,21 +301,26 @@ agx_gallium_set_null_native_pbe(
    enum agx_descriptor_generation generation,
    struct agx_gallium_pbe_descriptor *out)
 {
-   struct agx_pbe_packed legacy;
+   /* AGX_PBE_header already supplies the 1s for width, height, levels,
+    * layers, depth_linear and the two software tile dimensions. */
+   struct AGX_PBE legacy = {
+      AGX_PBE_header,
+      .layout = AGX_LAYOUT_TWIDDLED,
+      .channels = AGX_CHANNELS_R8,
+      .type = AGX_TEXTURE_TYPE_UNORM,
+      .swizzle_r = AGX_CHANNEL_R,
+      .swizzle_g = AGX_CHANNEL_R,
+      .swizzle_b = AGX_CHANNEL_R,
+      .swizzle_a = AGX_CHANNEL_R,
+      .buffer = AGX_SCRATCH_PAGE_ADDRESS,
+   };
 
-   agx_pack(&legacy, PBE, cfg) {
-      cfg.width = 1;
-      cfg.height = 1;
-      cfg.levels = 1;
-      cfg.layout = AGX_LAYOUT_TWIDDLED;
-      cfg.channels = AGX_CHANNELS_R8;
-      cfg.type = AGX_TEXTURE_TYPE_UNORM;
-      cfg.swizzle_r = AGX_CHANNEL_R;
-      cfg.swizzle_g = AGX_CHANNEL_R;
-      cfg.swizzle_b = AGX_CHANNEL_R;
-      cfg.swizzle_a = AGX_CHANNEL_R;
-      cfg.buffer = AGX_SCRATCH_PAGE_ADDRESS;
-   }
+   /* AGX3's recovered PBE geometry is 2D only, and the null descriptor
+    * Honeykrisp already runs on this hardware is 2D. The AGX2 null
+    * descriptor keeps the dimension it has always had.
+    */
+   if (agx_gallium_descriptor_generation_is_agx3(generation))
+      legacy.dimension = AGX_TEXTURE_DIMENSION_2D;
 
    return agx_gallium_pack_native_pbe(generation, out, &legacy);
 }

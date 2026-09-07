@@ -325,6 +325,86 @@ Closing it is the same work as `f05_texture_bias` and `f12_texture_grad`:
 either teach that pass to keep the op, or ground the bindless-heap sample
 form.
 
+## Native Gallium's texel fetch: measured, and the three gaps behind it
+
+`asahi-g17p-gallium-blit` reproduces the whole thing offline under the no-op
+DRM shim -- the 4x8 `B8G8R8A8_UNORM` to `R8G8B8A8_UNORM` `util_blitter_blit`
+that core 983 died on. With `AGX_MESA_DEBUG=shaders` the fragment program
+refuses:
+
+```
+agx3_pack_binary.c:4335: no grounded AGX3 encoding for texture_load
+  [d32:reg8 s0=32:reg8.discard s1=16:reg4.discard s2=64:uni0
+   s3=32:reg0.discard s4=16:imm0 s5=16:null0 cond=0 chan=4]
+```
+
+Three of those operands are wrong at once, and they all follow from **one**
+cause: u_blitter carries the mip level in a varying, so the `txf` has a
+**dynamic LOD**. `agx_nir_needs_texture_crawl()` returns true for a `txf` with
+a non-zero LOD, which makes `agx_nir_lower_bindings()` force the bindless path
+*and* makes `agx_nir_lower_texture()` emit a descriptor crawl to clamp the
+level. Hence:
+
+1. **`s1`, the level, is a register.** The fetch encoder only had the
+   immediate-zero form. This is now closed at the encoder: see below.
+2. **`s2`/`s3` are a bindless heap base plus a 32-bit index.**
+   `agx3_emit_texture_fetch()` wants `s2` to be the immediate zero and `s3` to
+   be an immediate index or a 64-bit descriptor *address* -- the form
+   Honeykrisp produces after `agx_nir_lower_g17p_combined_sampler`, which
+   Gallium never runs. Gallium would have to fold `heap_base + index * stride`
+   into that 64-bit operand, or the bindless-heap form would have to be
+   grounded.
+3. **The crawl reads AGX2 descriptor bits.** The preamble does
+   `load_constant_agx(desc, 1)` and pulls bits 24..27 and 28..31 out of word
+   1 -- `first_level` and `levels` in the 24-byte Gen7/8 texture packet.
+   Gen9's texture descriptor is 32 bytes with a different layout, so even
+   once (1) and (2) encode, the clamp would read the wrong fields.
+
+Note that nothing here is about the blit itself: any GL `texelFetch` with a
+non-constant level takes the same path.
+
+### The texel fetch's level is now grounded
+
+`metal-nt -arch applegpu_g17p` on one source file, three compute kernels
+differing only in the level argument to `texture2d<float>::read()`
+(`.tmp/g17p-gallium2-evidence/texlod.metal`):
+
+```text
+read(gid, 0)        05800cb8b0001701000000000100   f37=1 f139=2 f29=0
+read(gid, 2)        05800cb8b0001701000000080100   f37=1 f139=2 f29=128
+read(gid, lod[i])   05800cb830018024000000000100   f37 absent, f139=4
+```
+
+`f29` is the level in 1/64 steps, exactly as the filtered sample's explicit
+level and bias already are. The per-lane form drops the immediate operand
+selector entirely and selects `f139 = 4`, with the level published into
+texture operand bank 6 by a preceding `PACK_SMPIR`. The same two-field delta
+appears between two *fragment* programs in `texlodfs.metal`, so it is not a
+compute-only shape; those bytes also carry fragment-only `f83`/`f112`/`f124`
+selectors this encoder does not model, which is why the in-tree vectors are
+the compute pair.
+
+`PACK_SMPIR`'s `f74` types the level, and it is the only field that moves
+between a fragment texel fetch and a fragment filtered sample compiled from
+one file (`texlodtype.metal`):
+
+```text
+t.read(uint2(uv), uint(lod))       1705540600000004f0c00c00   f74 = 3
+t.sample(s, uv, level(lod))        17055406000c0004f0c00800   f74 = 2
+```
+
+So 2 is a float level and 3 an integer one. `agx3_tex_stage_typed_lod()`
+carries that; `agx3_tex_stage_lod()` stays the float form every existing
+caller uses.
+
+All five vectors are pinned byte-for-byte in
+`src/asahi/compiler/test/test-agx3-tex-core.c`. **The encoder is not routed
+yet**: `agx3_emit_texture_fetch()` still requires the immediate-zero level,
+because routing needs the staging-slot plumbing and a check that Mesa's
+`texture_load` source 1 really is an integer level in texel units, and gaps
+(2) and (3) above would still refuse the shader. This is the same state the
+LOD-bias and gradient sample forms are in.
+
 ## The 32-bit tied fcmpsel, and what it cost
 
 `max(x, 0.0)` on floats — so `normalize()`, `clamp()`, `saturate()` and the

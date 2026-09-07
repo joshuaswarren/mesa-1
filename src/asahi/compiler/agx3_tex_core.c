@@ -42,6 +42,12 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER))
       return false;
 
+   /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
+    * immediate at all, and is witnessed on AGX3b only. */
+   if (d->lod_x64 > 2047 || (d->register_lod && d->lod_x64) ||
+       (d->register_lod && enc != AGX_ISA_ENCODING_AGX3B))
+      return false;
+
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0x7f : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
@@ -97,7 +103,13 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(19, d->coord);
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot);
    ov[n++] = (struct agx3_field_kv)KV(27, d->coord_kill ? 1 : 0);
-   ov[n++] = (struct agx3_field_kv)KV(37, 1);  /* immediate LOD */
+   /* An immediate level carries the operand (f37) and the level in f29; the
+    * per-lane level has neither and selects f139 = 4 below. */
+   if (!d->register_lod) {
+      ov[n++] = (struct agx3_field_kv)KV(37, 1);
+      if (d->lod_x64)
+         ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
+   }
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
    ov[n++] = (struct agx3_field_kv)KV(76, 1);  /* 2D */
    if (d->array)
@@ -116,7 +128,7 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
                                          : 126,
       d->sampler_value);
    ov[n++] = (struct agx3_field_kv)KV(107, d->texture_kill);
-   ov[n++] = (struct agx3_field_kv)KV(139, 2); /* LOD0 immediate shape */
+   ov[n++] = (struct agx3_field_kv)KV(139, d->register_lod ? 4 : 2);
    if (enc == AGX_ISA_ENCODING_AGX3B)
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);
    else {
@@ -586,21 +598,23 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  * scalar half LOD, preserving the source when it remains live. f5=6 selects
  * operand bank 6, not architectural r3. */
 bool
-agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
-                   uint16_t wait_mask, bool src_cache, bool src_discard,
-                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
+                         uint16_t wait_mask, bool src_cache, bool src_discard,
+                         enum agx3_tex_level_kind kind,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || slot < 1 || slot > 6 ||
-       (wait_mask & ~0x3f) || (src_cache && src_discard))
+       (wait_mask & ~0x3f) || (src_cache && src_discard) ||
+       (kind != AGX3_TEX_LEVEL_FLOAT && kind != AGX3_TEX_LEVEL_INTEGER))
       return false;
 
    const struct agx3_field_kv base[] = {
       KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
-      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 2), KV(75, 16),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, (unsigned)kind), KV(75, 16),
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;
@@ -621,6 +635,16 @@ agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
     * Keep the same native instruction for Mesa's full 256-half bank. */
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+bool
+agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
+                   uint16_t wait_mask, bool src_cache, bool src_discard,
+                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_typed_lod(enc, src, slot, wait_mask, src_cache,
+                                   src_discard, AGX3_TEX_LEVEL_FLOAT, out,
+                                   len);
 }
 
 /* The dynamic array-layer witness uses PACK_SMPIR like register LOD, but its

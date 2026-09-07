@@ -58,6 +58,21 @@ enum agx3_tex_operand_kind {
    AGX3_TEX_OPERAND_UNIFORM = 3,
 };
 
+/*
+ * How the level operand staged into texture operand bank 6 is typed.
+ *
+ * PACK_SMPIR's f74 selects it, and it is the only field that moves between
+ * two otherwise byte-identical fragment programs compiled by
+ * `metal-nt -arch applegpu_g17p` from one source file: a filtered
+ * `t.sample(s, uv, level(in.uv.z))` stages f74 = 2, while a
+ * `t.read(uint2(in.uv.xy), uint(in.uv.z))` texel fetch stages f74 = 3.
+ * Evidence: .tmp/g17p-gallium2-evidence/texlodtype.{metal,nat}.
+ */
+enum agx3_tex_level_kind {
+   AGX3_TEX_LEVEL_FLOAT = 2,
+   AGX3_TEX_LEVEL_INTEGER = 3,
+};
+
 struct agx3_tex_fetch_desc {
    uint16_t dest;       /* half-register index */
    uint16_t coord;      /* four-half aligned pair of f32 coordinates */
@@ -78,6 +93,25 @@ struct agx3_tex_fetch_desc {
     * index. Half-register index for REGISTER, uniform half for UNIFORM. */
    uint16_t texture_value;
    uint16_t sampler_value;
+   /*
+    * The level.
+    *
+    * By default the fetch is at level 0, which is what the immediate form
+    * encodes with an all-zero f29. A non-zero `lod_x64` is the level in the
+    * same 1/64 fixed-point field the sample family uses: compiling
+    * `t.read(gid, 0)` against `t.read(gid, 2)` moves f29 from 0 to 128 and
+    * nothing else.
+    *
+    * `register_lod` selects the per-lane form instead: f37 clears (there is
+    * no immediate operand) and f139 becomes 4, with the level published into
+    * operand bank 6 by an agx3_tex_stage_lod() carrying
+    * AGX3_TEX_LEVEL_INTEGER. Those two fields are the ONLY difference
+    * between the two fragment texel fetches in
+    * .tmp/g17p-gallium2-evidence/texlodfs.{metal,nat}. AGX3b only; AGX3c has
+    * no witness.
+    */
+   uint16_t lod_x64;
+   bool register_lod;
 };
 
 bool agx3_tex_encode_fetch(enum agx_isa_encoding enc,
@@ -222,8 +256,17 @@ struct agx3_tex_sample_desc {
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
 };
 
-/* Pack a scalar half-float LOD into native texture operand bank 6. This bank
- * is separate from GPRs and the coordinate staging bank. */
+/* Pack a scalar LOD into native texture operand bank 6. This bank is separate
+ * from GPRs and the coordinate staging bank. `kind` selects how the level is
+ * typed: FLOAT for the filtered sample's `level(x)`, INTEGER for a texel
+ * fetch's level. */
+bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
+                              uint8_t slot, uint16_t wait_mask,
+                              bool src_cache, bool src_discard,
+                              enum agx3_tex_level_kind kind,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* The float-level form, which is what the filtered sample path stages. */
 bool agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                        uint16_t wait_mask, bool src_cache, bool src_discard,
                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
