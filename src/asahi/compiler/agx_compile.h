@@ -355,6 +355,10 @@ struct agx_shader_key {
     * independently grounded only for the two-word R32G32 SINT layout. */
    bool g17p_rt0_eot_i32_selector_15;
 
+   /* Select the native 0x75 imgwblk variant for an I32 store. This is
+    * independently grounded only for the two-word R32G32 UINT layout. */
+   bool g17p_rt0_eot_i32_selector_75;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.

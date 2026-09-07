@@ -3142,7 +3142,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
  * and R16G16_SINT key0x08020800 use selector 0x15, shared physically with
  * two-word RGBA16 key0x10020c00. R32G32_SINT key0x08021200 also uses the
- * 0x15 selector, despite lowering to the same I32 store as scalar R32.
+ * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
+ * despite both lowering to the same I32 store as scalar R32.
  * R8G8_UINT key0x08020500 uses one I8 imageblock word and selector 0x55.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
@@ -3248,11 +3249,23 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    }
 
    if (store_format == AGX_FORMAT_I32) {
+      if (ctx->key->g17p_rt0_eot_i32_selector_15 &&
+          ctx->key->g17p_rt0_eot_i32_selector_75)
+         return AGX3_G17P_RT0_EOT_NONE;
+
       if (ctx->key->g17p_rt0_eot_i32_selector_15) {
          /* Only the exact two-word signed pair has native evidence for this
           * I32 selector. Reject an ambiguous or scalar shape. */
          return ctx->key->g17p_rt0_eot_words == 2
                    ? AGX3_G17P_RT0_EOT_SELECTOR_15
+                   : AGX3_G17P_RT0_EOT_NONE;
+      }
+
+      if (ctx->key->g17p_rt0_eot_i32_selector_75) {
+         /* Only the exact two-word unsigned pair has native evidence for
+          * this I32 selector. Reject an ambiguous or scalar shape. */
+         return ctx->key->g17p_rt0_eot_words == 2
+                   ? AGX3_G17P_RT0_EOT_SELECTOR_75
                    : AGX3_G17P_RT0_EOT_NONE;
       }
 
@@ -3265,7 +3278,8 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    if (store_format == AGX_FORMAT_I8)
       return AGX3_G17P_RT0_EOT_SELECTOR_55;
 
-   if (ctx->key->g17p_rt0_eot_i32_selector_15)
+   if (ctx->key->g17p_rt0_eot_i32_selector_15 ||
+       ctx->key->g17p_rt0_eot_i32_selector_75)
       return AGX3_G17P_RT0_EOT_NONE;
    if (store_format == AGX_FORMAT_I16)
       return AGX3_G17P_RT0_EOT_SELECTOR_15;

@@ -349,10 +349,14 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
           key->tib.logical_format[0] == PIPE_FORMAT_R32G32_FLOAT ||
           key->tib.logical_format[0] == PIPE_FORMAT_R32_UINT ||
           key->tib.logical_format[0] == PIPE_FORMAT_R32_SINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_SINT),
+          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_SINT ||
+          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_UINT),
       .g17p_rt0_eot_i32_selector_15 =
          cache->dev->chip == AGX_CHIP_G17P &&
          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_SINT,
+      .g17p_rt0_eot_i32_selector_75 =
+         cache->dev->chip == AGX_CHIP_G17P &&
+         key->tib.logical_format[0] == PIPE_FORMAT_R32G32_UINT,
    };
 
    if (cache->dev->chip == AGX_CHIP_G17P) {
@@ -366,6 +370,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       case PIPE_FORMAT_R32G32_FLOAT:
       case PIPE_FORMAT_R16G16B16A16_UNORM:
       case PIPE_FORMAT_R32G32_SINT:
+      case PIPE_FORMAT_R32G32_UINT:
          compiler_key.g17p_rt0_eot_words = 2;
          break;
       default:
