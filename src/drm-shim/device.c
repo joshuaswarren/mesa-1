@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -270,6 +271,22 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
 }
 
 static int
+drm_shim_ioctl_syncobj_handle_to_fd(int fd, unsigned long request, void *arg)
+{
+   struct drm_syncobj_handle *handle = arg;
+
+   /* No-op submissions complete immediately, so their completion sync file
+    * must be immediately pollable. Ordinary syncobj-fd export stays closed:
+    * an eventfd models a sync file, not another syncobj handle. */
+   if (!handle->handle ||
+       handle->flags != DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE)
+      return -EINVAL;
+
+   handle->fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+   return handle->fd < 0 ? -errno : 0;
+}
+
+static int
 drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
 {
    return 0;
@@ -282,7 +299,8 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_GEM_CLOSE)] = drm_shim_ioctl_gem_close,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_CREATE)] = drm_shim_ioctl_syncobj_create,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_DESTROY)] = drm_shim_ioctl_stub,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] =
+      drm_shim_ioctl_syncobj_handle_to_fd,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,

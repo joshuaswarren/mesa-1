@@ -30,5 +30,6 @@ with tempfile.TemporaryDirectory(prefix="asahi-gl-shim-") as tmp:
     env["MESA_LOADER_DRIVER_OVERRIDE"] = "asahi"
     env["EGL_PLATFORM"] = "surfaceless"
     env.setdefault("ASAHI_SHIM_CHIP", "g17p")
+    env["ASAHI_GL_NOOP_SHIM"] = "1"
 
     sys.exit(subprocess.call([str(binary)], env=env))

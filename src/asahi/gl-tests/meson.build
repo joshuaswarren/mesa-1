@@ -32,3 +32,35 @@ run_target(
     gl_resources,
   ],
 )
+
+gl_buffer_sync = executable(
+  'asahi-g17p-gl-buffer-sync',
+  files('test-g17p-gl-buffer-sync.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-buffer-sync-software-control',
+  gl_buffer_sync,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+run_target(
+  'asahi-g17p-gl-buffer-sync-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_buffer_sync,
+  ],
+)
