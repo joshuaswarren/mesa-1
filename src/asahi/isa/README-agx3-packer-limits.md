@@ -1,11 +1,16 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
-**Status: the SSBO limit below is GONE, and so is the `fcmpsel` one; two
-texture-side gaps remain.** Every row of the original matrix compiles,
-including the ones marked **no**, and so do device atomics. The measurement
-that produced the matrix is preserved verbatim further down, because the
-*method* is what makes it re-runnable, and because the retraction it carries is
-still worth reading before theorising about a wrong value on this ISA.
+**Status: the SSBO limit below is GONE, so is the `fcmpsel` one, and so are the
+float source modifiers and the 32-bit rounding modes. Two texture-side gaps and
+one saturate gap remain.** Every row of the original matrix compiles, including
+the ones marked **no**, and so do device atomics. The measurement that produced
+the matrix is preserved verbatim further down, because the *method* is what
+makes it re-runnable, and because the retraction it carries is still worth
+reading before theorising about a wrong value on this ISA.
+
+**Every vkQuake pipeline now compiles: 385 of 385, 248 of 248 unique
+pipelines**, up from 67 of 385, with no packer refusal anywhere in the run. See
+"vkQuake" below for the exact reproduction.
 
 Measured 2026-09-07 under the G17P drm-shim, on the integration branch plus the
 commits named in "What changed". No hardware.
@@ -53,6 +58,11 @@ and every textured draw:
 | `x < 0.5 ? a : b` — a plain float ternary                           | yes\*\*\*|
 | `x >= k ? a : b`, `x <= k ? a : b`, `x != k ? a : b`                | yes\*\*\*|
 | `t.a > 0.5 ? t : colour` on a texture fetch                         | yes\*\*\*|
+| `exp2(-(d * d * z * z))` — a negated exponential source              | yes§    |
+| `exp2(-x)` with `x` read again — negate over a **live** source       | yes§    |
+| `log2(abs(x))` — an absolute-value source, live or dead              | yes§    |
+| `floor(vec2(16384.0) * uv)` — a **32-bit** floor                     | yes§    |
+| `ceil(vec2(64.0) * uv)` — a **32-bit** ceiling                        | yes§    |
 | `clamp(texture(tex, uv) * colour, 0.0, 1.0)`                        | **no**† |
 | `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**‡ |
 | `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**‡ |
@@ -64,6 +74,12 @@ below. The last three are new probes (`f14`, `f15`, `f16`) added with it.
 \*\*\* These rows were **no** after the tied minimum and maximum landed: two
 further gaps, described in "The untied select was a second gap" and "Which
 side the constant is written on" below. New probes `f17`-`f22`.
+
+§ These five rows were **no** until the float source modifiers and the 32-bit
+rounding modes were encoded; see "The source modifiers and the 32-bit rounding
+modes" below. New probes `f23`-`f28`. Two of them, `log2(abs(x))` and the
+32-bit `ceil`, were refusing in the live GNOME session; the other three are
+vkQuake's fog term and its quantized lightmap coordinate.
 
 † Not a `fcmpsel` gap at all: this shape reaches the packer as `fmul.sat`, a
 saturating float multiply, and it is the *saturate modifier* that has no
@@ -109,6 +125,155 @@ Known-missing, in the order they are worth doing:
   (f139 = 5) but the four gradient scalars have to be published into operand
   banks 8/10/12/14 through the ten-byte `copy.ep1` form, and only the
   four-byte `copy.ep0` coordinate staging is implemented.
+
+## The source modifiers and the 32-bit rounding modes
+
+Four shapes failed the whole shader closed and turned out to be one field
+family. Two were refusing on the live desktop:
+
+```
+agx3_pack_binary.c:4854: no grounded AGX3 encoding for log2
+  [d32:reg8 s0=32:reg8.abs cond=0 chan=1]
+agx3_pack_binary.c:4893: no grounded AGX3 encoding for ceil
+  [d32:reg12 s0=32:reg12 cond=0 chan=1]
+```
+
+and two in every vkQuake fragment shader:
+
+```
+agx3_pack_binary.c:4832: no grounded AGX3 encoding for exp2
+  [d32:reg2 s0=32:reg2.neg.discard cond=0 chan=1]
+agx3_pack_binary.c:4874: no grounded AGX3 encoding for floor
+  [d32:reg12 s0=32:reg12.discard cond=0 chan=1]
+```
+
+All four are the single-source form that `f32rcp`, `f32rsqrt`, `f32log2` and
+`f32exp2` already use. Apple's own bytes, one kernel per property, each a
+single-field difference from its control:
+
+```
+o[i] = exp2(a[i])         af 02 56 00 02 00 b0 40 00 00
+o[i] = exp2(-a[i])        af 02 56 00 02 00 b0 40 01 00   f31
+o[i] = exp2(fabs(a[i]))   af 02 56 00 02 00 b0 c0 00 00   f30
+o[i] = exp2(-fabs(a[i]))  af 02 56 00 02 00 b0 c0 01 00   both
+o[i] = log2(-a[i])        2f 02 56 00 02 00 b0 40 01 00
+o[i] = log2(fabs(a[i]))   2f 02 56 00 02 00 b0 c0 00 00
+o[i] = rsqrt(-a[i])       af 01 56 00 02 00 b0 40 01 00
+o[i] = rint(a[i])         2f 00 56 00 02 00 b0 40 00 00   f43 absent
+o[i] = trunc(a[i])        2f 00 56 00 02 00 b0 40 06 00   f43 = 1
+o[i] = ceil(a[i])         2f 00 56 00 02 00 b0 40 04 00   f43 = 2
+o[i] = floor(a[i])        2f 00 56 00 02 00 b0 40 02 00   f43 = 3
+o[i] = floor(-a[i])       2f 00 56 00 02 00 b0 40 03 00   f43 = 3, f31
+```
+
+f31 negates the source, f30 takes its absolute value, and the two are
+separable because `exp2(-fabs(x))` sets both. The 32-bit rounding form is the
+half one with the width selectors f10 and f26 raised from 1 to 2 — the same
+relationship `f32log2` has to `hlog2` — with f43 selecting the mode. Every
+field vector above was recovered with `tools/decomp.c`, which re-composes and
+compares, so they are facts about the encoder rather than readings of a
+disassembler.
+
+### This is what the f30 note was missing
+
+The comment beside `agx3_alu_f32log2` recorded f30 as a bit set on exactly one
+shape out of nineteen witnesses — the `f32log2` of Metal's `pow(x, y)` — and
+deliberately did not model it. f30 is the **absolute-value modifier**. `pow` is
+defined for a negative base with an integral exponent, so its lowering takes
+`log2(|x|)`; `powr()`, which promises a non-negative base, leaves f30 clear,
+and so does the hand-written `exp2(log2(x) * y)`. Witnessed directly:
+
+```
+pow(a[i], b[i])   log2 is  2f 02 56 06 03 00 92 c0 00 00   f30 set
+powr(a[i], b[i])  log2 is  2f 02 56 04 03 08 b0 40 00 00   f30 clear
+```
+
+It is not a domain flag, and the shape NIR produces genuinely does not want it.
+
+### Why floor and ceil do not fall through to the funop path
+
+`agx3_map_funop` already claims `FLOOR`, `CEIL`, `TRUNC`, `LOG2` and `EXP2`,
+and `agx3_funop_encode` already handles 32-bit operands with f30/f31 and f43 —
+so the obvious minimal fix was to make the fail-closed handlers *skip* rather
+than refuse, exactly as two half-select handlers were fixed earlier. **Do not
+do that.** `agx3_funop_core.c`'s AGX3b baseline is
+
+```c
+static const struct agx3_field_kv b_rint_like[] = {
+   KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(29, 1), KV(40, 1),
+};
+```
+
+f29 and f40 are folded in as if they were form constants. Measured directly
+through the encoder:
+
+```
+floor wait=0 no-mods   2f 00 56 00 02 00 b0 40 02 00
+floor wait=slot6       2f 00 56 00 02 00 b0 40 02 00     <- identical
+floor wait=slot1       2f 10 56 00 02 00 b0 40 02 00     <- slot 6 still set
+```
+
+So a funop can never *not* wait scoreboard slot 6, and can never describe a
+live source: it always declares f29, "this was the last use". The over-wait is
+conservative and harmless; claiming a live register is dead is a silent
+miscompile. This is the same standing defect "Baseline wait and lifetime bits
+in `agx3_alu_compose()`" describes, in a second file. The dedicated encoders
+model f11, f27, f29 and all six wait slots instead, each witnessed:
+
+```
+float x = a[i]; o[i] = floor(x) + x    2f 00 56 04 03 00 92 40 02 00
+o[i] = floor(a[i]) * 4 + floor(b[i])   2f 10 54 04 03 08 b0 40 02 00
+```
+
+`agx3_funop_core.c` is still reached by 32-bit `trunc`, `dFdx` and `dFdy`, and
+still has this defect. It was left alone because no measured refusal points at
+it and fixing it changes the bytes of instructions this session cannot test.
+
+### The probes lied before they told the truth
+
+`f23`, `f25`, `f26` and `f28` reported **ENCODES on the baseline** in their
+first form, which would have been a false pass on a shape that was demonstrably
+refusing in vkQuake. Two causes, both worth remembering:
+
+- **`exp()` is not `exp2()` here.** NIR lowers `exp(y)` to `exp2(y * log2 e)`,
+  and a leading negation folds into that constant rather than onto the
+  exponential's source. The refused shape only appears when nothing follows the
+  negation, so the probe has to write `exp2(-(...))` even though vkQuake writes
+  `exp(-(...))` — in vkQuake the density is a push constant and the fold lands
+  elsewhere.
+- **`common.vert` writes constants into everything but `texcoord.xy`.** It
+  emits `texcoord = vec4(p, 0.0, 1.0)` and `vcolor = vec4(p, 0.5, 1.0)`, so any
+  probe built from `.z` or `.w` is link-time constant-folded down to nothing.
+  The dump showed a fragment shader consisting of one texture sample and four
+  exports. **Read the shader dump, not just the pass/fail line**, when a probe
+  passes that should not.
+
+## vkQuake
+
+vkQuake is patched with a `-shader-sweep` switch that creates every pipeline in
+the game, records `SWEEP <kind> <name> OK|FAIL <VkResult>` per pipeline and a
+`SWEEP-SUMMARY` line, and keeps going past a failure instead of calling
+`Sys_Error`. The patch and the driver scripts are in
+`.tmp/g17p-vkquake-evidence/`.
+
+```sh
+docker exec -e MESA_BUILD=/src/_build-full vkquake-game /vkq/run-sweep.sh
+docker exec -e MESA_BUILD=/src/_build-full vkquake-game /vkq/sweep-detail.sh
+```
+
+The second adds `AGX_MESA_DEBUG=shaders`, so each refusal names its
+instruction and operand shape.
+
+| measurement                    | before  | after   |
+| ------------------------------ | ------- | ------- |
+| pipeline creations             | 67/385  | 385/385 |
+| unique pipelines by name       | 60/248  | 248/248 |
+| packer refusals in the run     | 318     | 0       |
+
+Before, the refusals were exactly two opcodes over 318 pipelines: `exp2` with a
+negated source (276) and a 32-bit `floor` (42). Both are closed above. Nothing
+here says vkQuake *renders* — the sweep runs under the drm-shim and only
+qualifies pipeline creation.
 
 ## The 32-bit tied fcmpsel, and what it cost
 
@@ -350,7 +515,7 @@ the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
 As of this revision the compute probe reports 24 of 24 encoding and the
-fragment probe 18 of 21. The three refusals are `f05_texture_bias` and
+fragment probe 25 of 28. The three refusals are `f05_texture_bias` and
 `f12_texture_grad`, both on the bindless-heap descriptor shape, and
 `f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before
