@@ -351,6 +351,10 @@ struct agx_shader_key {
     * RG16 are both one imageblock word, so word count alone is insufficient. */
    bool g17p_rt0_eot_norm16_selector_95;
 
+   /* Select the separately grounded 84-byte signed two-word I16 builtin.
+    * RGBA16_SINT is not byte-compatible with the unsigned I16 EOT. */
+   bool g17p_rt0_eot_i16_signed_two_words;
+
    /* Authorize the exact I32 G17P EOT builtin. Set only for logical formats
     * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;

@@ -25,16 +25,20 @@
 static bool
 agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
 {
-   /* Admit only complete native builtin texts: the 68-byte RT0 program or the
-    * exact 120-byte RGBA16F+R8 WBOIT MRT program. Neither has a synthetic
-    * compute preamble; the CODE container supplies the stop constant. */
+   /* Admit only complete native builtin texts: the common 68-byte RT0
+    * program, the signed RGBA16 84-byte RT0 program, or the exact 120-byte
+    * RGBA16F+R8 WBOIT MRT program. None has a synthetic compute preamble;
+    * the CODE container supplies the stop constant. */
    const bool rt0 = bin && bin->info.binary_size == 68 &&
                     bin->info.nr_gprs == 8 &&
                     bin->info.agx3_staging_halfs == 8;
    const bool wboit_mrt = bin && bin->info.binary_size == 120 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
-   return bin && bin->binary && (rt0 || wboit_mrt) &&
+   const bool rgba16_sint = bin && bin->info.binary_size == 84 &&
+                            bin->info.nr_gprs == 8 &&
+                            bin->info.agx3_staging_halfs == 8;
+   return bin && bin->binary && (rt0 || rgba16_sint || wboit_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;
@@ -362,6 +366,9 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          (key->tib.logical_format[0] == PIPE_FORMAT_R16_UNORM ||
           key->tib.logical_format[0] == PIPE_FORMAT_R16_SNORM ||
           key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM),
+      .g17p_rt0_eot_i16_signed_two_words =
+         cache->dev->chip == AGX_CHIP_G17P &&
+         key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT,
    };
 
    if (cache->dev->chip == AGX_CHIP_G17P) {
@@ -387,6 +394,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       case PIPE_FORMAT_R16G16B16A16_UNORM:
       case PIPE_FORMAT_R16G16B16A16_SNORM:
       case PIPE_FORMAT_R16G16B16A16_UINT:
+      case PIPE_FORMAT_R16G16B16A16_SINT:
       case PIPE_FORMAT_R32G32_SINT:
       case PIPE_FORMAT_R32G32_UINT:
          compiler_key.g17p_rt0_eot_words = 2;

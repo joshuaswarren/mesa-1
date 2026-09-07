@@ -1059,6 +1059,16 @@ test_g17p_rt0_eot_program(void)
    CHECK(memcmp(program.bytes + prefix_size, eot_state_tail,
                 sizeof(eot_state_tail)) == 0);
 
+   /* RGBA16_SINT's distinct 84-byte builtin has the same rounded 128-byte
+    * LDSHDR span and therefore the same bounded launch program. */
+   struct hk_agx3_g17p_rt0_eot_program signed_program;
+   struct hk_agx3_g17p_rt0_eot_program_desc signed_desc = desc;
+   signed_desc.shader_binary_size = 84;
+   CHECK(hk_agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &signed_desc, &signed_program));
+   CHECK(signed_program.length == program.length);
+   CHECK(memcmp(signed_program.bytes, program.bytes, program.length) == 0);
+
    /* Profile scratch occupies0..3; the table pointer survives in4..7.
     * Its only publications are COPY GPR4->uniform0 and GPR6->uniform2.
     * These COPY source-file/no-kill bits and the terminal are unchanged.
@@ -1757,11 +1767,15 @@ test_g17p_single_layer_rt0_layout(void)
    tib = agx_build_tilebuffer_layout(rgba16_uint, 1, 2, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
-   /* The adjacent signed format remains closed until separately grounded. */
    enum pipe_format rgba16_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_SINT,
    };
    tib = agx_build_tilebuffer_layout(rgba16_sint, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.nr_samples == 1 && tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+   tib = agx_build_tilebuffer_layout(rgba16_sint, 1, 2, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format r32_uint[AGX_MAX_RENDER_TARGETS] = {

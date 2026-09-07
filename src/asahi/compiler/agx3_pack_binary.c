@@ -3142,7 +3142,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
  * and R16G16_SINT key0x08020800 use selector 0x15. Fresh G17P
  * R16G16B16A16_UINT key0x10020900 uses the same selector with exactly two
- * imageblock words. R32G32_SINT key0x08021200 also uses the
+ * imageblock words. R16G16B16A16_SINT key0x10020800 instead has a distinct
+ * complete 84-byte builtin. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32.
  * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
@@ -3164,6 +3165,7 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_I32,
    AGX3_G17P_RT0_EOT_SELECTOR_55,
    AGX3_G17P_RT0_EOT_NORM16,
+   AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS,
 };
 
 static enum agx3_g17p_rt0_eot_kind
@@ -3249,6 +3251,11 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        zero_reg != offset_reg)
       return AGX3_G17P_RT0_EOT_NONE;
 
+   if (ctx->key->g17p_rt0_eot_i16_signed_two_words &&
+       (store_format != AGX_FORMAT_I16 ||
+        ctx->key->g17p_rt0_eot_words != 2))
+      return AGX3_G17P_RT0_EOT_NONE;
+
    if (store_format == AGX_FORMAT_S16NORM) {
       if (ctx->key->g17p_rt0_eot_norm16_selector_95 &&
           (ctx->key->g17p_rt0_eot_words == 1 ||
@@ -3311,6 +3318,9 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        ctx->key->g17p_rt0_eot_i32_selector_75)
       return AGX3_G17P_RT0_EOT_NONE;
    if (store_format == AGX_FORMAT_I16) {
+      if (ctx->key->g17p_rt0_eot_i16_signed_two_words)
+         return AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS;
+
       /* RG16 and RGBA16 integer stores use the same native selector, but only
        * the exact one- and two-word shapes have Apple builtin evidence. */
       return (ctx->key->g17p_rt0_eot_words == 1 ||
@@ -3606,6 +3616,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const enum agx3_g17p_rt0_eot_kind rt0_eot =
       agx3_g17p_rt0_eot_kind(ctx, enc);
    if (rt0_eot != AGX3_G17P_RT0_EOT_NONE) {
+      static const uint8_t g17p_rgba16_sint_eot[] = {
+         0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
+         0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
+         0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
+         0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
+         0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
+         0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
+         0x00,0x00,0x00,0x80,0x28,0x15,0x00,0x00,0x0e,0x00,0x00,0x00,
+      };
+
+      if (rt0_eot == AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS) {
+         ctx->max_reg = MAX2(ctx->max_reg, 7);
+         ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
+         return agx3_append(emission, g17p_rgba16_sint_eot,
+                            sizeof(g17p_rgba16_sint_eot));
+      }
+
       static const uint8_t g17p_rt0_eot[][68] = {{
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
