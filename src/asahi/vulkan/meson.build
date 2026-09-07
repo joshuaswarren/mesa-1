@@ -625,6 +625,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P R16G16 SINT colour storage.
+    executable(
+      'g17p-vulkan-rg16-sint',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RG16_SINT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-render-only',
       files('tests/g17p_render_only.c'),
