@@ -101,17 +101,26 @@
 #define G17P_R8_UINT 0
 #endif
 
+#ifndef G17P_R8_SNORM
+#define G17P_R8_SNORM 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RG16_SNORM + G17P_R32_UINT + G17P_R32_SFLOAT +              \
      G17P_R32_SINT + G17P_RG16_UINT + G17P_RG16_SINT +                \
      G17P_RG32_SINT + G17P_RG32_SFLOAT + G17P_RG8_UINT +              \
      G17P_RG8_SINT + G17P_RG32_UINT + G17P_RGBA8_UINT +               \
      G17P_RGBA8_SINT + G17P_RGBA8_SNORM + G17P_RG8_SNORM +             \
-     G17P_R8_UINT) > 1
+     G17P_R8_UINT + G17P_R8_SNORM) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_R8_UINT
+#if G17P_R8_SNORM
+#include "g17p_vulkan_r8_snorm_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_r8_snorm_frag_spv
+#elif G17P_R8_UINT
 #include "g17p_vulkan_r8_uint_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -207,7 +216,11 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 
-#if G17P_R8_UINT
+#if G17P_R8_SNORM
+#define IMAGE_FORMAT VK_FORMAT_R8_SNORM
+#define IMAGE_PIXEL_BYTES 1
+#define READBACK_GUARD_BYTES 64
+#elif G17P_R8_UINT
 #define IMAGE_FORMAT VK_FORMAT_R8_UINT
 #define IMAGE_PIXEL_BYTES 1
 #elif G17P_RG8_SNORM
@@ -389,7 +402,15 @@
 #error "the R8 UINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_R8_UINT
+#if G17P_R8_SNORM && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the R8 SNORM fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if G17P_R8_SNORM
+#define PROBE_NAME "g17p-vulkan-r8-snorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_R8_UINT
 #define PROBE_NAME "g17p-vulkan-r8-uint"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -621,7 +642,9 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_R8_UINT
+#if G17P_R8_SNORM
+   static const uint8_t expected[1] = {0xc0};
+#elif G17P_R8_UINT
    static const uint8_t expected[1] = {0xa7};
 #elif G17P_RG8_SNORM
    static const uint8_t expected[2] = {0xc0, 0x11};
@@ -696,6 +719,7 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_R8_SNORM && getenv("G17P_R8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_RG8_SNORM && getenv("G17P_RG8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_F16_IO && getenv("G17P_F16_IO_RECORD_ONLY") != NULL) ||
       (G17P_RG16_UNORM && getenv("G17P_RG16_UNORM_RECORD_ONLY") != NULL) ||
@@ -1408,14 +1432,18 @@ main(void)
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \
    G17P_RG8_UINT || G17P_RG8_SINT || G17P_RG32_UINT ||                \
    G17P_RGBA8_UINT || G17P_RGBA8_SINT || G17P_RGBA8_SNORM ||           \
-   G17P_RG8_SNORM || G17P_R8_UINT
+   G17P_RG8_SNORM || G17P_R8_UINT || G17P_R8_SNORM
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_R8_UINT
+#if G17P_R8_SNORM
+   printf(PROBE_NAME ": PASS — %ux%u R8 SNORM exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_R8_UINT
    printf(PROBE_NAME ": PASS — %ux%u R8 UINT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
