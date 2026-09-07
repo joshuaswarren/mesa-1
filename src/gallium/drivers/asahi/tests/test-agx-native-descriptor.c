@@ -123,6 +123,17 @@ test_feature_gates(void)
    CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_9));
    CHECK(agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_10));
    CHECK(!agx_gallium_native_pbe_supported(AGX_DESCRIPTOR_GENERATION_UNKNOWN));
+
+   CHECK(agx_gallium_native_compressed_pbe_supported(
+      AGX_DESCRIPTOR_GENERATION_7));
+   CHECK(agx_gallium_native_compressed_pbe_supported(
+      AGX_DESCRIPTOR_GENERATION_8));
+   CHECK(!agx_gallium_native_compressed_pbe_supported(
+      AGX_DESCRIPTOR_GENERATION_9));
+   CHECK(!agx_gallium_native_compressed_pbe_supported(
+      AGX_DESCRIPTOR_GENERATION_10));
+   CHECK(!agx_gallium_native_compressed_pbe_supported(
+      AGX_DESCRIPTOR_GENERATION_UNKNOWN));
 }
 
 /* A plain 2D render target: exactly what the end-of-tile store binds. */
@@ -182,6 +193,32 @@ test_agx3_pbe(void)
                                   &expected));
    CHECK(memcmp(native.opaque, expected.bytes, sizeof(expected.bytes)) == 0);
 
+   /* Native gl_fbo_readback's full-size render target. The width/height split
+    * is pinned by the G17P PBE capture corpus, including independent 8192x8,
+    * 100x60 and 40x24 witnesses; this checks the exact EOT descriptor the
+    * production allocation must reach after compression is ruled out.
+    */
+   static const uint8_t fullscreen_bytes[32] = {
+      0x22, 0x0a, 0xe4, 0x67, 0x49, 0x78, 0x01, 0x00,
+      0x00, 0x10, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_PBE fullscreen = rt;
+   fullscreen.layout = AGX_LAYOUT_GPU;
+   fullscreen.width = 2408;
+   fullscreen.height = 1506;
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &fullscreen));
+   CHECK(memcmp(native.opaque, fullscreen_bytes, sizeof(fullscreen_bytes)) ==
+         0);
+
+   fullscreen.compressed = true;
+   memset(&native, 0xff, sizeof(native));
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                      &fullscreen));
+   CHECK(native.opaque[0] == 0 && native.opaque[7] == 0);
+
    /* A single-level 2D image happens to share its first words with the AGX2
     * packet -- Gen9 keeps dimension, layout, channels, type, swizzles, width
     * and the shifted address where Gen7 had them. The encodings are not the
@@ -191,6 +228,8 @@ test_agx3_pbe(void)
    struct agx_gallium_pbe_descriptor agx2;
    memset(&agx2, 0, sizeof(agx2));
    CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_7, &agx2, &rt));
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &rt));
    CHECK(memcmp(native.opaque, agx2.opaque, AGX_PBE_LENGTH) == 0);
 
    struct AGX_PBE mipped = rt;

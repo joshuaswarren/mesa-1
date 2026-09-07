@@ -178,6 +178,16 @@ agx_gallium_native_pbe_supported(
           agx_gallium_descriptor_generation_is_agx3(generation);
 }
 
+/* Compression is usable only when Gallium can also encode the corresponding
+ * write descriptor. The recovered Gen9/10 PBE subset is uncompressed.
+ */
+static inline bool
+agx_gallium_native_compressed_pbe_supported(
+   enum agx_descriptor_generation generation)
+{
+   return agx_gallium_descriptor_generation_is_agx2(generation);
+}
+
 struct AGX_TEXTURE;
 struct AGX_PBE;
 

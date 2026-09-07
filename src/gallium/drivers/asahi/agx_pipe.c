@@ -48,6 +48,7 @@
 #include "agx_disk_cache.h"
 #include "agx_fence.h"
 #include "agx_helpers.h"
+#include "agx_native_descriptor.h"
 #include "agx_pack.h"
 #include "agx_public.h"
 #include "agx_state.h"
@@ -401,9 +402,24 @@ agx_twiddled_allowed(const struct agx_resource *pres)
 static bool
 agx_compression_allowed(const struct agx_resource *pres)
 {
+   const enum agx_descriptor_generation generation =
+      agx_gallium_descriptor_generation(
+         agx_device(pres->base.screen)->chip);
+
    /* Allow disabling compression for debugging */
    if (agx_device(pres->base.screen)->debug & AGX_DBG_NOCOMPRESS) {
       rsrc_debug(pres, "No compression: disabled\n");
+      return false;
+   }
+
+   /* Compression changes both the image allocation and its PBE write
+    * descriptor. Gen9/10 texture reads are grounded, but the matching
+    * compressed PBE is not. Selecting compressed tiling here would therefore
+    * make every real-sized render target fail at end-of-tile. Keep the image
+    * uncompressed, as Honeykrisp does, until that write descriptor is known.
+    */
+   if (!agx_gallium_native_compressed_pbe_supported(generation)) {
+      rsrc_debug(pres, "No compression: no native PBE encoding\n");
       return false;
    }
 

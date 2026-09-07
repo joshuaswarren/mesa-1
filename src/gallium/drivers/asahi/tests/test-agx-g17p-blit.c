@@ -9,7 +9,7 @@
  *
  * Core 983 caught the driver dereferencing a null `ctx->vs->bo` inside
  * agx_draw_vbo(), reached from util_blitter_blit() for a 4x8
- * BGRA8_UNORM -> RGBA8_UNORM blit with uses_txf. The cause is that the AGX3
+ * BGRA8_UNORM -> RGBA8_UNORM region with uses_txf. The cause is that the AGX3
  * backend is fail-closed: agx_compile_shader_nir() returns false and zeroes
  * its output for a shader it cannot encode, so agx_compile_nir() produced a
  * compiled shader with binary_size == 0 and therefore no executable BO, and
@@ -111,8 +111,12 @@ main(void)
     * triangle fan, which is where the null program was consumed. */
    struct pipe_resource *src =
       make_2d(screen, PIPE_FORMAT_B8G8R8A8_UNORM, 4, 8, PIPE_BIND_SAMPLER_VIEW);
-   struct pipe_resource *dst =
-      make_2d(screen, PIPE_FORMAT_R8G8B8A8_UNORM, 4, 8, PIPE_BIND_RENDER_TARGET);
+   /* The native hardware oracle uses a 2408x1506 target. Unlike the old 4x8
+    * fixture, that extent is compression-eligible, so it also reproduces the
+    * real end-of-tile PBE descriptor path while the blit rectangle stays 4x8.
+    */
+   struct pipe_resource *dst = make_2d(screen, PIPE_FORMAT_R8G8B8A8_UNORM,
+                                       2408, 1506, PIPE_BIND_RENDER_TARGET);
    if (!src || !dst) {
       fprintf(stderr, "resource_create failed\n");
       return 1;
@@ -180,6 +184,12 @@ main(void)
           fs_ok ? "ok" : "refused", linked_ok ? "ok" : "refused");
 
    int status = 0;
+
+   if (!agx2 && agx_resource(dst)->layout.compressed) {
+      fprintf(stderr,
+              "AGX3 render target selected an unencodable compressed PBE\n");
+      status = 1;
+   }
 
    /* CommandEncodingNext parts must not take Gallium's AGX2 compute blitter.
     * The render blitter binds a vertex stage; the compute one never does, so
