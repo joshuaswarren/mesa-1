@@ -1113,6 +1113,74 @@ static void test_native_sqrt_step(void)
    puts("Native sqrt step: two complete Apple live/dead square-root kernels PASS");
 }
 
+static void test_native_half_sqrt(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   assert(agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                  AGX3_ALU_HINT_CACHE, true, 32,
+                                  bytes, &len));
+   exact(bytes, len, "2f01560203088a400000");
+   assert(agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                  AGX3_ALU_HINT_CACHE, true, 0,
+                                  bytes, &len));
+   exact(bytes, len, "2f01540203088a400000");
+   assert(agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 4, 3,
+                                  AGX3_ALU_HINT_CACHE, true, 0,
+                                  bytes, &len));
+   exact(bytes, len, "2f01540403068a400000");
+
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   exact(bytes, len, "11030904");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   exact(bytes, len, "11031904");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 3, 4, 3, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   exact(bytes, len, "11051d021400");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 4, 2, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
+   exact(bytes, len, "11053902");
+
+   memset(bytes, 0xa5, sizeof(bytes));
+   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3C, 2, 4,
+                                   AGX3_ALU_HINT_CACHE, true, 0,
+                                   bytes, &len));
+   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 3, 4,
+                                   AGX3_ALU_HINT_CACHE, true, 0,
+                                   bytes, &len));
+   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                   AGX3_ALU_HINT_DISCARD, true, 0,
+                                   bytes, &len));
+   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                   AGX3_ALU_HINT_CACHE, false, 0,
+                                   bytes, &len));
+   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                   AGX3_ALU_HINT_CACHE, true, 1,
+                                   bytes, &len));
+   assert(!agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 3, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, false, 32, bytes, &len));
+   for (unsigned i = 0; i < sizeof(bytes); ++i)
+      assert(bytes[i] == 0xa5);
+
+   puts("Native half sqrt: seven exact Apple step/multiply vectors and narrow refusal guards PASS");
+}
+
 static void test_native_select_reg_imm(void)
 {
    const uint16_t src[4][4]={{0,2,10,1},{0,2,7,1},{0,2,10,1},{4,6,2,1}};
@@ -1393,6 +1461,7 @@ int main(void){
    test_native_half_fma();
    test_native_narrow_multiply();
    test_native_sqrt_step();
+   test_native_half_sqrt();
    test_native_select_reg_imm();
    test_native_half_compare_select();
    test_native_half_min();

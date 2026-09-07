@@ -4619,13 +4619,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_SRSQRT) {
             const agx_index dest=I->dest[0], src=I->src[0];
             if (I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate ||
-                !agx3_vary_reg32(dest) || !agx3_vary_reg32(src) ||
+                !agx3_vary_reg32(dest) ||
+                !agx3_src_is_register(src) || src.memory ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                src.abs || src.neg)
+                src.abs || src.neg || src.kill ||
+                (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if (!agx3_alu_sqrt_step(enc,dest.value,src.value,agx3_post_ra_hint(src),
-                                   dest.cache,wait,bytes,&len) ||
+            const bool half = src.size == AGX_SIZE_16;
+            if ((!half && !agx3_vary_reg32(src)) ||
+                !(half ? agx3_alu_sqrt_step_half : agx3_alu_sqrt_step)(
+                   enc,dest.value,src.value,agx3_post_ra_hint(src),
+                   dest.cache,wait,bytes,&len) ||
                 !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;
@@ -5664,6 +5669,34 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_alu_fmul_narrow(enc,I->dest[0].value,src,hints,
                                       I->dest[0].cache,wait,bytes,&len) ||
                 !agx3_append(emission,bytes,len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FMUL &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 &&
+             ((I->src[0].size == AGX_SIZE_32 &&
+               I->src[1].size == AGX_SIZE_16) ||
+              (I->src[0].size == AGX_SIZE_16 &&
+               I->src[1].size == AGX_SIZE_32))) {
+            const bool half_first = I->src[0].size == AGX_SIZE_16;
+            const agx_index f32 = I->src[half_first ? 1 : 0];
+            const agx_index f16 = I->src[half_first ? 0 : 1];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_src_is_register(f32) || !agx3_src_is_register(f16) ||
+                f32.memory || f16.memory || (f32.value & 1) ||
+                agx_channels(f32) != 1 || agx_channels(f16) != 1 ||
+                f32.abs || f32.neg || f32.kill || f16.abs || f16.neg ||
+                f16.kill || (f32.cache && f32.discard) ||
+                (f16.cache && f16.discard) ||
+                !agx3_alu_fmul_mixed_half(
+                   enc, I->dest[0].value, f32.value, f16.value,
+                   agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
+                   I->dest[0].cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }

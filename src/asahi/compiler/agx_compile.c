@@ -2707,6 +2707,15 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       return agx_icmp_to(b, dst, s0, i0, AGX_ICOND_UEQ, true);
 
    case nir_op_fsqrt:
+      if (instr->def.bit_size == 16) {
+         /* G17P computes a scalar half sqrt as a half-input sqrt step into a
+          * float32 temporary followed by a mixed multiply rounded once to
+          * the half destination.  Keeping the temporary wide matches Apple
+          * and avoids treating the neighbouring half as input state. */
+         agx_index step = agx_temp(b->shader, AGX_SIZE_32);
+         agx_srsqrt_to(b, step, s0);
+         return agx_fmul_to(b, dst, step, s0);
+      }
       return agx_fmul_to(b, dst, s0, agx_srsqrt(b, s0));
    case nir_op_fabs:
       return agx_fmov_to(b, dst, agx_abs(s0));

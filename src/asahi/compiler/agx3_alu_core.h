@@ -138,6 +138,14 @@ bool agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                           uint8_t *len);
 
+/* Native f32-by-f16 multiply rounded directly to a scalar half destination. */
+bool agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
+                              uint16_t f32, uint16_t f16,
+                              enum agx3_alu_hint hint32,
+                              enum agx3_alu_hint hint16, bool dest_cache,
+                              uint16_t wait_mask,
+                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P's unsigned16 GPR half -> float32, RTE. Every U16 is exactly
  * representable, so no precision is discarded. Native compiler witnesses
  * include both last-use and reused input, odd half indices and load waits.
@@ -275,6 +283,12 @@ bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native square-root step with a scalar half source and float32 temporary. */
+bool agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src, enum agx3_alu_hint hint,
+                             bool dest_cache, uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 bool agx3_alu_fmul_narrow(enum agx_isa_encoding enc, uint16_t dest,
                            const uint16_t src[2], const enum agx3_alu_hint hints[2],

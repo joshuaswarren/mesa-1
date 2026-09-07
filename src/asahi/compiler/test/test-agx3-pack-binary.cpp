@@ -5221,6 +5221,43 @@ TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, HalfSqrtMatchesNativeSequenceAndRefusesModifier)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index half = agx_register(2, AGX_SIZE_16);
+   half.cache = true;
+   agx_index step = agx_register(4, AGX_SIZE_32);
+   step.cache = true;
+   agx_srsqrt_to(b, step, half);
+
+   step.cache = false;
+   step.discard = true;
+   half.cache = false;
+   half.discard = true;
+   agx_index dest = agx_register(2, AGX_SIZE_16);
+   dest.cache = true;
+   agx_fmul_to(b, dest, step, half);
+   agx_stop(b);
+
+   const uint8_t native[] = {
+      0x2f,0x01,0x54,0x04,0x03,0x04,0x8a,0x40,0x00,0x00,
+      0x11,0x05,0x39,0x02,
+   };
+   const auto code = pack(b);
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   half = agx_register(2, AGX_SIZE_16);
+   half.cache = true;
+   half.abs = true;
+   step = agx_register(4, AGX_SIZE_32);
+   step.cache = true;
+   agx_srsqrt_to(b, step, half);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
