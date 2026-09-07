@@ -1342,6 +1342,30 @@ agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                             out, len);
 }
 
+bool
+agx3_alu_hfloor(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                enum agx3_alu_hint hint, bool dest_cache,
+                uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 ||
+       (hint != AGX3_ALU_HINT_NONE && hint != AGX3_ALU_HINT_DISCARD) ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+   /* f32rint mode3 is floor. Field10/26 select scalar halves; Apple kernels
+    * cover both lanes, lifetime, destination cache, and slot-6/no wait. */
+   const struct agx3_field_kv base[] = {
+      {9,2},{10,1},{25,2},{26,1},{43,3},
+   };
+   const struct agx3_field_kv fields[] = {
+      {2,dest},{18,src},{11,dest_cache},
+      {29,hint == AGX3_ALU_HINT_DISCARD},{40,wait_mask == 32},
+   };
+   return agx3_bind_compose(enc, "f32rint", 0, base, 5, fields, 5,
+                            out, len);
+}
+
 /* Native float32 multiplication rounds directly to the half destination. */
 bool
 agx3_alu_fmul_narrow(enum agx_isa_encoding enc, uint16_t dest,
