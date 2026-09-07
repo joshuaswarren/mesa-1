@@ -1576,6 +1576,35 @@ static void test_native_half_floor(void)
    puts("Native half floor: five exact Apple vectors and refusal guards PASS");
 }
 
+static void test_native_half_ceil(void)
+{
+   static const struct { uint16_t d,s; enum agx3_alu_hint h; bool dc;
+      uint16_t w; const char *b; } cases[] = {
+      {3,2,AGX3_ALU_HINT_NONE,false,32,"2f00560302048c600400"},
+      {2,2,AGX3_ALU_HINT_DISCARD,false,32,"2f0056020204ac600400"},
+      {2,2,AGX3_ALU_HINT_DISCARD,false,0,"2f0054020204ac600400"},
+      {3,3,AGX3_ALU_HINT_DISCARD,false,0,"2f0054030206ac600400"},
+      {2,2,AGX3_ALU_HINT_DISCARD,true,32,"2f0056020304ac600400"},
+   };
+   for (unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+      assert(agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,cases[i].d,cases[i].s,
+                            cases[i].h,cases[i].dc,cases[i].w,bytes,&len));
+      exact(bytes,len,cases[i].b);
+   }
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len=0xa5;
+   memset(bytes,0xa5,sizeof(bytes));
+   assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3C,2,2,
+                          AGX3_ALU_HINT_DISCARD,false,0,bytes,&len));
+   assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
+                          AGX3_ALU_HINT_CACHE,false,0,bytes,&len));
+   assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
+                          AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+   assert(len==0xa5);
+   for(unsigned i=0;i<sizeof(bytes);++i) assert(bytes[i]==0xa5);
+   puts("Native half ceil: five exact Apple vectors and refusal guards PASS");
+}
+
 static void test_native_high_float_registers(void)
 {
    /* Original native80-value kernels force retained ALU values into the upper
@@ -1633,6 +1662,7 @@ int main(void){
    test_native_half_exp2();
    test_native_half_log2();
    test_native_half_floor();
+   test_native_half_ceil();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();
