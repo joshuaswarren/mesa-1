@@ -3139,14 +3139,14 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * with its two U16-normalized lanes described by PBE. Fresh Apple G17P
  * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
  * the same one-word program for signed RG16 while PBE describes signedness.
- * Scalar I32 key0x04021100 and two-word RGBA16 key0x10020c00 each give a
- * distinct imgwblk selector.
+ * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
+ * uses selector 0x15, shared physically with two-word RGBA16 key0x10020c00.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_NONE,
-   AGX3_G17P_RT0_EOT_ONE_WORD,
-   AGX3_G17P_RT0_EOT_TWO_WORD,
+   AGX3_G17P_RT0_EOT_SELECTOR_75,
+   AGX3_G17P_RT0_EOT_SELECTOR_15,
    AGX3_G17P_RT0_EOT_I32,
 };
 
@@ -3197,6 +3197,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
                 (I->format != AGX_FORMAT_U8NORM &&
                  I->format != AGX_FORMAT_U16NORM &&
                  I->format != AGX_FORMAT_S16NORM &&
+                 I->format != AGX_FORMAT_I16 &&
                  I->format != AGX_FORMAT_RGB10A2 &&
                  I->format != AGX_FORMAT_I32) || I->dim != AGX_DIM_2D ||
                 !I->explicit_coords ||
@@ -3232,9 +3233,9 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 
    if (store_format == AGX_FORMAT_U16NORM) {
       if (ctx->key->g17p_rt0_eot_words == 1)
-         return AGX3_G17P_RT0_EOT_ONE_WORD;
+         return AGX3_G17P_RT0_EOT_SELECTOR_75;
       if (ctx->key->g17p_rt0_eot_words == 2)
-         return AGX3_G17P_RT0_EOT_TWO_WORD;
+         return AGX3_G17P_RT0_EOT_SELECTOR_15;
 
       /* RG16 and RGBA16 lower to the same final instruction shape. Refuse an
        * ambiguous selector instead of silently emitting the wrong store. */
@@ -3243,8 +3244,10 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 
    if (store_format == AGX_FORMAT_I32)
       return AGX3_G17P_RT0_EOT_I32;
+   if (store_format == AGX_FORMAT_I16)
+      return AGX3_G17P_RT0_EOT_SELECTOR_15;
 
-   return AGX3_G17P_RT0_EOT_ONE_WORD;
+   return AGX3_G17P_RT0_EOT_SELECTOR_75;
 }
 
 /* Native EOT key {RGBA16F RT0, R8 RT1} (mask 3) has a distinct, complete
@@ -3565,7 +3568,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
        * eight staging halves independently. Main68 pads to128: LDSHDR f1=1. */
       ctx->max_reg = MAX2(ctx->max_reg, 7);
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
-      const unsigned index = rt0_eot - AGX3_G17P_RT0_EOT_ONE_WORD;
+      const unsigned index = rt0_eot - AGX3_G17P_RT0_EOT_SELECTOR_75;
       return agx3_append(emission, g17p_rt0_eot[index],
                          sizeof(g17p_rt0_eot[index]));
    }

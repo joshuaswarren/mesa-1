@@ -490,6 +490,25 @@ main(void)
    assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
    assert(memcmp(&native_pbe, gen9_pbe, sizeof(gen9_pbe)) == 0);
 
+   /* Actual G17P UMD entry for RG16_UINT: channels0x23, UINT type2, 4B. */
+   static const uint8_t gen9_rg16_uint_pbe[32] = {
+      0xe2, 0x48, 0x04, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R16G16;
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
+   pbe.swizzle_b = 0;
+   pbe.swizzle_a = 0;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rg16_uint_pbe,
+                 sizeof(gen9_rg16_uint_pbe)) == 0);
+   pbe.channels = AGX_CHANNELS_R8G8B8A8;
+   pbe.type = AGX_TEXTURE_TYPE_UNORM;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+   pbe.swizzle_a = AGX_CHANNEL_A;
+
    /* Native R32_UINT storage/PBE capture pins channels0x21 and UINT type2:
     * its 64-wide word starts 0x3f004862. Preserve that exact format field
     * through the Gen9 RT0 descriptor path at this test's 256x128 extent. */
