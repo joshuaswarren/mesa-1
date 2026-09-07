@@ -164,7 +164,7 @@ TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
-TEST_F(AGX3PackBinary, G17PRG8IntegerEOTUsesExactNativeI8Program)
+TEST_F(AGX3PackBinary, G17PI8EOTUsesExactNativeProgram)
 {
    static const uint8_t native[] = {
       0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,

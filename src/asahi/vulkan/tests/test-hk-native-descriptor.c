@@ -606,6 +606,22 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rg8_sint_pbe,
                  sizeof(gen9_rg8_sint_pbe)) == 0);
 
+   /* Actual G17P UMD table entry for MTL format73 (RGBA8_UINT) resolves to
+    * channels0x28, UINT type2 and four bytes per pixel. */
+   static const uint8_t gen9_rgba8_uint_pbe[32] = {
+      0x22, 0x4a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R8G8B8A8;
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+   pbe.swizzle_a = AGX_CHANNEL_A;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rgba8_uint_pbe,
+                 sizeof(gen9_rgba8_uint_pbe)) == 0);
+
    pbe.channels = AGX_CHANNELS_R8G8B8A8;
    pbe.type = AGX_TEXTURE_TYPE_UNORM;
    pbe.swizzle_g = AGX_CHANNEL_G;
