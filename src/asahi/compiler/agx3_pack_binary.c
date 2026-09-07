@@ -5483,6 +5483,57 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    agx3_append(emission, bytes, len))
                   continue;
             }
+
+            /*
+             * Register + register where at least one operand is a 16-bit
+             * half, zero-extended (abs) or sign-extended (neg) as on AGX2.
+             * `gl_LocalInvocationID` arrives as three 16-bit special
+             * registers, so summing it is exactly this shape; the whole
+             * shader was refused before, because the register slot-A form
+             * pinned both operand widths to 32-bit.
+             *
+             * Apple emits the same instruction for `(uint)a + (uint)b` over
+             * two ushorts; see the witnesses quoted in agx3_iadd_core.h.
+             *
+             * Gated on a narrow operand so the all-32-bit unshifted add keeps
+             * the select-core encoding it already had: re-routing a shape
+             * that already worked is what cost two hardware probes last time.
+             */
+            const bool a_ok =
+               agx3_src_is_register(a) && !a.memory && agx_channels(a) == 1 &&
+               !(a.cache && a.discard) &&
+               (a.size == AGX_SIZE_32 ? (!a.abs && !a.neg)
+                                      : (a.size == AGX_SIZE_16 &&
+                                         (a.abs != a.neg)));
+            const bool b_ok =
+               agx3_src_is_register(bsrc) && !bsrc.memory &&
+               agx_channels(bsrc) == 1 && !(bsrc.cache && bsrc.discard) &&
+               (bsrc.size == AGX_SIZE_32 ? (!bsrc.abs && !bsrc.neg)
+                                         : (bsrc.size == AGX_SIZE_16 &&
+                                            (bsrc.abs != bsrc.neg)));
+
+            if (I->shift == 0 && !I->saturate && a_ok && b_ok &&
+                (a.size == AGX_SIZE_16 || bsrc.size == AGX_SIZE_16)) {
+               const struct agx3_iadd_desc d = {
+                  .dest = I->dest[0].value,
+                  .dest_cache = I->dest[0].cache,
+                  .src_a_is_register = true,
+                  .src_a_reg = a.value,
+                  .src_a_kill = a.discard,
+                  .src_a_16 = a.size == AGX_SIZE_16,
+                  .src_a_sign_extend = a.size == AGX_SIZE_16 && a.neg,
+                  .src = bsrc.value,
+                  .src_kill = bsrc.discard,
+                  .src_16 = bsrc.size == AGX_SIZE_16,
+                  .sign_extend = bsrc.size == AGX_SIZE_16 && bsrc.neg,
+                  .wait_mask = wait,
+               };
+               uint8_t bytes[AGX3_IADD_MAX_LENGTH];
+               uint8_t len = 0;
+               if (agx3_iadd_encode(enc, &d, bytes, &len) &&
+                   agx3_append(emission, bytes, len))
+                  continue;
+            }
          }
 
          /*

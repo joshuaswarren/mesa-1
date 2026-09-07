@@ -55,6 +55,22 @@ struct agx3_iadd_desc {
    bool src_a_is_register;
    uint16_t src_a_reg;
    /*
+    * Slot A may be a single 16-bit half, zero- or sign-extended, exactly as
+    * slot B may (f24 selects the width the way f39 does for slot B, and f28
+    * carries slot A's sign-extension the way f43 does for slot B). This is
+    * how `load_local_invocation_id`'s three 16-bit components are summed --
+    * `iadd d32, h_a, h_b` -- which the register slot-A form previously could
+    * not express at all, because it pinned both widths to 32-bit.
+    *
+    * Witnessed byte-exactly against applegpu_g17p:
+    *   ushort + ushort   9f 01 56 00 02 00 04 08 17 05  f24=1 f39=1
+    *   short  + short    9f 01 56 00 02 02 00 08 17 0f  f28=1 f43=1
+    *   lid.x + lid.y     9f 11 54 00 03 00 04 08 17 05  f11=1 (dest cache)
+    *   (that) + lid.z    9f 21 54 00 02 00 08 28 17 05  f24=2 f39=1
+    */
+   bool src_a_16;
+   bool src_a_sign_extend;
+   /*
     * Last-use (kill) hints for the two register operands, f27 for slot A and
     * f42 for slot B. These are LIVENESS, not constants -- agx3_mem_core.c
     * drives the same two fields from idx_kill/base_kill. Apple's witnesses
@@ -70,6 +86,10 @@ struct agx3_iadd_desc {
    bool src_16;        /* source is a single 16-bit half */
    bool sign_extend;   /* narrow source is sign- rather than zero-extended */
    uint8_t shift;      /* source shifted left by this first; 0..3 */
+   /* f11: keep the result in the operand cache. A hint, not semantics --
+    * Apple sets it on the first of a pair of dependent adds and clears it on
+    * the second. */
+   bool dest_cache;
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };
 

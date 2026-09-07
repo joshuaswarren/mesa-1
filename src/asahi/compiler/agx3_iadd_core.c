@@ -36,39 +36,65 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
    if (d->shift > 4 || d->wait_mask >= (1u << slots))
       return false;
    if (d->src_a_is_register) {
-      /* Only AGX3b is witnessed for a register slot A. */
-      if (!agx3b || (d->src_a_reg & 1) || d->src_a_reg + 2 > 256 ||
-          d->immediate != 0)
+      if (d->immediate != 0)
          return false;
+      if (d->src_a_16 ? (d->src_a_reg >= 256)
+                      : ((d->src_a_reg & 1) || d->src_a_reg + 2 > 256))
+         return false;
+   } else if (d->src_a_16 || d->src_a_sign_extend) {
+      /* Slot A width and sign-extension only exist for a register slot A. */
+      return false;
    }
 
    const struct agx3_field_kv baseline_b[] = {
       KV(9, 2), KV(10, 2), KV(23, 1), KV(24, 1), KV(38, 2), KV(42, 1),
    };
-   /* Register slot A: f23/f24 = 2 with the value in f16 instead of f15. */
+   /*
+    * Register slot A: f23 = 2 with the value in f16 instead of f15. f24 and
+    * f39 are the two operands' WIDTHS (1 = one 16-bit half, 2 = a 32-bit
+    * pair), not part of the operand kind -- the same role f24 already plays
+    * in agx3_isub_immediate_encode(). Pinning both to 2 here is what made
+    * `iadd d32, h_a, h_b` inexpressible.
+    */
    const struct agx3_field_kv baseline_b_reg[] = {
-      KV(9, 2), KV(10, 2), KV(23, 2), KV(24, 2), KV(38, 2), KV(39, 2),
+      KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, d->src_a_16 ? 1 : 2),
+      KV(38, 2), KV(39, d->src_16 ? 1 : 2),
+   };
+   /* AGX3c's iadd32 uses the identical operand fields on top of its own two
+    * form constants. Witnessed with metal-nt -arch applegpu_g17s on the same
+    * lid.x+lid.y / +lid.z pair:
+    *   16 + 16   27 04 04 1a 29 00 a3 02 60 00 21 00  f24=1 f39=1 f11=1
+    *   32 + 16   27 08 04 1a 21 00 a3 02 a8 00 21 00  f24=2 f39=1
+    */
+   const struct agx3_field_kv baseline_c_reg[] = {
+      KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, d->src_a_16 ? 1 : 2),
+      KV(38, 2), KV(39, d->src_16 ? 1 : 2), KV(44, 3), KV(45, 80),
    };
    const struct agx3_field_kv baseline_c[] = {
       KV(9, 2),  KV(10, 2), KV(23, 1), KV(24, 1),
       KV(38, 2), KV(42, 1), KV(44, 3),  KV(45, 80),
    };
    const struct agx3_field_kv *baseline =
-      d->src_a_is_register ? baseline_b_reg : (agx3b ? baseline_b : baseline_c);
+      d->src_a_is_register ? (agx3b ? baseline_b_reg : baseline_c_reg)
+                           : (agx3b ? baseline_b : baseline_c);
    const unsigned nbaseline =
       d->src_a_is_register
-         ? sizeof(baseline_b_reg) / sizeof(baseline_b_reg[0])
+         ? (agx3b ? sizeof(baseline_b_reg) / sizeof(baseline_b_reg[0])
+                  : sizeof(baseline_c_reg) / sizeof(baseline_c_reg[0]))
       : agx3b ? sizeof(baseline_b) / sizeof(baseline_b[0])
               : sizeof(baseline_c) / sizeof(baseline_c[0]);
 
-   struct agx3_field_kv ov[16];
+   struct agx3_field_kv ov[20];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
+   ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache ? 1 : 0);
    if (d->src_a_is_register) {
       ov[n++] = (struct agx3_field_kv)KV(16, d->src_a_reg);
       /* Liveness, not baseline: see the note in the header. */
       ov[n++] = (struct agx3_field_kv)KV(27, d->src_a_kill ? 1 : 0);
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
+      if (d->src_a_sign_extend)
+         ov[n++] = (struct agx3_field_kv)KV(28, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(15, d->immediate);

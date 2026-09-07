@@ -157,11 +157,103 @@ test_apple_shift_witnesses(void)
       }
    }
 
-   /* A register slot A is witnessed only on AGX3b. */
+   /*
+    * Narrow register operands. f24 is slot A's width and f39 is slot B's, on
+    * both encodings -- the register slot-A form used to pin both to 32-bit,
+    * which made `iadd d32, h_a, h_b` inexpressible and refused every shader
+    * that sums gl_LocalInvocationID's three 16-bit components.
+    *
+    * Every vector below is Apple's own, from
+    * `metal-nt -N compute.mtlp -arch applegpu_g17{p,s}`:
+    *
+    *   o[i] = (uint)a[2i] + (uint)a[2i+1]   over ushort   (f24=1 f39=1)
+    *   o[i] =  (int)a[2i] +  (int)a[2i+1]   over short    (f28=1 f43=1)
+    *   o[0] = lid.x + lid.y + lid.z                       (16+16, then 32+16)
+    */
    {
-      struct agx3_iadd_desc d = {.src_a_is_register = true, .src = 0};
+      static const uint8_t u16_u16[] = {0x9f, 0x01, 0x56, 0x00, 0x02,
+                                        0x00, 0x04, 0x08, 0x17, 0x05};
+      struct agx3_iadd_desc d = {
+         .src_a_is_register = true, .src_a_reg = 0, .src_a_16 = true,
+         .src = 1, .src_16 = true, .src_a_kill = true, .src_kill = true,
+         .wait_mask = 1u << 5,
+      };
       len = 0;
-      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(u16_u16) && memcmp(out, u16_u16, len) == 0);
+   }
+   {
+      static const uint8_t s16_s16[] = {0x9f, 0x01, 0x56, 0x00, 0x02,
+                                        0x02, 0x00, 0x08, 0x17, 0x0f};
+      struct agx3_iadd_desc d = {
+         .src_a_is_register = true, .src_a_reg = 1, .src_a_16 = true,
+         .src_a_sign_extend = true, .src = 0, .src_16 = true,
+         .sign_extend = true, .src_a_kill = true, .src_kill = true,
+         .wait_mask = 1u << 5,
+      };
+      len = 0;
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(s16_s16) && memcmp(out, s16_s16, len) == 0);
+   }
+   {
+      /* lid.x + lid.y: both halves, and Apple caches the result (f11). */
+      static const uint8_t lid_a[] = {0x9f, 0x11, 0x54, 0x00, 0x03,
+                                      0x00, 0x04, 0x08, 0x17, 0x05};
+      struct agx3_iadd_desc d = {
+         .src_a_is_register = true, .src_a_reg = 0, .src_a_16 = true,
+         .src = 1, .src_16 = true, .src_a_kill = true, .src_kill = true,
+         .dest_cache = true, .wait_mask = 1u << 0,
+      };
+      len = 0;
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(lid_a) && memcmp(out, lid_a, len) == 0);
+   }
+   {
+      /* ... + lid.z: a 32-bit slot A and a 16-bit slot B, no dest cache. */
+      static const uint8_t lid_b[] = {0x9f, 0x21, 0x54, 0x00, 0x02,
+                                      0x00, 0x08, 0x28, 0x17, 0x05};
+      struct agx3_iadd_desc d = {
+         .src_a_is_register = true, .src_a_reg = 0, .src = 2,
+         .src_16 = true, .src_a_kill = true, .src_kill = true,
+         .wait_mask = 1u << 1,
+      };
+      len = 0;
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(lid_b) && memcmp(out, lid_b, len) == 0);
+   }
+   {
+      /* The same pair on AGX3c (applegpu_g17s), same operand fields. */
+      static const uint8_t lid_a[] = {0x27, 0x04, 0x04, 0x1a, 0x29, 0x00,
+                                      0xa3, 0x02, 0x60, 0x00, 0x21, 0x00};
+      static const uint8_t lid_b[] = {0x27, 0x08, 0x04, 0x1a, 0x21, 0x00,
+                                      0xa3, 0x02, 0xa8, 0x00, 0x21, 0x00};
+      struct agx3_iadd_desc a = {
+         .src_a_is_register = true, .src_a_reg = 0, .src_a_16 = true,
+         .src = 1, .src_16 = true, .src_a_kill = true, .src_kill = true,
+         .dest_cache = true, .wait_mask = 1u << 0,
+      };
+      struct agx3_iadd_desc b = {
+         .src_a_is_register = true, .src_a_reg = 0, .src = 2,
+         .src_16 = true, .src_a_kill = true, .src_kill = true,
+         .wait_mask = 1u << 1,
+      };
+      len = 0;
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &a, out, &len));
+      CHECK(len == sizeof(lid_a) && memcmp(out, lid_a, len) == 0);
+      len = 0;
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &b, out, &len));
+      CHECK(len == sizeof(lid_b) && memcmp(out, lid_b, len) == 0);
+   }
+   {
+      /* Slot A width and sign-extension exist only for a REGISTER slot A;
+       * asking for them with an immediate must fail closed, not silently
+       * drop them. */
+      struct agx3_iadd_desc d = {.src_a_16 = true, .src = 0, .src_16 = true};
+      len = 0;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      d.src_a_16 = false;
+      d.src_a_sign_extend = true;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
    }
    return 0;
 }
