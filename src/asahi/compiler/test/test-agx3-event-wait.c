@@ -29,8 +29,8 @@ main(void)
       0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00,
       0x11, 0x00, 0x00, 0x40, 0x02, 0x00,
       0x0b, 0x01, 0x0f, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
-      0x0a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
-      0x8f, 0x04, 0x54, 0x02,
+      0x2a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
+      0x8f, 0x04, 0x54, 0x26,
       0x0f, 0x00, 0x54, 0xd6, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
       0x0f, 0x06, 0x04, 0x02, 0x00, 0x00,
       0x0f, 0x06, 0x04, 0x01, 0x00, 0x00,
@@ -77,6 +77,23 @@ main(void)
       memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
              end, sizeof(end)) == 0;
 
+   /* BREAK_IF names the lanes that leave the loop, while CNDLT retains the
+    * lanes selected by its predicate. The native nested-slot lowering must
+    * therefore invert this CNDLT. 0x0a was the old opposite-polarity control;
+    * keep it as an explicit negative so a byte update cannot silently restore
+    * an infinite wait after the event reaches SET. */
+   static const uint8_t wrong_break[] = {
+      0x0a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t wrong_cndlt[] = {0x8f, 0x04, 0x54, 0x02};
+   const bool rejects_wrong_break =
+      part.binary && part.info.binary_size >= 54 + sizeof(wrong_break) &&
+      memcmp((const uint8_t *)part.binary + 54, wrong_break,
+             sizeof(wrong_break)) != 0 &&
+      part.info.binary_size >= 64 + sizeof(wrong_cndlt) &&
+      memcmp((const uint8_t *)part.binary + 64, wrong_cndlt,
+             sizeof(wrong_cndlt)) != 0;
+
    unsigned control = 0;
    const uint8_t *need[] = {outer_entry, loop_entry, loop_exit, outer_exit};
    const size_t need_size[] = {sizeof(outer_entry), sizeof(loop_entry),
@@ -90,7 +107,7 @@ main(void)
       }
    }
 
-   if (!valid || control != 4) {
+   if (!valid || !rejects_wrong_break || control != 4) {
       fprintf(stderr, "AGX3b event-wait poll was not encoded safely\n");
       for (unsigned i = 0; part.binary && i < part.info.binary_size; ++i)
          fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
@@ -99,5 +116,5 @@ main(void)
 
    free(part.binary);
    ralloc_free(b.shader);
-   return valid && control == 4 ? 0 : 1;
+   return valid && rejects_wrong_break && control == 4 ? 0 : 1;
 }

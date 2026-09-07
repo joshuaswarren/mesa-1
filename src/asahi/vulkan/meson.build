@@ -490,6 +490,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Public record/execute oracle for host set/reset plus a transfer fill,
+    # event wait carrying a buffer dependency, transfer copy and GPU reset.
+    executable(
+      'g17p-vulkan-event-buffer',
+      files('tests/g17p_vulkan_event_buffer.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'asahi-submit-g17p-add3',
       files('tests/asahi_submit_g17p_add3.c'),

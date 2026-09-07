@@ -14,6 +14,18 @@
 
 #define HK_EVENT_MEM_SIZE sizeof(VkResult)
 
+/* Honeykrisp's current synchronization implementation is deliberately a full
+ * stream boundary.  That is stronger than every valid event dependency, but
+ * it is important that event commands apply the boundary at the dependency's
+ * semantic position instead of merely ending whichever stream happened to be
+ * open before the event poll. */
+static void
+hk_event_full_barrier(struct hk_cmd_buffer *cmd)
+{
+   hk_cmd_buffer_end_compute(cmd);
+   hk_cmd_buffer_end_graphics(cmd);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
                const VkAllocationCallbacks *pAllocator, VkEvent *pEvent)
@@ -92,8 +104,11 @@ hk_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Set event");
-   hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_graphics(cmd);
+
+   /* The full boundary makes every source access in pDependencyInfo
+    * available before publishing SET. */
+   assert(pDependencyInfo->sType == VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
+   hk_event_full_barrier(cmd);
    hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_SET, false);
 }
 
@@ -105,8 +120,7 @@ hk_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Reset event");
-   hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_graphics(cmd);
+   hk_event_full_barrier(cmd);
    hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_RESET, false);
 }
 
@@ -123,21 +137,22 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
     *
     * XXX: perf.
     */
-   hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_graphics(cmd);
+   hk_event_full_barrier(cmd);
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       for (uint32_t i = 0; i < eventCount; ++i) {
          VK_FROM_HANDLE(hk_event, event, pEvents[i]);
+         assert(pDependencyInfos[i].sType ==
+                VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
          hk_g17p_meta_wait_addr(cmd, event->addr, VK_EVENT_SET);
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
-      }
 
-      /* The event poll and every dependency covered by pDependencyInfos must
-       * precede later work.  Closing the polling CDM stream is the existing
-       * full memory-dependency implementation used by PipelineBarrier2. */
-      hk_cmd_buffer_end_compute(cmd);
-      hk_cmd_buffer_end_graphics(cmd);
+         /* End the polling CDM stream here. This is the full memory barrier
+          * that makes the dependency's source accesses visible to its
+          * destination accesses, including buffer barriers. Applying it once
+          * per event preserves the pEvents[i]/pDependencyInfos[i] pairing. */
+         hk_event_full_barrier(cmd);
+      }
    }
 }
