@@ -89,7 +89,10 @@
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_RG8_SINT
+#if G17P_RGBA8_UINT
+#include "g17p_vulkan_rgba8_uint_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_rgba8_uint_frag_spv
+#elif G17P_RG8_SINT
 #include "g17p_vulkan_rg8_sint_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -160,7 +163,11 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 
-#if G17P_RG8_SINT
+#if G17P_RGBA8_UINT
+#define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UINT
+#define IMAGE_PIXEL_BYTES 4
+#define READBACK_GUARD_BYTES 64
+#elif G17P_RG8_SINT
 #define IMAGE_FORMAT VK_FORMAT_R8G8_SINT
 #define IMAGE_PIXEL_BYTES 2
 #elif G17P_RG8_UINT
@@ -309,7 +316,10 @@
 #error "the RG8 SINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_RG8_SINT
+#if G17P_RGBA8_UINT
+#define PROBE_NAME "g17p-vulkan-rgba8-uint"
+#define READBACK_IMAGE_USAGE 0
+#elif G17P_RG8_SINT
 #define PROBE_NAME "g17p-vulkan-rg8-sint"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
