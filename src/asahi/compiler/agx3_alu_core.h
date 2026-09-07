@@ -261,6 +261,44 @@ bool agx3_alu_fmax_half(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                         uint8_t *len);
 
+/*
+ * 32-bit tied fmin/fmax -- the shape NIR produces for max(x, 0.0), and so for
+ * normalize(), clamp(), saturate() and discard.  Apple encodes it as a compact
+ * six-byte `fsel`, not as the general mixed-width select:
+ *
+ *   fmax(a, b)     f32   12 03 1e 05 00 c0   (fsel.ep7, register second operand)
+ *   fmax(a, 0.0f)  f32   12 03 0a 81 00 c2   (fsel.ep2, minifloat second operand)
+ *   fmin           f32   the same, condition 3 instead of 7
+ *
+ * both witnessed byte-exactly from `metal-nt -arch applegpu_g17p`.  The
+ * immediate is an ordinary AGX minifloat, deposited twice because the compared
+ * and selected operands are tied.  wait_mask carries at most one scoreboard
+ * slot; a wider wait must be retired before the instruction.
+ */
+bool agx3_alu_fmin_f32(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[4],
+                       const enum agx3_alu_hint hints[4], bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+
+bool agx3_alu_fmax_f32(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[4],
+                       const enum agx3_alu_hint hints[4], bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+
+bool agx3_alu_fmin_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, uint8_t minifloat,
+                           enum agx3_alu_hint hint, bool dest_cache,
+                           uint16_t wait_mask,
+                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_fmax_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, uint8_t minifloat,
+                           enum agx3_alu_hint hint, bool dest_cache,
+                           uint16_t wait_mask,
+                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                    enum agx3_alu_hint hint, bool dest_cache,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],

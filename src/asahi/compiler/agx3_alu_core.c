@@ -1213,6 +1213,155 @@ agx3_alu_fmax_half(enum agx_isa_encoding enc, uint16_t dest,
                                wait_mask, out, len);
 }
 
+/*
+ * 32-bit tied fmin/fmax.
+ *
+ * The 32-bit destination form of a tied fcmpsel is the same Apple `fsel`
+ * family the half encoder above uses; only the four width selectors change
+ * (f11/f43/f60/f77/f94: 1 = one 16-bit half, 2 = a 32-bit pair).  Which
+ * encoding profile Apple picks depends on the second operand:
+ *
+ *   fmax(a, b)     f32   12 03 1e 05 00 c0    fsel.ep7, src1 a register
+ *   fmax(a, 0.0f)  f32   12 03 0a 81 00 c2    fsel.ep2, src1 a minifloat
+ *
+ * both witnessed from `metal-nt -arch applegpu_g17p`.  ep7 names the
+ * destination in f3, ep2 in f17; every other field id is shared.  The
+ * immediate is a plain AGX minifloat and appears twice, in f51 and f85,
+ * because the compared value and the selected value are the same operand --
+ * which is exactly what makes the instruction a minimum or a maximum rather
+ * than a general select.
+ *
+ * The wait mask is the ordinary three-bit scoreboard selector at the top of
+ * the last byte: slot n sets f(101 + n).  Only a single slot is encodable in
+ * this form, so a multi-slot wait must be retired separately.
+ */
+static bool
+agx3_alu_fminmax32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src0,
+                   uint16_t src2, bool src1_immediate, uint16_t src1,
+                   uint16_t src3, const enum agx3_alu_hint hints[4],
+                   bool maximum, bool dest_cache, uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !hints || !out || !len || dest >= 256 ||
+       src0 >= 256 || src2 >= 256 || src1 >= 256 || src3 >= 256)
+      return false;
+   if (wait_mask & ~UINT16_C(0x3f))
+      return false;
+   /* One scoreboard slot at a time: the selector is a three-bit code. */
+   if (wait_mask & (wait_mask - 1))
+      return false;
+   for (unsigned i = 0; i < 4; ++i) {
+      if ((unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+   if (src1_immediate && (src1 > 255 || src3 > 255))
+      return false;
+
+   struct agx3_field_kv fields[24];
+   unsigned n = 0;
+   const uint16_t dest_field = src1_immediate ? 17 : 3;
+   const uint16_t dest_kind = src1_immediate ? 24 : 10;
+   const uint16_t dest_size = src1_immediate ? 25 : 11;
+   const uint16_t dest_cache_field = src1_immediate ? 26 : 12;
+   if (src1_immediate)
+      fields[n++] = (struct agx3_field_kv){0, 1};
+   fields[n++] = (struct agx3_field_kv){dest_field, dest};
+   fields[n++] = (struct agx3_field_kv){dest_kind, 2};
+   fields[n++] = (struct agx3_field_kv){dest_size, 2};
+   fields[n++] = (struct agx3_field_kv){dest_cache_field, dest_cache};
+
+   /* src0 and src2 are the tied register operand. */
+   fields[n++] = (struct agx3_field_kv){35, src0};
+   fields[n++] = (struct agx3_field_kv){42, 2};
+   fields[n++] = (struct agx3_field_kv){43, 2};
+   fields[n++] = (struct agx3_field_kv){44, hints[0] == AGX3_ALU_HINT_CACHE};
+   fields[n++] = (struct agx3_field_kv){46, hints[0] == AGX3_ALU_HINT_DISCARD};
+   fields[n++] = (struct agx3_field_kv){69, src2};
+   fields[n++] = (struct agx3_field_kv){76, 2};
+   fields[n++] = (struct agx3_field_kv){77, 2};
+   fields[n++] = (struct agx3_field_kv){78, hints[2] == AGX3_ALU_HINT_CACHE};
+   fields[n++] = (struct agx3_field_kv){80, hints[2] == AGX3_ALU_HINT_DISCARD};
+
+   /* src1 and src3 are the tied second operand: a register pair or the same
+    * minifloat deposited twice. */
+   fields[n++] = (struct agx3_field_kv){src1_immediate ? 51 : 52, src1};
+   fields[n++] = (struct agx3_field_kv){59, src1_immediate ? 1 : 2};
+   fields[n++] = (struct agx3_field_kv){60, 2};
+   fields[n++] = (struct agx3_field_kv){src1_immediate ? 85 : 86, src3};
+   fields[n++] = (struct agx3_field_kv){93, src1_immediate ? 1 : 2};
+   fields[n++] = (struct agx3_field_kv){94, 2};
+   if (!src1_immediate) {
+      fields[n++] = (struct agx3_field_kv){61, hints[1] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){63, hints[1] == AGX3_ALU_HINT_DISCARD};
+      fields[n++] = (struct agx3_field_kv){95, hints[3] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){97, hints[3] == AGX3_ALU_HINT_DISCARD};
+   } else if (hints[1] != AGX3_ALU_HINT_NONE ||
+              hints[3] != AGX3_ALU_HINT_NONE) {
+      return false;             /* an immediate has no lifetime */
+   }
+
+   struct agx3_field_kv all[32];
+   unsigned m = 0;
+   for (unsigned i = 0; i < n; ++i)
+      all[m++] = fields[i];
+   for (unsigned i = 0; i < 6; ++i) {
+      if (wait_mask & (1u << i))
+         all[m++] = (struct agx3_field_kv){(uint16_t)(102 + i), 1};
+   }
+   all[m++] = (struct agx3_field_kv){110, maximum ? 7 : 3};
+
+   return agx3_bind_compose(enc, "fsel", src1_immediate ? 2 : 7, NULL, 0, all,
+                            m, out, len);
+}
+
+bool
+agx3_alu_fmin_f32(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[4], const enum agx3_alu_hint hints[4],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!src)
+      return false;
+   return agx3_alu_fminmax32(enc, dest, src[0], src[2], false, src[1], src[3],
+                             hints, false, dest_cache, wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmax_f32(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[4], const enum agx3_alu_hint hints[4],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!src)
+      return false;
+   return agx3_alu_fminmax32(enc, dest, src[0], src[2], false, src[1], src[3],
+                             hints, true, dest_cache, wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmin_f32_imm(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      uint8_t minifloat, enum agx3_alu_hint hint,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   const enum agx3_alu_hint hints[4] = {hint, AGX3_ALU_HINT_NONE, hint,
+                                        AGX3_ALU_HINT_NONE};
+   return agx3_alu_fminmax32(enc, dest, src, src, true, minifloat, minifloat,
+                             hints, false, dest_cache, wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmax_f32_imm(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      uint8_t minifloat, enum agx3_alu_hint hint,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   const enum agx3_alu_hint hints[4] = {hint, AGX3_ALU_HINT_NONE, hint,
+                                        AGX3_ALU_HINT_NONE};
+   return agx3_alu_fminmax32(enc, dest, src, src, true, minifloat, minifloat,
+                             hints, true, dest_cache, wait_mask, out, len);
+}
+
 bool
 agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
               enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,

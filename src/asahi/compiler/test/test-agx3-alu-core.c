@@ -1404,6 +1404,115 @@ static void test_native_half_max(void)
    puts("Native half maximum: exact internal-clamp/dead Apple FSEL vectors and fail-closed bounds PASS");
 }
 
+/*
+ * Apple's own applegpu_g17p bytes for the 32-bit tied minimum/maximum, from
+ * `metal-nt`.  These are the shapes NIR produces for normalize(), clamp(),
+ * saturate() and discard, none of which had an encoding before.
+ */
+static void test_native_f32_minmax(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* o[i] = fmax(a[i], b[i]); loaded operands dead, waiting the load's slot. */
+   const uint16_t rr[] = {2, 4, 2, 4};
+   const enum agx3_alu_hint dead[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3B, 2, rr, dead, false, 32,
+                            bytes, &len));
+   exact(bytes, len, "12031e0500c0");
+   assert(agx3_alu_fmin_f32(AGX_ISA_ENCODING_AGX3B, 2, rr, dead, false, 32,
+                            bytes, &len));
+   exact(bytes, len, "12031e0501c0");
+
+   /* The same maximum with the second operand carried as a minifloat.  The
+    * immediate byte is a plain agx_minifloat_encode() of the constant. */
+   static const struct {
+      uint8_t minifloat;
+      const char *bytes;
+   } imm[] = {
+      {0x00, "12030a8100c2"},   /*  0.0f      */
+      {0x10, "12030a9100c2"},   /*  0.25f     */
+      {0x20, "12030aa100c2"},   /*  0.5f      */
+      {0x28, "12030aa900c2"},   /*  0.75f     */
+      {0x30, "12030ab100c2"},   /*  1.0f      */
+      {0x34, "12030ab500c2"},   /*  1.25f     */
+      {0x38, "12030ab900c2"},   /*  1.5f      */
+      {0x40, "12030ac100c2"},   /*  2.0f      */
+      {0x48, "12030ac900c2"},   /*  3.0f      */
+      {0x50, "12030ad100c2"},   /*  4.0f      */
+      {0x60, "12030ae100c2"},   /*  8.0f      */
+      {0x70, "12030af100c2"},   /* 16.0f      */
+      {0x08, "12030a8900c2"},   /*  0.125f    */
+      {0x01, "12030a8110c2"},   /*  0.015625f */
+      {0x7f, "12030aff10c2"},   /* 31.0f      */
+      {0x3f, "12030abf10c2"},   /*  1.9375f   */
+      {0xa0, "12031aa100c2"},   /* -0.5f      */
+      {0xb0, "12031ab100c2"},   /* -1.0f      */
+   };
+   for (unsigned i = 0; i < sizeof(imm) / sizeof(imm[0]); ++i) {
+      assert(agx3_alu_fmax_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2,
+                                   imm[i].minifloat, AGX3_ALU_HINT_DISCARD,
+                                   false, 32, bytes, &len));
+      exact(bytes, len, imm[i].bytes);
+   }
+   assert(agx3_alu_fmin_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x00,
+                                AGX3_ALU_HINT_DISCARD, false, 32, bytes, &len));
+   exact(bytes, len, "12030a8101c2");
+   assert(agx3_alu_fmin_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x30,
+                                AGX3_ALU_HINT_DISCARD, false, 32, bytes, &len));
+   exact(bytes, len, "12030ab101c2");
+
+   /* Eight simultaneously-live maxima against zero: Apple's own register and
+    * lifetime assignment, from one kernel. */
+   static const struct {
+      uint16_t dest, src;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *bytes;
+   } live[] = {
+      { 8, 16, AGX3_ALU_HINT_CACHE,   true, 32, "4291228100c2"},
+      {12, 18, AGX3_ALU_HINT_CACHE,   true,  0, "629322810002"},
+      {12, 20, AGX3_ALU_HINT_CACHE,   true,  0, "629522810002"},
+      {14, 22, AGX3_ALU_HINT_CACHE,   true,  0, "729722810002"},
+      { 0,  0, AGX3_ALU_HINT_DISCARD, true,  0, "02012a810002"},
+      {28,  2, AGX3_ALU_HINT_DISCARD, true,  0, "e2032a810002"},
+      { 4,  4, AGX3_ALU_HINT_DISCARD, true,  0, "22052a810002"},
+      { 6,  6, AGX3_ALU_HINT_DISCARD, true,  0, "32072a810002"},
+   };
+   for (unsigned i = 0; i < sizeof(live) / sizeof(live[0]); ++i) {
+      assert(agx3_alu_fmax_f32_imm(AGX_ISA_ENCODING_AGX3B, live[i].dest,
+                                   live[i].src, 0x00, live[i].hint,
+                                   live[i].dest_cache, live[i].wait, bytes,
+                                   &len));
+      exact(bytes, len, live[i].bytes);
+   }
+
+   /* A maximum whose operand came from a slot-1 load, also Apple's. */
+   assert(agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3B, 2, rr, dead, false, 1,
+                            bytes, &len));
+   exact(bytes, len, "12031e050020");
+
+   /* Fail closed: wrong encoding, out-of-range registers, a lifetime hint on
+    * an immediate, and a wait spanning two slots. */
+   const enum agx3_alu_hint none[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3C, 2, rr, none, false, 0,
+                             bytes, &len));
+   assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3B, 256, rr, none, false, 0,
+                             bytes, &len));
+   assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3B, 2, rr, none, false, 33,
+                             bytes, &len));
+   assert(!agx3_alu_fmax_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x00,
+                                 AGX3_ALU_HINT_NONE, false, 3, bytes, &len));
+   puts("Native f32 minimum/maximum: exact Apple register, minifloat and "
+        "lifetime vectors plus fail-closed bounds PASS");
+}
+
 static void test_native_half_clamp(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -1686,6 +1795,7 @@ int main(void){
    test_native_half_compare_select();
    test_native_half_min();
    test_native_half_max();
+   test_native_f32_minmax();
    test_native_half_clamp();
    test_native_half_reciprocal();
    test_native_half_rsqrt();
