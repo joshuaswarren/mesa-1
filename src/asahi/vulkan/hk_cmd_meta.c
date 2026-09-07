@@ -1717,7 +1717,7 @@ hk_g17p_copy_compressed_buffer_to_image(
        image->plane_count != 1 || image->vk.image_type != VK_IMAGE_TYPE_2D ||
        image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
        image->planes[0].layout.tiling != AIL_TILING_GPU ||
-       info->dstImageLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+       !hk_g17p_transfer_dst_layout_supported(info->dstImageLayout))
       return false;
 
    VK_FROM_HANDLE(hk_buffer, buffer, info->srcBuffer);

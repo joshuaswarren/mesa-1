@@ -32,6 +32,16 @@ struct hk_g17p_buffer_to_image_copy {
    uint32_t buffer_image_height;
 };
 
+/* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
+ * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
+ * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so
+ * this is an API-validity check rather than a capability check: it exists only
+ * so the G17P fast paths reject a destination the caller could not have meant.
+ * Keep the whole legal set, because a client that only ever passed
+ * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL starts passing VK_IMAGE_LAYOUT_GENERAL
+ * for every copy the moment it enables VK_KHR_unified_image_layouts. */
+bool hk_g17p_transfer_dst_layout_supported(VkImageLayout layout);
+
 /* Native uncompressed color uploads preserve rectangles and mip/layer
  * subresources. Multi-layer regions are split into native single-layer
  * passes without changing source layout or copying index/pixel data. */

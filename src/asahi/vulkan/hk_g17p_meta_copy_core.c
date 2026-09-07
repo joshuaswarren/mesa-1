@@ -6,6 +6,14 @@
 #include "hk_g17p_meta_copy_core.h"
 
 bool
+hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
+{
+   return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
+          layout == VK_IMAGE_LAYOUT_GENERAL ||
+          layout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR;
+}
+
+bool
 hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)
 {
@@ -14,8 +22,7 @@ hk_g17p_buffer_to_image_copy_supported(
         copy->format != VK_FORMAT_B8G8R8A8_UNORM &&
         copy->format != VK_FORMAT_R8G8B8A8_UNORM &&
         copy->format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) ||
-       (copy->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
-        copy->layout != VK_IMAGE_LAYOUT_GENERAL) ||
+       !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
        copy->image_type != VK_IMAGE_TYPE_2D ||
        copy->samples != VK_SAMPLE_COUNT_1_BIT || copy->plane_count != 1 ||
        copy->mip_levels == 0 || copy->array_layers == 0 ||

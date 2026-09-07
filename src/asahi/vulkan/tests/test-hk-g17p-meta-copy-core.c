@@ -76,7 +76,28 @@ main(void)
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
    bad.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad));
+   bad.layout = VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
 
+   /* Exactly the layouts vkCmdCopyBufferToImage accepts as dstImageLayout.
+    * VK_IMAGE_LAYOUT_GENERAL is what a VK_KHR_unified_image_layouts client
+    * (Zink with driver_workarounds.general_layout) passes for every copy, so
+    * rejecting it would turn every G17P block-compressed upload into
+    * VK_ERROR_FEATURE_NOT_PRESENT. */
+   CHECK(hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL));
+   CHECK(hk_g17p_transfer_dst_layout_supported(VK_IMAGE_LAYOUT_GENERAL));
+   CHECK(hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR));
+   CHECK(!hk_g17p_transfer_dst_layout_supported(VK_IMAGE_LAYOUT_UNDEFINED));
+   CHECK(!hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+   CHECK(!hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+   CHECK(!hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+   CHECK(!hk_g17p_transfer_dst_layout_supported(
+      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));
 
    /* Atlas uploads must preserve arbitrary offsets and padded source rows. */
    struct hk_g17p_buffer_to_image_copy atlas = vkcube;
