@@ -18,7 +18,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_NULL_DESCRIPTOR
+#ifdef G17P_WORKGROUP_SHARED
+#include "g17p_vulkan_workgroup_shared_spv.h"
+#define COMPUTE_SPV g17p_vulkan_workgroup_shared_spv
+#define TEST_NAME "g17p-vulkan-workgroup-shared"
+#elif defined(G17P_NULL_DESCRIPTOR)
 #include "g17p_vulkan_null_descriptor_spv.h"
 #define COMPUTE_SPV g17p_vulkan_null_descriptor_spv
 #define TEST_NAME "g17p-vulkan-null-descriptor"
@@ -29,11 +33,24 @@
 #endif
 
 #define T8140_DEVICE_ID 0x8140
-#define ELEMENT_COUNT   32
-#ifdef G17P_NULL_DESCRIPTOR
+#ifdef G17P_WORKGROUP_SHARED
+#define ELEMENT_COUNT 64
+#define PREFIX_COUNT 16
+#define GUARD_COUNT 16
+#define EXPECTED(i)                                                            \
+   (UINT32_C(0x51000000) ^ ((uint32_t)(i) << 16) ^                            \
+    ((UINT32_C(0x100) + (((i) ^ 32u) * 17u)) +                                \
+     (UINT32_C(0x100) + ((((i) * 7u + 11u) & 63u) * 17u))))
+#elif defined(G17P_NULL_DESCRIPTOR)
+#define ELEMENT_COUNT 32
+#define PREFIX_COUNT 0
 #define GUARD_COUNT 32
+#define EXPECTED(i) (UINT32_C(0x6d000000) + (i))
 #else
+#define ELEMENT_COUNT 32
+#define PREFIX_COUNT 0
 #define GUARD_COUNT 0
+#define EXPECTED(i) (UINT32_C(0x12340000) + (i))
 #endif
 
 /* Distinct per element and distinguishable from both 0 and any plausible
@@ -207,6 +224,12 @@ main(int argc, char **argv)
    free(physical_devices);
    if (physical == VK_NULL_HANDLE)
       die("T8140/G17P Vulkan device was not found");
+#ifdef G17P_WORKGROUP_SHARED
+   if (properties.limits.maxComputeWorkGroupInvocations < 64 ||
+       properties.limits.maxComputeWorkGroupSize[0] < 64 ||
+       properties.limits.maxComputeSharedMemorySize < 256)
+      die("required workgroup or shared-memory limits are not advertised");
+#endif
 
    uint32_t queue_family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_family_count,
@@ -312,7 +335,7 @@ main(int argc, char **argv)
 
    const VkDeviceSize payload_size = ELEMENT_COUNT * sizeof(uint32_t);
    const VkDeviceSize buffer_size =
-      (ELEMENT_COUNT + GUARD_COUNT) * sizeof(uint32_t);
+      (PREFIX_COUNT + ELEMENT_COUNT + GUARD_COUNT) * sizeof(uint32_t);
    const VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = buffer_size,
@@ -350,8 +373,10 @@ main(int argc, char **argv)
     * zero", and that ambiguity is exactly what stalled the last round: every
     * element read back as 0, which is also what an untouched buffer looks
     * like. With the sentinel the readback classifies itself. */
-   for (uint32_t i = 0; i < ELEMENT_COUNT + GUARD_COUNT; ++i)
+   for (uint32_t i = 0;
+        i < PREFIX_COUNT + ELEMENT_COUNT + GUARD_COUNT; ++i)
       mapped[i] = SENTINEL(i);
+   uint32_t *payload = mapped + PREFIX_COUNT;
 
    const VkDescriptorSetLayoutBinding bindings[] = {
       {
@@ -430,7 +455,7 @@ main(int argc, char **argv)
 #endif
       {
          .buffer = buffer,
-         .offset = 0,
+         .offset = PREFIX_COUNT * sizeof(uint32_t),
          .range = payload_size,
       },
 #ifdef G17P_NULL_DESCRIPTOR
@@ -539,10 +564,17 @@ main(int argc, char **argv)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
+#ifdef G17P_WORKGROUP_SHARED
+      printf(TEST_NAME ": RECORD PASS — 64-invocation shared-memory pipeline, "
+                       "cross-subgroup barrier, dispatch and EndCB accepted "
+                       "on queue %u (flags %#x)\n",
+             queue_family, queue_flags);
+#else
       printf(TEST_NAME ": RECORD PASS — null SSBO load/store and UBO load "
                        "descriptor update, pipeline, dispatch and EndCB "
                        "accepted on queue %u (flags %#x)\n",
              queue_family, queue_flags);
+#endif
       goto cleanup;
    }
 
@@ -557,23 +589,27 @@ main(int argc, char **argv)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
+#ifdef G17P_WORKGROUP_SHARED
+   const VkResult waited =
+      vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
+   if (waited == VK_TIMEOUT)
+      die("vkWaitForFences timed out after three seconds");
+   check(waited, "vkWaitForFences");
+#else
    check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
          "vkWaitForFences");
+#endif
 
    unsigned untouched = 0, zeroed = 0, wrong = 0, first_bad = UINT32_MAX;
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
-#ifdef G17P_NULL_DESCRIPTOR
-      const uint32_t expected = UINT32_C(0x6d000000) + i;
-#else
-      const uint32_t expected = UINT32_C(0x12340000) + i;
-#endif
-      if (mapped[i] == expected)
+      const uint32_t expected = EXPECTED(i);
+      if (payload[i] == expected)
          continue;
       if (first_bad == UINT32_MAX)
          first_bad = i;
-      if (mapped[i] == SENTINEL(i))
+      if (payload[i] == SENTINEL(PREFIX_COUNT + i))
          untouched++;
-      else if (mapped[i] == 0)
+      else if (payload[i] == 0)
          zeroed++;
       else
          wrong++;
@@ -585,13 +621,8 @@ main(int argc, char **argv)
               TEST_NAME ":   value[%u] is %#x, expected %#x "
               "(sentinel would be %#x)\n",
               untouched, zeroed, wrong, ELEMENT_COUNT, first_bad,
-              mapped[first_bad],
-#ifdef G17P_NULL_DESCRIPTOR
-              UINT32_C(0x6d000000) + first_bad,
-#else
-              UINT32_C(0x12340000) + first_bad,
-#endif
-              SENTINEL(first_bad));
+              payload[first_bad], EXPECTED(first_bad),
+              SENTINEL(PREFIX_COUNT + first_bad));
       /* The classification is the whole point, so spell it out. */
       if (untouched == ELEMENT_COUNT)
          fprintf(stderr,
@@ -616,31 +647,46 @@ main(int argc, char **argv)
       for (uint32_t i = 0; i < ELEMENT_COUNT; i += 8) {
          fprintf(stderr, TEST_NAME ":     [%2u] ", i);
          for (uint32_t j = 0; j < 8 && i + j < ELEMENT_COUNT; ++j)
-            fprintf(stderr, "%08x ", mapped[i + j]);
+            fprintf(stderr, "%08x ", payload[i + j]);
          fprintf(stderr, "\n");
       }
       return EXIT_FAILURE;
    }
 
-#ifdef G17P_NULL_DESCRIPTOR
-   for (uint32_t i = ELEMENT_COUNT; i < ELEMENT_COUNT + GUARD_COUNT; ++i) {
+#if defined(G17P_WORKGROUP_SHARED) || defined(G17P_NULL_DESCRIPTOR)
+   for (uint32_t i = 0; i < PREFIX_COUNT; ++i) {
       if (mapped[i] != SENTINEL(i))
-         die("output guard changed");
+         die("output prefix guard changed");
+   }
+   for (uint32_t i = PREFIX_COUNT + ELEMENT_COUNT;
+        i < PREFIX_COUNT + ELEMENT_COUNT + GUARD_COUNT; ++i) {
+      if (mapped[i] != SENTINEL(i))
+         die("output suffix guard changed");
    }
 
    sleep(3);
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
-      if (mapped[i] != UINT32_C(0x6d000000) + i)
-         die("null-load result changed after three seconds");
+      if (payload[i] != EXPECTED(i))
+         die("result changed after three seconds");
    }
-   for (uint32_t i = ELEMENT_COUNT; i < ELEMENT_COUNT + GUARD_COUNT; ++i) {
+   for (uint32_t i = 0; i < PREFIX_COUNT; ++i) {
       if (mapped[i] != SENTINEL(i))
-         die("output guard changed after three seconds");
+         die("output prefix guard changed after three seconds");
+   }
+   for (uint32_t i = PREFIX_COUNT + ELEMENT_COUNT;
+        i < PREFIX_COUNT + ELEMENT_COUNT + GUARD_COUNT; ++i) {
+      if (mapped[i] != SENTINEL(i))
+         die("output suffix guard changed after three seconds");
    }
 
+#ifdef G17P_WORKGROUP_SHARED
+   printf(TEST_NAME ": PASS — 64 exact cross-subgroup shared-memory results "
+                    "and 32 guards stable for three seconds\n");
+#else
    printf(TEST_NAME ": PASS — 32 null SSBO/UBO loads returned zero, null "
                     "SSBO stores were discarded, exact output and 32 guards "
                     "stable for three seconds\n");
+#endif
 #else
    printf("g17p-vulkan-compute-min: PASS — 32 buffer writes on queue family %u "
           "(flags %#x, private G17P compute route)\n",
