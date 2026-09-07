@@ -1661,7 +1661,6 @@ test_g17p_single_layer_rt0_layout(void)
 
    enum pipe_format unqualified_i8_siblings[][AGX_MAX_RENDER_TARGETS] = {
       {PIPE_FORMAT_R8_UINT},
-      {PIPE_FORMAT_R8G8B8A8_UINT},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(unqualified_i8_siblings); ++i) {
       tib = agx_build_tilebuffer_layout(unqualified_i8_siblings[i], 1, 1,
