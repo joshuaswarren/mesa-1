@@ -652,6 +652,15 @@ if with_tests
     )
 
     executable(
+      'asahi-vulkan-g17p-layer-requirements',
+      files('tests/g17p_vulkan_layer_requirements.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'asahi-submit-g17p-add3',
       files('tests/asahi_submit_g17p_add3.c'),
       include_directories : [inc_include],
