@@ -99,6 +99,7 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             agx_tilebuffer_physical_format(tib, 0) ==
                PIPE_FORMAT_R10G10B10A2_UNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM));
 }
 

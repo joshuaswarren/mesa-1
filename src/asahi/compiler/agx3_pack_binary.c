@@ -3136,8 +3136,10 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * Fresh native RGB10A2 key0x10021300 emits the identical physical program:
  * its normalized conversion happens before W32 tile storage; PBE describes
  * the destination format. RG16 UNORM is likewise one 32-bit imageblock word,
- * with its two U16-normalized lanes described by PBE. RGBA16
- * key0x10020c00 is two words and gives distinct imgwblk bytes.
+ * with its two U16-normalized lanes described by PBE. Fresh Apple G17P
+ * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
+ * the same one-word program for signed RG16 while PBE describes signedness.
+ * RGBA16 key0x10020c00 is two words and gives distinct imgwblk bytes.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3192,6 +3194,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
                 (I->format != AGX_FORMAT_U8NORM &&
                  I->format != AGX_FORMAT_U16NORM &&
+                 I->format != AGX_FORMAT_S16NORM &&
                  I->format != AGX_FORMAT_RGB10A2) || I->dim != AGX_DIM_2D ||
                 !I->explicit_coords ||
                 I->src[0].type != AGX_INDEX_IMMEDIATE ||

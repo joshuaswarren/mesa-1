@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Display-independent Vulkan graphics proof for T8140/G17P. Render one
- * full-screen triangle into a one-tile RGBA8 image and verify every byte.
+ * full-screen triangle into a one-tile image and verify every byte.
  *
  * The default build uses vkCmdCopyImageToBuffer and intentionally exercises
  * Honeykrisp's GPU meta-copy path.  g17p-hostcopy-triangle compiles this same
@@ -37,11 +37,20 @@
 #define G17P_RGBA16_UNORM 0
 #endif
 
+#ifndef G17P_RG16_SNORM
+#define G17P_RG16_SNORM 0
+#endif
+
 #if G17P_F16_IO
 #include "g17p_vulkan_f16_io_frag.h"
 #include "g17p_vulkan_f16_io_vert.h"
 #define G17P_VERT_SPV g17p_vulkan_f16_io_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_f16_io_frag_spv
+#elif G17P_RG16_SNORM
+#include "g17p_vulkan_rg16_snorm_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_rg16_snorm_frag_spv
 #else
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -56,6 +65,9 @@
 #if G17P_RGBA16_UNORM
 #define IMAGE_FORMAT VK_FORMAT_R16G16B16A16_UNORM
 #define IMAGE_PIXEL_BYTES 8
+#elif G17P_RG16_SNORM
+#define IMAGE_FORMAT VK_FORMAT_R16G16_SNORM
+#define IMAGE_PIXEL_BYTES 4
 #elif G17P_RG16_UNORM
 #define IMAGE_FORMAT VK_FORMAT_R16G16_UNORM
 #define IMAGE_PIXEL_BYTES 4
@@ -90,12 +102,25 @@
 #error "the RG16 fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_RGBA16_UNORM && (G17P_F16_IO || G17P_RG16_UNORM || G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#if G17P_RGBA16_UNORM &&                                               \
+   (G17P_F16_IO || G17P_RG16_UNORM || G17P_RG16_SNORM ||              \
+    G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
 #error "the RGBA16 fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if G17P_RG16_SNORM &&                                                   \
+   (G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||             \
+    G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the RG16 SNORM fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
 #if G17P_RGBA16_UNORM
 #define PROBE_NAME "g17p-vulkan-rgba16-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_RG16_SNORM
+#define PROBE_NAME "g17p-vulkan-rg16-snorm"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
@@ -247,7 +272,11 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_RG16_UNORM
+#if G17P_RG16_SNORM
+   /* Fragment (-0.5, 0.28) maps to signed-normalized -16384 (0xc000) and
+    * 9175 (0x23d7). The negative first lane distinguishes SNORM from UNORM. */
+   static const uint8_t expected[4] = {0x00, 0xc0, 0xd7, 0x23};
+#elif G17P_RG16_UNORM
    static const uint8_t expected[4] = {0xff, 0xff, 0xae, 0x47};
 #elif G17P_RGBA16_UNORM
    static const uint8_t expected[8] = {
@@ -281,7 +310,8 @@ main(void)
       (G17P_F16_IO && getenv("G17P_F16_IO_RECORD_ONLY") != NULL) ||
       (G17P_RG16_UNORM && getenv("G17P_RG16_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA16_UNORM &&
-       getenv("G17P_RGBA16_UNORM_RECORD_ONLY") != NULL);
+       getenv("G17P_RGBA16_UNORM_RECORD_ONLY") != NULL) ||
+      (G17P_RG16_SNORM && getenv("G17P_RG16_SNORM_RECORD_ONLY") != NULL);
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -913,7 +943,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM
+#if G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||            \
+   G17P_RG16_SNORM
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
@@ -954,7 +985,8 @@ main(void)
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 
-#if G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM
+#if G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
+   G17P_RGBA16_UNORM || G17P_RG16_SNORM
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
@@ -962,7 +994,11 @@ main(void)
 
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_RG16_UNORM
+#if G17P_RG16_SNORM
+   printf(PROBE_NAME ": PASS — %ux%u RG16 SNORM exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_RG16_UNORM
    printf(PROBE_NAME ": PASS — %ux%u RG16 UNORM exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
