@@ -20,6 +20,7 @@
 #include "hk_device.h"
 #include "hk_device_memory.h"
 #include "hk_entrypoints.h"
+#include "hk_g17p_meta_copy_core.h"
 #include "hk_physical_device.h"
 
 #include "vk_format.h"
@@ -49,6 +50,14 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
 
    enum pipe_format p_format = hk_format_to_pipe_format(vk_format);
    if (p_format == PIPE_FORMAT_NONE)
+      return 0;
+
+   /* Keep compressed families independent on G17P. The complete BC family is
+    * capture-backed; ETC2/EAC and ASTC still need public decode oracles before
+    * their Vulkan feature bits and format capabilities can be exposed. */
+   if (pdev->dev.chip == AGX_CHIP_G17P &&
+       util_format_is_compressed(p_format) &&
+       !hk_g17p_bc_format_supported(vk_format))
       return 0;
 
    /* NPOT formats only supported for texel buffers */

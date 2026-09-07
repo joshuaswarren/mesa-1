@@ -18,6 +18,23 @@
 int
 main(void)
 {
+   static const VkFormat bc[] = {
+      VK_FORMAT_BC1_RGB_UNORM_BLOCK,  VK_FORMAT_BC1_RGB_SRGB_BLOCK,
+      VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
+      VK_FORMAT_BC2_UNORM_BLOCK,      VK_FORMAT_BC2_SRGB_BLOCK,
+      VK_FORMAT_BC3_UNORM_BLOCK,      VK_FORMAT_BC3_SRGB_BLOCK,
+      VK_FORMAT_BC4_UNORM_BLOCK,      VK_FORMAT_BC4_SNORM_BLOCK,
+      VK_FORMAT_BC5_UNORM_BLOCK,      VK_FORMAT_BC5_SNORM_BLOCK,
+      VK_FORMAT_BC6H_UFLOAT_BLOCK,    VK_FORMAT_BC6H_SFLOAT_BLOCK,
+      VK_FORMAT_BC7_UNORM_BLOCK,      VK_FORMAT_BC7_SRGB_BLOCK,
+   };
+   for (unsigned i = 0; i < sizeof(bc) / sizeof(bc[0]); ++i)
+      CHECK(hk_g17p_bc_format_supported(bc[i]));
+
+   CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK));
+   CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_ASTC_4x4_UNORM_BLOCK));
+   CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_R8G8B8A8_UNORM));
+
    const struct hk_g17p_buffer_to_image_copy vkcube = {
       .chip = AGX_CHIP_G17P,
       .format = VK_FORMAT_R8G8B8A8_UNORM,

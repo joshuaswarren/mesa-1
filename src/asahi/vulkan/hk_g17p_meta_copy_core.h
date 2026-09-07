@@ -42,6 +42,10 @@ struct hk_g17p_buffer_to_image_copy {
  * for every copy the moment it enables VK_KHR_unified_image_layouts. */
 bool hk_g17p_transfer_dst_layout_supported(VkImageLayout layout);
 
+/* The complete BC family has captured G17P sampled descriptors and shares the
+ * hardware-validated Morton-of-4x4-blocks layout. */
+bool hk_g17p_bc_format_supported(VkFormat format);
+
 /* Native uncompressed color uploads preserve rectangles and mip/layer
  * subresources. Multi-layer regions are split into native single-layer
  * passes without changing source layout or copying index/pixel data. */

@@ -1702,9 +1702,7 @@ hk_g17p_copy_buffer_to_image_supported(
 static bool
 hk_g17p_block_upload_format(VkFormat format)
 {
-   return format == VK_FORMAT_ASTC_4x4_UNORM_BLOCK ||
-          format == VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK ||
-          format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+   return hk_g17p_bc_format_supported(format);
 }
 
 static bool
@@ -1725,9 +1723,6 @@ hk_g17p_copy_compressed_buffer_to_image(
    const uint32_t block_w = util_format_get_blockwidth(format);
    const uint32_t block_h = util_format_get_blockheight(format);
    const uint32_t block_B = util_format_get_blocksize(format);
-   /* EXP-0028 proves the same Morton-of-blocks layout for G17P BC1's 8-byte
-    * blocks and ASTC/ETC2's 16-byte blocks. Keep the upload path bounded to
-    * those exact public formats above. */
    if (block_w != 4 || block_h != 4 ||
        (block_B != 8 && block_B != 16))
       return false;

@@ -161,12 +161,81 @@ check_gen9_astc_4x4_texture(void)
    assert(memcmp(&packed, expected, sizeof(expected)) == 0);
 }
 
+static void
+check_gen9_bc_textures(void)
+{
+   static const uint8_t bc1_rgba_capture[32] = {
+      0x22, 0x1d, 0x88, 0xf6, 0x01, 0x7c, 0x00, 0x00,
+      0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+
+   /* EXP-M4-08 captured every BC codec on A18 Pro. These are the complete
+    * first descriptor words for a 32x32 ordinary 2D texture, including codec,
+    * numeric type, component routing and dimensions. */
+   static const struct {
+      enum agx_channels channels;
+      enum agx_texture_type type;
+      enum agx_channel g, b, a;
+      uint64_t word0;
+   } cases[] = {
+      {AGX_CHANNELS_BC1, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_A, UINT64_C(0x00007c01f6881d22)},
+      {AGX_CHANNELS_BC2, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_A, UINT64_C(0x00007c01f6881d62)},
+      {AGX_CHANNELS_BC3, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_A, UINT64_C(0x00007c01f6881da2)},
+      {AGX_CHANNELS_BC4, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_0,
+       AGX_CHANNEL_0, AGX_CHANNEL_1, UINT64_C(0x00007c01f9681de2)},
+      {AGX_CHANNELS_BC4, AGX_TEXTURE_TYPE_SNORM, AGX_CHANNEL_0,
+       AGX_CHANNEL_0, AGX_CHANNEL_1, UINT64_C(0x00007c01f9683de2)},
+      {AGX_CHANNELS_BC5, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_0, AGX_CHANNEL_1, UINT64_C(0x00007c01f9481e22)},
+      {AGX_CHANNELS_BC5, AGX_TEXTURE_TYPE_SNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_0, AGX_CHANNEL_1, UINT64_C(0x00007c01f9483e22)},
+      {AGX_CHANNELS_BC6H, AGX_TEXTURE_TYPE_FLOAT, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_1, UINT64_C(0x00007c01f8889e62)},
+      {AGX_CHANNELS_BC6H_UFLOAT, AGX_TEXTURE_TYPE_FLOAT, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_1, UINT64_C(0x00007c01f8889ea2)},
+      {AGX_CHANNELS_BC7, AGX_TEXTURE_TYPE_UNORM, AGX_CHANNEL_G,
+       AGX_CHANNEL_B, AGX_CHANNEL_A, UINT64_C(0x00007c01f6881ee2)},
+   };
+
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      const struct AGX_TEXTURE semantic = {
+         AGX_TEXTURE_header,
+         .dimension = AGX_TEXTURE_DIMENSION_2D,
+         .layout = AGX_LAYOUT_GPU,
+         .channels = cases[i].channels,
+         .type = cases[i].type,
+         .swizzle_r = AGX_CHANNEL_R,
+         .swizzle_g = cases[i].g,
+         .swizzle_b = cases[i].b,
+         .swizzle_a = cases[i].a,
+         .width = 32,
+         .height = 32,
+         .depth = 1,
+         .address = UINT64_C(0x1000001c500),
+      };
+      struct hk_native_texture_descriptor packed;
+      uint64_t word0;
+      assert(hk_pack_native_texture(9, &packed, &semantic));
+      memcpy(&word0, packed.opaque, sizeof(word0));
+      assert(word0 == cases[i].word0);
+      if (i == 0)
+         assert(memcmp(&packed, bc1_rgba_capture,
+                       sizeof(bc1_rgba_capture)) == 0);
+   }
+}
+
 int
 main(void)
 {
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();
+   check_gen9_bc_textures();
 
    /* Ordinary HAL200 2D has no layer-mode bit, even when its backing BO
     * allocation is page aligned. Compare the entire packet, not only bit62.
