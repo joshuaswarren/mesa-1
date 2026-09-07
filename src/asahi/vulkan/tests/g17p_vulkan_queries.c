@@ -352,7 +352,7 @@ main(int argc, char **argv)
          const VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT |
                                        VK_QUEUE_COMPUTE_BIT |
                                        VK_QUEUE_TRANSFER_BIT;
-         if (queues[q].queueCount == 1 &&
+         if (queues[q].queueCount > 0 &&
              (queues[q].queueFlags & required) == required &&
              !(queues[q].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) &&
              queues[q].timestampValidBits == 64) {

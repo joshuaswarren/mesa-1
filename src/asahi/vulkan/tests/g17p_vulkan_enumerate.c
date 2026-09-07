@@ -79,7 +79,7 @@ has_bounded_g17p_queue(VkPhysicalDevice physical)
       const VkQueueFlags deferred = VK_QUEUE_COMPUTE_BIT |
                                     VK_QUEUE_SPARSE_BINDING_BIT;
       if ((queues[i].queueFlags & required) == required &&
-          !(queues[i].queueFlags & deferred) && queues[i].queueCount == 1) {
+          !(queues[i].queueFlags & deferred) && queues[i].queueCount > 0) {
          if (queues[i].timestampValidBits != 64)
             continue;
          found = true;
