@@ -104,6 +104,80 @@ test_half_zero_lifetime(void)
    }
 }
 
+/*
+ * Apple's own bytes for a 16-bit compare against a non-zero constant, from
+ * .tmp/g17p-hyprland-cf-evidence/icmp16imm.metal via
+ * `metal-nt -arch applegpu_g17p`. Every kernel differs from the zero control
+ * in one place only -- the constant -- and the recovered field is the same
+ * f16 the 32-bit source form already uses.
+ */
+static void
+test_half_immediate_compare(void)
+{
+   const struct {
+      unsigned cond;
+      uint8_t imm;
+      uint8_t bytes[10];
+   } v[] = {
+      /* short x < imm */
+      {AGX3_CF_ICOND_SLT, 0,
+       {0x0a, 0x04, 0x23, 0x80, 0x02, 0x00, 0x07, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 1,
+       {0x0a, 0x04, 0x23, 0x80, 0x02, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 2,
+       {0x0a, 0x04, 0x23, 0x82, 0x02, 0x00, 0x07, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 3,
+       {0x0a, 0x04, 0x23, 0x82, 0x02, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 4,
+       {0x0a, 0x04, 0x23, 0x84, 0x02, 0x00, 0x07, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 17,
+       {0x0a, 0x04, 0x23, 0x90, 0x02, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 127,
+       {0x0a, 0x04, 0x23, 0xfe, 0x02, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_SLT, 255,
+       {0x0a, 0x04, 0x33, 0xfe, 0x02, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      /* short x > 5, short x == 7, ushort x == 2 */
+      {AGX3_CF_ICOND_SGT, 5,
+       {0x0a, 0x04, 0x23, 0x84, 0x02, 0x00, 0x16, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_EQ, 7,
+       {0x0a, 0x04, 0x23, 0x86, 0x06, 0x00, 0x17, 0xc2, 0x02, 0x00}},
+      {AGX3_CF_ICOND_EQ, 2,
+       {0x0a, 0x04, 0x23, 0x82, 0x06, 0x00, 0x07, 0xc2, 0x02, 0x00}},
+   };
+
+   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
+      uint8_t bytes[AGX3_CF_MAX_LENGTH], length = 0;
+      bool ok = agx3_cf_icmp_imm16_runtime(
+         AGX_ISA_ENCODING_AGX3B, v[i].cond, 0, 4, v[i].imm,
+         (struct agx3_cf_source_hints){false, false}, 32, bytes, &length);
+      checks++;
+      if (!ok || length != 10 || memcmp(bytes, v[i].bytes, 10)) {
+         fprintf(stderr, "FAIL native half-immediate branch vector%u\n", i);
+         failures++;
+      }
+   }
+
+   /* The two unsigned ordered relations have no witness with a non-zero
+    * constant on this encoding point -- Apple emits the compact six-byte form
+    * instead -- and 256 changes the instruction entirely. */
+   {
+      uint8_t bytes[AGX3_CF_MAX_LENGTH], length = 0;
+      const struct agx3_cf_source_hints none = {false, false};
+      REJECT(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
+                                        AGX3_CF_ICOND_ULT, 0, 4, 2, none, 32,
+                                        bytes, &length));
+      REJECT(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
+                                        AGX3_CF_ICOND_UGT, 0, 4, 2, none, 32,
+                                        bytes, &length));
+      /* Zero keeps working for every relation: that is the existing form. */
+      checks++;
+      if (!agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
+                                      AGX3_CF_ICOND_ULT, 0, 4, 0, none, 32,
+                                      bytes, &length))
+         failures++;
+   }
+}
+
 static void
 test_float_zero_compare(void)
 {
@@ -186,6 +260,7 @@ main(void)
    test_half_float_zero_compare();
    test_half_comparisons();
    test_half_zero_lifetime();
+   test_half_immediate_compare();
    for (size_t i = 0; i < cf_vec_count; ++i) {
       const struct cf_vec *v = &cf_vecs[i];
       const enum agx_isa_encoding e =

@@ -977,3 +977,110 @@ file for the harness; every byte quoted above came out of it.
 The field semantics used here were each pinned by a controlled sweep over
 `agx3_bind_compose()`, one field at a time, against the Apple bytes — never by
 reading a field name out of a disassembler.
+
+## Hyprland's own GLES shaders, measured (2026-09-07)
+
+Hyprland 0.56.1 ships thirteen built-in fragment shaders, all `#version 300
+es`. Running each one through Zink -> Honeykrisp under the G17P drm-shim, one
+shader per process, closed two encodings and left three open. No hardware.
+
+Reproduce with `neo-gpu-harness/scripts/hypr-shader-probe.sh <mesa worktree>`;
+it fetches the pinned Hyprland tag, preprocesses the GLSL the way Hyprland's
+own `CShaderLoader` does, runs a llvmpipe positive control and a
+known-unencodable negative control, and refuses to report a result if either
+control does not behave.
+
+Two things about that measurement are easy to get wrong and both produced a
+wrong answer here first:
+
+- **Zink does not fail a draw whose pipeline it could not build.** It logs
+  `pipeline creation failed; dropping draws that need it` and returns cleanly,
+  so `glGetError()` reports success for a shader the packer refused outright.
+  The authority is the packer's own refusal line, not the GL error.
+- **Under the no-op drm-shim nothing executes**, so the render target is never
+  written by anyone and a framebuffer readback cannot distinguish a dropped
+  draw from a working one either. The readback is only meaningful on hardware
+  or on llvmpipe.
+
+State after the two encodings below:
+
+| Hyprland fragment shader                       | G17P    |
+| ---------------------------------------------- | ------- |
+| passthru, quad, rgbamatte, surface             | encodes |
+| blurprepare, blurfinish                        | encodes |
+| blur1, blur2                                   | **no** - `hmul [d16 s0=16:reg s1=16:imm]` |
+| border, inner_glow, shadow                     | **no** - `iadd [d16 s0=16:reg s1=16:imm.neg]` |
+| ext, glitch                                    | **no** - `fcmpsel` with a 32-bit compare source and 16-bit immediates |
+
+### Closed: the 16-bit control-flow compare
+
+`if (gradientLength < 2)` in Hyprland's `gradient.glsl` reached the packer as
+`if_icmp [s0=16:imm0 s1=16:reg2 cond=5]` and then, once that order was
+accepted, as `if_icmp [s0=16:reg s1=16:imm2 cond=5]`. Two separate gaps:
+
+1. **Operand order.** `agx3_emit_cf_compare()`'s 16-bit path only matched a
+   constant on the right. The 32-bit path beside it already canonicalized the
+   other order with `agx3_cf_swap_icond()`; the 16-bit path now does the same.
+   This emits the encoding that was already grounded, with the relation
+   swapped, so it admits no new bytes.
+2. **Non-zero constant.** `agx3_cf_icmp_zero16_runtime()` never set f16, which
+   is why it was a zero compare. Witnessed with `metal-nt -arch
+   applegpu_g17p`, one kernel per immediate against the zero form as the
+   control (`.tmp/g17p-hyprland-cf-evidence/icmp16imm.metal`), every witness
+   the same ten-byte instruction with only f16 different:
+
+       short x;  if (x < 0)    0a 04 23 80 02 00 07 c2 02 00   (the zero form)
+       short x;  if (x < 1)    0a 04 23 80 02 00 17 c2 02 00
+       short x;  if (x < 2)    0a 04 23 82 02 00 07 c2 02 00
+       short x;  if (x < 3)    0a 04 23 82 02 00 17 c2 02 00
+       short x;  if (x < 4)    0a 04 23 84 02 00 07 c2 02 00
+       short x;  if (x < 17)   0a 04 23 90 02 00 17 c2 02 00
+       short x;  if (x < 127)  0a 04 23 fe 02 00 17 c2 02 00
+       short x;  if (x < 255)  0a 04 33 fe 02 00 17 c2 02 00
+       short x;  if (x > 5)    0a 04 23 84 02 00 16 c2 02 00
+       short x;  if (x == 7)   0a 04 23 86 06 00 17 c2 02 00
+       ushort x; if (x == 2)   0a 04 23 82 06 00 07 c2 02 00
+
+   f16 carries the constant split the way the 32-bit `agx3_cf_icmp_imm()` form
+   already deposits it: bits 1..7 land in byte 3, bit 0 in byte 6 bit 4, bit 7
+   in byte 2 bit 4.
+
+   `ushort x < 2` is **not** in that list on purpose: Apple compiles it to the
+   compact six-byte point (`0a 04 22 82 05 c2`) instead, so the two unsigned
+   ordered relations stay refused with a non-zero constant. At 256 the
+   instruction changes shape entirely, so the constant is capped at 255. Both
+   refusals are asserted in `test-agx3-cf-core.c`.
+
+### Open: 16-bit subtract-immediate
+
+`border`, `inner_glow` and `shadow` now stop at
+`iadd [d16:reg1 s0=16:reg s1=16:imm1.neg]` -- `gradientLength - 1`, a 16-bit
+subtract of a small constant. `agx3_alu_add_imm16()` encodes the *addition*;
+subtraction is a different form, not a flipped field. Apple's bytes, from
+`.tmp/g17p-hyprland-cf-evidence/iaddimm16.metal` (`ushort` in, `ushort` out,
+one kernel per constant), are recorded here so the next attempt starts from
+the witness rather than from another sweep:
+
+    ushort y = x + 2      9f 01 56 02 02 04 08 00 15 04
+    ushort y = x + 17     9f 01 56 02 02 22 08 00 15 04
+    ushort y = x - 1      1f 01 56 02 02 04 04 00 13 01
+    ushort y = x - 2      1f 01 56 02 02 04 08 00 13 01
+    ushort y = x - 17     1f 01 56 02 02 04 44 00 13 01
+    ushort y = x - 255    1f 01 56 02 02 04 fc 03 13 01
+
+The add form carries the constant at byte 5 as `imm << 1`; the subtract form
+is a different opcode byte (0x1f, not 0x9f) and carries `imm * 4` across bytes
+6 and 7, with a different trailing pair. Identify the form with
+`.tmp/g17p-fcmpsel-evidence/tools/decomp.c` before binding any of it.
+
+### Open: the other two
+
+- `hmul [d16:reg1 s0=16:reg1 s1=16:imm80]` and `... s1=16:imm64` (blur1,
+  blur2). The in-tree `hmul` path requires both sources to be registers
+  (`agx3_pack_binary.c`, the AGX3B HMUL block); a minifloat immediate operand
+  has no witness yet.
+- `fcmpsel [d16:reg1 s0=32:reg14 s1=16:imm48 s2=16:imm255 s3=16:imm0]` (ext)
+  and `fcmpsel [d32:reg2 s0=32:reg22.cache s1=16:imm64 s2=16:imm0
+  s3=32:reg2.discard cond=1]` (glitch). These are *mixed-width* selects -- a
+  32-bit compare source with 16-bit immediate operands -- which the tied and
+  untied 32-bit `fcmpsel` work above does not cover.

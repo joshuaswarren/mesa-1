@@ -82,6 +82,39 @@ bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond c
                                  struct agx3_cf_source_hints hint, uint16_t wait_mask,
                                  uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
+/*
+ * The same encoding point with a non-zero immediate.  `int n; if (n < 2)` is
+ * ordinary GLSL -- Hyprland's border, shadow and inner-glow shaders all reach
+ * the packer that way -- and Mesa keeps a small int in a 16-bit half, so it
+ * arrives here rather than at agx3_cf_icmp_imm().
+ *
+ * Witnessed with `metal-nt -arch applegpu_g17p` against the zero form as the
+ * control, one kernel per immediate and nothing else changed
+ * (.tmp/g17p-hyprland-cf-evidence/icmp16imm.metal).  Every witness is the same
+ * ten-byte instruction with only f16 different, which is the field
+ * agx3_cf_icmp_imm() already uses for the 32-bit source form:
+ *
+ *   short x;  if (x < 0)    0a 04 23 80 02 00 07 c2 02 00   (== the zero form)
+ *   short x;  if (x < 2)    0a 04 23 82 02 00 07 c2 02 00
+ *   short x;  if (x < 17)   0a 04 23 90 02 00 17 c2 02 00
+ *   short x;  if (x < 255)  0a 04 33 fe 02 00 17 c2 02 00
+ *   short x;  if (x > 5)    0a 04 23 84 02 00 16 c2 02 00
+ *   short x;  if (x == 7)   0a 04 23 86 06 00 17 c2 02 00
+ *   ushort x; if (x == 2)   0a 04 23 82 06 00 07 c2 02 00
+ *
+ * A non-zero immediate is refused for the two unsigned ordered relations:
+ * Apple compiles `ushort x < 2` to the compact six-byte encoding point
+ * instead (0a 04 22 82 05 c2), so this ten-byte form has no witness there.
+ * At 256 and above Apple changes the instruction, so the immediate is capped
+ * at 255.
+ */
+bool agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc,
+                                enum agx3_cf_icond cond, unsigned slot,
+                                uint16_t src, uint8_t imm,
+                                struct agx3_cf_source_hints hint,
+                                uint16_t wait_mask,
+                                uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
 bool agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                          unsigned slot, uint16_t src0,
                          uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);

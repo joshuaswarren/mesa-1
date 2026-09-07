@@ -107,14 +107,20 @@ agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
 }
 
 bool
-agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
-                            unsigned slot, uint16_t src,
-                            struct agx3_cf_source_hints hint, uint16_t wait_mask,
-                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
+                           unsigned slot, uint16_t src, uint8_t imm,
+                           struct agx3_cf_source_hints hint, uint16_t wait_mask,
+                           uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
    if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || src >= 256 ||
        !out || !len || (hint.cache && hint.discard) ||
        (wait_mask != 0 && wait_mask != 32))
+      return false;
+   /* Apple puts a non-zero constant on this encoding point only for equality
+    * and the two signed relations; `ushort x < 2` becomes the compact
+    * six-byte form instead. Keep the unwitnessed pair fail-closed. */
+   if (imm != 0 && cond != AGX3_CF_ICOND_EQ && cond != AGX3_CF_ICOND_SLT &&
+       cond != AGX3_CF_ICOND_SGT)
       return false;
    /* Native signed and unsigned zero tests both sign-extend the half.
     * This preserves equality and every relation to zero. Live witnesses
@@ -123,10 +129,20 @@ agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
       KV(9,2), KV(10,1), KV(14,1), KV(24,1), KV(25,1),
    };
    const struct agx3_field_kv fields[] = {
-      KV(2,src), KV(42,cond), KV(31,slot), KV(11,hint.cache),
+      KV(2,src), KV(16,imm), KV(42,cond), KV(31,slot), KV(11,hint.cache),
       KV(13,hint.discard), KV(39,wait_mask == 32),
    };
-   return agx3_bind_compose(enc,"icmp",1,base,5,fields,6,out,len);
+   return agx3_bind_compose(enc,"icmp",1,base,5,fields,7,out,len);
+}
+
+bool
+agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
+                            unsigned slot, uint16_t src,
+                            struct agx3_cf_source_hints hint, uint16_t wait_mask,
+                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_cf_icmp_imm16_runtime(enc, cond, slot, src, 0, hint, wait_mask,
+                                     out, len);
 }
 
 bool
