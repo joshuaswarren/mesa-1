@@ -88,4 +88,19 @@ if with_tests and with_tools.contains('drm-shim')
     env : ['ASAHI_SHIM_CHIP=g17p'],
     suite : ['asahi'],
   )
+
+  test(
+    'asahi-g17p-gallium-blit-encode',
+    prog_python,
+    args : [
+      files('tests/run-shim.py'),
+      libasahi_noop_drm_shim,
+      asahi_g17p_blit_test,
+    ],
+    env : [
+      'ASAHI_SHIM_CHIP=g17p',
+      'AGX_G17P_BLIT_REQUIRE_ENCODE=1',
+    ],
+    suite : ['asahi'],
+  )
 endif

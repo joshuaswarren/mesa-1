@@ -1946,7 +1946,12 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
          .callback = agx_mem_vectorize_cb,
       });
 
-   NIR_PASS(_, nir, agx_nir_lower_texture);
+   const enum agx_descriptor_generation descriptor_generation =
+      agx_gallium_descriptor_generation(dev->chip);
+   NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
+            descriptor_generation);
+   if (dev->chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, agx_nir_rebind_g17p_texture_crawls);
    NIR_PASS(_, nir, nir_lower_ssbo, NULL);
 
    agx_preprocess_nir(nir);

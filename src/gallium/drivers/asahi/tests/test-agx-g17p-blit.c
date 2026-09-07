@@ -192,9 +192,8 @@ main(void)
    /* A ratchet on what already works. u_blitter's pass-through vertex shader
     * moves a 16-bit uniform, which had no encoding until the AGX3b uniform
     * copy landed; if this regresses, every blit loses its vertex program
-    * again. The fragment program is a separate, still-open gap -- see
-    * src/asahi/isa/README-agx3-packer-limits.md -- so it is gated below
-    * rather than asserted here.
+    * again. The fragment program has its own encode ratchet below so the
+    * crash-safety check remains independently useful.
     */
    if (!agx2 && !vs_ok) {
       fprintf(stderr, "the blit's vertex program no longer encodes\n");

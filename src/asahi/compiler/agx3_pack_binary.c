@@ -857,8 +857,9 @@ agx3_tex_imm(agx_index index, uint16_t value)
           !index.memory && !index.abs && !index.neg;
 }
 
-/* Translate only the corpus-grounded 2D, non-array, immediate-index texel
- * fetch at LOD0.  Every other texture axis remains a deliberate refusal. */
+/* Translate the corpus-grounded 2D texel fetch. Dynamic integer LOD is
+ * published into operand bank 6; every other texture axis remains a
+ * deliberate refusal. */
 static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I,
@@ -867,6 +868,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
+   const bool register_lod =
+      I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+      agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_16 &&
+      agx_channels(I->src[1]) == 1;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -879,7 +884,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        (stage_coordinates ? ((I->src[0].value & 1) ||
          I->src[0].value + 2 * agx_channels(I->src[0]) > 256) :
          ((I->src[0].value & 3) || I->src[0].value > 60)) ||
-       !agx3_tex_imm(I->src[1], 0) || !agx3_tex_imm(I->src[2], 0) ||
+       (!(I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
+          agx3_tex_imm(I->src[1], 0)) && !register_lod) ||
+       (register_lod && !stage_coordinates) ||
+       !agx3_tex_imm(I->src[2], 0) ||
        (immediate ? I->src[3].value > 15 :
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (I->src[3].type != AGX_INDEX_REGISTER && I->src[3].type != AGX_INDEX_UNIFORM) ||
@@ -889,7 +897,6 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        !agx3_tex_imm(I->src[4], 0) ||
        !agx_is_null(I->src[5]) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
-       I->lod_mode != AGX_LOD_MODE_AUTO_LOD ||
        (enc == AGX_ISA_ENCODING_AGX3B ? (!I->mask || (I->mask & ~15u))
                                     : (I->mask != 1 && I->mask != 15)) ||
        I->offset || I->shadow ||
@@ -902,11 +909,23 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    const uint16_t staging_coord =
       I->op == AGX_OPCODE_IMAGE_LOAD ? 16 : 0;
    if (stage_coordinates) {
+      uint16_t staging_wait = wait_mask;
+      if (register_lod) {
+         uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
+         if (!agx3_tex_stage_typed_lod(
+                enc, I->src[1].value, slot, staging_wait,
+                I->src[1].cache, I->src[1].discard,
+                AGX3_TEX_LEVEL_INTEGER, lod, &lod_len) ||
+             !agx3_append(emission, lod, lod_len))
+            return false;
+         staging_wait = 0;
+      }
+
       for (unsigned i = 0; i < agx_channels(I->src[0]); i++) {
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
                                   I->src[0].value + 2 * i,
-                                  slot, i == 0 ? wait_mask : 0,
+                                  slot, i == 0 ? staging_wait : 0,
                                   enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
                                   enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard,
                                   copy, &copy_len) ||
@@ -932,6 +951,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       .coord_kill = stage_coordinates || I->src[0].kill,
       .final = final,
       .array = I->dim == AGX_DIM_2D_ARRAY,
+      .register_lod = register_lod,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t len = 0;

@@ -325,7 +325,7 @@ Closing it is the same work as `f05_texture_bias` and `f12_texture_grad`:
 either teach that pass to keep the op, or ground the bindless-heap sample
 form.
 
-## Native Gallium's texel fetch: measured, and the three gaps behind it
+## Native Gallium's texel fetch: closed without AGX2 addressing
 
 `asahi-g17p-gallium-blit` reproduces the whole thing offline under the no-op
 DRM shim -- the 4x8 `B8G8R8A8_UNORM` to `R8G8B8A8_UNORM` `util_blitter_blit`
@@ -338,30 +338,30 @@ agx3_pack_binary.c:4335: no grounded AGX3 encoding for texture_load
    s3=32:reg0.discard s4=16:imm0 s5=16:null0 cond=0 chan=4]
 ```
 
-Three of those operands are wrong at once, and they all follow from **one**
+Three of those operands were wrong at once, and they all followed from **one**
 cause: u_blitter carries the mip level in a varying, so the `txf` has a
 **dynamic LOD**. `agx_nir_needs_texture_crawl()` returns true for a `txf` with
 a non-zero LOD, which makes `agx_nir_lower_bindings()` force the bindless path
-*and* makes `agx_nir_lower_texture()` emit a descriptor crawl to clamp the
-level. Hence:
+and makes texture lowering emit a descriptor crawl to clamp the level.
 
-1. **`s1`, the level, is a register.** The fetch encoder only had the
-   immediate-zero form. This is now closed at the encoder: see below.
+1. **`s1`, the level, is a register.** It is now published through the
+   byte-grounded integer `PACK_SMPIR` form and selected by the dynamic-level
+   fetch form.
 2. **`s2`/`s3` are a bindless heap base plus a 32-bit index.**
-   `agx3_emit_texture_fetch()` wants `s2` to be the immediate zero and `s3` to
-   be an immediate index or a 64-bit descriptor *address* -- the form
-   Honeykrisp produces after `agx_nir_lower_g17p_combined_sampler`, which
-   Gallium never runs. Gallium would have to fold `heap_base + index * stride`
-   into that 64-bit operand, or the bindless-heap form would have to be
-   grounded.
-3. **The crawl reads AGX2 descriptor bits.** The preamble does
+   G17P's indirect operand is a native global-heap index, not that AGX2 pair.
+   A statically bound Gallium fetch is now restored to its immediate
+   texture-state index after its descriptor crawl has been made explicit.
+3. **The crawl read AGX2 descriptor bits.** The preamble did
    `load_constant_agx(desc, 1)` and pulls bits 24..27 and 28..31 out of word
    1 -- `first_level` and `levels` in the 24-byte Gen7/8 texture packet.
-   Gen9's texture descriptor is 32 bytes with a different layout, so even
-   once (1) and (2) encode, the clamp would read the wrong fields.
+   Gen9's 32-byte texture descriptor has a different layout; the Gen9 helper
+   now reads its level fields from word 5.
 
-Note that nothing here is about the blit itself: any GL `texelFetch` with a
-non-constant level takes the same path.
+Gallium now lowers the crawl with the Gen9 descriptor helper, then restores a
+statically bound fetch to its texture-state register while keeping the
+descriptor address live only for the clamp. Thus the hardware fetch never
+receives AGX2 base-plus-offset addressing, and the clamp is not bypassed.
+`asahi-g17p-gallium-blit-encode` ratchets the exact u_blitter shape.
 
 ### The texel fetch's level is now grounded
 
@@ -398,12 +398,9 @@ carries that; `agx3_tex_stage_lod()` stays the float form every existing
 caller uses.
 
 All five vectors are pinned byte-for-byte in
-`src/asahi/compiler/test/test-agx3-tex-core.c`. **The encoder is not routed
-yet**: `agx3_emit_texture_fetch()` still requires the immediate-zero level,
-because routing needs the staging-slot plumbing and a check that Mesa's
-`texture_load` source 1 really is an integer level in texel units, and gaps
-(2) and (3) above would still refuse the shader. This is the same state the
-LOD-bias and gradient sample forms are in.
+`src/asahi/compiler/test/test-agx3-tex-core.c`. The integer per-lane form is
+routed for `texture_load`; filtered-sample bias and gradient retain their
+separate heap/staging gaps above.
 
 ## The 32-bit tied fcmpsel, and what it cost
 

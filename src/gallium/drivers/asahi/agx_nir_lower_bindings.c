@@ -158,3 +158,78 @@ agx_nir_lower_bindings(nir_shader *shader, bool *uses_bindless_samplers)
       shader, lower, nir_metadata_control_flow, uses_bindless_samplers);
    return progress;
 }
+
+/*
+ * A descriptor crawl needs an address, so binding lowering temporarily turns
+ * an otherwise bindful texture into a bindless handle.  On AGX2 the texture
+ * instruction itself can consume that base-plus-byte-offset pair.  G17P
+ * cannot: its indirect operand is a native global-heap index.
+ *
+ * Once texture lowering has made the crawl explicit, put a statically bound
+ * fetch back on its texture-state register.  Keep the handle alive for the
+ * independent load_from_texture_handle_agx users which implement the Gen9
+ * clamp.  This preserves the bounds operation without presenting AGX2
+ * addressing to the native fetch instruction.
+ */
+bool
+agx_nir_rebind_g17p_texture_crawls(nir_shader *shader)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      bool impl_progress = false;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms)
+               continue;
+
+            const int handle_idx =
+               nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+            if (handle_idx < 0)
+               continue;
+
+            nir_intrinsic_instr *handle =
+               nir_src_as_intrinsic(tex->src[handle_idx].src);
+            if (!handle ||
+                handle->intrinsic != nir_intrinsic_load_texture_handle_agx ||
+                !nir_src_is_const(handle->src[0]))
+               continue;
+
+            const unsigned binding = nir_src_as_uint(handle->src[0]);
+            if (binding >= AGX_NUM_TEXTURE_STATE_REGS)
+               continue;
+
+            bool has_crawl = false;
+            nir_foreach_use(use, &handle->def) {
+               nir_instr *user = nir_src_parent_instr(use);
+               if (user->type == nir_instr_type_intrinsic &&
+                   nir_instr_as_intrinsic(user)->intrinsic ==
+                      nir_intrinsic_load_from_texture_handle_agx) {
+                  has_crawl = true;
+                  break;
+               }
+            }
+
+            if (!has_crawl)
+               continue;
+
+            nir_steal_tex_src(tex, nir_tex_src_texture_handle);
+            tex->texture_index = binding;
+            impl_progress = true;
+            progress = true;
+         }
+      }
+
+      if (impl_progress)
+         nir_progress(true, impl, nir_metadata_control_flow);
+   }
+
+   if (progress)
+      NIR_PASS(_, shader, nir_opt_dce);
+
+   return progress;
+}

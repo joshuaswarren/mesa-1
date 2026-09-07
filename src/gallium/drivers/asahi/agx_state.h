@@ -1039,6 +1039,7 @@ bool agx_nir_layout_uniforms(nir_shader *shader,
                              unsigned *push_size);
 
 bool agx_nir_lower_bindings(nir_shader *shader, bool *uses_bindless_samplers);
+bool agx_nir_rebind_g17p_texture_crawls(nir_shader *shader);
 
 bool agx_batch_is_active(struct agx_batch *batch);
 bool agx_batch_is_submitted(struct agx_batch *batch);
