@@ -340,7 +340,7 @@ hk_get_device_features(
 
       /* Vulkan 1.2 */
       .samplerMirrorClampToEdge = true,
-      .drawIndirectCount = true,
+      .drawIndirectCount = supported_extensions->KHR_draw_indirect_count,
       .storageBuffer8BitAccess = true,
       .uniformAndStorageBuffer8BitAccess = true,
       .storagePushConstant8 = true,
@@ -1443,21 +1443,23 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    struct vk_device_extension_table supported_extensions;
    hk_get_device_extensions(instance, &supported_extensions);
 
-   /* HAL200 advanced blend epilogs currently complete without a fault but
-    * write zero instead of the blended colour.  Keep the extension private to
-    * the compiler until its fragment tile protocol is hardware-qualified. */
-   if (pdev->dev.chip == AGX_CHIP_G17P)
+   if (pdev->dev.chip == AGX_CHIP_G17P) {
+      /* HAL200 advanced blend epilogs currently complete without a fault but
+       * write zero instead of the blended colour. */
       supported_extensions.EXT_blend_operation_advanced = false;
 
-   /* These three exist only to expose subgroup operations that the AGX3
-    * packer has no grounded encoding for -- icmp_ballot for ballot and vote,
-    * quad_shuffle_xor for the quad group.  A shader using any of them is
-    * refused whole at pipeline creation, so advertising the extension turns a
-    * capability query the application would have handled into a failure it
-    * cannot.  Kept together with the subgroupSupportedOperations mask in
-    * hk_get_device_properties(), which carries the per-operation
-    * measurements. */
-   if (pdev->dev.chip == AGX_CHIP_G17P) {
+      /* The base indirect Index List is native, but count variants require a
+       * predicate kernel that is not yet available on this path. */
+      supported_extensions.KHR_draw_indirect_count = false;
+
+      /* These three exist only to expose subgroup operations that the AGX3
+       * packer has no grounded encoding for -- icmp_ballot for ballot and vote,
+       * quad_shuffle_xor for the quad group.  A shader using any of them is
+       * refused whole at pipeline creation, so advertising the extension turns a
+       * capability query the application would have handled into a failure it
+       * cannot.  Kept together with the subgroupSupportedOperations mask in
+       * hk_get_device_properties(), which carries the per-operation
+       * measurements. */
       supported_extensions.EXT_shader_subgroup_ballot = false;
       supported_extensions.EXT_shader_subgroup_vote = false;
       supported_extensions.KHR_shader_quad_control = false;

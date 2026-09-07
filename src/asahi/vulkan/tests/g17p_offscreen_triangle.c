@@ -945,6 +945,9 @@ VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
+#if G17P_INDIRECT_DRAW
+VK_FN(vkEnumerateDeviceExtensionProperties);
+#endif
 VK_FN(vkGetPhysicalDeviceProperties);
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
@@ -1051,6 +1054,26 @@ fnv1a64(const uint8_t *bytes, size_t size)
 }
 
 #if G17P_INDIRECT_DRAW
+static bool
+has_device_extension(VkPhysicalDevice physical, const char *name)
+{
+   uint32_t count = 0;
+   check(vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL),
+         "vkEnumerateDeviceExtensionProperties(count)");
+   VkExtensionProperties *extensions = calloc(count, sizeof(*extensions));
+   if (!extensions)
+      die("out of host memory");
+   check(vkEnumerateDeviceExtensionProperties(physical, NULL, &count,
+                                               extensions),
+         "vkEnumerateDeviceExtensionProperties(list)");
+
+   bool found = false;
+   for (uint32_t i = 0; i < count; ++i)
+      found |= strcmp(extensions[i].extensionName, name) == 0;
+   free(extensions);
+   return found;
+}
+
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1313,7 +1336,8 @@ main(void)
       .applicationVersion = 1,
       .pEngineName = "none",
       .engineVersion = 1,
-      .apiVersion = VK_API_VERSION_1_1,
+      .apiVersion = G17P_INDIRECT_DRAW ? VK_API_VERSION_1_2
+                                      : VK_API_VERSION_1_1,
    };
    const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -1327,6 +1351,9 @@ main(void)
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
+#endif
+#if G17P_INDIRECT_DRAW
+   LOAD_INSTANCE(instance, vkEnumerateDeviceExtensionProperties);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
@@ -1395,13 +1422,21 @@ main(void)
 #endif
 
 #if G17P_INDIRECT_DRAW
+   VkPhysicalDeviceVulkan12Features indirect_available12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+   };
    VkPhysicalDeviceFeatures2 indirect_available = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &indirect_available12,
    };
    vkGetPhysicalDeviceFeatures2(physical, &indirect_available);
    if (!indirect_available.features.drawIndirectFirstInstance ||
        !indirect_available.features.multiDrawIndirect)
       die("required core indirect-draw features are not advertised");
+   if (indirect_available12.drawIndirectCount ||
+       has_device_extension(physical,
+                            VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME))
+      die("unqualified indirect-count variants are advertised");
 #endif
 
    if (!(properties.limits.framebufferColorSampleCounts &
