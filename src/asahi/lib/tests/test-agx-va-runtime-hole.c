@@ -274,26 +274,29 @@ test_g17p_user_window_fits_ppp_pointer_field(void)
    assert(shader_base == ppp_pointer_limit &&
           "the USC window sits exactly at the PPP pointer limit");
 
-   /* agx_device.c starts the low heap at shader_base/2 -- as high as it can
-    * go -- because the split needs size < start and the alias needs a second
-    * window of the same size. */
-   uint64_t start = shader_base / 2;
+   /* agx_device.c starts the low heap halfway through the effective user
+    * aperture -- as high as it can go -- because the split needs size < start
+    * and the alias needs a second window of the same size. The aperture is
+    * the NARROWER of the compact VDM pointer and the absolute USC
+    * texture/sampler pointer; see
+    * test_g17p_user_window_fits_usc_resource_pointer below. */
+   uint64_t start = AGX_G17P_USER_LIMIT / 2;
    assert(start >= reservation);
    assert(start < vdm_pointer_limit && vdm_pointer_limit < shader_base);
-   uint64_t size = vdm_pointer_limit - start;
+   uint64_t size = AGX_G17P_USER_LIMIT - start;
    uint64_t out_start = 0, out_size = 0;
    assert(agx_va_split_user_window(start, size, &out_start, &out_size));
 
    /* Whatever the split picks, halving until the alias fits must terminate
     * with a non-empty window -- the same loop agx_device.c runs. */
-   while (out_size > 0 && out_start + 2 * out_size > vdm_pointer_limit)
+   while (out_size > 0 && out_start + 2 * out_size > AGX_G17P_USER_LIMIT)
       out_size /= 2;
    assert(out_size > 0);
 
    /* The heap itself, and the read-only alias above it, are both addressable
     * by the 39-bit base-relative VDM pointer and the wider PPP pointer. */
    assert(out_start >= reservation);
-   assert(out_size == UINT64_C(0x800000000)); /* 32 GiB */
+   assert(out_size == UINT64_C(0x2000000000)); /* 128 GiB */
    assert(out_start + out_size <= vdm_pointer_limit);
    assert(out_start + 2 * out_size <= vdm_pointer_limit);
    assert(out_start + out_size <= ppp_pointer_limit);
@@ -301,6 +304,69 @@ test_g17p_user_window_fits_ppp_pointer_field(void)
 
    /* And it does not run into the USC window. */
    assert(out_start + 2 * out_size <= shader_base);
+}
+
+/*
+ * The user window must clear the ABSOLUTE 36-bit shr(3) pointer that USC
+ * Texture and USC Sampler carry, which is narrower than the compact VDM
+ * pointer. Gallium binds graphics through those records on G17P; Honeykrisp
+ * does not, which is why this only ever fired on the GL path.
+ *
+ * The bound is checked against the generated packer's own constant rather
+ * than restated, so widening or narrowing cmdbuf.xml moves the test with it.
+ */
+static void
+test_g17p_user_window_fits_usc_resource_pointer(void)
+{
+   static_assert(AGX_G17P_USC_RESOURCE_LIMIT == UINT64_C(0x8000000000),
+                 "36 stored bits scaled by 8 is a 39-bit address");
+   static_assert(AGX_G17P_USC_RESOURCE_LIMIT < AGX_G17P_VDM_USER_LIMIT,
+                 "the USC resource pointer is the narrower of the two");
+   static_assert(AGX_G17P_USER_LIMIT == AGX_G17P_USC_RESOURCE_LIMIT,
+                 "so it is what bounds the G17P user window");
+
+   /* The widest value the descriptor field can hold is exactly one scaled
+    * step below the limit. This is the packer's contract, spelled out from
+    * the field geometry rather than copied from the packer. */
+   const uint64_t widest_encodable =
+      ((UINT64_C(1) << AGX_G17P_USC_RESOURCE_FIELD_BITS) - 1)
+      << AGX_G17P_USC_RESOURCE_SCALE_SHIFT;
+   assert(widest_encodable ==
+          AGX_G17P_USC_RESOURCE_LIMIT -
+             (UINT64_C(1) << AGX_G17P_USC_RESOURCE_SCALE_SHIFT));
+   assert(widest_encodable < AGX_G17P_USC_RESOURCE_LIMIT);
+
+   /* Reproduce agx_device.c's placement exactly. */
+   const uint64_t reservation = UINT64_C(1) << 36;
+   uint64_t start = AGX_G17P_USER_LIMIT / 2;
+   assert(start >= reservation);
+
+   uint64_t out_start = 0, out_size = 0;
+   assert(agx_va_split_user_window(start, AGX_G17P_USER_LIMIT - start,
+                                   &out_start, &out_size));
+   while (out_size > 0 && out_start + 2 * out_size > AGX_G17P_USER_LIMIT)
+      out_size /= 2;
+   assert(out_size > 0);
+
+   /* 128 GiB of primary heap at 0x4000000000, whose read-only sparse alias
+    * ends exactly on the limit: nothing the driver hands to USC Texture or
+    * USC Sampler can be out of bounds, and nothing usable is wasted. */
+   assert(out_start == UINT64_C(0x4000000000));
+   assert(out_size == UINT64_C(0x2000000000));
+   assert(out_start + 2 * out_size == AGX_G17P_USC_RESOURCE_LIMIT);
+
+   /* The field stores an 8-byte-scaled address, so what has to fit is every
+    * 8-aligned base in the primary heap and in its alias. The highest one is
+    * the last scaled step below the end of the alias, which is exactly the
+    * widest value the field can hold. */
+   assert((out_start & 0x7) == 0);
+   assert(out_start + 2 * out_size -
+             (UINT64_C(1) << AGX_G17P_USC_RESOURCE_SCALE_SHIFT) ==
+          widest_encodable);
+
+   /* And it is still below the compact VDM pointer and the USC window. */
+   assert(out_start + 2 * out_size <= AGX_G17P_VDM_USER_LIMIT);
+   assert(out_start + 2 * out_size <= UINT64_C(0x10000000000));
 }
 
 static void
@@ -375,6 +441,7 @@ main(void)
    test_fixed_usc_allocation_skips_hole();
    test_other_chips_keep_existing_layout();
    test_g17p_user_window_fits_ppp_pointer_field();
+   test_g17p_user_window_fits_usc_resource_pointer();
    test_g17p_vdm_command_alias_heap();
    puts("AGX VA layout: user-window split and G17 runtime-graph hole checks passed");
    return 0;

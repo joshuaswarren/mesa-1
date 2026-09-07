@@ -23,6 +23,34 @@
 #define AGX_G17P_VDM_USER_LIMIT                                            \
    (AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_USER_SIZE)
 
+/*
+ * The legacy USC resource records Gallium still binds for graphics carry the
+ * texture and sampler table addresses as ABSOLUTE, 8-byte-scaled 36-bit
+ * fields -- cmdbuf.xml "USC Texture" and "USC Sampler", both
+ *
+ *   <field name="Buffer" size="36" start="0:27" type="address"
+ *          modifier="shr(3)"/>
+ *
+ * so 36 stored bits times an 8-byte scale is 39 significant address bits,
+ * with no USC exec base subtracted. The generated packer enforces exactly
+ * that with agx_genxml_validate_bounds(), which is fatal, so an allocation at
+ * or above this limit aborts the process before any draw is submitted.
+ *
+ * This is narrower than the compact VDM pointer above, so on G17P it -- not
+ * the VDM limit -- is what bounds the user window.
+ */
+#define AGX_G17P_USC_RESOURCE_FIELD_BITS  36
+#define AGX_G17P_USC_RESOURCE_SCALE_SHIFT 3
+#define AGX_G17P_USC_RESOURCE_LIMIT                                        \
+   (UINT64_C(1) << (AGX_G17P_USC_RESOURCE_FIELD_BITS +                     \
+                    AGX_G17P_USC_RESOURCE_SCALE_SHIFT))
+
+/* The narrower of the two pointers every G17P user allocation must satisfy. */
+#define AGX_G17P_USER_LIMIT                                                \
+   (AGX_G17P_VDM_USER_LIMIT < AGX_G17P_USC_RESOURCE_LIMIT                  \
+       ? AGX_G17P_VDM_USER_LIMIT                                           \
+       : AGX_G17P_USC_RESOURCE_LIMIT)
+
 /* Native TVB blocks are sparse 128-KiB mappings with 32-KiB page IDs
  * 0x11..0xc7. Their last range ends at compact 0x658000; the fixed scene,
  * discard and status mappings also live below this bound. Start command BOs
