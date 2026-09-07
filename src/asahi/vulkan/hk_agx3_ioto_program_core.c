@@ -114,6 +114,7 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R32_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
