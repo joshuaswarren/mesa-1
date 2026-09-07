@@ -4966,7 +4966,7 @@ TEST_F(AGX3PackBinary, NarrowFaddKeepsOddHalfAndLiveInput)
    }
 }
 
-TEST_F(AGX3PackBinary, HalfMaximumMatchesAppleLifetimes)
+TEST_F(AGX3PackBinary, HalfMaximumRoutesLifetimesWithoutPhantomWait)
 {
    for (bool live : {false, true}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -4981,12 +4981,42 @@ TEST_F(AGX3PackBinary, HalfMaximumMatchesAppleLifetimes)
       agx_fcmpsel_to(b, dest, a, c, a, c, AGX_FCOND_GTN);
       agx_stop(b);
       const auto code = pack(b);
-      const uint8_t retained[] = {0x0a,0x82,0x24,0x82,0x10,0xc0};
-      const uint8_t dead[] = {0x12,0x02,0x1c,0x02,0x10,0xc0};
+      const uint8_t retained[] = {0x02,0x82,0x24,0x82,0x10,0x00};
+      const uint8_t dead[] = {0x12,0x02,0x1c,0x02,0x10,0x00};
       const uint8_t *native = live ? retained : dead;
       ASSERT_EQ(code.size(), 10u);
       EXPECT_EQ(memcmp(code.data(), native, 6), 0);
    }
+}
+
+TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index x = agx_register(2, AGX_SIZE_16);
+   agx_index low = agx_register(3, AGX_SIZE_16);
+   agx_index high = agx_register(4, AGX_SIZE_16);
+   x.cache = low.cache = true;
+   agx_index temporary = agx_register(0, AGX_SIZE_16);
+   temporary.cache = true;
+   agx_fcmpsel_to(b, temporary, x, low, x, low, AGX_FCOND_GTN);
+   temporary.cache = false;
+   temporary.discard = high.discard = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_16), temporary, high,
+                  temporary, high, AGX_FCOND_LTN);
+   agx_stop(b);
+   const auto code = pack(b);
+   const uint8_t expected_chain[] = {
+      0x02,0x82,0x24,0x82,0x10,0x00,
+      0x02,0x00,0x1c,0x04,0x01,0x00,
+   };
+   ASSERT_EQ(code.size(), sizeof(expected_chain) + 4);
+   if (memcmp(code.data(), expected_chain, sizeof(expected_chain)) != 0) {
+      fprintf(stderr, "half-clamp chain got ");
+      for (unsigned i = 0; i < sizeof(expected_chain); ++i)
+         fprintf(stderr, "%02x", code[i]);
+      fputc('\n', stderr);
+   }
+   EXPECT_EQ(memcmp(code.data(), expected_chain, sizeof(expected_chain)), 0);
 }
 
 TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)

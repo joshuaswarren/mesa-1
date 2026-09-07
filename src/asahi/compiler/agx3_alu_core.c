@@ -1092,13 +1092,8 @@ agx3_alu_fminmax_half(enum agx_isa_encoding enc, uint16_t dest,
          hints[i] == AGX3_ALU_HINT_DISCARD};
    }
    for (unsigned ep = 0; ep < 28; ++ep) {
-      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, n, out, len)) {
-         if (dest_cache && *len == 6)
-            out[0] |= 0x08;
-         if (*len == 6)
-            out[5] |= 0xc0;
+      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, n, out, len))
          return true;
-      }
    }
    return false;
 }

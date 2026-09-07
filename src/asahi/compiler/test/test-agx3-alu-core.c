@@ -1222,35 +1222,60 @@ static void test_native_select_reg_imm(void)
 
 static void test_native_half_min(void)
 {
-   const uint16_t src[] = {2, 3, 2, 3};
-   for (unsigned live = 0; live < 2; ++live) {
-      const enum agx3_alu_hint hint =
-         live ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD;
-      const enum agx3_alu_hint hints[] = {hint, hint, hint, hint};
-      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-      assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B, live ? 0 : 2,
-                               src, hints, live, 0, bytes, &len));
-      exact(bytes, len, live ? "0a82248211c0" : "12021c0211c0");
-   }
-   puts("Native half minimum: two complete Apple retained/dead FSEL vectors PASS");
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+   const uint16_t internal_src[]={2,4,2,4};
+   const enum agx3_alu_hint cached[]={AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE};
+   assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B,0,internal_src,cached,
+                            true,32,bytes,&len));
+   exact(bytes,len,"0282248401c0");
+   const uint16_t dead_src[]={2,3,2,3};
+   const enum agx3_alu_hint dead[]={AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD};
+   assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B,2,dead_src,dead,
+                            false,32,bytes,&len));
+   exact(bytes,len,"12021c0211c0");
+   puts("Native half minimum: exact internal-clamp/dead Apple FSEL vectors PASS");
 }
 
 static void test_native_half_max(void)
 {
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
    const uint16_t src[]={2,3,2,3};
-   for (unsigned live=0;live<2;live++) {
-      const enum agx3_alu_hint hint=live?AGX3_ALU_HINT_CACHE:AGX3_ALU_HINT_DISCARD;
-      const enum agx3_alu_hint hints[]={hint,hint,hint,hint};
-      uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,live?0:2,src,hints,
-                               live,0,bytes,&len));
-      exact(bytes,len,live?"0a82248210c0":"12021c0210c0");
-      assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3C,live?0:2,src,hints,
-                                live,0,bytes,&len));
-      assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,256,src,hints,
-                                live,0,bytes,&len));
-   }
-   puts("Native half maximum: two complete Apple retained/dead FSEL vectors and fail-closed bounds PASS");
+   const enum agx3_alu_hint cached[]={AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE};
+   assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,0,src,cached,
+                            true,32,bytes,&len));
+   exact(bytes,len,"0282248210c0");
+   const enum agx3_alu_hint dead[]={AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD};
+   assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,2,src,dead,
+                            false,32,bytes,&len));
+   exact(bytes,len,"12021c0210c0");
+   assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3C,0,src,cached,
+                             true,32,bytes,&len));
+   assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,256,src,cached,
+                             true,32,bytes,&len));
+   puts("Native half maximum: exact internal-clamp/dead Apple FSEL vectors and fail-closed bounds PASS");
+}
+
+static void test_native_half_clamp(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+   const uint16_t max_src[]={2,3,2,3};
+   const enum agx3_alu_hint max_hints[]={AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_CACHE};
+   assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,0,max_src,max_hints,
+                            true,32,bytes,&len));
+   exact(bytes,len,"0282248210c0");
+
+   const uint16_t min_src[]={0,4,0,4};
+   const enum agx3_alu_hint min_hints[]={AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_CACHE};
+   assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B,0,min_src,min_hints,
+                            false,0,bytes,&len));
+   exact(bytes,len,"02000c840100");
+   puts("Native half clamp: exact internal Apple FSEL plus canonical no-wait tail PASS");
 }
 
 static void test_native_high_float_registers(void)
@@ -1302,6 +1327,7 @@ int main(void){
    test_native_select_reg_imm();
    test_native_half_min();
    test_native_half_max();
+   test_native_half_clamp();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();
