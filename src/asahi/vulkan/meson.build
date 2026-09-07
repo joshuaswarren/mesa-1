@@ -1145,6 +1145,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-compute-atomic2d',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_COMPUTE_ATOMIC_2D=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-null-descriptor',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],

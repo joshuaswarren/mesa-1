@@ -18,7 +18,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_WORKGROUP_SHARED
+#ifdef G17P_COMPUTE_ATOMIC_2D
+#include "g17p_vulkan_compute_atomic2d_spv.h"
+#define COMPUTE_SPV g17p_vulkan_compute_atomic2d_spv
+#define TEST_NAME "g17p-vulkan-compute-atomic2d"
+#elif defined(G17P_WORKGROUP_SHARED)
 #include "g17p_vulkan_workgroup_shared_spv.h"
 #define COMPUTE_SPV g17p_vulkan_workgroup_shared_spv
 #define TEST_NAME "g17p-vulkan-workgroup-shared"
@@ -33,7 +37,14 @@
 #endif
 
 #define T8140_DEVICE_ID 0x8140
-#ifdef G17P_WORKGROUP_SHARED
+#ifdef G17P_COMPUTE_ATOMIC_2D
+#define ELEMENT_COUNT 6
+#define PREFIX_COUNT 16
+#define GUARD_COUNT 16
+#define ATOMIC_SUM ((64u * 65u) / 2u)
+#define ATOMIC_SEED(i) (UINT32_C(0x20000000) + (uint32_t)(i) * 0x1000u)
+#define EXPECTED(i) (ATOMIC_SEED(i) + ATOMIC_SUM)
+#elif defined(G17P_WORKGROUP_SHARED)
 #define ELEMENT_COUNT 64
 #define PREFIX_COUNT 16
 #define GUARD_COUNT 16
@@ -230,6 +241,13 @@ main(int argc, char **argv)
        properties.limits.maxComputeSharedMemorySize < 256)
       die("required workgroup or shared-memory limits are not advertised");
 #endif
+#ifdef G17P_COMPUTE_ATOMIC_2D
+   if (properties.limits.maxComputeWorkGroupInvocations < 64 ||
+       properties.limits.maxComputeWorkGroupSize[0] < 64 ||
+       properties.limits.maxComputeWorkGroupCount[0] < 3 ||
+       properties.limits.maxComputeWorkGroupCount[1] < 2)
+      die("required 2D compute grid limits are not advertised");
+#endif
 
    uint32_t queue_family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_family_count,
@@ -377,6 +395,10 @@ main(int argc, char **argv)
         i < PREFIX_COUNT + ELEMENT_COUNT + GUARD_COUNT; ++i)
       mapped[i] = SENTINEL(i);
    uint32_t *payload = mapped + PREFIX_COUNT;
+#ifdef G17P_COMPUTE_ATOMIC_2D
+   for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
+      payload[i] = ATOMIC_SEED(i);
+#endif
 
    const VkDescriptorSetLayoutBinding bindings[] = {
       {
@@ -547,7 +569,11 @@ main(int argc, char **argv)
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+#ifdef G17P_COMPUTE_ATOMIC_2D
+   vkCmdDispatch(command_buffer, 3, 2, 1);
+#else
    vkCmdDispatch(command_buffer, 1, 1, 1);
+#endif
    const VkBufferMemoryBarrier host_barrier = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
       .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -564,7 +590,12 @@ main(int argc, char **argv)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
-#ifdef G17P_WORKGROUP_SHARED
+#ifdef G17P_COMPUTE_ATOMIC_2D
+      printf(TEST_NAME ": RECORD PASS — 3x2 grid, six storage-buffer atomic "
+                       "counters, dispatch and EndCB accepted on queue %u "
+                       "(flags %#x)\n",
+             queue_family, queue_flags);
+#elif defined(G17P_WORKGROUP_SHARED)
       printf(TEST_NAME ": RECORD PASS — 64-invocation shared-memory pipeline, "
                        "cross-subgroup barrier, dispatch and EndCB accepted "
                        "on queue %u (flags %#x)\n",
@@ -589,7 +620,7 @@ main(int argc, char **argv)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
-#ifdef G17P_WORKGROUP_SHARED
+#if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED)
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
@@ -653,7 +684,8 @@ main(int argc, char **argv)
       return EXIT_FAILURE;
    }
 
-#if defined(G17P_WORKGROUP_SHARED) || defined(G17P_NULL_DESCRIPTOR)
+#if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED) || \
+   defined(G17P_NULL_DESCRIPTOR)
    for (uint32_t i = 0; i < PREFIX_COUNT; ++i) {
       if (mapped[i] != SENTINEL(i))
          die("output prefix guard changed");
@@ -679,7 +711,11 @@ main(int argc, char **argv)
          die("output suffix guard changed after three seconds");
    }
 
-#ifdef G17P_WORKGROUP_SHARED
+#ifdef G17P_COMPUTE_ATOMIC_2D
+   printf(TEST_NAME ": PASS — 3x2 workgroup grid produced six exact "
+                    "64-contributor atomic sums and 32 guards stable for "
+                    "three seconds\n");
+#elif defined(G17P_WORKGROUP_SHARED)
    printf(TEST_NAME ": PASS — 64 exact cross-subgroup shared-memory results "
                     "and 32 guards stable for three seconds\n");
 #else
