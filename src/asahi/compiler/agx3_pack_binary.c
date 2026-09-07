@@ -3161,6 +3161,7 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * normalized-16 program with selector tail a895.
  * Scalar and paired R16 UINT/SINT formats use one I16 imageblock word and
  * the grounded selector-15 program; wider signed variants remain distinct.
+ * R16_SFLOAT format12/components1 uses that same grounded program.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3224,6 +3225,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
                  I->format != AGX_FORMAT_I8 &&
                  I->format != AGX_FORMAT_U16NORM &&
                  I->format != AGX_FORMAT_I16 &&
+                 I->format != AGX_FORMAT_F16 &&
                  I->format != AGX_FORMAT_RGB10A2 &&
                  I->format != AGX_FORMAT_I32) || I->dim != AGX_DIM_2D ||
                 !I->explicit_coords ||
@@ -3337,6 +3339,11 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    if (store_format == AGX_FORMAT_I8)
       return ctx->key->g17p_rt0_eot_words == 1
                 ? AGX3_G17P_RT0_EOT_SELECTOR_55
+                : AGX3_G17P_RT0_EOT_NONE;
+
+   if (store_format == AGX_FORMAT_F16)
+      return ctx->key->g17p_rt0_eot_words == 1
+                ? AGX3_G17P_RT0_EOT_SELECTOR_15
                 : AGX3_G17P_RT0_EOT_NONE;
 
    if (ctx->key->g17p_rt0_eot_i32_selector_15 ||
