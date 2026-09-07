@@ -1000,6 +1000,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Offline proof that vkCmdDispatchIndirect records a native G17P indirect
+    # launch pair.  Runs under the noop drm-shim and stops at
+    # vkEndCommandBuffer: it asserts the recording, never execution.
+    executable(
+      'g17p-vulkan-dispatch-indirect',
+      files('tests/g17p_vulkan_dispatch_indirect.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-pipeline-probe',
       files('tests/g17p_vulkan_pipeline_probe.c'),
