@@ -26,6 +26,7 @@ VK_FN(vkDestroyInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceFeatures);
 VK_FN(vkGetPhysicalDeviceProperties);
+VK_FN(vkGetPhysicalDeviceImageFormatProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 
 static void
@@ -60,6 +61,34 @@ check(VkResult result, const char *what)
    } while (0)
 
 static bool
+has_only_single_sample(const VkPhysicalDeviceLimits *limits)
+{
+   return limits->framebufferColorSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->framebufferDepthSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->framebufferStencilSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->framebufferNoAttachmentsSampleCounts ==
+             VK_SAMPLE_COUNT_1_BIT &&
+          limits->sampledImageColorSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->sampledImageIntegerSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->sampledImageDepthSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->sampledImageStencilSampleCounts == VK_SAMPLE_COUNT_1_BIT &&
+          limits->storageImageSampleCounts == VK_SAMPLE_COUNT_1_BIT;
+}
+
+static bool
+has_only_single_sample_color_images(VkPhysicalDevice physical)
+{
+   VkImageFormatProperties properties;
+   VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+      physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+      VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0,
+      &properties);
+
+   return result == VK_SUCCESS &&
+          properties.sampleCounts == VK_SAMPLE_COUNT_1_BIT;
+}
+
+static bool
 has_bounded_g17p_queue(VkPhysicalDevice physical)
 {
    uint32_t count = 0;
@@ -75,9 +104,9 @@ has_bounded_g17p_queue(VkPhysicalDevice physical)
    bool found = false;
    for (uint32_t i = 0; i < count; ++i) {
       const VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT |
+                                    VK_QUEUE_COMPUTE_BIT |
                                     VK_QUEUE_TRANSFER_BIT;
-      const VkQueueFlags deferred = VK_QUEUE_COMPUTE_BIT |
-                                    VK_QUEUE_SPARSE_BINDING_BIT;
+      const VkQueueFlags deferred = VK_QUEUE_SPARSE_BINDING_BIT;
       if ((queues[i].queueFlags & required) == required &&
           !(queues[i].queueFlags & deferred) && queues[i].queueCount > 0) {
          if (queues[i].timestampValidBits != 64)
@@ -123,6 +152,7 @@ main(void)
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceImageFormatProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceQueueFamilyProperties);
 
    uint32_t count = 0;
@@ -149,8 +179,8 @@ main(void)
       if (properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
           !strstr(properties.deviceName, "A18 Pro") ||
           !strstr(properties.deviceName, "G17P") ||
-          properties.limits.framebufferColorSampleCounts !=
-             (VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT) ||
+          !has_only_single_sample(&properties.limits) ||
+          !has_only_single_sample_color_images(devices[i]) ||
           !properties.limits.timestampComputeAndGraphics ||
           properties.limits.timestampPeriod != 1.0f ||
           features.geometryShader || features.tessellationShader ||

@@ -775,9 +775,7 @@ hk_get_device_properties(const struct agx_device *dev,
    const VkSampleCountFlagBits sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
    const VkSampleCountFlagBits color_sample_counts =
-      dev->chip == AGX_CHIP_G17P
-         ? VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT
-         : sample_counts;
+      dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
    const VkSampleCountFlagBits other_sample_counts =
       dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
 

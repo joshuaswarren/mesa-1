@@ -490,21 +490,17 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       sampleCounts =
          VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
-      if (pdev->dev.chip == AGX_CHIP_G17P) {
-         const enum pipe_format pipe =
-            hk_format_to_pipe_format(pImageFormatInfo->format);
-         const enum pipe_format physical = ail_pixel_format[pipe].renderable;
-         const bool native_rt0 =
-            physical == PIPE_FORMAT_R8_UNORM ||
-            physical == PIPE_FORMAT_R10G10B10A2_UNORM;
-         const bool bounded_color =
-            (features & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT) &&
-            !(pImageFormatInfo->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
-            native_rt0;
-
-         sampleCounts = VK_SAMPLE_COUNT_1_BIT |
-                        (bounded_color ? VK_SAMPLE_COUNT_2_BIT : 0);
-      }
+      VkSampleCountFlags attachmentSampleCounts = UINT32_MAX;
+      if (features & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT)
+         attachmentSampleCounts &=
+            pdev->vk.properties.framebufferColorSampleCounts;
+      if (vk_format_has_depth(pImageFormatInfo->format))
+         attachmentSampleCounts &=
+            pdev->vk.properties.framebufferDepthSampleCounts;
+      if (vk_format_has_stencil(pImageFormatInfo->format))
+         attachmentSampleCounts &=
+            pdev->vk.properties.framebufferStencilSampleCounts;
+      sampleCounts &= attachmentSampleCounts;
    }
 
    /* From the Vulkan 1.2.199 spec:
