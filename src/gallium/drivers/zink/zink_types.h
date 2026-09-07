@@ -1985,6 +1985,11 @@ struct zink_context {
    bool mesh_dirty;
 
    bool shobj_draw : 1; //using shader objects for draw
+   /* A pipeline the driver refused to create must never be bound: the Vulkan
+    * runtime dereferences the null pipeline object and kills the process,
+    * turning one unsupported draw into a dead compositor. Set when creation
+    * failed so the draw is dropped instead. */
+   bool pipeline_bind_failed : 1;
    bool is_device_lost;
    bool primitive_restart;
    bool blitting : 1;

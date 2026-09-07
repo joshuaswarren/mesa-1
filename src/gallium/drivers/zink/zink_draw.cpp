@@ -252,6 +252,23 @@ draw(struct zink_context *ctx,
    }
 }
 
+/*
+ * A driver may legitimately refuse a pipeline state it cannot implement, and
+ * vkCreateGraphicsPipelines then returns an error with no pipeline. Binding the
+ * resulting VK_NULL_HANDLE is fatal: vk_common_CmdBindPipeline dereferences the
+ * pipeline object unconditionally, so the whole process dies. Report it once and
+ * let the caller drop the draw; losing one draw degrades an application, losing
+ * the process takes the desktop down with it.
+ */
+static void
+zink_pipeline_bind_failed(struct zink_context *ctx)
+{
+   if (!ctx->pipeline_bind_failed) {
+      ctx->pipeline_bind_failed = true;
+      mesa_loge("ZINK: pipeline creation failed; dropping draws that need it");
+   }
+}
+
 template <zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>
 static bool
 update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode)
@@ -270,7 +287,10 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, true, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
       else
          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, false, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
-      assert(pipeline);
+      if (pipeline == VK_NULL_HANDLE) {
+         zink_pipeline_bind_failed(ctx);
+         return false;
+      }
       pipeline_changed = prev_pipeline != pipeline || ctx->shobj_draw;
       if (BATCH_CHANGED || pipeline_changed)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -732,6 +752,11 @@ zink_draw(struct pipe_context *pctx,
                            update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode) :
                            false;
 
+   if (ctx->pipeline_bind_failed) {
+      ctx->pipeline_bind_failed = false;
+      return;
+   }
+
    emit_dynamic_state<DYNAMIC_STATE, BATCH_CHANGED>(ctx, pipeline_changed, ctx->vp_state.num_viewports);
 
    bool using_depth_bias = zink_prim_type(ctx, dinfo) == MESA_PRIM_TRIANGLES && rast_state->offset_fill;
@@ -989,7 +1014,10 @@ update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs)
          pipeline = zink_get_gfx_pipeline<ZINK_DYNAMIC_STATE3, true, true>(ctx, ctx->mesh_program, &ctx->gfx_pipeline_state, MESA_PRIM_COUNT);
       else
          pipeline = zink_get_gfx_pipeline<ZINK_DYNAMIC_STATE3, false, true>(ctx, ctx->mesh_program, &ctx->gfx_pipeline_state, MESA_PRIM_COUNT);
-      assert(pipeline);
+      if (pipeline == VK_NULL_HANDLE) {
+         zink_pipeline_bind_failed(ctx);
+         return false;
+      }
       pipeline_changed = prev_pipeline != pipeline || ctx->shobj_draw;
       if (BATCH_CHANGED || pipeline_changed)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1311,6 +1339,10 @@ zink_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    VkPipeline pipeline = zink_get_compute_pipeline(screen, ctx->curr_compute,
                                                &ctx->compute_pipeline_state);
 
+   if (pipeline == VK_NULL_HANDLE) {
+      zink_pipeline_bind_failed(ctx);
+      return;
+   }
    bool pipeline_changed = prev_pipeline != pipeline;
    if (pipeline_changed || BATCH_CHANGED)
       VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
