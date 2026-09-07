@@ -18,7 +18,11 @@
 
 #include "g17p_vulkan_robust_buffer2_spv.h"
 
+#ifdef G17P_PIPELINE_ROBUSTNESS
+#define TEST_NAME            "g17p-vulkan-pipeline-robustness"
+#else
 #define TEST_NAME            "g17p-vulkan-robust-buffer2"
+#endif
 #define T8140_DEVICE_ID      0x8140
 #define UBO_RANGE            64
 #define SSBO_OFFSET          256
@@ -62,6 +66,21 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 
    die("host-visible coherent memory is unavailable");
    return UINT32_MAX;
+}
+
+static void
+initialize_memory(uint32_t *mapped)
+{
+   for (uint32_t i = 0; i < 16; ++i)
+      mapped[i] = INPUT_WORD(i);
+   for (uint32_t i = 16; i < 32; ++i)
+      mapped[i] = POISON_WORD(i);
+   for (uint32_t i = 0; i < 16; ++i)
+      mapped[(SSBO_OFFSET / 4) + i] = SSBO_INPUT_WORD(i);
+   for (uint32_t i = 16; i < 32; ++i)
+      mapped[(SSBO_OFFSET / 4) + i] = SSBO_POISON_WORD(i);
+   for (uint32_t i = 0; i < OUTPUT_WORDS + OUTPUT_GUARD_WORDS; ++i)
+      mapped[(OUTPUT_OFFSET / 4) + i] = OUTPUT_SENTINEL(i);
 }
 
 static void
@@ -205,23 +224,56 @@ main(int argc, char **argv)
    VkPhysicalDeviceRobustness2FeaturesEXT available_robustness2 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
    };
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   VkPhysicalDevicePipelineRobustnessFeaturesEXT available_pipeline = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+      .pNext = &available_robustness2,
+   };
+#endif
    VkPhysicalDeviceFeatures2 available_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      .pNext = &available_pipeline,
+#else
       .pNext = &available_robustness2,
+#endif
    };
    vkGetPhysicalDeviceFeatures2(physical, &available_features);
    if (!available_features.features.robustBufferAccess ||
        !available_robustness2.robustBufferAccess2)
       die("robustBufferAccess2 is not advertised");
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   if (!available_pipeline.pipelineRobustness)
+      die("pipelineRobustness is not advertised");
+#endif
 
    VkPhysicalDeviceRobustness2PropertiesEXT robustness2_properties = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT,
    };
-   VkPhysicalDeviceProperties2 properties2 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   VkPhysicalDevicePipelineRobustnessPropertiesEXT pipeline_properties = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_PROPERTIES_EXT,
       .pNext = &robustness2_properties,
    };
+#endif
+   VkPhysicalDeviceProperties2 properties2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      .pNext = &pipeline_properties,
+#else
+      .pNext = &robustness2_properties,
+#endif
+   };
    vkGetPhysicalDeviceProperties2(physical, &properties2);
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   if (pipeline_properties.defaultRobustnessUniformBuffers !=
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
+       pipeline_properties.defaultRobustnessStorageBuffers !=
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT)
+      die("G17P default pipeline buffer robustness is not disabled");
+#endif
    const VkDeviceSize ubo_alignment =
       robustness2_properties.robustUniformBufferAccessSizeAlignment;
    const VkDeviceSize ssbo_alignment =
@@ -261,17 +313,33 @@ main(int argc, char **argv)
       .queueCount = 1,
       .pQueuePriorities = &priority,
    };
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   VkPhysicalDevicePipelineRobustnessFeaturesEXT enabled_pipeline = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT,
+      .pipelineRobustness = VK_TRUE,
+   };
+#else
    VkPhysicalDeviceRobustness2FeaturesEXT enabled_robustness2 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
       .robustBufferAccess2 = VK_TRUE,
    };
+#endif
    const VkPhysicalDeviceFeatures2 enabled_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      .pNext = &enabled_pipeline,
+#else
       .pNext = &enabled_robustness2,
       .features = {.robustBufferAccess = VK_TRUE},
+#endif
    };
    const char *const enabled_extensions[] = {
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME,
+#else
       VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
+#endif
    };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -321,16 +389,7 @@ main(int argc, char **argv)
    uint32_t *mapped;
    check(vkMapMemory(device, memory, 0, BUFFER_SIZE, 0, (void **)&mapped),
          "vkMapMemory");
-   for (uint32_t i = 0; i < 16; ++i)
-      mapped[i] = INPUT_WORD(i);
-   for (uint32_t i = 16; i < 32; ++i)
-      mapped[i] = POISON_WORD(i);
-   for (uint32_t i = 0; i < 16; ++i)
-      mapped[(SSBO_OFFSET / 4) + i] = SSBO_INPUT_WORD(i);
-   for (uint32_t i = 16; i < 32; ++i)
-      mapped[(SSBO_OFFSET / 4) + i] = SSBO_POISON_WORD(i);
-   for (uint32_t i = 0; i < OUTPUT_WORDS + OUTPUT_GUARD_WORDS; ++i)
-      mapped[(OUTPUT_OFFSET / 4) + i] = OUTPUT_SENTINEL(i);
+   initialize_memory(mapped);
 
    const VkDescriptorSetLayoutBinding bindings[] = {
       {
@@ -436,7 +495,54 @@ main(int argc, char **argv)
    check(vkCreatePipelineLayout(device, &pipeline_layout_info, NULL,
                                 &pipeline_layout),
          "vkCreatePipelineLayout");
-   const VkComputePipelineCreateInfo pipeline_info = {
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   const VkPipelineRobustnessCreateInfoEXT robust2_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
+      .storageBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+      .uniformBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT,
+      .vertexInputs =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT,
+      .images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT,
+   };
+   const VkPipelineRobustnessCreateInfoEXT disabled_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT,
+      .storageBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
+      .uniformBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
+      .vertexInputs =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT,
+      .images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT,
+   };
+   const VkComputePipelineCreateInfo pipeline_infos[] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .pNext = &robust2_info,
+         .stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = shader,
+            .pName = "main",
+         },
+         .layout = pipeline_layout,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .pNext = &disabled_info,
+         .stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext = &robust2_info,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = shader,
+            .pName = "main",
+         },
+         .layout = pipeline_layout,
+      },
+   };
+#else
+   const VkComputePipelineCreateInfo pipeline_infos[] = {{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -445,14 +551,19 @@ main(int argc, char **argv)
          .pName = "main",
       },
       .layout = pipeline_layout,
-   };
-   VkPipeline pipeline;
-   check(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
-                                  NULL, &pipeline),
+   }};
+#endif
+   const uint32_t pipeline_count =
+      sizeof(pipeline_infos) / sizeof(pipeline_infos[0]);
+   VkPipeline pipelines[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+   check(vkCreateComputePipelines(device, VK_NULL_HANDLE,
+                                  pipeline_count, pipeline_infos,
+                                  NULL, pipelines),
          "vkCreateComputePipelines");
 
    const VkCommandPoolCreateInfo command_pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
       .queueFamilyIndex = queue_family,
    };
    VkCommandPool command_pool;
@@ -472,12 +583,6 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
    };
-   check(vkBeginCommandBuffer(command_buffer, &begin_info),
-         "vkBeginCommandBuffer");
-   vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
-   vkCmdDispatch(command_buffer, 1, 1, 1);
    const VkBufferMemoryBarrier host_barrier = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
       .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -488,11 +593,6 @@ main(int argc, char **argv)
       .offset = 0,
       .size = BUFFER_SIZE,
    };
-   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
-                        &host_barrier, 0, NULL);
-   check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
-
    VkFence fence = VK_NULL_HANDLE;
    if (!record_only) {
       const VkFenceCreateInfo fence_info = {
@@ -500,32 +600,88 @@ main(int argc, char **argv)
       };
       check(vkCreateFence(device, &fence_info, NULL, &fence),
             "vkCreateFence");
-      const VkSubmitInfo submit_info = {
-         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-         .commandBufferCount = 1,
-         .pCommandBuffers = &command_buffer,
-      };
-      check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
-      check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX),
-            "vkWaitForFences");
-      verify_result(mapped, "");
-      sleep(3);
-      verify_result(mapped, " after three seconds");
+   }
+
+#ifdef G17P_PIPELINE_ROBUSTNESS
+   const char *const run_labels[] = {
+      " (pipeline override)",
+      " (stage override over disabled pipeline)",
+   };
+#else
+   const char *const run_labels[] = {""};
+#endif
+
+   for (uint32_t run = 0; run < pipeline_count; ++run) {
+      initialize_memory(mapped);
+      check(vkBeginCommandBuffer(command_buffer, &begin_info),
+            "vkBeginCommandBuffer");
+      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipelines[run]);
+      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+      vkCmdDispatch(command_buffer, 1, 1, 1);
+      vkCmdPipelineBarrier(command_buffer,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
+                           &host_barrier, 0, NULL);
+      check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+
+      if (!record_only) {
+         const VkSubmitInfo submit_info = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer,
+         };
+         check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
+         check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX),
+               "vkWaitForFences");
+         verify_result(mapped, run_labels[run]);
+         char stable_label[96];
+         snprintf(stable_label, sizeof(stable_label), "%s after three seconds",
+                  run_labels[run]);
+         sleep(3);
+         verify_result(mapped, stable_label);
+
+         if (run + 1 < pipeline_count)
+            check(vkResetFences(device, 1, &fence), "vkResetFences");
+      }
+
+      if (run + 1 < pipeline_count)
+         check(vkResetCommandBuffer(command_buffer, 0),
+               "vkResetCommandBuffer");
+   }
+
+   if (!record_only) {
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      printf(TEST_NAME ": PASS — disabled device defaults overridden at "
+                       "pipeline and stage scope; UBO/SSBO OOB reads zero, "
+                       "stores discarded, guards stable\n");
+#else
       printf(TEST_NAME ": PASS — UBO/SSBO exact-end data preserved, "
                        "constant/dynamic OOB reads zero, OOB stores "
                        "discarded, guards stable\n");
+#endif
    } else {
+#ifdef G17P_PIPELINE_ROBUSTNESS
+      printf(TEST_NAME ": RECORD PASS — disabled device defaults, pipeline "
+                       "override and stage-over-pipeline override both "
+                       "accepted through dispatch and EndCB on queue %u "
+                       "(flags %#x)\n",
+             queue_family, queue_flags);
+#else
       printf(TEST_NAME ": RECORD PASS — robustness2 feature/property query, "
                        "constant/dynamic UBO/SSBO boundary pipeline, "
                        "stores, dispatch and EndCB accepted on queue %u "
                        "(flags %#x)\n",
              queue_family, queue_flags);
+#endif
    }
 
    if (fence != VK_NULL_HANDLE)
       vkDestroyFence(device, fence, NULL);
    vkDestroyCommandPool(device, command_pool, NULL);
-   vkDestroyPipeline(device, pipeline, NULL);
+   for (uint32_t i = 0; i < pipeline_count; ++i)
+      vkDestroyPipeline(device, pipelines[i], NULL);
    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
    vkDestroyShaderModule(device, shader, NULL);
    vkDestroyDescriptorPool(device, descriptor_pool, NULL);
