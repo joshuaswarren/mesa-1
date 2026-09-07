@@ -5368,6 +5368,83 @@ TEST_F(AGX3PackBinary, HalfMaximumRoutesLifetimesWithoutPhantomWait)
    }
 }
 
+/*
+ * Apple's own applegpu_g17p bytes for the 32-bit tied minimum/maximum.  Before
+ * this form existed the packer refused every shader containing max(x, 0.0),
+ * which is normalize(), clamp(), saturate() and the discard compare.
+ *
+ *   fmax(a, b)      12 03 1e 05 00 c0
+ *   fmin(a, b)      12 03 1e 05 01 c0
+ *   fmax(a, 0.0f)   12 03 0a 81 00 c2
+ *   fmax(a, 1.0f)   12 03 0a b1 00 c2
+ */
+TEST_F(AGX3PackBinary, F32TiedMaximumMatchesNativeRegisterForm)
+{
+   for (bool maximum : {true, false}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      agx_index c = agx_register(4, AGX_SIZE_32);
+      agx_index dest = agx_register(2, AGX_SIZE_32);
+      a.discard = c.discard = true;
+      agx_fcmpsel_to(b, dest, a, c, a, c,
+                     maximum ? AGX_FCOND_GTN : AGX_FCOND_LTN);
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t native[] = {
+         0x12, 0x03, 0x1e, 0x05, (uint8_t)(maximum ? 0x00 : 0x01), 0x00,
+      };
+      ASSERT_EQ(code.size(), 10u);
+      EXPECT_EQ(memcmp(code.data(), native, 6), 0);
+   }
+}
+
+TEST_F(AGX3PackBinary, F32TiedMaximumMatchesNativeMinifloatForm)
+{
+   static const struct {
+      float value;
+      uint8_t byte3, byte4;
+   } cases[] = {
+      {0.0f, 0x81, 0x00}, {0.5f, 0xa1, 0x00}, {1.0f, 0xb1, 0x00},
+      {2.0f, 0xc1, 0x00}, {-1.0f, 0xb1, 0x00}, {31.0f, 0xff, 0x10},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      agx_index dest = agx_register(2, AGX_SIZE_32);
+      a.discard = true;
+      const agx_index k = agx_immediate_f(cases[i].value);
+      agx_fcmpsel_to(b, dest, a, k, a, k, AGX_FCOND_GTN);
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t native[] = {
+         0x12, 0x03, (uint8_t)(cases[i].value < 0.0f ? 0x1a : 0x0a),
+         cases[i].byte3, cases[i].byte4, 0x02,
+      };
+      ASSERT_EQ(code.size(), 10u);
+      EXPECT_EQ(memcmp(code.data(), native, 6), 0);
+   }
+}
+
+/*
+ * A half select whose selected operands are byte constants is not the half
+ * fmin/fmax form and must fall through to the byte-constant encoder, not fail
+ * the shader.  This is the shape a `discard` compare produces.
+ */
+TEST_F(AGX3PackBinary, HalfSelectOfByteConstantsIsNotRefusedByTheHalfForms)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(4, AGX_SIZE_32);
+   agx_index c = agx_register(2, AGX_SIZE_32);
+   agx_index dest = agx_register(0, AGX_SIZE_16);
+   a.discard = c.discard = true;
+   agx_fcmpsel_to(b, dest, a, c, agx_immediate(255), agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const auto code = pack(b);
+   EXPECT_GT(code.size(), 4u);
+}
+
 TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
 {
    for (bool live : {false, true}) {

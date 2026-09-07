@@ -134,7 +134,16 @@ TEST_F(Optimizer, G17PPreservesNarrowingAfterAdd)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
-TEST_F(Optimizer, G17PPreservesTiedConstantFmax)
+/*
+ * A tied fcmpsel with a GTN or LTN condition is G17P's native minimum or
+ * maximum, and Apple's encoding carries the constant operand as one minifloat
+ * that serves as both the compared and the selected value. Fold the constant
+ * into both slots: folding into only the comparison -- which is what the
+ * generic rule does, because source 3 of a select is not a float source --
+ * leaves the packer a mixed-width general select it has no encoding for, and
+ * that is what made every max(x, 0.0) fail the shader closed.
+ */
+TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmax)
 {
    agx_builder *actual = agx_test_builder(mem_ctx);
    agx_builder *expected = agx_test_builder(mem_ctx);
@@ -149,9 +158,62 @@ TEST_F(Optimizer, G17PPreservesTiedConstantFmax)
                   AGX_FCOND_GTN);
    agx_unit_test(actual, out);
 
-   minus_one = agx_mov_imm(expected, 32, 0xbf800000);
+   const agx_index folded = agx_immediate_f(-1.0f);
+   /* Burn the index the dead constant held, so only the folding differs. */
+   (void)agx_temp(expected->shader, AGX_SIZE_32);
    out = agx_temp(expected->shader, AGX_SIZE_32);
-   agx_fcmpsel_to(expected, out, wx, minus_one, wx, minus_one,
+   agx_fcmpsel_to(expected, out, wx, folded, wx, folded, AGX_FCOND_GTN);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/* A constant that is not an exact minifloat has no immediate encoding, so the
+ * tie stays in a register -- in both slots, never one. */
+TEST_F(Optimizer, G17PPreservesTiedConstantFmaxThatIsNotAMinifloat)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   /* 0.1f is not representable as an AGX minifloat. */
+   agx_index tenth = agx_mov_imm(actual, 32, 0x3dcccccd);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(actual, out, wx, tenth, wx, tenth, AGX_FCOND_GTN);
+   agx_unit_test(actual, out);
+
+   tenth = agx_mov_imm(expected, 32, 0x3dcccccd);
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(expected, out, wx, tenth, wx, tenth, AGX_FCOND_GTN);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/* A general select is not a minimum: its selected operands are not tied to the
+ * compared ones, so the compare-slot fold must stay compare-only. */
+TEST_F(Optimizer, G17PDoesNotFoldTheSelectSlotOfAnUntiedFcmpsel)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index minus_one = agx_mov_imm(actual, 32, 0xbf800000);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(actual, out, wx, minus_one, wy, wz, AGX_FCOND_GTN);
+   agx_unit_test(actual, out);
+
+   (void)agx_temp(expected->shader, AGX_SIZE_32);
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(expected, out, wx, agx_immediate_f(-1.0f), wy, wz,
                   AGX_FCOND_GTN);
    agx_unit_test(expected, out);
 

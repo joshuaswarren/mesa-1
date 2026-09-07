@@ -313,6 +313,26 @@ agx3_emit(struct util_dynarray *emission, enum agx_isa_encoding enc,
    return true;
 }
 
+/*
+ * Every source of a scalar half select is a plain, unmodified half register.
+ * This is a shape test, not an encodability verdict: an instruction that fails
+ * it belongs to one of the later fcmpsel forms (byte constants, minifloats,
+ * 32-bit compares), so the caller must skip its handler rather than refuse the
+ * shader.
+ */
+static bool
+agx3_fcmpsel_all_half_regs(const agx_instr *I)
+{
+   for (unsigned i = 0; i < 4; ++i) {
+      const agx_index x = I->src[i];
+      if (!agx3_src_is_register(x) || x.memory || x.size != AGX_SIZE_16 ||
+          agx_channels(x) != 1 || x.abs || x.neg || x.kill ||
+          (x.cache && x.discard))
+         return false;
+   }
+   return true;
+}
+
 /* A source usable by the modifier long forms: a plain 32-bit register. */
 static bool
 agx3_mod_src_ok(agx_index s)
@@ -957,8 +977,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          uint8_t slot, uint16_t wait_mask, bool final)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
-   const bool immediate_lod = explicit_lod &&
-                              I->src[1].type == AGX_INDEX_IMMEDIATE;
+   /* An implicit-LOD sample with a constant bias: the same 12-bit x64
+    * immediate operand as an explicit level, selected by f139 = 1 instead
+    * of 2, and keeping the implicit-LOD marker. */
+   const bool biased_lod = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+                           I->src[1].type == AGX_INDEX_IMMEDIATE;
+   const bool immediate_lod =
+      (explicit_lod || biased_lod) && I->src[1].type == AGX_INDEX_IMMEDIATE;
    const float immediate_level = immediate_lod ?
       agx_minifloat_decode(I->src[1].value) : 0.0f;
    const float immediate_level_x64 = immediate_level * 64.0f;
@@ -971,7 +996,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (valid_immediate_lod ||
         (agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_16 &&
          agx_channels(I->src[1]) == 1))) :
-      (I->lod_mode == AGX_LOD_MODE_AUTO_LOD && agx3_tex_imm(I->src[1], 0));
+      biased_lod
+         ? (enc == AGX_ISA_ENCODING_AGX3B && valid_immediate_lod &&
+            immediate_level_x64 != 0.0f && !array)
+         : (I->lod_mode == AGX_LOD_MODE_AUTO_LOD && agx3_tex_imm(I->src[1], 0));
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
@@ -1071,8 +1099,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .sampler_value = immediate ? 0 : I->src[4].value,
       .texture_kill = !immediate && I->src[3].kill,
       .sampler_kill = !immediate && I->src[4].kill,
-      .lod = immediate_lod ? AGX3_TEX_LOD_LEVEL :
-             explicit_lod ? AGX3_TEX_LOD_REGISTER : AGX3_TEX_LOD_AUTO,
+      .lod = biased_lod      ? AGX3_TEX_LOD_BIAS
+             : immediate_lod ? AGX3_TEX_LOD_LEVEL
+             : explicit_lod  ? AGX3_TEX_LOD_REGISTER
+                             : AGX3_TEX_LOD_AUTO,
       .lod_x64 = immediate_lod ? (uint16_t)immediate_level_x64 : 0,
       .array = array,
       .slot = slot,
@@ -4920,6 +4950,99 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /*
+          * Native tied 32-bit comparison/selection is fmin/fmax.  This is the
+          * shape NIR hands us for max(x, 0.0) -- normalize(), clamp(),
+          * saturate() and the discard compare -- and Apple encodes it as a
+          * compact six-byte fsel, taking the register form when the second
+          * operand is a register and the minifloat form when it is a
+          * constant.  Both were witnessed byte-exactly; see agx3_alu_core.h.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+             !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_32 && agx_channels(I->dest[0]) == 1 &&
+             I->dest[0].value < 256 &&
+             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
+             I->src[0].size == AGX_SIZE_32 && agx_channels(I->src[0]) == 1 &&
+             agx3_src_is_register(I->src[2]) && !I->src[2].memory &&
+             I->src[2].size == AGX_SIZE_32 && agx_channels(I->src[2]) == 1 &&
+             I->src[0].value == I->src[2].value && I->src[0].value < 256 &&
+             !I->src[0].abs && !I->src[0].neg && !I->src[0].kill &&
+             !I->src[2].abs && !I->src[2].neg && !I->src[2].kill &&
+             !(I->src[0].cache && I->src[0].discard) &&
+             !(I->src[2].cache && I->src[2].discard) &&
+             agx3_post_ra_hint(I->src[0]) == agx3_post_ra_hint(I->src[2])) {
+            const bool second_imm =
+               I->src[1].type == AGX_INDEX_IMMEDIATE &&
+               I->src[3].type == AGX_INDEX_IMMEDIATE &&
+               I->src[1].value == I->src[3].value && I->src[1].value <= 255;
+            const bool second_reg =
+               !second_imm && agx3_src_is_register(I->src[1]) &&
+               agx3_src_is_register(I->src[3]) && !I->src[1].memory &&
+               !I->src[3].memory && I->src[1].size == AGX_SIZE_32 &&
+               I->src[3].size == AGX_SIZE_32 &&
+               agx_channels(I->src[1]) == 1 && agx_channels(I->src[3]) == 1 &&
+               I->src[1].value == I->src[3].value && I->src[1].value < 256 &&
+               agx3_post_ra_hint(I->src[1]) == agx3_post_ra_hint(I->src[3]);
+            const bool clean =
+               !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
+               !I->src[3].abs && !I->src[3].neg && !I->src[3].kill &&
+               !(I->src[1].cache && I->src[1].discard) &&
+               !(I->src[3].cache && I->src[3].discard);
+
+            if ((second_imm || second_reg) && clean) {
+               /* This form carries one scoreboard slot; retire anything wider
+                * first, exactly as the other fsel paths do. */
+               uint16_t fsel_wait = wait;
+               if (fsel_wait & (fsel_wait - 1)) {
+                  if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                     AGX3_REFUSE(I);
+                  fsel_wait = 0;
+               }
+
+               const bool maximum = I->fcond == AGX_FCOND_GTN;
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               bool composed;
+               if (second_imm) {
+                  composed =
+                     maximum
+                        ? agx3_alu_fmax_f32_imm(
+                             enc, I->dest[0].value, I->src[0].value,
+                             (uint8_t)I->src[1].value,
+                             agx3_post_ra_hint(I->src[0]), I->dest[0].cache,
+                             fsel_wait, bytes, &len)
+                        : agx3_alu_fmin_f32_imm(
+                             enc, I->dest[0].value, I->src[0].value,
+                             (uint8_t)I->src[1].value,
+                             agx3_post_ra_hint(I->src[0]), I->dest[0].cache,
+                             fsel_wait, bytes, &len);
+               } else {
+                  const uint16_t src[4] = {
+                     I->src[0].value, I->src[1].value,
+                     I->src[2].value, I->src[3].value};
+                  const enum agx3_alu_hint hints[4] = {
+                     agx3_post_ra_hint(I->src[0]),
+                     agx3_post_ra_hint(I->src[1]),
+                     agx3_post_ra_hint(I->src[2]),
+                     agx3_post_ra_hint(I->src[3])};
+                  composed =
+                     maximum
+                        ? agx3_alu_fmax_f32(enc, I->dest[0].value, src, hints,
+                                            I->dest[0].cache, fsel_wait, bytes,
+                                            &len)
+                        : agx3_alu_fmin_f32(enc, I->dest[0].value, src, hints,
+                                            I->dest[0].cache, fsel_wait, bytes,
+                                            &len);
+               }
+               if (!composed || !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+         }
+
          /* Native tied half comparison/selection is scalar fmin/fmax. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
@@ -4928,19 +5051,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
              I->src[0].value == I->src[2].value &&
-             I->src[1].value == I->src[3].value) {
+             I->src[1].value == I->src[3].value &&
+             agx3_fcmpsel_all_half_regs(I)) {
             uint16_t src[4];
             enum agx3_alu_hint hints[4];
-            bool invalid = false;
             for (unsigned i = 0; i < 4; ++i) {
-               const agx_index x = I->src[i];
-               invalid |= !agx3_src_is_register(x) || x.memory ||
-                  x.size != AGX_SIZE_16 || agx_channels(x) != 1 ||
-                  x.abs || x.neg || x.kill || (x.cache && x.discard);
-               src[i] = x.value;
-               hints[i] = agx3_post_ra_hint(x);
+               src[i] = I->src[i].value;
+               hints[i] = agx3_post_ra_hint(I->src[i]);
             }
-            if (invalid || (wait != 0 && wait != 32))
+            if (wait != 0 && wait != 32)
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             const bool composed = I->fcond == AGX_FCOND_GTN
@@ -4963,21 +5082,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 &&
-             agx_channels(I->dest[0]) == 1) {
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_fcmpsel_all_half_regs(I)) {
             uint16_t src[4];
             enum agx3_alu_hint hints[4];
-            bool invalid = false;
             for (unsigned i = 0; i < 4; ++i) {
-               const agx_index x = I->src[i];
-               invalid |= !agx3_src_is_register(x) || x.memory ||
-                          x.size != AGX_SIZE_16 || agx_channels(x) != 1 ||
-                          x.abs || x.neg || x.kill ||
-                          (x.cache && x.discard);
-               src[i] = x.value;
-               hints[i] = agx3_post_ra_hint(x);
+               src[i] = I->src[i].value;
+               hints[i] = agx3_post_ra_hint(I->src[i]);
             }
-            if (invalid)
-               AGX3_REFUSE(I);
 
             unsigned condition = I->fcond;
             bool swap = I->invert_cond;

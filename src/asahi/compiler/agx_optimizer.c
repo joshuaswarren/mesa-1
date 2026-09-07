@@ -89,6 +89,39 @@ agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
           agx_is_equiv(I->src[src], I->src[src + 2]);
 }
 
+/*
+ * A tied FCMPSEL whose condition is GTN or LTN is a minimum or a maximum, and
+ * G17P encodes exactly that as a compact six-byte fsel whose second operand is
+ * either a register pair or a single minifloat deposited into both the compare
+ * and the select slot. The tie is what makes it a min/max, so an immediate has
+ * to reach both slots or neither: folding it into just one leaves the packer a
+ * general mixed-width select it has no encoding for, which is how max(x, 0.0)
+ * -- normalize(), clamp(), saturate(), discard -- used to fail the shader
+ * closed.  Source 3 is not a float source in general (a select can carry an
+ * integer), so the float interpretation is only taken here, where the tie
+ * proves the operand is the compared float.
+ */
+static bool
+agx_g17p_tied_minmax(agx_context *ctx, const agx_instr *I)
+{
+   if (!(ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 && !I->invert_cond &&
+         !I->saturate &&
+         (I->fcond == AGX_FCOND_GTN || I->fcond == AGX_FCOND_LTN)))
+      return false;
+
+   /* agx_is_equiv() ignores modifiers, and a modifier on one half of a tie
+    * would make the two operands different values. Require them identical. */
+   for (unsigned i = 0; i < 2; ++i) {
+      const agx_index a = I->src[i], b = I->src[i + 2];
+      if (!agx_is_equiv(a, b) || a.size != b.size || a.abs != b.abs ||
+          a.neg != b.neg || a.memory != b.memory)
+         return false;
+   }
+
+   return true;
+}
+
 static void
 agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
 {
@@ -161,7 +194,10 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
    agx_foreach_ssa_src(I, s) {
       agx_index src = I->src[s];
-      if (agx_preserve_g17p_tied_fcmpsel(ctx, I, s))
+      /* Source 1 of a tied minimum/maximum may be inlined, because the fold
+       * below carries it into source 3 as well and so keeps the tie. */
+      if (agx_preserve_g17p_tied_fcmpsel(ctx, I, s) &&
+          !(s == 1 && agx_g17p_tied_minmax(ctx, I)))
          continue;
       if (src.neg)
          continue;
@@ -173,15 +209,29 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       uint8_t value = def->imm;
       uint16_t value_u16 = def->imm;
 
-      bool float_src = agx_is_float_src(I, s);
+      /* G17P's sample names its explicit level and its implicit-LOD bias in
+       * the same immediate operand, and the packer decodes that operand as a
+       * minifloat.  agx_is_float_src() reports the whole instruction, which
+       * is integer-typed, so name this one source explicitly rather than
+       * folding a float bit pattern in as an integer. */
+      bool float_src =
+         agx_is_float_src(I, s) ||
+         (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_TEXTURE_SAMPLE && s == 1 &&
+          (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS));
 
       if (I->op == AGX_OPCODE_ST_TILE && s == 0)
          continue;
       if (I->op == AGX_OPCODE_ZS_EMIT && s != 0)
          continue;
+      /* G17P names an explicit level and an implicit-LOD bias in the same
+       * 12-bit immediate operand, so both fold; every other sample source
+       * has to stay a register. */
       if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && s != 4 &&
           !(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && s == 1 &&
-            I->lod_mode == AGX_LOD_MODE_LOD_MIN))
+            (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+             I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS)))
          continue;
       if ((I->op == AGX_OPCODE_DEVICE_STORE ||
            I->op == AGX_OPCODE_LOCAL_STORE || I->op == AGX_OPCODE_ATOMIC ||
@@ -209,6 +259,10 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
          float f = fp16 ? _mesa_half_to_float(def->imm) : uif(def->imm);
          if (!agx_minifloat_exact(f))
             continue;
+
+         /* Both halves of a tied minimum/maximum, or neither. */
+         if (s == 1 && agx_g17p_tied_minmax(ctx, I))
+            I->src[3] = agx_immediate_f(f);
 
          I->src[s] = agx_immediate_f(f);
       } else if (value == def->imm) {
