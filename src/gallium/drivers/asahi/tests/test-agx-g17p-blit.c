@@ -40,6 +40,7 @@
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
+#include "util/u_inlines.h"
 #include "util/format/u_formats.h"
 #include "util/u_memory.h"
 #include "util/driconf.h"
@@ -136,6 +137,34 @@ main(void)
       .render_condition_enable = false,
    };
 
+   /* A clear and a flush first: no API shader is involved, so this is the
+    * background/end-of-tile programs, the PBE render-target descriptor and
+    * the batch submit path on their own. It used to abort the process in
+    * agx_native_descriptor_rejected("end-of-tile PBE") before any draw
+    * happened at all.
+    */
+   struct pipe_surface cbuf = {
+      .texture = dst,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .first_layer = 0,
+      .last_layer = 0,
+      .level = 0,
+   };
+   struct pipe_framebuffer_state fb = {
+      .width = 4,
+      .height = 8,
+      .layers = 1,
+      .samples = 1,
+      .nr_cbufs = 1,
+   };
+   fb.cbufs[0] = cbuf;
+   pctx->set_framebuffer_state(pctx, &fb);
+
+   const union pipe_color_union colour = {.f = {0.25f, 0.5f, 0.75f, 1.0f}};
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &colour, 0.0, 0);
+   pctx->flush(pctx, NULL, 0);
+   printf("clear and flush completed\n");
+
    pctx->blit(pctx, &info);
 
    struct agx_context *ctx = agx_context(pctx);
@@ -157,6 +186,25 @@ main(void)
     * a null ctx->vs here means asahi_compute_blit() ran. */
    if (!agx2 && ctx->vs == NULL) {
       fprintf(stderr, "blit took the compute path on a non-AGX2 chip\n");
+      status = 1;
+   }
+
+   /* A ratchet on what already works. u_blitter's pass-through vertex shader
+    * moves a 16-bit uniform, which had no encoding until the AGX3b uniform
+    * copy landed; if this regresses, every blit loses its vertex program
+    * again. The fragment program is a separate, still-open gap -- see
+    * src/asahi/isa/README-agx3-packer-limits.md -- so it is gated below
+    * rather than asserted here.
+    */
+   if (!agx2 && !vs_ok) {
+      fprintf(stderr, "the blit's vertex program no longer encodes\n");
+      status = 1;
+   }
+
+   /* Whatever the shaders did, a refused program must have been counted as a
+    * skipped draw rather than silently rendering nothing. */
+   if (!fs_ok && ctx->skipped_no_program == 0) {
+      fprintf(stderr, "a refused program did not skip its draw\n");
       status = 1;
    }
 
