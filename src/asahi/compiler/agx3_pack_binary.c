@@ -2667,6 +2667,15 @@ agx3_cf_is_zero(agx_index src)
           !src.neg;
 }
 
+/* A constant the witnessed 16-bit compare can carry. Above 255 Apple changes
+ * the instruction, so anything wider stays refused. */
+static bool
+agx3_cf_imm8(agx_index src)
+{
+   return src.type == AGX_INDEX_IMMEDIATE && src.value <= UINT8_MAX &&
+          !src.abs && !src.neg;
+}
+
 /* Emit the compare half of a fused AGX IR control-flow instruction. The flag
  * is consumed by the immediately following cnd instruction. Loop predicates
  * use distinct persistent slots by nesting depth; ordinary ifs reuse slot 0. */
@@ -2715,15 +2724,32 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
-   /* Branching on a boolean: Mesa keeps them in 16-bit halves, so the
-    * compare is `r0h != 0` rather than a 32-bit one. */
-   if (!is_float && agx3_cf_reg16(I->src[0]) &&
-       I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
-       !I->src[1].neg && I->src[1].value == 0) {
+   /* Branching on a 16-bit integer against a constant. Mesa keeps booleans
+    * and small ints in 16-bit halves, so `if (b)` arrives as `r0h != 0` and
+    * `if (gradientLength < 2)` as `r0h < 2` rather than as 32-bit compares.
+    *
+    * The constant arrives on either side. `0 < x` and `x > 0` are the same
+    * branch, and which one Mesa hands the packer depends only on how the
+    * source wrote the comparison -- Hyprland's border, shadow and inner-glow
+    * shaders produce both orders. Canonicalize the constant to the right
+    * exactly as the 32-bit path below already does; the emitted bytes are
+    * the witnessed encoding either way, with the relation swapped, so the
+    * normalization admits no new encoding of its own.
+    *
+    * agx3_cf_icmp_imm16_runtime() refuses the immediates and relations that
+    * have no witness, so an ungrounded constant still fails closed here. */
+   if (!is_float &&
+       ((agx3_cf_reg16(I->src[0]) && agx3_cf_imm8(I->src[1])) ||
+        (agx3_cf_imm8(I->src[0]) && agx3_cf_reg16(I->src[1])))) {
+      const bool imm_first = !agx3_cf_reg16(I->src[0]);
+      const agx_index source = I->src[imm_first ? 1 : 0];
+      const agx_index constant = I->src[imm_first ? 0 : 1];
       enum agx3_cf_icond cond16;
-      if (I->src[0].kill || !agx3_cf_map_icond(I->icond, &cond16) ||
-          !agx3_cf_icmp_zero16_runtime(enc, cond16, flag_slot, I->src[0].value,
-             (struct agx3_cf_source_hints){I->src[0].cache,I->src[0].discard},
+      if (source.kill || !agx3_cf_map_icond(I->icond, &cond16) ||
+          (imm_first && !agx3_cf_swap_icond(&cond16)) ||
+          !agx3_cf_icmp_imm16_runtime(enc, cond16, flag_slot, source.value,
+             (uint8_t)constant.value,
+             (struct agx3_cf_source_hints){source.cache, source.discard},
              0, bytes, &len))
          return false;
       return agx3_append(emission, bytes, len);
