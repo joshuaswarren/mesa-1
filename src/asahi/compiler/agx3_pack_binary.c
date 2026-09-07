@@ -3140,8 +3140,14 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * key0x10020c00 is two words and gives distinct imgwblk bytes.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
-static bool
-agx3_is_g17p_rt0_eot(const agx_context *ctx, enum agx_isa_encoding enc)
+enum agx3_g17p_rt0_eot_kind {
+   AGX3_G17P_RT0_EOT_NONE,
+   AGX3_G17P_RT0_EOT_ONE_WORD,
+   AGX3_G17P_RT0_EOT_TWO_WORD,
+};
+
+static enum agx3_g17p_rt0_eot_kind
+agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
        ctx->is_preamble || ctx->key->no_stop)
@@ -3150,6 +3156,7 @@ agx3_is_g17p_rt0_eot(const agx_context *ctx, enum agx_isa_encoding enc)
    unsigned instructions = 0, get_x = 0, get_y = 0, zeros = 0, stores = 0;
    unsigned x_reg = UINT_MAX, y_reg = UINT_MAX, zero_reg = UINT_MAX;
    unsigned coord_reg = UINT_MAX, offset_reg = UINT_MAX;
+   enum agx_format store_format = AGX_FORMAT_I8;
 
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
@@ -3201,6 +3208,7 @@ agx3_is_g17p_rt0_eot(const agx_context *ctx, enum agx_isa_encoding enc)
                 agx_channels(I->src[3]) != 2)
                return false;
             stores++;
+            store_format = I->format;
             offset_reg = I->src[2].value;
             coord_reg = I->src[3].value;
          } else {
@@ -3209,9 +3217,23 @@ agx3_is_g17p_rt0_eot(const agx_context *ctx, enum agx_isa_encoding enc)
       }
    }
 
-   return instructions == 4 && get_x == 1 && get_y == 1 && zeros == 1 &&
-          stores == 1 && x_reg == coord_reg && y_reg == coord_reg + 2 &&
-          zero_reg == offset_reg;
+   if (instructions != 4 || get_x != 1 || get_y != 1 || zeros != 1 ||
+       stores != 1 || x_reg != coord_reg || y_reg != coord_reg + 2 ||
+       zero_reg != offset_reg)
+      return AGX3_G17P_RT0_EOT_NONE;
+
+   if (store_format == AGX_FORMAT_U16NORM) {
+      if (ctx->key->g17p_rt0_eot_words == 1)
+         return AGX3_G17P_RT0_EOT_ONE_WORD;
+      if (ctx->key->g17p_rt0_eot_words == 2)
+         return AGX3_G17P_RT0_EOT_TWO_WORD;
+
+      /* RG16 and RGBA16 lower to the same final instruction shape. Refuse an
+       * ambiguous selector instead of silently emitting the wrong store. */
+      return AGX3_G17P_RT0_EOT_NONE;
+   }
+
+   return AGX3_G17P_RT0_EOT_ONE_WORD;
 }
 
 /* Native EOT key {RGBA16F RT0, R8 RT1} (mask 3) has a distinct, complete
@@ -3489,8 +3511,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                          sizeof(g17p_wboit_mrt_eot));
    }
 
-   if (agx3_is_g17p_rt0_eot(ctx, enc)) {
-      static const uint8_t g17p_rt0_eot[] = {
+   const enum agx3_g17p_rt0_eot_kind rt0_eot =
+      agx3_g17p_rt0_eot_kind(ctx, enc);
+   if (rt0_eot != AGX3_G17P_RT0_EOT_NONE) {
+      static const uint8_t g17p_rt0_eot[][68] = {{
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
          0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
@@ -3501,13 +3525,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0xd0, 0x40, 0x10, 0x00,
          0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
          0xa8, 0x75, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
-      };
+      }, {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+         0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+         0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+         0x50, 0x06, 0x0b, 0x00,
+         0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+         0x50, 0x06, 0x0b, 0x00,
+         0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+         0xd0, 0x40, 0x10, 0x00,
+         0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+         0xa8, 0x15, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+      }};
       /* Native metadata common0=3 means six GPR halves; retain the existing
        * conservative eight-half allocation. Fields38/42 are D=16, requiring
        * eight staging halves independently. Main68 pads to128: LDSHDR f1=1. */
       ctx->max_reg = MAX2(ctx->max_reg, 7);
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
-      return agx3_append(emission, g17p_rt0_eot, sizeof(g17p_rt0_eot));
+      const unsigned index = rt0_eot == AGX3_G17P_RT0_EOT_TWO_WORD;
+      return agx3_append(emission, g17p_rt0_eot[index],
+                         sizeof(g17p_rt0_eot[index]));
    }
 
    struct util_dynarray fixups;

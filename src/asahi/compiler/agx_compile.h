@@ -341,6 +341,11 @@ struct agx_shader_key {
     */
    bool no_stop;
 
+   /* Exact number of 32-bit imageblock words in the G17P RT0 EOT store.
+    * U16NORM is shared by RG16 and RGBA16 after tilebuffer lowering, so the
+    * backend cannot recover this layout from the final AGX IR alone. */
+   uint8_t g17p_rt0_eot_words;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.

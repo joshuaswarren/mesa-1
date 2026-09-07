@@ -345,6 +345,19 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
 
+   if (cache->dev->chip == AGX_CHIP_G17P) {
+      switch (key->tib.logical_format[0]) {
+      case PIPE_FORMAT_R16G16_UNORM:
+         compiler_key.g17p_rt0_eot_words = 1;
+         break;
+      case PIPE_FORMAT_R16G16B16A16_UNORM:
+         compiler_key.g17p_rt0_eot_words = 2;
+         break;
+      default:
+         break;
+      }
+   }
+
    return agx_compile_bg_eot_shader(cache, b.shader, &compiler_key, NULL);
 }
 
@@ -357,15 +370,17 @@ agx_get_bg_eot_shader(struct agx_bg_eot_cache *cache,
       return ent->data;
 
    struct agx_bg_eot_shader *ret = NULL;
+   bool has_store = false;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_EOT_STORE) {
+         has_store = true;
          ret = agx_build_end_of_tile_shader(cache, key);
          break;
       }
    }
 
-   if (!ret)
+   if (!ret && !has_store)
       ret = agx_build_background_shader(cache, key);
 
    if (!ret)

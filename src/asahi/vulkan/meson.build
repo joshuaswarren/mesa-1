@@ -565,6 +565,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for the bounded G17P RGBA16 UNORM colour path.
+    executable(
+      'g17p-vulkan-rgba16-unorm',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RGBA16_UNORM=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-render-only',
       files('tests/g17p_render_only.c'),
