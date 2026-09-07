@@ -5354,6 +5354,28 @@ TEST_F(AGX3PackBinary, HalfExp2MatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndRefusesModifier)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(3, AGX_SIZE_16);
+   src.discard = true;
+   agx_log2_to(b, agx_register(3, AGX_SIZE_16), src);
+   agx_stop(b);
+   const auto code = pack(b);
+   const uint8_t native[] = {
+      0x2f,0x02,0x54,0x03,0x02,0x06,0xac,0x60,0x00,0x00,
+   };
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_16);
+   src.neg = true;
+   agx_log2_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)
 {
    for (unsigned mode = 0; mode < 3; ++mode) {
