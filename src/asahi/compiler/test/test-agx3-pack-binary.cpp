@@ -4254,7 +4254,7 @@ TEST_F(AGX3PackBinary, G17PColourFusionRejectsIncompleteMainProof)
    }
 }
 
-TEST_F(AGX3PackBinary, G17PColourFusionRejectsNonOpaqueOrExtraEpilogWork)
+TEST_F(AGX3PackBinary, G17PColourFusionAcceptsS8NormAndRejectsOtherChanges)
 {
    for (unsigned mode = 0; mode < 4; ++mode) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -4277,7 +4277,7 @@ TEST_F(AGX3PackBinary, G17PColourFusionRejectsNonOpaqueOrExtraEpilogWork)
                   15,mode == 3 ? 16 : 0,false);
       agx_stop(b);
       pack(b);
-      EXPECT_FALSE(b->shader->agx3_colour_link.opaque_pack) << mode;
+      EXPECT_EQ(b->shader->agx3_colour_link.opaque_pack, mode == 2) << mode;
    }
 }
 

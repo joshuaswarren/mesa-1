@@ -3201,6 +3201,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
          } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
                 (I->format != AGX_FORMAT_U8NORM &&
+                 I->format != AGX_FORMAT_S8NORM &&
                  I->format != AGX_FORMAT_I8 &&
                  I->format != AGX_FORMAT_U16NORM &&
                  I->format != AGX_FORMAT_S16NORM &&
@@ -3380,6 +3381,12 @@ agx3_is_g17p_wboit_mrt_eot(const agx_context *ctx,
           x_reg == coord_reg && y_reg == coord_reg + 2;
 }
 
+static bool
+agx3_g17p_8norm_format(enum agx_format format)
+{
+   return format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
+}
+
 /* Native RGBA8 shaders pack before the write fence: opaque shaders then
  * acquire class 12, while blending already acquired it before the read/load.
  * Defer only over FLTNORM in one straight-line block, with exactly the native
@@ -3410,7 +3417,7 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
                     I->op == AGX_OPCODE_ST_TILE) {
             const bool load = I->op == AGX_OPCODE_LD_TILE;
             if (phase != (load ? 1 : 3) ||
-                !((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
+                !((agx3_g17p_8norm_format(I->format) && I->mask == 15) ||
                   (I->format == AGX_FORMAT_RGB10A2 && I->mask == 1)) ||
                 I->pixel_offset || I->explicit_coords)
                return NULL;
@@ -3485,7 +3492,7 @@ agx3_g17p_colour_link_info(agx_context *ctx, bool opaque_protocol)
                 !agx3_src_is_register(I->src[0]) || I->src[0].memory ||
                 I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != 0xff ||
                 !agx_is_null(I->src[2]) || I->explicit_coords || I->pixel_offset ||
-                I->format != AGX_FORMAT_U8NORM || I->mask != 15)
+                !agx3_g17p_8norm_format(I->format) || I->mask != 15)
                return;
             info.store_reg = I->src[0].value;
          } else {
@@ -3703,7 +3710,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        P->op == AGX_OPCODE_ST_TILE) {
                const bool load = P->op == AGX_OPCODE_LD_TILE;
                if (phase != (load ? 1 : 3) ||
-                   !((P->format == AGX_FORMAT_U8NORM && P->mask == 15) ||
+                   !((agx3_g17p_8norm_format(P->format) && P->mask == 15) ||
                      (P->format == AGX_FORMAT_RGB10A2 && P->mask == 1)) || P->pixel_offset || P->explicit_coords)
                   g17p_blend_protocol = false;
                phase = load ? 2 : 4;
