@@ -169,6 +169,12 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       /* 12-bit immediate level field; witnessed up to 464 (level 7.25). */
       if (d->lod_x64 > 0xfff)
          return false;
+   } else if (d->lod == AGX3_TEX_LOD_BIAS) {
+      /* The same 12-bit x64 field, and Apple emits the plain implicit form
+       * rather than a zero bias, so refuse the degenerate encoding. */
+      if (enc != AGX_ISA_ENCODING_AGX3B || d->lod_x64 == 0 ||
+          d->lod_x64 > 0xfff)
+         return false;
    } else if ((d->lod != AGX3_TEX_LOD_AUTO &&
                !(d->lod == AGX3_TEX_LOD_REGISTER &&
                  enc == AGX_ISA_ENCODING_AGX3B)) || d->lod_x64 != 0) {
@@ -261,6 +267,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(136, 1);
    if (d->lod == AGX3_TEX_LOD_AUTO) {
       ov[n++] = (struct agx3_field_kv)KV(156, 1); /* implicit-LOD marker */
+   } else if (d->lod == AGX3_TEX_LOD_BIAS) {
+      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* still implicit LOD */
+      ov[n++] = (struct agx3_field_kv)KV(37, 1);  /* immediate LOD operand */
+      ov[n++] = (struct agx3_field_kv)KV(139, 1); /* bias mode */
+      ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
    } else if (d->lod == AGX3_TEX_LOD_REGISTER) {
       ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed level bank */
       ov[n++] = (struct agx3_field_kv)KV(139, 4);

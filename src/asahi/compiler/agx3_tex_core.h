@@ -117,6 +117,16 @@ enum agx3_tex_lod {
    AGX3_TEX_LOD_AUTO,
    AGX3_TEX_LOD_LEVEL,
    AGX3_TEX_LOD_REGISTER, /* PACK_SMPIR publishes the per-lane level. */
+   /*
+    * Implicit LOD plus a constant bias.  This is the ordinary automatic-LOD
+    * sample with f139 = 1 and the bias in the same 12-bit x64 immediate the
+    * explicit-level form uses, witnessed from `metal-nt -arch applegpu_g17p`
+    * on t.sample(s, uv, bias(k)) for k in {0.25, 0.5, 1, 1.5, 2, 4, 1/64, 31}:
+    * f29 came out 16, 32, 64, 96, 128, 256, 1, 1984 -- exactly k * 64, and
+    * 63.0 saturated the field at 2047.  A zero bias is folded away by Apple's
+    * own compiler into the plain implicit form.
+    */
+   AGX3_TEX_LOD_BIAS,
 };
 
 struct agx3_tex_sample_desc {
@@ -127,7 +137,7 @@ struct agx3_tex_sample_desc {
    uint8_t texture;     /* immediate texture-state index, 0..15 */
    uint8_t sampler;     /* immediate sampler-state index, 0..15 */
    enum agx3_tex_lod lod;
-   uint16_t lod_x64;    /* immediate level * 64 when lod == LEVEL */
+   uint16_t lod_x64;    /* level * 64 when LEVEL, bias * 64 when BIAS */
    uint8_t slot;
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
    bool coord_kill;

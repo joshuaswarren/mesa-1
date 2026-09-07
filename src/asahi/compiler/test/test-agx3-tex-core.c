@@ -356,6 +356,38 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true},
        "05800cb8b0000004010010000100", NULL},
+      /*
+       * Implicit LOD plus a constant bias.  Apple's own fragment samples of
+       * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in
+       * exactly two places -- byte 6 gains 0x07 (f37 = 1, f139 = 1) and the
+       * 12-bit x64 field at bytes 7/11 takes k * 64 -- so these rows are the
+       * implicit-LOD witness above carrying that same delta:
+       *
+       *   t.sample(s, uv)              05 80 0c b8 b0 00 00 00 01 00 10 00 12 00
+       *   t.sample(s, uv, bias(0.25))  05 80 0c b8 b0 00 07 80 01 00 10 00 12 00
+       *   t.sample(s, uv, bias(0.5))   05 80 0c b8 b0 00 07 00 01 00 10 02 12 00
+       *   t.sample(s, uv, bias(1.0))   05 80 0c b8 b0 00 07 00 01 00 10 04 12 00
+       */
+      {"bias(0.25)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 16, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb8b0000780010010000100", NULL},
+      {"bias(0.5)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb8b0000700010010020100", NULL},
+      {"bias(1.0)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 64, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb8b0000700010010040100", NULL},
+      {"bias(31.0) saturating field",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 1984, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb8b00007000100107c0100", NULL},
    };
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
@@ -370,6 +402,26 @@ test_sample_witnesses(void)
          CHECK(length == 22 && hex_eq(bytes, length, v[i].hex_c));
       }
    }
+
+   /* The bias form is G17P-only, refuses a value past the 12-bit field, and
+    * refuses a zero bias, which Apple emits as the plain implicit sample. */
+   struct agx3_tex_sample_desc bad = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true,
+   };
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bad, bytes,
+                                 &length));
+   bad.lod_x64 = 0;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad.lod_x64 = 0x1000;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad.lod_x64 = 32;
+   bad.array = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
    return 0;
 }
 
