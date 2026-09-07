@@ -48,6 +48,8 @@ and every textured draw:
 | that lighting multiplied by a texture fetch                         | yes\*\*  |
 | `clamp(colour, 0.0, 1.0)`                                           | yes\*\*  |
 | `max(a, b)` / `min(a, b)` between two interpolated values           | yes\*\*  |
+| `max(0.0, x)` — the constant written **first**                      | yes\*\*\*|
+| `max(0.0031308, x)` — likewise, constant not a minifloat            | yes\*\*\*|
 | `x < 0.5 ? a : b` — a plain float ternary                           | yes\*\*\*|
 | `x >= k ? a : b`, `x <= k ? a : b`, `x != k ? a : b`                | yes\*\*\*|
 | `t.a > 0.5 ? t : colour` on a texture fetch                         | yes\*\*\*|
@@ -59,9 +61,9 @@ and every textured draw:
 \*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
 below. The last three are new probes (`f14`, `f15`, `f16`) added with it.
 
-\*\*\* These rows were **no** until the *untied* mixed-width `fcmpsel` was
-encoded — a separate gap the tied minimum and maximum did not touch; see "The
-untied select was a second gap" below. New probes `f17`-`f20`.
+\*\*\* These rows were **no** after the tied minimum and maximum landed: two
+further gaps, described in "The untied select was a second gap" and "Which
+side the constant is written on" below. New probes `f17`-`f22`.
 
 † Not a `fcmpsel` gap at all: this shape reaches the packer as `fmul.sat`, a
 saturating float multiply, and it is the *saturate modifier* that has no
@@ -214,6 +216,44 @@ witness to encode from:
   If Mesa hands the packer this shape the fix is to widen in Mesa, not to
   invent an encoding for it.
 
+## Which side the constant is written on
+
+Encoding the tied minimum and maximum, and then the untied select, still left
+stock vkcube refusing on `fcmpsel`. The shape, from the refusal line the
+hardware now prints:
+
+```
+agx3_pack_binary.c:6726: no grounded AGX3 encoding for fcmpsel
+  [d32:reg2 s0=16:reg0.discard s1=32:reg2.discard s2=16:imm0
+   s3=32:reg2.discard cond=7 chan=1]
+```
+
+`cond=7` is GTN, so this is a maximum, not a select: sources 0 and 2 are one
+tied operand and 1 and 3 the other. But source 0 is a 16-bit *register* while
+source 2 is a 16-bit *immediate zero* — the tie is broken, and broken across
+widths. `max(0.0, x)` reproduces it exactly (`f21`).
+
+It is the same half-fold as before, in the other pair. The fold had been opened
+for sources 1 and 3 only, so a constant written *first* still folded into
+source 2 alone and left source 0 a register. That is strictly worse than the
+other order, because `agx_opt_compact_constants` then sees the surviving
+reference as the constant's only float use and narrows it to 16 bits, producing
+a 32-bit maximum compared against a 16-bit register — a shape Apple's own
+compiler will not emit at all. Folding either pair as a unit fixes both halves
+of that: the foldable case becomes the grounded minifloat form, and the
+un-foldable case keeps two SSA references, one of which is not a float use, so
+the constant is never narrowed and the grounded register form takes it (`f22`).
+
+No new encoding was needed, and none was invented. The packer normalizes
+`max(0.0, x)` to the `max(x, 0.0)` Apple encodes, which is legal because NIR
+declares `fmin_agx` and `fmax_agx` `2src_commutative`, and a tied GTN/LTN
+`fcmpsel` can only have come from one of them — every other condition a
+comparison produces is ordered.
+
+The refused shape itself stays refused, correctly: with a 16-bit register on
+one side of a 32-bit tie there is nothing to encode and no witness to encode
+it from. It simply is not produced any more.
+
 ## Where the fragment epilog is not the problem
 
 `asahi-g17p-epilog-matrix` sweeps 36,864 fragment-epilog keys — twelve colour
@@ -310,7 +350,7 @@ the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
 As of this revision the compute probe reports 24 of 24 encoding and the
-fragment probe 17 of 20. The three refusals are `f05_texture_bias` and
+fragment probe 18 of 21. The three refusals are `f05_texture_bias` and
 `f12_texture_grad`, both on the bindless-heap descriptor shape, and
 `f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before

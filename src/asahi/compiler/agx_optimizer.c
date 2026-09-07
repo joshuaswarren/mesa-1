@@ -97,9 +97,15 @@ agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
  * to reach both slots or neither: folding it into just one leaves the packer a
  * general mixed-width select it has no encoding for, which is how max(x, 0.0)
  * -- normalize(), clamp(), saturate(), discard -- used to fail the shader
- * closed.  Source 3 is not a float source in general (a select can carry an
- * integer), so the float interpretation is only taken here, where the tie
- * proves the operand is the compared float.
+ * closed.  Sources 2 and 3 are not float sources in general (a select can
+ * carry an integer), so the float interpretation is only taken here, where the
+ * tie proves the operand is the compared float.
+ *
+ * Either pair can hold the constant: max(0.0, x) puts it in sources 0 and 2,
+ * max(x, 0.0) in 1 and 3. Half-folding the first pair is worse than the
+ * second, because agx_opt_compact_constants then sees the surviving reference
+ * as the constant's only float use and narrows it to 16 bits, handing the
+ * packer a 32-bit maximum against a 16-bit register.
  */
 static bool
 agx_g17p_tied_minmax(agx_context *ctx, const agx_instr *I)
@@ -194,10 +200,11 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
    agx_foreach_ssa_src(I, s) {
       agx_index src = I->src[s];
-      /* Source 1 of a tied minimum/maximum may be inlined, because the fold
-       * below carries it into source 3 as well and so keeps the tie. */
+      /* Either compared source of a tied minimum/maximum may be inlined,
+       * because the fold below carries it into its partner as well and so
+       * keeps the tie. */
       if (agx_preserve_g17p_tied_fcmpsel(ctx, I, s) &&
-          !(s == 1 && agx_g17p_tied_minmax(ctx, I)))
+          !(s < 2 && agx_g17p_tied_minmax(ctx, I)))
          continue;
       if (src.neg)
          continue;
@@ -261,8 +268,8 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
             continue;
 
          /* Both halves of a tied minimum/maximum, or neither. */
-         if (s == 1 && agx_g17p_tied_minmax(ctx, I))
-            I->src[3] = agx_immediate_f(f);
+         if (s < 2 && agx_g17p_tied_minmax(ctx, I))
+            I->src[s + 2] = agx_immediate_f(f);
 
          I->src[s] = agx_immediate_f(f);
       } else if (value == def->imm) {

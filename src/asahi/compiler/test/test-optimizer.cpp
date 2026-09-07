@@ -169,6 +169,34 @@ TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmax)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+/* The constant may be written on either side. Half-folding the first pair is
+ * worse than the second: agx_opt_compact_constants then sees the surviving
+ * reference as the constant's only float use and narrows it to 16 bits,
+ * leaving a 32-bit maximum compared against a 16-bit register. */
+TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmaxWrittenFirst)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index zero = agx_mov_imm(actual, 32, 0);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(actual, out, zero, wx, zero, wx, AGX_FCOND_GTN);
+   agx_unit_test(actual, out);
+
+   const agx_index folded = agx_immediate_f(0.0f);
+   (void)agx_temp(expected->shader, AGX_SIZE_32);
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fcmpsel_to(expected, out, folded, wx, folded, wx, AGX_FCOND_GTN);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 /* A constant that is not an exact minifloat has no immediate encoding, so the
  * tie stays in a register -- in both slots, never one. */
 TEST_F(Optimizer, G17PPreservesTiedConstantFmaxThatIsNotAMinifloat)

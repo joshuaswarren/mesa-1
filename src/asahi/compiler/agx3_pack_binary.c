@@ -5040,34 +5040,47 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_32 && agx_channels(I->dest[0]) == 1 &&
-             I->dest[0].value < 256 &&
-             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
-             I->src[0].size == AGX_SIZE_32 && agx_channels(I->src[0]) == 1 &&
-             agx3_src_is_register(I->src[2]) && !I->src[2].memory &&
-             I->src[2].size == AGX_SIZE_32 && agx_channels(I->src[2]) == 1 &&
-             I->src[0].value == I->src[2].value && I->src[0].value < 256 &&
-             !I->src[0].abs && !I->src[0].neg && !I->src[0].kill &&
-             !I->src[2].abs && !I->src[2].neg && !I->src[2].kill &&
-             !(I->src[0].cache && I->src[0].discard) &&
-             !(I->src[2].cache && I->src[2].discard) &&
-             agx3_post_ra_hint(I->src[0]) == agx3_post_ra_hint(I->src[2])) {
+             I->dest[0].value < 256) {
+            /*
+             * A minimum and a maximum are commutative -- NIR declares
+             * fmin_agx and fmax_agx 2src_commutative -- and a tied GTN/LTN
+             * fcmpsel can only have come from one of them, since every other
+             * condition a comparison produces is ordered. So the constant may
+             * be written on either side, and max(0.0, x) normalizes to the
+             * max(x, 0.0) Apple encodes.
+             */
+            const unsigned reg_pair =
+               (agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
+                I->src[0].size == AGX_SIZE_32) ? 0 : 1;
+            const agx_index reg_a = I->src[reg_pair];
+            const agx_index reg_b = I->src[reg_pair + 2];
+            const agx_index other_a = I->src[reg_pair ^ 1];
+            const agx_index other_b = I->src[(reg_pair ^ 1) + 2];
+
+            const bool tied_reg =
+               agx3_src_is_register(reg_a) && agx3_src_is_register(reg_b) &&
+               !reg_a.memory && !reg_b.memory &&
+               reg_a.size == AGX_SIZE_32 && reg_b.size == AGX_SIZE_32 &&
+               agx_channels(reg_a) == 1 && agx_channels(reg_b) == 1 &&
+               reg_a.value == reg_b.value && reg_a.value < 256 &&
+               agx3_post_ra_hint(reg_a) == agx3_post_ra_hint(reg_b);
             const bool second_imm =
-               I->src[1].type == AGX_INDEX_IMMEDIATE &&
-               I->src[3].type == AGX_INDEX_IMMEDIATE &&
-               I->src[1].value == I->src[3].value && I->src[1].value <= 255;
+               other_a.type == AGX_INDEX_IMMEDIATE &&
+               other_b.type == AGX_INDEX_IMMEDIATE &&
+               other_a.value == other_b.value && other_a.value <= 255;
             const bool second_reg =
-               !second_imm && agx3_src_is_register(I->src[1]) &&
-               agx3_src_is_register(I->src[3]) && !I->src[1].memory &&
-               !I->src[3].memory && I->src[1].size == AGX_SIZE_32 &&
-               I->src[3].size == AGX_SIZE_32 &&
-               agx_channels(I->src[1]) == 1 && agx_channels(I->src[3]) == 1 &&
-               I->src[1].value == I->src[3].value && I->src[1].value < 256 &&
-               agx3_post_ra_hint(I->src[1]) == agx3_post_ra_hint(I->src[3]);
-            const bool clean =
-               !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
-               !I->src[3].abs && !I->src[3].neg && !I->src[3].kill &&
-               !(I->src[1].cache && I->src[1].discard) &&
-               !(I->src[3].cache && I->src[3].discard);
+               !second_imm && agx3_src_is_register(other_a) &&
+               agx3_src_is_register(other_b) && !other_a.memory &&
+               !other_b.memory && other_a.size == AGX_SIZE_32 &&
+               other_b.size == AGX_SIZE_32 &&
+               agx_channels(other_a) == 1 && agx_channels(other_b) == 1 &&
+               other_a.value == other_b.value && other_a.value < 256 &&
+               agx3_post_ra_hint(other_a) == agx3_post_ra_hint(other_b);
+            bool clean = tied_reg;
+            for (unsigned i = 0; i < 4; ++i) {
+               clean &= !I->src[i].abs && !I->src[i].neg && !I->src[i].kill &&
+                        !(I->src[i].cache && I->src[i].discard);
+            }
 
             if ((second_imm || second_reg) && clean) {
                /* This form carries one scoreboard slot; retire anything wider
@@ -5086,24 +5099,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   composed =
                      maximum
                         ? agx3_alu_fmax_f32_imm(
-                             enc, I->dest[0].value, I->src[0].value,
-                             (uint8_t)I->src[1].value,
-                             agx3_post_ra_hint(I->src[0]), I->dest[0].cache,
-                             fsel_wait, bytes, &len)
+                             enc, I->dest[0].value, reg_a.value,
+                             (uint8_t)other_a.value, agx3_post_ra_hint(reg_a),
+                             I->dest[0].cache, fsel_wait, bytes, &len)
                         : agx3_alu_fmin_f32_imm(
-                             enc, I->dest[0].value, I->src[0].value,
-                             (uint8_t)I->src[1].value,
-                             agx3_post_ra_hint(I->src[0]), I->dest[0].cache,
-                             fsel_wait, bytes, &len);
+                             enc, I->dest[0].value, reg_a.value,
+                             (uint8_t)other_a.value, agx3_post_ra_hint(reg_a),
+                             I->dest[0].cache, fsel_wait, bytes, &len);
                } else {
                   const uint16_t src[4] = {
-                     I->src[0].value, I->src[1].value,
-                     I->src[2].value, I->src[3].value};
+                     reg_a.value, other_a.value, reg_b.value, other_b.value};
                   const enum agx3_alu_hint hints[4] = {
-                     agx3_post_ra_hint(I->src[0]),
-                     agx3_post_ra_hint(I->src[1]),
-                     agx3_post_ra_hint(I->src[2]),
-                     agx3_post_ra_hint(I->src[3])};
+                     agx3_post_ra_hint(reg_a), agx3_post_ra_hint(other_a),
+                     agx3_post_ra_hint(reg_b), agx3_post_ra_hint(other_b)};
                   composed =
                      maximum
                         ? agx3_alu_fmax_f32(enc, I->dest[0].value, src, hints,

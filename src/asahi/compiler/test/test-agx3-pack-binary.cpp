@@ -5486,6 +5486,59 @@ TEST_F(AGX3PackBinary, F32TiedMaximumMatchesNativeMinifloatForm)
 }
 
 /*
+ * max(0.0, x) is max(x, 0.0). NIR declares fmin_agx and fmax_agx
+ * 2src_commutative, and a tied GTN/LTN fcmpsel can only have come from one of
+ * them, so the constant may be written on either side and both encode to the
+ * bytes Apple emits for the constant-second form.
+ */
+TEST_F(AGX3PackBinary, F32TiedMaximumIsCommutative)
+{
+   for (bool constant_first : {false, true}) {
+      for (bool maximum : {true, false}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_index a = agx_register(2, AGX_SIZE_32);
+         agx_index dest = agx_register(2, AGX_SIZE_32);
+         a.discard = true;
+         const agx_index k = agx_immediate_f(0.0f);
+         const agx_index s0 = constant_first ? k : a;
+         const agx_index s1 = constant_first ? a : k;
+         agx_fcmpsel_to(b, dest, s0, s1, s0, s1,
+                        maximum ? AGX_FCOND_GTN : AGX_FCOND_LTN);
+         agx_stop(b);
+         const auto code = pack(b);
+         const uint8_t native[] = {
+            0x12, 0x03, 0x0a, 0x81, (uint8_t)(maximum ? 0x00 : 0x01), 0x02,
+         };
+         ASSERT_EQ(code.size(), 10u) << "constant_first=" << constant_first;
+         EXPECT_EQ(memcmp(code.data(), native, 6), 0)
+            << "constant_first=" << constant_first;
+      }
+   }
+
+   /* The same for two registers: the tied pair may be named either way. */
+   for (bool swapped : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      agx_index c = agx_register(4, AGX_SIZE_32);
+      agx_index dest = agx_register(2, AGX_SIZE_32);
+      a.discard = c.discard = true;
+      const agx_index s0 = swapped ? c : a;
+      const agx_index s1 = swapped ? a : c;
+      agx_fcmpsel_to(b, dest, s0, s1, s0, s1, AGX_FCOND_GTN);
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_EQ(code.size(), 10u);
+      /* Both operands are registers, so nothing is normalized: the two
+       * operand fields simply exchange. */
+      const uint8_t native[] = {
+         0x12, (uint8_t)(swapped ? 0x05 : 0x03), 0x1e,
+         (uint8_t)(swapped ? 0x03 : 0x05), 0x00, 0x00,
+      };
+      EXPECT_EQ(memcmp(code.data(), native, 6), 0) << "swapped=" << swapped;
+   }
+}
+
+/*
  * A half select whose selected operands are byte constants is not the half
  * fmin/fmax form and must fall through to the byte-constant encoder, not fail
  * the shader.  This is the shape a `discard` compare produces.
