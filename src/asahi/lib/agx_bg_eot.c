@@ -346,7 +346,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       .g17p_rt0_eot_i32 =
          cache->dev->chip == AGX_CHIP_G17P &&
          (key->tib.logical_format[0] == PIPE_FORMAT_R32_FLOAT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32_UINT),
+          key->tib.logical_format[0] == PIPE_FORMAT_R32_UINT ||
+          key->tib.logical_format[0] == PIPE_FORMAT_R32_SINT),
    };
 
    if (cache->dev->chip == AGX_CHIP_G17P) {
