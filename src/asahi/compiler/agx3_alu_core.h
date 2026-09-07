@@ -265,6 +265,11 @@ bool agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
                    bool dest_cache, uint16_t wait_mask,
                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+bool agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
+                   const uint16_t src[3], const enum agx3_alu_hint hints[3],
+                   bool dest_cache, uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 bool agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                          enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
