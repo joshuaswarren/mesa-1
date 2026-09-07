@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_hal200_direct_draw_core.h"
+#include "agx_vdm_index_list_core.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -30,6 +31,35 @@ check_indexed(void)
    assert(agx_vdm_hal200_indexed_draw_pack(AGX_CHIP_G17P, &f, &packed));
    assert(packed.length == sizeof(native));
    assert(memcmp(packed.bytes, native, sizeof(native)) == 0);
+
+   struct agx_vdm_hal200_indexed_draw_body packed_body;
+   assert(agx_vdm_hal200_indexed_draw_body_pack(AGX_CHIP_G17P, &f,
+                                                 &packed_body));
+   assert(packed_body.length == sizeof(native) - sizeof(native[0]));
+   assert(memcmp(packed_body.bytes, &native[1], packed_body.length) == 0);
+
+   /* A bare 28-byte Index List is the negative control for Gallium's old
+    * draw path. HAL200 requires the two-word restart state in front, even
+    * when restart is disabled; omitting it desynchronizes VDM. */
+   struct agx_vdm_index_list_direct_words old_body;
+   assert(agx_vdm_index_list_direct_pack_words(
+      AGX_CHIP_G17P, f.primitive, true, false,
+      AGX_VDM_INDEX_LIST_INDEX_SIZE_U16, f.index_buffer, f.index_count,
+      f.instance_count, 0, 0xff7f, &old_body));
+   assert(old_body.count == 7);
+   const size_t old_body_size = old_body.count * sizeof(old_body.words[0]);
+   assert(memcmp(old_body.words, &native[3], old_body_size) == 0);
+   assert(packed_body.length == old_body_size + 8);
+   assert(memcmp(packed_body.bytes, old_body.words,
+                 old_body_size) != 0);
+
+   f.draw_state_context_offset = 0;
+   assert(!agx_vdm_hal200_indexed_draw_pack(AGX_CHIP_G17P, &f, &packed));
+   assert(agx_vdm_hal200_indexed_draw_body_pack(AGX_CHIP_G17P, &f,
+                                                 &packed_body));
+   assert(memcmp(packed_body.bytes, &native[1], packed_body.length) == 0);
+   f.draw_state_context_offset = 0x48000;
+   assert(agx_vdm_hal200_indexed_draw_pack(AGX_CHIP_G17P, &f, &packed));
 
    uint8_t body[AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH];
    size_t emitted;
@@ -228,6 +258,12 @@ main(void)
    assert(agx_vdm_hal200_direct_draw_pack(AGX_CHIP_G17P, &fields, &packed));
    assert(packed.length == sizeof(expected));
    assert(memcmp(packed.bytes, expected, sizeof(expected)) == 0);
+
+   struct agx_vdm_hal200_direct_draw_body packed_body;
+   assert(agx_vdm_hal200_direct_draw_body_pack(AGX_CHIP_G17P, &fields,
+                                                &packed_body));
+   assert(packed_body.length == sizeof(expected) - sizeof(expected[0]));
+   assert(memcmp(packed_body.bytes, &expected[1], packed_body.length) == 0);
 
    struct agx_vdm_hal200_direct_draw_fields unpacked;
    assert(agx_vdm_hal200_direct_draw_unpack(

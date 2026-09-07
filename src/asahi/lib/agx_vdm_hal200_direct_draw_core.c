@@ -45,6 +45,29 @@ primitive_supported(uint8_t primitive)
 }
 
 bool
+agx_vdm_hal200_direct_draw_body_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_direct_draw_fields *fields,
+   struct agx_vdm_hal200_direct_draw_body *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   if (!out || !fields || chip != AGX_CHIP_G17P ||
+       !primitive_supported(fields->primitive) || fields->vertex_count == 0 ||
+       fields->instance_count == 0)
+      return false;
+
+   store_le32(&out->bytes[0],
+              (AGX_VDM_HAL200_DIRECT_DRAW_OPCODE << 16) |
+                 ((uint32_t)fields->primitive << 8));
+   store_le32(&out->bytes[4], fields->vertex_count);
+   store_le32(&out->bytes[8], fields->instance_count);
+   store_le32(&out->bytes[12], fields->vertex_start);
+   out->length = AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH;
+   return true;
+}
+
+bool
 agx_vdm_hal200_direct_draw_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_direct_draw_fields *fields,
    struct agx_vdm_hal200_direct_draw *out)
@@ -52,20 +75,15 @@ agx_vdm_hal200_direct_draw_pack(
    if (out)
       memset(out, 0, sizeof(*out));
 
-   if (!out || !fields || chip != AGX_CHIP_G17P ||
-       fields->draw_state_context_offset == 0 ||
+   struct agx_vdm_hal200_direct_draw_body body;
+   if (!out || !fields || fields->draw_state_context_offset == 0 ||
        (fields->draw_state_context_offset & UINT32_C(3)) != 0 ||
-       !primitive_supported(fields->primitive) || fields->vertex_count == 0 ||
-       fields->instance_count == 0)
+       !agx_vdm_hal200_direct_draw_body_pack(chip, fields, &body))
       return false;
 
-   store_le32(&out->bytes[0], fields->draw_state_context_offset);
-   store_le32(&out->bytes[4],
-              (AGX_VDM_HAL200_DIRECT_DRAW_OPCODE << 16) |
-                 ((uint32_t)fields->primitive << 8));
-   store_le32(&out->bytes[8], fields->vertex_count);
-   store_le32(&out->bytes[12], fields->instance_count);
-   store_le32(&out->bytes[16], fields->vertex_start);
+   store_le32(out->bytes, fields->draw_state_context_offset);
+   memcpy(out->bytes + AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH, body.bytes,
+          body.length);
    out->length = AGX_VDM_HAL200_DIRECT_DRAW_LENGTH;
    return true;
 }
@@ -167,9 +185,9 @@ agx_vdm_hal200_u16_index_range(uint64_t address, uint64_t range_B,
 }
 
 bool
-agx_vdm_hal200_indexed_draw_pack(
+agx_vdm_hal200_indexed_draw_body_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,
-   struct agx_vdm_hal200_indexed_draw *out)
+   struct agx_vdm_hal200_indexed_draw_body *out)
 {
    if (out)
       memset(out, 0, sizeof(*out));
@@ -177,8 +195,7 @@ agx_vdm_hal200_indexed_draw_pack(
    uint64_t address;
    uint32_t size_word;
    if (!out || !fields || chip != AGX_CHIP_G17P ||
-       !fields->draw_state_context_offset ||
-       (fields->draw_state_context_offset & 3) || fields->instance_count == 0 ||
+       fields->instance_count == 0 ||
        !primitive_supported(fields->primitive) ||
        !agx_vdm_hal200_index_range(
           fields->index_buffer, fields->index_buffer_range_B,
@@ -198,15 +215,35 @@ agx_vdm_hal200_indexed_draw_pack(
 
    /* 0x47e618..0x47e678: restart state precedes every native indexed draw,
     * even with restart disabled; baseVertex is copied as a raw signed word. */
-   store_le32(out->bytes, fields->draw_state_context_offset);
-   store_le32(out->bytes + 4, UINT32_C(0x40000001));
+   store_le32(out->bytes, UINT32_C(0x40000001));
    const uint32_t restart_max = fields->index_size_B == 1 ? UINT32_C(0xff)
                                  : fields->index_size_B == 2 ? UINT32_C(0xffff)
                                                             : UINT32_MAX;
-   store_le32(out->bytes + 8, fields->restart_index < restart_max
+   store_le32(out->bytes + 4, fields->restart_index < restart_max
                                  ? fields->restart_index : restart_max);
    for (unsigned i = 0; i < packet.count; ++i)
-      store_le32(out->bytes + 12 + 4 * i, packet.words[i]);
+      store_le32(out->bytes + 8 + 4 * i, packet.words[i]);
+   out->length = AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH;
+   return true;
+}
+
+bool
+agx_vdm_hal200_indexed_draw_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,
+   struct agx_vdm_hal200_indexed_draw *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   struct agx_vdm_hal200_indexed_draw_body body;
+   if (!out || !fields || !fields->draw_state_context_offset ||
+       (fields->draw_state_context_offset & 3) ||
+       !agx_vdm_hal200_indexed_draw_body_pack(chip, fields, &body))
+      return false;
+
+   store_le32(out->bytes, fields->draw_state_context_offset);
+   memcpy(out->bytes + AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH, body.bytes,
+          body.length);
    out->length = AGX_VDM_HAL200_INDEXED_DRAW_LENGTH;
    return true;
 }

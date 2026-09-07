@@ -35,6 +35,11 @@ struct agx_vdm_hal200_direct_draw {
    uint8_t length;
 };
 
+struct agx_vdm_hal200_direct_draw_body {
+   uint8_t bytes[AGX_VDM_HAL200_DIRECT_DRAW_BODY_LENGTH];
+   uint8_t length;
+};
+
 /* Pack the context-relative PPP pointer plus the direct, non-indexed draw.
  * Stream Terminate is a separate four-byte record emitted only when the
  * complete control stream is closed, not after each draw.
@@ -42,6 +47,11 @@ struct agx_vdm_hal200_direct_draw {
 bool agx_vdm_hal200_direct_draw_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_direct_draw_fields *fields,
    struct agx_vdm_hal200_direct_draw *out);
+
+/* Pack the native body used when PPP/render state was emitted separately. */
+bool agx_vdm_hal200_direct_draw_body_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_direct_draw_fields *fields,
+   struct agx_vdm_hal200_direct_draw_body *out);
 
 bool agx_vdm_hal200_direct_draw_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
@@ -83,6 +93,11 @@ struct agx_vdm_hal200_indexed_draw {
    uint8_t length;
 };
 
+struct agx_vdm_hal200_indexed_draw_body {
+   uint8_t bytes[AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH];
+   uint8_t length;
+};
+
 /* Checked relocation and native dword-range-minus-one conversion. */
 bool agx_vdm_hal200_index_range(uint64_t address, uint64_t range_B,
                                 uint32_t first_index, uint32_t count,
@@ -96,6 +111,10 @@ bool agx_vdm_hal200_u16_index_range(uint64_t address, uint64_t range_B,
 bool agx_vdm_hal200_indexed_draw_pack(
    enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,
    struct agx_vdm_hal200_indexed_draw *out);
+
+bool agx_vdm_hal200_indexed_draw_body_pack(
+   enum agx_chip chip, const struct agx_vdm_hal200_indexed_draw_fields *fields,
+   struct agx_vdm_hal200_indexed_draw_body *out);
 
 /* Native HAL200 indirect draws use the same context-relative PPP selector as
  * direct draws, followed by the independently recovered G17P indirect Index

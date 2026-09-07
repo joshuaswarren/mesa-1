@@ -17,6 +17,7 @@
 #include "asahi/lib/agx_ppp.h"
 #include "asahi/lib/agx_usc.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
+#include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "asahi/libagx/compression.h"
 #include "asahi/libagx/query.h"
 #include "asahi/libagx/tessellator.h"
@@ -4021,6 +4022,51 @@ agx_primitive_for_pipe(enum mesa_prim mode)
    }
 }
 
+static uint8_t *
+agx_g17p_emit_draw_body(uint8_t *out, const struct agx_draw *draw,
+                        enum agx_primitive primitive, uint32_t restart_index)
+{
+   if (draw->indexed) {
+      const struct agx_vdm_hal200_indexed_draw_fields fields = {
+         .primitive = primitive,
+         .index_size_B = agx_index_size_to_B(draw->index_size),
+         .restart_enable = draw->restart,
+         .restart_index = restart_index,
+         .index_buffer = draw->index_buffer,
+         .index_buffer_range_B = draw->index_buffer_range_B,
+         .first_index = draw->start,
+         .index_count = draw->b.count[0],
+         .instance_count = draw->b.count[1],
+         .base_vertex = (int32_t)draw->index_bias,
+      };
+      struct agx_vdm_hal200_indexed_draw_body packed;
+      const bool valid = agx_vdm_hal200_indexed_draw_body_pack(
+         AGX_CHIP_G17P, &fields, &packed);
+      assert(valid);
+      if (!valid)
+         return out;
+
+      memcpy(out, packed.bytes, packed.length);
+      return out + packed.length;
+   }
+
+   const struct agx_vdm_hal200_direct_draw_fields fields = {
+      .primitive = primitive,
+      .vertex_count = draw->b.count[0],
+      .instance_count = draw->b.count[1],
+      .vertex_start = draw->start,
+   };
+   struct agx_vdm_hal200_direct_draw_body packed;
+   const bool valid = agx_vdm_hal200_direct_draw_body_pack(
+      AGX_CHIP_G17P, &fields, &packed);
+   assert(valid);
+   if (!valid)
+      return out;
+
+   memcpy(out, packed.bytes, packed.length);
+   return out + packed.length;
+}
+
 static uint64_t
 agx_index_buffer_rsrc_ptr(struct agx_batch *batch,
                           const struct pipe_draw_info *info, size_t *extent)
@@ -5513,7 +5559,9 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    uint8_t *out = agx_encode_state(batch, batch->vdm.current);
 
-   if (info->index_size && info->primitive_restart) {
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   if (dev->chip != AGX_CHIP_G17P && info->index_size &&
+       info->primitive_restart) {
       agx_push(out, VDM_STATE, cfg)
          cfg.restart_index_present = true;
 
@@ -5540,8 +5588,12 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          draw.index_bias = draws->index_bias;
    }
 
-   out = (void *)agx_vdm_draw((uint32_t *)out, 0 /* ignored for now */, draw,
-                              agx_primitive_for_pipe(info->mode));
+   const enum agx_primitive primitive = agx_primitive_for_pipe(info->mode);
+   if (dev->chip == AGX_CHIP_G17P && !indirect)
+      out = agx_g17p_emit_draw_body(out, &draw, primitive,
+                                   info->restart_index);
+   else
+      out = (void *)agx_vdm_draw((uint32_t *)out, dev->chip, draw, primitive);
 
    /* Barrier transform feedback writes on themselves for consistency.
     * This is the other half of agx_legalize_xfb.
