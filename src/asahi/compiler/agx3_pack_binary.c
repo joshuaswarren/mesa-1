@@ -4590,10 +4590,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Native tied half comparison/selection is scalar fmin. */
+         /* Native tied half comparison/selection is scalar fmin/fmax. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
-             I->fcond == AGX_FCOND_LTN && !I->saturate &&
+             (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+             !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
              I->src[0].value == I->src[2].value &&
@@ -4612,8 +4613,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (invalid || (wait != 0 && wait != 32))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_fmin_half(enc, I->dest[0].value, src, hints,
-                                    I->dest[0].cache, wait, bytes, &len) ||
+            const bool composed = I->fcond == AGX_FCOND_GTN
+               ? agx3_alu_fmax_half(enc, I->dest[0].value, src, hints,
+                                    I->dest[0].cache, wait, bytes, &len)
+               : agx3_alu_fmin_half(enc, I->dest[0].value, src, hints,
+                                    I->dest[0].cache, wait, bytes, &len);
+            if (!composed ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

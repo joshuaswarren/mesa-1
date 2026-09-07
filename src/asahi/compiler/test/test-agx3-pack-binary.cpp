@@ -4868,6 +4868,49 @@ TEST_F(AGX3PackBinary, NarrowFaddKeepsOddHalfAndLiveInput)
    }
 }
 
+TEST_F(AGX3PackBinary, HalfMaximumMatchesAppleLifetimes)
+{
+   for (bool live : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_16);
+      agx_index c = agx_register(3, AGX_SIZE_16);
+      agx_index dest = agx_register(live ? 0 : 2, AGX_SIZE_16);
+      if (live) {
+         a.cache = c.cache = dest.cache = true;
+      } else {
+         a.discard = c.discard = true;
+      }
+      agx_fcmpsel_to(b, dest, a, c, a, c, AGX_FCOND_GTN);
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t retained[] = {0x0a,0x82,0x24,0x82,0x10,0xc0};
+      const uint8_t dead[] = {0x12,0x02,0x1c,0x02,0x10,0xc0};
+      const uint8_t *native = live ? retained : dead;
+      ASSERT_EQ(code.size(), 10u);
+      EXPECT_EQ(memcmp(code.data(), native, 6), 0);
+   }
+}
+
+TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)
+{
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_16);
+      agx_index c = agx_register(3, AGX_SIZE_16);
+      agx_index selected_a = a;
+      if (mode == 0)
+         selected_a.value = 4;
+      if (mode == 1)
+         a.abs = true;
+      agx_instr *I = agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_16), a, c,
+                                    selected_a, c, AGX_FCOND_GTN);
+      if (mode == 2)
+         I->saturate = true;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+   }
+}
+
 TEST_F(AGX3PackBinary, FselZeroMixedGnomeRegisterShape)
 {
    for (unsigned mode = 0; mode < 4; ++mode) {

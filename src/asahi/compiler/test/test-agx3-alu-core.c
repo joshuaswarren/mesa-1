@@ -1235,6 +1235,24 @@ static void test_native_half_min(void)
    puts("Native half minimum: two complete Apple retained/dead FSEL vectors PASS");
 }
 
+static void test_native_half_max(void)
+{
+   const uint16_t src[]={2,3,2,3};
+   for (unsigned live=0;live<2;live++) {
+      const enum agx3_alu_hint hint=live?AGX3_ALU_HINT_CACHE:AGX3_ALU_HINT_DISCARD;
+      const enum agx3_alu_hint hints[]={hint,hint,hint,hint};
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+      assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,live?0:2,src,hints,
+                               live,0,bytes,&len));
+      exact(bytes,len,live?"0a82248210c0":"12021c0210c0");
+      assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3C,live?0:2,src,hints,
+                                live,0,bytes,&len));
+      assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,256,src,hints,
+                                live,0,bytes,&len));
+   }
+   puts("Native half maximum: two complete Apple retained/dead FSEL vectors and fail-closed bounds PASS");
+}
+
 static void test_native_high_float_registers(void)
 {
    /* Original native80-value kernels force retained ALU values into the upper
@@ -1283,6 +1301,7 @@ int main(void){
    test_native_sqrt_step();
    test_native_select_reg_imm();
    test_native_half_min();
+   test_native_half_max();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();

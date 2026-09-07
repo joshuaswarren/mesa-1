@@ -1060,11 +1060,12 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
-bool
-agx3_alu_fmin_half(enum agx_isa_encoding enc, uint16_t dest,
-                   const uint16_t src[4], const enum agx3_alu_hint hints[4],
-                   bool dest_cache, uint16_t wait_mask,
-                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+static bool
+agx3_alu_fminmax_half(enum agx_isa_encoding enc, uint16_t dest,
+                      const uint16_t src[4],
+                      const enum agx3_alu_hint hints[4], bool maximum,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
        dest >= 256 || (wait_mask != 0 && wait_mask != 32))
@@ -1079,7 +1080,7 @@ agx3_alu_fmin_half(enum agx_isa_encoding enc, uint16_t dest,
    };
    struct agx3_field_kv fields[16] = {
       {3,dest},{12,dest_cache},{35,src[0]},{52,src[1]},
-      {69,src[2]},{86,src[3]},{110,3},{107,wait_mask == 32},
+      {69,src[2]},{86,src[3]},{110,maximum ? 7 : 3},{107,wait_mask == 32},
    };
    const unsigned cache[] = {44,61,78,95};
    const unsigned discard[] = {46,63,80,97};
@@ -1100,6 +1101,28 @@ agx3_alu_fmin_half(enum agx_isa_encoding enc, uint16_t dest,
       }
    }
    return false;
+}
+
+bool
+agx3_alu_fmin_half(enum agx_isa_encoding enc, uint16_t dest,
+                   const uint16_t src[4],
+                   const enum agx3_alu_hint hints[4], bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len)
+{
+   return agx3_alu_fminmax_half(enc, dest, src, hints, false, dest_cache,
+                               wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmax_half(enum agx_isa_encoding enc, uint16_t dest,
+                   const uint16_t src[4],
+                   const enum agx3_alu_hint hints[4], bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len)
+{
+   return agx3_alu_fminmax_half(enc, dest, src, hints, true, dest_cache,
+                               wait_mask, out, len);
 }
 
 /* Native float32 multiplication rounds directly to the half destination. */
