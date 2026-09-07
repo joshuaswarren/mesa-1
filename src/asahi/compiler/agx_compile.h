@@ -342,12 +342,13 @@ struct agx_shader_key {
    bool no_stop;
 
    /* Exact number of 32-bit imageblock words in the G17P RT0 EOT store.
-    * U16NORM is shared by RG16 and RGBA16 after tilebuffer lowering, so the
-    * backend cannot recover this layout from the final AGX IR alone. */
+    * U16NORM is shared by RG16 and RGBA16, while I32 is shared by scalar R32
+    * and R32G32 after tilebuffer lowering, so the backend cannot recover the
+    * logical layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
 
-   /* Authorize the exact scalar-I32 G17P EOT builtin. Set only for logical
-    * formats whose scalar I32 store and PBE descriptor are both grounded. */
+   /* Authorize the exact I32 G17P EOT builtin. Set only for logical formats
+    * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;
 
    /* Set if this is a secondary shader part (prolog or epilog). This prevents

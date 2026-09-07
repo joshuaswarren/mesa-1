@@ -164,21 +164,24 @@
 
 #if G17P_RGBA16_UNORM &&                                               \
    (G17P_F16_IO || G17P_RG16_UNORM || G17P_RG16_SNORM ||              \
-    G17P_R32_UINT || G17P_R32_SINT || G17P_HOST_IMAGE_COPY ||          \
+    G17P_R32_UINT || G17P_R32_SINT || G17P_RG32_SFLOAT ||             \
+    G17P_HOST_IMAGE_COPY ||                                             \
     G17P_MSAA_SAMPLES != 1)
 #error "the RGBA16 fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
 #if G17P_RG16_SNORM &&                                                   \
    (G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||             \
-    G17P_R32_UINT || G17P_R32_SINT || G17P_HOST_IMAGE_COPY ||          \
+    G17P_R32_UINT || G17P_R32_SINT || G17P_RG32_SFLOAT ||              \
+    G17P_HOST_IMAGE_COPY ||                                              \
     G17P_MSAA_SAMPLES != 1)
 #error "the RG16 SNORM fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
 #if G17P_R32_UINT &&                                                     \
    (G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||             \
-    G17P_RG16_SNORM || G17P_R32_SINT || G17P_HOST_IMAGE_COPY ||        \
+    G17P_RG16_SNORM || G17P_R32_SINT || G17P_RG32_SFLOAT ||            \
+    G17P_HOST_IMAGE_COPY ||                                              \
     G17P_MSAA_SAMPLES != 1)
 #error "the R32 UINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
@@ -186,7 +189,7 @@
 #if G17P_R32_SFLOAT &&                                                   \
    (G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||             \
     G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SINT ||               \
-    G17P_HOST_IMAGE_COPY ||                                             \
+    G17P_RG32_SFLOAT || G17P_HOST_IMAGE_COPY ||                         \
     G17P_MSAA_SAMPLES != 1)
 #error "the R32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
@@ -194,7 +197,7 @@
 #if G17P_R32_SINT &&                                                     \
    (G17P_F16_IO || G17P_RG16_UNORM || G17P_RGBA16_UNORM ||             \
     G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
-    G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+    G17P_RG32_SFLOAT || G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
 #error "the R32 SINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
@@ -408,6 +411,11 @@ verify_readback(const uint8_t *map)
 #elif G17P_R32_SFLOAT
    /* -0.15625 is exactly 0xbe200000 as binary32. */
    static const uint8_t expected[4] = {0x00, 0x00, 0x20, 0xbe};
+#elif G17P_RG32_SFLOAT
+   /* Both lanes are exact binary32: -0.15625 and 13.625. */
+   static const uint8_t expected[8] = {
+      0x00, 0x00, 0x20, 0xbe, 0x00, 0x00, 0x5a, 0x41,
+   };
 #elif G17P_RG16_SNORM
    /* Fragment (-0.5, 0.28) maps to signed-normalized -16384 (0xc000) and
     * 9175 (0x23d7). The negative first lane distinguishes SNORM from UNORM. */
@@ -1161,6 +1169,10 @@ main(void)
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
 #elif G17P_R32_SFLOAT
    printf(PROBE_NAME ": PASS — %ux%u R32 SFLOAT exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_RG32_SFLOAT
+   printf(PROBE_NAME ": PASS — %ux%u RG32 SFLOAT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
 #elif G17P_RG16_SNORM

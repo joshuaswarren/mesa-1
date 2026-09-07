@@ -96,6 +96,8 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
                             tib->logical_format[0] == PIPE_FORMAT_R32_FLOAT;
    const bool scalar_r32i = tib->nr_samples == 1 &&
                             tib->logical_format[0] == PIPE_FORMAT_R32_SINT;
+   const bool pair_r32f = tib->nr_samples == 1 &&
+                          tib->logical_format[0] == PIPE_FORMAT_R32G32_FLOAT;
 
    return mixed_mrt ||
           (tib->sample_size_B == 8 &&
@@ -109,7 +111,7 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
-            scalar_r32f || scalar_r32i));
+            scalar_r32f || scalar_r32i || pair_r32f));
 }
 
 static bool

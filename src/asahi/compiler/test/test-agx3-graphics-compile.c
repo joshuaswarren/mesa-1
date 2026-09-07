@@ -1890,6 +1890,7 @@ test_g17p_eot_block_store(void)
    agx_preprocess_nir(i32.shader);
    memset(&part, 0, sizeof(part));
    key.g17p_rt0_eot_i32 = true;
+   key.g17p_rt0_eot_words = 1;
    const bool i32_compiled = agx_compile_shader_nir(i32.shader, &key, &part);
    static const uint8_t expected_i32[] = {
       0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,0x0c,0x9d,0x10,0x26,
@@ -1909,6 +1910,7 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i32.shader);
    key.g17p_rt0_eot_i32 = false;
+   key.g17p_rt0_eot_words = 0;
 
    /* A different store format must not inherit RT0's byte string. */
    nir_builder bad = nir_builder_init_simple_shader(

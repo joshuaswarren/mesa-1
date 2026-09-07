@@ -548,6 +548,23 @@ main(void)
    assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
    assert(memcmp(&native_pbe, gen9_r32_sint_pbe,
                  sizeof(gen9_r32_sint_pbe)) == 0);
+
+   /* Fresh G17P EOT key 0x08021100 identifies a two-word scalar-float pair.
+    * The recovered Gen9 PBE fields carry that pair as channels0x31/FLOAT4,
+    * including the G swizzle, yielding this exact RT0 descriptor. */
+   static const uint8_t gen9_rg32_float_pbe[32] = {
+      0x62, 0x8c, 0x04, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R32G32;
+   pbe.type = AGX_TEXTURE_TYPE_FLOAT;
+   pbe.swizzle_g = AGX_CHANNEL_G;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rg32_float_pbe,
+                 sizeof(gen9_rg32_float_pbe)) == 0);
+
    pbe.channels = AGX_CHANNELS_R8G8B8A8;
    pbe.type = AGX_TEXTURE_TYPE_UNORM;
    pbe.swizzle_g = AGX_CHANNEL_G;
