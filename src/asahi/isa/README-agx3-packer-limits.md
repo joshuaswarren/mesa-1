@@ -275,6 +275,46 @@ negated source (276) and a 32-bit `floor` (42). Both are closed above. Nothing
 here says vkQuake *renders* — the sweep runs under the drm-shim and only
 qualifies pipeline creation.
 
+### Sample count and swapchain format
+
+The sweep used to pin one sample count and one swapchain format, which is a
+narrow gate: a pipeline that refuses at the configuration the game actually
+selects breaks it just as completely. `VKQ_SWEEP_SAMPLES` and
+`VKQ_SWEEP_FORMAT` now choose them, so one build covers the space.
+
+| samples | format          | result  | refused                        |
+| ------- | --------------- | ------- | ------------------------------ |
+| 1       | B8G8R8A8_UNORM  | 385/385 | none                           |
+| 1       | B8G8R8A8_SRGB   | 385/385 | none                           |
+| 1       | R8G8B8A8_UNORM  | 385/385 | none                           |
+| 1       | R8G8B8A8_SRGB   | 385/385 | none                           |
+| 2, 4, 8 | either          | 366/385 | 17 `texture_sample`, 2 `texture_load` |
+
+`vid_fsaa` defaults to `"0"`, so the shipping configuration is the clean one.
+Under MSAA the nineteen refusals are all one shape, and it is the third gap
+already listed above rather than a new one:
+
+```
+no grounded AGX3 encoding for texture_sample
+  [d32:regN s0=32:regN s1=16:imm0 s2=64:uni16 s3=32:regN
+   s4=16:regN.discard s5=16:null0 cond=0 chan=4]
+```
+
+Source 2 is a *uniform* heap base, not the immediate zero
+`agx3_emit_texture_sample` requires — the bindless texture-heap descriptor
+form. The cause is upstream of the packer:
+`agx_nir_lower_g17p_combined_sampler.c` disowns a shader unless every texture
+op is `nir_texop_tex` or `nir_texop_txl`, and an MSAA resolve fetches with
+`txf_ms`. One multisample fetch therefore drops the whole shader onto the
+bindless path. The affected pipelines are the resolves and moment composites:
+`wboit_resolve`, `mboit_resolve`, `basic_blend`, and the
+`world`/`alias`/`md5`/`md5_8`/`particles`/`sprite` `_mboit_composite`
+variants.
+
+Closing it is the same work as `f05_texture_bias` and `f12_texture_grad`:
+either teach that pass to keep the op, or ground the bindless-heap sample
+form.
+
 ## The 32-bit tied fcmpsel, and what it cost
 
 `max(x, 0.0)` on floats — so `normalize()`, `clamp()`, `saturate()` and the
