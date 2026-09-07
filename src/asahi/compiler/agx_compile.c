@@ -4281,13 +4281,34 @@ agx3_sink_vertex_outputs(agx_context *ctx)
       return false;
 
    /* Outputs already belonging to the final block can be bundled locally
-    * even when earlier blocks contain instance transforms. Never move an
-    * output across a branch or change its execution mask. */
-   agx_block *output_block = NULL;
-   agx_foreach_block(ctx, block)
-      output_block = block;
-   if (output_block == NULL)
+    * even when earlier blocks contain instance transforms. NIR may also
+    * leave the stores in the immediately preceding block and put only STOP
+    * in a synthetic final block. Treat that single-predecessor,
+    * single-successor fallthrough as one terminal region: moving uses over
+    * that edge cannot change their execution mask. */
+   agx_block *previous = NULL, *stop_block = NULL;
+   agx_foreach_block(ctx, block) {
+      previous = stop_block;
+      stop_block = block;
+   }
+   if (stop_block == NULL)
       return false;
+
+   agx_block *output_block = stop_block;
+   bool final_has_store = false;
+   agx_foreach_instr_in_block(stop_block, I)
+      final_has_store |= I->op == AGX_OPCODE_ST_VARY;
+
+   if (!final_has_store && previous &&
+       agx_num_successors(previous) == 1 &&
+       previous->successors[0] == stop_block &&
+       agx_num_predecessors(stop_block) == 1 &&
+       *util_dynarray_element(&stop_block->predecessors, agx_block *, 0) ==
+          previous &&
+       previous->divergent == stop_block->divergent) {
+      output_block = previous;
+   }
+
    agx_foreach_block(ctx, block) {
       if (block == output_block)
          break;
@@ -4298,12 +4319,24 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    }
 
    agx_instr *stores[AGX3_MAX_VERTEX_OUTPUTS] = {0}, *stop = NULL;
+   if (output_block != stop_block) {
+      agx_foreach_instr_in_block(stop_block, I) {
+         if (I->op != AGX_OPCODE_STOP || stop)
+            return false;
+         stop = I;
+      }
+   }
+
+   bool seen_stop = false;
    agx_foreach_instr_in_block(output_block, I) {
-      if (stop)
+      if (seen_stop)
          return false;
       switch (I->op) {
       case AGX_OPCODE_STOP:
+         if (output_block != stop_block || stop)
+            return false;
          stop = I;
+         seen_stop = true;
          break;
       case AGX_OPCODE_ST_VARY: {
          if (I->nr_dests || I->nr_srcs != 2 ||
@@ -4315,10 +4348,6 @@ agx3_sink_vertex_outputs(agx_context *ctx)
          stores[I->src[0].value] = I;
          break;
       }
-      case AGX_OPCODE_GET_SR:
-         if (I->sr != AGX_SR_VERTEX_ID)
-            return false;
-         break;
       default:
          /* Pure SSA producers may move relative to vertex writeout. Their
           * actual encodings remain validated by the normal compiler path;

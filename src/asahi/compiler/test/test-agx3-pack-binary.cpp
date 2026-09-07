@@ -5093,6 +5093,52 @@ TEST_F(AGX3PackBinary, VertexTerminalOutputBlockPreservesEarlierControlFlow)
    }
 }
 
+TEST_F(AGX3PackBinary, VertexTerminalOutputsCrossDirectEmptyFallthrough)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_block *stores_block = agx_start_block(b->shader);
+   agx_index values[12];
+   values[0] = agx_temp(b->shader, AGX_SIZE_32);
+   values[1] = agx_temp(b->shader, AGX_SIZE_32);
+   agx_get_sr_to(b, values[0], AGX_SR_VERTEX_ID);
+   agx_get_sr_to(b, values[1], AGX_SR_INSTANCE_ID);
+   for (unsigned c = 2; c < ARRAY_SIZE(values); ++c)
+      values[c] = agx_mov_imm(b, 32, 0x3f000000 + c);
+
+   /* Exact ordering from the live Settings/Zink shader. */
+   for (unsigned c : {8u, 9u, 10u, 11u, 4u, 5u, 6u, 7u, 0u, 1u, 2u, 3u})
+      agx_st_vary(b, agx_immediate(c), values[c]);
+
+   agx_block *stop_block = agx_test_block(b->shader);
+   agx_block_add_successor(stores_block, stop_block);
+   b->cursor = agx_after_block(stop_block);
+   agx_stop(b);
+
+   agx_pressure_schedule(b->shader);
+   ASSERT_TRUE(agx3_sink_vertex_outputs(b->shader));
+   agx_foreach_instr_in_block(stores_block, I)
+      EXPECT_NE(I->op, AGX_OPCODE_ST_VARY);
+
+   unsigned next = 0;
+   agx_foreach_instr_in_block(stop_block, I) {
+      if (I->op == AGX_OPCODE_ST_VARY) {
+         ASSERT_LT(next, ARRAY_SIZE(values));
+         EXPECT_EQ(I->src[0].value, next++);
+      } else {
+         EXPECT_EQ(I->op, AGX_OPCODE_STOP);
+         EXPECT_EQ(next, ARRAY_SIZE(values));
+      }
+   }
+   EXPECT_EQ(next, ARRAY_SIZE(values));
+
+   agx_ra(b->shader);
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, VertexOutputCannotMoveAcrossControlFlow)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
