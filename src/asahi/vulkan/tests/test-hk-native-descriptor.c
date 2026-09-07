@@ -606,6 +606,19 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rg8_sint_pbe,
                  sizeof(gen9_rg8_sint_pbe)) == 0);
 
+   /* Actual MTL format32 resolves to RG8 channels0x0a, signed-normalized
+    * type1 and two bytes per pixel. */
+   static const uint8_t gen9_rg8_snorm_pbe[32] = {
+      0xa2, 0x22, 0x04, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.type = AGX_TEXTURE_TYPE_SNORM;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rg8_snorm_pbe,
+                 sizeof(gen9_rg8_snorm_pbe)) == 0);
+
    /* Actual G17P UMD table entry for MTL format73 (RGBA8_UINT) resolves to
     * channels0x28, UINT type2 and four bytes per pixel. */
    static const uint8_t gen9_rgba8_uint_pbe[32] = {

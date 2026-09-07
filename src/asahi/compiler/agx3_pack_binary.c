@@ -3145,7 +3145,10 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32.
  * R8G8_UINT key0x08020500 and R8G8_SINT key0x08020400 use one I8
- * imageblock word and selector 0x55.
+ * imageblock word and selector 0x55. R8G8B8A8_UINT/SINT use the same I8
+ * builtin with four attachment components. R8G8_SNORM and R8G8B8A8_SNORM
+ * attachment fields format2/layout2 with two or four components emit the
+ * normalized program below, matching the exact U8NORM bytes.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
