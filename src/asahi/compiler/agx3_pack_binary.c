@@ -5425,14 +5425,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx_index x = I->src[i];
                if (!agx3_src_is_register(x) || x.memory ||
                    x.size != AGX_SIZE_16 || agx_channels(x) != 1 || x.abs ||
-                   x.neg || x.kill || (x.cache && x.discard))
+                   x.kill ||
+                   (x.cache && x.discard))
                   AGX3_REFUSE(I);
                src[i] = x.value;
                hints[i] = agx3_post_ra_hint(x);
             }
+            const bool product_neg = I->src[0].neg != I->src[1].neg;
+            if (product_neg && I->src[0].neg) {
+               const uint16_t swap_src = src[0];
+               src[0] = src[1];
+               src[1] = swap_src;
+               const enum agx3_alu_hint swap_hint = hints[0];
+               hints[0] = hints[1];
+               hints[1] = swap_hint;
+            }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_hfma(enc, dst.value, src, hints, dst.cache, wait,
-                               bytes, &len) ||
+            if (!agx3_alu_hfma(enc, dst.value, src, hints, product_neg,
+                               I->src[2].neg, dst.cache, wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

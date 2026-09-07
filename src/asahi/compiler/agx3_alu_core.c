@@ -1161,7 +1161,8 @@ agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
 bool
 agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
               const uint16_t src[3], const enum agx3_alu_hint hints[3],
-              bool dest_cache, uint16_t wait_mask,
+              bool product_neg, bool src2_neg, bool dest_cache,
+              uint16_t wait_mask,
               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
@@ -1176,7 +1177,7 @@ agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
       {9, 2}, {10, 1}, {24, 2}, {25, 1},
       {41, 2}, {42, 1}, {58, 2}, {59, 1},
    };
-   struct agx3_field_kv fields[17] = {
+   struct agx3_field_kv fields[19] = {
       {2, dest},
       {17, src[0]},
       {34, src[1]},
@@ -1188,15 +1189,17 @@ agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
       {45, hints[1] == AGX3_ALU_HINT_DISCARD},
       {60, hints[2] == AGX3_ALU_HINT_CACHE},
       {62, hints[2] == AGX3_ALU_HINT_DISCARD},
+      {47, product_neg},
+      {64, src2_neg},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[11 + i] =
+      fields[13 + i] =
          (struct agx3_field_kv){68 + i, !!(wait_mask & (1u << i))};
 
    /* The three-register form begins at ep3.  The shorter entries alias a
     * two-source layout and cannot represent all three independent operands. */
    for (unsigned ep = 3; ep < 6; ++ep) {
-      if (agx3_bind_compose(enc, "f16fma", ep, base, 8, fields, 17, out,
+      if (agx3_bind_compose(enc, "f16fma", ep, base, 8, fields, 19, out,
                             len)) {
          /* metal-nt canonicalizes the otherwise ignored tail bits of ep3. */
          if (*len == 8)
