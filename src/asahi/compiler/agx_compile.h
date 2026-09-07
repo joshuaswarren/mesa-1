@@ -359,8 +359,9 @@ struct agx_shader_key {
     * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;
 
-   /* Authorize the exact four-word I32 builtin. The native RGBA32_UINT key
-    * uses the scalar 0x35 selector, unlike the two-word unsigned pair. */
+   /* Authorize the exact four-word I32 builtin. The native RGBA32 UINT and
+    * SFLOAT keys use the scalar 0x35 selector, unlike the two-word unsigned
+    * pair. */
    bool g17p_rt0_eot_i32_four_words;
 
    /* Select the distinct 84-byte signed four-word I32 builtin. */

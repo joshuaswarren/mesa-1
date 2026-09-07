@@ -1936,6 +1936,31 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i32x4.shader);
 
+   /* Fresh Apple key0x10021100: RGBA32 SFLOAT is the same exact four-word
+    * I32 tile store and 0x35 program; the FLOAT conversion lives in PBE. */
+   nir_builder i32x4_float = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 SFLOAT RT0 EOT");
+   coords = nir_trim_vector(
+      &i32x4_float, nir_load_global_invocation_id(&i32x4_float, 32), 2);
+   nir_image_store_block_agx(
+      &i32x4_float, nir_imm_intN_t(&i32x4_float, 0, 16),
+      nir_imm_int(&i32x4_float, 0), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(i32x4_float.shader);
+   memset(&part, 0, sizeof(part));
+   const bool i32x4_float_compiled =
+      agx_compile_shader_nir(i32x4_float.shader, &key, &part);
+   ok &= i32x4_float_compiled &&
+         part.info.binary_size == sizeof(expected_i32) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i32) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i32, sizeof(expected_i32)) == 0;
+   if (i32x4_float_compiled)
+      free(part.binary);
+   ralloc_free(i32x4_float.shader);
+
    /* Fresh signed key0x10020a00 uses an 84-byte program with selector0x35. */
    nir_builder i32x4_signed = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 SINT RT0 EOT");

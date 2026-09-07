@@ -596,6 +596,19 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rgba32_uint_pbe,
                  sizeof(gen9_rgba32_uint_pbe)) == 0);
 
+   /* Actual G17P RGBA32_SFLOAT entry: channels0x38, FLOAT type4, internal EOT
+    * format17 and sixteen bytes per pixel. */
+   static const uint8_t gen9_rgba32_float_pbe[32] = {
+      0x22, 0x8e, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.type = AGX_TEXTURE_TYPE_FLOAT;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rgba32_float_pbe,
+                 sizeof(gen9_rgba32_float_pbe)) == 0);
+
    /* Adjacent actual G17P RGBA32_SINT entry: signed type3 and EOT format10. */
    static const uint8_t gen9_rgba32_sint_pbe[32] = {
       0x22, 0x6e, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,

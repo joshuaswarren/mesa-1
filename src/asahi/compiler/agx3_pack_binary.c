@@ -3149,6 +3149,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * R32G32B32A32_UINT key0x10020b00 has four I32 imageblock words and returns
  * to the scalar 0x35 selector. R32G32B32A32_SINT key0x10020a00 also uses
  * selector 0x35 but requires the distinct complete 84-byte signed program.
+ * Fresh R32G32B32A32_SFLOAT key0x10021100 has four I32 imageblock words and
+ * is byte-identical to the 68-byte UINT/scalar 0x35 program; its PBE carries
+ * FLOAT conversion.
  * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
  * R8G8_UINT key0x08020500 and R8G8_SINT
  * key0x08020400 use one I8

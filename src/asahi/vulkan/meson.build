@@ -615,6 +615,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P R32G32B32A32 SFLOAT storage.
+    executable(
+      'g17p-vulkan-rgba32-sfloat',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RGBA32_SFLOAT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for exact G17P A2B10G10R10 UINT storage.
     executable(
       'g17p-vulkan-a2b10g10r10-uint',
