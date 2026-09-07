@@ -1459,6 +1459,50 @@ static void test_native_half_rsqrt(void)
    puts("Native half reciprocal sqrt: five exact Apple vectors and narrow refusal guards PASS");
 }
 
+static void test_native_half_exp2(void)
+{
+   static const struct {
+      uint16_t dest, src;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *bytes;
+   } cases[] = {
+      {3,2,AGX3_ALU_HINT_NONE,    false,32,"af02560302048c600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false,32,"af0256020204ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false, 0,"af0254020204ac600000"},
+      {3,3,AGX3_ALU_HINT_DISCARD, false, 0,"af0254030206ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, true, 32,"af0256020304ac600000"},
+   };
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_hexp2(AGX_ISA_ENCODING_AGX3B, cases[i].dest,
+                            cases[i].src, cases[i].hint,
+                            cases[i].dest_cache, cases[i].wait,
+                            bytes, &len));
+      exact(bytes, len, cases[i].bytes);
+   }
+
+   for (unsigned bad = 0; bad < 5; ++bad) {
+      enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+      uint16_t dest = 2, src = 2, wait = 0;
+      enum agx3_alu_hint hint = AGX3_ALU_HINT_DISCARD;
+      if (bad == 0) enc = AGX_ISA_ENCODING_AGX3C;
+      if (bad == 1) dest = 256;
+      if (bad == 2) src = 256;
+      if (bad == 3) hint = AGX3_ALU_HINT_CACHE;
+      if (bad == 4) wait = 1;
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
+      memset(bytes, 0xa5, sizeof(bytes));
+      assert(!agx3_alu_hexp2(enc, dest, src, hint, false, wait,
+                             bytes, &len));
+      assert(len == 0xa5);
+      for (unsigned j = 0; j < sizeof(bytes); ++j)
+         assert(bytes[j] == 0xa5);
+   }
+   puts("Native half exp2: five exact Apple vectors and narrow refusal guards PASS");
+}
+
 static void test_native_high_float_registers(void)
 {
    /* Original native80-value kernels force retained ALU values into the upper
@@ -1513,6 +1557,7 @@ int main(void){
    test_native_half_clamp();
    test_native_half_reciprocal();
    test_native_half_rsqrt();
+   test_native_half_exp2();
    test_native_asr32();
    test_native_extract32();
    test_blur_half_arithmetic();
