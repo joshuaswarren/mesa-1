@@ -31,8 +31,9 @@
  *   f25 / f27  = source-0 liveness pair, only for a register source:
  *                f27 = 1 last use, f25 = 1 still live
  *   f42 / f44  = the same pair for source 1
- *   f58 = normalized format: U8=0, S8=1, U16=2, S16=3. Fresh native
- *         R16Unorm/R16Snorm pipelines establish the upper width bit.
+ *   f58 = normalized format: U8=0, S8=1, U16=2, S16=3, and the two sRGB
+ *         modes below. Fresh native R16Unorm/R16Snorm pipelines establish the
+ *         upper width bit.
  *   f59 = 1 two packed lanes. A single-component target instead sets f59 = 0,
  *         f40 = 0, f41 = 1 and has no second source (probe fn_r).
  *   f50 + (slot - 1) = the per-slot wait mask, as in every other AGX3b form.
@@ -69,6 +70,30 @@
  *   f18 = the interpolated operand (f25 = 2, f26 = 2), liveness pair
  *         f29 last use / f27 still live
  *   f80 + (slot - 1) = wait mask
+ *
+ * ## The sRGB conversion modes
+ *
+ * f58 (and normflt's f40, which is the same field on the other side) reaches
+ * two further values, and they are what makes an sRGB attachment free. From
+ * nine fresh render pipelines built with `metal-nt -arch applegpu_g17p` and
+ * rebuilt against `applegpu_g17s`:
+ *
+ *   f58 = 4   every lane of this pack is sRGB-encoded
+ *   f58 = 6   lane 0 is sRGB-encoded, lane 1 is a linear UNORM8 lane
+ *
+ * A float4 into RGBA8Unorm_sRGB is therefore mode 4 on the (R,G) pack and
+ * mode 6 on the (B,A) pack, because the alpha channel of an sRGB format is
+ * linear. BGRA8Unorm_sRGB emits byte-identical code, so channel order is not
+ * the shader's business. R8Unorm_sRGB is one lane at mode 4 and RG8Unorm_sRGB
+ * two lanes at mode 4, so the mode describes the lanes rather than the
+ * attachment. Fixed-function blending on an sRGB attachment adds no
+ * instruction at all, and a shader with an sRGB attachment at color(0) and a
+ * linear one at color(1) selects per attachment. Programmable blending shows
+ * the same two modes on the `normflt` decode. f58 = 5 is unwitnessed.
+ *
+ * The whole difference between Apple's sRGB and linear RGBA8 fragment programs
+ * is these two field values: the `lstcol` that follows is byte-identical,
+ * which is the same statement as "lstcol carries a width, not a format".
  *
  * ## normflt
  *
@@ -112,6 +137,18 @@ extern "C" {
  */
 #define AGX3_FLTNORM_MAX_LENGTH 12u
 
+/*
+ * Which lanes of one pack are sRGB. The linear modes are chosen by `snorm` and
+ * `is_16bit`; sRGB is a separate selector because the hardware distinguishes an
+ * all-sRGB pair from the RGBA tail pair whose second lane is the linear alpha,
+ * and neither is reachable by combining the two linear booleans.
+ */
+enum agx3_fltnorm_srgb {
+   AGX3_FLTNORM_SRGB_NONE = 0,  /* linear; snorm/is_16bit pick the mode */
+   AGX3_FLTNORM_SRGB_BOTH = 1,  /* f58 = 4 */
+   AGX3_FLTNORM_SRGB_LANE0 = 2, /* f58 = 6, lane 1 stays linear UNORM8 */
+};
+
 enum agx3_fltnorm_src_kind {
    AGX3_FLTNORM_SRC_NONE = 0,
    AGX3_FLTNORM_SRC_IMMEDIATE = 1, /* AGX 8-bit minifloat */
@@ -153,6 +190,7 @@ struct agx3_fltnorm_desc {
    bool two_lanes;                /* pack both sources; false = one lane */
    bool snorm;                    /* signed-normalized target */
    bool is_16bit;                 /* 16-bit normalized lane, G17P only */
+   uint8_t srgb;                  /* enum agx3_fltnorm_srgb */
    uint16_t wait_mask;            /* bit i waits scoreboard slot i + 1 */
    bool first_instruction;       /* G17P f68, first main instruction only */
 };
@@ -241,6 +279,7 @@ struct agx3_normflt_desc {
    bool two_lanes;     /* unpack both bytes; false = one lane */
    bool snorm;         /* signed-normalized source */
    bool is_16bit;      /* 16-bit normalized lane, G17P only */
+   uint8_t srgb;       /* enum agx3_fltnorm_srgb */
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };
 

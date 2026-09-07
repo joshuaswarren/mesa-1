@@ -82,6 +82,40 @@ append_src(struct agx3_field_kv *ov, unsigned *n,
    return true;
 }
 
+/*
+ * Build the shared normalized-format field, f58 on `fltnorm` and f40 on
+ * `normflt`. Both pass through the same encoder LUT, so both take the same
+ * value here. Returns false for a combination the hardware has no mode for.
+ */
+static bool
+norm_mode(bool snorm, bool is_16bit, uint8_t srgb, bool two_lanes,
+          uint8_t *out)
+{
+   switch (srgb) {
+   case AGX3_FLTNORM_SRGB_NONE:
+      *out = (uint8_t)((is_16bit ? 2 : 0) | (snorm ? 1 : 0));
+      return true;
+
+   case AGX3_FLTNORM_SRGB_BOTH:
+      /* Witnessed with one lane (R8Unorm_sRGB) and with two (RG8Unorm_sRGB
+       * and the leading pair of every RGBA8Unorm_sRGB shader). */
+      if (snorm || is_16bit)
+         return false;
+      *out = 4;
+      return true;
+
+   case AGX3_FLTNORM_SRGB_LANE0:
+      /* Only meaningful for a pair: it names lane 1 as the linear one. */
+      if (snorm || is_16bit || !two_lanes)
+         return false;
+      *out = 6;
+      return true;
+
+   default:
+      return false;
+   }
+}
+
 bool
 agx3_fltnorm_encode(enum agx_isa_encoding enc,
                     const struct agx3_fltnorm_desc *d,
@@ -127,8 +161,10 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
-   ov[n++] =
-      (struct agx3_field_kv)KV(58, (d->is_16bit ? 2 : 0) | (d->snorm ? 1 : 0));
+   uint8_t mode;
+   if (!norm_mode(d->snorm, d->is_16bit, d->srgb, d->two_lanes, &mode))
+      return false;
+   ov[n++] = (struct agx3_field_kv)KV(58, mode);
    ov[n++] = (struct agx3_field_kv)KV(59, d->two_lanes ? 1 : 0);
    if (d->first_instruction)
       ov[n++] = (struct agx3_field_kv)KV(68, 1);
@@ -205,7 +241,7 @@ agx3_fuse_colour_parts(const struct agx3_colour_link_info *main,
    unsigned offset = 0, used = 0;
    for (unsigned i = 0; i < 2; ++i) {
       struct agx3_fltnorm_desc d = epilog->packs[i];
-      if (!d.two_lanes || d.snorm || d.is_16bit || d.wait_mask ||
+      if (!d.two_lanes || d.snorm || d.is_16bit || d.srgb || d.wait_mask ||
           d.dest != epilog->store_reg + i)
          return false;
       /* A pack must not overwrite a register whose exported value a later
@@ -395,8 +431,10 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(18, d->src);
    ov[n++] = (struct agx3_field_kv)KV(41, d->two_lanes ? 1 : 0);
-   ov[n++] =
-      (struct agx3_field_kv)KV(40, (d->is_16bit ? 2 : 0) | (d->snorm ? 1 : 0));
+   uint8_t mode;
+   if (!norm_mode(d->snorm, d->is_16bit, d->srgb, d->two_lanes, &mode))
+      return false;
+   ov[n++] = (struct agx3_field_kv)KV(40, mode);
 
    for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))

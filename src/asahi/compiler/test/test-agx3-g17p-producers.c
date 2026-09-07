@@ -112,6 +112,7 @@ struct fn_v {
    uint8_t k1; uint16_t v1; bool kill1;
    bool two, snorm;
    uint16_t wait;
+   uint8_t srgb;
 };
 static const struct fn_v fn_vs[] = {
    /* mnemonic witnesses from the shipped .metalar objects */
@@ -136,6 +137,16 @@ static const struct fn_v fn_vs[] = {
    {"fn_buf fltnorm h1",  "97045401021028d005c8", 1, 3,8,false,3,10,false,true,false,0},
    /* single-lane (R8Unorm) */
    {"fn_r fltnorm h0",    "970454000200009044c0", 0, 2,0,true, 0,0,false, false,false,0},
+   /*
+    * sRGB attachments. Each of these is the same instruction as the linear
+    * witness above it with only the conversion mode changed: RGBA8Unorm_sRGB
+    * emits mode 4 on the (R,G) pack and mode 6 on the (B,A) pack, because the
+    * alpha channel of an sRGB format is linear, and R8Unorm_sRGB is a single
+    * lane at mode 4.
+    */
+   {"s_rgba fltnorm h0",  "97045400020020d04522", 0, 2,0,true, 2,8,true,  true,false,0, 1},
+   {"s_rgba fltnorm h1",  "97045401020410d045a2", 1, 2,2,true, 2,4,true,  true,false,0, 2},
+   {"s_r8 fltnorm h0",    "97045400020000904420", 0, 2,0,true, 0,0,false, false,false,0, 1},
 };
 
 static void
@@ -151,6 +162,7 @@ test_fltnorm(void)
          .two_lanes = v->two,
          .snorm = v->snorm,
          .wait_mask = v->wait,
+         .srgb = v->srgb,
       };
       bool ok = agx3_fltnorm_encode(B, &d, o, &l);
       check(v->n, v->hex, o, l, ok);
@@ -392,6 +404,7 @@ struct fnc_v {
    uint8_t k1; uint16_t v1; bool kill1;
    bool two, snorm;
    uint16_t wait;
+   uint8_t srgb;
 };
 /*
  * The same operand map on AGX3c, established by re-running the g17p probe set
@@ -406,6 +419,10 @@ static const struct fnc_v fnc_vs[] = {
    {"g17s fn_buf fltnorm h1",  "270000132581a90290028140", 1, 3,8,false,3,10,false,true,false,0},
    {"g17s ftex fltnorm h0 w1", "270400022182a902b0008140", 0, 2,0,true, 2,2,true,  true,false,1},
    {"g17s fb4 fltnorm h4",     "270000022182a90ab0008140", 4, 2,0,true, 2,2,true,  true,false,0},
+   /* The sRGB modes are the same two field values on this encoding: these are
+    * byte-for-byte the first two vectors above with only the mode changed. */
+   {"g17s s_rgba fltnorm h0",  "270000022182a90230024100", 0, 2,0,true, 2,8,true,  true,false,0, 1},
+   {"g17s s_rgba fltnorm h1",  "27020003a182a9023000c100", 1, 2,2,true, 2,4,true,  true,false,0, 2},
 };
 
 struct nf_v {
@@ -414,6 +431,8 @@ struct nf_v {
    uint16_t dest, src;
    bool two;
    uint16_t wait;
+   uint8_t srgb;
+   bool no_hint;
 };
 static const struct nf_v nf_vs[] = {
    {"fb4 normflt r0<-h4 w6", "17045600010814ea", 0, 0, 4, true,  0x20},
@@ -423,6 +442,16 @@ static const struct nf_v nf_vs[] = {
    {"g17s fb4 normflt w8",   "2f00003a2d00a802d000", 1, 0, 4, true,  0x80},
    {"g17s fb4 normflt r0<-h5","2701003a2d00a802d000", 1, 0, 5, true,  0},
    {"g17s fb1 normflt w8",   "2f00001a2d00a802c000", 1, 0, 0, false, 0x80},
+   /*
+    * The decode half of the same story: programmable blending on an sRGB
+    * attachment reads it back with the same two modes. The two linear
+    * witnesses below are the same instructions from the same probe against a
+    * linear attachment, so the pair isolates the mode field.
+    */
+   {"l_pblend normflt r4<-h0", "17045604010014ea", 0, 4, 0, true, 0x20, 0, false},
+   {"l_pblend normflt r0<-h1", "17045400000214ea", 0, 0, 1, true, 0,    0, true},
+   {"s_pblend normflt r4<-h0", "170456040100149a", 0, 4, 0, true, 0x20, 1, false},
+   {"s_pblend normflt r0<-h1", "17045400000214da", 0, 0, 1, true, 0,    2, true},
 };
 
 static void
@@ -438,6 +467,7 @@ test_agx3c_and_normflt(void)
          .two_lanes = v->two,
          .snorm = v->snorm,
          .wait_mask = v->wait,
+         .srgb = v->srgb,
       };
       const bool ok = agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3C, &d, o, &l);
       check(v->n, v->hex, o, l, ok);
@@ -447,10 +477,11 @@ test_agx3c_and_normflt(void)
       const struct nf_v *v = &nf_vs[i];
       const struct agx3_normflt_desc d = {
          .dest = v->dest,
-         .dest_hint = true,
+         .dest_hint = !v->no_hint,
          .src = v->src,
          .two_lanes = v->two,
          .wait_mask = v->wait,
+         .srgb = v->srgb,
       };
       const bool ok =
          agx3_normflt_encode(v->enc ? AGX_ISA_ENCODING_AGX3C
@@ -485,6 +516,49 @@ test_refusals(void)
    if (agx3_fltnorm_encode(B, &mism, o, &l)) {
       fprintf(stderr, "fltnorm accepted a lane-count mismatch\n");
       failures++;
+   }
+
+   /* The sRGB modes replace the linear format field rather than joining it,
+    * and mode 6 exists only to name lane 1 as the linear one, so it has no
+    * meaning without a second lane. */
+   static const struct {
+      const char *why;
+      uint8_t srgb;
+      bool snorm, is_16bit, one_lane;
+   } bad_srgb[] = {
+      {"sRGB combined with snorm", AGX3_FLTNORM_SRGB_BOTH, true, false, false},
+      {"sRGB combined with 16-bit", AGX3_FLTNORM_SRGB_BOTH, false, true, false},
+      {"sRGB lane0 mode on a single lane", AGX3_FLTNORM_SRGB_LANE0, false,
+       false, true},
+      {"an out-of-range sRGB selector", 3, false, false, false},
+   };
+   for (unsigned i = 0; i < sizeof(bad_srgb) / sizeof(*bad_srgb); ++i) {
+      checks++;
+      struct agx3_fltnorm_desc bad = d;
+      bad.srgb = bad_srgb[i].srgb;
+      bad.snorm = bad_srgb[i].snorm;
+      bad.is_16bit = bad_srgb[i].is_16bit;
+      if (bad_srgb[i].one_lane) {
+         bad.two_lanes = false;
+         bad.src[1].kind = AGX3_FLTNORM_SRC_NONE;
+      }
+      if (agx3_fltnorm_encode(B, &bad, o, &l)) {
+         fprintf(stderr, "fltnorm accepted %s\n", bad_srgb[i].why);
+         failures++;
+      }
+
+      checks++;
+      struct agx3_normflt_desc nbad = {
+         .dest = 0, .dest_hint = true, .src = 0,
+         .two_lanes = !bad_srgb[i].one_lane,
+         .srgb = bad_srgb[i].srgb,
+         .snorm = bad_srgb[i].snorm,
+         .is_16bit = bad_srgb[i].is_16bit,
+      };
+      if (agx3_normflt_encode(B, &nbad, o, &l)) {
+         fprintf(stderr, "normflt accepted %s\n", bad_srgb[i].why);
+         failures++;
+      }
    }
 
    checks++;
