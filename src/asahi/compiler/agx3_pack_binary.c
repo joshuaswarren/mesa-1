@@ -3151,8 +3151,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * builtin with four attachment components. R8_SNORM, R8G8_SNORM and
  * R8G8B8A8_SNORM attachment fields format2/layout2 with one, two or four components emit the
  * normalized program below, matching the exact U8NORM bytes.
- * R16G16B16A16_SNORM attachment fields format6/layout2/components4 emit a
- * distinct normalized-16 program with selector tail a895.
+ * R16_SNORM and R16G16B16A16_SNORM attachment fields format6/layout2 with
+ * one or four components emit a distinct normalized-16 program with selector
+ * tail a895.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
