@@ -1878,6 +1878,36 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(mrt.shader);
 
+   /* Genuine applegpu-nt builtin EOT key0x04021100: scalar I32 tile store. */
+   nir_builder i32 = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P I32 RT0 EOT");
+   coords =
+      nir_trim_vector(&i32, nir_load_global_invocation_id(&i32, 32), 2);
+   nir_image_store_block_agx(
+      &i32, nir_imm_intN_t(&i32, 0, 16), nir_imm_int(&i32, 0), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   agx_preprocess_nir(i32.shader);
+   memset(&part, 0, sizeof(part));
+   const bool i32_compiled = agx_compile_shader_nir(i32.shader, &key, &part);
+   static const uint8_t expected_i32[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,0x0c,0x9d,0x10,0x26,
+      0x24,0xa9,0x10,0x26,0x9f,0x10,0x54,0x00,0x00,0x04,0x14,0x00,
+      0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,0x00,0x00,0x10,0x00,
+      0x50,0x06,0x0b,0x00,0x97,0x05,0x54,0x04,0x00,0x08,0x00,0x00,
+      0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,
+      0xa8,0x35,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+   ok &= i32_compiled && part.info.binary_size == sizeof(expected_i32) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i32) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i32, sizeof(expected_i32)) == 0;
+   if (i32_compiled)
+      free(part.binary);
+   ralloc_free(i32.shader);
+
    /* A different store format must not inherit RT0's byte string. */
    nir_builder bad = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P EOT");
