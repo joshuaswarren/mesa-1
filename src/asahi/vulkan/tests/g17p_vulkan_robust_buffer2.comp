@@ -6,8 +6,12 @@ layout(set = 0, binding = 0, std140) uniform Input {
    uvec4 values[5];
 } input_buffer;
 
-layout(set = 0, binding = 1, std430) buffer Output {
-   uvec4 values[4];
+layout(set = 0, binding = 1, std430) buffer Storage {
+   uvec4 values[8];
+} storage_buffer;
+
+layout(set = 0, binding = 2, std430) buffer Output {
+   uvec4 values[8];
 } output_buffer;
 
 void
@@ -26,4 +30,23 @@ main()
     * overflow-safe run-time end calculation as well. */
    output_buffer.values[3] =
       input_buffer.values[gl_GlobalInvocationID.x + 4];
+
+   uvec4 ssbo_base = storage_buffer.values[0];
+   uvec4 ssbo_exact_end = storage_buffer.values[3];
+   uvec4 ssbo_constant_oob = storage_buffer.values[4];
+   uvec4 ssbo_dynamic_oob =
+      storage_buffer.values[gl_GlobalInvocationID.x + 4];
+
+   output_buffer.values[4] = ssbo_base;
+   output_buffer.values[5] = ssbo_exact_end;
+   output_buffer.values[6] = ssbo_constant_oob;
+   output_buffer.values[7] = ssbo_dynamic_oob;
+
+   /* The exact-end store must execute, while both first-OOB stores must be
+    * discarded without touching the mapped poison that follows the range. */
+   storage_buffer.values[3] =
+      uvec4(0x63000000u, 0x63000001u, 0x63000002u, 0x63000003u);
+   storage_buffer.values[4] = uvec4(0xdeadbeefu);
+   storage_buffer.values[gl_GlobalInvocationID.x + 4] =
+      uvec4(0xcafef00du);
 }

@@ -2,9 +2,9 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Public Vulkan oracle for robustBufferAccess2 UBO range checks.  The buffer
- * contains mapped poison immediately after the descriptor's aligned range, so
- * relying on VM soft faults instead of the descriptor bound returns poison.
+ * Public Vulkan oracle for robustBufferAccess2 UBO and SSBO range checks.
+ * Mapped poison follows both descriptor ranges, distinguishing descriptor
+ * bounds from allocation/VM bounds and detecting stray stores.
  */
 
 #include <vulkan/vulkan.h>
@@ -21,12 +21,17 @@
 #define TEST_NAME            "g17p-vulkan-robust-buffer2"
 #define T8140_DEVICE_ID      0x8140
 #define UBO_RANGE            64
-#define OUTPUT_OFFSET        256
-#define OUTPUT_WORDS         16
+#define SSBO_OFFSET          256
+#define SSBO_RANGE           64
+#define OUTPUT_OFFSET        512
+#define OUTPUT_WORDS         32
 #define OUTPUT_GUARD_WORDS   8
-#define BUFFER_SIZE          512
+#define BUFFER_SIZE          1024
 #define INPUT_WORD(i)        (UINT32_C(0x41000000) + (i))
 #define POISON_WORD(i)       (UINT32_C(0xbad00000) + (i))
+#define SSBO_INPUT_WORD(i)   (UINT32_C(0x52000000) + (i))
+#define SSBO_POISON_WORD(i)  (UINT32_C(0xced00000) + (i))
+#define SSBO_STORE_WORD(i)   (UINT32_C(0x63000000) + (i))
 #define OUTPUT_SENTINEL(i)   (UINT32_C(0xa5a50000) | (i))
 
 static void
@@ -81,7 +86,7 @@ verify_result(const uint32_t *mapped, const char *suffix)
       }
    }
 
-   for (uint32_t i = 8; i < OUTPUT_WORDS; ++i) {
+   for (uint32_t i = 8; i < 16; ++i) {
       if (mapped[(OUTPUT_OFFSET / 4) + i] != 0) {
          fprintf(stderr,
                  TEST_NAME ": OOB UBO word %u leaked %#x, expected zero%s\n",
@@ -90,9 +95,54 @@ verify_result(const uint32_t *mapped, const char *suffix)
       }
    }
 
+   for (uint32_t i = 0; i < 4; ++i) {
+      if (mapped[(OUTPUT_OFFSET / 4) + 16 + i] != SSBO_INPUT_WORD(i)) {
+         fprintf(stderr,
+                 TEST_NAME ": in-range SSBO word %u is %#x, expected %#x%s\n",
+                 i, mapped[(OUTPUT_OFFSET / 4) + 16 + i],
+                 SSBO_INPUT_WORD(i), suffix);
+         exit(EXIT_FAILURE);
+      }
+   }
+
+   for (uint32_t i = 0; i < 4; ++i) {
+      if (mapped[(OUTPUT_OFFSET / 4) + 20 + i] !=
+          SSBO_INPUT_WORD(12 + i)) {
+         fprintf(stderr,
+                 TEST_NAME ": exact-end SSBO word %u is %#x, expected %#x%s\n",
+                 i, mapped[(OUTPUT_OFFSET / 4) + 20 + i],
+                 SSBO_INPUT_WORD(12 + i), suffix);
+         exit(EXIT_FAILURE);
+      }
+   }
+
+   for (uint32_t i = 24; i < OUTPUT_WORDS; ++i) {
+      if (mapped[(OUTPUT_OFFSET / 4) + i] != 0) {
+         fprintf(stderr,
+                 TEST_NAME ": OOB SSBO word %u leaked %#x, expected zero%s\n",
+                 i, mapped[(OUTPUT_OFFSET / 4) + i], suffix);
+         exit(EXIT_FAILURE);
+      }
+   }
+
    for (uint32_t i = 16; i < 32; ++i) {
       if (mapped[i] != POISON_WORD(i))
          die("mapped poison after the UBO descriptor range changed");
+   }
+
+   for (uint32_t i = 0; i < 12; ++i) {
+      if (mapped[(SSBO_OFFSET / 4) + i] != SSBO_INPUT_WORD(i))
+         die("in-range SSBO prefix changed");
+   }
+
+   for (uint32_t i = 12; i < 16; ++i) {
+      if (mapped[(SSBO_OFFSET / 4) + i] != SSBO_STORE_WORD(i - 12))
+         die("exact-end SSBO store was discarded");
+   }
+
+   for (uint32_t i = 16; i < 32; ++i) {
+      if (mapped[(SSBO_OFFSET / 4) + i] != SSBO_POISON_WORD(i))
+         die("OOB SSBO store changed mapped poison");
    }
 
    for (uint32_t i = OUTPUT_WORDS;
@@ -174,9 +224,14 @@ main(int argc, char **argv)
    vkGetPhysicalDeviceProperties2(physical, &properties2);
    const VkDeviceSize ubo_alignment =
       robustness2_properties.robustUniformBufferAccessSizeAlignment;
+   const VkDeviceSize ssbo_alignment =
+      robustness2_properties.robustStorageBufferAccessSizeAlignment;
    if (!ubo_alignment || ubo_alignment > UBO_RANGE ||
        (UBO_RANGE % ubo_alignment) != 0)
       die("oracle UBO range is not aligned to the advertised robustness2 limit");
+   if (!ssbo_alignment || ssbo_alignment > SSBO_RANGE ||
+       (SSBO_RANGE % ssbo_alignment) != 0)
+      die("oracle SSBO range is not aligned to the advertised robustness2 limit");
 
    uint32_t queue_family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &queue_family_count,
@@ -270,6 +325,10 @@ main(int argc, char **argv)
       mapped[i] = INPUT_WORD(i);
    for (uint32_t i = 16; i < 32; ++i)
       mapped[i] = POISON_WORD(i);
+   for (uint32_t i = 0; i < 16; ++i)
+      mapped[(SSBO_OFFSET / 4) + i] = SSBO_INPUT_WORD(i);
+   for (uint32_t i = 16; i < 32; ++i)
+      mapped[(SSBO_OFFSET / 4) + i] = SSBO_POISON_WORD(i);
    for (uint32_t i = 0; i < OUTPUT_WORDS + OUTPUT_GUARD_WORDS; ++i)
       mapped[(OUTPUT_OFFSET / 4) + i] = OUTPUT_SENTINEL(i);
 
@@ -286,10 +345,16 @@ main(int argc, char **argv)
          .descriptorCount = 1,
          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       },
+      {
+         .binding = 2,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
    };
    const VkDescriptorSetLayoutCreateInfo set_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 2,
+      .bindingCount = 3,
       .pBindings = bindings,
    };
    VkDescriptorSetLayout set_layout;
@@ -299,7 +364,7 @@ main(int argc, char **argv)
 
    const VkDescriptorPoolSize pool_sizes[] = {
       {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
-      {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1},
+      {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2},
    };
    const VkDescriptorPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -322,6 +387,7 @@ main(int argc, char **argv)
 
    const VkDescriptorBufferInfo descriptor_buffers[] = {
       {.buffer = buffer, .offset = 0, .range = UBO_RANGE},
+      {.buffer = buffer, .offset = SSBO_OFFSET, .range = SSBO_RANGE},
       {.buffer = buffer, .offset = OUTPUT_OFFSET,
        .range = OUTPUT_WORDS * sizeof(uint32_t)},
    };
@@ -342,8 +408,16 @@ main(int argc, char **argv)
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
          .pBufferInfo = &descriptor_buffers[1],
       },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = descriptor_set,
+         .dstBinding = 2,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &descriptor_buffers[2],
+      },
    };
-   vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, NULL);
+   vkUpdateDescriptorSets(device, 3, descriptor_writes, 0, NULL);
 
    const VkShaderModuleCreateInfo shader_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -411,8 +485,8 @@ main(int argc, char **argv)
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .buffer = buffer,
-      .offset = OUTPUT_OFFSET,
-      .size = OUTPUT_WORDS * sizeof(uint32_t),
+      .offset = 0,
+      .size = BUFFER_SIZE,
    };
    vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
@@ -437,13 +511,13 @@ main(int argc, char **argv)
       verify_result(mapped, "");
       sleep(3);
       verify_result(mapped, " after three seconds");
-      printf(TEST_NAME ": PASS — aligned in-range UBO data preserved, "
-                       "constant/dynamic mapped OOB poison returned zero, "
-                       "guards stable\n");
+      printf(TEST_NAME ": PASS — UBO/SSBO exact-end data preserved, "
+                       "constant/dynamic OOB reads zero, OOB stores "
+                       "discarded, guards stable\n");
    } else {
       printf(TEST_NAME ": RECORD PASS — robustness2 feature/property query, "
-                       "constant/dynamic aligned UBO range pipeline, "
-                       "dispatch and EndCB accepted on queue %u "
+                       "constant/dynamic UBO/SSBO boundary pipeline, "
+                       "stores, dispatch and EndCB accepted on queue %u "
                        "(flags %#x)\n",
              queue_family, queue_flags);
    }
