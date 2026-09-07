@@ -425,7 +425,10 @@ main(void)
    put_block(blocks, 0, 0xf800, 0x0000, 0);
    put_block(blocks, 1, 0x07e0, 0x0000, 0);
    put_block(blocks, 2, 0x001f, 0x0000, 0);
-   put_block(blocks, 3, 0xffff, 0x0000, UINT32_C(0xe4e4e4e4));
+   /* Keep the exact oracle independent of the implementation's permitted
+    * interpolation rounding: c0 <= c1 selects BC1 alpha mode and 0/1/3 use
+    * only black, white and transparent black. */
+   put_block(blocks, 3, 0x0000, 0xffff, UINT32_C(0x74747474));
    uint8_t reference[PIXEL_BYTES];
    build_reference(blocks, reference);
 
