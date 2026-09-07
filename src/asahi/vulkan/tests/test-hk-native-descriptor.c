@@ -607,7 +607,21 @@ main(void)
    assert(memcmp(&native_pbe, gen9_r8_uint_pbe,
                  sizeof(gen9_r8_uint_pbe)) == 0);
 
+   /* Adjacent actual MTL format14 uses scalar channels0x00, SINT type3,
+    * internal EOT format4 and one byte per pixel. */
+   static const uint8_t gen9_r8_sint_pbe[32] = {
+      0x22, 0x60, 0x00, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.type = AGX_TEXTURE_TYPE_SINT;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_r8_sint_pbe,
+                 sizeof(gen9_r8_sint_pbe)) == 0);
+
    pbe.channels = AGX_CHANNELS_R8G8;
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
    pbe.swizzle_g = AGX_CHANNEL_G;
 
    /* Adjacent actual MTL format34 resolves to the same R8G8 channels0x0a

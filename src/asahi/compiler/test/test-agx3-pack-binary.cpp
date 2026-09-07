@@ -166,8 +166,8 @@ TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 
 TEST_F(AGX3PackBinary, G17PI8EOTUsesExactOneWordNativeProgram)
 {
-   /* Fresh scalar R8_UINT key0x04020500 produces this exact program.
-    * Its 68-byte text SHA256 is
+   /* Fresh scalar R8_UINT key0x04020500 and scalar R8_SINT key0x04020400
+    * both produce this exact program. Its 68-byte text SHA256 is
     * 7a5e8ed6d0d8fca6b23b335f416f069c0942332ad7becf7ea5ec2704ee59ce95. */
    static const uint8_t native[] = {
       0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,

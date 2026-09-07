@@ -635,6 +635,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P scalar R8 SINT colour storage.
+    executable(
+      'g17p-vulkan-r8-sint',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_R8_SINT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for the exact G17P R32 SINT colour path.
     executable(
       'g17p-vulkan-r32-sint',

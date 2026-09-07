@@ -3144,7 +3144,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * two-word RGBA16 key0x10020c00. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32.
- * Scalar R8_UINT key0x04020500, R8G8_UINT key0x08020500 and R8G8_SINT
+ * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
+ * R8G8_UINT key0x08020500 and R8G8_SINT
  * key0x08020400 use one I8
  * imageblock word and selector 0x55. R8G8B8A8_UINT/SINT use the same I8
  * builtin with four attachment components. R8_SNORM, R8G8_SNORM and
