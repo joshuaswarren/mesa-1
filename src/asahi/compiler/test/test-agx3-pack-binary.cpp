@@ -2980,30 +2980,63 @@ TEST_F(AGX3PackBinary, GetSrIndexedLoadAddStoreCarriesWait)
       uint8_t rl = 0;
       ASSERT_TRUE(agx3_sr_encode(enc, &sr, rb, &rl));
 
+   /*
+    * The expected stream is built from the encoders, so it has to state the
+    * three things the packer decides and this test used to leave at their
+    * defaults:
+    *
+    *  - the ENCODED shift is the IR shift plus the access format's log2 size
+    *    (2 for I32). A register index is scaled only by the instruction's
+    *    shift, so dropping the format scale addressed elements as bytes.
+    *  - the first device load of a non-fragment shader takes scoreboard slot
+    *    6 (agx3_pack_binary's G17P load policy), so its consumer's wait is
+    *    bit 17 -- byte 2 = 0x56 -- not byte 1.
+    *  - the last LDDEV of the stream carries AGX3b f79=2, which clears bit 4
+    *    of byte 2 (0x54 -> 0x44). Apple sets it on the final LDDEV and only
+    *    the final one; `metal-nt -arch applegpu_g17p` on a two-load kernel
+    *    emits 0x54 then 0x44.
+    *
+    * The dependent add goes through agx3_alu_integer_reg(), which drives the
+    * two operand-lifetime fields from post-RA hints, rather than
+    * agx3_alu_compose(), whose per-form baselines still carry the witnessed
+    * instruction's own wait and lifetime bits as if they were constants.
+    */
       struct agx3_mem_desc ld = {};
       ld.data = 6;
       ld.width = AGX3_MEM_W32;
       ld.mask = 1;
-      ld.shift = 2;
+      ld.shift = 4; /* IR shift 2 + log2(sizeof(uint32_t)) */
       ld.base_is_uniform = false;
       ld.base = 0;
       ld.idx_kind = AGX3_MEM_IDX_REG;
       ld.idx_reg = 4;
-      ld.slot = 2;
+      /* The G17P load policy puts the first device load on slot 6;
+       * AGX3c has no such policy and keeps the round-robin slot. */
+      ld.slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 2;
       ld.wait_mask = 0x1;
+      ld.agx3b_last_load = enc == AGX_ISA_ENCODING_AGX3B;
       uint8_t lb[AGX3_MEM_MAX_LENGTH];
       uint8_t ll = 0;
       ASSERT_TRUE(agx3_mem_encode_load(enc, &ld, lb, &ll));
 
+      /* AGX3b routes an unshifted register add through the lifetime-aware
+       * encoder; AGX3c has no such form yet and keeps the composer. */
+      const uint16_t add_src[2] = {6, 6};
+      const enum agx3_alu_hint add_hints[2] = {AGX3_ALU_HINT_NONE,
+                                               AGX3_ALU_HINT_NONE};
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
-                                   /*wait*/ 0x2, ab, &al));
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, add_src,
+                                            add_hints, 1u << 5, ab, &al)
+                     : agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
+                                        1u << 1, ab, &al));
 
       struct agx3_mem_desc st = ld;
       st.data = 8;
       st.slot = 0;
       st.wait_mask = 0;
+      st.agx3b_last_load = false;
       uint8_t sb[AGX3_MEM_MAX_LENGTH];
       uint8_t sl = 0;
       ASSERT_TRUE(agx3_mem_encode_store(enc, &st, sb, &sl));
@@ -3054,30 +3087,63 @@ TEST_F(AGX3PackBinary, LoadAddStoreCarriesWait)
       std::vector<uint8_t> got = pack(b);
 
       /* Independently build the expected stream from the encoders. */
+   /*
+    * The expected stream is built from the encoders, so it has to state the
+    * three things the packer decides and this test used to leave at their
+    * defaults:
+    *
+    *  - the ENCODED shift is the IR shift plus the access format's log2 size
+    *    (2 for I32). A register index is scaled only by the instruction's
+    *    shift, so dropping the format scale addressed elements as bytes.
+    *  - the first device load of a non-fragment shader takes scoreboard slot
+    *    6 (agx3_pack_binary's G17P load policy), so its consumer's wait is
+    *    bit 17 -- byte 2 = 0x56 -- not byte 1.
+    *  - the last LDDEV of the stream carries AGX3b f79=2, which clears bit 4
+    *    of byte 2 (0x54 -> 0x44). Apple sets it on the final LDDEV and only
+    *    the final one; `metal-nt -arch applegpu_g17p` on a two-load kernel
+    *    emits 0x54 then 0x44.
+    *
+    * The dependent add goes through agx3_alu_integer_reg(), which drives the
+    * two operand-lifetime fields from post-RA hints, rather than
+    * agx3_alu_compose(), whose per-form baselines still carry the witnessed
+    * instruction's own wait and lifetime bits as if they were constants.
+    */
       struct agx3_mem_desc ld = {};
       ld.data = 6;
       ld.width = AGX3_MEM_W32;
       ld.mask = 1;
-      ld.shift = 2;
+      ld.shift = 4; /* IR shift 2 + log2(sizeof(uint32_t)) */
       ld.base_is_uniform = false;
       ld.base = 0;
       ld.idx_kind = AGX3_MEM_IDX_REG;
       ld.idx_reg = 4;
-      ld.slot = 1;
+      /* The G17P load policy puts the first device load on slot 6;
+       * AGX3c has no such policy and keeps the round-robin slot. */
+      ld.slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 1;
       ld.wait_mask = 0;
+      ld.agx3b_last_load = enc == AGX_ISA_ENCODING_AGX3B;
       uint8_t lb[AGX3_MEM_MAX_LENGTH];
       uint8_t ll = 0;
       ASSERT_TRUE(agx3_mem_encode_load(enc, &ld, lb, &ll));
 
+      /* AGX3b routes an unshifted register add through the lifetime-aware
+       * encoder; AGX3c has no such form yet and keeps the composer. */
+      const uint16_t add_src[2] = {6, 6};
+      const enum agx3_alu_hint add_hints[2] = {AGX3_ALU_HINT_NONE,
+                                               AGX3_ALU_HINT_NONE};
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
-                                   /*wait*/ 0x1, ab, &al));
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, add_src,
+                                            add_hints, 1u << 5, ab, &al)
+                     : agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
+                                        1u << 0, ab, &al));
 
       struct agx3_mem_desc st = ld;
       st.data = 8;
       st.slot = 0;
       st.wait_mask = 0;
+      st.agx3b_last_load = false;
       uint8_t sb[AGX3_MEM_MAX_LENGTH];
       uint8_t sl = 0;
       ASSERT_TRUE(agx3_mem_encode_store(enc, &st, sb, &sl));
@@ -3125,10 +3191,16 @@ TEST_F(AGX3PackBinary, LocalLoadAddStoreCarriesWait)
       uint8_t ll = 0;
       ASSERT_TRUE(agx3_local_encode_load(enc, &ld, lb, &ll));
 
+      const uint16_t add_src[2] = {0, 0};
+      const enum agx3_alu_hint add_hints[2] = {AGX3_ALU_HINT_NONE,
+                                               AGX3_ALU_HINT_NONE};
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 2, 0, 0, 0, 0,
-                                   /*wait*/ 1, ab, &al));
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 2, add_src,
+                                            add_hints, 1, ab, &al)
+                     : agx3_alu_compose(enc, AGX3_ALU_IADD, 2, 0, 0, 0, 0, 1,
+                                        ab, &al));
 
       struct agx3_local_desc st = ld;
       st.data = 2;

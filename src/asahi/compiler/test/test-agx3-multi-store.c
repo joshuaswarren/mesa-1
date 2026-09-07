@@ -222,20 +222,22 @@ compile_index_derived_store(enum agx_isa_encoding encoding,
    }
 
    /*
-    * Also pin the `K + gid` add. This is the shape the compute probes run,
-    * and it is where a codegen change silently altered the encoding of an
-    * instruction that already worked: re-routing an unshifted register add
-    * onto a newly grounded path changed two liveness bits and cost two
-    * probes on hardware, while every host-side test stayed green because
-    * they only check that shaders COMPILE. Byte-pinning an instruction the
-    * hardware is known to accept is what catches that class.
+    * Also pin the `K + gid` add -- the instruction that feeds the store, so
+    * take the ten bytes immediately ahead of the stdev rather than hunting
+    * for a byte pattern. This is the shape the compute probes run, and it is
+    * where a codegen change silently altered the encoding of an instruction
+    * that already worked: re-routing an unshifted register add onto a newly
+    * grounded path changed two liveness bits and cost two probes on
+    * hardware, while every host-side test stayed green because they only
+    * check that shaders COMPILE. Byte-pinning an instruction the hardware is
+    * known to accept is what catches that class.
     */
    if (ok && out_add != NULL) {
       const uint8_t *bin = part.binary;
-      for (unsigned i = 0; i + 10 <= part.info.binary_size; ++i) {
-         if (bin[i] != 0x9f || bin[i + 2] != 0x56)
+      for (unsigned i = 10; i + AGX3_STDEV_LEN <= part.info.binary_size; ++i) {
+         if (bin[i] != 0xe7 || bin[i - 10] != 0x9f)
             continue;
-         memcpy(out_add, bin + i, 10);
+         memcpy(out_add, bin + i - 10, 10);
          *out_add_found = true;
          break;
       }
@@ -400,7 +402,14 @@ compile_uniform_atomic(enum agx_isa_encoding encoding)
 
 /*
  * `imad dst, srcA, #imm, srcC` must encode as Apple's own bytes. This vector
- * is `o[i] = a[i] * 255u + b[i]` compiled by metal-nt for applegpu_g16g.
+ * is `o[i] = a[i] * 255u + b[i]` compiled by metal-nt; it is byte-identical
+ * for applegpu_g16g and applegpu_g17p.
+ *
+ * Both register operands are DEAD after the multiply-add in that kernel, and
+ * Apple's instruction says so: f27 and f57 (slot A's and slot C's last-use
+ * bits) are set, which is the 0x2b in byte 9. Leaving them out of the
+ * descriptor encoded 0x21 and made this vector unreachable -- the operand
+ * hints are liveness, not constants, so a witness has to state them.
  */
 static void
 check_imad_bytes(void)
@@ -408,8 +417,8 @@ check_imad_bytes(void)
    static const uint8_t expected[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x00,
                                       0xfc, 0x23, 0x50, 0x2b, 0x22, 0x00};
    const struct agx3_imad_desc d = {
-      .dest = 0, .src_a = 0, .multiplier = 255, .src_c = 4,
-      .wait_mask = 1u << 5,
+      .dest = 0, .src_a = 0, .src_a_kill = true, .multiplier = 255,
+      .src_c = 4, .src_c_kill = true, .wait_mask = 1u << 5,
    };
    uint8_t out[AGX3_IADD_MAX_LENGTH];
    uint8_t len = 0;
@@ -439,11 +448,28 @@ main(void)
          0x00, 0x11, 0x00, 0x00, 0x90, 0x11, 0x00};
       uint8_t add[10];
       bool add_found = false;
-      /* The `K + gid` add, byte-identical to the build the compute probes
-       * are known to pass on. f42 (slot-B last use) must stay 0 here: the
-       * addend is still live. */
-      static const uint8_t want_add[10] = {0x9f, 0x01, 0x56, 0x02, 0x02,
-                                           0x00, 0x08, 0xa8, 0x13, 0x05};
+      /*
+       * The `K + gid` add. Post-RA this shader is
+       *
+       *   r0 = imad ^r0, #32, ^r1, #0      <- the index
+       *   r1 = mov_imm #0x12340000         <- the constant
+       *   r1 = iadd r0, ^r1, #0            <- THIS
+       *   device_store ^r1, u0:u1, ^r0.abs
+       *
+       * so the two last-use bits in byte 8 are determined: slot A (r0) is
+       * still live, because the store addresses with it, and slot B (r1, the
+       * constant) is dead. That is byte 8 = 0x15; the sweep over
+       * agx3_iadd_encode()'s two kill flags gives 0x11/0x13/0x15/0x17 for
+       * (A,B) = (0,0)/(1,0)/(0,1)/(1,1). Byte 2 is 0x54 -- no scoreboard
+       * wait -- because the only async producers here are the two get_sr
+       * reads, and the imad above already waited them.
+       *
+       * The previous pin (byte 2 = 0x56, byte 8 = 0x13) was taken before 142
+       * commits of packer work and named the opposite operand as dead; it
+       * described an operand order this shader no longer has.
+       */
+      static const uint8_t want_add[10] = {0x9f, 0x01, 0x54, 0x02, 0x02,
+                                           0x00, 0x08, 0xa8, 0x15, 0x05};
       CHECK(compile_index_derived_store(AGX_ISA_ENCODING_AGX3B, store, &found,
                                         add, &add_found));
       CHECK(found);
