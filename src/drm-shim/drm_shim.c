@@ -384,6 +384,7 @@ PUBLIC int close(int fd)
 {
    init_shim();
 
+   drm_shim_prime_fd_unregister(fd);
    drm_shim_fd_unregister(fd);
 
    return real_close(fd);
@@ -806,7 +807,12 @@ fcntl(int fd, int cmd, ...)
    int ret = real_fcntl(fd, cmd, arg);
 
    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
-      if (shim_fd) {
+      struct shim_bo *prime_bo = drm_shim_prime_fd_lookup(fd);
+      if (prime_bo) {
+         if (ret >= 0)
+            drm_shim_prime_fd_register(ret, prime_bo);
+         drm_shim_bo_put(prime_bo);
+      } else if (shim_fd) {
          drm_shim_fd_register(ret, shim_fd);
       } else {
          /* x11_dri3_open / xcb_dri3_open_reply_fds will end up here. */
@@ -835,8 +841,14 @@ dup(int fd)
    int ret = real_dup(fd);
 
    struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
-   if (shim_fd && ret >= 0)
+   struct shim_bo *prime_bo = drm_shim_prime_fd_lookup(fd);
+   if (prime_bo) {
+      if (ret >= 0)
+         drm_shim_prime_fd_register(ret, prime_bo);
+      drm_shim_bo_put(prime_bo);
+   } else if (shim_fd && ret >= 0) {
       drm_shim_fd_register(ret, shim_fd);
+   }
 
    return ret;
 }

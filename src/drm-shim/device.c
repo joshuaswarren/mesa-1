@@ -29,6 +29,7 @@
 
 #include <c11/threads.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/memfd.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -82,6 +83,10 @@ drm_shim_device_init(void)
    shim_device.fd_map = _mesa_hash_table_create(NULL,
                                                 uint_key_hash,
                                                 uint_key_compare);
+   shim_device.prime_fd_map = _mesa_hash_table_create(NULL,
+                                                      uint_key_hash,
+                                                      uint_key_compare);
+   mtx_init(&shim_device.prime_fd_lock, mtx_plain);
 
    shim_device.offset_map = _mesa_hash_table_u64_create(NULL);
 
@@ -179,6 +184,53 @@ drm_shim_fd_lookup(int fd)
    return entry->data;
 }
 
+void
+drm_shim_prime_fd_register(int fd, struct shim_bo *bo)
+{
+   if (fd < 0 || !bo)
+      return;
+
+   mtx_lock(&shim_device.prime_fd_lock);
+   drm_shim_bo_get(bo);
+   _mesa_hash_table_insert(shim_device.prime_fd_map,
+                           (void *)(uintptr_t)(fd + 1), bo);
+   mtx_unlock(&shim_device.prime_fd_lock);
+}
+
+struct shim_bo *
+drm_shim_prime_fd_lookup(int fd)
+{
+   if (fd < 0)
+      return NULL;
+
+   mtx_lock(&shim_device.prime_fd_lock);
+   struct hash_entry *entry = _mesa_hash_table_search(
+      shim_device.prime_fd_map, (void *)(uintptr_t)(fd + 1));
+   struct shim_bo *bo = entry ? entry->data : NULL;
+   if (bo)
+      drm_shim_bo_get(bo);
+   mtx_unlock(&shim_device.prime_fd_lock);
+   return bo;
+}
+
+void
+drm_shim_prime_fd_unregister(int fd)
+{
+   if (fd < 0)
+      return;
+
+   mtx_lock(&shim_device.prime_fd_lock);
+   struct hash_entry *entry = _mesa_hash_table_search(
+      shim_device.prime_fd_map, (void *)(uintptr_t)(fd + 1));
+   struct shim_bo *bo = entry ? entry->data : NULL;
+   if (entry)
+      _mesa_hash_table_remove(shim_device.prime_fd_map, entry);
+   mtx_unlock(&shim_device.prime_fd_lock);
+
+   if (bo)
+      drm_shim_bo_put(bo);
+}
+
 /* ioctl used by drmGetVersion() */
 static int
 drm_shim_ioctl_version(int fd, unsigned long request, void *arg)
@@ -223,6 +275,8 @@ drm_shim_ioctl_get_cap(int fd, unsigned long request, void *arg)
 
    switch (gc->capability) {
    case DRM_CAP_PRIME:
+      gc->value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
+      return 0;
    case DRM_CAP_SYNCOBJ:
    case DRM_CAP_SYNCOBJ_TIMELINE:
    case DRM_CAP_ADDFB2_MODIFIERS:
@@ -287,6 +341,52 @@ drm_shim_ioctl_syncobj_handle_to_fd(int fd, unsigned long request, void *arg)
 }
 
 static int
+drm_shim_ioctl_prime_handle_to_fd(int fd, unsigned long request, void *arg)
+{
+   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
+   struct drm_prime_handle *prime = arg;
+   if (!shim_fd || !prime->handle ||
+       (prime->flags & ~(DRM_CLOEXEC | DRM_RDWR)))
+      return -EINVAL;
+
+   struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, prime->handle);
+   if (!bo)
+      return -ENOENT;
+
+   const unsigned flags = (prime->flags & DRM_CLOEXEC) ? MFD_CLOEXEC : 0;
+   const int prime_fd = memfd_create("drm-shim-prime", flags);
+   if (prime_fd < 0 || ftruncate(prime_fd, bo->size)) {
+      const int error = errno;
+      if (prime_fd >= 0)
+         close(prime_fd);
+      drm_shim_bo_put(bo);
+      return -error;
+   }
+
+   drm_shim_prime_fd_register(prime_fd, bo);
+   drm_shim_bo_put(bo);
+   prime->fd = prime_fd;
+   return 0;
+}
+
+static int
+drm_shim_ioctl_prime_fd_to_handle(int fd, unsigned long request, void *arg)
+{
+   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
+   struct drm_prime_handle *prime = arg;
+   if (!shim_fd || prime->fd < 0 || prime->flags)
+      return -EINVAL;
+
+   struct shim_bo *bo = drm_shim_prime_fd_lookup(prime->fd);
+   if (!bo)
+      return -ENOENT;
+
+   prime->handle = drm_shim_bo_get_handle(shim_fd, bo);
+   drm_shim_bo_put(bo);
+   return prime->handle ? 0 : -ENOMEM;
+}
+
+static int
 drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
 {
    return 0;
@@ -308,6 +408,8 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_QUERY)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_PRIME_HANDLE_TO_FD)] = drm_shim_ioctl_prime_handle_to_fd,
+   [_IOC_NR(DRM_IOCTL_PRIME_FD_TO_HANDLE)] = drm_shim_ioctl_prime_fd_to_handle,
 };
 
 /**
@@ -359,6 +461,7 @@ drm_shim_bo_init(struct shim_bo *bo, size_t size)
       return -ENOMEM;
 
    bo->size = size;
+   p_atomic_set(&bo->refcount, 1);
 
    return 0;
 }
@@ -390,7 +493,7 @@ drm_shim_bo_get(struct shim_bo *bo)
 void
 drm_shim_bo_put(struct shim_bo *bo)
 {
-   if (p_atomic_dec_return(&bo->refcount) == 0)
+   if (p_atomic_dec_return(&bo->refcount) != 0)
       return;
 
    if (shim_device.driver_bo_free)

@@ -41,6 +41,10 @@ struct shim_device {
    /* Mapping from int fd to struct shim_fd *. */
    struct hash_table *fd_map;
 
+   /* Opaque PRIME fds exported by the shim, mapped back to their BO. */
+   struct hash_table *prime_fd_map;
+   mtx_t prime_fd_lock;
+
    /* Mapping from mmap offset to shim_bo */
    struct hash_table_u64 *offset_map;
 
@@ -97,6 +101,9 @@ void drm_shim_override_file(const char *contents,
 void drm_shim_fd_register(int fd, struct shim_fd *shim_fd);
 void drm_shim_fd_unregister(int fd);
 struct shim_fd *drm_shim_fd_lookup(int fd);
+void drm_shim_prime_fd_register(int fd, struct shim_bo *bo);
+struct shim_bo *drm_shim_prime_fd_lookup(int fd);
+void drm_shim_prime_fd_unregister(int fd);
 int drm_shim_ioctl(int fd, unsigned long request, void *arg);
 void *drm_shim_mmap(struct shim_fd *shim_fd, size_t length, int prot, int flags,
                     int fd, off64_t offset);

@@ -27,6 +27,7 @@ with tempfile.TemporaryDirectory(prefix="asahi-gl-shim-") as tmp:
     env["LD_PRELOAD"] = str(shim) + (":" + preload if preload else "")
     env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(vendor_json)
     env["LIBGL_DRIVERS_PATH"] = str(root)
+    env["GBM_BACKENDS_PATH"] = str(gallium.parents[3] / "gbm/backends/dri")
     env["MESA_LOADER_DRIVER_OVERRIDE"] = "asahi"
     env["EGL_PLATFORM"] = "surfaceless"
     env.setdefault("ASAHI_SHIM_CHIP", "g17p")

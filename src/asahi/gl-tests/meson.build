@@ -64,3 +64,22 @@ run_target(
     gl_buffer_sync,
   ],
 )
+
+gbm_share = executable(
+  'asahi-g17p-gbm-share',
+  files('test-g17p-gbm-share.c'),
+  dependencies : [dep_gbm, dep_libdrm],
+  build_by_default : false,
+)
+
+run_target(
+  'asahi-g17p-gbm-share-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gbm_share,
+  ],
+)
