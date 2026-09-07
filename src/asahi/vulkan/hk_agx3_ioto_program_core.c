@@ -112,8 +112,12 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    const bool rgba16i =
       tib->nr_samples == 1 &&
       tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT;
+   const bool rgba32u =
+      tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT &&
+      agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
 
-   return mixed_mrt ||
+   return mixed_mrt || rgba32u ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
             agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_FLOAT ||

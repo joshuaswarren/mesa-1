@@ -1909,6 +1909,56 @@ test_g17p_eot_block_store(void)
    if (i32_compiled)
       free(part.binary);
    ralloc_free(i32.shader);
+
+   /* Fresh Apple key0x10020b00: four I32 words deliberately return to the
+    * scalar 0x35 selector instead of RG32_UINT's two-word 0x75 selector. */
+   nir_builder i32x4 = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 UINT RT0 EOT");
+   coords =
+      nir_trim_vector(&i32x4, nir_load_global_invocation_id(&i32x4, 32), 2);
+   nir_image_store_block_agx(
+      &i32x4, nir_imm_intN_t(&i32x4, 0, 16), nir_imm_int(&i32x4, 0), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   agx_preprocess_nir(i32x4.shader);
+   memset(&part, 0, sizeof(part));
+   key.g17p_rt0_eot_i32_four_words = true;
+   key.g17p_rt0_eot_words = 4;
+   const bool i32x4_compiled =
+      agx_compile_shader_nir(i32x4.shader, &key, &part);
+   ok &= i32x4_compiled && part.info.binary_size == sizeof(expected_i32) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i32) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i32, sizeof(expected_i32)) == 0;
+   if (i32x4_compiled)
+      free(part.binary);
+   ralloc_free(i32x4.shader);
+
+   nir_builder bad_i32x4 = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P RGBA32 EOT");
+   coords = nir_trim_vector(
+      &bad_i32x4, nir_load_global_invocation_id(&bad_i32x4, 32), 2);
+   nir_image_store_block_agx(
+      &bad_i32x4, nir_imm_intN_t(&bad_i32x4, 0, 16),
+      nir_imm_int(&bad_i32x4, 0), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(bad_i32x4.shader);
+   memset(&part, 0xa5, sizeof(part));
+   key.g17p_rt0_eot_words = 3;
+   const bool bad_i32x4_compiled =
+      agx_compile_shader_nir(bad_i32x4.shader, &key, &part);
+   const struct agx_shader_part cleared_i32x4 = {0};
+   if (bad_i32x4_compiled ||
+       memcmp(&part, &cleared_i32x4, sizeof(part)) != 0) {
+      fprintf(stderr, "unsupported G17P four-word I32 shape did not close\n");
+      ok = false;
+   }
+   if (bad_i32x4_compiled)
+      free(part.binary);
+   ralloc_free(bad_i32x4.shader);
+   key.g17p_rt0_eot_i32_four_words = false;
    key.g17p_rt0_eot_i32 = false;
    key.g17p_rt0_eot_words = 0;
 

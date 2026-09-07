@@ -579,6 +579,23 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rg32_uint_pbe,
                  sizeof(gen9_rg32_uint_pbe)) == 0);
 
+   /* Actual G17P RGBA32_UINT entry: channels0x38, UINT type2, internal EOT
+    * format11 and sixteen bytes per pixel. */
+   static const uint8_t gen9_rgba32_uint_pbe[32] = {
+      0x22, 0x4e, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R32G32B32A32;
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
+   pbe.swizzle_g = AGX_CHANNEL_G;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+   pbe.swizzle_a = AGX_CHANNEL_A;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rgba32_uint_pbe,
+                 sizeof(gen9_rgba32_uint_pbe)) == 0);
+
    /* Actual G17P MTL R16G16B16A16_UINT entry: channels0x32, UINT type2,
     * internal EOT format9 and eight bytes per pixel. */
    static const uint8_t gen9_rgba16_uint_pbe[32] = {

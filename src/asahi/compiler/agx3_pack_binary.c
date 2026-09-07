@@ -3145,7 +3145,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * imageblock words. R16G16B16A16_SINT key0x10020800 instead has a distinct
  * complete 84-byte builtin. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
- * despite both lowering to the same I32 store as scalar R32.
+ * despite both lowering to the same I32 store as scalar R32. Fresh
+ * R32G32B32A32_UINT key0x10020b00 has four I32 imageblock words and returns
+ * to the scalar 0x35 selector.
  * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
  * R8G8_UINT key0x08020500 and R8G8_SINT
  * key0x08020400 use one I8
@@ -3283,9 +3285,17 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    }
 
    if (store_format == AGX_FORMAT_I32) {
-      if (ctx->key->g17p_rt0_eot_i32_selector_15 &&
-          ctx->key->g17p_rt0_eot_i32_selector_75)
+      if ((ctx->key->g17p_rt0_eot_i32_selector_15 &&
+           ctx->key->g17p_rt0_eot_i32_selector_75) ||
+          (ctx->key->g17p_rt0_eot_i32_four_words &&
+           (ctx->key->g17p_rt0_eot_i32_selector_15 ||
+            ctx->key->g17p_rt0_eot_i32_selector_75)))
          return AGX3_G17P_RT0_EOT_NONE;
+
+      if (ctx->key->g17p_rt0_eot_i32_four_words)
+         return ctx->key->g17p_rt0_eot_words == 4
+                   ? AGX3_G17P_RT0_EOT_I32
+                   : AGX3_G17P_RT0_EOT_NONE;
 
       if (ctx->key->g17p_rt0_eot_i32_selector_15) {
          /* Only the exact two-word signed pair has native evidence for this
