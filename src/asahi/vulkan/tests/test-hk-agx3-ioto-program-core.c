@@ -1611,6 +1611,24 @@ test_g17p_single_layer_rt0_layout(void)
       CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    }
 
+   enum pipe_format rg16[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(rg16, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+
+   /* Keep the new path format-exact: the normalized tile opcode and PBE
+    * descriptor are independently grounded for RG16 UNORM only. */
+   enum pipe_format rg16_snorm[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16_SNORM,
+   };
+   tib = agx_build_tilebuffer_layout(rg16_snorm, 1, 1, false);
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+
+   tib = agx_build_tilebuffer_layout(rg16, 1, 1, false);
+
    tib.layered = true;
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 

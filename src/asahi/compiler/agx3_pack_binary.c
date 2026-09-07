@@ -3096,7 +3096,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * preceding pack_imgwir and coordinate-select sequence is part of its ABI.
  * Fresh native RGB10A2 key0x10021300 emits the identical physical program:
  * its normalized conversion happens before W32 tile storage; PBE describes
- * the destination format. RGBA16 key0x10020c00 gives distinct imgwblk bytes.
+ * the destination format. RG16 UNORM is likewise one 32-bit imageblock word,
+ * with its two U16-normalized lanes described by PBE. RGBA16
+ * key0x10020c00 is two words and gives distinct imgwblk bytes.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 static bool
@@ -3143,6 +3145,7 @@ agx3_is_g17p_rt0_eot(const agx_context *ctx, enum agx_isa_encoding enc)
          } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
                 (I->format != AGX_FORMAT_U8NORM &&
+                 I->format != AGX_FORMAT_U16NORM &&
                  I->format != AGX_FORMAT_RGB10A2) || I->dim != AGX_DIM_2D ||
                 !I->explicit_coords ||
                 I->src[0].type != AGX_INDEX_IMMEDIATE ||

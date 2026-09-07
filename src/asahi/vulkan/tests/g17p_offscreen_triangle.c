@@ -29,6 +29,10 @@
 #define G17P_F16_IO 0
 #endif
 
+#ifndef G17P_RG16_UNORM
+#define G17P_RG16_UNORM 0
+#endif
+
 #if G17P_F16_IO
 #include "g17p_vulkan_f16_io_frag.h"
 #include "g17p_vulkan_f16_io_vert.h"
@@ -45,6 +49,12 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
+
+#if G17P_RG16_UNORM
+#define IMAGE_FORMAT VK_FORMAT_R16G16_UNORM
+#else
+#define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#endif
 
 #ifndef G17P_HOST_IMAGE_COPY
 #define G17P_HOST_IMAGE_COPY 0
@@ -66,7 +76,16 @@
 #error "the f16 I/O fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_F16_IO
+#if G17P_RG16_UNORM && (G17P_F16_IO || G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the RG16 fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if G17P_RG16_UNORM
+#define PROBE_NAME "g17p-vulkan-rg16-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_F16_IO
 #define PROBE_NAME "g17p-vulkan-f16-io"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -209,14 +228,18 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
+#if G17P_RG16_UNORM
+   static const uint8_t expected[4] = {0xff, 0xff, 0xae, 0x47};
+#else
    static const uint8_t expected[4] = {255, 71, 13, 255};
+#endif
    for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
       const uint8_t *actual = &pixels[pixel * 4];
       if (memcmp(actual, expected, sizeof(expected)) != 0) {
-         fprintf(stderr,
-                 PROBE_NAME ": pixel %zu is {%u,%u,%u,%u}, "
-                            "expected {255,71,13,255}\n",
-                 pixel, actual[0], actual[1], actual[2], actual[3]);
+         fprintf(stderr, PROBE_NAME ": pixel %zu is {%u,%u,%u,%u}, "
+                         "expected {%u,%u,%u,%u}\n",
+                 pixel, actual[0], actual[1], actual[2], actual[3],
+                 expected[0], expected[1], expected[2], expected[3]);
          return false;
       }
    }
@@ -228,7 +251,8 @@ int
 main(void)
 {
    const bool record_only =
-      G17P_F16_IO && getenv("G17P_F16_IO_RECORD_ONLY") != NULL;
+      (G17P_F16_IO && getenv("G17P_F16_IO_RECORD_ONLY") != NULL) ||
+      (G17P_RG16_UNORM && getenv("G17P_RG16_UNORM_RECORD_ONLY") != NULL);
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -332,14 +356,14 @@ main(void)
       die("requested color sample count is not advertised");
 
    VkFormatProperties format_properties;
-   vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
+   vkGetPhysicalDeviceFormatProperties(physical, IMAGE_FORMAT,
                                        &format_properties);
    const VkFormatFeatureFlags required_format =
       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
       VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
    if ((format_properties.optimalTilingFeatures & required_format) !=
        required_format)
-      die("RGBA8 optimal images lack color-attachment or transfer-src support");
+      die("target optimal images lack color-attachment or transfer-src support");
 
    fprintf(stderr, PROBE_NAME ": device %s, queue %u\n",
            properties.deviceName, queue_family);
@@ -462,7 +486,7 @@ main(void)
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = IMAGE_FORMAT,
       .extent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -558,7 +582,7 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = IMAGE_FORMAT,
       .subresourceRange = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .levelCount = 1,
@@ -578,7 +602,7 @@ main(void)
 #endif
 
    const VkAttachmentDescription attachments[] = {{
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = IMAGE_FORMAT,
       .samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
       .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 #if G17P_MSAA_SAMPLES == 2
@@ -597,7 +621,7 @@ main(void)
    },
 #if G17P_MSAA_SAMPLES == 2
    {
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = IMAGE_FORMAT,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -860,7 +884,7 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_RG16_UNORM
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
@@ -901,7 +925,7 @@ main(void)
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
@@ -909,8 +933,14 @@ main(void)
 
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
+#if G17P_RG16_UNORM
+   printf(PROBE_NAME ": PASS — %ux%u RG16 UNORM exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#else
    printf(PROBE_NAME ": PASS — %ux%u RGBA8, checksum "
           "%016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#endif
    return EXIT_SUCCESS;
 }
