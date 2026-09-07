@@ -382,6 +382,73 @@ bool agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                       uint8_t *len);
 
+/*
+ * The same two forms with the grounded source modifiers: f31 negates the
+ * source, f30 takes its absolute value. Both are witnessed as single-field
+ * differences against the plain forms above, on applegpu_g17p:
+ *
+ *   o[i] = exp2(a[i])        af 02 56 00 02 00 b0 40 00 00
+ *   o[i] = exp2(-a[i])       af 02 56 00 02 00 b0 40 01 00   f31
+ *   o[i] = exp2(fabs(a[i]))  af 02 56 00 02 00 b0 c0 00 00   f30
+ *   o[i] = exp2(-fabs(a))    af 02 56 00 02 00 b0 c0 01 00   both
+ *   o[i] = log2(-a[i])       2f 02 56 00 02 00 b0 40 01 00
+ *   o[i] = rsqrt(-a[i])      af 01 56 00 02 00 b0 40 01 00
+ *   o[i] = floor(-a[i])      2f 00 56 00 02 00 b0 40 03 00
+ *
+ * The half forms carry the same field: `half o[i] = exp2(-a[i])` is
+ * af 02 56 02 02 04 ac 60 01 00, the plain half form with f31 set.
+ *
+ * This is also what the f30 note above was missing. Metal's pow(x, y) is
+ * defined for a negative base with an integral exponent, so its lowering
+ * takes log2 of |x| -- f30 -- while powr() and the hand-written
+ * exp2(log2(x) * y) do not. f30 is the absolute-value modifier, not a domain
+ * flag.
+ *
+ * NIR folds a negation into a float source, so `exp(-x)` -- vkQuake's fog
+ * term, in every one of its fragment shaders -- reaches the packer as an
+ * exp2 with a negated source and refused the whole shader.
+ */
+bool agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src, enum agx3_alu_hint hint,
+                          bool dest_cache, uint16_t wait_mask, bool src_neg,
+                          bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                          uint8_t *len);
+
+bool agx3_alu_f32exp2_mod(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t src, enum agx3_alu_hint hint,
+                          bool dest_cache, uint16_t wait_mask, bool src_neg,
+                          bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                          uint8_t *len);
+
+/*
+ * Full-precision floor and ceiling. Apple names the instruction f32rint and
+ * selects the rounding in f43; the width selectors f10 and f26 are 1 for a
+ * scalar half and 2 for a 32-bit pair, the same relationship the 32-bit
+ * logarithm has to the half one. Only the half widths were wired up, so
+ * floor() on a float -- vkQuake's quantized lightmap coordinate -- refused
+ * the shader.
+ *
+ * Witnessed byte-exactly against applegpu_g17p, one kernel per mode:
+ *   o[i] = rint(a[i])    2f 00 56 00 02 00 b0 40 00 00   f43 absent
+ *   o[i] = trunc(a[i])   2f 00 56 00 02 00 b0 40 06 00   f43 = 1
+ *   o[i] = ceil(a[i])    2f 00 56 00 02 00 b0 40 04 00   f43 = 2
+ *   o[i] = floor(a[i])   2f 00 56 00 02 00 b0 40 02 00   f43 = 3
+ * and, for the lifetime and wait fields this form shares with the family,
+ *   float x = a[i]; o[i] = floor(x) + x
+ *                        2f 00 56 04 03 00 92 40 02 00   f27 retained, f11
+ *   o[i] = floor(a[i]) * 4 + floor(b[i])
+ *                        2f 10 54 04 03 08 b0 40 02 00   f35, wait slot 1
+ */
+bool agx3_alu_f32floor(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, bool src_neg, bool src_abs,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_f32ceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, bool src_neg, bool src_abs,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],
                                   const enum agx3_alu_hint hints[4],

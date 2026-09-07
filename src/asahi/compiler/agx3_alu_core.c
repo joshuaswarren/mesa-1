@@ -1539,8 +1539,8 @@ agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 static bool
 agx3_alu_f32_unop(enum agx_isa_encoding enc, const char *mnemonic,
                   uint16_t dest, uint16_t src, enum agx3_alu_hint hint,
-                  bool dest_cache, uint16_t wait_mask,
-                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+                  bool dest_cache, uint16_t wait_mask, bool src_neg,
+                  bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || (dest & 1) || (src & 1) ||
@@ -1551,15 +1551,16 @@ agx3_alu_f32_unop(enum agx_isa_encoding enc, const char *mnemonic,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, 2}, {26, 2},
    };
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[13] = {
       {2, dest}, {18, src}, {11, dest_cache},
       {27, hint == AGX3_ALU_HINT_CACHE},
       {29, hint == AGX3_ALU_HINT_DISCARD},
+      {30, src_abs}, {31, src_neg},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[5 + i] =
+      fields[7 + i] =
          (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
-   return agx3_bind_compose(enc, mnemonic, 0, base, 4, fields, 11, out, len);
+   return agx3_bind_compose(enc, mnemonic, 0, base, 4, fields, 13, out, len);
 }
 
 bool
@@ -1568,7 +1569,7 @@ agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_f32_unop(enc, "f32log2", dest, src, hint, dest_cache,
-                            wait_mask, out, len);
+                            wait_mask, false, false, out, len);
 }
 
 bool
@@ -1577,7 +1578,80 @@ agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_f32_unop(enc, "f32exp2", dest, src, hint, dest_cache,
-                            wait_mask, out, len);
+                            wait_mask, false, false, out, len);
+}
+
+bool
+agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, bool src_neg, bool src_abs,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_unop(enc, "f32log2", dest, src, hint, dest_cache,
+                            wait_mask, src_neg, src_abs, out, len);
+}
+
+bool
+agx3_alu_f32exp2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, bool src_neg, bool src_abs,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_unop(enc, "f32exp2", dest, src, hint, dest_cache,
+                            wait_mask, src_neg, src_abs, out, len);
+}
+
+/*
+ * The 32-bit rounding modes. Field-for-field the half forms below with f10
+ * and f26 raised from 1 to 2, exactly as the 32-bit logarithm relates to the
+ * half one, plus the source modifiers f30 (absolute value) and f31 (negate)
+ * that every member of this form family carries. f43 is the mode.
+ */
+static bool
+agx3_alu_f32_rint(enum agx_isa_encoding enc, uint64_t mode, uint16_t dest,
+                  uint16_t src, enum agx3_alu_hint hint, bool dest_cache,
+                  uint16_t wait_mask, bool src_neg, bool src_abs,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (dest & 1) || (src & 1) ||
+       (wait_mask & ~UINT16_C(0x3f)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {25, 2}, {26, 2}, {43, mode},
+   };
+   struct agx3_field_kv fields[13] = {
+      {2, dest}, {18, src}, {11, dest_cache},
+      {27, hint == AGX3_ALU_HINT_CACHE},
+      {29, hint == AGX3_ALU_HINT_DISCARD},
+      {30, src_abs}, {31, src_neg},
+   };
+   for (unsigned i = 0; i < 6; ++i)
+      fields[7 + i] =
+         (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
+   return agx3_bind_compose(enc, "f32rint", 0, base, 5, fields, 13, out, len);
+}
+
+bool
+agx3_alu_f32floor(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                  bool src_neg, bool src_abs,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_rint(enc, 3, dest, src, hint, dest_cache, wait_mask,
+                            src_neg, src_abs, out, len);
+}
+
+bool
+agx3_alu_f32ceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                 bool src_neg, bool src_abs,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_f32_rint(enc, 2, dest, src, hint, dest_cache, wait_mask,
+                            src_neg, src_abs, out, len);
 }
 
 bool

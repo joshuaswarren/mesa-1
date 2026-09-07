@@ -4818,6 +4818,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* f30 and f31 are the source's absolute-value and negate modifiers,
+          * witnessed as single-field differences on this exact form. NIR
+          * folds a negation into a float source, so exp(-x) -- vkQuake's fog
+          * term, in every one of its fragment shaders -- arrives here as an
+          * exp2 of a negated register and refused the shader. Only the 32-bit
+          * modifier forms are wired up: that is where both the witnesses and
+          * the refusals are. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_EXP2 &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
@@ -4827,14 +4834,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 src.size != dest.size || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                (half && (src.abs || src.neg)) || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hexp2 : agx3_alu_f32exp2)(
-                   enc, dest.value, src.value,
-                   agx3_post_ra_hint(src), dest.cache, wait,
-                   bytes, &len) ||
+            if (!(half ? agx3_alu_hexp2(enc, dest.value, src.value,
+                                        agx3_post_ra_hint(src), dest.cache,
+                                        wait, bytes, &len)
+                       : agx3_alu_f32exp2_mod(enc, dest.value, src.value,
+                                              agx3_post_ra_hint(src),
+                                              dest.cache, wait, src.neg,
+                                              src.abs, bytes, &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
@@ -4849,33 +4859,47 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 src.size != dest.size || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                (half && (src.abs || src.neg)) || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hlog2 : agx3_alu_f32log2)(
-                   enc, dest.value, src.value,
-                   agx3_post_ra_hint(src), dest.cache, wait,
-                   bytes, &len) ||
+            if (!(half ? agx3_alu_hlog2(enc, dest.value, src.value,
+                                        agx3_post_ra_hint(src), dest.cache,
+                                        wait, bytes, &len)
+                       : agx3_alu_f32log2_mod(enc, dest.value, src.value,
+                                              agx3_post_ra_hint(src),
+                                              dest.cache, wait, src.neg,
+                                              src.abs, bytes, &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }
 
+         /* floor() and ceil() at either width. Only the half forms were wired
+          * up, so a 32-bit floor -- the quantized lightmap coordinate in
+          * vkQuake's world shader -- refused the shader outright. The 32-bit
+          * form is the half one with the width selectors raised, and carries
+          * the same source modifiers as the rest of this form family. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FLOOR &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
+            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
-                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
+                agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != AGX_SIZE_16 || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                src.size != dest.size || agx_channels(src) != 1 ||
+                (half && (src.abs || src.neg)) || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_hfloor(enc, dest.value, src.value,
-                                 agx3_post_ra_hint(src), dest.cache, wait,
-                                 bytes, &len) ||
+            if (!(half ? agx3_alu_hfloor(enc, dest.value, src.value,
+                                         agx3_post_ra_hint(src), dest.cache,
+                                         wait, bytes, &len)
+                       : agx3_alu_f32floor(enc, dest.value, src.value,
+                                           agx3_post_ra_hint(src), dest.cache,
+                                           wait, src.neg, src.abs, bytes,
+                                           &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
@@ -4884,17 +4908,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CEIL &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
+            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
-                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
+                agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != AGX_SIZE_16 || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                src.size != dest.size || agx_channels(src) != 1 ||
+                (half && (src.abs || src.neg)) || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_hceil(enc, dest.value, src.value,
-                                agx3_post_ra_hint(src), dest.cache, wait,
-                                bytes, &len) ||
+            if (!(half ? agx3_alu_hceil(enc, dest.value, src.value,
+                                        agx3_post_ra_hint(src), dest.cache,
+                                        wait, bytes, &len)
+                       : agx3_alu_f32ceil(enc, dest.value, src.value,
+                                          agx3_post_ra_hint(src), dest.cache,
+                                          wait, src.neg, src.abs, bytes,
+                                          &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

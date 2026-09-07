@@ -189,6 +189,182 @@ test_native_f32_log2_exp2(void)
                             false, 1u << 6, bytes, &len));
 }
 
+/*
+ * The source modifiers this whole form family carries: f31 negates the
+ * source, f30 takes its absolute value. Every vector is Apple's own
+ * applegpu_g17p machine code for the named expression, and every one differs
+ * from the unmodified form in exactly those bits.
+ *
+ * exp(-x) is vkQuake's fog term. NIR folds the negation into the source, so
+ * the packer saw `exp2 d32, r.neg` and refused every fragment shader in the
+ * game.
+ */
+static void
+test_native_f32_log2_exp2_modifiers(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   static const struct {
+      const char *name;
+      bool exp2;
+      bool neg, abs;
+      uint8_t bytes[10];
+   } vectors[] = {
+      {"exp2(a[i])", true, false, false,
+       {0xaf, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"exp2(-a[i])", true, true, false,
+       {0xaf, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x01, 0x00}},
+      {"exp2(fabs(a[i]))", true, false, true,
+       {0xaf, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0xc0, 0x00, 0x00}},
+      {"exp2(-fabs(a[i]))", true, true, true,
+       {0xaf, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0xc0, 0x01, 0x00}},
+      {"log2(a[i])", false, false, false,
+       {0x2f, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x00, 0x00}},
+      {"log2(-a[i])", false, true, false,
+       {0x2f, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0x40, 0x01, 0x00}},
+      {"log2(fabs(a[i]))", false, false, true,
+       {0x2f, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0xc0, 0x00, 0x00}},
+      {"log2(-fabs(a[i]))", false, true, true,
+       {0x2f, 0x02, 0x56, 0x00, 0x02, 0x00, 0xb0, 0xc0, 0x01, 0x00}},
+   };
+
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert((vectors[i].exp2 ? agx3_alu_f32exp2_mod : agx3_alu_f32log2_mod)(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+         vectors[i].neg, vectors[i].abs, bytes, &len));
+      assert(len == sizeof(vectors[i].bytes));
+      assert(!memcmp(bytes, vectors[i].bytes, len));
+   }
+
+   /* The unmodified entry point and the modifier one agree when no modifier
+    * is asked for, so nothing silently changed for existing callers. */
+   uint8_t plain[AGX3_ALU_MAX_LENGTH], plen;
+   assert(agx3_alu_f32exp2(AGX_ISA_ENCODING_AGX3B, 4, 6, AGX3_ALU_HINT_CACHE,
+                           true, 1u << 2, plain, &plen));
+   assert(agx3_alu_f32exp2_mod(AGX_ISA_ENCODING_AGX3B, 4, 6,
+                               AGX3_ALU_HINT_CACHE, true, 1u << 2, false,
+                               false, bytes, &len));
+   assert(plen == len && !memcmp(plain, bytes, len));
+
+   /* A negated source is a different instruction, not a no-op. */
+   assert(agx3_alu_f32exp2_mod(AGX_ISA_ENCODING_AGX3B, 4, 6,
+                               AGX3_ALU_HINT_CACHE, true, 1u << 2, true,
+                               false, bytes, &len));
+   assert(plen == len && memcmp(plain, bytes, len) != 0);
+}
+
+/*
+ * Full-precision floor and ceiling. Apple's f32rint with f43 selecting the
+ * mode and the width selectors raised from the half form. floor() on a float
+ * is vkQuake's quantized lightmap coordinate; only the half form was wired
+ * up, so world.frag refused.
+ */
+static void
+test_native_f32_floor_ceil(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* o[i] = floor(a[i]) -- source dead, waiting the load's slot 6. */
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                            false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x00\x02\x00\xb0\x40\x02\x00", 10));
+
+   /* o[i] = ceil(a[i]) -- the same instruction with f43 = 2. */
+   assert(agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                           AGX3_ALU_HINT_DISCARD, false, 1u << 5, false, false,
+                           bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x00\x02\x00\xb0\x40\x04\x00", 10));
+
+   /* o[i] = floor(-a[i]) -- the family's f31 negate. */
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, true, false,
+                            bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x00\x02\x00\xb0\x40\x03\x00", 10));
+
+   /* float x = a[i]; o[i] = floor(x) + x -- the source is retained, and the
+    * destination is cached for the add. This is the CACHE hint the half
+    * encoder still refuses for want of a witness. */
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 4, 0, AGX3_ALU_HINT_CACHE,
+                            true, 1u << 5, false, false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x04\x03\x00\x92\x40\x02\x00", 10));
+
+   /* o[i] = floor(a[i]) * 4 + floor(b[i]) -- the second floor waits slot 1,
+    * so the wait mask reaches further than the half form's slot 6. */
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 4, 4,
+                            AGX3_ALU_HINT_DISCARD, true, 1u << 0, false, false,
+                            bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x10\x54\x04\x03\x08\xb0\x40\x02\x00", 10));
+
+   /* o[i] = ceil(fabs(a[i])) and floor(fabs(a[i])) -- the family's f30. */
+   assert(agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                           AGX3_ALU_HINT_DISCARD, false, 1u << 5, false, true,
+                           bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x00\x02\x00\xb0\xc0\x04\x00", 10));
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, false, true,
+                            bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x00\x02\x00\xb0\xc0\x02\x00", 10));
+
+   /* float x = a[i]; o[i] = ceil(x) + x, and the second of two ceils. */
+   assert(agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 4, 0, AGX3_ALU_HINT_CACHE,
+                           true, 1u << 5, false, false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x00\x56\x04\x03\x00\x92\x40\x04\x00", 10));
+   assert(agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 4, 4,
+                           AGX3_ALU_HINT_DISCARD, true, 1u << 0, false, false,
+                           bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes,
+                  "\x2f\x10\x54\x04\x03\x08\xb0\x40\x04\x00", 10));
+
+   /* The lifetime and wait fields are modelled, not pinned. The shared funop
+    * baseline (agx3_funop_core.c) folds f29 and f40 into its form constant,
+    * so it cannot express a live source or an absent slot-6 wait; these
+    * encoders can, which is why floor and ceil do not fall through to it. */
+   uint8_t live[AGX3_ALU_MAX_LENGTH], llen;
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                            false, live, &llen));
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE,
+                            false, 0, false, false, bytes, &len));
+   assert(llen == len && memcmp(live, bytes, len) != 0);
+
+   /* The half and 32-bit forms are distinct encodings, not aliases. */
+   uint8_t half[AGX3_ALU_MAX_LENGTH], hlen;
+   assert(agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3B, 2, 2, AGX3_ALU_HINT_DISCARD,
+                          false, 1u << 5, half, &hlen));
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 2, 2,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                            false, bytes, &len));
+   assert(hlen == len && memcmp(half, bytes, len) != 0);
+
+   /* A 32-bit operand pair is aligned, only AGX3b is witnessed, and the wait
+    * mask has six slots. */
+   assert(!agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 1, 0, AGX3_ALU_HINT_NONE,
+                             false, 0, false, false, bytes, &len));
+   assert(!agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 0, 1, AGX3_ALU_HINT_NONE,
+                            false, 0, false, false, bytes, &len));
+   assert(!agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
+                             false, 0, false, false, bytes, &len));
+   assert(!agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE,
+                            false, 1u << 6, false, false, bytes, &len));
+}
+
 static void
 test_native_bit_andc(void)
 {
@@ -1980,6 +2156,8 @@ int main(void){
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
    test_native_f32_log2_exp2();
+   test_native_f32_log2_exp2_modifiers();
+   test_native_f32_floor_ceil();
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_add();
