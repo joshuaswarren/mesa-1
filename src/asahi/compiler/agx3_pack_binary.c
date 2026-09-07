@@ -3144,7 +3144,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * two-word RGBA16 key0x10020c00. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32.
- * R8G8_UINT key0x08020500 uses one I8 imageblock word and selector 0x55.
+ * R8G8_UINT key0x08020500 and R8G8_SINT key0x08020400 use one I8
+ * imageblock word and selector 0x55.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3602,7 +3603,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
          0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
       }, {
-         /* Native key0x08020500: one R8G8_UINT I8 word. */
+         /* Native keys0x08020500/0x08020400: one RG8 integer I8 word. */
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
          0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
