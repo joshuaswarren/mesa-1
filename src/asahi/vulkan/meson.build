@@ -835,6 +835,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P R8 UNORM storage.
+    executable(
+      'g17p-vulkan-r8-unorm',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_R8_UNORM=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for exact G17P R16 UNORM colour storage.
     executable(
       'g17p-vulkan-r16-unorm',
