@@ -3213,6 +3213,8 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
                 I->src[3].size != AGX_SIZE_32 ||
                 agx_channels(I->src[3]) != 2)
                return false;
+            if ((I->format == AGX_FORMAT_I32) != ctx->key->g17p_rt0_eot_i32)
+               return false;
             stores++;
             store_format = I->format;
             offset_reg = I->src[2].value;

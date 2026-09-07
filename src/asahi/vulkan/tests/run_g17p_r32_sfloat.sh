@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+package_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+export VK_DRIVER_FILES="$package_dir/g17p_wsi_triangle_icd.json"
+export LD_LIBRARY_PATH="$package_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# G17P_R32_SFLOAT_RECORD_ONLY=1 is intended for DRM-shim. Without it, the
+# binary submits and checks every pixel, both guards, and 3s stability.
+exec "$package_dir/g17p-vulkan-r32-sfloat"

@@ -92,6 +92,9 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    if (tib->logical_format[0] == PIPE_FORMAT_NONE)
       return tib->sample_size_B == 0;
 
+   const bool scalar_r32f = tib->nr_samples == 1 &&
+                            tib->logical_format[0] == PIPE_FORMAT_R32_FLOAT;
+
    return mixed_mrt ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
@@ -101,7 +104,8 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R32_UINT ||
-            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM));
+            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
+            scalar_r32f));
 }
 
 static bool

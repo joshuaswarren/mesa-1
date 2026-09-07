@@ -346,6 +346,10 @@ struct agx_shader_key {
     * backend cannot recover this layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
 
+   /* Authorize the exact scalar-I32 G17P EOT builtin. Set only for logical
+    * formats whose scalar I32 store and PBE descriptor are both grounded. */
+   bool g17p_rt0_eot_i32;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.
