@@ -807,6 +807,42 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
    return n;
 }
 
+/* Pure 8-bit integer outputs have already been clamped and narrowed to 16-bit
+ * NIR lanes. AGX3 tile traffic instead carries two adjacent bytes in each
+ * 16-bit register, so explicitly reproduce that physical packing here. */
+static unsigned
+agx_pack_integer_8_agx3(agx_builder *b, const agx_index *channels,
+                        unsigned nr_channels, enum agx_format format,
+                        agx_index *packed)
+{
+   if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       format != AGX_FORMAT_I8 || nr_channels < 1 || nr_channels > 4)
+      return 0;
+
+   for (unsigned i = 0; i < nr_channels; ++i)
+      if (channels[i].size != AGX_SIZE_16)
+         return 0;
+
+   unsigned n = 0;
+   for (unsigned i = 0; i < nr_channels; i += 2) {
+      if (i + 1 == nr_channels) {
+         packed[n++] = channels[i];
+         continue;
+      }
+
+      agx_index upper = agx_pad_to_32(b, channels[i + 1]);
+      agx_index shifted = agx_temp(b->shader, AGX_SIZE_32);
+      agx_bfi_to(b, shifted, agx_immediate(0), upper,
+                 agx_immediate(8), 0);
+      agx_index lower = agx_and(b, channels[i], agx_immediate(0xff));
+      agx_index pair = agx_temp(b->shader, AGX_SIZE_16);
+      agx_bitop_to(b, pair, lower, shifted, 0xe /* OR */);
+      packed[n++] = pair;
+   }
+
+   return n;
+}
+
 static agx_instr *
 agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
 {
@@ -831,6 +867,9 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
    agx_index packed[4] = {agx_null()};
    unsigned nr_packed =
       agx_pack_normalized_agx3(b, compacted, compact_count, format, packed);
+   if (nr_packed == 0)
+      nr_packed = agx_pack_integer_8_agx3(
+         b, compacted, compact_count, format, packed);
 
    /* G17P's tile store encodes only the lane width.  Unlike AGX2 it cannot
     * narrow an f32 colour to the f16 lanes named by that width, so make the

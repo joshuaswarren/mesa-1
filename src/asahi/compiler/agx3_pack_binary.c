@@ -3143,6 +3143,7 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * and R16G16_SINT key0x08020800 use selector 0x15, shared physically with
  * two-word RGBA16 key0x10020c00. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, despite lowering to the same I32 store as scalar R32.
+ * R8G8_UINT key0x08020500 uses one I8 imageblock word and selector 0x55.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
@@ -3150,6 +3151,7 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_SELECTOR_75,
    AGX3_G17P_RT0_EOT_SELECTOR_15,
    AGX3_G17P_RT0_EOT_I32,
+   AGX3_G17P_RT0_EOT_SELECTOR_55,
 };
 
 static enum agx3_g17p_rt0_eot_kind
@@ -3197,6 +3199,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
          } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
                 (I->format != AGX_FORMAT_U8NORM &&
+                 I->format != AGX_FORMAT_I8 &&
                  I->format != AGX_FORMAT_U16NORM &&
                  I->format != AGX_FORMAT_S16NORM &&
                  I->format != AGX_FORMAT_I16 &&
@@ -3258,6 +3261,9 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
                 ? AGX3_G17P_RT0_EOT_I32
                 : AGX3_G17P_RT0_EOT_NONE;
    }
+
+   if (store_format == AGX_FORMAT_I8)
+      return AGX3_G17P_RT0_EOT_SELECTOR_55;
 
    if (ctx->key->g17p_rt0_eot_i32_selector_15)
       return AGX3_G17P_RT0_EOT_NONE;
@@ -3581,6 +3587,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0xd0, 0x40, 0x10, 0x00,
          0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
          0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+      }, {
+         /* Native key0x08020500: one R8G8_UINT I8 word. */
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+         0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+         0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+         0x50, 0x06, 0x0b, 0x00,
+         0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+         0x50, 0x06, 0x0b, 0x00,
+         0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+         0xd0, 0x40, 0x10, 0x00,
+         0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+         0xa8, 0x55, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
       }};
       /* Native metadata common0=3 means six GPR halves; retain the existing
        * conservative eight-half allocation. Fields38/42 are D=16, requiring
