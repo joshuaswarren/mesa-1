@@ -23,6 +23,31 @@ struct hk_g17p_full_frame_scissor {
  * only the integer bounds after viewport truncation would admit fractions.
  * The caller retains all array records and indices, even when this is true.
  */
+/* The G17P native bind tail (hk_cmd_draw.c, hk_g17p_bind_tail) emits a
+ * viewport-only PPP payload with viewport_count == 1, built from
+ * dyn->vp.viewports[0] and dyn->vp.scissors[0] alone.  The shared codec in
+ * agx_ppp_viewport_payload_core.c can carry up to sixteen, but the native
+ * vertex-state update that selects among them writes viewport_count - 1 at
+ * context+0x1f94 and there is no witness for what the vertex program must
+ * emit to choose a viewport, so more than one is not encodable here.
+ *
+ * Without this predicate a pipeline with viewportCount > 1 rendered every
+ * draw through viewport 0 and dropped the rest silently, which is worse than
+ * refusing: nothing reports it.  multiViewport is advertised false and
+ * maxViewports is 1 on G17P (hk_physical_device.c) so a conformant
+ * application cannot ask for more; this is the driver-side check that keeps
+ * the failure visible if one does anyway.
+ *
+ * Zero is admitted because it is the legal "no viewport bound yet" state --
+ * rasterizer discard, or dynamic viewport state not set -- which the bind
+ * tail already handles by reading the zeroed viewports[0].
+ */
+static inline bool
+hk_g17p_single_viewport_state(uint32_t viewport_count, uint32_t scissor_count)
+{
+   return viewport_count <= 1 && scissor_count <= 1;
+}
+
 static inline bool
 hk_g17p_full_frame_scissor_can_elide(
    const struct hk_g17p_full_frame_scissor *s)
