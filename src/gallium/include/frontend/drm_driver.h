@@ -19,6 +19,9 @@ struct drm_driver_descriptor
     */
    const char *driver_name;
 
+   /** Whether this build contains the driver's real screen implementation. */
+   bool available;
+
    /**
     * Optional pointer to the array of driOptionDescription describing
     * driver-specific driconf options.

@@ -10,9 +10,10 @@
 /**
  * Instantiate a drm_driver_descriptor struct.
  */
-#define DEFINE_DRM_DRIVER_DESCRIPTOR(descriptor_name, driver, _driconf, _driconf_count, func, ...) \
+#define DEFINE_DRM_DRIVER_DESCRIPTOR(descriptor_name, driver, _driconf, _driconf_count, func, _available, ...) \
 const struct drm_driver_descriptor descriptor_name = {         \
    .driver_name = #driver,                                     \
+   .available = _available,                                    \
    .driconf = _driconf,                                        \
    .driconf_count = _driconf_count,                            \
    .create_screen = func,                                      \
@@ -28,7 +29,7 @@ const struct drm_driver_descriptor descriptor_name = {         \
  */
 
 #define DRM_DRIVER_DESCRIPTOR(driver, driconf, driconf_count, ...)      \
-   DEFINE_DRM_DRIVER_DESCRIPTOR(driver##_driver_descriptor, driver, driconf, driconf_count, pipe_##driver##_create_screen, __VA_ARGS__)
+   DEFINE_DRM_DRIVER_DESCRIPTOR(driver##_driver_descriptor, driver, driconf, driconf_count, pipe_##driver##_create_screen, true, __VA_ARGS__)
 
 #define DRM_DRIVER_DESCRIPTOR_STUB(driver)                              \
    static struct pipe_screen *                                          \
@@ -37,11 +38,11 @@ const struct drm_driver_descriptor descriptor_name = {         \
       fprintf(stderr, #driver ": driver missing\n");                    \
       return NULL;                                                      \
    }                                                                    \
-   DRM_DRIVER_DESCRIPTOR(driver, NULL, 0)
+   DEFINE_DRM_DRIVER_DESCRIPTOR(driver##_driver_descriptor, driver, NULL, 0, pipe_##driver##_create_screen, false)
 
 #define DRM_DRIVER_DESCRIPTOR_ALIAS(driver, alias, driconf, driconf_count) \
    DEFINE_DRM_DRIVER_DESCRIPTOR(alias##_driver_descriptor, alias, driconf, \
-                                driconf_count, pipe_##driver##_create_screen, NULL)
+                                driconf_count, pipe_##driver##_create_screen, true, NULL)
 
 #ifdef GALLIUM_KMSRO_ONLY
 #undef GALLIUM_V3D

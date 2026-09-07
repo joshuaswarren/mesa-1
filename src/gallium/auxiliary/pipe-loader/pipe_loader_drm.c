@@ -96,7 +96,8 @@ static const struct drm_driver_descriptor *
 get_driver_descriptor(const char *driver_name)
 {
    for (int i = 0; i < ARRAY_SIZE(driver_descriptors); i++) {
-      if (strcmp(driver_descriptors[i]->driver_name, driver_name) == 0)
+      if (driver_descriptors[i]->available &&
+          strcmp(driver_descriptors[i]->driver_name, driver_name) == 0)
          return driver_descriptors[i];
    }
    return NULL;
@@ -174,9 +175,28 @@ pipe_loader_drm_probe_fd_nodup(struct pipe_loader_device **dev, int fd, bool zin
 
    ddev->dd = get_driver_descriptor(ddev->base.driver_name);
 
-   /* vgem is a virtual device; don't try using it with kmsro */
+   /* vgem is a virtual device; don't try using it with either Zink or kmsro. */
    if (strcmp(ddev->base.driver_name, "vgem") == 0)
       goto fail;
+
+   /* A render-capable kernel device can be driven through Zink when this
+    * Mesa build deliberately omits its native Gallium driver.  Prefer that
+    * direct renderer before kmsro: kmsro is for a KMS-only display fd and
+    * cannot discover another render device when the fd is itself the sole
+    * render node.  Keep KMS-only devices on the kmsro fallback below so a
+    * split display/render topology still allocates scanout correctly. */
+   if (!ddev->dd && !zink && loader_is_device_render_capable(fd)) {
+      const struct drm_driver_descriptor *zink_dd =
+         get_driver_descriptor("zink");
+
+      if (zink_dd) {
+         FREE(ddev->base.driver_name);
+         ddev->base.driver_name = strdup("zink");
+         if (!ddev->base.driver_name)
+            goto fail;
+         ddev->dd = zink_dd;
+      }
+   }
 
    /* kmsro supports lots of drivers, try as a fallback */
    if (!ddev->dd && !zink)
