@@ -1195,8 +1195,14 @@ agx_batch_upload_pbe(struct agx_batch *batch,
    unsigned level = is_buffer ? 0 : view->u.tex.level;
    unsigned layer = is_buffer ? 0 : view->u.tex.first_layer;
 
-   struct agx_pbe_packed legacy;
-   agx_pack(&legacy, PBE, cfg) {
+   /* Build the SEMANTIC descriptor and let the native packer decide how to
+    * encode it. The AGX2 packet is a union -- stride aliases levels/layers,
+    * and the software addressing sideband aliases the extended word -- so
+    * only this producer knows which arm is live, and packing here would
+    * throw that away before the AGX3 encoder could check it.
+    */
+   struct AGX_PBE cfg = {AGX_PBE_header};
+   {
       cfg.dimension =
          agx_translate_tex_dim(target, util_res_sample_count(&tex->base));
       cfg.layout = agx_translate_layout(tex->layout.tiling);
@@ -1298,9 +1304,22 @@ agx_batch_upload_pbe(struct agx_batch *batch,
 
       /* When the descriptor isn't extended architecturally, we can use the last
        * 8 bytes as a sideband. We use it to provide metadata for image atomics.
+       *
+       * Only libagx_image_texel_address() and libagx_buffer_texel_address()
+       * ever read it, and both agx_unpack() the 24-byte AGX2 packet, so
+       * neither can read an AGX3 descriptor at all. A block-access image is
+       * addressed by the hardware and never consults them, so on AGX3 the
+       * sideband would be bits with no Gen9/Gen10 home. Leave it out there;
+       * every other AGX3 descriptor that would carry one stays refused by
+       * agx_gallium_pack_native_pbe(), which is the honest answer until that
+       * ABI is recovered.
        */
+      const bool sideband_has_no_reader =
+         block_access &&
+         agx_gallium_descriptor_generation_is_agx3(descriptor_generation);
+
       if (!cfg.extended && (tex->layout.writeable_image || emrt) &&
-          tex->base.target != PIPE_BUFFER) {
+          tex->base.target != PIPE_BUFFER && !sideband_has_no_reader) {
 
          if (util_res_sample_count(&tex->base) > 1) {
             cfg.aligned_width_msaa_sw =
@@ -1321,9 +1340,9 @@ agx_batch_upload_pbe(struct agx_batch *batch,
             cfg.layer_stride_sw = tex->layout.layer_stride_B;
          }
       }
-   };
+   }
 
-   return agx_gallium_pack_native_pbe(descriptor_generation, out, &legacy);
+   return agx_gallium_pack_native_pbe(descriptor_generation, out, &cfg);
 }
 
 /* Likewise constant buffers, textures, and samplers are handled in a common
