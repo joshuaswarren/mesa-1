@@ -4918,6 +4918,35 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       if (source_imul64)
          agx3_options.lower_int64_options &= ~nir_lower_imul64;
       nir->options = &agx3_options;
+
+      /* Lower the 64-bit multiply BEFORE agx_optimize_nir, not only after.
+       *
+       * Clearing nir_lower_imul64 above leaves a 64-bit imul standing all the
+       * way through agx_optimize_nir, and agx_nir_fuse_algebraic_late's
+       * strength-reduction rule
+       *
+       *    (('imul', a, 1 + (1 << s)), iaddshl(a, a, s))
+       *
+       * is not width-qualified, so a 64-bit `x * 3` is rewritten into a
+       * 64-bit imadshl_agx.  agx_emit_imadshl_agx() then emits a 64-bit iadd,
+       * which G17P has no grounded encoding for, and the whole shader is
+       * refused:
+       *
+       *    no grounded AGX3 encoding for iadd
+       *      [d64:reg4 s0=64:reg4.discard s1=64:reg4.discard]
+       *
+       * That refusal is reached by ordinary shaderInt64 code -- one 64-bit
+       * multiply followed by a 64-bit add -- while shaderInt64 is advertised.
+       * Lowering here leaves only 32-bit multiplies and adds plus
+       * pack_64_2x32_split, so no rule in the late fusion can form a 64-bit
+       * add out of it, and the expansion additionally gets optimized by the
+       * passes that follow rather than being emitted raw.
+       *
+       * The existing call after agx_optimize_nir stays: this pass is
+       * idempotent, and it still covers a 64-bit multiply created during
+       * optimization rather than present in the source. */
+      if (source_imul64)
+         NIR_PASS(_, nir, agx_nir_lower_imul64);
    }
 
    agx_optimize_nir(
