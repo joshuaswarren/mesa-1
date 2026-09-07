@@ -1154,6 +1154,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-image-copy-subregion',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-null-descriptor',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],
