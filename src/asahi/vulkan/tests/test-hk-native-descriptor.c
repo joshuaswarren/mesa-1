@@ -596,6 +596,19 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rgba32_uint_pbe,
                  sizeof(gen9_rgba32_uint_pbe)) == 0);
 
+   /* Adjacent actual G17P RGBA32_SINT entry: signed type3 and EOT format10. */
+   static const uint8_t gen9_rgba32_sint_pbe[32] = {
+      0x22, 0x6e, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.type = AGX_TEXTURE_TYPE_SINT;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rgba32_sint_pbe,
+                 sizeof(gen9_rgba32_sint_pbe)) == 0);
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
+
    /* Actual G17P MTL R16G16B16A16_UINT entry: channels0x32, UINT type2,
     * internal EOT format9 and eight bytes per pixel. */
    static const uint8_t gen9_rgba16_uint_pbe[32] = {

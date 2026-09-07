@@ -363,6 +363,9 @@ struct agx_shader_key {
     * uses the scalar 0x35 selector, unlike the two-word unsigned pair. */
    bool g17p_rt0_eot_i32_four_words;
 
+   /* Select the distinct 84-byte signed four-word I32 builtin. */
+   bool g17p_rt0_eot_i32_signed_four_words;
+
    /* Select the native 0x15 imgwblk variant for an I32 store. This is
     * independently grounded only for the two-word R32G32 SINT layout. */
    bool g17p_rt0_eot_i32_selector_15;

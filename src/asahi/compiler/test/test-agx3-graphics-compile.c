@@ -1936,6 +1936,44 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i32x4.shader);
 
+   /* Fresh signed key0x10020a00 uses an 84-byte program with selector0x35. */
+   nir_builder i32x4_signed = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 SINT RT0 EOT");
+   coords = nir_trim_vector(
+      &i32x4_signed, nir_load_global_invocation_id(&i32x4_signed, 32), 2);
+   nir_image_store_block_agx(
+      &i32x4_signed, nir_imm_intN_t(&i32x4_signed, 0, 16),
+      nir_imm_int(&i32x4_signed, 0), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(i32x4_signed.shader);
+   memset(&part, 0, sizeof(part));
+   key.g17p_rt0_eot_i32_four_words = false;
+   key.g17p_rt0_eot_i32_signed_four_words = true;
+   const bool i32x4_signed_compiled =
+      agx_compile_shader_nir(i32x4_signed.shader, &key, &part);
+   static const uint8_t expected_i32x4_signed[] = {
+      0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
+      0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
+      0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
+      0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
+      0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
+      0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
+      0x00,0x00,0x00,0x80,0x28,0x35,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+   ok &= i32x4_signed_compiled &&
+         part.info.binary_size == sizeof(expected_i32x4_signed) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i32x4_signed) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i32x4_signed,
+                sizeof(expected_i32x4_signed)) == 0;
+   if (i32x4_signed_compiled)
+      free(part.binary);
+   ralloc_free(i32x4_signed.shader);
+   key.g17p_rt0_eot_i32_signed_four_words = false;
+   key.g17p_rt0_eot_i32_four_words = true;
+
    nir_builder bad_i32x4 = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P RGBA32 EOT");
    coords = nir_trim_vector(
