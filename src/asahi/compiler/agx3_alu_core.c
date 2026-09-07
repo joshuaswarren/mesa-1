@@ -1214,7 +1214,8 @@ agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
 /* Exact half-to-float widening uses native mixed-width ADD with negative zero. */
 bool
 agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                    enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                    enum agx3_alu_hint hint, bool src_abs, bool dest_cache,
+                    uint16_t wait_mask,
                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
@@ -1224,14 +1225,19 @@ agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    const struct agx3_field_kv base[] = {
       {9,2},{10,2},{25,2},{26,1},{42,1},{43,2},
    };
-   struct agx3_field_kv fields[12] = {
+   struct agx3_field_kv fields[13] = {
       {2,dest},{18,src},{34,0x80},{11,dest_cache},
       {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
+      {30,src_abs},
    };
    for (unsigned i=0;i<6;i++)
-      fields[6+i] = (struct agx3_field_kv){52+i,!!(wait_mask & (1u<<i))};
+      fields[7+i] = (struct agx3_field_kv){52+i,!!(wait_mask & (1u<<i))};
    for (unsigned ep=0;ep<4;ep++)
-      if (agx3_bind_compose(enc,"f32add",ep,base,6,fields,12,out,len))
+      if (agx3_bind_compose(enc,"f32add",ep,base,6,fields,13,out,len)) {
+         /* metal-nt canonicalizes the absolute modifier tail bit on ep3. */
+         if (src_abs && *len == 10)
+            out[7] |= 0x80;
          return true;
+      }
    return false;
 }

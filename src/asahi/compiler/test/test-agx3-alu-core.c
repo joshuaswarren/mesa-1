@@ -1080,10 +1080,18 @@ static void test_native_widen_half(void)
    for (unsigned i=0;i<4;i++) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,(i&1)*2,i+2,
-         i<2?AGX3_ALU_HINT_DISCARD:AGX3_ALU_HINT_CACHE,false,(i&1)?0:32,bytes,&len));
+         i<2?AGX3_ALU_HINT_DISCARD:AGX3_ALU_HINT_CACHE,false,false,
+         (i&1)?0:32,bytes,&len));
       exact(bytes,len,golden[i]);
    }
-   puts("Native half widening: four Apple even/odd retained/dead vectors PASS");
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+   assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,4,
+      AGX3_ALU_HINT_CACHE,true,false,0,bytes,&len));
+   exact(bytes,len,"09841481020200800100");
+   assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,0,
+      AGX3_ALU_HINT_DISCARD,true,false,0,bytes,&len));
+   exact(bytes,len,"09001c81020200800100");
+   puts("Native half widening/abs: six Apple even/odd retained/dead vectors PASS");
 }
 
 static void test_native_sqrt_step(void)
