@@ -190,6 +190,10 @@
 #define G17P_INDEX_RESTART 0
 #endif
 
+#ifndef G17P_INSTANCE_RATE
+#define G17P_INSTANCE_RATE 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -208,7 +212,12 @@
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_INDIRECT_DRAW
+#if G17P_INSTANCE_RATE
+#include "g17p_vulkan_instance_rate_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_instance_rate_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#elif G17P_INDIRECT_DRAW
 #include "g17p_vulkan_indirect_draw_vert.h"
 #include "g17p_wsi_triangle_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_indirect_draw_vert_spv
@@ -726,7 +735,12 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_INDEX_RESTART
+#if G17P_INSTANCE_RATE
+#define PROBE_NAME "g17p-vulkan-instance-rate"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INDEX_RESTART
 #define PROBE_NAME "g17p-vulkan-index-restart"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -1089,7 +1103,7 @@ has_device_extension(VkPhysicalDevice physical, const char *name)
 }
 #endif
 
-#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || G17P_INSTANCE_RATE
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1285,6 +1299,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_INSTANCE_RATE &&
+       getenv("G17P_INSTANCE_RATE_RECORD_ONLY") != NULL) ||
       (G17P_INDEX_RESTART &&
        getenv("G17P_INDEX_RESTART_RECORD_ONLY") != NULL) ||
       (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
@@ -1572,7 +1588,63 @@ main(void)
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
 
-#if G17P_INDEX_RESTART
+#if G17P_INSTANCE_RATE
+   enum {
+      INSTANCE_VERTEX_BIND_OFFSET = 64,
+      INSTANCE_VERTEX_STRIDE = 24,
+      INSTANCE_VERTEX_ATTRIBUTE_OFFSET = 8,
+      INSTANCE_VERTEX_COUNT = 6,
+      INSTANCE_VERTEX_SUFFIX_BYTES = 64,
+      INSTANCE_VERTEX_BUFFER_BYTES = INSTANCE_VERTEX_BIND_OFFSET +
+                                     INSTANCE_VERTEX_COUNT *
+                                        INSTANCE_VERTEX_STRIDE +
+                                     INSTANCE_VERTEX_SUFFIX_BYTES,
+      INSTANCE_DATA_BIND_OFFSET = 96,
+      INSTANCE_DATA_STRIDE = 32,
+      INSTANCE_DATA_TRANSFORM_OFFSET = 8,
+      INSTANCE_DATA_COUNT = 6,
+      INSTANCE_DATA_SUFFIX_BYTES = 64,
+      INSTANCE_DATA_BUFFER_BYTES = INSTANCE_DATA_BIND_OFFSET +
+                                   INSTANCE_DATA_COUNT * INSTANCE_DATA_STRIDE +
+                                   INSTANCE_DATA_SUFFIX_BYTES,
+   };
+   static const float positions[INSTANCE_VERTEX_COUNT][2] = {
+      {-1.0f, -1.0f}, {1.0f, -1.0f}, {-1.0f, 1.0f},
+      {-1.0f, 1.0f},  {1.0f, -1.0f}, {1.0f, 1.0f},
+   };
+   uint8_t vertex_expected[INSTANCE_VERTEX_BUFFER_BYTES];
+   memset(vertex_expected, 0xa5, sizeof(vertex_expected));
+   for (uint32_t i = 0; i < INSTANCE_VERTEX_COUNT; ++i) {
+      uint8_t *record = vertex_expected + INSTANCE_VERTEX_BIND_OFFSET +
+                        i * INSTANCE_VERTEX_STRIDE;
+      memset(record, 0, INSTANCE_VERTEX_STRIDE);
+      memcpy(record + INSTANCE_VERTEX_ATTRIBUTE_OFFSET, positions[i],
+             sizeof(positions[i]));
+   }
+   struct mapped_buffer vertex = create_mapped_buffer(
+      device, &memory_properties, sizeof(vertex_expected),
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "instance-rate vertex buffer");
+   memcpy(vertex.map, vertex_expected, sizeof(vertex_expected));
+
+   uint8_t instance_expected[INSTANCE_DATA_BUFFER_BYTES];
+   memset(instance_expected, 0xa5, sizeof(instance_expected));
+   memset(instance_expected + INSTANCE_DATA_BIND_OFFSET, 0,
+          INSTANCE_DATA_COUNT * INSTANCE_DATA_STRIDE);
+   static const float transforms[2][4] = {
+      {0.5f, 1.0f, -0.5f, 0.0f},
+      {0.5f, 1.0f, 0.5f, 0.0f},
+   };
+   for (uint32_t i = 0; i < 2; ++i) {
+      uint8_t *record = instance_expected + INSTANCE_DATA_BIND_OFFSET +
+                        (i + 3) * INSTANCE_DATA_STRIDE;
+      memcpy(record + INSTANCE_DATA_TRANSFORM_OFFSET, transforms[i],
+             sizeof(transforms[i]));
+   }
+   struct mapped_buffer instance_data = create_mapped_buffer(
+      device, &memory_properties, sizeof(instance_expected),
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "instance-rate data buffer");
+   memcpy(instance_data.map, instance_expected, sizeof(instance_expected));
+#elif G17P_INDEX_RESTART
    enum {
       RESTART_VERTEX_COUNT = UINT16_MAX + 1u,
       RESTART_VERTEX_OFFSET = 64,
@@ -1984,6 +2056,43 @@ main(void)
          .pName = "main",
       },
    };
+#if G17P_INSTANCE_RATE
+   const VkVertexInputBindingDescription vertex_bindings[] = {
+      {
+         .binding = 0,
+         .stride = INSTANCE_VERTEX_STRIDE,
+         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+      },
+      {
+         .binding = 1,
+         .stride = INSTANCE_DATA_STRIDE,
+         .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+      },
+   };
+   const VkVertexInputAttributeDescription vertex_attributes[] = {
+      {
+         .location = 0,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32_SFLOAT,
+         .offset = INSTANCE_VERTEX_ATTRIBUTE_OFFSET,
+      },
+      {
+         .location = 1,
+         .binding = 1,
+         .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+         .offset = INSTANCE_DATA_TRANSFORM_OFFSET,
+      },
+   };
+   const VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount =
+         sizeof(vertex_bindings) / sizeof(vertex_bindings[0]),
+      .pVertexBindingDescriptions = vertex_bindings,
+      .vertexAttributeDescriptionCount =
+         sizeof(vertex_attributes) / sizeof(vertex_attributes[0]),
+      .pVertexAttributeDescriptions = vertex_attributes,
+   };
+#else
    const VkVertexInputBindingDescription vertex_binding = {
       .binding = 0,
       .stride = 2 * sizeof(float),
@@ -2001,6 +2110,7 @@ main(void)
       .vertexAttributeDescriptionCount = 1,
       .pVertexAttributeDescriptions = &vertex_attribute,
    };
+#endif
    const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
       .topology = G17P_INDEX_RESTART ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
@@ -2130,6 +2240,15 @@ main(void)
                         VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
+#if G17P_INSTANCE_RATE
+   const VkBuffer vertex_buffers[] = {vertex.buffer, instance_data.buffer};
+   const VkDeviceSize vertex_offsets[] = {
+      INSTANCE_VERTEX_BIND_OFFSET,
+      INSTANCE_DATA_BIND_OFFSET,
+   };
+   vkCmdBindVertexBuffers(command_buffer, 0, 2, vertex_buffers,
+                          vertex_offsets);
+#else
 #if G17P_INDEX_RESTART
    const VkDeviceSize vertex_offset = RESTART_VERTEX_OFFSET;
 #else
@@ -2137,7 +2256,10 @@ main(void)
 #endif
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
-#if G17P_INDEX_RESTART
+#endif
+#if G17P_INSTANCE_RATE
+   vkCmdDraw(command_buffer, 6, 2, 0, 3);
+#elif G17P_INDEX_RESTART
    vkCmdBindIndexBuffer(command_buffer, restart_index.buffer,
                         RESTART_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
    vkCmdDrawIndexed(command_buffer, 7, 1, RESTART_FIRST_INDEX, 0, 0);
@@ -2189,7 +2311,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_INDEX_RESTART || G17P_INDIRECT_DRAW || G17P_F16_IO ||        \
+#if G17P_INSTANCE_RATE || G17P_INDEX_RESTART || G17P_INDIRECT_DRAW || \
+   G17P_F16_IO ||                                                       \
    G17P_RG16_UNORM ||                                                  \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -2244,6 +2367,11 @@ main(void)
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 
+#if G17P_INSTANCE_RATE
+   if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
+       !verify_upload(&instance_data, instance_expected, "instance input"))
+      return EXIT_FAILURE;
+#endif
 #if G17P_INDIRECT_DRAW
    if (!verify_upload(&indirect, indirect_expected, "indirect input"))
       return EXIT_FAILURE;
@@ -2258,7 +2386,7 @@ main(void)
       return EXIT_FAILURE;
 #endif
 
-#if G17P_INDEX_RESTART || G17P_INDIRECT_DRAW ||                         \
+#if G17P_INSTANCE_RATE || G17P_INDEX_RESTART || G17P_INDIRECT_DRAW ||   \
    G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -2275,6 +2403,11 @@ main(void)
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
+#if G17P_INSTANCE_RATE
+   if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
+       !verify_upload(&instance_data, instance_expected, "instance input"))
+      return EXIT_FAILURE;
+#endif
 #if G17P_INDIRECT_DRAW
    if (!verify_upload(&indirect, indirect_expected, "indirect input"))
       return EXIT_FAILURE;
@@ -2291,7 +2424,13 @@ main(void)
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_INDEX_RESTART
+#if G17P_INSTANCE_RATE
+   printf(PROBE_NAME ": PASS — two distinct instance-rate quads exact "
+                     "immediately/3s, firstInstance 3, padded binding/stride/"
+                     "attribute offsets, all source/readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_INDEX_RESTART
    printf(PROBE_NAME ": PASS — triangle-strip primitive restart exact "
                      "immediately/3s, firstIndex 31 crosses byte 128, "
                      "all vertex/index/readback guards unchanged, checksum "
