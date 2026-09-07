@@ -190,6 +190,25 @@ test_geometry_pack(void)
          packed[AGX3_G17P_INDIRECT_GEOMETRY_SIZE + 1] == 0xa5);
    CHECK(memcmp(packed + 1, expected, sizeof(expected)) == 0);
 
+   /* The named half offsets must address the halves the packer wrote, not
+    * merely divide the block in two: a driver kernel writes through them. */
+   CHECK(AGX3_G17P_INDIRECT_GEOMETRY_GLOBAL_OFFSET == 0);
+   CHECK(AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET +
+            3 * sizeof(uint32_t) == AGX3_G17P_INDIRECT_GEOMETRY_SIZE);
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      uint32_t word;
+      memcpy(&word,
+             packed + 1 + AGX3_G17P_INDIRECT_GEOMETRY_GLOBAL_OFFSET +
+                axis * sizeof(word),
+             sizeof(word));
+      CHECK(word == geometry.global_size[axis]);
+      memcpy(&word,
+             packed + 1 + AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET +
+                axis * sizeof(word),
+             sizeof(word));
+      CHECK(word == geometry.local_size[axis]);
+   }
+
    struct agx3_g17p_indirect_geometry parsed;
    CHECK(agx3_g17p_indirect_geometry_unpack(expected, &parsed));
    CHECK(memcmp(&parsed, &geometry, sizeof(parsed)) == 0);

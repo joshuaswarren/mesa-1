@@ -49,6 +49,11 @@ extern "C" {
 #define AGX3_G17P_INDIRECT_GEOMETRY_WORDS 6u
 #define AGX3_G17P_INDIRECT_GEOMETRY_SIZE  (AGX3_G17P_INDIRECT_GEOMETRY_WORDS * 4u)
 
+/* Byte offsets of the two halves within the block, so a writer names the field
+ * it means instead of deriving it from the total size. */
+#define AGX3_G17P_INDIRECT_GEOMETRY_GLOBAL_OFFSET 0u
+#define AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET  12u
+
 /* agx3_g17p_native_indirect_compute_dispatch_append() splits the geometry
  * address into two u32 and requires a 4-byte-aligned address; the helper
  * writes whole u32 words, so this is the real hardware requirement. */
