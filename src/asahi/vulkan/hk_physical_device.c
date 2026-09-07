@@ -721,6 +721,24 @@ hk_get_device_features(
       features->multiview = false;
       features->transformFeedback = false;
       features->geometryStreams = false;
+      /* vkCmdDrawIndirectCount/vkCmdDrawIndexedIndirectCount reach
+       * libagx_predicate_indirect, and every libagx precompiled kernel is
+       * dispatched through hk_dispatch_precomp() -> hk_dispatch_with_usc_launch(),
+       * which refuses AGX_CS_GENERATION_HAL200 outright: `usc` names an AGX2
+       * USC block and an AGX3 direct launch needs a dispatch-local Ioto
+       * program VA instead.  So the count form is not merely untested here,
+       * it fails every time, and it fails at vkEndCommandBuffer rather than
+       * at device selection.  Direct and indirect draws without a count
+       * buffer keep their native HAL200 path and stay advertised.  Re-enable
+       * this with the Ioto meta-kernel launch, not before. */
+      features->drawIndirectCount = false;
+      /* hk_agx3_g17p_rt0_tile_layout_supported() refuses any tilebuffer
+       * layout with `layered` set, so a render pass with more than one layer
+       * has no BG/EOT program and is refused at vkCmdBeginRendering.  Writing
+       * gl_Layer is meaningless without one.  maxFramebufferLayers drops to 1
+       * alongside it in hk_get_device_properties(); this is unimplemented,
+       * not hardware-impossible -- it needs layered BG/EOT programs. */
+      features->shaderOutputLayer = false;
       /* hk_g17p_bind_tail builds one viewport transform and one region clip
        * from dyn->vp.viewports[0] / dyn->vp.scissors[0], and the native
        * vertex-state update that would select among several has no witness
@@ -1149,6 +1167,12 @@ hk_get_device_properties(const struct agx_device *dev,
    if (dev->chip == AGX_CHIP_G17P) {
       /* Required pairing for features->multiViewport == false. */
       properties->maxViewports = 1;
+
+      /* Pairs with features->shaderOutputLayer == false: the G17P tile layout
+       * has no layered form, so one layer is all a render pass can bind.
+       * Reporting 2048 here let an application build a layered framebuffer
+       * that vkCmdBeginRendering then refused. */
+      properties->maxFramebufferLayers = 1;
 
       /* Measured per operation under the G17P drm-shim with
        * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
