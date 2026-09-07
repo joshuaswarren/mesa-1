@@ -429,6 +429,67 @@ check_device_shuffle_compute(enum agx_isa_encoding encoding)
 }
 
 static bool
+check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "AGX3 divergent elect and broadcast-first");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *value = nir_load_global(
+      &b, 1, 32, nir_imm_int64(&b, 0x1000),
+      .align_mul = sizeof(uint32_t));
+   nir_push_if(&b, nir_ine_imm(&b, value, 0));
+   nir_def *first = nir_read_first_invocation(&b, value);
+   nir_def *elected = nir_b2i32(&b, nir_elect(&b, 1));
+   nir_store_global(&b, nir_iadd(&b, first, elected),
+                    nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   nir_pop_if(&b, NULL);
+   agx_preprocess_nir(b.shader);
+
+   bool lowered = true;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            const nir_intrinsic_op op =
+               nir_instr_as_intrinsic(instr)->intrinsic;
+            if (op == nir_intrinsic_elect ||
+                op == nir_intrinsic_read_first_invocation ||
+                op == nir_intrinsic_load_active_subgroup_invocation_agx)
+               lowered = false;
+         }
+      }
+   }
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = encoding;
+   struct agx_shader_part part = {0};
+   const bool compiled =
+      lowered && agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid =
+      compiled && part.binary != NULL && part.info.binary_size > sizeof(end) &&
+      (encoding == AGX_ISA_ENCODING_AGX2 ||
+       memcmp((const uint8_t *)part.binary + part.info.binary_size -
+                 sizeof(end),
+              end, sizeof(end)) == 0);
+   if (!valid)
+      fprintf(stderr,
+              "elect/broadcast-first lowering failed for encoding %u\n",
+              encoding);
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_device_rmw_compute(enum agx_isa_encoding encoding)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
@@ -1171,6 +1232,14 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--elect-only")) {
+      const bool valid =
+         check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2) &&
+         check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX3B);
+      fprintf(stderr, "elect/broadcast-first lowering: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
 
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
@@ -1202,6 +1271,8 @@ main(int argc, char **argv)
       return 1;
    if (!check_half_add_compute())
       return 1;
+   if (!check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2))
+      return 1;
 
    for (unsigned i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {
       if (!check_empty_compute(encodings[i]))
@@ -1219,6 +1290,9 @@ main(int argc, char **argv)
       if (!check_device_ballot_compute(encodings[i]))
          return 1;
       if (!check_device_shuffle_compute(encodings[i]))
+         return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B &&
+          !check_elect_broadcast_first_compute(encodings[i]))
          return 1;
       if (!check_device_rmw_compute(encodings[i]))
          return 1;
