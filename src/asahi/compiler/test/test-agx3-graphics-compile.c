@@ -1912,6 +1912,63 @@ test_g17p_eot_block_store(void)
    key.g17p_rt0_eot_i32 = false;
    key.g17p_rt0_eot_words = 0;
 
+   /* Fresh Apple builtin key0x10020900: an RGBA16_UINT attachment lowers to
+    * exactly two I16 imageblock words and selects the native 0x15 EOT. */
+   nir_builder i16 = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA16 UINT RT0 EOT");
+   coords =
+      nir_trim_vector(&i16, nir_load_global_invocation_id(&i16, 32), 2);
+   nir_image_store_block_agx(
+      &i16, nir_imm_intN_t(&i16, 0, 16), nir_imm_int(&i16, 0), coords,
+      .format = PIPE_FORMAT_R16_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   agx_preprocess_nir(i16.shader);
+   memset(&part, 0, sizeof(part));
+   key.g17p_rt0_eot_words = 2;
+   const bool i16_compiled = agx_compile_shader_nir(i16.shader, &key, &part);
+   static const uint8_t expected_i16[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,0x0c,0x9d,0x10,0x26,
+      0x24,0xa9,0x10,0x26,0x9f,0x10,0x54,0x00,0x00,0x04,0x14,0x00,
+      0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,0x00,0x00,0x10,0x00,
+      0x50,0x06,0x0b,0x00,0x97,0x05,0x54,0x04,0x00,0x08,0x00,0x00,
+      0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,
+      0xa8,0x15,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+   ok &= i16_compiled && part.info.binary_size == sizeof(expected_i16) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i16) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i16, sizeof(expected_i16)) == 0;
+   if (i16_compiled)
+      free(part.binary);
+   ralloc_free(i16.shader);
+
+   /* Do not let an ungrounded I16 word count inherit the same selector. */
+   nir_builder bad_i16 = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P I16 EOT");
+   coords = nir_trim_vector(
+      &bad_i16, nir_load_global_invocation_id(&bad_i16, 32), 2);
+   nir_image_store_block_agx(
+      &bad_i16, nir_imm_intN_t(&bad_i16, 0, 16), nir_imm_int(&bad_i16, 0),
+      coords, .format = PIPE_FORMAT_R16_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(bad_i16.shader);
+   memset(&part, 0xa5, sizeof(part));
+   key.g17p_rt0_eot_words = 3;
+   const bool bad_i16_compiled =
+      agx_compile_shader_nir(bad_i16.shader, &key, &part);
+   const struct agx_shader_part cleared_i16 = {0};
+   if (bad_i16_compiled ||
+       memcmp(&part, &cleared_i16, sizeof(part)) != 0) {
+      fprintf(stderr, "unsupported G17P I16 word count did not fail closed\n");
+      ok = false;
+   }
+   if (bad_i16_compiled)
+      free(part.binary);
+   ralloc_free(bad_i16.shader);
+   key.g17p_rt0_eot_words = 0;
+
    /* A different store format must not inherit RT0's byte string. */
    nir_builder bad = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P EOT");

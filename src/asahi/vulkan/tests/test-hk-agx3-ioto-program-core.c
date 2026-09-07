@@ -1746,6 +1746,24 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.sample_size_B == 8);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
 
+   enum pipe_format rgba16_uint[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16B16A16_UINT,
+   };
+   tib = agx_build_tilebuffer_layout(rgba16_uint, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.nr_samples == 1 && tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+   tib = agx_build_tilebuffer_layout(rgba16_uint, 1, 2, false);
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+
+   /* The adjacent signed format remains closed until separately grounded. */
+   enum pipe_format rgba16_sint[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16B16A16_SINT,
+   };
+   tib = agx_build_tilebuffer_layout(rgba16_sint, 1, 1, false);
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+
    enum pipe_format r32_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32_UINT,
    };

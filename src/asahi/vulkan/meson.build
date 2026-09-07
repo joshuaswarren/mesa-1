@@ -575,6 +575,16 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # F01b public Vulkan oracle for exact G17P R16G16B16A16 UINT storage.
+    executable(
+      'g17p-vulkan-rgba16-uint',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RGBA16_UINT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for exact G17P RG16 SNORM conversion/storage.
     executable(
       'g17p-vulkan-rg16-snorm',

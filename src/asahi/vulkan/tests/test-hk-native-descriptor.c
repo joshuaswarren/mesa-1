@@ -579,6 +579,25 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rg32_uint_pbe,
                  sizeof(gen9_rg32_uint_pbe)) == 0);
 
+   /* Actual G17P MTL R16G16B16A16_UINT entry: channels0x32, UINT type2,
+    * internal EOT format9 and eight bytes per pixel. */
+   static const uint8_t gen9_rgba16_uint_pbe[32] = {
+      0xa2, 0x4c, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.channels = AGX_CHANNELS_R16G16B16A16;
+   pbe.type = AGX_TEXTURE_TYPE_UINT;
+   pbe.swizzle_g = AGX_CHANNEL_G;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+   pbe.swizzle_a = AGX_CHANNEL_A;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_rgba16_uint_pbe,
+                 sizeof(gen9_rgba16_uint_pbe)) == 0);
+   pbe.swizzle_b = 0;
+   pbe.swizzle_a = 0;
+
    /* Actual G17P UMD table entry for MTL format33 (RG8_UINT) resolves to
     * channels0x0a, UINT type2 and two bytes per pixel. */
    static const uint8_t gen9_rg8_uint_pbe[32] = {

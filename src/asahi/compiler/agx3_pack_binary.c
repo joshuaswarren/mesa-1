@@ -3140,8 +3140,9 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
  * the same one-word program for signed RG16 while PBE describes signedness.
  * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
- * and R16G16_SINT key0x08020800 use selector 0x15, shared physically with
- * two-word RGBA16 key0x10020c00. R32G32_SINT key0x08021200 also uses the
+ * and R16G16_SINT key0x08020800 use selector 0x15. Fresh G17P
+ * R16G16B16A16_UINT key0x10020900 uses the same selector with exactly two
+ * imageblock words. R32G32_SINT key0x08021200 also uses the
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32.
  * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
@@ -3309,8 +3310,14 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    if (ctx->key->g17p_rt0_eot_i32_selector_15 ||
        ctx->key->g17p_rt0_eot_i32_selector_75)
       return AGX3_G17P_RT0_EOT_NONE;
-   if (store_format == AGX_FORMAT_I16)
-      return AGX3_G17P_RT0_EOT_SELECTOR_15;
+   if (store_format == AGX_FORMAT_I16) {
+      /* RG16 and RGBA16 integer stores use the same native selector, but only
+       * the exact one- and two-word shapes have Apple builtin evidence. */
+      return (ctx->key->g17p_rt0_eot_words == 1 ||
+              ctx->key->g17p_rt0_eot_words == 2)
+                ? AGX3_G17P_RT0_EOT_SELECTOR_15
+                : AGX3_G17P_RT0_EOT_NONE;
+   }
 
    return AGX3_G17P_RT0_EOT_SELECTOR_75;
 }
