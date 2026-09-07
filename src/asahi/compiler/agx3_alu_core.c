@@ -1117,6 +1117,46 @@ agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
+/* Scalar half add uses the register, lifetime and six-slot wait fields pinned
+ * by fresh G17P add_dead/add_live Metal witnesses. */
+bool
+agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
+              const uint16_t src[2], const enum agx3_alu_hint hints[2],
+              bool dest_cache, uint16_t wait_mask,
+              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       dest >= 256 || src[0] >= 256 || src[1] >= 256 ||
+       (wait_mask & ~UINT16_C(0x3f)) ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {24, 2}, {25, 1}, {41, 2}, {42, 1},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest},
+      {17, src[0]},
+      {34, src[1]},
+      {11, dest_cache},
+      {26, hints[0] == AGX3_ALU_HINT_CACHE},
+      {28, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {43, hints[1] == AGX3_ALU_HINT_CACHE},
+      {45, hints[1] == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned i = 0; i < 6; ++i)
+      fields[8 + i] =
+         (struct agx3_field_kv){51 + i, !!(wait_mask & (1u << i))};
+
+   for (unsigned ep = 0; ep < 4; ++ep) {
+      if (agx3_bind_compose(enc, "f16add", ep, base, 6, fields, 14, out, len))
+         return true;
+   }
+
+   return false;
+}
+
 /* Exact half-to-float widening uses native mixed-width ADD with negative zero. */
 bool
 agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,

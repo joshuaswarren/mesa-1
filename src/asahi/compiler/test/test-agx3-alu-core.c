@@ -995,6 +995,43 @@ static void test_native_half_multiply(void)
    puts("Native half multiply: two complete Apple live/dead vectors PASS");
 }
 
+static void test_native_half_add(void)
+{
+   {
+      const uint16_t src[] = {2, 3};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+      };
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 2, src, hints, false, 32,
+                           bytes, &len));
+      exact(bytes, len, "10021c0300c0");
+   }
+   {
+      const uint16_t src[] = {2, 3};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+      };
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 1, src, hints, true, 32,
+                           bytes, &len));
+      exact(bytes, len, "0882248300c0");
+   }
+
+   const uint16_t src[] = {2, 3};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3C, 0, src, hints, false, 0,
+                         bytes, &len));
+   assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 256, src, hints, false, 0,
+                         bytes, &len));
+   assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 0, src, hints, false, 0x40,
+                         bytes, &len));
+   puts("Native half add: two exact Apple vectors and bounds PASS");
+}
+
 static void test_native_widen_half(void)
 {
    const char *golden[]={"09021c8100c2","19021c810802","0984148100c2","198414810802"};
@@ -1166,6 +1203,7 @@ int main(void){
    test_native_ft1();
    test_native_high_float_registers();
    test_native_widen_half();
+   test_native_half_add();
    test_native_half_multiply();
    test_native_narrow_multiply();
    test_native_sqrt_step();

@@ -5309,6 +5309,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate) {
+            uint16_t src[2];
+            enum agx3_alu_hint hints[2];
+            agx_index dst = I->dest[0];
+            if (!agx3_src_is_register(dst) || dst.memory ||
+                dst.size != AGX_SIZE_16 || agx_channels(dst) != 1)
+               AGX3_REFUSE(I);
+            for (unsigned i = 0; i < 2; ++i) {
+               agx_index x = I->src[i];
+               if (!agx3_src_is_register(x) || x.memory ||
+                   x.size != AGX_SIZE_16 || agx_channels(x) != 1 || x.abs ||
+                   x.neg || x.kill || (x.cache && x.discard))
+                  AGX3_REFUSE(I);
+               src[i] = x.value;
+               hints[i] = agx3_post_ra_hint(x);
+            }
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_hadd(enc, dst.value, src, hints, dst.cache, wait,
+                               bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Native scalar f32 x f16 -> f32. Keep the half register distinct
           * from its neighbour, preserve post-RA hints and producer waits. */
          if (I->op == AGX_OPCODE_FMUL && I->nr_dests == 1 &&
