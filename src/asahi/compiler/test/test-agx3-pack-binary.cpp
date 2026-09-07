@@ -4097,6 +4097,30 @@ TEST_F(AGX3PackBinary, ProjectiveRhwMatchesNativeAndKeepsUserInterp)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, ProjectiveRhwStartsAfterCoefficientLoads)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(b, agx_register(2, AGX_SIZE_32), agx_immediate(4), 1);
+   agx_index rhw = agx_register(8, AGX_SIZE_32);
+   agx_rhw_interp_agx3_to(b, rhw, agx_immediate(0), agx_immediate(0),
+                         AGX_INTERPOLATION_CENTER);
+   agx_persp_rcp_agx3_to(b, agx_register(10, AGX_SIZE_32), rhw, 0);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_vary_ldcf_at_start(AGX_ISA_ENCODING_AGX3B, 2, 4, 1,
+                                      true, bytes, &len));
+   std::vector<uint8_t> prefix(bytes, bytes + len);
+   ASSERT_TRUE(agx3_vary_projective_rhw(AGX_ISA_ENCODING_AGX3B, 8, 0, true,
+                                       bytes, &len));
+   prefix.insert(prefix.end(), bytes, bytes + len);
+
+   const auto code = pack(b);
+   ASSERT_GE(code.size(), prefix.size());
+   EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), code.begin()));
+}
+
 TEST_F(AGX3PackBinary, ProjectiveRhwModeIndependentOfFirstAndRcpDestination)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

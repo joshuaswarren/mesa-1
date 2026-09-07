@@ -4263,6 +4263,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned vertex_loads_seen = 0;
    unsigned loop_depth = 1;
    bool interpolation_started = false;
+   bool coefficient_load_started = false;
    if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
@@ -4418,10 +4419,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_LDCF) {
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT && !interpolation_started;
+               ctx->stage == MESA_SHADER_FRAGMENT && !coefficient_load_started;
             if (!agx3_emit_ldcf(emission, enc, I, slot, wait, first))
                AGX3_REFUSE(I);
-            interpolation_started = true;
+            coefficient_load_started = true;
             continue;
          }
 
