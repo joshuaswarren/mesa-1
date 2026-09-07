@@ -1468,9 +1468,12 @@ TEST_F(AGX3PackBinary, SimdReductionsAndExactPrefixes)
    }
 }
 
-TEST_F(AGX3PackBinary, G17PClusteredIntegerMinMax)
+TEST_F(AGX3PackBinary, G17PClusteredIntegerReductions)
 {
-   for (unsigned op : {AGX3_SUBGROUP_REDUCE_SMIN,
+   for (unsigned op : {AGX3_SUBGROUP_REDUCE_AND,
+                       AGX3_SUBGROUP_REDUCE_OR,
+                       AGX3_SUBGROUP_REDUCE_XOR,
+                       AGX3_SUBGROUP_REDUCE_SMIN,
                        AGX3_SUBGROUP_REDUCE_SMAX,
                        AGX3_SUBGROUP_REDUCE_UMIN,
                        AGX3_SUBGROUP_REDUCE_UMAX}) {

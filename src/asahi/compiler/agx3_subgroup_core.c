@@ -260,13 +260,13 @@ struct reduce_form {
 };
 
 static const struct reduce_form reduce_forms[AGX3_SUBGROUP_REDUCE_NUM] = {
-   [AGX3_SUBGROUP_REDUCE_AND] = {"sRedAND", "", 169, 0, false, 2},
+   [AGX3_SUBGROUP_REDUCE_AND] = {"sRedAND", "qRedAND", 169, 0, false, 2},
    [AGX3_SUBGROUP_REDUCE_FADD] = {"sRedf32add", "qRedf32add", 172, 126, true,
                                   0},
-   [AGX3_SUBGROUP_REDUCE_OR] = {"sRedOR", "", 177, 0, false, 2},
+   [AGX3_SUBGROUP_REDUCE_OR] = {"sRedOR", "qRedOR", 177, 0, false, 2},
    [AGX3_SUBGROUP_REDUCE_FMUL] = {"sRedf32mul", "qRedf32mul", 173, 127, true,
                                   0},
-   [AGX3_SUBGROUP_REDUCE_XOR] = {"sRedXOR", "", 182, 0, false, 2},
+   [AGX3_SUBGROUP_REDUCE_XOR] = {"sRedXOR", "qRedXOR", 182, 0, false, 2},
    [AGX3_SUBGROUP_REDUCE_FMIN] = {"sRedfmin", "qRedfmin", 175, 129, true, 0},
    [AGX3_SUBGROUP_REDUCE_FMAX] = {"sRedfmax", "qRedfmax", 174, 128, true, 0},
    [AGX3_SUBGROUP_REDUCE_IADD] = {"sRediadd", "qRediadd", 176, 130, false, 0},
@@ -292,10 +292,14 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    const char *mnemonic = d->quad ? f->quad : f->simd;
    if (mnemonic == NULL || mnemonic[0] == '\0')
       return false;
-   /* The newly recovered integer min/max quad words are G17P/AGX3b
-    * witnesses. Preserve the existing AGX3c boundary until independently
-    * captured on that encoding. */
-   if (d->quad && is_c(enc) && d->op >= AGX3_SUBGROUP_REDUCE_SMIN)
+   /* The newly recovered integer min/max and bitwise quad words are
+    * G17P/AGX3b witnesses. Preserve the existing AGX3c boundary until
+    * independently captured on that encoding. */
+   if (d->quad && is_c(enc) &&
+       (d->op == AGX3_SUBGROUP_REDUCE_AND ||
+        d->op == AGX3_SUBGROUP_REDUCE_OR ||
+        d->op == AGX3_SUBGROUP_REDUCE_XOR ||
+        d->op >= AGX3_SUBGROUP_REDUCE_SMIN))
       return false;
    if (d->prefix && (d->quad || (d->op != AGX3_SUBGROUP_REDUCE_FADD &&
                                  d->op != AGX3_SUBGROUP_REDUCE_FMUL &&

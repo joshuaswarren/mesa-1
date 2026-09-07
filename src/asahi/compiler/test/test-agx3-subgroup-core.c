@@ -279,6 +279,15 @@ test_reduce_vectors(void)
    static const uint8_t qsmax_final_b[] = {
       0xb7, 0x02, 0x54, 0x02, 0x02, 0x04, 0x14, 0x07,
    };
+   static const uint8_t qand_live_wait6_b[] = {
+      0x37, 0x00, 0x56, 0x00, 0x02, 0x08, 0x16, 0x01,
+   };
+   static const uint8_t qor_live_b[] = {
+      0xb7, 0x00, 0x54, 0x02, 0x02, 0x08, 0x16, 0x01,
+   };
+   static const uint8_t qxor_final_b[] = {
+      0x37, 0x01, 0x54, 0x04, 0x02, 0x08, 0x14, 0x03,
+   };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    struct agx3_subgroup_reduce_desc d = {
       .op = AGX3_SUBGROUP_REDUCE_FADD,
@@ -387,6 +396,34 @@ test_reduce_vectors(void)
    CHECK(bytes_equal(out, length, qsmax_final_b, sizeof(qsmax_final_b)));
    CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out,
                                        &length));
+
+   d = (struct agx3_subgroup_reduce_desc){
+      .quad = true,
+      .op = AGX3_SUBGROUP_REDUCE_AND,
+      .src = 4,
+      .wait_mask = 1u << 5,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qand_live_wait6_b,
+                     sizeof(qand_live_wait6_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_OR;
+   d.dest = 2;
+   d.wait_mask = 0;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qor_live_b, sizeof(qor_live_b)));
+
+   d.op = AGX3_SUBGROUP_REDUCE_XOR;
+   d.dest = 4;
+   d.src_live = false;
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, qxor_final_b, sizeof(qxor_final_b)));
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out,
+                                       &length));
    return 0;
 }
 
@@ -458,9 +495,11 @@ test_rejection(void)
       .op = AGX3_SUBGROUP_REDUCE_AND,
    };
    CHECK(
+      !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &r, out, &length));
+   r.prefix = true;
+   CHECK(
       !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
    r.quad = false;
-   r.prefix = true;
    CHECK(
       !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
    r.prefix = false;
