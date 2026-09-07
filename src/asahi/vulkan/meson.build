@@ -647,6 +647,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-robust-buffer2',
+      files('tests/g17p_vulkan_robust_buffer2.c'),
+      include_directories : [inc_include],
+      dependencies : [cc.find_library('vulkan')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-compute-count',
       files('tests/g17p_vulkan_compute_count.c'),
       include_directories : [inc_include],

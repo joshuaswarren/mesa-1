@@ -481,38 +481,16 @@ lower_load_global_constant_offset_instr(nir_builder *b,
    if (intrin->intrinsic == nir_intrinsic_load_global_constant_bounded) {
       nir_scalar offs = nir_scalar_resolved(offset, 0);
       if (nir_scalar_is_const(offs)) {
-         /* Calculate last byte loaded */
-         unsigned offs_imm = nir_scalar_as_uint(offs) + load_size;
-
-         /* Simplify the bounds check. Uniform buffers are bounds checked at
-          * 64B granularity, so `bound` is a multiple of K = 64. Then
-          *
-          * offs_imm < bound <==> round_down(offs_imm, K) < bound. Proof:
-          *
-          * "=>" round_down(offs_imm, K) <= offs_imm < bound.
-          *
-          * "<=" Let a, b be integer s.t. offs_imm = K a + b with b < K.
-          *      Note round_down(offs_imm, K) = Ka.
-          *
-          *      Let c be integer s.t. bound = Kc.
-          *      We have Ka < Kc => a < c.
-          *      b < K => Ka + b < K(a + 1).
-          *
-          *      a < c with integers => a + 1 <= c.
-          *      offs_imm < K(a + 1) <= Kc = bound.
-          *      Hence offs_imm < bound.
-          */
-         assert(align_mul == 64);
-         offs_imm &= ~(align_mul - 1);
-
-         /* Bounds checks are `offset > bound ? 0 : val` so if offset = 0,
-          * the bounds check is useless.
-          */
-         if (offs_imm) {
-            val = bounds_check(b, val, nir_imm_int(b, offs_imm), bound);
-         }
+         /* Compare the exclusive end against the descriptor's byte size.
+          * Do not round the access down: a descriptor ending exactly where
+          * this load begins must return zero with robustBufferAccess2. */
+         uint64_t end = (uint64_t)nir_scalar_as_uint(offs) + load_size;
+         val = end <= UINT32_MAX
+                  ? bounds_check(b, val, nir_imm_int(b, end), bound)
+                  : nir_imm_zero(b, val->num_components, val->bit_size);
       } else {
-         offset = nir_iadd_imm(b, offset, load_size);
+         /* Saturation makes a wrapping address fail the unsigned check. */
+         offset = nir_uadd_sat(b, offset, nir_imm_int(b, load_size));
          val = bounds_check(b, val, offset, bound);
       }
    }

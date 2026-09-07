@@ -1,0 +1,29 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std140) uniform Input {
+   uvec4 values[5];
+} input_buffer;
+
+layout(set = 0, binding = 1, std430) buffer Output {
+   uvec4 values[4];
+} output_buffer;
+
+void
+main()
+{
+   output_buffer.values[0] = input_buffer.values[0];
+
+   /* This access ends exactly at the descriptor boundary and must survive. */
+   output_buffer.values[1] = input_buffer.values[3];
+
+   /* The descriptor range ends after values[3].  Its advertised 64-byte
+    * robustness2 alignment therefore cannot admit this access. */
+   output_buffer.values[2] = input_buffer.values[4];
+
+   /* Keep the same access dynamic through compilation to exercise the
+    * overflow-safe run-time end calculation as well. */
+   output_buffer.values[3] =
+      input_buffer.values[gl_GlobalInvocationID.x + 4];
+}
