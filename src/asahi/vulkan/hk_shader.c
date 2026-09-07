@@ -839,9 +839,21 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.
+    *
+    * Only the Gen4 sampler word has no LOD-bias field. On every later
+    * generation hk_CreateSampler writes the API bias into the hardware
+    * sampler (SAMPLER_HAL200.lod_bias, SAMPLER_GEN5.lod_bias) and
+    * deliberately publishes a *zero* software bias, so lowering the software
+    * bias into the shader adds a descriptor crawl that provably computes
+    * nothing: it turns every tex into txb(load 0), and every txd into
+    * gradients scaled by exp2(load 0). Skipping it is a no-op for the value
+    * and keeps a genuine API bias or gradient as the shader's own operand.
     */
+   const bool support_lod_bias =
+      agx_chip_sampler_generation(dev->dev.chip) == AGX_SAMPLER_GENERATION_GEN4;
+
    NIR_PASS(_, nir, agx_nir_lower_texture_early_with_2d_robustness,
-            true /* support_lod_bias */, dev->dev.chip == AGX_CHIP_G17P);
+            support_lod_bias, dev->dev.chip == AGX_CHIP_G17P);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);

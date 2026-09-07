@@ -127,6 +127,76 @@ enum agx3_tex_lod {
     * own compiler into the plain implicit form.
     */
    AGX3_TEX_LOD_BIAS,
+   /*
+    * Implicit LOD plus a per-lane register bias.  Apple's fragment
+    * `t.sample(s, uv, bias(in.uv.x))` is byte-identical to its
+    * `t.sample(s, uv, level(in.uv.x))` apart from f139 (3 instead of 4): the
+    * same PACK_SMPIR scalar staging into operand bank 6, the same fragment
+    * marker f156 = 1.  Ground truth, `xcrun metal-nt -arch applegpu_g17p`:
+    *
+    *    level(in.uv.x)  05800cb8b0000001010010001200   f139 = 4
+    *    bias(in.uv.x)   05800cb8b0000400010010001200   f139 = 3
+    */
+   AGX3_TEX_LOD_BIAS_REGISTER,
+   /*
+    * Explicit gradients.  f139 = 5, and unlike every other shape the
+    * fragment marker f156 is *not* set: the four gradient scalars replace
+    * the derivative the marker would request.  The scalars are published
+    * into staging banks 8/10/12/14, in half-register units, before the
+    * sample.  Apple's own compute kernel
+    * `t.sample(s, g[0], gradient2d(g[1], g[2]))` stages six consecutive
+    * source registers into banks 0, 2, 8, 10, 12, 14 on one shared slot and
+    * then samples:
+    *
+    *    copy 0b10210c  bank  0     copy 5b16210c  bank 10
+    *    copy 1b12210c  bank  2     copy 6b18210c  bank 12
+    *    copy 4b14210c  bank  8     copy 7b1a210c  bank 14
+    *    smp  05800cb8b0000401000010000100
+    *
+    * Which component lands in which bank is pinned by the fragment kernels
+    * that pass literal gradients, where the staged value is the constant
+    * itself: gradient2d((0.25, 0.5), (0.75, 1.0)) loads 0.25/0.75/0.5/1.0
+    * into banks 8/10/12/14, so the order is (ddx.x, ddy.x, ddx.y, ddy.y).
+    * The (1, 2)/(4, 8) and (16, 32)/(64, 128) pairs agree.  That is exactly
+    * the layout of the collect agx_emit_tex() builds for nir_tex_src_ddx.
+    */
+   AGX3_TEX_LOD_GRADIENT,
+};
+
+/*
+ * Staging banks for AGX3_TEX_LOD_GRADIENT, in half-register units, in the
+ * order the four scalars are witnessed.  A gradient sample also names
+ * coordinate bank 0, as every witness does.
+ */
+#define AGX3_TEX_GRADIENT_BANK_DDX_X 8u
+#define AGX3_TEX_GRADIENT_BANK_DDY_X 10u
+#define AGX3_TEX_GRADIENT_BANK_DDX_Y 12u
+#define AGX3_TEX_GRADIENT_BANK_DDY_Y 14u
+
+/*
+ * textureGather.  f144 = 1 selects the gather and f145 carries the component
+ * index -- absent for R, 1 for G, 2 for B, 3 for A.  A gather also *drops*
+ * the f74 mask-group bit that every ordinary sample sets; nothing else about
+ * the instruction changes, so a gather is a plain implicit sample with one
+ * bit cleared and one or two set.  Ground truth,
+ * `xcrun metal-nt -arch applegpu_g17p`, five fragment kernels differing only
+ * in the gathered component:
+ *
+ *    t.gather(s, uv)                       05800ca490000000010000001200
+ *    t.gather(s, uv, int2(0), component::x) 05800ca490000000010000001200  f145 -
+ *    t.gather(s, uv, int2(0), component::y) 05800cac90000000010000001200  f145 1
+ *    t.gather(s, uv, int2(0), component::z) 05800cb490000000010000001200  f145 2
+ *    t.gather(s, uv, int2(0), component::w) 05800cbc90000000010000001200  f145 3
+ *
+ * Every witness is a plain 2D implicit-LOD gather: no array layer, no LOD
+ * argument and no coordinate offset, so those stay refused.
+ */
+enum agx3_tex_gather {
+   AGX3_TEX_GATHER_NONE = 0,
+   AGX3_TEX_GATHER_R,
+   AGX3_TEX_GATHER_G,
+   AGX3_TEX_GATHER_B,
+   AGX3_TEX_GATHER_A,
 };
 
 struct agx3_tex_sample_desc {
@@ -149,6 +219,7 @@ struct agx3_tex_sample_desc {
    uint16_t sampler_value;
    bool texture_kill;
    bool sampler_kill;
+   enum agx3_tex_gather gather; /* textureGather component, or NONE */
 };
 
 /* Pack a scalar half-float LOD into native texture operand bank 6. This bank

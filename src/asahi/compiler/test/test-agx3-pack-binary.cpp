@@ -6187,6 +6187,278 @@ TEST_F(AGX3PackBinary, ArraySampleStagingAndLifetime)
    }
 }
 
+/*
+ * textureGrad. The gradient collect is (ddx.x, ddy.x, ddx.y, ddy.y) and each
+ * scalar is staged into the bank Apple's own kernels stage it into: 8, 10, 12
+ * and 14 in half-register units, on one shared staging slot, after the two
+ * coordinate copies. agx3_tex_core's own test asserts the sample byte-exact
+ * against `xcrun metal-nt -arch applegpu_g17p` on the compute kernel
+ * t.sample(s, g[0], gradient2d(g[1], g[2])); this test asserts that the
+ * packer drives it with the right banks, sources and staging budget.
+ */
+TEST_F(AGX3PackBinary, GradientSampleStagesFourScalarsIntoTheirOwnBanks)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_index grad = agx_register(24, AGX_SIZE_32);
+   grad.channels_m1 = 3;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, grad, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_GRAD, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   /* Coordinates go to bank 0, as every gradient witness names coord 0. */
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 20, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   const uint16_t bank[4] = {8, 10, 12, 14};
+   for (unsigned i = 0; i < 4; ++i) {
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, bank[i], 24 + 2 * i, 1, 0,
+                                            false, false, bytes, &len));
+      append(want, bytes, len);
+   }
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_GRADIENT;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   /* Apple's own compute gradient sample is 05800cb8b0000401000010000100;
+    * this one differs only in the destination register (8, not 0) and the
+    * coordinate-kill hint. */
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             (std::vector<uint8_t>{0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x04,
+                                   0x01, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00}));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1, bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
+}
+
+/* A gradient whose four scalars are not one aligned 32-bit run, and a
+ * gradient on an array texture, have no witness and must fail closed. */
+TEST_F(AGX3PackBinary, GradientSampleRefusesUnwitnessedShapes)
+{
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = shape == 2 ? 2 : 1;
+      agx_index grad = agx_register(24, AGX_SIZE_32);
+      grad.channels_m1 = shape == 0 ? 1 : 3;
+      if (shape == 1)
+         grad = agx_register(25, AGX_SIZE_32), grad.channels_m1 = 3;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, grad, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(),
+         shape == 2 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D, AGX_LOD_MODE_LOD_GRAD, 0,
+         false, false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/false);
+   }
+}
+
+/* A zero bias is the plain implicit sample, byte for byte, exactly as Apple's
+ * own compiler folds it. Nothing extra is staged and the coordinate keeps its
+ * own bank. */
+TEST_F(AGX3PackBinary, ZeroBiasFoldsIntoTheImplicitSample)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   std::vector<uint8_t> packed[2];
+   for (unsigned biased = 0; biased < 2; ++biased) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D,
+         biased ? AGX_LOD_MODE_AUTO_LOD_BIAS : AGX_LOD_MODE_AUTO_LOD, 0,
+         false, false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      packed[biased] = pack(b);
+   }
+   EXPECT_FALSE(packed[0].empty());
+   EXPECT_EQ(packed[0], packed[1]);
+}
+
+/*
+ * A per-lane LOD bias stages exactly like a per-lane level -- PACK_SMPIR into
+ * operand bank 6, coordinates rebased to bank 0 -- and moves only f139, so
+ * the emitted sample differs from the explicit-level one in bytes 6 and 7
+ * alone, exactly as Apple's own fragment pair does.
+ */
+TEST_F(AGX3PackBinary, RegisterLodBiasStagesLikeRegisterLevel)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_register(4, AGX_SIZE_16), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_AUTO_LOD_BIAS, 0, false, false, false, AGX_GATHER_NONE,
+      false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_lod(enc, 4, 1, 0, false, false, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 20, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   std::vector<uint8_t> bias(bytes, bytes + len);
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1, bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+
+   d.lod = AGX3_TEX_LOD_REGISTER;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   std::vector<uint8_t> level(bytes, bytes + len);
+   ASSERT_EQ(level.size(), bias.size());
+   for (size_t i = 0; i < level.size(); ++i) {
+      if (i == 6) {
+         EXPECT_EQ(level[i], 0x00);
+         EXPECT_EQ(bias[i], 0x04);
+      } else if (i == 7) {
+         EXPECT_EQ(level[i], 0x01);
+         EXPECT_EQ(bias[i], 0x00);
+      } else {
+         EXPECT_EQ(level[i], bias[i]);
+      }
+   }
+}
+
+/*
+ * textureGather. AGX_GATHER_{R,G,B,A} are 1/3/5/7 in the IR but the native
+ * component field counts 0..3, so the packer halves them; a mistake there
+ * would silently gather the wrong channel. The four encodings themselves are
+ * asserted against Apple's kernels in test-agx3-tex-core.c.
+ */
+TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
+{
+   const enum agx_gather ir[4] = {AGX_GATHER_R, AGX_GATHER_G, AGX_GATHER_B,
+                                  AGX_GATHER_A};
+   const enum agx3_tex_gather native[4] = {
+      AGX3_TEX_GATHER_R, AGX3_TEX_GATHER_G, AGX3_TEX_GATHER_B,
+      AGX3_TEX_GATHER_A};
+
+   for (unsigned c = 0; c < 4; ++c) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         false, false, false, ir[c], false);
+      I->mask = 15;
+      agx_stop(b);
+
+      std::vector<uint8_t> want;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 20, 20, 1, 0, false, false,
+                                            bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 22, 22, 1, 0, false, false,
+                                            bytes, &len));
+      append(want, bytes, len);
+      struct agx3_tex_sample_desc d = {};
+      d.dest = 8;
+      d.coord = 20;
+      d.width = AGX3_TEX_W32;
+      d.mask = 15;
+      d.lod = AGX3_TEX_LOD_AUTO;
+      d.slot = 1;
+      d.wait_mask = 1;
+      d.final = true;
+      d.gather = native[c];
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                   1, bytes, &len));
+      append(want, bytes, len);
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
+/* Only the plain 2D implicit gather is witnessed: an array gather, and a
+ * gather carrying any LOD argument, must fail closed. */
+TEST_F(AGX3PackBinary, GatherRefusesUnwitnessedShapes)
+{
+   for (unsigned shape = 0; shape < 2; ++shape) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = shape == 0 ? 2 : 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord,
+         shape == 1 ? agx_immediate(agx_minifloat_encode(0.5f))
+                    : agx_immediate(0),
+         agx_immediate(0), agx_immediate(0), agx_immediate(0), agx_null(),
+         shape == 0 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
+         shape == 1 ? AGX_LOD_MODE_AUTO_LOD_BIAS : AGX_LOD_MODE_AUTO_LOD, 0,
+         false, false, false, AGX_GATHER_G, false);
+      I->mask = 15;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/false);
+   }
+}
+
 TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
