@@ -3166,9 +3166,10 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * key0x08020400 use one I8
  * imageblock word and selector 0x55. R8G8B8A8_UINT/SINT use the same I8
  * builtin with four attachment components. R8_UNORM uses format3/layout2
- * with one component. R8_SNORM, R8G8_SNORM and R8G8B8A8_SNORM attachment
- * fields use format2/layout2 with one, two or four components. They emit the
- * normalized program below, matching the exact U8NORM bytes.
+ * with one component. R8_SNORM, R8G8_SNORM, R8G8B8A8_SNORM and
+ * B8G8R8A8_SNORM attachment fields use format2/layout2 with one, two or four
+ * components. They emit the normalized program below, matching the exact
+ * U8NORM bytes; RGBA/BGRA memory ordering is encoded only in the PBE.
  * R16_UNORM format7 and R16_SNORM/R16G16B16A16_SNORM format6 attachment
  * fields use layout2 with one or four components. All emit a distinct
  * normalized-16 program with selector tail a895.

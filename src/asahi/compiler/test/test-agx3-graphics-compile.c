@@ -2151,7 +2151,7 @@ test_g17p_eot_block_store(void)
    coords = nir_trim_vector(&bad, nir_load_global_invocation_id(&bad, 32), 2);
    nir_image_store_block_agx(
       &bad, nir_imm_intN_t(&bad, 0, 16), nir_imm_int(&bad, 0), coords,
-      .format = PIPE_FORMAT_R16_FLOAT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
       .explicit_coord = true);
    agx_preprocess_nir(bad.shader);
    memset(&part, 0xa5, sizeof(part));

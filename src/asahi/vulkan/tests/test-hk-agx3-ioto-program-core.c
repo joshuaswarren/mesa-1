@@ -1637,6 +1637,14 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.sample_size_B == 8);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
 
+   enum pipe_format bgra8_snorm[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B8G8R8A8_SNORM,
+   };
+   tib = agx_build_tilebuffer_layout(bgra8_snorm, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+
    enum pipe_format rgba8_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R8G8B8A8_UINT,
    };
@@ -1967,6 +1975,8 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.nr_samples == 2 && tib.sample_size_B == 8 &&
          tib.tile_size == 32 * 32 && !tib.spilled[0]);
    tib = agx_build_tilebuffer_layout(rgba, 1, 4, false);
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   tib = agx_build_tilebuffer_layout(bgra8_snorm, 1, 2, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
    return 0;

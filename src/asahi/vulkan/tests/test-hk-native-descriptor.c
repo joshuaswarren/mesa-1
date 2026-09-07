@@ -810,6 +810,23 @@ main(void)
    assert(memcmp(&native_pbe, gen9_rgba8_snorm_pbe,
                  sizeof(gen9_rgba8_snorm_pbe)) == 0);
 
+   /* B8G8R8A8_SNORM shares MTL72's native channels/type and EOT program.
+    * MTL80 independently grounds the BGR memory ordering; the PBE permutation
+    * is the only difference from RGBA8_SNORM. */
+   static const uint8_t gen9_bgra8_snorm_pbe[32] = {
+      0x22, 0x2a, 0xc6, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   pbe.swizzle_r = AGX_CHANNEL_B;
+   pbe.swizzle_b = AGX_CHANNEL_R;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_bgra8_snorm_pbe,
+                 sizeof(gen9_bgra8_snorm_pbe)) == 0);
+   pbe.swizzle_r = AGX_CHANNEL_R;
+   pbe.swizzle_b = AGX_CHANNEL_B;
+
    /* Actual MTL format112 resolves to RGBA16 channels0x32,
     * signed-normalized type1 and eight bytes per pixel. */
    static const uint8_t gen9_rgba16_snorm_pbe[32] = {
