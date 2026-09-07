@@ -157,6 +157,10 @@
 #define G17P_RGBA16_SFLOAT 0
 #endif
 
+#ifndef G17P_A2B10G10R10_UINT
+#define G17P_A2B10G10R10_UINT 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -168,11 +172,16 @@
      G17P_R8_UINT + G17P_R8_SNORM + G17P_R8_SINT + G17P_RGBA16_SNORM + \
      G17P_R16_SNORM + G17P_R16_UNORM + G17P_R16_UINT +               \
      G17P_R16_SINT + G17P_R16_SFLOAT + G17P_RG16_SFLOAT +             \
-     G17P_RGBA16_SFLOAT) > 1
+     G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_RGBA16_SFLOAT
+#if G17P_A2B10G10R10_UINT
+#include "g17p_vulkan_a2b10g10r10_uint_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_a2b10g10r10_uint_frag_spv
+#elif G17P_RGBA16_SFLOAT
 #include "g17p_vulkan_rgba16_sfloat_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -338,7 +347,10 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 
-#if G17P_RGBA16_SFLOAT
+#if G17P_A2B10G10R10_UINT
+#define IMAGE_FORMAT VK_FORMAT_A2B10G10R10_UINT_PACK32
+#define IMAGE_PIXEL_BYTES 4
+#elif G17P_RGBA16_SFLOAT
 #define IMAGE_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
 #define IMAGE_PIXEL_BYTES 8
 #elif G17P_RG16_SFLOAT
@@ -619,7 +631,16 @@
 #error "the RGBA32 SINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_RGBA16_SFLOAT
+#if G17P_A2B10G10R10_UINT && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the packed UINT fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if G17P_A2B10G10R10_UINT
+#define PROBE_NAME "g17p-vulkan-a2b10g10r10-uint"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_RGBA16_SFLOAT
 #define PROBE_NAME "g17p-vulkan-rgba16-sfloat"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -920,7 +941,9 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_RGBA16_SFLOAT
+#if G17P_A2B10G10R10_UINT
+   static const uint8_t expected[4] = {0x55, 0xa9, 0x3a, 0xbc};
+#elif G17P_RGBA16_SFLOAT
    static const uint8_t expected[8] = {
       0x80, 0xc6, 0xa0, 0x4a, 0x55, 0x35, 0x00, 0xb0,
    };
@@ -1037,6 +1060,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_A2B10G10R10_UINT &&
+       getenv("G17P_A2B10G10R10_UINT_RECORD_ONLY") != NULL) ||
       (G17P_RGBA16_SFLOAT &&
        getenv("G17P_RGBA16_SFLOAT_RECORD_ONLY") != NULL) ||
       (G17P_RG16_SFLOAT && getenv("G17P_RG16_SFLOAT_RECORD_ONLY") != NULL) ||
@@ -1662,7 +1687,7 @@ main(void)
    const VkClearValue clear = {.color = {.int32 = {0, 0, 0, 0}}};
 #elif G17P_R32_UINT || G17P_RG16_UINT || G17P_RG8_UINT ||             \
    G17P_RG32_UINT || G17P_RGBA8_UINT || G17P_R8_UINT || G17P_RGBA16_UINT || \
-   G17P_RGBA32_UINT || G17P_R16_UINT
+   G17P_RGBA32_UINT || G17P_R16_UINT || G17P_A2B10G10R10_UINT
    const VkClearValue clear = {.color = {.uint32 = {0, 0, 0, 0}}};
 #else
    const VkClearValue clear = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
@@ -1729,7 +1754,7 @@ main(void)
    G17P_RGBA16_SNORM || G17P_R16_SNORM || G17P_R16_UNORM ||          \
    G17P_RGBA16_UINT || G17P_RGBA16_SINT || G17P_RGBA32_UINT ||        \
    G17P_RGBA32_SINT || G17P_R16_UINT || G17P_R16_SINT || G17P_R16_SFLOAT || \
-   G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT
+   G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT || G17P_A2B10G10R10_UINT
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
@@ -1780,14 +1805,18 @@ main(void)
    G17P_RGBA16_SNORM || G17P_R16_SNORM || G17P_R16_UNORM ||            \
    G17P_RGBA16_UINT || G17P_RGBA16_SINT || G17P_RGBA32_UINT ||         \
    G17P_RGBA32_SINT || G17P_R16_UINT || G17P_R16_SINT || G17P_R16_SFLOAT || \
-   G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT
+   G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT || G17P_A2B10G10R10_UINT
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_RGBA16_SFLOAT
+#if G17P_A2B10G10R10_UINT
+   printf(PROBE_NAME ": PASS — %ux%u A2B10G10R10 UINT exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_RGBA16_SFLOAT
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 SFLOAT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);

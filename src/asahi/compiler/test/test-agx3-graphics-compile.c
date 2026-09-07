@@ -2032,6 +2032,32 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i16.shader);
 
+   /* Packed A2B10G10R10_UINT key0x10021200 is the grounded one-word I16
+    * sibling of the two-word RGBA16_UINT store. */
+   nir_builder i16_one = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGB10A2 UINT RT0 EOT");
+   coords = nir_trim_vector(
+      &i16_one, nir_load_global_invocation_id(&i16_one, 32), 2);
+   nir_image_store_block_agx(
+      &i16_one, nir_imm_intN_t(&i16_one, 0, 16), nir_imm_int(&i16_one, 0),
+      coords, .format = PIPE_FORMAT_R16_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(i16_one.shader);
+   memset(&part, 0, sizeof(part));
+   key.g17p_rt0_eot_words = 1;
+   const bool i16_one_compiled =
+      agx_compile_shader_nir(i16_one.shader, &key, &part);
+   ok &= i16_one_compiled && part.info.binary_size == sizeof(expected_i16) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_i16) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, expected_i16, sizeof(expected_i16)) == 0;
+   if (i16_one_compiled)
+      free(part.binary);
+   ralloc_free(i16_one.shader);
+   key.g17p_rt0_eot_words = 2;
+
    /* Signed RGBA16 has a distinct complete native program, not merely the
     * unsigned program with a different PBE descriptor. */
    nir_builder i16_signed = nir_builder_init_simple_shader(

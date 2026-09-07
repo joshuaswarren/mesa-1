@@ -396,6 +396,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       case PIPE_FORMAT_R16G16_SNORM:
       case PIPE_FORMAT_R16G16_UINT:
       case PIPE_FORMAT_R16G16_SINT:
+      case PIPE_FORMAT_R10G10B10A2_UINT:
          compiler_key.g17p_rt0_eot_words = 1;
          break;
       case PIPE_FORMAT_R32G32_FLOAT:

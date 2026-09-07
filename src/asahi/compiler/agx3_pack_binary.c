@@ -3163,6 +3163,7 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * the grounded selector-15 program; wider signed variants remain distinct.
  * R16_SFLOAT, R16G16_SFLOAT and R16G16B16A16_SFLOAT format12 with one,
  * two or four components use that same grounded program.
+ * A2B10G10R10_UINT_PACK32 key0x10021200 uses one I16 word and selector0x15.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
