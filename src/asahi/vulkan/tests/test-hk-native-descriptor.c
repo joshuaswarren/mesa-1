@@ -129,11 +129,44 @@ check_gen9_etc2_rgba8_texture(void)
    assert(memcmp(&packed, expected, sizeof(expected)) == 0);
 }
 
+static void
+check_gen9_astc_4x4_texture(void)
+{
+   /* Native G17P descriptor capture, EXP-0028 fmt_astc_4x4_ldr. It pins
+    * the ASTC 4x4 codec selector (channels0x60 -> physical fmt bytes
+    * 0x1822), ordinary 2D layout, RGBA swizzle, 32x32 extent and VA. */
+   static const uint8_t expected[32] = {
+      0x22, 0x18, 0x88, 0xf6, 0x01, 0x7c, 0x00, 0x00,
+      0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   const struct AGX_TEXTURE semantic = {
+      AGX_TEXTURE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D,
+      .layout = AGX_LAYOUT_GPU,
+      .channels = AGX_CHANNELS_ASTC_4X4,
+      .type = AGX_TEXTURE_TYPE_UNORM,
+      .swizzle_r = AGX_CHANNEL_R,
+      .swizzle_g = AGX_CHANNEL_G,
+      .swizzle_b = AGX_CHANNEL_B,
+      .swizzle_a = AGX_CHANNEL_A,
+      .width = 32,
+      .height = 32,
+      .depth = 1,
+      .address = UINT64_C(0x1000001c500),
+   };
+   struct hk_native_texture_descriptor packed;
+   assert(hk_pack_native_texture(9, &packed, &semantic));
+   assert(memcmp(&packed, expected, sizeof(expected)) == 0);
+}
+
 int
 main(void)
 {
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
+   check_gen9_astc_4x4_texture();
 
    /* Ordinary HAL200 2D has no layer-mode bit, even when its backing BO
     * allocation is page aligned. Compare the entire packet, not only bit62.
