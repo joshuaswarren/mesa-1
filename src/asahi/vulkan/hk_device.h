@@ -88,6 +88,17 @@ struct hk_device {
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
 
+   /* Native G17P indirect compute grid helper.  A compact indirect helper
+    * record carries no dimensions and no resource table, so the only way a
+    * runtime grid can reach the main record is for this program to publish
+    * the six-u32 geometry block.  Compiled once, from NIR, through the same
+    * path as any other Honeykrisp compute shader, so it uses the driver's own
+    * proven root/uniform ABI rather than a replayed one.  NULL on every other
+    * chip, and NULL on G17P if the backend refused it -- in which case
+    * indirect dispatch stays refused instead of launching a program that does
+    * not exist. */
+   struct hk_api_shader *g17p_grid_helper;
+
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;
 

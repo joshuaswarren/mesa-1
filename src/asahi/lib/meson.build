@@ -10,6 +10,8 @@ libasahi_lib_files = files(
   'agx3_cdm_direct_launch_semantic_core.h',
   'agx3_compute_program_core.c',
   'agx3_compute_program_core.h',
+  'agx3_g17p_grid_helper_core.c',
+  'agx3_g17p_grid_helper_core.h',
   'agx3_code_container_core.c',
   'agx3_code_container_core.h',
   'agx_ioto_core.c',
@@ -528,6 +530,22 @@ if with_tests
       files(
         'agx3_cdm_direct_launch_semantic_core.c',
         'tests/test-agx3-cdm-direct-launch-semantic-core.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_agx_pack, idep_mesautil],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-agx3-g17p-grid-helper-core',
+    executable(
+      'asahi-agx3-g17p-grid-helper-core',
+      files(
+        'agx3_g17p_grid_helper_core.c',
+        'agx_ioto_core.c',
+        'agx_ioto_state_core.c',
+        'tests/test-agx3-g17p-grid-helper-core.c',
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_agx_pack, idep_mesautil],

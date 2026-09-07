@@ -113,6 +113,15 @@ struct hk_root_descriptor_table {
          uint64_t constant_data_addr;
          uint64_t group_count_addr;
          uint32_t base_group[3];
+
+         /* Native G17P indirect dispatch only.  The grid helper reads the
+          * threadgroup counts at group_count_addr, multiplies them by
+          * grid_helper_local_size, and publishes the six-u32 launch geometry
+          * at grid_helper_geometry_addr for the main record to consume.  Both
+          * are zero for every direct dispatch and for every other chip. */
+         uint64_t grid_helper_geometry_addr;
+         uint32_t grid_helper_local_size[3];
+         uint32_t _pad_grid_helper;
       } cs;
    };
 

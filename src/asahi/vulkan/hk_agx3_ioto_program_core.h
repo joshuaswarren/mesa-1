@@ -255,6 +255,14 @@ struct hk_agx3_g17p_compute_program_desc {
    uint32_t compiler_d;
    uint32_t threadgroup_memory_size_B;
    struct agx3_cdm_direct_template_sources launch_sources;
+
+   /* Which program kind the LoadShader record announces.  Zero, the default,
+    * is the direct-dispatch kind used by every direct launch.  A native
+    * indirect pair announces two different kinds -- see
+    * AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1 and AGX3_G17P_GRID_HELPER_LDSHDR_F1 --
+    * so both records of that pair must set this explicitly.  Only the three
+    * witnessed values are accepted; anything else fails the compose. */
+   enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1;
 };
 
 struct hk_agx3_g17p_compute_program {

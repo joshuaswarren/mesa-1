@@ -1,0 +1,138 @@
+/*
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ */
+
+#pragma once
+
+#include "agx_ioto_state_core.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * G17P native indirect compute: the grid helper and its geometry contract.
+ *
+ * A native A18 Pro indirect dispatch is a pair of CDM records (see
+ * agx3_g17p_native_indirect_compute_dispatch_append):
+ *
+ *   1. a 0x2c main launch, shaped exactly like a direct launch but with bit 23
+ *      set in word 0, whose inline dimension words are ignored, and
+ *   2. a compact 0x1c helper launch that names a second program plus the
+ *      address of a six-u32 "geometry" block.
+ *
+ * The helper program runs first from the caller's point of view: it publishes
+ * the geometry block that the main record then consumes.  Nothing in the
+ * command stream carries the runtime dimensions, so the helper is the only
+ * thing that can turn an indirect argument buffer into a launch geometry.
+ *
+ * GEOMETRY LAYOUT.  Six little-endian u32:
+ *
+ *     +0x00  global_size[0]      (threadgroups[0] * local_size[0])
+ *     +0x04  global_size[1]
+ *     +0x08  global_size[2]
+ *     +0x0c  local_size[0]
+ *     +0x10  local_size[1]
+ *     +0x14  local_size[2]
+ *
+ * That is positionally identical to the direct launch record's own inline
+ * fields (global at +0x10..+0x1b, local at +0x1c..+0x27), and it is what the
+ * only known G17P grid helper actually writes -- see the provenance note on
+ * the shader image below.  The first three words are therefore GLOBAL THREAD
+ * counts, not threadgroup counts; the helper is what performs the multiply.
+ */
+#define AGX3_G17P_INDIRECT_GEOMETRY_WORDS 6u
+#define AGX3_G17P_INDIRECT_GEOMETRY_SIZE  (AGX3_G17P_INDIRECT_GEOMETRY_WORDS * 4u)
+
+/* Byte offsets of the two halves within the block, so a writer names the field
+ * it means instead of deriving it from the total size. */
+#define AGX3_G17P_INDIRECT_GEOMETRY_GLOBAL_OFFSET 0u
+#define AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET  12u
+
+/* agx3_g17p_native_indirect_compute_dispatch_append() splits the geometry
+ * address into two u32 and requires a 4-byte-aligned address; the helper
+ * writes whole u32 words, so this is the real hardware requirement. */
+#define AGX3_G17P_INDIRECT_GEOMETRY_ALIGNMENT 4u
+
+/* The LDSHDR "f1" program kinds observed in the two output-positive G17P
+ * indirect witnesses.  A direct dispatch announces DIRECT_ADD3; the indirect
+ * pair announces INDIRECT_ADD3 for the main program and GRID_HELPER for the
+ * compact helper program.  These are witness names, not decoded semantics. */
+#define AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1                                      \
+   AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_INDIRECT_ADD3
+#define AGX3_G17P_GRID_HELPER_LDSHDR_F1                                        \
+   AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_GRID_HELPER
+
+/*
+ * The G17P grid-helper shader binary.
+ *
+ * PROVENANCE, and why this is not a guessed encoding.  These 97 bytes are the
+ * verbatim __TEXT,__text of
+ *
+ *    metal -c gridhelper.metal -o gridhelper.air
+ *    metallib gridhelper.air -o gridhelper.metallib
+ *    metal-nt -arch applegpu_g17p -N gridhelper.mtlp-json \
+ *             -platform_version macos 26.0 26.0 gridhelper.metallib -o gridhelper.nat
+ *
+ * for exactly one kernel, whose source is reproduced in
+ * agx3_g17p_grid_helper_source() below.  The same 97 bytes appear verbatim as
+ * the tail of the G17P grid-helper image captured in m1n1
+ * (proxyclient/experiments/g17p_indirect_code.py, GRID_SETUP_PREAMBLE), whose
+ * Ioto program announces LDSHDR f1 = GRID_HELPER for a shader at
+ * 0x10000000400 -- the third witness already encoded in
+ * agx_ioto_g17p_runtime_compute_tail_build().  Apple's own compiler and an
+ * independent hardware capture therefore agree byte for byte.
+ *
+ * This image is the definition of the geometry contract above: the kernel
+ * multiplies the indirect threadgroup counts by the threads-per-group and
+ * writes the six words.  It does NOT come with a grounded uniform/argument
+ * ABI: which uniform halves its three device pointers arrive in has not been
+ * established offline, so this image is published as evidence and as a
+ * reference for the contract, not as something a driver may launch blind.
+ */
+#define AGX3_G17P_GRID_HELPER_SHADER_SIZE 97u
+
+/* Pointer to the 97-byte image; never NULL. */
+const uint8_t *agx3_g17p_grid_helper_shader_image(void);
+
+/* The exact MSL the image was compiled from, as a NUL-terminated string. */
+const char *agx3_g17p_grid_helper_source(void);
+
+struct agx3_g17p_indirect_geometry {
+   uint32_t global_size[3];
+   uint32_t local_size[3];
+};
+
+/*
+ * Host reference for what the grid helper computes, so a driver can predict
+ * the block it is about to make the GPU produce and so tests can check it.
+ *
+ * The helper multiplies in 32-bit and wraps.  Wrapping would silently launch
+ * the wrong grid, so this refuses instead: a caller that cannot prove
+ * groups[i] * local[i] fits in u32 must not record the dispatch.  Zero
+ * components are refused for the same reason -- an all-zero geometry is
+ * indistinguishable from an unwritten block.
+ *
+ * *out is unchanged on failure.
+ */
+bool agx3_g17p_indirect_geometry_from_groups(
+   const uint32_t groups[3], const uint32_t local_size[3],
+   struct agx3_g17p_indirect_geometry *out);
+
+/* Serialize/parse the six little-endian u32.  Transactional. */
+bool agx3_g17p_indirect_geometry_pack(
+   const struct agx3_g17p_indirect_geometry *geometry,
+   uint8_t out[AGX3_G17P_INDIRECT_GEOMETRY_SIZE]);
+
+bool agx3_g17p_indirect_geometry_unpack(
+   const uint8_t in[AGX3_G17P_INDIRECT_GEOMETRY_SIZE],
+   struct agx3_g17p_indirect_geometry *out);
+
+#ifdef __cplusplus
+}
+#endif

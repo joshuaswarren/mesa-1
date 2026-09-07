@@ -20,6 +20,7 @@
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_bo.h"
 #include "asahi/lib/agx_device.h"
+#include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "compiler/nir/nir_builder.h"
 #include "poly/geometry.h"
 #include "util/hash_table.h"
@@ -363,6 +364,81 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+/*
+ * The native G17P indirect-compute grid helper.
+ *
+ * A native indirect dispatch is two CDM records: a direct-shaped main launch
+ * with bit 23 set, whose inline dimension words the hardware ignores, and a
+ * compact helper launch naming a program plus a six-u32 geometry block.  The
+ * compact record carries no dimensions and no argument table, so nothing in
+ * the command stream can turn a runtime VkDispatchIndirectCommand into a
+ * launch geometry except a program that reads it and writes the block.
+ *
+ * The contract this implements is agx3_g17p_grid_helper_core.h's, which was
+ * grounded byte-exactly against Apple's own compiler: geometry[0..2] are
+ * GLOBAL THREAD counts (threadgroups * local size), geometry[3..5] are the
+ * local size.  The kernel is written in NIR rather than reusing Apple's
+ * compiled image because that image's uniform ABI is not established, while
+ * Honeykrisp's own root ABI is the one every other G17P compute dispatch
+ * already uses.
+ *
+ * Every invocation writes the same six values, so the helper needs no
+ * invocation guard and therefore no system values: the compact record does not
+ * say how many threads it launches, and an idempotent kernel is correct for
+ * any answer.
+ */
+static void
+hk_init_g17p_grid_helper(struct hk_device *dev,
+                         const VkAllocationCallbacks *pAllocator)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return;
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P indirect grid helper");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *root = nir_load_root_agx(&b);
+   nir_def *groups_addr = nir_load_global(
+      &b, 1, 64,
+      nir_iadd_imm(&b, root, hk_root_descriptor_offset(cs.group_count_addr)),
+      .align_mul = 8);
+   nir_def *geometry_addr = nir_load_global(
+      &b, 1, 64,
+      nir_iadd_imm(&b, root,
+                   hk_root_descriptor_offset(cs.grid_helper_geometry_addr)),
+      .align_mul = 8);
+   nir_def *local = nir_load_global(
+      &b, 3, 32,
+      nir_iadd_imm(&b, root,
+                   hk_root_descriptor_offset(cs.grid_helper_local_size)),
+      .align_mul = 4);
+
+   /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
+   nir_def *groups = nir_load_global(&b, 3, 32, groups_addr, .align_mul = 4);
+
+   nir_store_global(&b, nir_imul(&b, groups, local), geometry_addr,
+                    .align_mul = 4);
+   nir_store_global(&b, local,
+                    nir_iadd_imm(&b, geometry_addr,
+                                 AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET),
+                    .align_mul = 4);
+
+   struct vk_shader_compile_info info = {
+      .nir = b.shader,
+      .robustness = &vk_robustness_disabled,
+      .stage = MESA_SHADER_COMPUTE,
+   };
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator,
+                     &dev->g17p_grid_helper);
+
+   /* A refusal is not fatal: it costs indirect dispatch, not the device. */
+   if (!dev->g17p_grid_helper)
+      mesa_logw("G17P indirect compute unavailable: grid helper refused");
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
@@ -545,6 +621,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_meta;
    }
 
+   hk_init_g17p_grid_helper(dev, pAllocator);
+
    *pDevice = hk_device_to_handle(dev);
 
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
@@ -624,6 +702,10 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (dev->null_fs) {
       hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
+   }
+
+   if (dev->g17p_grid_helper) {
+      hk_api_shader_destroy(&dev->vk, &dev->g17p_grid_helper->vk, pAllocator);
    }
 
    hk_destroy_sampler_heap(dev, &dev->samplers);
