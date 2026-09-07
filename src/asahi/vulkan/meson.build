@@ -542,6 +542,19 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Public Vulkan/DRM-shim oracle for VK_KHR_16bit_storage's
+    # storageInputOutput16 feature. The SPIR-V modules carry the explicit
+    # StorageInputOutput16 capability, so this covers feature enumeration,
+    # device enablement, pipeline compilation, command recording and submit.
+    executable(
+      'g17p-vulkan-f16-io',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_F16_IO=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-render-only',
       files('tests/g17p_render_only.c'),

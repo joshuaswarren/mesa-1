@@ -25,8 +25,21 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef G17P_F16_IO
+#define G17P_F16_IO 0
+#endif
+
+#if G17P_F16_IO
+#include "g17p_vulkan_f16_io_frag.h"
+#include "g17p_vulkan_f16_io_vert.h"
+#define G17P_VERT_SPV g17p_vulkan_f16_io_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_f16_io_frag_spv
+#else
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#endif
 
 #define T8140_DEVICE_ID 0x8140
 #define IMAGE_WIDTH 32
@@ -49,7 +62,16 @@
 #error "the MSAA fixture validates the GPU resolve and copy path"
 #endif
 
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_F16_IO && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the f16 I/O fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if G17P_F16_IO
+#define PROBE_NAME "g17p-vulkan-f16-io"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MSAA_SAMPLES == 2
 #define PROBE_NAME "g17p-msaa2-triangle"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -72,6 +94,9 @@ VK_FN(vkGetInstanceProcAddr);
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
+#if G17P_F16_IO
+VK_FN(vkGetPhysicalDeviceFeatures2);
+#endif
 VK_FN(vkGetPhysicalDeviceProperties);
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
@@ -202,6 +227,9 @@ verify_readback(const uint8_t *map)
 int
 main(void)
 {
+   const bool record_only =
+      G17P_F16_IO && getenv("G17P_F16_IO_RECORD_ONLY") != NULL;
+
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -230,6 +258,9 @@ main(void)
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
+#if G17P_F16_IO
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
+#endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceQueueFamilyProperties);
@@ -283,6 +314,19 @@ main(void)
    if (!physical)
       die("no T8140 device has a graphics-and-transfer queue");
 
+#if G17P_F16_IO
+   VkPhysicalDeviceVulkan11Features available11 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+   };
+   VkPhysicalDeviceFeatures2 available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available11,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available);
+   if (!available11.storageInputOutput16)
+      die("T8140/G17P does not advertise storageInputOutput16");
+#endif
+
    if (!(properties.limits.framebufferColorSampleCounts &
          (VkSampleCountFlags)G17P_MSAA_SAMPLES))
       die("requested color sample count is not advertised");
@@ -316,9 +360,17 @@ main(void)
       VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
    };
 #endif
+#if G17P_F16_IO
+   const VkPhysicalDeviceVulkan11Features enabled11 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .storageInputOutput16 = VK_TRUE,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-#if G17P_HOST_IMAGE_COPY
+#if G17P_F16_IO
+      .pNext = &enabled11,
+#elif G17P_HOST_IMAGE_COPY
       .pNext = &host_copy_features,
 #endif
       .queueCreateInfoCount = 1,
@@ -606,13 +658,13 @@ main(void)
 
    const VkShaderModuleCreateInfo vert_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_wsi_triangle_vert_spv),
-      .pCode = g17p_wsi_triangle_vert_spv,
+      .codeSize = sizeof(G17P_VERT_SPV),
+      .pCode = G17P_VERT_SPV,
    };
    const VkShaderModuleCreateInfo frag_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_wsi_triangle_frag_spv),
-      .pCode = g17p_wsi_triangle_frag_spv,
+      .codeSize = sizeof(G17P_FRAG_SPV),
+      .pCode = G17P_FRAG_SPV,
    };
    VkShaderModule vert_module, frag_module;
    check(vkCreateShaderModule(device, &vert_module_info, NULL, &vert_module),
@@ -783,11 +835,19 @@ main(void)
       },
       .imageExtent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
    };
-   vkCmdCopyImageToBuffer(command_buffer, image,
-                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1,
-                          &copy);
+   if (!record_only) {
+      vkCmdCopyImageToBuffer(command_buffer, image,
+                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1,
+                             &copy);
+   }
 #endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+
+   if (record_only) {
+      printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
+                        "vkEndCommandBuffer succeeded\n");
+      return EXIT_SUCCESS;
+   }
 
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -800,7 +860,13 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES == 2
+#if G17P_F16_IO
+   const VkResult waited =
+      vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
+   if (waited == VK_TIMEOUT)
+      die("vkWaitForFences timed out after three seconds");
+   check(waited, "vkWaitForFences");
+#elif G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES == 2
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000));
    if (waited == VK_TIMEOUT)

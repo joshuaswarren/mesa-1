@@ -326,7 +326,9 @@ hk_get_device_features(
       .storageBuffer16BitAccess = true,
       .uniformAndStorageBuffer16BitAccess = true,
       .storagePushConstant16 = true,
-      .storageInputOutput16 = false,
+      /* HAL200 interpolation is 32-bit, but the compiler performs matching
+       * type-correct widening at ST_VARY and narrowing after interpolation. */
+      .storageInputOutput16 = dev->chip == AGX_CHIP_G17P,
       .multiview = true,
       .multiviewGeometryShader = false,
       .multiviewTessellationShader = false,

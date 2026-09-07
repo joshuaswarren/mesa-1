@@ -622,10 +622,12 @@ agx_interp_for_bary(nir_intrinsic_instr *bary, agx_index *sample_index)
 static bool
 agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
                         agx_index sample_index, unsigned components,
-                        enum agx_interpolation interp, bool perspective)
+                        enum agx_interpolation interp, bool perspective,
+                        nir_alu_type dest_type)
 {
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ||
-       dest.size != AGX_SIZE_32 || cf.type != AGX_INDEX_IMMEDIATE ||
+       (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
+       cf.type != AGX_INDEX_IMMEDIATE ||
        sample_index.type != AGX_INDEX_IMMEDIATE || sample_index.value != 0 ||
        (interp != AGX_INTERPOLATION_CENTER &&
         interp != AGX_INTERPOLATION_CENTROID))
@@ -665,6 +667,22 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
       } else {
          channels[c] = perspective ? agx_fmul(b, raw, reciprocal_w) : raw;
       }
+
+      /* AGX3 interpolation is natively 32-bit. Vulkan's
+       * storageInputOutput16 feature nevertheless permits a logical 16-bit
+       * fragment input, so narrow only after interpolation. Vertex output
+       * lowering performs the matching type-correct widening before ST_VARY.
+       * This preserves integer bits for flat varyings and applies the required
+       * floating-point conversion for smooth/noperspective float varyings. */
+      if (dest.size == AGX_SIZE_16) {
+         agx_index narrowed = agx_temp(b->shader, AGX_SIZE_16);
+         if (nir_alu_type_get_base_type(dest_type) == nir_type_float)
+            agx_fmov_to(b, narrowed, channels[c]);
+         else
+            agx_subdivide_to(b, narrowed, channels[c], 0);
+
+         channels[c] = narrowed;
+      }
    }
 
    agx_emit_collect_to(b, dest, components, channels);
@@ -688,7 +706,7 @@ agx_emit_load_vary(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    agx_index I = cf_for_intrinsic(b, instr);
 
    if (agx_emit_load_vary_agx3(b, dest, I, sample_index, components, interp,
-                               perspective)) {
+                               perspective, nir_intrinsic_dest_type(instr))) {
       agx_emit_cached_split(b, dest, components);
       return;
    }
