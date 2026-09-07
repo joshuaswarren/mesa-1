@@ -58,6 +58,15 @@
 #define DRAW_R 51
 #define DRAW_G 153
 #define DRAW_B 230
+
+/* The draw-shape sweep asks a geometry question, so its colour must not also
+ * be a rounding question: 0.9 * 255 is 229.5, a tie, and a converter that
+ * resolves it the wrong way makes every shape look broken at once. 0.4 * 255
+ * is 102 exactly in binary32, as 0.2 * 255 and 0.6 * 255 already are, so no
+ * channel of this colour can disagree under any rounding rule. */
+#define SHAPE_R 51
+#define SHAPE_G 153
+#define SHAPE_B 102
 #define CLEAR_R 255
 #define CLEAR_G 0
 #define CLEAR_B 0
@@ -70,6 +79,10 @@ static const char *vs_src = "attribute vec2 pos;\n"
 
 static const char *fs_src = "precision highp float;\n"
                             "void main() { gl_FragColor = vec4(0.2, 0.6, 0.9, 1.0); }\n";
+
+static const char *shape_fs_src =
+   "precision highp float;\n"
+   "void main() { gl_FragColor = vec4(0.2, 0.6, 0.4, 1.0); }\n";
 
 static bool
 check_gl(const char *what)
@@ -591,7 +604,7 @@ run_shape_sweep(const char *surface_name)
 
    printf("case %s draw-shapes (%dx%d)\n", surface_name, width, height);
    if (!shape_prog)
-      shape_prog = build_program(fs_src);
+      shape_prog = build_program(shape_fs_src);
    glUseProgram(shape_prog);
    glViewport(0, 0, width, height);
    glDisable(GL_CULL_FACE);
@@ -647,7 +660,7 @@ run_shape_sweep(const char *surface_name)
 
       char full[96];
       snprintf(full, sizeof full, "%s/%s", surface_name, c->name);
-      if (check_surface(full, DRAW_R, DRAW_G, DRAW_B, CLEAR_R, CLEAR_G,
+      if (check_surface(full, SHAPE_R, SHAPE_G, SHAPE_B, CLEAR_R, CLEAR_G,
                         CLEAR_B)) {
          if (nbroken < (int)(sizeof broken / sizeof broken[0]))
             broken[nbroken++] = c->name;
