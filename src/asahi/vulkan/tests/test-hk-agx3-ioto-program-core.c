@@ -3,6 +3,7 @@
 
 #include "hk_agx3_ioto_program_core.h"
 
+#include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_ioto_profile_core.h"
 #include "asahi/lib/agx_ioto_state_core.h"
@@ -600,6 +601,69 @@ test_g17p_dynamic_compute_program(void)
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17S, &desc,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
+
+   /* The two records of a native indirect pair announce program kinds that a
+    * direct dispatch never uses, so the generator has to be able to select
+    * them. Each selector must land its own witnessed LoadShader tail in the
+    * generated program, exactly once, and must change nothing else: the three
+    * programs differ only inside that record. */
+   static const enum agx_ioto_g17p_compute_ldshdr_f1 kinds[] = {
+      AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+      AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1,
+      AGX3_G17P_GRID_HELPER_LDSHDR_F1,
+   };
+   struct hk_agx3_g17p_compute_program kind_programs[ARRAY_SIZE(kinds)];
+   for (unsigned k = 0; k < ARRAY_SIZE(kinds); ++k) {
+      struct hk_agx3_g17p_compute_program_desc kind_desc = desc;
+      kind_desc.ldshdr_f1 = kinds[k];
+      memset(&kind_programs[k], 0xa5, sizeof(kind_programs[k]));
+      CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &kind_desc,
+                                                  &kind_programs[k]));
+      CHECK(kind_programs[k].length == before.length);
+
+      struct agx_ioto_state_tail_output kind_tail;
+      CHECK(agx_ioto_g17p_runtime_compute_tail_build_shared(
+         desc.shader_va, kinds[k], desc.threadgroup_memory_size_B,
+         &kind_tail));
+      CHECK(agx_ioto_state_pack_spectpr(
+         AGX_CHIP_G17P, &expected_spectpr,
+         kind_tail.bytes + AGX_IOTO_SPECLM_SIZE + AGX_IOTO_LDSHDR_SIZE,
+         AGX_IOTO_SPECTPR_SIZE));
+
+      size_t kind_matches = 0;
+      for (size_t i = 0; i + kind_tail.length <= kind_programs[k].length; ++i) {
+         if (memcmp(kind_programs[k].bytes + i, kind_tail.bytes,
+                    kind_tail.length) == 0)
+            kind_matches++;
+      }
+      CHECK(kind_matches == 1);
+   }
+
+   /* The default selector is the direct kind, so every existing caller keeps
+    * the exact program it had before this field existed. */
+   CHECK(memcmp(&kind_programs[0], &before, sizeof(before)) == 0);
+
+   /* Different kinds are different programs, and they differ only in the
+    * LoadShader record: the byte-difference count cannot exceed one record. */
+   for (unsigned k = 1; k < ARRAY_SIZE(kinds); ++k) {
+      size_t differing = 0;
+      for (size_t i = 0; i < before.length; ++i) {
+         if (kind_programs[k].bytes[i] != before.bytes[i])
+            differing++;
+      }
+      CHECK(differing > 0);
+      CHECK(differing <= AGX_IOTO_LDSHDR_SIZE);
+   }
+
+   /* An unwitnessed program kind fails the compose rather than inventing an
+    * encoding for it. */
+   invalid = desc;
+   invalid.ldshdr_f1 = (enum agx_ioto_g17p_compute_ldshdr_f1)2;
+   memset(&program, 0xa5, sizeof(program));
+   const struct hk_agx3_g17p_compute_program poisoned = program;
+   CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
+                                                &program));
+   CHECK(memcmp(&program, &poisoned, sizeof(program)) == 0);
    return 0;
 }
 

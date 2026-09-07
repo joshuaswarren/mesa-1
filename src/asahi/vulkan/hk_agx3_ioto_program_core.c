@@ -765,14 +765,20 @@ hk_agx3_g17p_compute_state_tail(
        desc->nr_gprs == 0 || desc->scratch_size != 0)
       return false;
 
-   /* The direct-dispatch program kind, exactly as the add3 witness announces
-    * its own compute shader.  See the graphics path above for why f1 is a
-    * selector rather than a size: deriving it from `shader_binary_size` made
-    * this 118-byte shader announce itself as GRID_HELPER, the kind m1n1 uses
-    * for the indirect grid-setup helper, and made every shader over 256 bytes
-    * fail the compose. */
-   const enum agx_ioto_g17p_compute_ldshdr_f1 fetch =
-      AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3;
+   /* The program kind the caller asked for, defaulting to the direct-dispatch
+    * kind exactly as the add3 witness announces its own compute shader.  See
+    * the graphics path above for why f1 is a selector rather than a size:
+    * deriving it from `shader_binary_size` made this 118-byte shader announce
+    * itself as GRID_HELPER, the kind the indirect grid-setup helper uses, and
+    * made every shader over 256 bytes fail the compose.
+    *
+    * A native indirect dispatch needs the other two kinds: its main record's
+    * program announces INDIRECT_ADD3 and its grid helper announces
+    * GRID_HELPER.  Both are witnessed values that
+    * agx_ioto_g17p_runtime_compute_tail_build() already accepts; every other
+    * value is rejected there, so an invalid selector fails the compose rather
+    * than producing a program. */
+   const enum agx_ioto_g17p_compute_ldshdr_f1 fetch = desc->ldshdr_f1;
    struct agx_ioto_state_tail_output staged;
    const bool tail_ok = desc->threadgroup_memory_size_B
       ? agx_ioto_g17p_runtime_compute_tail_build_shared(
