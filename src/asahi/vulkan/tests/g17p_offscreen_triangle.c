@@ -186,6 +186,10 @@
 #error "select a valid G17P indirect draw oracle"
 #endif
 
+#ifndef G17P_INDEX_RESTART
+#define G17P_INDEX_RESTART 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -722,7 +726,12 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_INDIRECT_DRAW == 1
+#if G17P_INDEX_RESTART
+#define PROBE_NAME "g17p-vulkan-index-restart"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INDIRECT_DRAW == 1
 #define PROBE_NAME "g17p-vulkan-draw-indirect"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -978,7 +987,12 @@ VK_FN(vkCmdDraw);
 #if G17P_INDIRECT_DRAW
 VK_FN(vkCmdDrawIndirect);
 VK_FN(vkCmdDrawIndexedIndirect);
+#endif
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
 VK_FN(vkCmdBindIndexBuffer);
+#endif
+#if G17P_INDEX_RESTART
+VK_FN(vkCmdDrawIndexed);
 #endif
 VK_FN(vkCmdEndRenderPass);
 #if G17P_HOST_IMAGE_COPY
@@ -1073,7 +1087,9 @@ has_device_extension(VkPhysicalDevice physical, const char *name)
    free(extensions);
    return found;
 }
+#endif
 
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1269,6 +1285,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_INDEX_RESTART &&
+       getenv("G17P_INDEX_RESTART_RECORD_ONLY") != NULL) ||
       (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
@@ -1530,7 +1548,12 @@ main(void)
 #if G17P_INDIRECT_DRAW
    LOAD_DEVICE(device, vkCmdDrawIndirect);
    LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
+#endif
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
+#endif
+#if G17P_INDEX_RESTART
+   LOAD_DEVICE(device, vkCmdDrawIndexed);
 #endif
    LOAD_DEVICE(device, vkCmdEndRenderPass);
 #if G17P_HOST_IMAGE_COPY
@@ -1549,6 +1572,43 @@ main(void)
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
 
+#if G17P_INDEX_RESTART
+   enum {
+      RESTART_VERTEX_COUNT = UINT16_MAX + 1u,
+      RESTART_VERTEX_OFFSET = 64,
+      RESTART_VERTEX_DATA_BYTES = RESTART_VERTEX_COUNT * 2 * sizeof(float),
+      RESTART_VERTEX_SUFFIX_BYTES = 64,
+      RESTART_VERTEX_BUFFER_BYTES = RESTART_VERTEX_OFFSET +
+                                    RESTART_VERTEX_DATA_BYTES +
+                                    RESTART_VERTEX_SUFFIX_BYTES,
+   };
+   uint8_t *vertex_expected = malloc(RESTART_VERTEX_BUFFER_BYTES);
+   if (!vertex_expected)
+      die("out of host memory");
+   memset(vertex_expected, 0xa5, RESTART_VERTEX_BUFFER_BYTES);
+   float (*restart_vertices)[2] =
+      (void *)(vertex_expected + RESTART_VERTEX_OFFSET);
+   for (uint32_t i = 0; i < RESTART_VERTEX_COUNT; ++i) {
+      restart_vertices[i][0] = 2.0f;
+      restart_vertices[i][1] = 2.0f;
+   }
+   restart_vertices[3][0] = -1.0f;
+   restart_vertices[3][1] = -1.0f;
+   restart_vertices[4][0] = 3.0f;
+   restart_vertices[4][1] = -1.0f;
+   restart_vertices[5][0] = -1.0f;
+   restart_vertices[5][1] = 3.0f;
+   restart_vertices[6][0] = 3.0f;
+   restart_vertices[6][1] = 3.0f;
+   restart_vertices[UINT16_MAX][0] = 3.0f;
+   restart_vertices[UINT16_MAX][1] = 3.0f;
+
+   struct mapped_buffer vertex = create_mapped_buffer(
+      device, &memory_properties, RESTART_VERTEX_BUFFER_BYTES,
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "restart vertex buffer");
+   memcpy(vertex.map, vertex_expected, RESTART_VERTEX_BUFFER_BYTES);
+   VkBuffer vertex_buffer = vertex.buffer;
+#else
 #if G17P_INDIRECT_DRAW
    /* The first three vertices are deliberately degenerate.  A zero/wrong
     * firstVertex, firstIndex, or baseVertex therefore cannot paint the image. */
@@ -1597,6 +1657,7 @@ main(void)
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+#endif
 
 #if G17P_INDIRECT_DRAW
    enum {
@@ -1659,6 +1720,34 @@ main(void)
       VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "index buffer");
    memcpy(index.map, index_expected, sizeof(index_expected));
 #endif
+#endif
+
+#if G17P_INDEX_RESTART
+   enum {
+      RESTART_INDEX_BUFFER_OFFSET = 64,
+      RESTART_FIRST_INDEX = 31,
+      RESTART_INDEX_SEQUENCE_OFFSET = RESTART_INDEX_BUFFER_OFFSET +
+                                      RESTART_FIRST_INDEX * sizeof(uint16_t),
+      RESTART_INDEX_SUFFIX_BYTES = 64,
+   };
+   static const uint16_t restart_indices[] = {
+      3, 4, 5, UINT16_MAX, 6, 6, 6,
+   };
+   uint8_t restart_index_expected[RESTART_INDEX_SEQUENCE_OFFSET +
+                                  sizeof(restart_indices) +
+                                  RESTART_INDEX_SUFFIX_BYTES];
+   memset(restart_index_expected, 0xa5, sizeof(restart_index_expected));
+   /* Ignoring either the binding offset or firstIndex selects only safe zero
+    * indices. The requested seven-index sequence starts at byte 126 and
+    * crosses the 128-byte boundary. */
+   memset(restart_index_expected, 0, RESTART_INDEX_SEQUENCE_OFFSET);
+   memcpy(restart_index_expected + RESTART_INDEX_SEQUENCE_OFFSET,
+          restart_indices, sizeof(restart_indices));
+   struct mapped_buffer restart_index = create_mapped_buffer(
+      device, &memory_properties, sizeof(restart_index_expected),
+      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "restart index buffer");
+   memcpy(restart_index.map, restart_index_expected,
+          sizeof(restart_index_expected));
 #endif
 
    const VkImageCreateInfo image_info = {
@@ -1897,7 +1986,7 @@ main(void)
    };
    const VkVertexInputBindingDescription vertex_binding = {
       .binding = 0,
-      .stride = sizeof(vertices[0]),
+      .stride = 2 * sizeof(float),
       .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
    };
    const VkVertexInputAttributeDescription vertex_attribute = {
@@ -1914,7 +2003,9 @@ main(void)
    };
    const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .topology = G17P_INDEX_RESTART ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                                     : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .primitiveRestartEnable = G17P_INDEX_RESTART,
    };
    const VkViewport viewport = {
       .width = IMAGE_WIDTH,
@@ -1942,6 +2033,13 @@ main(void)
       .rasterizationSamples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
    };
    const VkPipelineColorBlendAttachmentState blend_attachment = {
+      .blendEnable = G17P_INDEX_RESTART,
+      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
    };
@@ -2032,10 +2130,18 @@ main(void)
                         VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
+#if G17P_INDEX_RESTART
+   const VkDeviceSize vertex_offset = RESTART_VERTEX_OFFSET;
+#else
    const VkDeviceSize vertex_offset = 0;
+#endif
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
-#if G17P_INDIRECT_DRAW == 1
+#if G17P_INDEX_RESTART
+   vkCmdBindIndexBuffer(command_buffer, restart_index.buffer,
+                        RESTART_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
+   vkCmdDrawIndexed(command_buffer, 7, 1, RESTART_FIRST_INDEX, 0, 0);
+#elif G17P_INDIRECT_DRAW == 1
    vkCmdDrawIndirect(command_buffer, indirect.buffer, INDIRECT_COMMAND_OFFSET,
                      2, INDIRECT_COMMAND_STRIDE);
 #elif G17P_INDIRECT_DRAW == 2
@@ -2083,7 +2189,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_INDIRECT_DRAW || G17P_F16_IO || G17P_RG16_UNORM ||           \
+#if G17P_INDEX_RESTART || G17P_INDIRECT_DRAW || G17P_F16_IO ||        \
+   G17P_RG16_UNORM ||                                                  \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
    G17P_R32_SINT || G17P_RG16_UINT || G17P_RG16_SINT ||               \
@@ -2145,9 +2252,14 @@ main(void)
       return EXIT_FAILURE;
 #endif
 #endif
+#if G17P_INDEX_RESTART
+   if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
+       !verify_upload(&restart_index, restart_index_expected, "index input"))
+      return EXIT_FAILURE;
+#endif
 
-#if G17P_INDIRECT_DRAW || G17P_MSAA_SAMPLES == 2 || G17P_F16_IO ||      \
-   G17P_RG16_UNORM ||                                                    \
+#if G17P_INDEX_RESTART || G17P_INDIRECT_DRAW ||                         \
+   G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \
@@ -2171,10 +2283,21 @@ main(void)
       return EXIT_FAILURE;
 #endif
 #endif
+#if G17P_INDEX_RESTART
+   if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
+       !verify_upload(&restart_index, restart_index_expected, "index input"))
+      return EXIT_FAILURE;
+#endif
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_INDIRECT_DRAW == 1
+#if G17P_INDEX_RESTART
+   printf(PROBE_NAME ": PASS — triangle-strip primitive restart exact "
+                     "immediately/3s, firstIndex 31 crosses byte 128, "
+                     "all vertex/index/readback guards unchanged, checksum "
+                     "%016" PRIx64 "\n",
+          checksum);
+#elif G17P_INDIRECT_DRAW == 1
    printf(PROBE_NAME ": PASS — vkCmdDrawIndirect exact immediately/3s, "
                      "two records/stride, nonzero command offset/firstVertex/"
                      "firstInstance, "
