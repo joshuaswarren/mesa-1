@@ -20,6 +20,11 @@
  *
  * The recorded bytes are read back out of the driver's own launch trace,
  * which is the only channel a Vulkan client has into the command stream.
+ *
+ * `--execute` additionally submits one indirect dispatch and checks the buffer
+ * the shader was supposed to write.  That mode is meaningless under the shim
+ * -- nothing runs, so it reports the sentinel and fails -- and exists so a
+ * single hardware boot can answer whether the recorded pair actually launches.
  */
 
 #define VK_NO_PROTOTYPES
@@ -92,6 +97,12 @@ VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdDispatch);
 VK_FN(vkCmdDispatchIndirect);
 VK_FN(vkEndCommandBuffer);
+VK_FN(vkGetDeviceQueue);
+VK_FN(vkCmdPipelineBarrier);
+VK_FN(vkCreateFence);
+VK_FN(vkDestroyFence);
+VK_FN(vkQueueSubmit);
+VK_FN(vkWaitForFences);
 
 static const char *const NAME = "g17p-vulkan-dispatch-indirect";
 
@@ -327,8 +338,16 @@ verify(const struct recorded_indirect *r, unsigned index,
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+   bool execute = false;
+   for (int i = 1; i < argc; ++i) {
+      if (!strcmp(argv[i], "--execute"))
+         execute = true;
+      else
+         die("usage: g17p-vulkan-dispatch-indirect [--execute]");
+   }
+
    /* Turn the launch trace on before the driver caches the option. */
    setenv("HK_G17P_LAUNCH_TRACE", "1", 1);
 
@@ -460,6 +479,12 @@ main(void)
    LOAD_DEVICE(device, vkCmdDispatch);
    LOAD_DEVICE(device, vkCmdDispatchIndirect);
    LOAD_DEVICE(device, vkEndCommandBuffer);
+   LOAD_DEVICE(device, vkGetDeviceQueue);
+   LOAD_DEVICE(device, vkCmdPipelineBarrier);
+   LOAD_DEVICE(device, vkCreateFence);
+   LOAD_DEVICE(device, vkDestroyFence);
+   LOAD_DEVICE(device, vkQueueSubmit);
+   LOAD_DEVICE(device, vkWaitForFences);
 
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
@@ -498,10 +523,14 @@ main(void)
       .usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
-   VkBuffer args[2];
-   VkDeviceMemory args_memory[2];
-   static const uint32_t args_values[2][3] = {{2, 3, 1}, {5, 1, 1}};
-   for (unsigned i = 0; i < 2; ++i) {
+   /* args[2] is the only one an execute run may dispatch: the shader writes
+    * values[gl_GlobalInvocationID.x] for ELEMENT_COUNT elements and declares
+    * local_size 32, so exactly one group covers the buffer and nothing else
+    * does. */
+   VkBuffer args[3];
+   VkDeviceMemory args_memory[3];
+   static const uint32_t args_values[3][3] = {{2, 3, 1}, {5, 1, 1}, {1, 1, 1}};
+   for (unsigned i = 0; i < 3; ++i) {
       check(vkCreateBuffer(device, &args_info, NULL, &args[i]),
             "vkCreateBuffer(indirect)");
       VkMemoryRequirements args_requirements;
@@ -704,13 +733,107 @@ main(void)
               "both helper records name the same geometry address");
    }
 
+   if (execute) {
+      /* One indirect dispatch whose runtime group count covers the buffer
+       * exactly, submitted for real.  Under the shim this reports the prefill
+       * sentinel, which means "no GPU here", not "the launch is wrong" -- so
+       * only run it on hardware. */
+      uint32_t *mapped;
+      check(vkMapMemory(device, memory, 0, buffer_size, 0, (void **)&mapped),
+            "vkMapMemory");
+      for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
+         mapped[i] = UINT32_C(0xA5A50000) | i;
+
+      VkCommandBuffer execute_cb;
+      check(vkAllocateCommandBuffers(device, &command_buffer_info,
+                                     &execute_cb),
+            "vkAllocateCommandBuffers(execute)");
+      check(vkBeginCommandBuffer(execute_cb, &begin_info),
+            "vkBeginCommandBuffer(execute)");
+      vkCmdBindPipeline(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+      vkCmdBindDescriptorSets(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+      vkCmdDispatchIndirect(execute_cb, args[2], 0);
+      const VkBufferMemoryBarrier host_barrier = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+         .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+         .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .buffer = buffer,
+         .offset = 0,
+         .size = buffer_size,
+      };
+      vkCmdPipelineBarrier(execute_cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
+                           &host_barrier, 0, NULL);
+      check(vkEndCommandBuffer(execute_cb), "vkEndCommandBuffer(execute)");
+
+      VkQueue queue;
+      vkGetDeviceQueue(device, queue_family, 0, &queue);
+      const VkFenceCreateInfo fence_info = {
+         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+      };
+      VkFence fence;
+      check(vkCreateFence(device, &fence_info, NULL, &fence),
+            "vkCreateFence");
+      const VkSubmitInfo submit_info = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &execute_cb,
+      };
+      check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
+      check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
+            "vkWaitForFences");
+
+      /* Classify rather than just compare: "the grid never launched" and "the
+       * grid launched with the wrong dimensions" are different bugs, and the
+       * geometry block is exactly what decides between them. */
+      unsigned untouched = 0, wrong = 0, correct = 0;
+      for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
+         const uint32_t expected = UINT32_C(0x12340000) + (2 * i) + 3;
+         if (mapped[i] == expected)
+            correct++;
+         else if (mapped[i] == (UINT32_C(0xA5A50000) | i))
+            untouched++;
+         else
+            wrong++;
+      }
+
+      if (correct != ELEMENT_COUNT) {
+         failures++;
+         fprintf(stderr,
+                 "%s: FAIL execute correct=%u untouched=%u wrong=%u of %u\n",
+                 NAME, correct, untouched, wrong, ELEMENT_COUNT);
+         if (untouched == ELEMENT_COUNT)
+            fprintf(stderr,
+                    "%s:   -> nothing ran. Either the helper never published "
+                    "the geometry block or the main record never consumed "
+                    "it; this is not a shader bug.\n",
+                    NAME);
+         else if (untouched)
+            fprintf(stderr,
+                    "%s:   -> a PREFIX of %u elements ran. The pair launched, "
+                    "but with a smaller grid than 1 group of 32 threads, so "
+                    "the geometry block holds threadgroups where it should "
+                    "hold global threads.\n",
+                    NAME, correct);
+      } else {
+         printf("%s: execute PASS - the indirect grid launched %u threads\n",
+                NAME, ELEMENT_COUNT);
+      }
+
+      vkDestroyFence(device, fence, NULL);
+      vkUnmapMemory(device, memory);
+   }
+
    vkDestroyCommandPool(device, command_pool, NULL);
    vkDestroyPipeline(device, pipeline, NULL);
    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
    vkDestroyShaderModule(device, shader, NULL);
    vkDestroyDescriptorPool(device, descriptor_pool, NULL);
    vkDestroyDescriptorSetLayout(device, set_layout, NULL);
-   for (unsigned i = 0; i < 2; ++i) {
+   for (unsigned i = 0; i < 3; ++i) {
       vkDestroyBuffer(device, args[i], NULL);
       vkFreeMemory(device, args_memory[i], NULL);
    }
