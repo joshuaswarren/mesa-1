@@ -49,6 +49,15 @@ test_shuffle_vectors(void)
    static const uint8_t uniform_c[] = {
       0x27, 0x00, 0x21, 0x1a, 0x20, 0x00, 0xa8, 0x02, 0x18, 0x02,
    };
+   static const uint8_t quad_broadcast_lane2_wait6[] = {
+      0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x04, 0x2c, 0x02, 0x00,
+   };
+   static const uint8_t quad_xor_lane1_live[] = {
+      0xc7, 0x00, 0x54, 0x02, 0x02, 0x0c, 0x02, 0x2c, 0x02, 0x00,
+   };
+   static const uint8_t quad_xor_lane3_final[] = {
+      0xc7, 0x00, 0x54, 0x06, 0x02, 0x0c, 0x06, 0x2c, 0x04, 0x00,
+   };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
 
    struct agx3_subgroup_shuffle_desc d = {
@@ -79,6 +88,38 @@ test_shuffle_vectors(void)
       agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, uniform_c, sizeof(uniform_c)));
 
+   d = (struct agx3_subgroup_shuffle_desc){
+      .quad = true,
+      .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+      .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+      .src = 6,
+      .lane = 2,
+      .wait_mask = 1u << 5,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   CHECK(bytes_equal(out, length, quad_broadcast_lane2_wait6,
+                     sizeof(quad_broadcast_lane2_wait6)));
+
+   d.op = AGX3_SUBGROUP_SHUFFLE_XOR;
+   d.dest = 2;
+   d.lane = 1;
+   d.wait_mask = 0;
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   CHECK(bytes_equal(out, length, quad_xor_lane1_live,
+                     sizeof(quad_xor_lane1_live)));
+
+   d.dest = 6;
+   d.lane = 3;
+   d.src_live = false;
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   CHECK(bytes_equal(out, length, quad_xor_lane3_final,
+                     sizeof(quad_xor_lane3_final)));
+
+   d.lane = 8;
    for (unsigned quad = 0; quad < 2; ++quad) {
       d.quad = quad;
       for (unsigned op = 0; op < AGX3_SUBGROUP_SHUFFLE_NUM; ++op) {
@@ -310,6 +351,25 @@ test_rejection(void)
    s.lane_kind = (enum agx3_subgroup_lane_kind)1;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   s.quad = true;
+   s.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
+   s.lane = 1;
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   s.op = AGX3_SUBGROUP_SHUFFLE_XOR;
+   s.lane = 0;
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   s.lane = 1;
+   s.wait_mask = 1;
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   s.wait_mask = 0;
+   s.op = AGX3_SUBGROUP_SHUFFLE_UP;
+   s.lane = 1;
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   s.quad = false;
    s.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
    s.lane = 3;
    CHECK(

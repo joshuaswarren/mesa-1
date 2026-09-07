@@ -70,10 +70,21 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
     */
    if (d->lane_kind == AGX3_SUBGROUP_LANE_IMMEDIATE) {
       const unsigned slots = 6;
-      /* Only the sub-group broadcast is witnessed with an immediate lane, and
-       * only on AGX3b; everything else fails closed. */
-      if (enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
-          d->op != AGX3_SUBGROUP_SHUFFLE_BROADCAST)
+      /* G17P witnesses the SIMD broadcast subset and the exact quad family
+       * used by the public GLSL operations below. Keep every other immediate
+       * shape fail-closed. */
+      const bool simd_witness =
+         !d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST &&
+         (d->lane == 0 || d->lane == 3 || d->lane == 5);
+      const bool quad_witness =
+         d->quad && ((d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST && d->lane == 2) ||
+                     (d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
+                      d->lane >= 1 && d->lane <= 3));
+      if (enc != AGX_ISA_ENCODING_AGX3B || (!simd_witness && !quad_witness))
+         return false;
+      if (d->quad && (d->dest_hint ||
+                      (d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
+                       d->wait_mask != 0)))
          return false;
       if (d->lane > 0x7f || (d->wait_mask >> slots) != 0)
          return false;
@@ -84,7 +95,11 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       ibase[inb++] = (struct agx3_field_kv){10, 2};
       ibase[inb++] = (struct agx3_field_kv){23, 2};
       ibase[inb++] = (struct agx3_field_kv){24, 2};
-      ibase[inb++] = (struct agx3_field_kv){27, 1};
+      if (d->quad) {
+         ibase[inb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
+      } else {
+         ibase[inb++] = (struct agx3_field_kv){27, 1};
+      }
       ibase[inb++] = (struct agx3_field_kv){37, 1};
       ibase[inb++] = (struct agx3_field_kv){38, 1};
 

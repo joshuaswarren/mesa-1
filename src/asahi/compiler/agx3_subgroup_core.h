@@ -30,9 +30,8 @@ enum agx3_subgroup_shuffle_op {
 };
 
 enum agx3_subgroup_lane_kind {
-   /* An immediate lane index, in f29 with the class selector f37 = 1. This is
-    * what Apple emits for `simd_broadcast(v, K)`; PROVEN against the corpus
-    * csimd shader (lane 3) and three offline g17p probes (lanes 0, 3, 5). */
+   /* An immediate lane index, in f29 with the class selector f37 = 1. Apple
+    * emits this for the bounded SIMD and quad witnesses accepted below. */
    AGX3_SUBGROUP_LANE_IMMEDIATE = 1,
    AGX3_SUBGROUP_LANE_REGISTER = 2,
    AGX3_SUBGROUP_LANE_UNIFORM = 3,
@@ -47,9 +46,12 @@ struct agx3_subgroup_shuffle_desc {
    uint16_t lane;
    uint16_t wait_mask;
    /* f11, the one-bit general-destination hint. Only consulted on the
-    * immediate-lane path; the register and uniform paths keep the constants
-    * their own corpus pinned. */
+    * immediate-lane path; the register and uniform paths keep their own
+    * corpus constants pinned. */
    bool dest_hint;
+   /* The G17P immediate quad form uses f25 while the source remains live and
+    * f27 on its final read.  This is ignored by the older SIMD witnesses. */
+   bool src_live;
 };
 
 enum agx3_subgroup_ballot_type {

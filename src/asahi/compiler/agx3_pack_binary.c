@@ -2246,6 +2246,39 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
        I->src[1].type == AGX_INDEX_IMMEDIATE)
       return agx3_emit_simd_broadcast(emission, enc, I, wait_mask);
 
+   if (quad && I->nr_srcs == 2 && I->src[1].type == AGX_INDEX_IMMEDIATE) {
+      if (I->nr_dests != 1 || I->saturate ||
+          !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
+          !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER) ||
+          I->src[1].memory || I->src[1].abs || I->src[1].neg ||
+          agx_channels(I->src[1]) != 1)
+         return false;
+
+      /* The native quad broadcast carries the device-load wait directly.
+       * The witnessed quad butterfly words have no wait, so settle any
+       * producer before emitting those byte-exact forms. */
+      if (op != AGX3_SUBGROUP_SHUFFLE_BROADCAST && wait_mask != 0) {
+         if (!agx3_retire_slots_noop(emission, enc, wait_mask))
+            return false;
+         wait_mask = 0;
+      }
+
+      const struct agx3_subgroup_shuffle_desc d = {
+         .quad = true,
+         .op = op,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = I->dest[0].value,
+         .src = I->src[0].value,
+         .lane = I->src[1].value,
+         .wait_mask = wait_mask,
+         .dest_hint = I->dest[0].cache,
+         .src_live = !I->src[0].discard,
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
+             agx3_append(emission, bytes, length);
+   }
+
    if (I->nr_dests != 1 || I->nr_srcs != 2 || I->saturate ||
        !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
        !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER))
