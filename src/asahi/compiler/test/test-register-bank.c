@@ -20,10 +20,11 @@ static void
 init(struct fixture *f, unsigned bound, unsigned reserved)
 {
    memset(f, 0, sizeof(*f));
-   f->key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   f->key.dev.encoding =
+      reserved == 2 ? AGX_ISA_ENCODING_AGX2 : AGX_ISA_ENCODING_AGX3B;
    f->shader.key = &f->key;
    f->shader.any_cf = reserved > 0;
-   f->shader.any_quad_divergent_shuffle = reserved == 2;
+   f->shader.any_quad_divergent_shuffle = reserved == 2 || reserved == 4;
    f->shader.has_spill_pcopy_reserved = reserved == 8;
    f->ra = (struct ra_ctx){
       .shader = &f->shader, .ssa_to_reg = f->assignments,
@@ -112,10 +113,10 @@ main(void)
 
    unsigned rng = 0x1234567;
    for (unsigned run = 0; run < 256; ++run) {
-      unsigned reserved[] = {0, 1, 2, 8};
+      unsigned reserved[] = {0, 1, 2, 4, 8};
       unsigned count = 1u << (run % 4);
       unsigned bound = run & 1 ? 192 : 256;
-      init(&f, bound, reserved[(run / 4) % 4]);
+      init(&f, bound, reserved[(run / 4) % ARRAY_SIZE(reserved)]);
       /* Fill the whole low bank and all but count halves of the high bank.
        * Power-of-two vectors independently vary in width and scalar type. */
       for (unsigned reg = reserved_size(&f.shader); reg < bound - count;) {

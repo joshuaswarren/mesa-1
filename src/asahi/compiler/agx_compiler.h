@@ -516,8 +516,8 @@ typedef struct {
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
 
-   /* Do we need r0h zero throughout the program to handle quad-divergent
-    * shuffle?
+   /* Do we need a reserved zero register throughout the program to handle
+    * quad-divergent shuffle?
     */
    bool any_quad_divergent_shuffle;
 

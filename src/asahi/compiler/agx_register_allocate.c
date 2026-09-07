@@ -129,7 +129,7 @@ reserved_size(agx_context *ctx)
    if (ctx->has_spill_pcopy_reserved)
       return 8;
    else if (ctx->any_quad_divergent_shuffle)
-      return 2;
+      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
    else if (ctx->any_cf)
       return 1;
    else
@@ -1178,10 +1178,14 @@ agx_ra_assign_local(struct ra_ctx *rctx)
    if (rctx->shader->any_cf)
       BITSET_SET(used_regs_gpr, 0);
 
-   /* Force the zero r0h live throughout shaders using divergent shuffles. */
+   /* Keep the divergent-shuffle scratch live throughout the shader. AGX2
+    * uses r0h; AGX3 reserves the full r1 after r0's nesting counter. */
    if (rctx->shader->any_quad_divergent_shuffle) {
       assert(rctx->shader->any_cf);
-      BITSET_SET(used_regs_gpr, 1);
+      if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2)
+         BITSET_SET(used_regs_gpr, 1);
+      else
+         BITSET_SET_COUNT(used_regs_gpr, 0, 4);
    }
 
    /* Reserve bottom registers as temporaries for parallel copy lowering */

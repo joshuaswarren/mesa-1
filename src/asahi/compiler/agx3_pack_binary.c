@@ -2134,6 +2134,10 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
 }
 
 static bool
+agx3_retire_slots_noop(struct util_dynarray *emission,
+                       enum agx_isa_encoding enc, uint16_t mask);
+
+static bool
 agx3_subgroup_plain(agx_index index, enum agx_index_type type)
 {
    /* cache/discard are post-RA performance hints, not value modifiers.  The
@@ -2254,6 +2258,17 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
       lane_kind = AGX3_SUBGROUP_LANE_UNIFORM;
    else
       return false;
+
+   /* Register-index subgroup multiplication is produced by common NIR as a
+    * shuffle tree.  Its first read can consume an asynchronous device load,
+    * but the grounded register-lane shuffle form has no known wait fields.
+    * Retire the dependency with the existing synchronous identity prelude,
+    * then emit the unchanged byte-grounded shuffle. */
+   if (wait_mask != 0) {
+      if (!agx3_retire_slots_noop(emission, enc, wait_mask))
+         return false;
+      wait_mask = 0;
+   }
 
    const struct agx3_subgroup_shuffle_desc d = {
       .quad = quad,

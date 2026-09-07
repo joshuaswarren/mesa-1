@@ -6,6 +6,7 @@
 #include "util/lut.h"
 #include "util/macros.h"
 #include "agx_builder.h"
+#include "agx3_select_core.h"
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
 
@@ -537,6 +538,22 @@ agx_optimizer_cmpsel(agx_instr **defs, agx_instr *I)
 static void
 agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
+   /* The grounded G17P ballot form compares a full 32-bit register against
+    * zero.  Common subgroup reduction lowering legitimately creates
+    * ballot(true) to distinguish full from partial active subgroups, and the
+    * immediate inliner runs before this fusion pass.  Materialize that exact
+    * boolean here so lower_pseudo reaches the witnessed register ballot
+    * instead of leaving an unencodable immediate predicate after RA. */
+   if (I->op == AGX_OPCODE_BALLOT && ctx->key &&
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      I->src[0].type == AGX_INDEX_IMMEDIATE) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index predicate = agx_temp(ctx, AGX_SIZE_32);
+      agx_mov_imm_to(&b, predicate, I->src[0].value);
+      I->src[0] = predicate;
+      return;
+   }
+
    if (I->src[0].type != AGX_INDEX_NORMAL)
       return;
 
@@ -566,7 +583,7 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
  * Fuse not srcs into bitop.
  */
 static void
-agx_optimizer_bitop(agx_instr **defs, agx_instr *I)
+agx_optimizer_bitop(agx_context *ctx, agx_instr **defs, agx_instr *I)
 {
    agx_foreach_ssa_src(I, s) {
       agx_index src = I->src[s];
@@ -574,7 +591,16 @@ agx_optimizer_bitop(agx_instr **defs, agx_instr *I)
 
       /* If we find a not, select new operation and fuse */
       if (def->op == AGX_OPCODE_NOT) {
-         I->truth_table = util_lut2_invert_source(I->truth_table, s);
+         const unsigned truth_table =
+            util_lut2_invert_source(I->truth_table, s);
+         if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             truth_table != AGX3_SEL_TT_AND &&
+             truth_table != AGX3_SEL_TT_OR &&
+             truth_table != AGX3_SEL_TT_XOR &&
+             truth_table != AGX3_SEL_TT_NOT)
+            continue;
+
+         I->truth_table = truth_table;
          I->src[s] = def->src[0];
       }
    }
@@ -710,7 +736,7 @@ agx_optimizer_forward(agx_context *ctx)
                  I->op == AGX_OPCODE_QUAD_BALLOT) {
          agx_optimizer_ballot(ctx, defs, I);
       } else if (I->op == AGX_OPCODE_BITOP) {
-         agx_optimizer_bitop(defs, I);
+         agx_optimizer_bitop(ctx, defs, I);
       } else if (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD) {
          agx_optimizer_signext(defs, I);
       }

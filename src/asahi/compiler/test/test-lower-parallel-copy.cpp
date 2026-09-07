@@ -285,6 +285,30 @@ TEST_F(LowerParallelCopy, StackCopies)
    });
 }
 
+TEST_F(LowerParallelCopy, G17PStackCopiesAvoidDivergentShuffleScratch)
+{
+   struct agx_copy copies[] = {
+      {.dest = 0,
+       .dest_mem = true,
+       .src = agx_memory_register(12, AGX_SIZE_32)},
+   };
+
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   actual->shader->any_quad_divergent_shuffle = true;
+
+   agx_emit_parallel_copies(actual, copies, ARRAY_SIZE(copies));
+   agx_mov_to(expected, agx_register(4, AGX_SIZE_32),
+              agx_memory_register(12, AGX_SIZE_32));
+   agx_mov_to(expected, agx_memory_register(0, AGX_SIZE_32),
+              agx_register(4, AGX_SIZE_32));
+
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 #if 0
 TEST_F(LowerParallelCopy, LooksLikeASwap) {
    struct agx_copy test[] = {

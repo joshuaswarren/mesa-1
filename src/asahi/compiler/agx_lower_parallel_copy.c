@@ -53,9 +53,14 @@ do_copy(agx_builder *b, const struct agx_copy *copy)
 
    if (copy->dest_mem && copy->src.memory) {
       /* Memory-memory copies need to be lowered to memory-register and
-       * register-memory, using a reserved scratch register.
+       * register-memory, using a reserved scratch register. Keep AGX3's r1
+       * available for a full-width divergent-shuffle index when required.
        */
-      agx_index scratch_reg = agx_register(2, copy->src.size);
+      const bool agx3_shuffle =
+         b->shader->any_quad_divergent_shuffle &&
+         b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+      agx_index scratch_reg =
+         agx_register(agx3_shuffle ? 4 : 2, copy->src.size);
       agx_mov_to(b, scratch_reg, copy->src);
       agx_mov_to(b, dst, scratch_reg);
    } else if (copy->src.type == AGX_INDEX_IMMEDIATE) {

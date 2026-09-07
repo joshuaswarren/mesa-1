@@ -29,23 +29,20 @@ is_shuffle(enum agx_opcode op)
  * AGX shuffle instructions read indices to shuffle with from the entire quad
  * and accumulate them. That means that an inactive thread anywhere in the quad
  * can make the whole shuffle undefined! To workaround, we reserve a scratch
- * register (r0h) which we keep zero throughout the program... except for when
- * actually shuffling, when we copy the shuffle index into r0h for the
+ * register which we keep zero throughout the program... except for when
+ * actually shuffling, when we copy the shuffle index into it for the
  * operation. This ensures that inactive threads read 0 for their index and
- * hence do not contribute to the accumulated index.
+ * hence do not contribute to the accumulated index. AGX2 uses r0h, while
+ * AGX3's full-width register-lane form uses the separately reserved r1.
  */
 void
 agx_lower_divergent_shuffle(agx_context *ctx)
 {
    agx_builder b = agx_init_builder(ctx, agx_before_function(ctx));
-   const bool agx3 = ctx->key != NULL &&
-                     ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
-
-   /* AGX2 consumes a half-register lane selector. AGX3's native register-lane
-    * shuffle consumes a 32-bit register, and RA already reserves both r0
-    * halves for control flow plus this divergent-shuffle workaround. */
-   agx_index scratch = agx3 ? agx_register(0, AGX_SIZE_32)
-                            : agx_register(1, AGX_SIZE_16);
+   /* Keep AGX3 off r0: its low half is the control-flow nesting counter. */
+   const bool agx3 = ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   agx_index scratch =
+      agx_register(agx3 ? 2 : 1, agx3 ? AGX_SIZE_32 : AGX_SIZE_16);
 
    assert(ctx->any_quad_divergent_shuffle);
    agx_mov_imm_to(&b, scratch, 0);
