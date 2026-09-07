@@ -259,6 +259,10 @@
 #error "vertex-format oracles cannot be combined with another draw oracle"
 #endif
 
+#ifndef G17P_BRESENHAM_LINES
+#define G17P_BRESENHAM_LINES 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -274,7 +278,7 @@
      G17P_R16_SINT + G17P_R16_SFLOAT + G17P_RG16_SFLOAT +             \
      G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
-     (G17P_VERTEX_FORMAT != 0)) > 1
+     (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -1137,6 +1141,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_BRESENHAM_LINES
+#define PROBE_NAME "g17p-vulkan-bresenham-lines"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1155,7 +1164,7 @@ VK_FN(vkGetInstanceProcAddr);
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
-#if G17P_F16_IO || G17P_INDIRECT_DRAW
+#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1529,6 +1538,21 @@ verify_readback(const uint8_t *map)
 #else
    static const uint8_t expected[4] = {255, 71, 13, 255};
 #endif
+#if G17P_BRESENHAM_LINES
+   static const uint8_t clear[4] = {0, 0, 0, 255};
+   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+      const unsigned y = pixel / IMAGE_WIDTH;
+      const uint8_t *wanted = (y >= 15 && y <= 17) ? expected : clear;
+      const uint8_t *actual = &pixels[pixel * sizeof(expected)];
+      if (memcmp(actual, wanted, sizeof(expected)) != 0) {
+         fprintf(stderr, PROBE_NAME ": pixel %zu differs: got "
+                         "%02x%02x%02x%02x, expected %02x%02x%02x%02x\n",
+                 pixel, actual[0], actual[1], actual[2], actual[3], wanted[0],
+                 wanted[1], wanted[2], wanted[3]);
+         return false;
+      }
+   }
+#else
    for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
       const uint8_t *actual = &pixels[pixel * IMAGE_PIXEL_BYTES];
 #if G17P_SHADOW_COMPARE
@@ -1557,6 +1581,7 @@ verify_readback(const uint8_t *map)
          return false;
       }
    }
+#endif
 
    return true;
 }
@@ -1649,6 +1674,8 @@ main(void)
       (G17P_RGBA8_SINT && getenv("G17P_RGBA8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_BGRA8_SNORM && getenv("G17P_BGRA8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA8_SNORM && getenv("G17P_RGBA8_SNORM_RECORD_ONLY") != NULL) ||
+      (G17P_BRESENHAM_LINES &&
+       getenv("G17P_BRESENHAM_LINES_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -1682,7 +1709,7 @@ main(void)
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
-#if G17P_F16_IO || G17P_INDIRECT_DRAW
+#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1752,6 +1779,18 @@ main(void)
    vkGetPhysicalDeviceFeatures2(physical, &available);
    if (!available11.storageInputOutput16)
       die("T8140/G17P does not advertise storageInputOutput16");
+#elif G17P_BRESENHAM_LINES
+   VkPhysicalDeviceLineRasterizationFeaturesKHR available_lines = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR,
+   };
+   VkPhysicalDeviceFeatures2 available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_lines,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available);
+   if (!available.features.wideLines || !available_lines.bresenhamLines)
+      die("T8140/G17P lacks wideLines or bresenhamLines");
 #endif
 
 #if G17P_INDIRECT_DRAW
@@ -1824,6 +1863,7 @@ main(void)
       .queueCount = 1,
       .pQueuePriorities = &queue_priority,
    };
+#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
 #if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
    const VkPhysicalDeviceHostImageCopyFeaturesEXT host_copy_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT,
@@ -1832,6 +1872,19 @@ main(void)
    const char *device_extensions[] = {
       VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
    };
+#else
+   const VkPhysicalDeviceLineRasterizationFeaturesKHR enabled_lines = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR,
+      .bresenhamLines = VK_TRUE,
+   };
+   const VkPhysicalDeviceFeatures enabled_features = {
+      .wideLines = VK_TRUE,
+   };
+   const char *device_extensions[] = {
+      VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME,
+   };
+#endif
 #endif
 #if G17P_F16_IO
    const VkPhysicalDeviceVulkan11Features enabled11 = {
@@ -1853,6 +1906,8 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_F16_IO
       .pNext = &enabled11,
+#elif G17P_BRESENHAM_LINES
+      .pNext = &enabled_lines,
 #elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
       .pNext = &host_copy_features,
 #elif G17P_INDIRECT_DRAW
@@ -1863,7 +1918,10 @@ main(void)
 #if G17P_INDIRECT_DRAW
       .pEnabledFeatures = &indirect_enabled,
 #endif
-#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
+#if G17P_BRESENHAM_LINES
+      .pEnabledFeatures = &enabled_features,
+#endif
+#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
 #endif
@@ -2115,7 +2173,14 @@ main(void)
           sizeof(texture_vertex_expected));
    VkBuffer vertex_buffer = texture_vertex.buffer;
 #else
-#if G17P_INDIRECT_DRAW
+#if G17P_BRESENHAM_LINES
+   /* A horizontal line centred on row 16.5 and clipped past both viewport
+    * sides. Width 3.0 must cover exactly rows 15..17, all 32 columns. */
+   static const float vertices[][2] = {
+      {-4.0f, 0.03125f},
+      {4.0f, 0.03125f},
+   };
+#elif G17P_INDIRECT_DRAW
    /* The first three vertices are deliberately degenerate.  A zero/wrong
     * firstVertex, firstIndex, or baseVertex therefore cannot paint the image. */
    static const float vertices[][2] = {
@@ -2888,8 +2953,11 @@ main(void)
 #endif
    const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = G17P_INDEX_RESTART ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-                                     : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .topology = G17P_BRESENHAM_LINES
+                     ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                     : G17P_INDEX_RESTART
+                          ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                          : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
       .primitiveRestartEnable = G17P_INDEX_RESTART,
    };
    const VkViewport viewport = {
@@ -2906,12 +2974,25 @@ main(void)
       .scissorCount = 1,
       .pScissors = &scissor,
    };
+#if G17P_BRESENHAM_LINES
+   const VkPipelineRasterizationLineStateCreateInfoKHR line_raster = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR,
+      .lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR,
+   };
+#endif
    const VkPipelineRasterizationStateCreateInfo raster = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+#if G17P_BRESENHAM_LINES
+      .pNext = &line_raster,
+#endif
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_NONE,
       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+#if G17P_BRESENHAM_LINES
+      .lineWidth = 3.0f,
+#else
       .lineWidth = 1.0f,
+#endif
    };
    const VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
@@ -3230,6 +3311,8 @@ main(void)
                         cube_pipelines[face]);
       vkCmdDraw(command_buffer, 3, 1, 0, 0);
    }
+#elif G17P_BRESENHAM_LINES
+   vkCmdDraw(command_buffer, 2, 1, 0, 0);
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #endif
@@ -3272,7 +3355,7 @@ main(void)
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
-   G17P_RG16_UNORM ||                                                  \
+   G17P_BRESENHAM_LINES || G17P_RG16_UNORM ||                           \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
    G17P_R32_SINT || G17P_RG16_UINT || G17P_RG16_SINT ||               \
@@ -3369,7 +3452,8 @@ main(void)
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
-   G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_RG16_UNORM ||         \
+   G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
+   G17P_RG16_UNORM ||                                                     \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \
@@ -3577,6 +3661,10 @@ main(void)
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 SINT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_BRESENHAM_LINES
+   printf(PROBE_NAME ": PASS — 32x32 exact 3px Bresenham line immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          checksum);
 #elif G17P_RGBA16_UINT
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UINT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",

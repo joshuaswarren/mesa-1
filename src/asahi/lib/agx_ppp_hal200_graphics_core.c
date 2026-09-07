@@ -41,8 +41,8 @@ agx_ppp_hal200_fragment_face_raster_pack(
       return false;
 
    /* setLineWidth is consumed by the native finalize path as unsigned 4:4
-    * fixed point minus one. setTriangleFillMode writes the same two-bit field
-    * to both face words with BFI #18,#2. */
+    * fixed point minus one. setTriangleFillMode at 0x45a1a4 writes the same
+    * two-bit field to both face words with BFI #18,#2. */
    const uint32_t mask = UINT32_C(0x000cff00);
    *out = (original & ~mask) | (line_width << 8) | (polygon_mode << 18);
    return true;
@@ -53,7 +53,8 @@ agx_ppp_hal200_fragment_face_object_pack(
    enum agx_chip chip, unsigned object_type, uint32_t original,
    uint32_t *out)
 {
-   /* Native object types: triangle, line, and two point-sprite UV modes. */
+   /* These are the four native Object Type encodings: triangle, line, and
+    * the two point-sprite UV conventions. Reject every ungrounded nibble. */
    if (chip != AGX_CHIP_G17P ||
        (object_type != 0 && object_type != 1 && object_type != 2 &&
         object_type != 4) ||
