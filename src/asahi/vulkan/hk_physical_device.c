@@ -159,6 +159,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_swapchain_mutable_format = true,
 #endif
       .KHR_synchronization2 = true,
+      .KHR_unified_image_layouts = true,
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_variable_pointers = true,
       .KHR_vertex_attribute_divisor = true,
@@ -477,6 +478,20 @@ hk_get_device_features(
       /* VK_KHR_shader_subgroup_rotate */
       .shaderSubgroupRotate = true,
       .shaderSubgroupRotateClustered = true,
+
+      /* VK_KHR_unified_image_layouts
+       *
+       * Honeykrisp does not act on VkImageLayout anywhere: barriers
+       * (hk_CmdPipelineBarrier2) discard the dependency info and simply end the
+       * open batches, hk_CmdBeginRendering ignores the attachment layouts, and
+       * hk_TransitionImageLayoutEXT is a documented no-op.  Compression is
+       * decided once at image creation and is never a function of the layout,
+       * so VK_IMAGE_LAYOUT_GENERAL is already equivalent to every other layout.
+       *
+       * Video is not supported, so the video half stays false.
+       */
+      .unifiedImageLayouts = true,
+      .unifiedImageLayoutsVideo = false,
 
       /* VK_KHR_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
