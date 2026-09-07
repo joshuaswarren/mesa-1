@@ -1063,6 +1063,95 @@ test_register_lod(void)
    return 0;
 }
 
+/*
+ * The texel fetch's level.
+ *
+ * Three `metal-nt -arch applegpu_g17p` compute kernels differing only in the
+ * level argument to texture2d<float>::read(), from one source file
+ * (.tmp/g17p-gallium2-evidence/texlod.metal):
+ *
+ *   read(gid, 0)        f37 = 1, f139 = 2, f29 = 0
+ *   read(gid, 2)        f37 = 1, f139 = 2, f29 = 128     -- the level x 64
+ *   read(gid, lod[i])   f37 absent, f139 = 4, preceded by a PACK_SMPIR
+ *
+ * The same delta appears between two fragment programs in texlodfs.metal, so
+ * it is not a compute-only shape; those bytes additionally carry the
+ * fragment-only f83/f112/f124 selectors this encoder does not model, which is
+ * why the vectors here are the compute pair.
+ */
+static int
+test_fetch_lod(void)
+{
+   const uint8_t lod0[] = {0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x17,
+                           0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00};
+   const uint8_t lod2[] = {0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x17,
+                           0x01, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00};
+   const uint8_t dynamic[] = {0x05, 0x80, 0x0c, 0xb8, 0x30, 0x01, 0x80,
+                              0x24, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00};
+
+   struct agx3_tex_fetch_desc d = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .texture = 0, .slot = 1, .wait_mask = 1u << 0,
+      .coord_kill = true, .final = true,
+   };
+   uint8_t b[AGX3_TEX_MAX_LENGTH], len = 0;
+
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
+   CHECK(len == sizeof(lod0) && !memcmp(b, lod0, len));
+
+   d.lod_x64 = 2 * 64;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
+   CHECK(len == sizeof(lod2) && !memcmp(b, lod2, len));
+
+   /* The per-lane form waits on the staging slot the PACK_SMPIR published,
+    * which is why Apple's own program moves the wait from f62 to f63. */
+   d.lod_x64 = 0;
+   d.register_lod = true;
+   d.wait_mask = 1u << 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
+   CHECK(len == sizeof(dynamic) && !memcmp(b, dynamic, len));
+
+   /* An immediate level and a per-lane level are mutually exclusive, and the
+    * per-lane form has no AGX3c witness. */
+   d.lod_x64 = 64;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
+   d.lod_x64 = 0;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, b, &len));
+   d.register_lod = false;
+   d.lod_x64 = 2048;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
+
+   /* The level staged for a texel fetch is an INTEGER: PACK_SMPIR's f74 is
+    * the only field that moves between the fragment fetch and the fragment
+    * filtered sample in texlodtype.metal. */
+   const uint8_t integer_level[] = {0x17, 0x05, 0x54, 0x06, 0x00, 0x08,
+                                    0x00, 0x04, 0xf0, 0xc4, 0x0c, 0x00};
+   const uint8_t float_level[] = {0x17, 0x05, 0x54, 0x06, 0x00, 0x0c,
+                                  0x00, 0x04, 0xf0, 0xc0, 0x08, 0x00};
+   CHECK(agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 4, 2, 0, false,
+                                  true, AGX3_TEX_LEVEL_INTEGER, b, &len));
+   CHECK(len == sizeof(integer_level) && !memcmp(b, integer_level, len));
+   CHECK(agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false,
+                                  true, AGX3_TEX_LEVEL_FLOAT, b, &len));
+   CHECK(len == sizeof(float_level) && !memcmp(b, float_level, len));
+
+   /* The default entry point stays the float form every existing caller
+    * relies on. */
+   uint8_t plain[AGX3_TEX_MAX_LENGTH], plain_len = 0;
+   CHECK(agx3_tex_stage_lod(AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false, true,
+                            plain, &plain_len));
+   CHECK(plain_len == len && !memcmp(plain, b, len));
+
+   /* No other level type is witnessed. */
+   CHECK(!agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 4, 2, 0, false,
+                                   true, (enum agx3_tex_level_kind)1, b,
+                                   &len));
+   CHECK(!agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 4, 2, 0, false,
+                                   true, (enum agx3_tex_level_kind)4, b,
+                                   &len));
+   return 0;
+}
+
 static int
 test_register_array_layer(void)
 {
@@ -1093,7 +1182,8 @@ test_register_array_layer(void)
 int
 main(void)
 {
-   if (test_register_lod() || test_register_array_layer() ||
+   if (test_register_lod() || test_fetch_lod() ||
+       test_register_array_layer() ||
        test_staging_source_lifetime() || test_exact_witnesses() ||
        test_supported_axes() || test_fail_closed() ||
        test_sample_witnesses() || test_copy_witnesses() ||
