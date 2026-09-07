@@ -169,6 +169,10 @@
 #define G17P_A2B10G10R10_UINT 0
 #endif
 
+#ifndef G17P_A2R10G10B10_UNORM
+#define G17P_A2R10G10B10_UNORM 0
+#endif
+
 #ifndef G17P_RGBA32_SFLOAT
 #define G17P_RGBA32_SFLOAT 0
 #endif
@@ -186,11 +190,17 @@
      G17P_RGBA16_SNORM +                                               \
      G17P_R16_SNORM + G17P_R16_UNORM + G17P_R16_UINT +               \
      G17P_R16_SINT + G17P_R16_SFLOAT + G17P_RG16_SFLOAT +             \
-     G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT + G17P_RGBA32_SFLOAT) > 1
+     G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
+     G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_RGBA32_SFLOAT
+#if G17P_A2R10G10B10_UNORM
+#include "g17p_vulkan_a2r10g10b10_unorm_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_a2r10g10b10_unorm_frag_spv
+#elif G17P_RGBA32_SFLOAT
 #include "g17p_vulkan_rgba32_sfloat_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -376,7 +386,11 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 
-#if G17P_RGBA32_SFLOAT
+#if G17P_A2R10G10B10_UNORM
+#define IMAGE_FORMAT VK_FORMAT_A2R10G10B10_UNORM_PACK32
+#define IMAGE_PIXEL_BYTES 4
+#define READBACK_GUARD_BYTES 64
+#elif G17P_RGBA32_SFLOAT
 #define IMAGE_FORMAT VK_FORMAT_R32G32B32A32_SFLOAT
 #define IMAGE_PIXEL_BYTES 16
 #elif G17P_A2B10G10R10_UINT
@@ -683,11 +697,20 @@
 #error "the packed UINT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
+#if G17P_A2R10G10B10_UNORM && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the packed UNORM fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
 #if G17P_RGBA32_SFLOAT && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_RGBA32_SFLOAT
+#if G17P_A2R10G10B10_UNORM
+#define PROBE_NAME "g17p-vulkan-a2r10g10b10-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_RGBA32_SFLOAT
 #define PROBE_NAME "g17p-vulkan-rgba32-sfloat"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -1007,7 +1030,9 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
-#if G17P_RGBA32_SFLOAT
+#if G17P_A2R10G10B10_UNORM
+   static const uint8_t expected[4] = {0xab, 0xab, 0x5a, 0x95};
+#elif G17P_RGBA32_SFLOAT
    static const uint8_t expected[16] = {
       0x00, 0x00, 0x20, 0xbe, 0x00, 0x00, 0x5a, 0x41,
       0x00, 0x00, 0xe8, 0xc0, 0x00, 0x00, 0x00, 0x3d,
@@ -1135,6 +1160,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_A2R10G10B10_UNORM &&
+       getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
        getenv("G17P_RGBA32_SFLOAT_RECORD_ONLY") != NULL) ||
       (G17P_A2B10G10R10_UINT &&
@@ -1835,7 +1862,7 @@ main(void)
    G17P_RGBA16_UINT || G17P_RGBA16_SINT || G17P_RGBA32_UINT ||        \
    G17P_RGBA32_SINT || G17P_R16_UINT || G17P_R16_SINT || G17P_R16_SFLOAT || \
    G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT || G17P_A2B10G10R10_UINT || \
-   G17P_RGBA32_SFLOAT
+   G17P_A2R10G10B10_UNORM || G17P_RGBA32_SFLOAT
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
@@ -1888,14 +1915,18 @@ main(void)
    G17P_RGBA16_UINT || G17P_RGBA16_SINT || G17P_RGBA32_UINT ||         \
    G17P_RGBA32_SINT || G17P_R16_UINT || G17P_R16_SINT || G17P_R16_SFLOAT || \
    G17P_RG16_SFLOAT || G17P_RGBA16_SFLOAT || G17P_A2B10G10R10_UINT || \
-   G17P_RGBA32_SFLOAT
+   G17P_A2R10G10B10_UNORM || G17P_RGBA32_SFLOAT
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_RGBA32_SFLOAT
+#if G17P_A2R10G10B10_UNORM
+   printf(PROBE_NAME ": PASS — %ux%u A2R10G10B10 UNORM exact immediately/3s, "
+                     "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_RGBA32_SFLOAT
    printf(PROBE_NAME ": PASS — %ux%u RGBA32 SFLOAT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
