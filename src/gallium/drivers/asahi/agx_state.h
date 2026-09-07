@@ -224,6 +224,24 @@ struct agx_compiled_shader {
    /* Mapped executable memory */
    struct agx_bo *bo;
 
+   /* The backend refused to encode this variant. agx_compile_shader_nir() is
+    * fail-closed: it returns false and leaves a zeroed agx_shader_part, so
+    * binary_size is 0 and no executable BO is ever allocated. A main shader
+    * in that state must never reach a draw or a dispatch -- consuming it
+    * dereferences a null bo and takes the process down, which for a
+    * compositor means the whole desktop rather than one degraded draw.
+    *
+    * This is NOT the same as `bo == NULL`. A fragment main whose work all
+    * lives in the epilog legitimately has an empty binary, and prologs,
+    * epilogs and other secondary parts never own a BO at all.
+    */
+   bool failed;
+
+   /* Set once the draw/dispatch path has reported that this program is
+    * unusable, so a refused shader logs once instead of once per draw.
+    */
+   bool refusal_reported;
+
    /* Uniforms the driver must push */
    unsigned push_range_count;
    struct agx_push_range push[AGX_MAX_PUSH_RANGES];
@@ -602,6 +620,12 @@ struct agx_context {
    /* Acts as a context-level shader key */
    bool support_lod_bias;
    bool robust;
+
+   /* Draws and dispatches dropped because a bound program had no encoding.
+    * Exposed so an offline oracle can tell "the draw was skipped" apart from
+    * "the draw silently rendered nothing".
+    */
+   unsigned skipped_no_program;
 
    /* Set of batches. When full, the LRU entry (the batch with the smallest
     * seqnum) is flushed to free a slot.

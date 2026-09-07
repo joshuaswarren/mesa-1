@@ -1569,7 +1569,24 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
       key.fs.cf_base = cf_base;
    }
 
-   agx_compile_shader_nir(nir, &key, &compiled->b);
+   if (!agx_compile_shader_nir(nir, &key, &compiled->b)) {
+      /* Fail closed and say so. agx_compile_shader_nir() zeroes its output on
+       * refusal, so what comes back here is an empty shader part with no
+       * binary and no BO. Record that on the variant: the draw and dispatch
+       * paths must skip it rather than dereference the missing BO.
+       *
+       * Which instruction was refused is only printed under
+       * AGX_MESA_DEBUG=shaders, because only the operand shape makes it
+       * actionable; name the stage unconditionally so the gap is visible
+       * without a rebuild.
+       */
+      compiled->failed = true;
+      mesa_loge("asahi: the AGX backend cannot encode this %s shader for %s; "
+                "draws and dispatches using it will be skipped "
+                "(AGX_MESA_DEBUG=shaders names the instruction)",
+                _mesa_shader_stage_to_abbrev(stage), agx_chip_name(dev->chip));
+      return compiled;
+   }
 
    agx2_stats_util_debug(debug, _mesa_shader_stage_to_abbrev(nir->info.stage),
                          &compiled->b.info.stats);
@@ -1752,6 +1769,15 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    compiled->gs = gs_info;
    compiled->b.info.outputs = outputs;
 
+   /* An auxiliary program is as load-bearing as the main one. A geometry
+    * variant whose count, pre-GS or copy program was refused cannot run, so
+    * the variant as a whole is unusable.
+    */
+   if ((compiled->gs_count && compiled->gs_count->failed) ||
+       (compiled->pre_gs && compiled->pre_gs->failed) ||
+       (compiled->gs_copy && compiled->gs_copy->failed))
+      compiled->failed = true;
+
    ralloc_free(nir);
    ralloc_free(pre_gs);
    ralloc_free(gs_count);
@@ -1768,7 +1794,15 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
 
    if (!compiled) {
       compiled = agx_compile_variant(&screen->dev, pctx, so, key);
-      agx_disk_cache_store(screen->disk_cache, so, key, compiled);
+
+      /* The serialized form carries only the binary and its info, so a
+       * refused variant would come back from the cache indistinguishable
+       * from a legitimately empty one -- and silently, on a later run. Keep
+       * refusals out of it; they are cheap to re-derive and must stay
+       * visible.
+       */
+      if (!compiled->failed)
+         agx_disk_cache_store(screen->disk_cache, so, key, compiled);
    }
 
    /* key may be destroyed after we return, so clone it before using it as a
@@ -2122,6 +2156,56 @@ agx_update_shader(struct agx_context *ctx, struct agx_compiled_shader **out,
    return true;
 }
 
+/*
+ * Whether a bound program can actually be issued.
+ *
+ * agx_compile_shader_nir() is fail-closed: a shape it cannot encode comes
+ * back as a zeroed agx_shader_part, so the variant has an empty binary and no
+ * executable BO. Consuming that is a null dereference inside a draw, which
+ * for a compositor loses the whole session rather than one frame. A refused
+ * program must therefore drop the work that needs it.
+ *
+ * `bo == NULL` is deliberately not the test. A fragment main whose entire
+ * body lives in the epilog has a legitimately empty binary, and prologs,
+ * epilogs and every other secondary part never own a BO at all.
+ */
+static bool
+agx_program_usable(const struct agx_compiled_shader *cs)
+{
+   return cs != NULL && !cs->failed;
+}
+
+/*
+ * Drop a draw or dispatch whose program is unusable, and say so once per
+ * program rather than once per draw -- a refused shader in a compositor is
+ * hit every frame.
+ */
+static bool
+agx_drop_for_unusable_program(struct agx_context *ctx,
+                              struct agx_compiled_shader *cs, bool linked,
+                              const char *stage)
+{
+   if (agx_program_usable(cs) && linked)
+      return false;
+
+   ctx->skipped_no_program++;
+
+   if (cs == NULL || !cs->refusal_reported) {
+      if (cs != NULL)
+         cs->refusal_reported = true;
+
+      mesa_loge("asahi: dropping work: the %s program is unusable (%s). This "
+                "is a driver gap; run with AGX_MESA_DEBUG=shaders to see the "
+                "instruction the backend refused.",
+                stage,
+                cs == NULL     ? "no compiled variant"
+                : cs->failed   ? "the backend refused to encode it"
+                               : "it could not be linked");
+   }
+
+   return true;
+}
+
 static enum mesa_prim
 rast_prim(enum mesa_prim mode, unsigned fill_mode)
 {
@@ -2185,6 +2269,14 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
    if (ent)
       return ent->data;
 
+   /* Never link on top of a refused main program: agx_fast_link() would
+    * happily concatenate an empty binary and produce a linked shader that
+    * runs no API code at all. Refusing here keeps ctx->linked.* NULL, which
+    * the draw path already treats as "this draw cannot be issued".
+    */
+   if (key->main == NULL || key->main->failed)
+      return NULL;
+
    struct agx_compiled_shader *prolog = NULL, *epilog = NULL;
 
    /* Build the prolog/epilog now */
@@ -2206,6 +2298,12 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
          ctx, agx_nir_vs_prolog, &key->prolog.vs, sizeof(key->prolog.vs), true,
          false, 0, false);
    }
+
+   /* A refused prolog or epilog is just as fatal as a refused main: the
+    * linked program would be missing the code that feeds or drains it.
+    */
+   if ((prolog && prolog->failed) || (epilog && epilog->failed))
+      return NULL;
 
    /* Fast-link it all together */
    struct agx_device *dev = agx_device(ctx->base.screen);
@@ -2275,7 +2373,12 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    ctx->linked.vs =
       asahi_fast_link(ctx, ctx->stage[MESA_SHADER_VERTEX].shader, &link_key);
 
-   agx_batch_add_bo(batch, ctx->vs->bo);
+   /* A refused variant owns no executable BO. Residency is decided per draw
+    * in agx_draw_vbo(), which skips the draw entirely, so there is nothing
+    * to make resident here and nothing to dereference.
+    */
+   if (ctx->vs->bo)
+      agx_batch_add_bo(batch, ctx->vs->bo);
    if (ctx->linked.vs)
       agx_batch_add_bo(batch, ctx->linked.vs->bo);
 
@@ -2464,7 +2567,8 @@ agx_update_fs(struct agx_batch *batch)
    if (ctx->fs->bo)
       agx_batch_add_bo(batch, ctx->fs->bo);
 
-   agx_batch_add_bo(batch, ctx->linked.fs->bo);
+   if (ctx->linked.fs)
+      agx_batch_add_bo(batch, ctx->linked.fs->bo);
 
    return old != ctx->linked.fs;
 }
@@ -4687,6 +4791,21 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    agx_upload_vbos(batch);
    agx_update_vs(batch, info->index_size);
    agx_update_tcs(ctx, info);
+
+   /* Bail before building any tessellation state on a program that cannot
+    * run, undoing the passthrough TCS this function may have bound. The
+    * vertex CSO and ctx->in_tess are not touched until later, so there is
+    * nothing else to restore here.
+    */
+   if (agx_drop_for_unusable_program(ctx, ctx->vs, ctx->linked.vs != NULL,
+                                     "vertex") ||
+       agx_drop_for_unusable_program(ctx, ctx->tcs, true,
+                                     "tessellation control")) {
+      if (unbind_tcs_when_done)
+         ctx->base.bind_tcs_state(&ctx->base, NULL);
+      return;
+   }
+
    /* XXX */
    ctx->stage[MESA_SHADER_TESS_CTRL].dirty = ~0;
    ctx->stage[MESA_SHADER_TESS_EVAL].dirty = ~0;
@@ -5150,11 +5269,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
               (ctx->dirty & AGX_DIRTY_VERTEX))
       ctx->dirty |= AGX_DIRTY_VS;
 
+   if (agx_drop_for_unusable_program(ctx, ctx->vs, ctx->linked.vs != NULL,
+                                     "vertex"))
+      return;
+
    /* This is subtle. But agx_update_vs will be true at least once per batch. */
    assert(agx_batch_uses_bo(batch, ctx->vs->bo));
    assert(!ctx->linked.vs || agx_batch_uses_bo(batch, ctx->linked.vs->bo));
 
    agx_update_gs(ctx, info, indirect);
+
+   if (ctx->gs &&
+       agx_drop_for_unusable_program(ctx, ctx->gs, true, "geometry"))
+      return;
 
    if (ctx->gs) {
       batch->uniforms.geometry_params =
@@ -5193,6 +5320,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
               (ctx->dirty & (AGX_DIRTY_BLEND_COLOR | AGX_DIRTY_SAMPLE_MASK))) {
       ctx->dirty |= AGX_DIRTY_FS;
    }
+
+   if (agx_drop_for_unusable_program(ctx, ctx->fs, ctx->linked.fs != NULL,
+                                     "fragment"))
+      return;
 
    /* This is subtle. But agx_update_fs will be true at least once per batch. */
    assert(!ctx->fs->bo || agx_batch_uses_bo(batch, ctx->fs->bo));
@@ -5438,6 +5569,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
            unsigned variable_shared_mem)
 {
    struct agx_context *ctx = batch->ctx;
+
+   if (agx_drop_for_unusable_program(ctx, cs, true,
+                                     _mesa_shader_stage_to_abbrev(stage)))
+      return;
+
    if (!linked && agx_is_shader_empty(&cs->b))
       return;
 
