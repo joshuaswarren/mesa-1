@@ -194,6 +194,19 @@
 #define G17P_INSTANCE_RATE 0
 #endif
 
+#ifndef G17P_VERTEX_FORMAT
+#define G17P_VERTEX_FORMAT 0
+#endif
+
+#if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 2
+#error "select a valid G17P vertex-format oracle"
+#endif
+
+#if G17P_VERTEX_FORMAT &&                                                  \
+   (G17P_INSTANCE_RATE || G17P_INDEX_RESTART || G17P_INDIRECT_DRAW)
+#error "vertex-format oracles cannot be combined with another draw oracle"
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -208,11 +221,24 @@
      G17P_R16_SNORM + G17P_R16_UNORM + G17P_R16_UINT +               \
      G17P_R16_SINT + G17P_R16_SFLOAT + G17P_RG16_SFLOAT +             \
      G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
-     G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT) > 1
+     G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
+     (G17P_VERTEX_FORMAT != 0)) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT == 1
+#include "g17p_vulkan_vertex_unorm_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_vertex_unorm_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#define VERTEX_INPUT_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#elif G17P_VERTEX_FORMAT == 2
+#include "g17p_vulkan_vertex_sint_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_vertex_sint_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#define VERTEX_INPUT_FORMAT VK_FORMAT_R16G16_SINT
+#elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_instance_rate_vert_spv
@@ -735,7 +761,17 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT == 1
+#define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 2
+#define PROBE_NAME "g17p-vulkan-vertex-rg16-sint"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INSTANCE_RATE
 #define PROBE_NAME "g17p-vulkan-instance-rate"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -1103,7 +1139,8 @@ has_device_extension(VkPhysicalDevice physical, const char *name)
 }
 #endif
 
-#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || G17P_INSTANCE_RATE
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || G17P_INSTANCE_RATE || \
+   G17P_VERTEX_FORMAT
 struct mapped_buffer {
    VkBuffer buffer;
    VkDeviceMemory memory;
@@ -1299,6 +1336,8 @@ int
 main(void)
 {
    const bool record_only =
+      (G17P_VERTEX_FORMAT &&
+       getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
        getenv("G17P_INSTANCE_RATE_RECORD_ONLY") != NULL) ||
       (G17P_INDEX_RESTART &&
@@ -1487,6 +1526,15 @@ main(void)
        required_format)
       die("target optimal images lack color-attachment or transfer-src support");
 
+#if G17P_VERTEX_FORMAT
+   VkFormatProperties vertex_format_properties;
+   vkGetPhysicalDeviceFormatProperties(physical, VERTEX_INPUT_FORMAT,
+                                       &vertex_format_properties);
+   if (!(vertex_format_properties.bufferFeatures &
+         VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))
+      die("required vertex-buffer format is not advertised");
+#endif
+
    fprintf(stderr, PROBE_NAME ": device %s, queue %u\n",
            properties.deviceName, queue_family);
 
@@ -1588,7 +1636,52 @@ main(void)
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
 
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT
+   enum {
+      VERTEX_FORMAT_BINDING = 3,
+      VERTEX_FORMAT_BIND_OFFSET = 64,
+#if G17P_VERTEX_FORMAT == 1
+      VERTEX_FORMAT_STRIDE = 13,
+      VERTEX_FORMAT_ATTRIBUTE_OFFSET = 5,
+#else
+      VERTEX_FORMAT_STRIDE = 14,
+      VERTEX_FORMAT_ATTRIBUTE_OFFSET = 6,
+#endif
+      VERTEX_FORMAT_COUNT = 3,
+      VERTEX_FORMAT_SUFFIX_BYTES = 64,
+      VERTEX_FORMAT_BUFFER_BYTES = VERTEX_FORMAT_BIND_OFFSET +
+                                   VERTEX_FORMAT_COUNT *
+                                      VERTEX_FORMAT_STRIDE +
+                                   VERTEX_FORMAT_SUFFIX_BYTES,
+   };
+   uint8_t vertex_format_expected[VERTEX_FORMAT_BUFFER_BYTES];
+   memset(vertex_format_expected, 0xa5, sizeof(vertex_format_expected));
+#if G17P_VERTEX_FORMAT == 1
+   static const uint8_t packed_positions[VERTEX_FORMAT_COUNT][4] = {
+      {0, 0, 0x35, 0xc7},
+      {255, 0, 0x6a, 0x91},
+      {0, 255, 0xbd, 0x4e},
+   };
+#else
+   static const int16_t packed_positions[VERTEX_FORMAT_COUNT][2] = {
+      {-1, -1},
+      {3, -1},
+      {-1, 3},
+   };
+#endif
+   for (uint32_t i = 0; i < VERTEX_FORMAT_COUNT; ++i) {
+      uint8_t *record = vertex_format_expected + VERTEX_FORMAT_BIND_OFFSET +
+                        i * VERTEX_FORMAT_STRIDE;
+      memset(record, 0, VERTEX_FORMAT_STRIDE);
+      memcpy(record + VERTEX_FORMAT_ATTRIBUTE_OFFSET, packed_positions[i],
+             sizeof(packed_positions[i]));
+   }
+   struct mapped_buffer vertex_format = create_mapped_buffer(
+      device, &memory_properties, sizeof(vertex_format_expected),
+      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "packed vertex-format buffer");
+   memcpy(vertex_format.map, vertex_format_expected,
+          sizeof(vertex_format_expected));
+#elif G17P_INSTANCE_RATE
    enum {
       INSTANCE_VERTEX_BIND_OFFSET = 64,
       INSTANCE_VERTEX_STRIDE = 24,
@@ -2056,7 +2149,26 @@ main(void)
          .pName = "main",
       },
    };
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT
+   const VkVertexInputBindingDescription vertex_binding = {
+      .binding = VERTEX_FORMAT_BINDING,
+      .stride = VERTEX_FORMAT_STRIDE,
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   };
+   const VkVertexInputAttributeDescription vertex_attribute = {
+      .location = 0,
+      .binding = VERTEX_FORMAT_BINDING,
+      .format = VERTEX_INPUT_FORMAT,
+      .offset = VERTEX_FORMAT_ATTRIBUTE_OFFSET,
+   };
+   const VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &vertex_binding,
+      .vertexAttributeDescriptionCount = 1,
+      .pVertexAttributeDescriptions = &vertex_attribute,
+   };
+#elif G17P_INSTANCE_RATE
    const VkVertexInputBindingDescription vertex_bindings[] = {
       {
          .binding = 0,
@@ -2240,7 +2352,11 @@ main(void)
                         VK_SUBPASS_CONTENTS_INLINE);
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT
+   const VkDeviceSize vertex_format_offset = VERTEX_FORMAT_BIND_OFFSET;
+   vkCmdBindVertexBuffers(command_buffer, VERTEX_FORMAT_BINDING, 1,
+                          &vertex_format.buffer, &vertex_format_offset);
+#elif G17P_INSTANCE_RATE
    const VkBuffer vertex_buffers[] = {vertex.buffer, instance_data.buffer};
    const VkDeviceSize vertex_offsets[] = {
       INSTANCE_VERTEX_BIND_OFFSET,
@@ -2257,7 +2373,9 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
 #endif
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#elif G17P_INSTANCE_RATE
    vkCmdDraw(command_buffer, 6, 2, 0, 3);
 #elif G17P_INDEX_RESTART
    vkCmdBindIndexBuffer(command_buffer, restart_index.buffer,
@@ -2311,8 +2429,8 @@ main(void)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-#if G17P_INSTANCE_RATE || G17P_INDEX_RESTART || G17P_INDIRECT_DRAW || \
-   G17P_F16_IO ||                                                       \
+#if G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE || G17P_INDEX_RESTART ||  \
+   G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_RG16_UNORM ||                                                  \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -2367,6 +2485,11 @@ main(void)
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
 
+#if G17P_VERTEX_FORMAT
+   if (!verify_upload(&vertex_format, vertex_format_expected,
+                      "vertex-format input"))
+      return EXIT_FAILURE;
+#endif
 #if G17P_INSTANCE_RATE
    if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
        !verify_upload(&instance_data, instance_expected, "instance input"))
@@ -2386,7 +2509,8 @@ main(void)
       return EXIT_FAILURE;
 #endif
 
-#if G17P_INSTANCE_RATE || G17P_INDEX_RESTART || G17P_INDIRECT_DRAW ||   \
+#if G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE || G17P_INDEX_RESTART ||    \
+   G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -2403,6 +2527,11 @@ main(void)
    sleep(3);
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
+#if G17P_VERTEX_FORMAT
+   if (!verify_upload(&vertex_format, vertex_format_expected,
+                      "vertex-format input"))
+      return EXIT_FAILURE;
+#endif
 #if G17P_INSTANCE_RATE
    if (!verify_upload(&vertex, vertex_expected, "vertex input") ||
        !verify_upload(&instance_data, instance_expected, "instance input"))
@@ -2424,7 +2553,19 @@ main(void)
 #endif
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_INSTANCE_RATE
+#if G17P_VERTEX_FORMAT == 1
+   printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
+                     "immediately/3s, binding 3, offset 64, stride 13, "
+                     "attribute offset 5, all source/readback guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_VERTEX_FORMAT == 2
+   printf(PROBE_NAME ": PASS — RG16 SINT integer vertex input exact "
+                     "immediately/3s, binding 3, offset 64, stride 14, "
+                     "attribute offset 6, all source/readback guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_INSTANCE_RATE
    printf(PROBE_NAME ": PASS — two distinct instance-rate quads exact "
                      "immediately/3s, firstInstance 3, padded binding/stride/"
                      "attribute offsets, all source/readback guards unchanged, "
