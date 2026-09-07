@@ -1080,18 +1080,26 @@ static void test_native_widen_half(void)
    for (unsigned i=0;i<4;i++) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,(i&1)*2,i+2,
-         i<2?AGX3_ALU_HINT_DISCARD:AGX3_ALU_HINT_CACHE,false,false,
+         i<2?AGX3_ALU_HINT_DISCARD:AGX3_ALU_HINT_CACHE,false,false,false,
          (i&1)?0:32,bytes,&len));
       exact(bytes,len,golden[i]);
    }
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
    assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,4,
-      AGX3_ALU_HINT_CACHE,true,false,0,bytes,&len));
+      AGX3_ALU_HINT_CACHE,true,false,false,0,bytes,&len));
    exact(bytes,len,"09841481020200800100");
    assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,0,
-      AGX3_ALU_HINT_DISCARD,true,false,0,bytes,&len));
+      AGX3_ALU_HINT_DISCARD,true,false,false,0,bytes,&len));
    exact(bytes,len,"09001c81020200800100");
-   puts("Native half widening/abs: six Apple even/odd retained/dead vectors PASS");
+   assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,4,
+      AGX3_ALU_HINT_CACHE,false,true,false,0,bytes,&len));
+   exact(bytes,len,"0984148101020280");
+   assert(agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,0,
+      AGX3_ALU_HINT_DISCARD,false,true,false,0,bytes,&len));
+   exact(bytes,len,"09001c8101020280");
+   assert(!agx3_alu_widen_half(AGX_ISA_ENCODING_AGX3B,0,0,
+      AGX3_ALU_HINT_DISCARD,true,true,false,0,bytes,&len));
+   puts("Native half widening/abs/neg: eight Apple vectors plus combined-modifier refusal PASS");
 }
 
 static void test_native_sqrt_step(void)

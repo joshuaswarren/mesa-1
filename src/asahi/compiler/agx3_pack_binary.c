@@ -5547,12 +5547,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool swap=I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index src=I->src[swap?1:0], imm=I->src[swap?0:1];
             if (agx3_src_is_register(src) && !src.memory && src.size == AGX_SIZE_16 &&
-                agx_channels(src) == 1 && !src.neg && !src.kill &&
+                agx_channels(src) == 1 && !src.kill &&
+                !(src.abs && src.neg) &&
                 imm.type == AGX_INDEX_IMMEDIATE && imm.value == 0x80 &&
                 !imm.abs && !imm.neg && !imm.memory) {
                uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
                if (!agx3_alu_widen_half(enc,I->dest[0].value,src.value,
-                                         agx3_post_ra_hint(src),src.abs,
+                                         agx3_post_ra_hint(src),src.abs,src.neg,
                                          I->dest[0].cache,
                                          wait,bytes,&len) ||
                    !agx3_append(emission,bytes,len))
