@@ -51,6 +51,17 @@ agx_g17p_vdm_alias_compact(uint64_t addr, uint32_t *offset)
 }
 
 bool
+agx_g17p_vdm_payload_compact(uint64_t addr, uint64_t *compact)
+{
+   if (!compact || addr < AGX_G17P_VDM_USER_BASE ||
+       addr >= AGX_G17P_VDM_USER_LIMIT || (addr & 3))
+      return false;
+
+   *compact = addr - AGX_G17P_VDM_USER_BASE;
+   return true;
+}
+
+bool
 agx_va_split_user_window(uint64_t user_start, uint64_t user_size,
                          uint64_t *out_start, uint64_t *out_size)
 {

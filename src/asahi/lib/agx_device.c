@@ -986,11 +986,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * Compute never noticed because nothing on that path encodes a 40-bit
     * pointer.
     *
-    * The VDM control-stream register is narrower still: G17P interprets its
-    * value as a 39-bit offset from 0x1000000000. Therefore both the primary
-    * heap and its sparse shadow must end by 0x9000000000, not merely below
-    * the 2^40 USC window. This leaves the bottom 2^36 robustness carveout
-    * untouched while making every ordinary control-stream allocation
+    * Nested G17P VDM pointers are narrower still: hardware adds the
+    * 0x1000000000 render-context base to a 39-bit compact offset. Therefore
+    * both the primary heap and its sparse shadow must end by 0x9000000000,
+    * not merely below the 2^40 USC window. This leaves the bottom 2^36
+    * robustness carveout untouched while making every ordinary VDM payload
     * directly representable, with no per-run alias option.
     */
    const bool heap_below_usc = dev->chip == AGX_CHIP_G17P;

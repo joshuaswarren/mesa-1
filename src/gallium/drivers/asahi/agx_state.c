@@ -16,6 +16,7 @@
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
 #include "asahi/lib/agx_usc.h"
+#include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/libagx/compression.h"
 #include "asahi/libagx/query.h"
 #include "asahi/libagx/tessellator.h"
@@ -69,6 +70,27 @@
 #include "nir_intrinsics_indices.h"
 #include "nir_xfb_info.h"
 #include "pool.h"
+
+/* G17P adds the render-context base when a VDM record follows a nested PPP
+ * pointer. Gallium's batch pool already returns the full context VA, so make
+ * only that nested pointer relative. The root VDM stream remains absolute. */
+static bool
+agx_gallium_ppp_fini(struct agx_device *dev, uint8_t **out,
+                     struct agx_ppp_update *ppp)
+{
+   if (!dev || !ppp)
+      return false;
+
+   if (dev->chip != AGX_CHIP_G17P)
+      return agx_ppp_fini(dev->chip, out, ppp);
+
+   struct agx_ppp_update compact_ppp = *ppp;
+   if (!agx_g17p_vdm_payload_compact(ppp->gpu_base,
+                                     &compact_ppp.gpu_base))
+      return false;
+
+   return agx_ppp_fini(dev->chip, out, &compact_ppp);
+}
 
 void
 agx_legalize_compression(struct agx_context *ctx, struct agx_resource *rsrc,
@@ -1044,8 +1066,8 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
       }
    }
 
-   bool emitted =
-      agx_ppp_fini(agx_device(batch->ctx->base.screen)->chip, out, &ppp);
+   bool emitted = agx_gallium_ppp_fini(
+      agx_device(batch->ctx->base.screen), out, &ppp);
    assert(emitted);
    (void)emitted;
 }
@@ -3590,8 +3612,8 @@ agx_batch_init_state(struct agx_batch *batch)
    agx_ppp_push(&ppp, VARYING_2, cfg);
    /* clang-format on */
 
-   bool emitted =
-      agx_ppp_fini(agx_device(batch->ctx->base.screen)->chip, &out, &ppp);
+   bool emitted = agx_gallium_ppp_fini(
+      agx_device(batch->ctx->base.screen), &out, &ppp);
    assert(emitted);
    (void)emitted;
    batch->vdm.current = out;
@@ -3963,7 +3985,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
          cfg.count = vs->uvs.size;
    }
 
-   bool emitted = agx_ppp_fini(dev->chip, &out, &ppp);
+   bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
    assert(emitted);
    (void)emitted;
    ppp_updates++;

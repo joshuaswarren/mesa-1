@@ -765,6 +765,7 @@ if with_tests
       'asahi-ppp-finalizer',
       files(
         'agx_chip.c',
+        'agx_va_runtime_hole.c',
         'agx_vdm_ppp_state_core.c',
         'tests/test-ppp-fini.c',
       ),

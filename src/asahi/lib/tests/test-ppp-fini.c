@@ -4,6 +4,7 @@
  */
 
 #include "../agx_ppp.h"
+#include "../agx_va_runtime_hole.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -203,6 +204,34 @@ check_complete_update_finalization(void)
 }
 
 static int
+check_g17p_context_relative_payload(void)
+{
+   uint8_t payload[16] = {0};
+   uint64_t compact = UINT64_MAX;
+   CHECK(agx_g17p_vdm_payload_compact(UINT64_C(0x5fffee0000), &compact));
+   CHECK(compact == UINT64_C(0x4fffee0000));
+
+   struct agx_ppp_update ppp = {
+      .head = payload + sizeof(payload),
+      .gpu_base = compact,
+      .total_size = sizeof(payload),
+      .cpu_base = payload,
+   };
+   uint8_t stream[AGX_PPP_STATE_LENGTH + 2];
+   memset(stream, 0xa5, sizeof(stream));
+   uint8_t *out = &stream[1];
+   CHECK(agx_ppp_fini(AGX_CHIP_G17P, &out, &ppp));
+
+   static const uint8_t expected[AGX_PPP_STATE_LENGTH] = {
+      0x4f, 0x04, 0x00, 0x00, 0x00, 0x00, 0xee, 0xff,
+   };
+   CHECK(out == &stream[1 + AGX_PPP_STATE_LENGTH]);
+   CHECK(memcmp(&stream[1], expected, sizeof(expected)) == 0);
+   CHECK(stream[0] == 0xa5 && stream[sizeof(stream) - 1] == 0xa5);
+   return 0;
+}
+
+static int
 check_transactional_rejections(void)
 {
    static const enum agx_chip unsupported[] = {
@@ -264,6 +293,7 @@ main(void)
    if (check_outer_state_all_generations() ||
        check_live_legacy_payload_gate() ||
        check_complete_update_finalization() ||
+       check_g17p_context_relative_payload() ||
        check_transactional_rejections())
       return 1;
 

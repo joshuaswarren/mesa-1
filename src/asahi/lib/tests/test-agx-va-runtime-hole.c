@@ -258,9 +258,9 @@ test_user_window_split(void)
  * payload and vkEndCommandBuffer() failed before a render command buffer
  * could be recorded.
  *
- * The VDM control-stream register carries a 39-bit offset from 0x1000000000,
- * so merely remaining below 2^40 is insufficient: 0xbfff... is a valid
- * 40-bit absolute address but is not representable by that register.
+ * G17P interprets nested VDM payload pointers as offsets from 0x1000000000,
+ * so merely remaining below 2^40 is insufficient: a compact offset with bit
+ * 39 set selects the wrong address domain.
  * agx_device.c bounds the two allocation windows by 0x9000000000.
  */
 static void
@@ -294,7 +294,7 @@ test_g17p_user_window_fits_ppp_pointer_field(void)
    assert(out_size > 0);
 
    /* The heap itself, and the read-only alias above it, are both addressable
-    * by the 39-bit base-relative VDM pointer and the wider PPP pointer. */
+    * by the 39-bit base-relative VDM pointer. */
    assert(out_start >= reservation);
    assert(out_size == UINT64_C(0x2000000000)); /* 128 GiB */
    assert(out_start + out_size <= vdm_pointer_limit);
@@ -431,6 +431,38 @@ test_g17p_vdm_command_alias_heap(void)
    util_vma_heap_finish(&heap);
 }
 
+static void
+test_g17p_vdm_payload_context_address(void)
+{
+   /* The first native Gallium draw mapped its PPP payload at 0x5fffee0000.
+    * Encoding that absolute VA made G17P add its 0x1000000000 render-context
+    * base and fault on the exact unmapped address 0x6fffee0000. */
+   const uint64_t payload = UINT64_C(0x5fffee0000);
+   const uint64_t observed_fault = UINT64_C(0x6fffee0000);
+   uint64_t compact = UINT64_MAX;
+
+   assert(agx_g17p_vdm_payload_compact(payload, &compact));
+   assert(compact == UINT64_C(0x4fffee0000));
+   assert(AGX_G17P_VDM_USER_BASE + compact == payload);
+   assert(AGX_G17P_VDM_USER_BASE + payload == observed_fault);
+
+   assert(agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_BASE, &compact));
+   assert(compact == 0);
+   assert(agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_LIMIT - 4,
+                                      &compact));
+   assert(compact == AGX_G17P_VDM_USER_SIZE - 4);
+
+   compact = UINT64_C(0xdeadbeef);
+   assert(!agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_BASE - 4,
+                                        &compact));
+   assert(compact == UINT64_C(0xdeadbeef));
+   assert(!agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_LIMIT, &compact));
+   assert(compact == UINT64_C(0xdeadbeef));
+   assert(!agx_g17p_vdm_payload_compact(payload + 1, &compact));
+   assert(compact == UINT64_C(0xdeadbeef));
+   assert(!agx_g17p_vdm_payload_compact(payload, NULL));
+}
+
 int
 main(void)
 {
@@ -443,6 +475,7 @@ main(void)
    test_g17p_user_window_fits_ppp_pointer_field();
    test_g17p_user_window_fits_usc_resource_pointer();
    test_g17p_vdm_command_alias_heap();
+   test_g17p_vdm_payload_context_address();
    puts("AGX VA layout: user-window split and G17 runtime-graph hole checks passed");
    return 0;
 }
