@@ -72,14 +72,55 @@ struct agx3_branch_fixup {
  * compiler's existing shader-debug flag (AGX_MESA_DEBUG=shaders). This is the
  * difference between "AGX3 rejected this shader" and a usable bug report.
  */
+static const char *
+agx3_index_kind(const agx_index x)
+{
+   switch (x.type) {
+   case AGX_INDEX_NULL:      return "null";
+   case AGX_INDEX_NORMAL:    return "ssa";
+   case AGX_INDEX_IMMEDIATE: return "imm";
+   case AGX_INDEX_UNIFORM:   return "uni";
+   case AGX_INDEX_REGISTER:  return "reg";
+   default:                  return "?";
+   }
+}
+
+/*
+ * Name the refused instruction, not just its opcode.
+ *
+ * A refusal is fatal for the whole shader, and the only thing that makes one
+ * actionable is the operand shape: which sources are registers, immediates or
+ * uniforms, what width each one is, and which modifiers are set. Reporting
+ * only the mnemonic costs a round trip to hardware every time -- "no grounded
+ * AGX3 encoding for fcmpsel" is true of the shapes that encode as well.
+ */
 static void
 agx3_report_refusal(const agx_instr *I, unsigned line)
 {
-   if (agx_compiler_debug & AGX_DBG_SHADERS) {
-      fprintf(stderr,
-              "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s\n",
-              line, agx_opcodes_info[I->op].name);
+   if (!(agx_compiler_debug & AGX_DBG_SHADERS))
+      return;
+
+   char shape[512];
+   int n = snprintf(shape, sizeof(shape), "d%u:%s%u",
+                    I->nr_dests ? 16u << I->dest[0].size : 0u,
+                    I->nr_dests ? agx3_index_kind(I->dest[0]) : "none",
+                    I->nr_dests ? I->dest[0].value : 0u);
+
+   for (unsigned i = 0; i < I->nr_srcs && n > 0 && n < (int)sizeof(shape); ++i) {
+      const agx_index x = I->src[i];
+      n += snprintf(shape + n, sizeof(shape) - n, " s%u=%u:%s%u%s%s%s%s%s", i,
+                    16u << x.size, agx3_index_kind(x), x.value,
+                    x.abs ? ".abs" : "", x.neg ? ".neg" : "",
+                    x.kill ? ".kill" : "", x.cache ? ".cache" : "",
+                    x.discard ? ".discard" : "");
    }
+
+   fprintf(stderr,
+           "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
+           "[%s%s%s cond=%u chan=%u]\n",
+           line, agx_opcodes_info[I->op].name, shape,
+           I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
+           (unsigned)I->fcond, I->nr_dests ? agx_channels(I->dest[0]) : 0u);
 }
 
 #define AGX3_REFUSE(I)                                                         \
@@ -331,6 +372,41 @@ agx3_fcmpsel_all_half_regs(const agx_instr *I)
          return false;
    }
    return true;
+}
+
+/*
+ * The five comparison codes witnessed in Apple's own selects. f110 is
+ * literally `enum agx_fcond`; eq, lt, gt, ge and le were each swept from a
+ * kernel differing only in the operator. The NaN-ignoring ltn/gtn codes carry
+ * the tied minimum/maximum forms instead and are not witnessed here.
+ */
+static bool
+agx3_fcond_witnessed_select(enum agx_fcond cond)
+{
+   return cond == AGX_FCOND_EQ || cond == AGX_FCOND_LT ||
+          cond == AGX_FCOND_GT || cond == AGX_FCOND_GE ||
+          cond == AGX_FCOND_LE;
+}
+
+/* A plain, unmodified scalar half register. */
+static bool
+agx3_half_reg(agx_index s)
+{
+   return agx3_src_is_register(s) && !s.memory && s.size == AGX_SIZE_16 &&
+          agx_channels(s) == 1;
+}
+
+/* Reverse a comparison so the operands can be exchanged. */
+static enum agx_fcond
+agx3_fcond_reverse(enum agx_fcond cond)
+{
+   switch (cond) {
+   case AGX_FCOND_LT: return AGX_FCOND_GT;
+   case AGX_FCOND_GT: return AGX_FCOND_LT;
+   case AGX_FCOND_LE: return AGX_FCOND_GE;
+   case AGX_FCOND_GE: return AGX_FCOND_LE;
+   default:           return cond;
+   }
 }
 
 /* A source usable by the modifier long forms: a plain 32-bit register. */
@@ -5186,30 +5262,99 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /*
+          * A 32-bit float compared against a minifloat immediate, selecting
+          * either of two 32-bit registers. This is what an ordinary
+          * `x < k ? a : b` becomes: the comparison stays 32-bit and Mesa
+          * carries the constant as a minifloat, so the packer used to see a
+          * mixed-width select with nothing to widen and refuse the shader.
+          * The immediate may be on either side; a leading immediate reverses
+          * the comparison, which does not change what is selected.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_fcond_witnessed_select(I->fcond) &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[2]) && agx3_vary_reg32(I->src[3]) &&
+             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1 &&
+             ((agx3_vary_reg32(I->src[0]) &&
+               I->src[1].type == AGX_INDEX_IMMEDIATE) ||
+              (agx3_vary_reg32(I->src[1]) &&
+               I->src[0].type == AGX_INDEX_IMMEDIATE))) {
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index immediate = I->src[immediate_first ? 0 : 1];
+            const agx_index compare = I->src[immediate_first ? 1 : 0];
+            const unsigned true_src = I->invert_cond ? 3 : 2;
+            const unsigned false_src = I->invert_cond ? 2 : 3;
+
+            bool invalid = immediate.value > 255 ||
+                           agx_channels(compare) != 1;
+            for (unsigned i = 0; i < 4; ++i)
+               invalid |= I->src[i].abs || I->src[i].neg || I->src[i].kill ||
+                          I->src[i].memory ||
+                          (I->src[i].cache && I->src[i].discard);
+            if (invalid)
+               AGX3_REFUSE(I);
+
+            const unsigned condition =
+               immediate_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
+            const enum agx3_alu_hint hints[4] = {
+               agx3_post_ra_hint(compare), AGX3_ALU_HINT_NONE,
+               agx3_post_ra_hint(I->src[true_src]),
+               agx3_post_ra_hint(I->src[false_src])};
+
+            uint16_t fsel_wait = wait;
+            if (fsel_wait & (fsel_wait - 1)) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_fcmp_select_f32_imm(
+                   enc, I->dest[0].value, compare.value,
+                   (uint8_t)immediate.value, I->src[true_src].value,
+                   I->src[false_src].value, hints, condition,
+                   I->dest[0].cache, fsel_wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Full/half comparisons select between full-register alternatives.
           * WBOIT uses EQ against half +inf; update_lightmap uses ordered LT
           * against a half threshold. The condition selector is orthogonal to
           * the native mixed-width routing and is byte-grounded for both. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
-             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
-             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT) &&
-             !I->saturate &&
+             I->nr_dests == 1 && I->nr_srcs == 4 &&
+             agx3_fcond_witnessed_select(I->fcond) && !I->saturate &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
-             agx3_vary_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
-             agx3_src_is_register(I->src[1]) && !I->src[1].memory &&
-             I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1 &&
              agx3_vary_reg32(I->src[2]) && agx3_vary_reg32(I->src[3]) &&
-             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1) {
+             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1 &&
+             ((agx3_vary_reg32(I->src[0]) && agx3_half_reg(I->src[1])) ||
+              (agx3_vary_reg32(I->src[1]) && agx3_half_reg(I->src[0])))) {
+            /* The half may be on either side. Exchanging the compared
+             * operands reverses the comparison and nothing else; an inverted
+             * condition exchanges the two selected operands, which is how
+             * Apple spells `!=`. */
+            const bool half_first = agx3_half_reg(I->src[0]);
+            const unsigned order[4] = {
+               half_first ? 1u : 0u, half_first ? 0u : 1u,
+               I->invert_cond ? 3u : 2u, I->invert_cond ? 2u : 3u};
             uint16_t src[4];
             enum agx3_alu_hint hints[4];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            bool invalid = false;
+            bool invalid = agx_channels(I->src[0]) != 1 ||
+                           agx_channels(I->src[1]) != 1;
             for (unsigned i = 0; i < 4; ++i) {
                invalid |= I->src[i].abs || I->src[i].neg || I->src[i].kill ||
                           (I->src[i].cache && I->src[i].discard);
-               src[i] = I->src[i].value;
-               hints[i] = agx3_post_ra_hint(I->src[i]);
+               src[i] = I->src[order[i]].value;
+               hints[i] = agx3_post_ra_hint(I->src[order[i]]);
             }
+            const unsigned condition =
+               half_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
                if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
@@ -5218,7 +5363,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             if (invalid ||
                 !agx3_alu_fcmp_select_f32_f16(
-                   enc, I->dest[0].value, src, hints, I->fcond,
+                   enc, I->dest[0].value, src, hints, condition,
                    I->dest[0].cache, fsel_wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);

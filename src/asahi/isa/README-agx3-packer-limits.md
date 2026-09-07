@@ -48,6 +48,9 @@ and every textured draw:
 | that lighting multiplied by a texture fetch                         | yes\*\*  |
 | `clamp(colour, 0.0, 1.0)`                                           | yes\*\*  |
 | `max(a, b)` / `min(a, b)` between two interpolated values           | yes\*\*  |
+| `x < 0.5 ? a : b` — a plain float ternary                           | yes\*\*\*|
+| `x >= k ? a : b`, `x <= k ? a : b`, `x != k ? a : b`                | yes\*\*\*|
+| `t.a > 0.5 ? t : colour` on a texture fetch                         | yes\*\*\*|
 | `clamp(texture(tex, uv) * colour, 0.0, 1.0)`                        | **no**† |
 | `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**‡ |
 | `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**‡ |
@@ -55,6 +58,10 @@ and every textured draw:
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
 \*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
 below. The last three are new probes (`f14`, `f15`, `f16`) added with it.
+
+\*\*\* These rows were **no** until the *untied* mixed-width `fcmpsel` was
+encoded — a separate gap the tied minimum and maximum did not touch; see "The
+untied select was a second gap" below. New probes `f17`-`f20`.
 
 † Not a `fcmpsel` gap at all: this shape reaches the packer as `fmul.sat`, a
 saturating float multiply, and it is the *saturate modifier* that has no
@@ -148,6 +155,79 @@ select of two byte constants, which the byte-constant encoder has always
 supported and never got the chance to. Those two handlers now skip. That alone
 also fixed `AGX3PackBinary.UpdateLightmapNativeIntegerAndMaskForms`.
 
+## The untied select was a second gap
+
+Encoding the tied minimum and maximum did not close `fcmpsel`. A plain float
+ternary — `x < 0.5 ? a : b`, the commonest select there is — still failed the
+shader closed, because Mesa keeps the comparison at 32 bits and carries the
+constant as a minifloat, so the packer sees a select with a 32-bit register on
+one side and a 16-bit immediate on the other and nothing to widen. The tied
+handler does not apply: the compared operand and the selected operand are
+different values, which is the whole point of a select.
+
+The refusal message named only the opcode, which is true of the shapes that
+encode as well, so it is now printed with the operand shape:
+
+```
+agx3_pack_binary.c:6622: no grounded AGX3 encoding for fcmpsel
+  [d32:reg8 s0=32:reg4.discard s1=16:imm32 s2=32:reg4.discard s3=32:reg6.cache
+   cond=5 chan=1]
+```
+
+Apple's bytes for `(a[i] OP 0.5f) ? c[i] : d[i]`, six kernels differing only in
+the operator:
+
+```
+<    12 03 0f a1 22 06 03 02 20 0a     f110 = 1
+>    12 03 0f a1 22 06 02 02 20 0a     f110 = 2
+>=   12 03 0f a1 26 06 02 02 20 0a     f110 = 5
+<=   12 03 0f a1 26 06 03 02 20 0a     f110 = 6
+==   12 03 0f a1 26 06 00 02 20 0a     f110 = 0
+!=   12 03 0f a1 26 08 00 02 20 06     f110 = 0, selected operands exchanged
+```
+
+Only the condition moves. f110 is literally `enum agx_fcond`, and `!=` is `==`
+with the two selected values exchanged — which is also how an inverted
+condition encodes, so `invert_cond` needs no form of its own. The same field
+in the same form governs the half-register comparison the tree already had
+grounded for `EQ` and `LT` only; that handler is now open to all five
+witnessed conditions and to the half being on either side. The NaN-ignoring
+`LTN`/`GTN` codes are *not* witnessed for this form and stay refused; they
+belong to the tied minimum and maximum, which have their own grounding.
+
+The shape space is enumerable, and now is:
+`AGX3PackBinary.DISABLED_FcmpselShapeSurvey` in
+`src/asahi/compiler/test/test-agx3-pack-binary.cpp` walks every combination of
+destination width, four operand kinds, seven conditions and inversion, and
+prints the refusals. Run it with
+`agx_tests --gtest_also_run_disabled_tests --gtest_filter=*FcmpselShapeSurvey*`.
+Every `d32 = fcmpsel <reg|imm|half>, <reg|imm|half>, r32, r32` now encodes
+except `LTN`/`GTN`. Two families remain refused, and neither has an Apple
+witness to encode from:
+
+- **Selects that are themselves immediates** (`sel(r32, #k)` and friends).
+- **A 16-bit destination whose comparison is not also 16-bit** — e.g.
+  `d16 = fcmpsel r32, h16, h16, h16`. Asked for exactly this shape,
+  `(a[i] OP 0.5f) ? c[i] : d[i]` with `a` a float and `c`, `d`, `o` halves,
+  Apple's compiler does **not** emit it: it widens the halves, selects in 32
+  bits, and narrows the result, so every witness comes back `11:2 77:2 94:2`.
+  If Mesa hands the packer this shape the fix is to widen in Mesa, not to
+  invent an encoding for it.
+
+## Where the fragment epilog is not the problem
+
+`asahi-g17p-epilog-matrix` sweeps 36,864 fragment-epilog keys — twelve colour
+formats, six blend modes, sRGB lowering, and the eight link flags — compiles
+each, and reports the opcode of every refusal. It is a ratchet: it fails only
+if the refusal count grows.
+
+As measured, 33,136 refuse, and the opcodes are `zs_emit` (depth or stencil
+written from the epilog), `ld_tile` and `st_tile` (tilebuffer formats), `log2`
+(the sRGB encode's `pow`, which is also why `asahi-g17p-srgb-epilog` is red)
+and a saturating `fadd`/`fmul`. **No `fcmpsel` shape appears anywhere in that
+space**, which is what ruled the epilog out as the source of a reported
+`fcmpsel` refusal, and is why the untied select above was found instead.
+
 ## The bias and gradient sample forms
 
 Both instruction encodings are grounded, from fragment and compute pipelines
@@ -230,7 +310,7 @@ the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
 As of this revision the compute probe reports 24 of 24 encoding and the
-fragment probe 13 of 16. The three refusals are `f05_texture_bias` and
+fragment probe 17 of 20. The three refusals are `f05_texture_bias` and
 `f12_texture_grad`, both on the bindless-heap descriptor shape, and
 `f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before

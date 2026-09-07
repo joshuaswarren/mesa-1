@@ -750,9 +750,34 @@ test_float_compare_select(void)
       AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints,
       1, true, 0, out, &len));
    exact(out, len, "22af67b4029a03000024");
-   assert(!agx3_alu_fcmp_select_f32_f16(
-      AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints,
-      2, true, 0, out, &len));
+   /* The condition is orthogonal: gt, ge and le encode the same way, and
+    * only the condition bytes move. Apple's own six-kernel sweep is in
+    * test_native_f32_minifloat_select. The NaN-ignoring ltn/gtn codes were
+    * not witnessed for this form and stay refused. */
+   {
+      uint8_t widened[AGX3_ALU_MAX_LENGTH];
+      uint8_t widened_len;
+      static const struct {
+         unsigned condition;
+         const char *bytes;
+      } conditions[] = {
+         {2 /* gt */, "22af67b4029a02000024"},
+         {5 /* ge */, "22af67b4069a02000024"},
+         {6 /* le */, "22af67b4069a03000024"},
+      };
+      for (unsigned i = 0; i < 3; ++i) {
+         assert(agx3_alu_fcmp_select_f32_f16(
+            AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints,
+            conditions[i].condition, true, 0, widened, &widened_len));
+         exact(widened, widened_len, conditions[i].bytes);
+      }
+      assert(!agx3_alu_fcmp_select_f32_f16(
+         AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints, 3, true, 0,
+         widened, &widened_len));
+      assert(!agx3_alu_fcmp_select_f32_f16(
+         AGX_ISA_ENCODING_AGX3B, 36, lightmap_src, lightmap_hints, 7, true, 0,
+         widened, &widened_len));
+   }
    assert(!agx3_alu_fcmp_select_f32_f16(
       AGX_ISA_ENCODING_AGX3C, 4, mixed_src, mixed_hints, 0, true, 0,
       out, &len));
@@ -1513,6 +1538,93 @@ static void test_native_f32_minmax(void)
         "lifetime vectors plus fail-closed bounds PASS");
 }
 
+/*
+ * A 32-bit float compared against a minifloat immediate, selecting two 32-bit
+ * registers -- what an ordinary `x < k ? a : b` becomes.
+ *
+ * Apple's own bytes for `(a[i] OP 0.5f) ? c[i] : d[i]`, from
+ * `metal-nt -arch applegpu_g17p`.  Six kernels differing only in the operator;
+ * only the condition changes, and `!=` is `==` with the selected operands
+ * exchanged:
+ *
+ *   <    12 03 0f a1 22 06 03 02 20 0a
+ *   >    12 03 0f a1 22 06 02 02 20 0a
+ *   >=   12 03 0f a1 26 06 02 02 20 0a
+ *   <=   12 03 0f a1 26 06 03 02 20 0a
+ *   ==   12 03 0f a1 26 06 00 02 20 0a
+ *   !=   12 03 0f a1 26 08 00 02 20 06
+ *
+ * Those witnesses route their selected operands through Apple's kind-3 slots;
+ * the encoder emits ordinary registers, which changes only the operand bits.
+ * The condition lives in byte 4 bit 2 and byte 6, and the test pins those
+ * against the witnesses directly as well as pinning the whole instruction.
+ */
+static void test_native_f32_minifloat_select(void)
+{
+   static const struct {
+      unsigned condition;
+      const char *bytes;
+      uint8_t apple_byte4, apple_byte6;
+   } cases[] = {
+      {0 /* eq */, "12030fa106060002000a", 0x26, 0x00},
+      {1 /* lt */, "12030fa102060302000a", 0x22, 0x03},
+      {2 /* gt */, "12030fa102060202000a", 0x22, 0x02},
+      {5 /* ge */, "12030fa106060202000a", 0x26, 0x02},
+      {6 /* le */, "12030fa106060302000a", 0x26, 0x03},
+   };
+   const enum agx3_alu_hint hints[4] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20,
+                                          6, 10, hints, cases[i].condition,
+                                          false, 0, bytes, &len));
+      exact(bytes, len, cases[i].bytes);
+
+      /* The condition bits are Apple's, not ours. */
+      assert((bytes[4] & 0x04) == (cases[i].apple_byte4 & 0x04));
+      assert(bytes[6] == cases[i].apple_byte6);
+   }
+
+   /* The minifloat spans the same field as every other fsel immediate. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x00, 6,
+                                       10, hints, 1, false, 0, bytes, &len));
+   exact(bytes, len, "12030f8102060302000a");
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0xff, 6,
+                                       10, hints, 1, false, 0, bytes, &len));
+   exact(bytes, len, "12031fff02061302000a");
+
+   /* Waits, lifetimes and the cached destination stay orthogonal. */
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+                                       10, hints, 2, true, 32, bytes, &len));
+   exact(bytes, len, "12032fa1020602c2000a");
+
+   /* Fail closed: the wrong encoding, an unwitnessed condition, a wait
+    * spanning two slots, an odd register, and a lifetime on the immediate. */
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, 6,
+                                        10, hints, 1, false, 0, bytes, &len));
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+                                        10, hints, 3, false, 0, bytes, &len));
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+                                        10, hints, 7, false, 0, bytes, &len));
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+                                        10, hints, 1, false, 3, bytes, &len));
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, 6,
+                                        10, hints, 1, false, 0, bytes, &len));
+   const enum agx3_alu_hint bad[4] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+                                        10, bad, 1, false, 0, bytes, &len));
+   puts("Native f32 minifloat select: Apple's five witnessed conditions, "
+        "immediate span, wait/lifetime orthogonality and fail-closed PASS");
+}
+
 static void test_native_half_clamp(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -1796,6 +1908,7 @@ int main(void){
    test_native_half_min();
    test_native_half_max();
    test_native_f32_minmax();
+   test_native_f32_minifloat_select();
    test_native_half_clamp();
    test_native_half_reciprocal();
    test_native_half_rsqrt();

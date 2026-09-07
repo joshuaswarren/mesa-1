@@ -1046,7 +1046,12 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !hints ||
        dest >= 256 || (dest & 1) ||
-       (condition != 0 && condition != 1) ||
+       /* f110 is enum agx_fcond (eq 0, lt 1, gt 2, ge 5, le 6), swept one
+        * field at a time against Apple's own bytes for the same form; see
+        * agx3_alu_fcmp_select_f32_imm. The NaN-ignoring ltn/gtn codes were
+        * not witnessed here and stay out. */
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
        (wait_mask != 0 && wait_mask != 32))
       return false;
 
@@ -1090,6 +1095,97 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
  * instruction carries independent post-RA lifetime hints.  Only the no-wait
  * form is witnessed; callers retire scoreboard slots before composing it.
  */
+/*
+ * Compare a 32-bit float against a minifloat immediate and select either of
+ * two 32-bit registers.
+ *
+ * This is what an ordinary `x < k ? a : b` becomes: NIR keeps the comparison
+ * at 32 bits and Mesa carries the constant as a minifloat, so the packer sees
+ * a mixed-width select with no register to widen.  Apple's own bytes, from
+ * `metal-nt -arch applegpu_g17p` compiling `(a[i] OP 0.5f) ? c[i] : d[i]`:
+ *
+ *   <    12 03 0f a1 22 06 03 02 20 0a     f110 = 1
+ *   >    12 03 0f a1 22 06 02 02 20 0a     f110 = 2
+ *   >=   12 03 0f a1 26 06 02 02 20 0a     f110 = 5
+ *   <=   12 03 0f a1 26 06 03 02 20 0a     f110 = 6
+ *   ==   12 03 0f a1 26 06 00 02 20 0a     f110 = 0
+ *   !=   12 03 0f a1 26 08 00 02 20 06     f110 = 0, selected operands swapped
+ *
+ * Six kernels differing only in the operator, and only f110 (and, for `!=`,
+ * which operand lands in which select slot) changes: the condition selector is
+ * literally `enum agx_fcond`, and it is orthogonal to the operand routing.
+ * The last row is why an inverted condition needs no separate encoding --
+ * Apple spells it by exchanging the two selected values.
+ */
+bool
+agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src0, uint8_t minifloat, uint16_t src2,
+                             uint16_t src3,
+                             const enum agx3_alu_hint hints[4],
+                             unsigned condition, bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !hints ||
+       dest >= 256 || src0 >= 256 || src2 >= 256 || src3 >= 256 ||
+       (dest & 1) || (src0 & 1) || (src2 & 1) || (src3 & 1))
+      return false;
+
+   /* Only the five conditions Apple was witnessed emitting for this form:
+    * eq = 0, lt = 1, gt = 2, ge = 5, le = 6, matching enum agx_fcond. */
+   if (condition != 0 && condition != 1 && condition != 2 &&
+       condition != 5 && condition != 6)
+      return false;
+
+   /* One scoreboard slot at a time: the selector is a three-bit code. */
+   if ((wait_mask & ~UINT16_C(0x3f)) || (wait_mask & (wait_mask - 1)))
+      return false;
+
+   for (unsigned i = 0; i < 4; ++i) {
+      if ((unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   /* The compared immediate and the unused slot-1 register share a lifetime
+    * that does not exist; refuse a hint on either. */
+   if (hints[1] != AGX3_ALU_HINT_NONE)
+      return false;
+
+   struct agx3_field_kv fields[24];
+   unsigned n = 0;
+   fields[n++] = (struct agx3_field_kv){3, dest};
+   fields[n++] = (struct agx3_field_kv){10, 2};
+   fields[n++] = (struct agx3_field_kv){11, 2};
+   fields[n++] = (struct agx3_field_kv){12, dest_cache};
+   fields[n++] = (struct agx3_field_kv){35, src0};
+   fields[n++] = (struct agx3_field_kv){42, 2};
+   fields[n++] = (struct agx3_field_kv){43, 2};
+   fields[n++] = (struct agx3_field_kv){44, hints[0] == AGX3_ALU_HINT_CACHE};
+   fields[n++] = (struct agx3_field_kv){46, hints[0] == AGX3_ALU_HINT_DISCARD};
+   fields[n++] = (struct agx3_field_kv){51, minifloat};
+   fields[n++] = (struct agx3_field_kv){59, 1};
+   fields[n++] = (struct agx3_field_kv){60, 2};
+   fields[n++] = (struct agx3_field_kv){69, src2};
+   fields[n++] = (struct agx3_field_kv){76, 2};
+   fields[n++] = (struct agx3_field_kv){77, 2};
+   fields[n++] = (struct agx3_field_kv){78, hints[2] == AGX3_ALU_HINT_CACHE};
+   fields[n++] = (struct agx3_field_kv){80, hints[2] == AGX3_ALU_HINT_DISCARD};
+   fields[n++] = (struct agx3_field_kv){86, src3};
+   fields[n++] = (struct agx3_field_kv){93, 2};
+   fields[n++] = (struct agx3_field_kv){94, 2};
+   fields[n++] = (struct agx3_field_kv){95, hints[3] == AGX3_ALU_HINT_CACHE};
+   fields[n++] = (struct agx3_field_kv){97, hints[3] == AGX3_ALU_HINT_DISCARD};
+   fields[n++] = (struct agx3_field_kv){110, condition};
+   for (unsigned i = 0; i < 6; ++i) {
+      if (wait_mask & (1u << i)) {
+         fields[n++] = (struct agx3_field_kv){(uint16_t)(102 + i), 1};
+         break;
+      }
+   }
+
+   return agx3_bind_compose(enc, "fsel", 27, NULL, 0, fields, n, out, len);
+}
+
 bool
 agx3_alu_fcmp_select_half(enum agx_isa_encoding enc, uint16_t dest,
                           const uint16_t src[4],
