@@ -216,6 +216,7 @@ TEST(Twiddling, ETC)
 {
    /* Block alignment assumed */
    test_ldst(32, 32, 0, 0, 32, 32, 512, PIPE_FORMAT_ETC1_RGB8);
+   test_ldst(32, 32, 0, 0, 32, 32, 512, PIPE_FORMAT_ETC2_RGBA8);
    test_ldst(32, 256, 0, 0, 32, 256, 512, PIPE_FORMAT_ETC2_RGB8A1);
    test_ldst(32, 512, 0, 0, 32, 512, 512, PIPE_FORMAT_ETC2_RG11_SNORM);
 }
@@ -224,6 +225,7 @@ TEST(Twiddling, PartialETC)
 {
    /* Block alignment assumed */
    test_ldst(32, 32, 4, 8, 16, 12, 512, PIPE_FORMAT_ETC1_RGB8);
+   test_ldst(32, 32, 4, 8, 16, 12, 512, PIPE_FORMAT_ETC2_RGBA8);
    test_ldst(32, 32, 4, 8, 16, 12, 512, PIPE_FORMAT_ETC2_RGB8A1);
    test_ldst(32, 32, 4, 8, 16, 12, 512, PIPE_FORMAT_ETC2_RG11_SNORM);
 }
