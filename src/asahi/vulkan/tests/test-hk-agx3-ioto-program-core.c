@@ -1686,6 +1686,11 @@ test_g17p_single_layer_rt0_layout(void)
       PIPE_FORMAT_R32G32_SINT,
    };
    tib = agx_build_tilebuffer_layout(rg32_sint, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.nr_samples == 1 && tib.sample_size_B == 8);
+   CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
+   CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+   tib = agx_build_tilebuffer_layout(rg32_sint, 1, 2, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rg16_snorm[AGX_MAX_RENDER_TARGETS] = {

@@ -351,6 +351,10 @@ struct agx_shader_key {
     * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;
 
+   /* Select the native 0x15 imgwblk variant for an I32 store. This is
+    * independently grounded only for the two-word R32G32 SINT layout. */
+   bool g17p_rt0_eot_i32_selector_15;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.
