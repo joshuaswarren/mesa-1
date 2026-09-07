@@ -1390,6 +1390,38 @@ check_half_divide_compute(void)
 }
 
 static bool
+check_half_compare_select_compute(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P shaderFloat16 comparison select");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *input = nir_load_global(&b, 4, 32, nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *a = nir_f2f16(&b, nir_channel(&b, input, 0));
+   nir_def *c = nir_f2f16(&b, nir_channel(&b, input, 1));
+   nir_def *if_true = nir_f2f16(&b, nir_channel(&b, input, 2));
+   nir_def *if_false = nir_f2f16(&b, nir_channel(&b, input, 3));
+   nir_def *selected = nir_bcsel(&b, nir_flt(&b, a, c), if_true, if_false);
+   nir_store_global(&b, nir_f2f32(&b, selected),
+                    nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary && part.info.stats.instrs >= 8;
+   if (!valid)
+      fprintf(stderr, "G17P shaderFloat16 comparison select lowering failed\n");
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_uniform_alu_policy(void)
 {
    const struct {
@@ -1483,7 +1515,6 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
-
    if (argc == 2 && !strcmp(argv[1], "--half-fma-only")) {
       const bool valid = check_half_fma_compute();
       fprintf(stderr, "G17P shaderFloat16 FMA: %s\n",
@@ -1529,6 +1560,12 @@ main(int argc, char **argv)
       return valid ? 0 : 1;
    }
 
+   if (argc == 2 && !strcmp(argv[1], "--half-compare-only")) {
+      const bool valid = check_half_compare_select_compute();
+      fprintf(stderr, "G17P shaderFloat16 comparison select: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -1574,6 +1611,8 @@ main(int argc, char **argv)
    if (!check_half_clamp_compute())
       return 1;
    if (!check_half_divide_compute())
+      return 1;
+   if (!check_half_compare_select_compute())
       return 1;
    if (!check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2))
       return 1;

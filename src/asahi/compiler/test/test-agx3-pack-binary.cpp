@@ -5101,6 +5101,46 @@ TEST_F(AGX3PackBinary, HalfMaximumRoutesLifetimesWithoutPhantomWait)
    }
 }
 
+TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
+{
+   for (bool live : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(live ? 2 : 0, AGX_SIZE_16);
+      agx_index c = agx_register(live ? 3 : 1, AGX_SIZE_16);
+      agx_index if_true = agx_register(live ? 4 : 2, AGX_SIZE_16);
+      agx_index if_false = agx_register(live ? 5 : 3, AGX_SIZE_16);
+      agx_index dest = agx_register(0, AGX_SIZE_16);
+      if (live) {
+         a.cache = c.cache = if_true.cache = dest.cache = true;
+         if_false.discard = true;
+      } else {
+         a.discard = c.discard = if_true.discard = if_false.discard = true;
+      }
+      agx_fcmpsel_to(b, dest, a, c, if_true, if_false, AGX_FCOND_LT);
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t retained[] = {
+         0x0a,0x82,0x25,0x82,0x02,0x84,0x13,0xc0,0x80,0x05,
+      };
+      const uint8_t dead[] = {
+         0x02,0x00,0x1d,0x00,0x82,0x02,0x13,0xc0,0x80,0x03,
+      };
+      const uint8_t *native = live ? retained : dead;
+      ASSERT_EQ(code.size(), 14u);
+      EXPECT_EQ(memcmp(code.data(), native, 10), 0);
+   }
+
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index modified = agx_register(0, AGX_SIZE_16);
+   modified.abs = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_16), modified,
+                  agx_register(1, AGX_SIZE_16),
+                  agx_register(2, AGX_SIZE_16),
+                  agx_register(3, AGX_SIZE_16), AGX_FCOND_LT);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

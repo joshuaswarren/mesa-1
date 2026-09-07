@@ -1238,6 +1238,54 @@ static void test_native_half_min(void)
    puts("Native half minimum: exact internal-clamp/dead Apple FSEL vectors PASS");
 }
 
+static void test_native_half_compare_select(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const uint16_t src[] = {2, 3, 4, 5};
+   const enum agx3_alu_hint cached[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_fcmp_select_half(AGX_ISA_ENCODING_AGX3B, 0, src,
+                                    cached, 1, true, 0, bytes, &len));
+   exact(bytes, len, "0a822582028413c08005");
+
+   const uint16_t dead_src[] = {0, 1, 2, 3};
+   const enum agx3_alu_hint dead[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_fcmp_select_half(AGX_ISA_ENCODING_AGX3B, 0, dead_src,
+                                    dead, 1, false, 0, bytes, &len));
+   exact(bytes, len, "02001d00820213c08003");
+
+   /* Reject unwitnessed shapes without touching the caller's storage. */
+   for (unsigned bad = 0; bad < 7; ++bad) {
+      uint16_t bad_src[] = {0, 1, 2, 3};
+      enum agx3_alu_hint bad_hints[] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+      unsigned dest = 0, cond = 1, wait = 0;
+      if (bad == 0) enc = AGX_ISA_ENCODING_AGX3C;
+      if (bad == 1) dest = 256;
+      if (bad == 2) bad_src[0] = 256;
+      if (bad == 3) bad_src[3] = 256;
+      if (bad == 4) bad_hints[2] = 3;
+      if (bad == 5) cond = 4;
+      if (bad == 6) wait = 1;
+      memset(bytes, 0xa5, sizeof(bytes));
+      len = 0xa5;
+      assert(!agx3_alu_fcmp_select_half(enc, dest, bad_src, bad_hints,
+                                        cond, false, wait, bytes, &len));
+      assert(len == 0xa5);
+      for (unsigned i = 0; i < sizeof(bytes); ++i)
+         assert(bytes[i] == 0xa5);
+   }
+   puts("Native scalar half comparison/select: two exact Apple vectors and fail-closed cases PASS");
+}
+
 static void test_native_half_max(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -1346,6 +1394,7 @@ int main(void){
    test_native_narrow_multiply();
    test_native_sqrt_step();
    test_native_select_reg_imm();
+   test_native_half_compare_select();
    test_native_half_min();
    test_native_half_max();
    test_native_half_clamp();

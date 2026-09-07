@@ -4704,6 +4704,64 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Native scalar half comparison/select.  This is the general
+          * shaderFloat16 ternary form: compare two half registers and select
+          * either of two half registers without widening or materializing a
+          * boolean.  Keep every operand's physical half and lifetime hint.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1) {
+            uint16_t src[4];
+            enum agx3_alu_hint hints[4];
+            bool invalid = false;
+            for (unsigned i = 0; i < 4; ++i) {
+               const agx_index x = I->src[i];
+               invalid |= !agx3_src_is_register(x) || x.memory ||
+                          x.size != AGX_SIZE_16 || agx_channels(x) != 1 ||
+                          x.abs || x.neg || x.kill ||
+                          (x.cache && x.discard);
+               src[i] = x.value;
+               hints[i] = agx3_post_ra_hint(x);
+            }
+            if (invalid)
+               AGX3_REFUSE(I);
+
+            unsigned condition = I->fcond;
+            bool swap = I->invert_cond;
+            if (condition == AGX_FCOND_LTN) {
+               condition = AGX_FCOND_GE;
+               swap = !swap;
+            } else if (condition == AGX_FCOND_GTN) {
+               condition = AGX_FCOND_LE;
+               swap = !swap;
+            }
+            if (swap) {
+               const uint16_t value = src[2];
+               const enum agx3_alu_hint hint = hints[2];
+               src[2] = src[3];
+               src[3] = value;
+               hints[2] = hints[3];
+               hints[3] = hint;
+            }
+
+            uint16_t fsel_wait = wait;
+            if (fsel_wait != 0) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_fcmp_select_half(
+                   enc, I->dest[0].value, src, hints, condition,
+                   I->dest[0].cache, fsel_wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Native mixed-width comparison against floating zero with full
           * float alternatives. Keep the half comparator in its assigned half
           * register; neither widening nor a separate comparison is needed. */

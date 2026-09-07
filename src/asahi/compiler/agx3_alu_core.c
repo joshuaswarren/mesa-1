@@ -1057,6 +1057,75 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
       if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, n, out, len))
          return true;
    }
+
+   return false;
+}
+
+/* Native Metal keeps all four scalar half operands in their assigned halves:
+ * src0/src1 are compared and src2/src3 are the selected alternatives.  The
+ * instruction carries independent post-RA lifetime hints.  Only the no-wait
+ * form is witnessed; callers retire scoreboard slots before composing it.
+ */
+bool
+agx3_alu_fcmp_select_half(enum agx_isa_encoding enc, uint16_t dest,
+                          const uint16_t src[4],
+                          const enum agx3_alu_hint hints[4],
+                          unsigned condition, bool dest_cache,
+                          uint16_t wait_mask,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !hints ||
+       dest >= 256 ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) || wait_mask != 0)
+      return false;
+
+   for (unsigned i = 0; i < 4; ++i) {
+      if (src[i] >= 256 || (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   const struct agx3_field_kv base[] = {
+      {10, 2}, {11, 1}, {42, 2}, {43, 1}, {59, 2}, {60, 1},
+      {76, 2}, {77, 1}, {93, 2}, {94, 1},
+   };
+   const struct agx3_field_kv fields[] = {
+      {3, dest}, {12, dest_cache}, {35, src[0]}, {52, src[1]},
+      {69, src[2]}, {86, src[3]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {61, hints[1] == AGX3_ALU_HINT_CACHE},
+      {63, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {78, hints[2] == AGX3_ALU_HINT_CACHE},
+      {80, hints[2] == AGX3_ALU_HINT_DISCARD},
+      {95, hints[3] == AGX3_ALU_HINT_CACHE},
+      {97, hints[3] == AGX3_ALU_HINT_DISCARD},
+      {110, condition}, {107, 0},
+   };
+
+   for (unsigned ep = 0; ep < 28; ++ep) {
+      uint8_t candidate[AGX3_ALU_MAX_LENGTH], candidate_len;
+      if (!agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 16,
+                             candidate, &candidate_len))
+         continue;
+
+      /* The table admits an equivalent alias for two otherwise fixed bits.
+       * Apple's G17P compiler canonicalizes scalar-half FSEL with bits62:63
+       * set and duplicates destination-cache in its bit3 alias.  Apply
+       * exactly that canonical choice, witnessed independently with cached
+       * and all-dead operands.  These bits decode to the same named fields.
+       */
+      if (candidate_len != 10)
+         continue;
+      candidate[7] |= 0xc0;
+      if (dest_cache)
+         candidate[0] |= 0x08;
+      for (unsigned i = 0; i < candidate_len; ++i)
+         out[i] = candidate[i];
+      *len = candidate_len;
+      return true;
+   }
+
    return false;
 }
 
