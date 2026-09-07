@@ -1,14 +1,14 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
-**Status: the SSBO limit below is GONE; fragment-side gaps remain.** Every row
-of the original matrix now compiles, including the ones marked **no**, and so
-do device atomics. The measurement that produced the matrix is preserved
-verbatim further down, because the *method* is what makes it re-runnable, and
-because the retraction it carries is still worth reading before theorising
-about a wrong value on this ISA.
+**Status: the SSBO limit below is GONE, and so is the `fcmpsel` one; two
+texture-side gaps remain.** Every row of the original matrix compiles,
+including the ones marked **no**, and so do device atomics. The measurement
+that produced the matrix is preserved verbatim further down, because the
+*method* is what makes it re-runnable, and because the retraction it carries is
+still worth reading before theorising about a wrong value on this ISA.
 
 Measured 2026-09-07 under the G17P drm-shim, on the integration branch plus the
-two commits named in "What changed". No hardware.
+commits named in "What changed". No hardware.
 
 ## Current matrix
 
@@ -43,47 +43,143 @@ and every textured draw:
 | `textureLod(tex, uv, 0.0)`, `textureProj`, `texelFetch`             | yes     |
 | `dFdx` on an interpolated value                                     | yes     |
 | `texture(tex, uv) / float(textureSize(tex, 0).x)`                   | yes\*   |
-| `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**  |
-| `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**  |
-| `if (x < 0.1) discard;`                                             | **no**  |
-| `max(dot(normalize(n), L), 0.0)` — any normalize/clamp lighting     | **no**  |
+| `if (x < 0.1) discard;`                                             | yes\*\*  |
+| `max(dot(normalize(n), L), 0.0)` — normalize/clamp lighting         | yes\*\*  |
+| that lighting multiplied by a texture fetch                         | yes\*\*  |
+| `clamp(colour, 0.0, 1.0)`                                           | yes\*\*  |
+| `max(a, b)` / `min(a, b)` between two interpolated values           | yes\*\*  |
+| `clamp(texture(tex, uv) * colour, 0.0, 1.0)`                        | **no**† |
+| `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**‡ |
+| `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**‡ |
 
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
+\*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
+below. The last three are new probes (`f14`, `f15`, `f16`) added with it.
+
+† Not a `fcmpsel` gap at all: this shape reaches the packer as `fmul.sat`, a
+saturating float multiply, and it is the *saturate modifier* that has no
+grounded encoding (`agx3_pack_binary.c`, the generic ALU fallback names
+`fmul`). Recorded here because the probe is new and the distinction is easy to
+lose.
+
+‡ The LOD-bias and gradient *instruction* encodings are now grounded and
+implemented — see "The bias and gradient sample forms" below — but these two
+shapes still fail, for a different reason found while grounding them, also
+recorded there.
 
 ## The rule, as it stands now
 
-There is no per-shader SSBO access limit and no atomic limit. What remains is
-a set of missing *instruction encodings*, each of which fails the whole shader
-closed. With `AGX_MESA_DEBUG=shaders` the packer names the one it refused:
+There is no per-shader SSBO access limit, no atomic limit, and no missing
+minimum/maximum. What remains is a small set of missing *instruction
+encodings*, each of which fails the whole shader closed. With
+`AGX_MESA_DEBUG=shaders` the packer names the one it refused:
 
 ```
-agx3_pack_binary.c:4253: no grounded AGX3 encoding for texture_sample
-agx3_pack_binary.c:4980: no grounded AGX3 encoding for fcmpsel
+agx3_pack_binary.c:4288: no grounded AGX3 encoding for texture_sample
+agx3_pack_binary.c:6567: no grounded AGX3 encoding for fmul
 ```
 
 Known-missing, in the order they are worth doing:
 
-- **`fcmpsel` with a 32-bit destination.** Every handler is gated on
-  `AGX_SIZE_16`. `max(x, 0.0)` on floats — so `normalize()`, `clamp()`,
-  `saturate()`, and `discard` — reaches the generic ALU fallback and is
-  refused. Apple's own bytes for the two shapes, from
-  `metal-nt -arch applegpu_g17p`:
+- **The float saturate modifier.** `clamp(x, 0.0, 1.0)` on a value that is
+  itself a product reaches the packer as `fmul.sat`, and the generic ALU
+  fallback has no encoding for the saturating form. Apple compiles
+  `saturate(a[i])` on its own to the eight-byte `09 01 1c 81 01 02 00 82`,
+  which decomposes as `f32add.ep2` carrying f14 = 1 and a minifloat operand;
+  the plain add does not set f14. That is a witness, not a swept field
+  assignment — nothing here varied f14 against a second shape — so it is
+  recorded as a starting point, not as an encoding.
 
-  ```
-  max(a[i], b[i])    12 03 1e 05 00 c0
-  max(a[i], 0.0f)    12 03 0a 81 00 c2
-  ```
+- **The bindless texture-heap descriptor shape.** A sample whose texture and
+  sampler come from the bindless heap rather than the combined-sampler
+  descriptor names a *uniform* heap base in source 2; `agx3_emit_texture_sample`
+  requires that source to be the immediate zero. This is what actually blocks
+  the LOD-bias and gradient probes today; see below.
 
-  Note it is a six-byte `fmax`, not an `fsel`: the 32-bit path is a compact
-  min/max form, and `agx3_pack_fmax_f32_reg_reg()` already exists for the
-  all-register case. What is missing is the mixed-width shape Mesa actually
-  produces (`fcmpsel d32, r32, h16, ...`), because NIR materialises the 0.0
-  in a 16-bit half.
+- **`textureGrad`'s gradient staging.** The instruction mode is grounded
+  (f139 = 5) but the four gradient scalars have to be published into operand
+  banks 8/10/12/14 through the ten-byte `copy.ep1` form, and only the
+  four-byte `copy.ep0` coordinate staging is implemented.
 
-- **`texture_sample` with an LOD bias or explicit gradients.** Plain sample,
-  explicit LOD, projective and fetch all encode.
+## The 32-bit tied fcmpsel, and what it cost
 
-## What changed, and how it was measured
+`max(x, 0.0)` on floats — so `normalize()`, `clamp()`, `saturate()` and the
+`discard` compare — used to reach the generic ALU fallback and fail the shader
+closed. It is now encoded. Apple's own bytes, from
+`metal-nt -arch applegpu_g17p`:
+
+```
+max(a[i], b[i])      12 03 1e 05 00 c0     fsel.ep7, register second operand
+min(a[i], b[i])      12 03 1e 05 01 c0
+max(a[i], 0.0f)      12 03 0a 81 00 c2     fsel.ep2, minifloat second operand
+max(a[i], 1.0f)      12 03 0a b1 00 c2
+max(a[i], -1.0f)     12 03 1a b1 00 c2
+max(a[i], 31.0f)     12 03 0a ff 10 c2
+min(a[i], 0.0f)      12 03 0a 81 01 c2
+```
+
+It is a six-byte `fsel`, not the mixed-width select the packer was reaching
+for. Structurally it is the same form the half `fmin`/`fmax` encoder already
+used: only the five width selectors change (f11/f43/f60/f77/f94, 1 = one
+16-bit half, 2 = a 32-bit pair). The immediate is an ordinary AGX minifloat and
+is deposited **twice**, into f51 and f85, because the compared operand and the
+selected operand are the same value — which is exactly what makes the
+instruction a minimum or a maximum rather than a general select. Apple picks
+the encoding profile by that operand: ep7 (destination in f3) for a register,
+ep2 (destination in f17) for a minifloat.
+
+Three things had to change together:
+
+1. `agx3_alu_fmin_f32` / `agx3_alu_fmax_f32` and their `_imm` forms
+   (`agx3_alu_core.c`), byte-exact against every witness above plus Apple's
+   own register and lifetime assignment for eight simultaneously live maxima.
+2. A packer handler for the tied 32-bit shape, placed ahead of every other
+   `fcmpsel` handler so the general select paths cannot claim it.
+3. The optimizer had to stop half-folding the constant. `agx_is_float_src()`
+   reports source 3 of a select as an integer — correctly, a select can carry
+   an integer — so the generic rule folded the minifloat into the *comparison*
+   and left the *selection* a register, breaking the tie and handing the packer
+   a shape it has no encoding for. The tie now folds in both slots or neither.
+
+The same session found that two of the half-select handlers refused the shader
+outright when their operand shape did not match, instead of falling through to
+the later handler that did. `if (x < 0.1) discard;` is exactly that: a half
+select of two byte constants, which the byte-constant encoder has always
+supported and never got the chance to. Those two handlers now skip. That alone
+also fixed `AGX3PackBinary.UpdateLightmapNativeIntegerAndMaskForms`.
+
+## The bias and gradient sample forms
+
+Both instruction encodings are grounded, from fragment and compute pipelines
+compiled with `metal-nt`. **Neither closes its probe**, and the reason is worth
+recording because it is not where anyone was looking.
+
+`t.sample(s, uv, bias(k))` is the ordinary implicit-LOD sample with two extra
+fields: f37 = 1 (immediate operand), f139 = 1 (bias mode), and f29 = k * 64 in
+the same 12-bit fixed-point field the explicit-level form uses. Swept over
+k = 0.25, 0.5, 1, 1.5, 2, 4, 1/64 and 31, f29 came out 16, 32, 64, 96, 128,
+256, 1 and 1984 — exactly k * 64 — and k = 63 saturated the field at 2047. A
+zero bias is folded away by Apple's own compiler into the plain form. That is
+`AGX3_TEX_LOD_BIAS` in `agx3_tex_core.c`, with byte-exact vectors.
+
+`t.sample(s, uv, gradient2d(dx, dy))` selects f139 = 5 and stages the four
+gradient scalars into operand banks 8/10/12/14 with six ten-byte `copy.ep1`
+instructions ahead of the sample. The mode is implemented in neither direction
+yet; only the mode number is recorded.
+
+**What actually blocks both probes** is a NIR-side gate, not the ISA:
+`agx_nir_lower_g17p_combined_sampler.c` accepts a shader only when *every*
+texture op is `nir_texop_tex` or `nir_texop_txl`. One `txb` or `txd` disowns
+the whole shader, which then falls back to the bindless texture-heap
+descriptor form — source 2 a uniform heap base rather than the immediate zero
+`agx3_emit_texture_sample` requires — and the sample is refused for that
+instead. Measured directly: `f01` reaches the packer with sources 2/3/4 all
+immediate zero, `f05` with `[2] = uniform 16, [3] = register 2, [4] = register
+0`. Closing either probe means teaching that pass to keep a genuine API bias
+(its existing `txb` handling only recognises and *discards* the driver's own
+zero-valued software bias), or grounding the bindless-heap sample form.
+
+## What changed earlier, and how it was measured
 
 Two compiler fixes, both grounded byte-exactly against Apple's own machine
 code (see "Getting Apple's own G17P encoding", below):
@@ -132,6 +228,14 @@ docker run --rm -v <repo>:/workspace -w /workspace/<mesa worktree> \
 Each line prints `ENCODES` or `REFUSED` with the `VkResult`; the exit status is
 the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
+
+As of this revision the compute probe reports 24 of 24 encoding and the
+fragment probe 13 of 16. The three refusals are `f05_texture_bias` and
+`f12_texture_grad`, both on the bindless-heap descriptor shape, and
+`f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
+(`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before
+this revision too, so vkcube's reported failure is not this file's matrix and
+has not been reproduced here.
 
 Two traps, both of which produced wrong answers before being caught:
 

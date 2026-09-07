@@ -30,7 +30,45 @@ The script is `.mtlp-json`.  For a COMPUTE pipeline the entry is:
 
 `{"compute_function": {"library": "lib0", "name": ...}}` and adding `"library"`
 or `"label"` siblings are all parse errors.  Render pipelines use the
-`render_pipelines` key instead of `compute_pipelines` (see `gen.py`).
+`render_pipelines` key instead of `compute_pipelines`, with each entry a
+`{"vertex_function": "<name>", "fragment_function": "<name>"}` pair of bare
+strings.
+
+### A render pipeline's fragment shader is dead code unless it has a side effect
+
+`metal-nt` compiles a render pipeline with no attachment information, so a
+`fragment float4` whose result goes only to a colour output is optimised away
+entirely: the fragment object comes back as an 80-byte stub and every variant
+you are trying to tell apart is byte-identical.  Declare the entry
+`fragment void` and store the value to a `device` buffer instead.  With that
+one change, `t.sample(s, uv)`, `bias(k)` and `bias(reg)` differ exactly where
+they should.  Sampling with an implicit LOD is also illegal in a compute
+kernel -- `metal-nt` aborts with `LLVM ERROR: Failed to encode` -- so bias
+witnesses have to come from the render path.
+
+## Turning bytes back into fields
+
+`.tmp/g17p-fcmpsel-evidence/tools/decomp.c` is the inverse of the encoder: give
+it a hex instruction and it enumerates every AGX3b/AGX3c form of that length,
+walks the form's choice-group alternatives, derives the field vector the target
+bytes imply (predicates pin selectors, direct deposits recover operands, LUT
+deposits are inverted by enumeration), and then **re-composes and compares**.
+Only exact round-trips are printed, so a reported field vector is a fact about
+the encoder rather than a reading of a disassembler's field names -- which is
+the failure mode the retraction in `README-agx3-packer-limits.md` describes.
+`scan.py` next to it walks a whole code image that way, one instruction at a
+time; `bind.c` composes a field vector back to bytes.
+
+Build them against the in-tree tables:
+
+    cc -O2 -I src/asahi/compiler/agx3_compose -o /tmp/decomp \
+       .tmp/g17p-fcmpsel-evidence/tools/decomp.c \
+       src/asahi/compiler/agx3_compose/agx3_compose.c \
+       src/asahi/compiler/agx3_compose/agx3{b,c}_tables.c
+
+The in-tree Python disassembler (`isa/test/disasm.py`) is not a substitute: on
+the six-byte `fsel` above it matched the wrong form, reported the wrong length,
+and asserted inside its operand mapper.
 
 ## Reading the output
 
