@@ -3159,6 +3159,8 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
  * R16_UNORM format7 and R16_SNORM/R16G16B16A16_SNORM format6 attachment
  * fields use layout2 with one or four components. All emit a distinct
  * normalized-16 program with selector tail a895.
+ * Scalar and paired R16 UINT/SINT formats use one I16 imageblock word and
+ * the grounded selector-15 program; wider signed variants remain distinct.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
