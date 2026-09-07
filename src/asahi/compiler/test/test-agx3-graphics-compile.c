@@ -1308,6 +1308,105 @@ test_combined_sampler_scope(void)
    return ok;
 }
 
+/* The same shader with a real API LOD bias instead of the driver's software
+ * one. `texture(tex, uv, k)` is a txb whose bias is the shader's own value,
+ * not a descriptor field, so the lowering must keep both the source and the
+ * txb: the hardware sampler applies its own bias and the instruction applies
+ * this one. */
+static nir_shader *
+build_fs_texture_api_bias(bool gradient)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 biased FS");
+
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *uv = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+
+   nir_def *timage = nir_bindless_image_agx(&b, nir_imm_int(&b, 64),
+                                            .desc_set = 0);
+   nir_def *tsampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 96), nir_imm_intN_t(&b, 45, 16), .desc_set = 0);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, gradient ? 5 : 4);
+   tex->op = gradient ? nir_texop_txd : nir_texop_txb;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, timage);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, tsampler);
+   if (gradient) {
+      /* Any live 32-bit vec2 pair stands in for the screen-space
+       * derivatives; this test is about the lowering keeping them. */
+      tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_ddx,
+                                        nir_fmul_imm(&b, uv, 0.5));
+      tex->src[4] = nir_tex_src_for_ssa(nir_tex_src_ddy,
+                                        nir_fmul_imm(&b, uv, 0.25));
+   } else {
+      tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_bias,
+                                        nir_imm_floatN_t(&b, 0.5, 16));
+   }
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   fs_store_colour(&b, &tex->def);
+
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   return b.shader;
+}
+
+/* The lowering keeps the API bias and the explicit gradients, binds the
+ * combined sampler, and leaves no descriptor crawl behind. */
+static bool
+test_combined_sampler_biased_and_gradient(bool gradient)
+{
+   nir_shader *shader = build_fs_texture_api_bias(gradient);
+   struct agx_g17p_combined_sampler_binding binding = {
+      .texture_offset_B = UINT32_MAX,
+      .sampler_index_offset_B = UINT32_MAX,
+   };
+   bool ok = agx_nir_lower_g17p_combined_sampler(shader, &binding);
+   ok &= binding.texture_offset_B == 64 &&
+         binding.sampler_index_offset_B == 104;
+
+   unsigned samples = 0, descriptors = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               const int bias =
+                  nir_tex_instr_src_index(tex, nir_tex_src_bias);
+               const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
+               const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
+               samples += tex->texture_index == 0 && tex->sampler_index == 0 &&
+                          (gradient ? (tex->op == nir_texop_txd && ddx >= 0 &&
+                                       ddy >= 0)
+                                    : (tex->op == nir_texop_txb && bias >= 0));
+            } else if (instr->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+               descriptors += op == nir_intrinsic_load_descriptor_set_agx ||
+                              op == nir_intrinsic_bindless_image_agx ||
+                              op == nir_intrinsic_bindless_sampler_agx;
+            }
+         }
+      }
+   }
+
+   ok &= samples == 1 && descriptors == 0;
+   ralloc_free(shader);
+   return ok;
+}
+
 static nir_shader *
 build_cs_bindless_txf(void)
 {
@@ -2684,6 +2783,14 @@ main(int argc, char **argv)
       fprintf(stderr, "native sampler plus push-root lowering: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--bias-gradient-only")) {
+      const bool ok = test_combined_sampler_biased_and_gradient(false) &&
+                      test_combined_sampler_biased_and_gradient(true) &&
+                      test_combined_sampler_scope();
+      fprintf(stderr, "API LOD bias and explicit gradient lowering: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--reload-staging-only")) {
       const bool ok = test_g17p_background_reload_staging();
       fprintf(stderr, "G17P background reload staging: %s\n", ok ? "PASS" : "FAIL");
@@ -2735,6 +2842,13 @@ main(int argc, char **argv)
 
    if (!test_combined_sampler_scope() || !test_combined_sampler_root()) {
       fputs("combined sampler lowering consumed a non-sampler bias\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_combined_sampler_biased_and_gradient(false) ||
+       !test_combined_sampler_biased_and_gradient(true)) {
+      fputs("combined sampler lowering disowned an API bias or gradient\n",
+            stderr);
       all_ok = false;
    }
 

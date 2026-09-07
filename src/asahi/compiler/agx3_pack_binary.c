@@ -1055,27 +1055,83 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
     * immediate operand as an explicit level, selected by f139 = 1 instead
-    * of 2, and keeping the implicit-LOD marker. */
+    * of 2, and keeping the implicit-LOD marker.
+    *
+    * A zero bias is not encoded at all: Apple's own compiler folds it into
+    * the plain implicit form, and this packer follows it, so the operand
+    * stays the immediate zero the implicit form already requires. Minifloat
+    * -0.0 folds the same way. */
+   const bool zero_bias = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+                          I->src[1].type == AGX_INDEX_IMMEDIATE &&
+                          agx_minifloat_decode(I->src[1].value) == 0.0f;
    const bool biased_lod = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
-                           I->src[1].type == AGX_INDEX_IMMEDIATE;
+                           I->src[1].type == AGX_INDEX_IMMEDIATE && !zero_bias;
+   /* The same sample with a per-lane bias instead: PACK_SMPIR publishes the
+    * scalar exactly as it does for a per-lane level, and only f139 moves
+    * (3 rather than 4). */
+   const bool register_bias = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+                              I->src[1].type != AGX_INDEX_IMMEDIATE;
+   const bool implicit_lod = I->lod_mode == AGX_LOD_MODE_AUTO_LOD || zero_bias;
+   /* Explicit gradients. The four scalars are staged into their own banks
+    * and the sample names coordinate bank 0, as every witness does. */
+   const bool gradient_lod = I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
+   /* textureGather. Every witness is a plain 2D implicit-LOD gather, so the
+    * gather bit rides on the ordinary implicit sample and nothing else about
+    * the instruction changes. The IR spells the components 1/3/5/7 in a
+    * three-bit field, so map them one by one: an unspelled value must refuse
+    * rather than alias onto a real channel. */
+   const bool gather = I->gather != AGX_GATHER_NONE;
+   enum agx3_tex_gather gather_component = AGX3_TEX_GATHER_NONE;
+   switch (I->gather) {
+   case AGX_GATHER_NONE: break;
+   case AGX_GATHER_R: gather_component = AGX3_TEX_GATHER_R; break;
+   case AGX_GATHER_G: gather_component = AGX3_TEX_GATHER_G; break;
+   case AGX_GATHER_B: gather_component = AGX3_TEX_GATHER_B; break;
+   case AGX_GATHER_A: gather_component = AGX3_TEX_GATHER_A; break;
+   default: return false;
+   }
    const bool immediate_lod =
       (explicit_lod || biased_lod) && I->src[1].type == AGX_INDEX_IMMEDIATE;
    const float immediate_level = immediate_lod ?
       agx_minifloat_decode(I->src[1].value) : 0.0f;
    const float immediate_level_x64 = immediate_level * 64.0f;
-   const bool valid_immediate_lod = immediate_lod && immediate_level >= 0.0f &&
-      immediate_level_x64 <= 0xfff &&
-      immediate_level_x64 == (float)(uint16_t)immediate_level_x64;
+   /* f29 is a *signed* 12-bit LOD in 1/64 steps. Sweeping Apple's own
+    * `t.sample(s, uv, bias(k))` over k = +-{1/64, 0.25, 0.5, 1, 1.5, 2, 4,
+    * 31, 32, 33, 63, 64} gives f29 = k * 64 in two's complement -- bias(-1.0)
+    * is 4032, bias(-32.0) is 2048 -- saturating at 2047 (+31.984375) and 2048
+    * (-32). A minifloat immediate spans [-31, 31], so it always lands inside
+    * that range, but the sign has to survive into the field. */
+   const bool integral_x64 =
+      immediate_level_x64 >= -2048.0f && immediate_level_x64 <= 2047.0f &&
+      immediate_level_x64 == (float)(int16_t)immediate_level_x64;
+   /* An explicit level is unsigned; only a bias may be negative. */
+   const bool valid_immediate_lod =
+      immediate_lod && immediate_level >= 0.0f && integral_x64;
+   const bool valid_immediate_bias = immediate_lod && integral_x64;
+   const uint16_t immediate_x64_field =
+      (uint16_t)(((int)immediate_level_x64) & 0xfff);
    const bool array = I->dim == AGX_DIM_2D_ARRAY;
+   /* A per-lane level and a per-lane bias share one staging form, so they
+    * share one operand test: a live single-channel 16-bit register. */
+   const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
+      I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1;
+   /* A 2D gradient is four 32-bit scalars in one aligned run, which the four
+    * staging copies name two halves apart. */
+   const bool gradient_operand = agx3_tex_plain_reg(I->src[1]) &&
+      I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 4 &&
+      (I->src[1].value & 1) == 0 && I->src[1].value + 6 < 256;
    const bool valid_lod = explicit_lod ?
       (enc == AGX_ISA_ENCODING_AGX3B &&
-       (valid_immediate_lod ||
-        (agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_16 &&
-         agx_channels(I->src[1]) == 1))) :
+       (valid_immediate_lod || scalar_lod_reg)) :
       biased_lod
-         ? (enc == AGX_ISA_ENCODING_AGX3B && valid_immediate_lod &&
+         ? (enc == AGX_ISA_ENCODING_AGX3B && valid_immediate_bias &&
             immediate_level_x64 != 0.0f && !array)
-         : (I->lod_mode == AGX_LOD_MODE_AUTO_LOD && agx3_tex_imm(I->src[1], 0));
+         : register_bias
+         ? (enc == AGX_ISA_ENCODING_AGX3B && scalar_lod_reg && !array)
+         : gradient_lod
+         ? (enc == AGX_ISA_ENCODING_AGX3B && gradient_operand && !array)
+         : (implicit_lod &&
+            (zero_bias || agx3_tex_imm(I->src[1], 0)));
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
@@ -1108,8 +1164,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
        (array && (enc != AGX_ISA_ENCODING_AGX3B || explicit_lod)) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       I->offset || I->shadow || I->query_lod ||
-       I->gather != AGX_GATHER_NONE || I->sparse)
+       I->offset || I->shadow || I->query_lod || I->sparse ||
+       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array ||
+                   enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
    /* The witnessed copy form carries at most one producer dependency. */
@@ -1129,11 +1186,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    /* Every native array witness names coordinate bank 0 in SMP, including
     * register-indexed shaders whose physical coordinates live elsewhere.
     * PACK_SMPIR publishes only the layer, so explicitly copy x/y to bank 0. */
-   const uint16_t coord = (explicit_lod || array) ? 0 : I->src[0].value;
+   const uint16_t coord = (explicit_lod || register_bias || array ||
+                           gradient_lod)
+                             ? 0
+                             : I->src[0].value;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t len = 0;
 
-   if (explicit_lod && !immediate_lod) {
+   if ((explicit_lod && !immediate_lod) || register_bias) {
       if (!agx3_tex_stage_lod(enc, I->src[1].value, stage_slot, wait_mask,
                              I->src[1].cache, I->src[1].discard,
                              bytes, &len) ||
@@ -1160,6 +1220,26 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         !agx3_append(emission, bytes, len)))
       return false;
 
+   /* The gradient scalars follow the coordinates, in the interleaved order
+    * (ddx.x, ddy.x, ddx.y, ddy.y) the native kernels stage them in. The
+    * collect that produced them is laid out the same way, so the run is
+    * copied straight through. */
+   if (gradient_lod) {
+      static const uint16_t bank[4] = {
+         AGX3_TEX_GRADIENT_BANK_DDX_X, AGX3_TEX_GRADIENT_BANK_DDY_X,
+         AGX3_TEX_GRADIENT_BANK_DDX_Y, AGX3_TEX_GRADIENT_BANK_DDY_Y,
+      };
+
+      for (unsigned i = 0; i < 4; ++i) {
+         if (!agx3_tex_stage_copy_hints(enc, bank[i],
+                                        I->src[1].value + (2 * i), stage_slot,
+                                        0, I->src[1].cache, I->src[1].discard,
+                                        bytes, &len) ||
+             !agx3_append(emission, bytes, len))
+            return false;
+      }
+   }
+
    const struct agx3_tex_sample_desc d = {
       .dest = I->dest[0].value,
       .coord = coord,
@@ -1175,11 +1255,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .sampler_value = immediate ? 0 : I->src[4].value,
       .texture_kill = !immediate && I->src[3].kill,
       .sampler_kill = !immediate && I->src[4].kill,
-      .lod = biased_lod      ? AGX3_TEX_LOD_BIAS
-             : immediate_lod ? AGX3_TEX_LOD_LEVEL
-             : explicit_lod  ? AGX3_TEX_LOD_REGISTER
-                             : AGX3_TEX_LOD_AUTO,
-      .lod_x64 = immediate_lod ? (uint16_t)immediate_level_x64 : 0,
+      .gather = gather_component,
+      .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
+             : immediate_lod  ? AGX3_TEX_LOD_LEVEL
+             : explicit_lod   ? AGX3_TEX_LOD_REGISTER
+             : register_bias  ? AGX3_TEX_LOD_BIAS_REGISTER
+             : gradient_lod   ? AGX3_TEX_LOD_GRADIENT
+                              : AGX3_TEX_LOD_AUTO,
+      .lod_x64 = immediate_lod ? immediate_x64_field : 0,
       .array = array,
       .slot = slot,
       .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
@@ -4353,15 +4436,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool compute_level = ctx->stage == MESA_SHADER_COMPUTE &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_IMMEDIATE;
-            if ((ctx->stage != MESA_SHADER_FRAGMENT && !compute_level) ||
+            /* An explicit gradient carries its own derivative, so it needs no
+             * quad either; Apple's own witness for the form is a compute
+             * kernel. */
+            const bool compute_gradient = ctx->stage == MESA_SHADER_COMPUTE &&
+               I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
+            if ((ctx->stage != MESA_SHADER_FRAGMENT && !compute_level &&
+                 !compute_gradient) ||
                 !agx3_emit_texture_sample(emission, enc, I, slot, wait,
                                           final))
                AGX3_REFUSE(I);
-            /* The sample emitter stages exactly two 32-bit coordinates. */
+            /* The sample emitter stages exactly two 32-bit coordinates, plus
+             * the auxiliary scalar bank for a per-lane level or bias, plus
+             * the four gradient banks that reach half 14. */
+            const bool staged_scalar =
+               I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+               (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+                I->src[1].type != AGX_INDEX_IMMEDIATE);
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
-                    (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
-                     I->dim == AGX_DIM_2D_ARRAY)
+                    I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
+                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY)
                        ? 8 : I->src[0].value + 4);
             continue;
          }

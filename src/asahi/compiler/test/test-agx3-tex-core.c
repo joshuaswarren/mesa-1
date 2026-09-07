@@ -426,6 +426,253 @@ test_sample_witnesses(void)
 }
 
 /*
+ * Explicit gradients and the per-lane LOD bias.
+ *
+ * The Apple bytes quoted here were regenerated with
+ * `xcrun metal-nt -arch applegpu_g17p` (Metal toolchain 27.1) and decomposed
+ * with the production compose tables, which only report a field vector that
+ * re-composes to the same bytes. Sources and native objects are in
+ * .tmp/g17p-texgrad-evidence (fragment shapes) and the compute kernel
+ * `t.sample(s, g[0], gradient2d(g[1], g[2]))`.
+ *
+ * The gradient sample selects f139 = 5 and is the one sample shape that does
+ * *not* set the fragment marker f156: the four staged scalars are the
+ * derivative the marker would otherwise request. Apple's compute kernel
+ * stages six scalars with the compact copy form, all naming one staging slot,
+ * into banks 0, 2, 8, 10, 12 and 14 from six consecutive source registers:
+ *
+ *    copy 0b10210c   bank  0 <- r16      copy 5b16210c   bank 10 <- r22
+ *    copy 1b12210c   bank  2 <- r18      copy 6b18210c   bank 12 <- r24
+ *    copy 4b14210c   bank  8 <- r20      copy 7b1a210c   bank 14 <- r26
+ *    smp  05800cb8b0000401000010000100
+ *
+ * which is the bank order, the shared slot and the consecutive-source layout
+ * this encoder emits. Which gradient component lands in which bank is pinned
+ * independently by the fragment kernels that pass literal gradients, where
+ * the staged value is the constant itself: gradient2d((0.25, 0.5),
+ * (0.75, 1.0)) loads 0.25 into bank 8, 0.75 into bank 10, 0.5 into bank 12
+ * and 1.0 into bank 14, so the interleave is (ddx.x, ddy.x, ddx.y, ddy.y).
+ * The (1, 2)/(4, 8) and (16, 32)/(64, 128) pairs agree.
+ *
+ * The per-lane bias is the per-lane level with one field moved. Apple's
+ * fragment pair is byte-identical apart from bytes 6 and 7:
+ *
+ *    t.sample(s, uv, level(in.uv.x))  05800cb8b0000001010010001200   f139 = 4
+ *    t.sample(s, uv, bias(in.uv.x))   05800cb8b0000400010010001200   f139 = 3
+ *
+ * Both set f156. Those two carry the fragment-only f83 = 4 / f112 = 8
+ * descriptor-operand profile that this encoder does not emit, so only the
+ * delta between them is asserted here, on the encoder's own operand profile.
+ */
+static int
+test_gradient_and_register_bias(void)
+{
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length;
+
+   /* Apple's own compute gradient sample, reproduced byte for byte:
+    * immediate texture and sampler, coordinates in bank 0, waiting on the
+    * staging slot the six copies published. */
+   const struct agx3_tex_sample_desc grad_apple = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_GRADIENT, .slot = 1, .wait_mask = 1u << 0,
+      .coord_kill = true, .final = true,
+   };
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &grad_apple, bytes,
+                                &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0000401000010000100"));
+
+   /* The same sample waiting on a different staging slot. */
+   const struct agx3_tex_sample_desc grad = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_GRADIENT, .slot = 1, .wait_mask = 1u << 2,
+      .coord_kill = true, .final = true,
+   };
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &grad, bytes,
+                                &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0010401000010000100"));
+
+   /* The same gradient sample reading its texture and sampler out of the
+    * bindless heap. Apple's own argument-buffer compute kernel
+    * `ts.t.sample(ts.s, g[0], gradient2d(g[1], g[2]))` binds them at uniform
+    * halves 20 and 24 and emits the identical six staging copies, so the
+    * gradient mode is orthogonal to the descriptor operand class and there is
+    * no separate heap gradient form to ground. Byte-exact. */
+   struct agx3_tex_sample_desc grad_heap = grad_apple;
+   grad_heap.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   grad_heap.texture_value = 20;
+   grad_heap.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
+   grad_heap.sampler_value = 24;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &grad_heap, bytes,
+                                &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length,
+                "05a00cb8b8000401920390010100802000000000"));
+
+   /* The six staging copies this encoder emits, in Apple's bank order. The
+    * source-operand class is the packer's own witnessed staging form (f16,
+    * f23 = 2), not the compact f17 / f23 = 3 form that particular Apple
+    * kernel happened to use, so these are round-trips of the shared helper
+    * every already-qualified sample path uses -- what is asserted here is the
+    * bank assignment and the shared slot. */
+   struct {
+      uint16_t dest, src, wait;
+      const char *hex;
+   } stage[] = {
+      {0, 8, 1u << 5, "0b092f00420000880000"},
+      {2, 10, 0, "1b0b2f00420000080000"},
+      {AGX3_TEX_GRADIENT_BANK_DDX_X, 4, 1u << 0, "4b052f00422000080000"},
+      {AGX3_TEX_GRADIENT_BANK_DDY_X, 0, 1u << 1, "5b012f00424000080000"},
+      {AGX3_TEX_GRADIENT_BANK_DDX_Y, 6, 0, "6b072f00420000080000"},
+      {AGX3_TEX_GRADIENT_BANK_DDY_Y, 2, 0, "7b032f00420000080000"},
+   };
+   for (unsigned i = 0; i < sizeof(stage) / sizeof(stage[0]); ++i) {
+      uint8_t copy[AGX3_TEX_COPY_MAX_LENGTH];
+      CHECK(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3B, stage[i].dest,
+                                      stage[i].src, 3, stage[i].wait, false,
+                                      true, copy, &length));
+      CHECK(length == 10 && hex_eq(copy, length, stage[i].hex));
+   }
+
+   /* The per-lane level, byte-exact, and the per-lane bias derived from it. */
+   struct agx3_tex_sample_desc level_reg = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1u << 1,
+      .coord_kill = true, .final = true,
+   };
+   uint8_t level_bytes[AGX3_TEX_MAX_LENGTH], bias_bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t level_len, bias_len;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &level_reg,
+                                level_bytes, &level_len));
+   CHECK(level_len == 14 &&
+         hex_eq(level_bytes, level_len, "05800cb830010001010010000100"));
+
+   struct agx3_tex_sample_desc bias_reg = level_reg;
+   bias_reg.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bias_reg, bias_bytes,
+                                &bias_len));
+   CHECK(bias_len == level_len);
+
+   /* Exactly Apple's own delta: bytes 6 and 7 move (0x00, 0x01) ->
+    * (0x04, 0x00), nothing else changes. */
+   for (unsigned i = 0; i < level_len; ++i) {
+      if (i == 6) {
+         CHECK(level_bytes[i] == 0x00 && bias_bytes[i] == 0x04);
+      } else if (i == 7) {
+         CHECK(level_bytes[i] == 0x01 && bias_bytes[i] == 0x00);
+      } else {
+         CHECK(level_bytes[i] == bias_bytes[i]);
+      }
+   }
+
+   /* The immediate bias field f29 is a *signed* 12-bit LOD in 1/64 steps.
+    * Sweeping Apple's own `t.sample(s, uv, bias(k))` over these k gives
+    * exactly k * 64 in two's complement; the fragment kernels differ from
+    * this encoder only in the f83 = 4 / f112 = 8 descriptor-operand profile,
+    * which is the trailing byte. Apple saturates at 2047 (bias 32, 63) and
+    * at 2048 (bias -33, -64), so a minifloat immediate, which spans
+    * [-31, 31], always lands inside the representable range.
+    */
+   const struct {
+      int x64;
+      const char *hex;
+   } bias_sweep[] = {
+      {   16, "05800cb8b0000780010010000100" },   /* bias  +0.015625 * 16 */
+      {   32, "05800cb8b0000700010010020100" },   /* bias  +0.5           */
+      {   64, "05800cb8b0000700010010040100" },   /* bias  +1             */
+      {   96, "05800cb8b0000700010010060100" },   /* bias  +1.5           */
+      {  128, "05800cb8b0000700010010080100" },   /* bias  +2             */
+      {  256, "05800cb8b0000700010010100100" },   /* bias  +4             */
+      {    1, "05800cb8b0000708010010000100" },   /* bias  +1/64          */
+      { 1984, "05800cb8b00007000100107c0100" },   /* bias  +31            */
+      { 4095, "05801cb8b00007f80100107e0100" },   /* bias  -1/64          */
+      { 4064, "05801cb8b00007000100107e0100" },   /* bias  -0.5           */
+      { 4032, "05801cb8b00007000100107c0100" },   /* bias  -1             */
+      { 3968, "05801cb8b0000700010010780100" },   /* bias  -2             */
+      { 3840, "05801cb8b0000700010010700100" },   /* bias  -4             */
+      { 2112, "05801cb8b0000700010010040100" },   /* bias  -31            */
+   };
+   for (unsigned i = 0; i < sizeof(bias_sweep) / sizeof(bias_sweep[0]); ++i) {
+      struct agx3_tex_sample_desc b = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         .lod = AGX3_TEX_LOD_BIAS, .slot = 1, .wait_mask = 1u << 0,
+         .coord_kill = true, .final = true,
+         .lod_x64 = (uint16_t)bias_sweep[i].x64,
+      };
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &b, bytes,
+                                   &length));
+      CHECK(length == 14 && hex_eq(bytes, length, bias_sweep[i].hex));
+   }
+
+   /* textureGather: f144 = 1, the component in f145, and the f74 mask-group
+    * bit every other sample sets is cleared. Apple's five fragment kernels
+    * differ from these only in the f83 = 4 / f112 = 8 descriptor-operand
+    * profile, which is the trailing byte:
+    *
+    *    t.gather(s, uv, int2(0), component::x)  05800ca490000000010000001200
+    *    t.gather(s, uv, int2(0), component::y)  05800cac90000000010000001200
+    *    t.gather(s, uv, int2(0), component::z)  05800cb490000000010000001200
+    *    t.gather(s, uv, int2(0), component::w)  05800cbc90000000010000001200
+    *
+    * `t.gather(s, uv)` with no component is byte-identical to component::x.
+    */
+   const char *const gathers[] = {
+      "05800ca490000000010000000100", "05800cac90000000010000000100",
+      "05800cb490000000010000000100", "05800cbc90000000010000000100",
+   };
+   for (unsigned g = AGX3_TEX_GATHER_R; g <= AGX3_TEX_GATHER_A; ++g) {
+      struct agx3_tex_sample_desc gd = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1u << 0,
+         .coord_kill = true, .final = true,
+         .gather = (enum agx3_tex_gather)g,
+      };
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &gd, bytes,
+                                   &length));
+      CHECK(length == 14 &&
+            hex_eq(bytes, length, gathers[g - AGX3_TEX_GATHER_R]));
+
+      /* Only the plain 2D implicit gather is witnessed. */
+      struct agx3_tex_sample_desc bad_gather = gd;
+      bad_gather.array = true;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
+                                    bytes, &length));
+      bad_gather = gd;
+      bad_gather.lod = AGX3_TEX_LOD_BIAS;
+      bad_gather.lod_x64 = 32;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
+                                    bytes, &length));
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &gd, bytes,
+                                    &length));
+   }
+
+   /* Fail closed on everything unwitnessed: both forms are AGX3b-only,
+    * neither carries the immediate LOD operand, and a gradient array sample
+    * would need the immediate layer selector Apple pairs with it. */
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &grad, bytes,
+                                 &length));
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bias_reg, bytes,
+                                 &length));
+   struct agx3_tex_sample_desc bad = grad;
+   bad.lod_x64 = 32;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad = grad;
+   bad.array = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad = bias_reg;
+   bad.lod_x64 = 32;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad = bias_reg;
+   bad.array = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   return 0;
+}
+
+/*
  * The coordinate-staging copy, replayed against the kernel witnesses
  * (t_base, x_coordreg, Ls_slots4) and the fragment fs_bufcoord witnesses.
  * The wait bit names the producer's scoreboard slot (f30 + slot - 1); a
@@ -1098,7 +1345,9 @@ main(void)
        test_supported_axes() || test_fail_closed() ||
        test_sample_witnesses() || test_copy_witnesses() ||
        test_sample_fail_closed() || test_array_fetch() ||
-       test_bindless_operand_kinds() || test_indexed_sample_witnesses() || test_sample_mask_domain() || test_indexed_fetch_native())
+       test_bindless_operand_kinds() || test_indexed_sample_witnesses() ||
+       test_sample_mask_domain() || test_indexed_fetch_native() ||
+       test_gradient_and_register_bias())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

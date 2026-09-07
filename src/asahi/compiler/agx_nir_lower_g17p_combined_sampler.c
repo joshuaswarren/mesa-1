@@ -13,7 +13,8 @@ static bool
 g17p_sample_shape(const nir_tex_instr *tex)
 {
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-       tex->op != nir_texop_txl) ||
+       tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
+       tex->op != nir_texop_tg4) ||
        tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
        tex->is_shadow || tex->is_sparse ||
        tex->coord_components != (tex->is_array ? 3 : 2) ||
@@ -28,9 +29,30 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const bool has_bias =
       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0;
    const bool has_lod = nir_tex_instr_src_index(tex, nir_tex_src_lod) >= 0;
-   if (tex->num_srcs != ((has_bias || has_lod) ? 4 : 3) ||
+   const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
+   const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
+   const bool has_grad = ddx >= 0 && ddy >= 0;
+   if (tex->num_srcs != (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) ||
        has_lod != (tex->op == nir_texop_txl) ||
-       has_bias != (tex->op == nir_texop_txb))
+       has_bias != (tex->op == nir_texop_txb) ||
+       has_grad != (tex->op == nir_texop_txd))
+      return false;
+
+   /* Only the plain 2D implicit gather is witnessed: no array layer and no
+    * coordinate offset, both of which the packer would silently drop. */
+   if (tex->op == nir_texop_tg4 && (tex->is_array || tex->component > 3))
+      return false;
+
+   /* An explicit gradient is four 32-bit scalars staged into their own
+    * operand banks. The array layer would additionally need the immediate
+    * layer selector Apple pairs with gradients, which is not encoded, so a
+    * gradient array sample is refused rather than silently mis-staged. */
+   if (has_grad &&
+       (tex->is_array ||
+        nir_src_num_components(tex->src[ddx].src) != 2 ||
+        nir_src_num_components(tex->src[ddy].src) != 2 ||
+        nir_src_bit_size(tex->src[ddx].src) != 32 ||
+        nir_src_bit_size(tex->src[ddy].src) != 32))
       return false;
 
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -110,6 +132,8 @@ g17p_is_constant_offset(nir_def *def, uint32_t expected)
 /* Match only the driver-generated software LOD-bias field belonging to this
  * sampled descriptor. API samplers carry the same bias in their G17P native
  * sampler word, so this zero-valued software load must not become a txb.
+ * A shader with no bias source at all has nothing to classify and passes;
+ * g17p_sample_shape() has already tied the presence of the source to txb.
  */
 static bool
 g17p_is_sampler_bias(const nir_tex_instr *tex, uint8_t set,
@@ -117,7 +141,7 @@ g17p_is_sampler_bias(const nir_tex_instr *tex, uint8_t set,
 {
    const int index = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    if (index < 0)
-      return tex->op == nir_texop_tex || tex->op == nir_texop_txl;
+      return tex->op != nir_texop_txb;
 
    nir_intrinsic_instr *load = nir_src_as_intrinsic(tex->src[index].src);
    if (!load || load->def.num_components != 1 || load->def.bit_size != 16)
@@ -213,13 +237,15 @@ agx_nir_lower_g17p_combined_sampler(
        sampler_state_offset_B != texture_offset_B + 32)
       return false;
 
-   /* The Gen9 software LOD bias is at byte 12 of sampler state. */
-   if (!g17p_is_sampler_bias(sample, 0, sampler_state_offset_B + 12))
-      return false;
-
+   /* The Gen9 software LOD bias is at byte 12 of sampler state, and the
+    * native sampler word already applies it, so that load -- and only that
+    * load -- is dropped. A genuine API bias is a different value entirely:
+    * keep it, and keep the sample a txb, so the hardware applies both the
+    * descriptor bias and the shader's. */
    nir_steal_tex_src(sample, nir_tex_src_texture_handle);
    nir_steal_tex_src(sample, nir_tex_src_sampler_handle);
-   if (sample->op == nir_texop_txb) {
+   if (sample->op == nir_texop_txb &&
+       g17p_is_sampler_bias(sample, 0, sampler_state_offset_B + 12)) {
       nir_steal_tex_src(sample, nir_tex_src_bias);
       sample->op = nir_texop_tex;
    }
@@ -328,8 +354,10 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                continue;
             nir_tex_instr *tex = nir_instr_as_tex(instr);
             const bool fetch = g17p_indexed_fetch_shape(tex);
-            if (!fetch && (!g17p_sample_shape(tex) ||
-                           (tex->op != nir_texop_tex && tex->op != nir_texop_txl)))
+            /* txb and txd reach the packer as the same sample instruction
+             * with a different LOD mode; the heap-indexed descriptor operand
+             * is orthogonal to it. */
+            if (!fetch && !g17p_sample_shape(tex))
                return false;
             nir_intrinsic_instr *image = nir_src_as_intrinsic(
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);

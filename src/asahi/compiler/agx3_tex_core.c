@@ -170,14 +170,23 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       if (d->lod_x64 > 0xfff)
          return false;
    } else if (d->lod == AGX3_TEX_LOD_BIAS) {
-      /* The same 12-bit x64 field, and Apple emits the plain implicit form
+      /* The same 12-bit x64 field, but read as *signed*: Apple encodes a
+       * negative bias in two's complement (bias(-1.0) is 4032, bias(-32.0)
+       * is 2048) and saturates at 2047 / 2048. The caller passes the field
+       * already masked to 12 bits. Apple emits the plain implicit form
        * rather than a zero bias, so refuse the degenerate encoding. */
       if (enc != AGX_ISA_ENCODING_AGX3B || d->lod_x64 == 0 ||
           d->lod_x64 > 0xfff)
          return false;
-   } else if ((d->lod != AGX3_TEX_LOD_AUTO &&
-               !(d->lod == AGX3_TEX_LOD_REGISTER &&
-                 enc == AGX_ISA_ENCODING_AGX3B)) || d->lod_x64 != 0) {
+   } else if (d->lod == AGX3_TEX_LOD_REGISTER ||
+              d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
+              d->lod == AGX3_TEX_LOD_GRADIENT) {
+      /* The per-lane level, the per-lane bias and the four gradient scalars
+       * are all witnessed on AGX3b only, and none of them carries the
+       * immediate operand. */
+      if (enc != AGX_ISA_ENCODING_AGX3B || d->lod_x64 != 0)
+         return false;
+   } else if (d->lod != AGX3_TEX_LOD_AUTO || d->lod_x64 != 0) {
       return false;
    }
 
@@ -200,6 +209,12 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
+   /* Every gather witness is a plain 2D implicit-LOD gather on AGX3b. */
+   if (d->gather != AGX3_TEX_GATHER_NONE &&
+       (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
+        d->lod != AGX3_TEX_LOD_AUTO || d->array))
+      return false;
+
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
@@ -219,7 +234,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       return false;
 
    /* The fetch baseline plus f74=1: the sample witnesses carry the extra
-    * mask-group bit on every mask value, where the fetch form does not. */
+    * mask-group bit on every mask value, where the fetch form does not.
+    * A gather is the one sample shape that also clears it. */
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
    const unsigned sk = d->sampler_kind ? d->sampler_kind : 1;
    const bool immediate = tk == 1 && sk == 1;
@@ -229,7 +245,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(23, 5);
    base[nb++] = (struct agx3_field_kv)KV(38, 1);
    base[nb++] = (struct agx3_field_kv)KV(52, 1);
-   base[nb++] = (struct agx3_field_kv)KV(74, 1);
+   if (d->gather == AGX3_TEX_GATHER_NONE)
+      base[nb++] = (struct agx3_field_kv)KV(74, 1);
    base[nb++] = (struct agx3_field_kv)KV(89, 3);
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
@@ -246,7 +263,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[26];
+   struct agx3_field_kv ov[30];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -276,10 +293,24 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed level bank */
       ov[n++] = (struct agx3_field_kv)KV(139, 4);
       ov[n++] = (struct agx3_field_kv)KV(156, 1); /* native fragment form */
+   } else if (d->lod == AGX3_TEX_LOD_BIAS_REGISTER) {
+      ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed bias bank */
+      ov[n++] = (struct agx3_field_kv)KV(139, 3);
+      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* native fragment form */
+   } else if (d->lod == AGX3_TEX_LOD_GRADIENT) {
+      /* The gradient form clears the implicit-derivative marker: the four
+       * staged scalars are the derivative. */
+      ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
       ov[n++] = (struct agx3_field_kv)KV(37, 1);  /* immediate LOD operand */
       ov[n++] = (struct agx3_field_kv)KV(139, 2); /* explicit-level mode */
       ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
+   }
+   if (d->gather != AGX3_TEX_GATHER_NONE) {
+      ov[n++] = (struct agx3_field_kv)KV(144, 1);
+      if (d->gather != AGX3_TEX_GATHER_R)
+         ov[n++] = (struct agx3_field_kv)KV(145, d->gather -
+                                                 AGX3_TEX_GATHER_R);
    }
    if (enc == AGX_ISA_ENCODING_AGX3B)
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);

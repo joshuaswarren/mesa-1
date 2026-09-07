@@ -64,8 +64,16 @@ and every textured draw:
 | `floor(vec2(16384.0) * uv)` — a **32-bit** floor                     | yes§    |
 | `ceil(vec2(64.0) * uv)` — a **32-bit** ceiling                        | yes§    |
 | `clamp(texture(tex, uv) * colour, 0.0, 1.0)`                        | **no**† |
-| `texture(tex, uv, 0.5)` — LOD **bias**                              | **no**‡ |
-| `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | **no**‡ |
+| `texture(tex, uv, 0.5)` — LOD **bias**                              | yes‡    |
+| `texture(tex, uv, -1.0)` — **negative** LOD bias                    | yes‡    |
+| `texture(tex, uv, vcolor.x)` — per-lane LOD bias                    | yes‡    |
+| `textureLod(tex, uv, 2.0)` / `textureLod(tex, uv, vcolor.x)`        | yes‡    |
+| `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | yes‡    |
+| `texture(sampler2DArray, vec3(uv, layer))`                          | see below |
+| `texture(samplerCube, n)`                                           | see below |
+| `textureGather(tex, uv, comp)`                                      | yes‡    |
+| `texture(sampler2DShadow, ...)`                                     | **no**§ |
+| `textureGrad` on a 2D **array**                                      | **no**§  |
 
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
 \*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
@@ -87,10 +95,12 @@ grounded encoding (`agx3_pack_binary.c`, the generic ALU fallback names
 `fmul`). Recorded here because the probe is new and the distinction is easy to
 lose.
 
-‡ The LOD-bias and gradient *instruction* encodings are now grounded and
-implemented — see "The bias and gradient sample forms" below — but these two
-shapes still fail, for a different reason found while grounding them, also
-recorded there.
+‡ Closed 2026-09-07. See "The bias and gradient sample forms" below for the
+byte tables and for what actually blocked them (a NIR-side software-bias
+lowering, not the ISA).
+
+§ Shadow compare (f143) and the immediate-array-layer form (f77 = 1) are now
+*grounded* — the byte tables are below — but not implemented.
 
 ## The rule, as it stands now
 
@@ -475,34 +485,183 @@ space**, which is what ruled the epilog out as the source of a reported
 
 ## The bias and gradient sample forms
 
-Both instruction encodings are grounded, from fragment and compute pipelines
-compiled with `metal-nt`. **Neither closes its probe**, and the reason is worth
-recording because it is not where anyone was looking.
+All of this is grounded from `xcrun metal-nt -arch applegpu_g17p` (Metal
+toolchain 27.1), decomposed with the production compose tables and re-composed to prove
+each field vector. The harness and every `.nat` are in
+`.tmp/g17p-texgrad-evidence`.
 
-`t.sample(s, uv, bias(k))` is the ordinary implicit-LOD sample with two extra
-fields: f37 = 1 (immediate operand), f139 = 1 (bias mode), and f29 = k * 64 in
-the same 12-bit fixed-point field the explicit-level form uses. Swept over
-k = 0.25, 0.5, 1, 1.5, 2, 4, 1/64 and 31, f29 came out 16, 32, 64, 96, 128,
-256, 1 and 1984 — exactly k * 64 — and k = 63 saturated the field at 2047. A
-zero bias is folded away by Apple's own compiler into the plain form. That is
-`AGX3_TEX_LOD_BIAS` in `agx3_tex_core.c`, with byte-exact vectors.
+### One field, f139, selects the LOD shape
 
-`t.sample(s, uv, gradient2d(dx, dy))` selects f139 = 5 and stages the four
-gradient scalars into operand banks 8/10/12/14 with six ten-byte `copy.ep1`
-instructions ahead of the sample. The mode is implemented in neither direction
-yet; only the mode number is recorded.
+Seven fragment kernels differing only in the sample's LOD argument, all with an
+immediate texture 0 / sampler 0, dest r0, coordinate bank 0:
 
-**What actually blocks both probes** is a NIR-side gate, not the ISA:
-`agx_nir_lower_g17p_combined_sampler.c` accepts a shader only when *every*
-texture op is `nir_texop_tex` or `nir_texop_txl`. One `txb` or `txd` disowns
-the whole shader, which then falls back to the bindless texture-heap
-descriptor form — source 2 a uniform heap base rather than the immediate zero
-`agx3_emit_texture_sample` requires — and the sample is refused for that
-instead. Measured directly: `f01` reaches the packer with sources 2/3/4 all
-immediate zero, `f05` with `[2] = uniform 16, [3] = register 2, [4] = register
-0`. Closing either probe means teaching that pass to keep a genuine API bias
-(its existing `txb` handling only recognises and *discards* the driver's own
-zero-valued software bias), or grounding the bindless-heap sample form.
+```
+t.sample(s, uv)                       05800cb8b0000000010010001200   f139 -      f156 1
+t.sample(s, uv, bias(0.5))            05800cb8b0000700010010021200   f139 1 f37 1 f29 32   f156 1
+t.sample(s, uv, level(2.0))           05800cb8b0000900010010081200   f139 2 f37 1 f29 128  f156 1
+t.sample(s, uv, level(4.5))           05800cb8b0000900010010121200   f139 2 f37 1 f29 288  f156 1
+t.sample(s, uv, bias(in.uv.x))        05800cb8b0000400010010001200   f139 3      f156 1
+t.sample(s, uv, level(in.uv.x))       05800cb8b0000001010010001200   f139 4      f156 1
+t.sample(s, uv, gradient2d(dx, dy))   05800cb8b0000401000010001200   f139 5      f156 -
+```
+
+So the whole family is one field. **f139 = 3 is a per-lane LOD bias**, staged
+exactly like the per-lane level (f139 = 4): the same twelve-byte `PACK_SMPIR`
+into operand bank 6, the same fragment marker. The two kernels above are
+byte-identical apart from bytes 6 and 7. **f139 = 5 is the gradient form, and
+it is the only sample shape that clears f156** — the four staged scalars are
+the derivative the marker would otherwise ask for.
+
+(Those fragment bytes carry f83 = 4 / f112 = 8. Apple's *compute* samples, and
+everything Mesa emits, carry f83 = 0 / f112 = 4 instead; that difference is
+orthogonal to this work and is called out under "Not closed" below.)
+
+### f29 is a *signed* 1/64 LOD, and negative bias is what games actually use
+
+Sweeping `t.sample(s, uv, bias(k))` over positive and negative k pins the
+field completely:
+
+```
+k     1/64  0.25   0.5     1     1.5      2      4     31     32     63
+f29      1    16    32    64      96    128    256   1984   2047   2047
+
+k    -1/64  -0.5    -1    -2      -4    -31    -32    -33    -64
+f29   4095  4064  4032  3968    3840   2112   2048   2048   2048
+```
+
+So f29 = k * 64 in **two's complement over 12 bits**, saturating at 2047
+(+31.984375) and 2048 (-32). The positive half was already implemented; the
+negative half was refused outright by an `immediate_level >= 0.0f` guard, even
+though a negative mip bias is one of the most common things a real game does
+(texture sharpening, and every renderer that biases against an upscaler).
+`agx_minifloat_decode` spans [-31, 31], so every immediate a shader can
+actually reach lands inside the representable range and no clamp is needed —
+only the sign has to survive into the field. `f31_texture_bias_negative`
+covers it, and `test-agx3-tex-core.c` asserts the whole sweep above.
+
+An explicit *level* stays unsigned: `textureLod` with a negative level is
+refused rather than silently encoded as a large positive LOD.
+
+### The gradient staging
+
+Apple's compute `t.sample(s, g[0], gradient2d(g[1], g[2]))` emits **six
+`copy` instructions naming one shared staging slot**, publishing six
+consecutive source registers into banks 0, 2, 8, 10, 12 and 14, and then the
+sample:
+
+```
+copy 0b10210c   bank  0 <- r16      copy 5b16210c   bank 10 <- r22
+copy 1b12210c   bank  2 <- r18      copy 6b18210c   bank 12 <- r24
+copy 4b14210c   bank  8 <- r20      copy 7b1a210c   bank 14 <- r26
+smp  05800cb8b0000401000010000100
+```
+
+`agx3_tex_encode_sample()` reproduces that sample byte for byte. The staging
+copies go through the packer's existing `agx3_tex_stage_copy_hints()`, which
+emits the same banks on the same shared slot but names its source with f16 /
+f23 = 2 rather than the compact f17 / f23 = 3 class this particular kernel
+used; that is the staging form every already-qualified G17P sample path
+(plain, explicit level, array) already uses, so the gradient path inherits it
+rather than introducing a new one.
+
+Banks are half-register units, so 8/10/12/14 are four consecutive 32-bit
+operand slots. The **interleaved** order (ddx.x, ddy.x, ddx.y, ddy.y) is
+confirmed three more times by fragment kernels that pass literal gradients,
+where the staged value is the constant itself:
+
+```
+gradient2d((0.25, 0.5), (0.75, 1.0))   bank 8 = 0.25  10 = 0.75  12 = 0.5  14 = 1.0
+gradient2d((1, 2), (4, 8))             bank 8 = 1     10 = 4     12 = 2    14 = 8
+gradient2d((16, 32), (64, 128))        bank 8 = 16    10 = 64    12 = 32   14 = 128
+```
+
+Mesa's `agx_collect` for `nir_tex_src_ddx`/`ddy` already lays the four scalars
+out in exactly that order, so the run is copied straight through.
+
+Every gradient witness names coordinate bank 0, so the packer rebases the
+coordinates to bank 0 for a gradient sample, as it already does for an
+explicit per-lane level.
+
+### The gradient works through the bindless heap too
+
+A compute kernel sampling through an argument-buffer `{texture2d, sampler}`
+pair — the same uniform-descriptor operand class Honeykrisp's heap-indexed
+path uses — emits the identical six staging copies and
+
+```
+smp  05a00cb8b8000401920390010100802000000000
+     f103 = 3 / f132 = 3 (uniform), f97 = 20, f126 = 24, f139 = 5
+```
+
+which `agx3_tex_encode_sample()` reproduces byte for byte. So the gradient
+mode is orthogonal to the descriptor operand class; there is no separate
+"bindless-heap gradient" form to ground.
+
+### What actually blocked both probes
+
+Not the ISA. Honeykrisp called `agx_nir_lower_texture_early` with
+`support_lod_bias = true` on every chip, so `nir_lower_tex` rewrote **every**
+`texture()` into `txb(descriptor load)` and scaled every `textureGrad` by
+`exp2(descriptor load)`. On Gen4 that load is the sampler's real bias; from
+HAL200 onward `hk_CreateSampler` puts the bias in the hardware sampler word
+(`SAMPLER_HAL200.lod_bias`) and deliberately publishes a software bias of
+**zero**, so the lowering only added a descriptor crawl computing nothing —
+and that crawl is what made `agx_nir_lower_g17p_combined_sampler()` disown the
+shader, which then fell back to the heap-descriptor form.
+
+`hk_compile_nir` now passes `support_lod_bias` only when
+`agx_chip_sampler_generation(chip) == AGX_SAMPLER_GENERATION_GEN4`, the same
+predicate `hk_CreateSampler` uses to decide whether the software field is
+nonzero. A genuine API bias and explicit gradients now survive as the shader's
+own operands, and `texture()` stays a plain `tex` again — which also un-blocks
+the cube-to-array lowering, whose shape test only ever accepted
+`nir_texop_tex`.
+
+### textureGather
+
+A gather is a plain implicit sample with one bit cleared and one or two set:
+**f144 = 1 selects it, f145 carries the component, and the f74 mask-group bit
+that every ordinary sample sets is dropped.** Five fragment kernels differing
+only in the gathered component:
+
+```
+t.gather(s, uv)                          05800ca490000000010000001200
+t.gather(s, uv, int2(0), component::x)   05800ca490000000010000001200   f145 -
+t.gather(s, uv, int2(0), component::y)   05800cac90000000010000001200   f145 1
+t.gather(s, uv, int2(0), component::z)   05800cb490000000010000001200   f145 2
+t.gather(s, uv, int2(0), component::w)   05800cbc90000000010000001200   f145 3
+```
+
+`agx3_tex_encode_sample()` reproduces all four (modulo the f83 / f112 profile
+byte), and `agx_nir_lower_g17p_combined_sampler()` now keeps a `tg4`. Every
+witness is a plain 2D implicit-LOD gather, so an array gather, a gather with a
+coordinate offset and a gather carrying any LOD argument all stay refused
+rather than being encoded from an unwitnessed shape. `f29_texture_gather` and
+`f32_texture_gather_alpha` cover it.
+
+### Not closed
+
+- **Shadow compare.** Grounded, not implemented. `depth2d`'s
+  `sample_compare(s, uv, 0.5f)` is `1d800ca090002000010000001200`: f143 = 1,
+  mask f75 = 1, no f74, and the reference value staged into bank 4 (an
+  ordinary `ldimm` to f5 = 4). Encoding it means staging the comparator,
+  which is a fifth staged operand this emitter does not have a slot plan for
+  yet, so `f28_texture_shadow` still refuses.
+- **The immediate array layer.** `texture2d_array::sample(s, uv, 3u)` is
+  `05800cb8b0000d18010010001200`: f77 = **1** with the layer in f29 and
+  f37 = 1, a different selector from the f77 = 2 register-layer form Mesa
+  emits. Combined with an immediate bias the layer keeps f29 and the bias
+  moves to f43 with f51 = 1 (`05800cb8b000051b010010001202`). Array plus
+  gradient is `05800cb8b0000f19000010001200` (f77 = 1, f29 = 3, f139 = 5) and
+  is refused today because Mesa's array path uses the register-layer form.
+- **Native cube sampling.** f76 = 4 selects a cube, but the shader must first
+  run `cem_calc` (three of them) and publish the face through a third
+  `PACK_SMPIR` variant, f74 = 10 — distinct from f74 = 2 (level) and f74 = 4
+  (array layer). Mesa lowers cube to 2D array in NIR instead.
+- **f83 / f112.** Apple's *fragment* samples carry f83 = 4 and f112 = 8 where
+  its compute samples, and everything Mesa emits, carry f83 = 0 and f112 = 4.
+  Mesa's f112 = 4 fragment samples are hardware-proven (the desktop renders),
+  so this is recorded, not changed.
 
 ## What changed earlier, and how it was measured
 
