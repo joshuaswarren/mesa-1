@@ -220,8 +220,20 @@ asahi_blit_compute_shader(struct pipe_context *ctx, struct asahi_blit_key *key)
 }
 
 static bool
-asahi_compute_blit_supported(const struct pipe_blit_info *info)
+asahi_compute_blit_supported(enum agx_chip chip,
+                             const struct pipe_blit_info *info)
 {
+   /* Gallium's compute blitter reaches agx_launch_grid() and therefore
+    * agx_cdm_launch(), whose packet is the AGX2 compute command format, and
+    * agx_upload_textures()'s legacy storage PBE descriptor. CommandEncodingNext
+    * parts need the native Ioto program/launch path Honeykrisp already uses;
+    * on HAL200 the internal block-image kernel aborts in
+    * agx_native_descriptor_rejected("storage PBE") before it is ever
+    * submitted. Take the fully supported render blitter until native Gallium
+    * compute is wired. */
+   if (agx_chip_command_stream_generation(chip) != AGX_CS_GENERATION_AGX2)
+      return false;
+
    return (info->src.box.depth == info->dst.box.depth) && !info->alpha_blend &&
           !info->num_window_rectangles && !info->sample0_only &&
           !info->scissor_enable && !info->window_rectangle_include &&
@@ -313,7 +325,7 @@ asahi_compute_blit(struct pipe_context *ctx, const struct pipe_blit_info *info,
        info->dst.box.width == 0 || info->dst.box.height == 0)
       return;
 
-   assert(asahi_compute_blit_supported(info));
+   assert(asahi_compute_blit_supported(agx_device(ctx->screen)->chip, info));
    asahi_compute_save(agx_context(ctx));
 
    unsigned depth = info->dst.box.depth;
@@ -527,7 +539,8 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    agx_legalize_compression(ctx, agx_resource(info->src.resource),
                             info->src.format);
 
-   if (asahi_compute_blit_supported(info)) {
+   if (asahi_compute_blit_supported(agx_device(ctx->base.screen)->chip,
+                                    info)) {
       asahi_compute_blit(pipe, info, &ctx->compute_blitter);
       return;
    }
