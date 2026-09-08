@@ -1432,10 +1432,10 @@ test_g17p_nonzero_fetch_lod_compile(void)
 }
 
 static bool
-test_g17p_cube_sample_lowering(void)
+test_g17p_native_cube_sample(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P cube sample lowering");
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P native cube sample");
    nir_def *bary = nir_load_barycentric_pixel(
       &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
    nir_def *coord = nir_load_interpolated_input(
@@ -1466,15 +1466,14 @@ test_g17p_cube_sample_lowering(void)
 
    NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
             AGX_DESCRIPTOR_GENERATION_9);
-   bool ok = agx_nir_lower_g17p_cube_samples(b.shader) &&
-             tex->sampler_dim == GLSL_SAMPLER_DIM_2D && tex->is_array &&
-             tex->array_is_lowered_cube && tex->coord_components == 3;
+   bool ok = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && !tex->is_array &&
+             !tex->array_is_lowered_cube && tex->coord_components == 3;
    int ci = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   struct agx_g17p_combined_sampler_binding binding;
    ok &= ci >= 0 && nir_src_num_components(tex->src[ci].src) == 3 &&
-         agx_nir_lower_g17p_indexed_samplers(b.shader);
-
-   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
-            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+         agx_nir_lower_g17p_combined_sampler(b.shader, &binding) &&
+         tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && !tex->is_array &&
+         binding.texture_offset_B == 0 && binding.sampler_index_offset_B == 40;
 
    agx_preprocess_nir(b.shader);
    fs_lower(b.shader);
@@ -1484,46 +1483,41 @@ test_g17p_cube_sample_lowering(void)
    key.reserved_preamble = 24;
    struct agx_shader_part part = {0};
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
+
+   bool native_smp = false, cube_z = false;
+   uint8_t candidate[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned slot = 1; slot <= 6 && part.binary; ++slot) {
+      for (unsigned dest = 0; dest < 128; dest += 2) {
+         for (unsigned flags = 0; flags < 4; ++flags) {
+            const struct agx3_tex_sample_desc d = {
+               .dest = dest, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+               .lod = AGX3_TEX_LOD_AUTO, .slot = slot,
+               .wait_mask = 1u << (slot - 1),
+               .coord_kill = flags & 1, .final = flags & 2, .cube = true,
+            };
+            if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
+                                        candidate, &length))
+               continue;
+            for (unsigned off = 0; off + length <= part.info.binary_size; ++off)
+               native_smp |= !memcmp((uint8_t *)part.binary + off,
+                                     candidate, length);
+         }
+      }
+      for (unsigned src = 0; src < 256; src += 2) {
+         for (unsigned hint = 0; hint < 3; ++hint) {
+            if (!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, src, slot, 0,
+                                       hint == 1, hint == 2,
+                                       candidate, &length))
+               continue;
+            for (unsigned off = 0; off + length <= part.info.binary_size; ++off)
+               cube_z |= !memcmp((uint8_t *)part.binary + off,
+                                 candidate, length);
+         }
+      }
+   }
+   ok &= native_smp && cube_z;
    free(part.binary);
    ralloc_free(b.shader);
-
-   /* Texture lowering has already moved the cube coordinate to backend1 when
-    * the G17P-specific pass runs.  The staged 2D-array layer must therefore
-    * be the integer coordinate bits expected by SMP, not IEEE float bits.
-    * Float 1.0 has a zero low half and aliases the -X face to layer 0. */
-   nir_builder c = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P cube -X layer");
-   nir_def *c_image =
-      nir_bindless_image_agx(&c, nir_imm_int(&c, 0), .desc_set = 0);
-   nir_def *c_sampler = nir_bindless_sampler_agx(
-      &c, nir_imm_int(&c, 32), nir_imm_int(&c, 0), .desc_set = 0);
-   nir_tex_instr *c_tex = nir_tex_instr_create(c.shader, 3);
-   c_tex->op = nir_texop_tex;
-   c_tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
-   c_tex->dest_type = nir_type_float32;
-   c_tex->coord_components = 3;
-   c_tex->src[0] = nir_tex_src_for_ssa(
-      nir_tex_src_coord,
-      nir_vec3(&c, nir_imm_float(&c, -1.0f), nir_imm_float(&c, 0.0f),
-               nir_imm_float(&c, 0.0f)));
-   c_tex->src[1] =
-      nir_tex_src_for_ssa(nir_tex_src_texture_handle, c_image);
-   c_tex->src[2] =
-      nir_tex_src_for_ssa(nir_tex_src_sampler_handle, c_sampler);
-   nir_def_init(&c_tex->instr, &c_tex->def, 4, 32);
-   nir_builder_instr_insert(&c, &c_tex->instr);
-   fs_store_colour(&c, &c_tex->def);
-   c.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
-
-   NIR_PASS(_, c.shader, agx_nir_lower_texture_for_generation,
-            AGX_DESCRIPTOR_GENERATION_9);
-   ok &= agx_nir_lower_g17p_cube_samples(c.shader);
-   NIR_PASS(_, c.shader, nir_opt_constant_folding);
-   const int c_coord =
-      nir_tex_instr_src_index(c_tex, nir_tex_src_backend1);
-   ok &= c_coord >= 0 && nir_src_is_const(c_tex->src[c_coord].src) &&
-         nir_src_comp_as_uint(c_tex->src[c_coord].src, 2) == 1;
-   ralloc_free(c.shader);
    return ok;
 }
 
@@ -3407,8 +3401,8 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--cube-sample-lowering-only")) {
-      const bool ok = test_g17p_cube_sample_lowering();
-      fprintf(stderr, "G17P cube-to-array sample lowering: %s\n",
+      const bool ok = test_g17p_native_cube_sample();
+      fprintf(stderr, "G17P native cube sample: %s\n",
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -3484,8 +3478,8 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_g17p_cube_sample_lowering()) {
-      fputs("cube-to-array sample lowering mismatch\n", stderr);
+   if (!test_g17p_native_cube_sample()) {
+      fputs("native cube sample mismatch\n", stderr);
       all_ok = false;
    }
 

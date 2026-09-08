@@ -251,6 +251,7 @@ struct agx3_tex_sample_desc {
    bool array;          /* 2D array: layer is named directly by f31/f37 */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
+   bool cube;           /* native cube: third coordinate in cube operand bank */
    enum agx3_tex_operand_kind texture_kind;
    enum agx3_tex_operand_kind sampler_kind;
    uint16_t texture_value;
@@ -284,6 +285,12 @@ bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish the third f32 coordinate of a native cube sample. */
+bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
+                           uint8_t slot, uint16_t wait_mask,
+                           bool src_cache, bool src_discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Publish a register-valued integer 2D-MS sample index into the sampler
  * operand bank. The following MS fetch uses the sample-0 instruction form;

@@ -364,6 +364,11 @@ test_sample_witnesses(void)
         .wait_mask = 1, .coord_kill = true, .final = true,
         .three_d = true},
        "05800cb8b0003900000010080100", NULL},
+      {"native cube implicit LOD",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true},
+       "05800cb8b0001000010010000100", NULL},
       /*
        * Implicit LOD plus a constant bias.  Apple's own fragment samples of
        * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in
@@ -1517,6 +1522,27 @@ test_register_array_layer(void)
 }
 
 static int
+test_cube_coordinate_stage(void)
+{
+   /* Exact own-MSL texturecube third-coordinate publication. */
+   static const uint8_t native[] = {
+      0x17,0x05,0x54,0x06,0x00,0x04,
+      0x00,0x04,0xf0,0xc0,0x00,0x00,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
+                               false, true, bytes, &len));
+   CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
+   CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3C, 2, 1, 0,
+                                false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 3, 1, 0,
+                                false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
+                                true, true, bytes, &len));
+   return 0;
+}
+
+static int
 test_multisample_fetch(void)
 {
    /* A18 Pro own-MSL texture2d_ms reads, isolated for samples 0..3. */
@@ -1598,7 +1624,8 @@ int
 main(void)
 {
    if (test_register_lod() || test_fetch_lod() ||
-       test_register_array_layer() || test_multisample_fetch() ||
+       test_register_array_layer() || test_cube_coordinate_stage() ||
+       test_multisample_fetch() ||
        test_multisample_sample_stage() ||
        test_staging_source_lifetime() || test_exact_witnesses() ||
        test_supported_axes() || test_fail_closed() ||

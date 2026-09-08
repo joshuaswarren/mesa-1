@@ -248,8 +248,17 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * fragment derivatives, array, per-lane/bias/gradient, gather and
     * comparison combinations remain closed until independently witnessed. */
    if (d->three_d &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->array ||
+       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
         d->lod != AGX3_TEX_LOD_LEVEL ||
+        d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
+      return false;
+
+   /* Native cube sampling is a distinct dimension (SMP f76=4). Apple
+    * publishes its third f32 coordinate with PACK_SMPIR f74=10, then issues
+    * a plain implicit-LOD sample from fixed coordinate bank 0. */
+   if (d->cube &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->three_d ||
+        d->coord != 0 || d->lod != AGX3_TEX_LOD_AUTO ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -262,17 +271,20 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
+   if (d->cube && (tk != 1 || sk != 1))
+      return false;
+
    /* Every gather witness is a plain 2D implicit-LOD gather on AGX3b. */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
        (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
-        d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d))
+        d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d || d->cube))
       return false;
 
    /* Apple's depth2d sample_compare witness is a plain 2D implicit sample
     * with one result component and its reference value in fixed bank 4. */
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO ||
-        d->array || d->three_d ||
+        d->array || d->three_d || d->cube ||
         d->gather != AGX3_TEX_GATHER_NONE || d->mask != 1))
       return false;
 
@@ -335,7 +347,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot);
    ov[n++] = (struct agx3_field_kv)KV(27, d->coord_kill ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
-   ov[n++] = (struct agx3_field_kv)KV(76, d->three_d ? 3 : 1);
+   ov[n++] = (struct agx3_field_kv)KV(76, d->cube ? 4 : d->three_d ? 3 : 1);
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
    if (d->array) {
       ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
@@ -763,6 +775,45 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
    const struct agx3_field_kv base[] = {
       KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, src & 0x7f);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   if (!agx3_bind_compose(enc, "pack_smpir", 0, base,
+                         sizeof(base) / sizeof(base[0]), ov, n, out, len))
+      return false;
+
+   out[6] |= (src >> 7) & 1;
+   return true;
+}
+
+/* Own-MSL cube sampling publishes the third coordinate through the FLOAT
+ * cube form of PACK_SMPIR.  For discarded r1 on slot 1 Apple emits exactly
+ * 1705540600040004f0c00000; only f74 differs from the array-layer form. */
+bool
+agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
+                      uint8_t slot, uint16_t wait_mask, bool src_cache,
+                      bool src_discard,
+                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || (src & 1) ||
+       slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       !one_or_zero(wait_mask) || (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 10),
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;

@@ -205,11 +205,7 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    struct ail_layout *layout = &plane->layout;
    uint64_t base_addr = hk_image_base_address(image, image_plane);
 
-   /* G17P cube samples are lowered in the shader to 2D-array samples. The
-    * sampled descriptor has to expose the same six-layer address domain;
-    * leaving it cube-shaped makes the staged face layer ineffective. */
-   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED ||
-                      dev->dev.chip == AGX_CHIP_G17P;
+   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
