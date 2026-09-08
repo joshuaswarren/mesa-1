@@ -4270,7 +4270,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        P->op == AGX_OPCODE_ST_TILE) {
                const bool load = P->op == AGX_OPCODE_LD_TILE;
                if (phase != (load ? 1 : 3) ||
-                   !((agx3_g17p_8norm_format(P->format) && P->mask == 15) ||
+                   !((agx3_g17p_8norm_format(P->format) &&
+                      (P->mask == 3 || P->mask == 15)) ||
                      (P->format == AGX_FORMAT_RGB10A2 && P->mask == 1)) || P->pixel_offset || P->explicit_coords)
                   g17p_blend_protocol = false;
                phase = load ? 2 : 4;

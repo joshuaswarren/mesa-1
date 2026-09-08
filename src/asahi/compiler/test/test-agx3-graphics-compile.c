@@ -918,6 +918,91 @@ build_fs_tilebuffer_load(void)
    return fs_finish(&b);
 }
 
+/* Exercise the complete single-sample fragment-I/O family reached by
+ * Gallium's native tilebuffer lowering.  The individual AGX3 encoders have
+ * byte-exact Apple witnesses; this matrix proves that production NIR selects
+ * those encoders with the right register width and channel packing instead of
+ * merely testing hand-built backend IR.
+ */
+static bool
+test_g17p_fragment_io_matrix(void)
+{
+   static const struct {
+      enum pipe_format format;
+      uint8_t components;
+      bool expect_ok;
+   } cases[] = {
+      {PIPE_FORMAT_R8_UNORM, 1, true},
+      {PIPE_FORMAT_R8_UNORM, 2, true},
+      {PIPE_FORMAT_R8_UNORM, 4, true},
+      {PIPE_FORMAT_R8_SNORM, 1, true},
+      {PIPE_FORMAT_R8_SNORM, 2, true},
+      {PIPE_FORMAT_R8_SNORM, 4, true},
+      {PIPE_FORMAT_R16_FLOAT, 1, true},
+      {PIPE_FORMAT_R16_FLOAT, 2, false},
+      {PIPE_FORMAT_R16_FLOAT, 4, true},
+      {PIPE_FORMAT_R16_UNORM, 1, true},
+      {PIPE_FORMAT_R16_UNORM, 2, false},
+      {PIPE_FORMAT_R16_UNORM, 4, true},
+      {PIPE_FORMAT_R16_SNORM, 1, true},
+      {PIPE_FORMAT_R16_SNORM, 2, false},
+      {PIPE_FORMAT_R16_SNORM, 4, true},
+      {PIPE_FORMAT_R16_UINT, 1, true},
+      {PIPE_FORMAT_R16_UINT, 2, false},
+      {PIPE_FORMAT_R16_UINT, 4, true},
+      {PIPE_FORMAT_R32_UINT, 1, true},
+      {PIPE_FORMAT_R32_UINT, 2, false},
+      {PIPE_FORMAT_R32_UINT, 4, true},
+      {PIPE_FORMAT_R10G10B10A2_UNORM, 4, true},
+   };
+
+   /* The false rows are an owned negative matrix, not formats silently
+    * omitted from the audit.  W16/W32 mask3 LDCOL has no Apple witness yet;
+    * scalar and full-vector encodings must keep working without accidentally
+    * admitting those shapes through a neighbouring mask.
+    */
+
+   bool ok = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options,
+         "G17P fragment I/O %s", util_format_name(cases[i].format));
+      nir_def *old = nir_load_local_pixel_agx(
+         &b, cases[i].components, 32, nir_imm_intN_t(&b, 0xff, 16),
+         .base = 0, .format = cases[i].format);
+      nir_store_local_pixel_agx(
+         &b, old, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+         .base = 0, .write_mask = BITFIELD_MASK(cases[i].components),
+         .format = cases[i].format);
+      nir_shader *nir = fs_finish(&b);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+      };
+      struct agx_shader_part part;
+      memset(&part, 0xa5, sizeof(part));
+      const bool compiled = agx_compile_shader_nir(nir, &key, &part);
+      const struct agx_shader_part cleared = {0};
+      const bool terminated = compiled && part.binary &&
+         part.info.binary_size > sizeof(agx3_end) &&
+         !memcmp((const uint8_t *)part.binary + part.info.binary_size -
+                    sizeof(agx3_end),
+                 agx3_end, sizeof(agx3_end));
+      if (compiled != cases[i].expect_ok ||
+          (cases[i].expect_ok && !terminated) ||
+          (!cases[i].expect_ok && memcmp(&part, &cleared, sizeof(part)))) {
+         fprintf(stderr, "G17P fragment I/O %s%u %s unexpectedly\n",
+                 util_format_name(cases[i].format), cases[i].components,
+                 compiled ? "compiled" : "rejected");
+         ok = false;
+      }
+      free(part.binary);
+      ralloc_free(nir);
+   }
+
+   return ok;
+}
+
 /* Fragment shader matching vkcube's statically indexed set-0 combined image
  * sampler after Honeykrisp descriptor lowering. The Gen9 texture starts at
  * byte 64, followed by the native sampler word at byte 96.
@@ -3111,6 +3196,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--fragment-io-matrix-only")) {
+      const bool ok = test_g17p_fragment_io_matrix();
+      fprintf(stderr, "G17P Gallium fragment I/O matrix: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--storage-image-lowering-only")) {
       const bool ok = test_storage_image_lowering();
       fprintf(stderr, "G17P bounded RGBA8UI storage-image lowering: %s\n",
@@ -3221,6 +3312,8 @@ main(int argc, char **argv)
    if (!test_g17p_background_f16_clear_narrowing())
       all_ok = false;
    if (!test_g17p_half_norm8_epilog())
+      all_ok = false;
+   if (!test_g17p_fragment_io_matrix())
       all_ok = false;
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {

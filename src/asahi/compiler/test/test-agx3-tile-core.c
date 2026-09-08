@@ -34,6 +34,18 @@ int main(void){
       }
    }
    {
+      uint8_t out[AGX3_TILE_MAX_LENGTH], len = 0;
+      static const uint8_t rg8[] = {
+         0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xd2,0x02,0x00,0x00,0x00,
+      };
+      if (!agx3_tile_load(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8, 6,
+                          3, 0, AGX3_TILE_COV_1X, 0, true, true, out, &len) ||
+          len != sizeof(rg8) || memcmp(out, rg8, sizeof(rg8)))
+         fail++;
+      else
+         pass++;
+   }
+   {
       uint8_t out[AGX3_TILE_MAX_LENGTH]; uint8_t len=0;
       if(agx3_tile_store(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W32,15,0,
                          AGX3_TILE_COV_1X,0x40,out,&len)) fail++; else pass++;
