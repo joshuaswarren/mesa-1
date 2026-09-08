@@ -43,7 +43,9 @@ bool agx3_vary_interp_at(enum agx_isa_encoding enc, uint16_t dest,
                          enum agx3_vary_location location,
                          uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
 
-/* Native G17P sets f63 on the first interpolation of each fragment part.
+/* Native G17P sets f63 when F32INTERP is the first fragment-input operation.
+ * LDCF f48 is the alternate encoding of this one shared entry marker, so a
+ * later first operation from the other family must not restart the part.
  * This marker is independent of f54, whose optimization/liveness role remains
  * unproven and is deliberately left clear. */
 /* G17P center RHW used only by the coefficient-tagged projective reciprocal.
@@ -66,7 +68,7 @@ bool agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
 
 /* Load the raw coefficient triple for `coef_index` into `dest`, on scoreboard
  * slot `slot` (1..6/1..8). */
-/* Native G17P flat fragment shaders mark their first coefficient load. */
+/* Native G17P sets f48 when LDCF is the first fragment-input operation. */
 bool agx3_vary_ldcf_at_start(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t coef_index, uint8_t slot, bool first,
                             uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);

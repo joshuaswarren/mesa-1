@@ -4978,8 +4978,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    k = 0;
    unsigned vertex_loads_seen = 0;
    unsigned loop_depth = 1;
-   bool interpolation_started = false;
-   bool coefficient_load_started = false;
+   /* f63 on F32INTERP and f48 on LDCF are two encodings of the same native
+    * fragment-input entry marker. Apple's mixed flat+smooth fragment marks
+    * whichever family comes first and leaves the other family's first op
+    * unmarked; restarting here corrupts the coefficient-fetch protocol. */
+   bool fragment_input_started = false;
    if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
@@ -4994,7 +4997,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       ctx->agx3_colour_link.entry_emitted = true;
       ctx->agx3_colour_link.entry_offset = emission->size - entry_len - initial_size;
       g17p_colour_open = true;
-      interpolation_started = true;
+      fragment_input_started = true;
    }
 
    agx_foreach_block(ctx, block) {
@@ -5083,11 +5086,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                interp_wait = 0;
             }
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT && !interpolation_started;
+               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started;
             if (!agx3_emit_interp(emission, enc, I, interp_wait, first,
                                   ctx->stage == MESA_SHADER_FRAGMENT))
                AGX3_REFUSE(I);
-            interpolation_started = true;
+            fragment_input_started = true;
             continue;
          }
 
@@ -5148,10 +5151,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_LDCF) {
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT && !coefficient_load_started;
+               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started;
             if (!agx3_emit_ldcf(emission, enc, I, slot, wait, first))
                AGX3_REFUSE(I);
-            coefficient_load_started = true;
+            fragment_input_started = true;
             continue;
          }
 
@@ -5546,7 +5549,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_sr_encode(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
-            interpolation_started = true;
+            fragment_input_started = true;
             continue;
          }
 

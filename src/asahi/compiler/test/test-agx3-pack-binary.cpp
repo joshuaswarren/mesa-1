@@ -5078,7 +5078,7 @@ TEST_F(AGX3PackBinary, ProjectiveRhwMatchesNativeAndKeepsUserInterp)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, ProjectiveRhwStartsAfterCoefficientLoads)
+TEST_F(AGX3PackBinary, FragmentInputStartsOnceWithFlatFirst)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_FRAGMENT;
@@ -5093,13 +5093,32 @@ TEST_F(AGX3PackBinary, ProjectiveRhwStartsAfterCoefficientLoads)
    ASSERT_TRUE(agx3_vary_ldcf_at_start(AGX_ISA_ENCODING_AGX3B, 2, 4, 1,
                                       true, bytes, &len));
    std::vector<uint8_t> prefix(bytes, bytes + len);
-   ASSERT_TRUE(agx3_vary_projective_rhw(AGX_ISA_ENCODING_AGX3B, 8, 0, true,
+   /* Apple mixed_wide begins with marked LDCF `1f0b...`, followed by its
+    * first F32INTERP as `2f05...`: the two families share one entry. */
+   ASSERT_TRUE(agx3_vary_projective_rhw(AGX_ISA_ENCODING_AGX3B, 8, 0, false,
                                        bytes, &len));
    prefix.insert(prefix.end(), bytes, bytes + len);
 
    const auto code = pack(b);
    ASSERT_GE(code.size(), prefix.size());
    EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), code.begin()));
+}
+
+TEST_F(AGX3PackBinary, FragmentInputStartsOnceWithSmoothFirst)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_interp_agx3_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(0),
+                      agx_immediate(0), AGX_INTERPOLATION_CENTER, false);
+   agx_ldcf_to(b, agx_register(2, AGX_SIZE_32), agx_immediate(4), 1);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   ASSERT_GE(code.size(), 16u);
+   EXPECT_EQ(code[0], 0x2f);
+   EXPECT_EQ(code[1] & 8, 8u); /* marked F32INTERP */
+   EXPECT_EQ(code[10], 0x1f);
+   EXPECT_EQ(code[11] & 8, 0u); /* unmarked LDCF */
 }
 
 TEST_F(AGX3PackBinary, ProjectiveRhwModeIndependentOfFirstAndRcpDestination)
@@ -6127,7 +6146,7 @@ TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
                                 bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_vary_projective_rhw(enc, 8, 0, true, bytes, &len));
+   ASSERT_TRUE(agx3_vary_projective_rhw(enc, 8, 0, false, bytes, &len));
    append(want, bytes, len);
    struct agx3_persp_rcp_desc rcp = {
       .dest = 8, .rhw = 8, .coef_index = 0,
@@ -6156,7 +6175,7 @@ TEST_F(AGX3PackBinary, LinearInterpRetiresReusedCoefficientDestination)
                                 bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_vary_interp_at_start(
-      enc, 8, 4, true, AGX3_VARY_CENTER, true, bytes, &len));
+      enc, 8, 4, true, AGX3_VARY_CENTER, false, bytes, &len));
    append(want, bytes, len);
    want.insert(want.end(), {0x0e, 0, 0, 0});
    EXPECT_EQ(pack(b), want);
