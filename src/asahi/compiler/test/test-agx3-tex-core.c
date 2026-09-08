@@ -461,6 +461,33 @@ test_sample_witnesses(void)
       }
    }
 
+   /* Apple G17P uses a distinct operand profile for fragment sampling.  The
+    * first instruction is the exact plain implicit-LOD fragment witness.  The
+    * second is a fresh argument-buffer fragment witness generated with Metal
+    * toolchain 32023.917; uniform halves20/24 hold its texture/sampler pair.
+    * Compute keeps the table's f83=0/f112=4 vectors above. */
+   struct agx3_tex_sample_desc native_fragment = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .g17p_fragment_profile = true,
+   };
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &native_fragment,
+                                bytes, &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0000000010010001200"));
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &native_fragment,
+                                 bytes, &length));
+
+   native_fragment.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   native_fragment.texture_value = 20;
+   native_fragment.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
+   native_fragment.sampler_value = 24;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &native_fragment,
+                                bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length,
+                "05a00cb8b8000000930390011200802000000000"));
+
    /* The bias form is G17P-only, refuses a value past the 12-bit field, and
     * refuses a zero bias, which Apple emits as the plain implicit sample. */
    struct agx3_tex_sample_desc bad = {
@@ -542,9 +569,7 @@ test_sample_witnesses(void)
  *    t.sample(s, uv, level(in.uv.x))  05800cb8b0000001010010001200   f139 = 4
  *    t.sample(s, uv, bias(in.uv.x))   05800cb8b0000400010010001200   f139 = 3
  *
- * Both set f156. Those two carry the fragment-only f83 = 4 / f112 = 8
- * descriptor-operand profile that this encoder does not emit, so only the
- * delta between them is asserted here, on the encoder's own operand profile.
+ * Both set f156 and carry the fragment-only f83 = 4 / f112 = 8 profile.
  */
 static int
 test_gradient_and_register_bias(void)
@@ -620,14 +645,14 @@ test_gradient_and_register_bias(void)
    struct agx3_tex_sample_desc level_reg = {
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
       .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1u << 1,
-      .coord_kill = true, .final = true,
+      .coord_kill = true, .final = true, .g17p_fragment_profile = true,
    };
    uint8_t level_bytes[AGX3_TEX_MAX_LENGTH], bias_bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t level_len, bias_len;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &level_reg,
                                 level_bytes, &level_len));
    CHECK(level_len == 14 &&
-         hex_eq(level_bytes, level_len, "05800cb830010001010010000100"));
+         hex_eq(level_bytes, level_len, "05800cb830010001010010001200"));
 
    struct agx3_tex_sample_desc bias_reg = level_reg;
    bias_reg.lod = AGX3_TEX_LOD_BIAS_REGISTER;
@@ -649,30 +674,28 @@ test_gradient_and_register_bias(void)
 
    /* The immediate bias field f29 is a *signed* 12-bit LOD in 1/64 steps.
     * Sweeping Apple's own `t.sample(s, uv, bias(k))` over these k gives
-    * exactly k * 64 in two's complement; the fragment kernels differ from
-    * this encoder only in the f83 = 4 / f112 = 8 descriptor-operand profile,
-    * which is the trailing byte. Apple saturates at 2047 (bias 32, 63) and
-    * at 2048 (bias -33, -64), so a minifloat immediate, which spans
+    * exactly k * 64 in two's complement. Apple saturates at 2047 (bias 32,
+    * 63) and at 2048 (bias -33, -64), so a minifloat immediate, which spans
     * [-31, 31], always lands inside the representable range.
     */
    const struct {
       int x64;
       const char *hex;
    } bias_sweep[] = {
-      {   16, "05800cb8b0000780010010000100" },   /* bias  +0.015625 * 16 */
-      {   32, "05800cb8b0000700010010020100" },   /* bias  +0.5           */
-      {   64, "05800cb8b0000700010010040100" },   /* bias  +1             */
-      {   96, "05800cb8b0000700010010060100" },   /* bias  +1.5           */
-      {  128, "05800cb8b0000700010010080100" },   /* bias  +2             */
-      {  256, "05800cb8b0000700010010100100" },   /* bias  +4             */
-      {    1, "05800cb8b0000708010010000100" },   /* bias  +1/64          */
-      { 1984, "05800cb8b00007000100107c0100" },   /* bias  +31            */
-      { 4095, "05801cb8b00007f80100107e0100" },   /* bias  -1/64          */
-      { 4064, "05801cb8b00007000100107e0100" },   /* bias  -0.5           */
-      { 4032, "05801cb8b00007000100107c0100" },   /* bias  -1             */
-      { 3968, "05801cb8b0000700010010780100" },   /* bias  -2             */
-      { 3840, "05801cb8b0000700010010700100" },   /* bias  -4             */
-      { 2112, "05801cb8b0000700010010040100" },   /* bias  -31            */
+      {   16, "05800cb8b0000780010010001200" },   /* bias  +0.015625 * 16 */
+      {   32, "05800cb8b0000700010010021200" },   /* bias  +0.5           */
+      {   64, "05800cb8b0000700010010041200" },   /* bias  +1             */
+      {   96, "05800cb8b0000700010010061200" },   /* bias  +1.5           */
+      {  128, "05800cb8b0000700010010081200" },   /* bias  +2             */
+      {  256, "05800cb8b0000700010010101200" },   /* bias  +4             */
+      {    1, "05800cb8b0000708010010001200" },   /* bias  +1/64          */
+      { 1984, "05800cb8b00007000100107c1200" },   /* bias  +31            */
+      { 4095, "05801cb8b00007f80100107e1200" },   /* bias  -1/64          */
+      { 4064, "05801cb8b00007000100107e1200" },   /* bias  -0.5           */
+      { 4032, "05801cb8b00007000100107c1200" },   /* bias  -1             */
+      { 3968, "05801cb8b0000700010010781200" },   /* bias  -2             */
+      { 3840, "05801cb8b0000700010010701200" },   /* bias  -4             */
+      { 2112, "05801cb8b0000700010010041200" },   /* bias  -31            */
    };
    for (unsigned i = 0; i < sizeof(bias_sweep) / sizeof(bias_sweep[0]); ++i) {
       struct agx3_tex_sample_desc b = {
@@ -680,6 +703,7 @@ test_gradient_and_register_bias(void)
          .lod = AGX3_TEX_LOD_BIAS, .slot = 1, .wait_mask = 1u << 0,
          .coord_kill = true, .final = true,
          .lod_x64 = (uint16_t)bias_sweep[i].x64,
+         .g17p_fragment_profile = true,
       };
       CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &b, bytes,
                                    &length));
@@ -687,9 +711,7 @@ test_gradient_and_register_bias(void)
    }
 
    /* textureGather: f144 = 1, the component in f145, and the f74 mask-group
-    * bit every other sample sets is cleared. Apple's five fragment kernels
-    * differ from these only in the f83 = 4 / f112 = 8 descriptor-operand
-    * profile, which is the trailing byte:
+    * bit every other sample sets is cleared. Apple's five fragment kernels:
     *
     *    t.gather(s, uv, int2(0), component::x)  05800ca490000000010000001200
     *    t.gather(s, uv, int2(0), component::y)  05800cac90000000010000001200
@@ -699,8 +721,8 @@ test_gradient_and_register_bias(void)
     * `t.gather(s, uv)` with no component is byte-identical to component::x.
     */
    const char *const gathers[] = {
-      "05800ca490000000010000000100", "05800cac90000000010000000100",
-      "05800cb490000000010000000100", "05800cbc90000000010000000100",
+      "05800ca490000000010000001200", "05800cac90000000010000001200",
+      "05800cb490000000010000001200", "05800cbc90000000010000001200",
    };
    for (unsigned g = AGX3_TEX_GATHER_R; g <= AGX3_TEX_GATHER_A; ++g) {
       struct agx3_tex_sample_desc gd = {
@@ -708,6 +730,7 @@ test_gradient_and_register_bias(void)
          .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1u << 0,
          .coord_kill = true, .final = true,
          .gather = (enum agx3_tex_gather)g,
+         .g17p_fragment_profile = true,
       };
       CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &gd, bytes,
                                    &length));
@@ -736,11 +759,12 @@ test_gradient_and_register_bias(void)
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
       .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1u << 0,
       .coord_kill = true, .final = true, .shadow = true,
+      .g17p_fragment_profile = true,
    };
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &shadow, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800ca090002000010000000100"));
+         hex_eq(bytes, length, "05800ca090002000010000001200"));
    struct agx3_tex_sample_desc bad_shadow = shadow;
    bad_shadow.mask = 3;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
@@ -1496,7 +1520,7 @@ test_register_lod(void)
    /* Fresh native G17P fragment bodies, float-to-half and retained half LOD. */
    const uint8_t dead[] = {0x17,0x05,0x54,0x06,0,0,0,0x04,0xf0,0xc0,0x08,0};
    const uint8_t live[] = {0x17,0x05,0x56,0x06,0,0x10,0,0x04,0x70,0xc0,0x08,0};
-   const uint8_t sample[] = {0x05,0x80,0x0c,0xb8,0xb0,0,0,1,1,0,0x10,0,1,0};
+   const uint8_t sample[] = {0x05,0x80,0x0c,0xb8,0xb0,0,0,1,1,0,0x10,0,0x12,0};
    uint8_t b[AGX3_TEX_MAX_LENGTH], len;
    CHECK(agx3_tex_stage_lod(AGX_ISA_ENCODING_AGX3B,0,1,0,false,true,b,&len));
    CHECK(len == sizeof(dead) && !memcmp(b,dead,len));
@@ -1504,7 +1528,7 @@ test_register_lod(void)
    CHECK(len == sizeof(live) && !memcmp(b,live,len));
    struct agx3_tex_sample_desc d = {.dest=0,.coord=0,.width=AGX3_TEX_W32,
       .mask=15,.lod=AGX3_TEX_LOD_REGISTER,.slot=1,.wait_mask=1,
-      .coord_kill=true,.final=true};
+      .coord_kill=true,.final=true,.g17p_fragment_profile=true};
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,b,&len));
    CHECK(len == sizeof(sample) && !memcmp(b,sample,len));
    /* Independently decode the full eight-bit field, including the upper

@@ -200,6 +200,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
                      enc != AGX_ISA_ENCODING_AGX3C))
       return false;
 
+   if (d->g17p_fragment_profile && enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
    if ((d->width != AGX3_TEX_W16 && d->width != AGX3_TEX_W32) ||
        d->dest >= 128 || (d->width == AGX3_TEX_W32 && (d->dest & 1)) ||
        (d->coord & 3) || d->coord > 60 || !mask_witnessed(d->mask) ||
@@ -343,10 +346,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   if (d->array || d->cube)
+   if (d->g17p_fragment_profile || d->array || d->cube)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
-   base[nb++] =
-      (struct agx3_field_kv)KV(112, (d->array || d->cube) ? 8 : 4);
+   base[nb++] = (struct agx3_field_kv)KV(
+      112, (d->g17p_fragment_profile || d->array || d->cube) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);

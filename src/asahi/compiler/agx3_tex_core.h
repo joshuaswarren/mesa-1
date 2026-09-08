@@ -269,6 +269,9 @@ struct agx3_tex_sample_desc {
    bool shadow;                 /* compare against the scalar in bank 4 */
    bool offset;                 /* signed nibble-packed 2D texel offset */
    uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
+   /* Apple's G17P fragment samples select the fragment operand profile
+    * (f83=4/f112=8). Compute and vertex samples use f83=0/f112=4. */
+   bool g17p_fragment_profile;
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate
