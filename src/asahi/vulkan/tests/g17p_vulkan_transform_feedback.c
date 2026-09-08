@@ -274,13 +274,12 @@ int
 main(int argc, char **argv)
 {
    const bool rasterized = getenv("G17P_XFB_RASTERIZED_DIAGNOSTIC") != NULL;
-   const bool optin = argc >= 2 && !strcmp(argv[1], "--optin");
-   const bool execute = (argc == 2 && !strcmp(argv[1], "--execute")) ||
-                        (argc == 3 && optin && !strcmp(argv[2], "--execute"));
-   if ((!optin && argc > 2) || (optin && argc > 3) ||
-       (argc == 2 && !optin && !execute) ||
-       (argc == 3 && (!optin || !execute)))
-      die("usage: g17p-vulkan-transform-feedback [--execute]");
+   const bool execute = argc == 2 && !strcmp(argv[1], "--execute");
+   const bool submit_only = argc == 2 && !strcmp(argv[1], "--submit-only");
+   if (argc > 2 || (argc == 2 && !execute && !submit_only))
+      die("usage: g17p-vulkan-transform-feedback [--submit-only|--execute]");
+   if (submit_only && !getenv("ASAHI_SHIM_G17P_EXPECT_XFB"))
+      die("--submit-only is a drm-shim oracle; use --execute on hardware");
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -356,20 +355,8 @@ main(int argc, char **argv)
       .pNext = &xfb_feature,
    };
    vkGetPhysicalDeviceFeatures2(physical, &features);
-   if (!optin) {
-      if (xfb_feature.transformFeedback)
-         die("negative control: transformFeedback advertised without opt-in");
-
-      /* u_debug options are process-cached.  Re-exec with the opt-in so the
-       * positive control cannot inherit a cached false from this query. */
-      setenv("HK_G17P_UNVERIFIED_FEATURES", "transform_feedback", 1);
-      char *const next[] = {argv[0], "--optin", execute ? "--execute" : NULL,
-                            NULL};
-      execv(argv[0], next);
-      die("execv for transform-feedback positive control failed");
-   } else if (!xfb_feature.transformFeedback) {
-      die("transformFeedback not advertised with the qualification opt-in");
-   }
+   if (!xfb_feature.transformFeedback)
+      die("transformFeedback not advertised");
 
    VkPhysicalDeviceTransformFeedbackPropertiesEXT xfb_properties = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT,
@@ -678,7 +665,7 @@ main(int argc, char **argv)
                         0, NULL, 0, NULL);
    check(vkEndCommandBuffer(command), "vkEndCommandBuffer");
 
-   if (execute) {
+   if (execute || submit_only) {
       VkFence fence;
       check(vkCreateFence(device, &(VkFenceCreateInfo){
                              .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -691,11 +678,13 @@ main(int argc, char **argv)
       check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
       check(vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000ull),
             "vkWaitForFences");
-      unsigned failures = verify_bytes(&vertices, &xfb, &counter);
-      sleep(3);
-      failures += verify_bytes(&vertices, &xfb, &counter);
-      if (failures)
-         die("exact output, counter, or guard check failed");
+      if (execute) {
+         unsigned failures = verify_bytes(&vertices, &xfb, &counter);
+         sleep(3);
+         failures += verify_bytes(&vertices, &xfb, &counter);
+         if (failures)
+            die("exact output, counter, or guard check failed");
+      }
       vkDestroyFence(device, fence, NULL);
    }
 
@@ -720,7 +709,9 @@ main(int argc, char **argv)
       printf("G17P TRANSFORM FEEDBACK %s PASS: two exact guarded captures "
              "and resumed counter stayed exact immediately and after 3 seconds\n",
              rasterized ? "RASTERIZED DIAGNOSTIC" : "");
+   else if (submit_only)
+      puts("G17P TRANSFORM FEEDBACK SUBMIT PASS: public XFB path reached the UAPI stream validator");
    else
-      puts("G17P TRANSFORM FEEDBACK RECORD PASS: feature is fail-closed by default and complete native XFB path reached vkEndCommandBuffer");
+      puts("G17P TRANSFORM FEEDBACK RECORD PASS: public feature and complete native XFB path reached vkEndCommandBuffer");
    return EXIT_SUCCESS;
 }

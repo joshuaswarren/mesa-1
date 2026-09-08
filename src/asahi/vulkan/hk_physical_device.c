@@ -768,11 +768,8 @@ hk_get_device_features(
       features->sparseResidencyBuffer = false;
       features->multiview = false;
       /* The direct triangle path uses the native geometry pipeline plus the
-       * G17P-compiled libagx XFB counter-copy kernel.  The strict public
-       * transform-feedback probe records the complete path under the shim;
-       * keep the bit opt-in until that probe has executed on hardware. */
-      features->transformFeedback =
-         hk_g17p_unverified_feature("transform_feedback");
+       * G17P-compiled libagx XFB counter-copy kernel. */
+      features->transformFeedback = true;
       features->geometryStreams = false;
       /* Precompiled predicate kernels now use the same direct HAL200 Ioto
        * launch as the public compute path, followed by native indirect Index

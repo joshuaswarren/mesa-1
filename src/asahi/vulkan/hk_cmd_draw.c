@@ -4883,7 +4883,11 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
-   if (draw->restart || geom)
+   /* HAL200's indexed draw packet carries its own native restart-state
+    * record. Geometry/XFB lowers even a non-indexed API draw to that packet,
+    * so emitting the legacy state here as well produces two consecutive
+    * restart records before the synthetic indexed draw. */
+   if ((draw->restart || geom) && dev->dev.chip != AGX_CHIP_G17P)
       hk_flush_index(cmd, cs);
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
