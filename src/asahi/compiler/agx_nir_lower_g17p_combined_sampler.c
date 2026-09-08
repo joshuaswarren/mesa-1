@@ -12,12 +12,17 @@
 static bool
 g17p_sample_shape(const nir_tex_instr *tex)
 {
+   const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
+
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
        tex->op != nir_texop_tg4) ||
-       tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+       (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d) ||
+       (three_d &&
+        (tex->is_array || tex->is_shadow ||
+         tex->op != nir_texop_txl)) ||
        tex->is_sparse ||
-       tex->coord_components != (tex->is_array ? 3 : 2) ||
+       tex->coord_components != ((tex->is_array || three_d) ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
        tex->backend_flags == (AGX_TEXTURE_FLAG_CLAMP_TO_0 |
@@ -52,7 +57,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
 
    /* Only the plain 2D implicit gather is witnessed: no array layer and no
     * coordinate offset, both of which the packer would silently drop. */
-   if (tex->op == nir_texop_tg4 && (tex->is_array || tex->component > 3))
+   if (tex->op == nir_texop_tg4 &&
+       (tex->is_array || three_d || tex->component > 3))
       return false;
 
    /* An explicit gradient is four 32-bit scalars staged into their own

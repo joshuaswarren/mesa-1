@@ -142,9 +142,12 @@ bool agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  *
  * G17P also supports directly witnessed 2D-array forms with a register-valued
  * layer for implicit, level, bias and gradient LOD.
- * Everything else about the sampler family -- other dimensions, min-LOD, offsets,
- * shadow compare, gather -- remains a deliberate refusal: those axes either
- * need additional operand marshalling and qualification.
+ * G17P 3D immediate-level samples use the same operand ABI, with f76=3
+ * selecting the third contiguous coordinate.
+ * Everything else about the sampler family -- remaining dimensions, min-LOD,
+ * offsets, 3D shadow/gather/gradient, and array combinations -- remains a
+ * deliberate refusal: those axes need additional operand marshalling and
+ * qualification.
  */
 enum agx3_tex_lod {
    AGX3_TEX_LOD_AUTO,
@@ -247,6 +250,7 @@ struct agx3_tex_sample_desc {
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer is named directly by f31/f37 */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
+   bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
    enum agx3_tex_operand_kind texture_kind;
    enum agx3_tex_operand_kind sampler_kind;
    uint16_t texture_value;

@@ -1228,6 +1228,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const uint16_t immediate_x64_field =
       (uint16_t)(((int)immediate_level_x64) & 0xfff);
    const bool array = I->dim == AGX_DIM_2D_ARRAY;
+   const bool three_d = I->dim == AGX_DIM_3D;
    /* A per-lane level and a per-lane bias share one staging form, so they
     * share one operand test: a live single-channel 16-bit register. */
    const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
@@ -1252,7 +1253,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
-   /* Array x/y coordinates are copied to the fixed staging bank before SMP,
+   /* Array and 3D coordinates are copied to the fixed staging bank before SMP,
     * while the layer is named directly by the sample's 8-bit register field.
     * The third scalar must not wrap that field. Plain 2D samples name
     * the coordinate directly in SMP and retain its narrower bound. */
@@ -1265,7 +1266,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
-       agx_channels(I->src[0]) != (array ? 3 : 2) ||
+       agx_channels(I->src[0]) != ((array || three_d) ? 3 : 2) ||
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
        (immediate && (I->src[3].value > 15 || I->src[4].value > 15)) ||
@@ -1282,13 +1283,16 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               I->src[5].size != AGX_SIZE_32 ||
               agx_channels(I->src[5]) != 1 || I->src[5].value > 254)
            : !agx_is_null(I->src[5])) ||
-       (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
+       (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
+       (three_d &&
+        (enc != AGX_ISA_ENCODING_AGX3B ||
+         !valid_immediate_lod)) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->offset || I->query_lod || I->sparse ||
-       (shadow && (array || !implicit_lod || gather || I->mask != 1 ||
+       (shadow && (array || three_d || !implicit_lod || gather || I->mask != 1 ||
                    enc != AGX_ISA_ENCODING_AGX3B)) ||
-       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array ||
+       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
@@ -1308,7 +1312,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const uint8_t stage_slot = array && register_operands ? 6 : slot;
    /* Every native array witness names coordinate bank 0 in SMP, including
     * register-indexed shaders whose physical coordinates live elsewhere. */
-   const uint16_t coord = (explicit_lod || register_bias || array ||
+   const uint16_t coord = (explicit_lod || register_bias || array || three_d ||
                            gradient_lod || shadow)
                              ? 0
                              : I->src[0].value;
@@ -1333,6 +1337,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
           enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard, bytes, &len) ||
        !agx3_append(emission, bytes, len))
+      return false;
+
+   if (three_d &&
+       (!agx3_tex_stage_copy_hints(
+           enc, coord + 4, I->src[0].value + 4, stage_slot, 0,
+           I->src[0].cache, I->src[0].discard, bytes, &len) ||
+        !agx3_append(emission, bytes, len)))
       return false;
 
    if (shadow &&
@@ -1388,6 +1399,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .lod_x64 = immediate_lod ? immediate_x64_field : 0,
       .array = array,
       .array_layer = array ? I->src[0].value + 4 : 0,
+      .three_d = three_d,
       .slot = slot,
       .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
       .coord_kill = I->src[0].kill,

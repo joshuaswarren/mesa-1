@@ -7323,6 +7323,87 @@ TEST_F(AGX3PackBinary, ComputeImmediateLodSample)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
+TEST_F(AGX3PackBinary, Texture3DImmediateLodStagesThirdCoordinate)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate_f(2.0f), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_3D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   for (unsigned component = 0; component < 3; ++component) {
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(
+         enc, 2 * component, 4 + 2 * component, 1, 0, false, true,
+         bytes, &len));
+      append(want, bytes, len);
+   }
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_LEVEL;
+   d.lod_x64 = 128;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.coord_kill = false;
+   d.final = true;
+   d.three_d = true;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   static const uint8_t native_sample[] = {
+      0x25,0x80,0x0c,0x98,0xb0,0x00,0x39,
+      0x00,0x00,0x00,0x10,0x08,0x01,0x00,
+   };
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(native_sample,
+                                  native_sample + sizeof(native_sample)));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
+TEST_F(AGX3PackBinary, Texture3DRefusesUnwitnessedModes)
+{
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      const auto enc = shape == 2 ? AGX_ISA_ENCODING_AGX3C
+                                  : AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 2;
+      const enum agx_lod_mode mode = shape == 0 ? AGX_LOD_MODE_AUTO_LOD
+                                     : shape == 1 ? AGX_LOD_MODE_LOD_GRAD
+                                                  : AGX_LOD_MODE_LOD_MIN;
+      agx_index lod = shape == 0 ? agx_immediate(0)
+                      : shape == 1 ? agx_register(20, AGX_SIZE_32)
+                                   : agx_immediate_f(1.0f);
+      if (shape == 1)
+         lod.channels_m1 = 3;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_3D, mode, 0, false, false,
+         false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/false);
+   }
+}
+
 TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
 {
    for (unsigned shape = 0; shape < 3; ++shape) {

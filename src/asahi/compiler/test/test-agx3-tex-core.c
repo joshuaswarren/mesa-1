@@ -358,6 +358,12 @@ test_sample_witnesses(void)
         .coord_kill = true, .final = true, .array = true,
         .array_layer = 22},
        "05800cb8b0000db4010010001200", NULL},
+      {"texture3d level(2.0)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true,
+        .three_d = true},
+       "05800cb8b0003900000010080100", NULL},
       /*
        * Implicit LOD plus a constant bias.  Apple's own fragment samples of
        * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in
@@ -427,6 +433,27 @@ test_sample_witnesses(void)
                                 &length));
    CHECK(length == 14 &&
          hex_eq(bytes, length, "05800cb8b00005b7010010001202"));
+
+   bad = (struct agx3_tex_sample_desc){
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .three_d = true,
+   };
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bad, bytes,
+                                 &length));
+   bad.array = true;
+   bad.array_layer = 2;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad.array = false;
+   bad.array_layer = 0;
+   bad.lod = AGX3_TEX_LOD_GRADIENT;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad.lod = AGX3_TEX_LOD_AUTO;
+   bad.gather = AGX3_TEX_GATHER_R;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
    return 0;
 }
 

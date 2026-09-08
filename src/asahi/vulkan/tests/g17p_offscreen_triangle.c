@@ -230,10 +230,15 @@
 #define G17P_CUBE_SAMPLE 0
 #endif
 
+#ifndef G17P_TEXTURE_3D
+#define G17P_TEXTURE_3D 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
-    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE)
+    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE ||     \
+    G17P_TEXTURE_3D)
 
 #if G17P_SHADOW_COMPARE
 #define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
@@ -326,6 +331,11 @@
 #include "g17p_vulkan_cube_sample_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_cube_sample_frag_spv
+#elif G17P_TEXTURE_3D
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_texture_3d_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texture_3d_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -1122,6 +1132,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TEXTURE_3D
+#define PROBE_NAME "g17p-vulkan-texture-3d"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1208,6 +1223,10 @@ VK_FN(vkCmdEndRenderPass);
 VK_FN(vkCopyImageToMemoryEXT);
 #else
 VK_FN(vkCmdCopyImageToBuffer);
+#endif
+#if G17P_TEXTURE_3D
+VK_FN(vkCopyMemoryToImageEXT);
+VK_FN(vkTransitionImageLayoutEXT);
 #endif
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
@@ -1393,6 +1412,10 @@ verify_readback(const uint8_t *map)
       {255, 255, 0, 255}, {255, 0, 255, 255}, {0, 255, 255, 255},
    };
    static const uint8_t clear[4] = {0, 0, 0, 255};
+#elif G17P_TEXTURE_3D
+   /* LOD1 is 32x32x2; z=0.75 addresses its blue slice 1.  Its red slice 0
+    * catches dropped or 2D-reinterpreted Z. */
+   static const uint8_t expected[4] = {0, 0, 255, 255};
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1569,6 +1592,8 @@ main(void)
        getenv("G17P_TEXEL_FETCH_LOD_RECORD_ONLY") != NULL) ||
       (G17P_CUBE_SAMPLE &&
        getenv("G17P_CUBE_SAMPLE_RECORD_ONLY") != NULL) ||
+      (G17P_TEXTURE_3D &&
+       getenv("G17P_TEXTURE_3D_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -1799,7 +1824,7 @@ main(void)
       .queueCount = 1,
       .pQueuePriorities = &queue_priority,
    };
-#if G17P_HOST_IMAGE_COPY
+#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
    const VkPhysicalDeviceHostImageCopyFeaturesEXT host_copy_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT,
       .hostImageCopy = VK_TRUE,
@@ -1828,7 +1853,7 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_F16_IO
       .pNext = &enabled11,
-#elif G17P_HOST_IMAGE_COPY
+#elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
       .pNext = &host_copy_features,
 #elif G17P_INDIRECT_DRAW
       .pNext = &indirect_enabled12,
@@ -1838,7 +1863,7 @@ main(void)
 #if G17P_INDIRECT_DRAW
       .pEnabledFeatures = &indirect_enabled,
 #endif
-#if G17P_HOST_IMAGE_COPY
+#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
 #endif
@@ -1904,6 +1929,10 @@ main(void)
    LOAD_DEVICE(device, vkCopyImageToMemoryEXT);
 #else
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
+#endif
+#if G17P_TEXTURE_3D
+   LOAD_DEVICE(device, vkCopyMemoryToImageEXT);
+   LOAD_DEVICE(device, vkTransitionImageLayoutEXT);
 #endif
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
@@ -2256,17 +2285,23 @@ main(void)
 #if G17P_CUBE_SAMPLE
       TEXTURE_LEVELS = 1,
       TEXTURE_LAYERS = 6,
+#elif G17P_TEXTURE_3D
+      TEXTURE_LEVELS = 2,
+      TEXTURE_LAYERS = 1,
 #else
       TEXTURE_LEVELS = 3,
       TEXTURE_LAYERS = 1,
 #endif
+      TEXTURE_DEPTH = G17P_TEXTURE_3D ? 4 : 1,
       TEXTURE_GUARD_BYTES = 64,
       TEXTURE_LEVEL0_BYTES =
-         64 * 64 * TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS,
-      TEXTURE_LEVEL1_BYTES =
-         G17P_CUBE_SAMPLE ? 0 : 32 * 32 * TEXTURE_PIXEL_BYTES,
+         64 * 64 * TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS * TEXTURE_DEPTH,
+      TEXTURE_LEVEL1_BYTES = G17P_CUBE_SAMPLE
+         ? 0
+         : 32 * 32 * TEXTURE_PIXEL_BYTES * (G17P_TEXTURE_3D ? 2 : 1),
       TEXTURE_LEVEL2_BYTES =
-         G17P_CUBE_SAMPLE ? 0 : 16 * 16 * TEXTURE_PIXEL_BYTES,
+         (G17P_CUBE_SAMPLE || G17P_TEXTURE_3D)
+            ? 0 : 16 * 16 * TEXTURE_PIXEL_BYTES,
       TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
                            TEXTURE_LEVEL2_BYTES,
       TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
@@ -2288,6 +2323,30 @@ main(void)
            ++pixel)
          memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, face_colours[layer],
                 TEXTURE_PIXEL_BYTES);
+   }
+#elif G17P_TEXTURE_3D
+   static const uint8_t slice_colours[TEXTURE_DEPTH][4] = {
+      {0xff, 0x00, 0x00, 0xff}, {0x00, 0xff, 0x00, 0xff},
+      {0x00, 0x00, 0xff, 0xff}, {0xff, 0xff, 0x00, 0xff},
+   };
+   for (unsigned slice = 0; slice < TEXTURE_DEPTH; ++slice) {
+      uint8_t *dst = texture_upload_expected + TEXTURE_GUARD_BYTES +
+                     slice * TEXTURE_WIDTH * TEXTURE_HEIGHT *
+                        TEXTURE_PIXEL_BYTES;
+      for (size_t pixel = 0; pixel < TEXTURE_WIDTH * TEXTURE_HEIGHT;
+           ++pixel)
+         memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, slice_colours[slice],
+                TEXTURE_PIXEL_BYTES);
+   }
+   static const uint8_t mip1_colours[2][4] = {
+      {0xff, 0x00, 0x00, 0xff}, {0x00, 0x00, 0xff, 0xff},
+   };
+   uint8_t *mip1 = texture_upload_expected + TEXTURE_GUARD_BYTES +
+                   TEXTURE_LEVEL0_BYTES;
+   for (unsigned slice = 0; slice < 2; ++slice) {
+      for (size_t pixel = 0; pixel < 32 * 32; ++pixel)
+         memcpy(mip1 + (slice * 32 * 32 + pixel) * TEXTURE_PIXEL_BYTES,
+                mip1_colours[slice], TEXTURE_PIXEL_BYTES);
    }
 #else
    static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
@@ -2346,14 +2405,16 @@ main(void)
 #if G17P_CUBE_SAMPLE
       .flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
 #endif
-      .imageType = VK_IMAGE_TYPE_2D,
+      .imageType = G17P_TEXTURE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,
       .format = TEXTURE_FORMAT,
-      .extent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
+      .extent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, TEXTURE_DEPTH},
       .mipLevels = TEXTURE_LEVELS,
       .arrayLayers = TEXTURE_LAYERS,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
-      .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      .usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+               (G17P_TEXTURE_3D ? VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
+                                : VK_IMAGE_USAGE_TRANSFER_DST_BIT),
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
    };
@@ -2374,6 +2435,53 @@ main(void)
          "vkAllocateMemory(texture)");
    check(vkBindImageMemory(device, texture, texture_memory, 0),
          "vkBindImageMemory(texture)");
+#if G17P_TEXTURE_3D
+   const VkHostImageLayoutTransitionInfoEXT host_to_general = {
+      .sType = VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT,
+      .image = texture,
+      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .subresourceRange = {
+         .aspectMask = TEXTURE_ASPECT,
+         .levelCount = 1,
+         .layerCount = 1,
+      },
+   };
+   check(vkTransitionImageLayoutEXT(device, 1, &host_to_general),
+         "vkTransitionImageLayoutEXT(texture3d upload)");
+   const VkMemoryToImageCopyEXT host_texture_regions[2] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT,
+         .pHostPointer = texture_upload_expected + TEXTURE_GUARD_BYTES,
+         .memoryRowLength = TEXTURE_WIDTH,
+         .memoryImageHeight = TEXTURE_HEIGHT,
+         .imageSubresource = {TEXTURE_ASPECT, 0, 0, 1},
+         .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, TEXTURE_DEPTH},
+      }, {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT,
+         .pHostPointer = texture_upload_expected + TEXTURE_GUARD_BYTES +
+                         TEXTURE_LEVEL0_BYTES,
+         .memoryRowLength = 32,
+         .memoryImageHeight = 32,
+         .imageSubresource = {TEXTURE_ASPECT, 1, 0, 1},
+         .imageExtent = {32, 32, 2},
+      },
+   };
+   const VkCopyMemoryToImageInfoEXT host_texture_copy = {
+      .sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT,
+      .dstImage = texture,
+      .dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .regionCount = 2,
+      .pRegions = host_texture_regions,
+   };
+   check(vkCopyMemoryToImageEXT(device, &host_texture_copy),
+         "vkCopyMemoryToImageEXT(texture3d)");
+   VkHostImageLayoutTransitionInfoEXT host_to_shader = host_to_general;
+   host_to_shader.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+   host_to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+   check(vkTransitionImageLayoutEXT(device, 1, &host_to_shader),
+         "vkTransitionImageLayoutEXT(texture3d sample)");
+#endif
 #endif
 
    const VkImageCreateInfo image_info = {
@@ -2491,7 +2599,8 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = texture,
       .viewType = G17P_CUBE_SAMPLE ? VK_IMAGE_VIEW_TYPE_CUBE
-                                   : VK_IMAGE_VIEW_TYPE_2D,
+                  : G17P_TEXTURE_3D ? VK_IMAGE_VIEW_TYPE_3D
+                                    : VK_IMAGE_VIEW_TYPE_2D,
       .format = TEXTURE_FORMAT,
       .subresourceRange = {
          .aspectMask = TEXTURE_ASPECT,
@@ -2945,11 +3054,16 @@ main(void)
    check(vkBeginCommandBuffer(command_buffer, &begin_info),
          "vkBeginCommandBuffer");
 #if G17P_TEXTURE_ORACLE
+#if !G17P_TEXTURE_3D
    VkImageMemoryBarrier texture_barrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-      .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .srcAccessMask = G17P_TEXTURE_3D ? VK_ACCESS_HOST_WRITE_BIT : 0,
+      .dstAccessMask = G17P_TEXTURE_3D ? VK_ACCESS_SHADER_READ_BIT
+                                      : VK_ACCESS_TRANSFER_WRITE_BIT,
+      .oldLayout = G17P_TEXTURE_3D ? VK_IMAGE_LAYOUT_PREINITIALIZED
+                                   : VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout = G17P_TEXTURE_3D ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                   : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .image = texture,
@@ -2959,9 +3073,12 @@ main(void)
          .layerCount = TEXTURE_LAYERS,
       },
    };
-   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+   vkCmdPipelineBarrier(command_buffer,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0, 0, NULL, 0, NULL,
                         1, &texture_barrier);
+#endif
 #if G17P_SHADOW_COMPARE
    const VkClearDepthStencilValue depth_clear = {.depth = 0.5f};
    const VkImageSubresourceRange depth_range = {
@@ -2983,6 +3100,9 @@ main(void)
    vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                           texture_copies);
+#elif G17P_TEXTURE_3D
+   /* Host-populated optimal storage avoids conflating 3D sampling with the
+    * separate, not-yet-witnessed G17P 3D storage-image meta-copy path. */
 #else
    const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
       {
@@ -3006,6 +3126,7 @@ main(void)
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           TEXTURE_LEVELS, texture_copies);
 #endif
+#if !G17P_TEXTURE_3D
    texture_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
    texture_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
    texture_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -3013,6 +3134,7 @@ main(void)
    vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
                         NULL, 1, &texture_barrier);
+#endif
 #endif
 #if G17P_R32_SINT || G17P_RG16_SINT || G17P_RG32_SINT ||              \
    G17P_RG8_SINT || G17P_RGBA8_SINT || G17P_R8_SINT ||                \
@@ -3350,6 +3472,11 @@ main(void)
                         "and all source/readback guards unchanged, checksum %016" PRIx64
                         "\n", checksum);
    }
+#elif G17P_TEXTURE_3D
+   printf(PROBE_NAME ": PASS — explicit LOD1 3D sampling selected exact "
+                     "blue slice 1 from two distinct mip slices immediately/3s; "
+                     "all source/readback guards unchanged, checksum %016" PRIx64
+                     "\n", checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
                      "immediately/3s, binding 3, offset 64, stride 13, "
