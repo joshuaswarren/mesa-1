@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC2_DECODE)
+#if defined(G17P_BC7_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC7_UNORM_BLOCK
+#define NAME "g17p-vulkan-bc7-decode"
+#elif defined(G17P_BC2_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC2_UNORM_BLOCK
@@ -161,7 +166,8 @@ fnv1a64(const uint8_t *data, size_t size)
 
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
-#if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE)
+#if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE) &&               \
+   !defined(G17P_BC7_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -223,7 +229,18 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
-#if defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
+#if defined(G17P_BC7_DECODE)
+   static const uint8_t encoded[4][16] = {
+      {0x10,0x84,0x20,0x04,0x21,0x86,0x01,0,0,0,0,0,0,0,0,0},
+      {0x10,0xce,0x09,0xc1,0x39,0x8a,0x02,0,0,0,0,0,0,0,0,0},
+      {0x10,0x5a,0x4b,0x69,0x0c,0x82,0x00,0,0,0,0,0,0,0,0,0},
+      {0x10,0xde,0x63,0xac,0xd4,0xff,0x03,0,0,0,0,0,0,0,0,0},
+   };
+   (void)c0;
+   (void)c1;
+   (void)indices;
+   memcpy(out, encoded[block], BLOCK_BYTES);
+#elif defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
    static const uint8_t rg[4][2] = {
       {0x20, 0xe0}, {0x60, 0xa0}, {0xa0, 0x60}, {0xe0, 0x20},
    };
@@ -254,7 +271,21 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
-#if defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
+#if defined(G17P_BC7_DECODE)
+   (void)blocks;
+   static const uint8_t decoded[4][4] = {
+      {0x21, 0x42, 0x84, 0x61},
+      {0x73, 0x10, 0xe7, 0xa2},
+      {0xd6, 0x94, 0x31, 0x20},
+      {0xf7, 0xc6, 0x52, 0xff},
+   };
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         memcpy(reference + (y * WIDTH + x) * 4, decoded[block], 4);
+      }
+   }
+#elif defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
    for (unsigned y = 0; y < HEIGHT; ++y) {
       for (unsigned x = 0; x < WIDTH; ++x) {
          const unsigned block = (y / 4) * 2 + x / 4;
