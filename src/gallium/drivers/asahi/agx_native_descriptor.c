@@ -110,11 +110,18 @@ agx_gallium_pack_native_texture(
           semantic->height > 16384)
          return false;
 
+      /* Every recovered nonlinear extended Gen9 descriptor carries a second
+       * VA immediately after the selected image range.  Compression metadata
+       * aliases that word, while an ordinary array/mip/cube uses the end VA. */
+      if (extended && semantic->layout != AGX_LAYOUT_LINEAR &&
+          !semantic->acceleration_buffer)
+         return false;
+
       /* The recovered cube form requires an uncompressed face-range end VA.
        * Compression metadata aliases that word, so there is no grounded
        * representation for the combination yet. */
       if (semantic->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
-          (semantic->compressed || !semantic->extended ||
+          (semantic->compressed || !extended ||
            !semantic->acceleration_buffer))
          return false;
 
@@ -139,10 +146,9 @@ agx_gallium_pack_native_texture(
          .depth = semantic->layout == AGX_LAYOUT_LINEAR ? 1 : semantic->depth,
          .page_aligned_layers = semantic->page_aligned_layers,
          .extended = extended,
-         /* Gen9 reuses this wire address as the face-range end VA for an
-          * uncompressed cube descriptor. */
-         .acceleration_buffer =
-            semantic->extended ? semantic->acceleration_buffer : 0,
+         /* Gen9 reuses this wire address as the exclusive range end for an
+          * ordinary extended texture, or compression metadata otherwise. */
+         .acceleration_buffer = extended ? semantic->acceleration_buffer : 0,
          .depth_linear = semantic->layout == AGX_LAYOUT_LINEAR &&
                                semantic->extended
                             ? semantic->depth_linear
@@ -157,12 +163,10 @@ agx_gallium_pack_native_texture(
 
       AGX_TEXTURE_GEN9_pack(out->opaque, &cfg);
 
-      /* All recovered native A18 cube descriptors carry word1 bit 27 together
-       * with their extended face-range end VA.  Keep this selector bounded to
-       * the exact semantic; ordinary and compressed 2D descriptors retain
-       * their independently witnessed state control. */
-      if (semantic->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
-          semantic->extended && semantic->acceleration_buffer)
+      /* A18's array, 3D, mipmapped-2D, and cube descriptors all carry word1
+       * bit 27 exactly when word3's extended bit and word4's range/metadata
+       * payload are live.  A base one-level 2D descriptor clears both. */
+      if (extended)
          out->opaque[1] |= BITFIELD_BIT(27);
 
       return true;

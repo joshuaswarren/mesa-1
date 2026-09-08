@@ -799,10 +799,9 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
             (first_layer * rsrc->layout.compression_layer_stride_B);
       }
 
-      /* Native Gen9 cube descriptors carry a secondary VA immediately after
-       * the selected face range.  A18 captures advance it by exactly six
-       * layer strides for one cube.  This is not compression metadata: the
-       * same word is reused by the cube descriptor shape. */
+      /* Native Gen9 cube descriptors require one complete six-face range.
+       * The shared extended-range address is filled for all applicable
+       * dimensions below, after the selected layer count is known. */
       if (agx_device(rsrc->base.screen)->chip == AGX_CHIP_G17P &&
           state->target == PIPE_TEXTURE_CUBE) {
          const unsigned faces =
@@ -813,10 +812,6 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
           * secondary word, so reject those shapes instead of guessing. */
          if (rsrc->layout.compressed || faces != 6)
             return false;
-
-         cfg.extended = true;
-         cfg.acceleration_buffer =
-            cfg.address + (rsrc->layout.layer_stride_B * faces);
       }
 
       if (state->target == PIPE_TEXTURE_3D) {
@@ -852,6 +847,32 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
          cfg.stride = ail_get_linear_stride_B(&rsrc->layout, 0) - 16;
       } else {
          cfg.page_aligned_layers = rsrc->layout.page_aligned_layers;
+      }
+
+      /* A18 Gen9 publishes a nonlinear texture's exclusive end VA whenever
+       * the descriptor is extended: one-level arrays/3D/cubes as well as
+       * mipmapped 2D.  The exact captures advance by the complete selected
+       * layer stride (or by the complete 3D miptree), independently of whether
+       * the layers themselves are tightly or page aligned.  Compression keeps
+       * using the same word for metadata instead. */
+      const bool gen9_range =
+         agx_device(rsrc->base.screen)->chip == AGX_CHIP_G17P &&
+         !rsrc->layout.compressed &&
+         rsrc->layout.tiling != AIL_TILING_LINEAR &&
+         (state->target == PIPE_TEXTURE_2D_ARRAY ||
+          state->target == PIPE_TEXTURE_3D ||
+          state->target == PIPE_TEXTURE_CUBE ||
+          state->u.tex.first_level != 0 || state->u.tex.last_level != 0);
+      if (gen9_range) {
+         unsigned layers =
+            state->u.tex.last_layer - state->u.tex.first_layer + 1;
+         const uint64_t range_B =
+            state->target == PIPE_TEXTURE_3D
+               ? rsrc->layout.size_B
+               : rsrc->layout.layer_stride_B * layers;
+
+         cfg.extended = true;
+         cfg.acceleration_buffer = cfg.address + range_B;
       }
    }
 

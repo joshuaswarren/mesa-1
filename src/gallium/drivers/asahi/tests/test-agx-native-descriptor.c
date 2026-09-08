@@ -407,6 +407,53 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
    CHECK(memcmp(native.opaque, gen9_cube_bytes, sizeof(gen9_cube_bytes)) == 0);
 
+   /* A18 Pro EXP-0015 arr_2: a two-layer 16x16 GPU-layout array advances the
+    * secondary VA by two 0x400-byte layers.  Word1 bit 27 marks the same live
+    * extended payload as the cube form above. */
+   static const uint8_t gen9_array2_bytes[32] = {
+      0x23, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x08,
+      0x50, 0x1c, 0x00, 0x00, 0x10, 0x40, 0x00, 0x80,
+      0xd0, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_TEXTURE array2 = semantic;
+   array2.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   array2.layout = AGX_LAYOUT_GPU;
+   array2.width = 16;
+   array2.height = 16;
+   array2.depth = 2;
+   array2.address = UINT64_C(0x1000001c500);
+   array2.extended = true;
+   array2.acceleration_buffer = UINT64_C(0x1000001cd00);
+   CHECK(agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &array2));
+   CHECK(memcmp(native.opaque, gen9_array2_bytes,
+                sizeof(gen9_array2_bytes)) == 0);
+
+   /* A18 Pro EXP-0015 mip_2: two levels make a plain 2D descriptor extended
+    * even when the caller did not redundantly set semantic.extended. */
+   static const uint8_t gen9_mip2_bytes[32] = {
+      0x22, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x0c,
+      0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
+      0xb8, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_TEXTURE mip2 = semantic;
+   mip2.layout = AGX_LAYOUT_GPU;
+   mip2.width = 16;
+   mip2.height = 16;
+   mip2.address = UINT64_C(0x1000001c500);
+   mip2.last_level = 1;
+   mip2.acceleration_buffer = UINT64_C(0x1000001cb80);
+   CHECK(agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &mip2));
+   CHECK(memcmp(native.opaque, gen9_mip2_bytes,
+                sizeof(gen9_mip2_bytes)) == 0);
+
+   mip2.acceleration_buffer = 0;
+   CHECK(!agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &mip2));
+
    cube.extended = false;
    CHECK(!agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
