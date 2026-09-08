@@ -385,5 +385,80 @@ main(void)
       AGX_CHIP_G17P, true, 0, 0, NULL, &cull_discard));
    assert(!agx_ppp_hal200_rasterizer_discard_pack(
       AGX_CHIP_G17P, true, 0, 0, &secondary_discard, NULL));
+
+   /* GNOME's ordinary textured fragment sets the legacy helper-invocation
+    * bit. Apple G17P f_plain/f_grad/f_lod/f_shadow all publish native ff2=0,
+    * so HAL200 must retain triangle merging and the exact base record. */
+   struct agx_ppp_hal200_fragment_control_fields fragment_fields = {
+      .linked_control = UINT32_C(1) << 26,
+   };
+   uint32_t primary_control = UINT32_C(0x00040200);
+   uint32_t secondary_control = UINT32_C(0x00000200);
+   assert(agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, primary_control, secondary_control,
+      &primary_control, &secondary_control));
+   assert(primary_control == UINT32_C(0x00040200));
+   assert(secondary_control == UINT32_C(0x00000200));
+   const uint32_t gnome_secondary_words[] = {
+      secondary_control, UINT32_C(0x07e00000), UINT32_C(0x07e00000),
+      UINT32_C(0x0001ffff),
+   };
+   check(AGX_PPP_HAL200_GRAPHICS_SECONDARY_FACE, gnome_secondary_words, 4,
+         secondary_expected, sizeof(secondary_expected));
+
+   fragment_fields.linked_control =
+      (UINT32_C(1) << 29) | (UINT32_C(1) << 26);
+   assert(agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, UINT32_C(0x00040200),
+      UINT32_C(0x00000200), &primary_control, &secondary_control));
+   assert(primary_control == UINT32_C(0x00040200));
+   assert(secondary_control == UINT32_C(0x20000200));
+
+   /* Native multisampled depth metadata and coverage disable merging only in
+    * SECONDARY; the primitive override is the sole dual-control producer. */
+   fragment_fields = (struct agx_ppp_hal200_fragment_control_fields){
+      .shader_tri_merge_disable = true,
+   };
+   assert(agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, UINT32_C(0x00040200),
+      UINT32_C(0x00200200), &primary_control, &secondary_control));
+   assert(primary_control == UINT32_C(0x00040200));
+   assert(secondary_control == UINT32_C(0x04200200));
+
+   fragment_fields = (struct agx_ppp_hal200_fragment_control_fields){
+      .linked_control = UINT32_C(2) << 29,
+      .coverage_tri_merge_disable = true,
+   };
+   assert(agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, UINT32_C(0x00040200),
+      UINT32_C(0x00000200), &primary_control, &secondary_control));
+   assert(primary_control == UINT32_C(0x00040200));
+   assert(secondary_control == UINT32_C(0x44000200));
+
+   fragment_fields = (struct agx_ppp_hal200_fragment_control_fields){
+      .primitive_tri_merge_disable = true,
+   };
+   assert(agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, UINT32_C(0x00040200),
+      UINT32_C(0x00000200), &primary_control, &secondary_control));
+   assert(primary_control == UINT32_C(0x04040200));
+   assert(secondary_control == UINT32_C(0x04000200));
+
+   primary_control = secondary_control = UINT32_C(0xdeadbeef);
+   fragment_fields.linked_control = UINT32_C(4) << 29;
+   assert(!agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, 0, 0, &primary_control,
+      &secondary_control));
+   assert(!agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17G, &fragment_fields, 0, 0, &primary_control,
+      &secondary_control));
+   assert(!agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, NULL, 0, 0, &primary_control, &secondary_control));
+   assert(!agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, 0, 0, NULL, &secondary_control));
+   assert(!agx_ppp_hal200_fragment_controls_pack(
+      AGX_CHIP_G17P, &fragment_fields, 0, 0, &primary_control, NULL));
+   assert(primary_control == UINT32_C(0xdeadbeef));
+   assert(secondary_control == UINT32_C(0xdeadbeef));
    return 0;
 }

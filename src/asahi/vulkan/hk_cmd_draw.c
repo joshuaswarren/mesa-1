@@ -3340,18 +3340,38 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        pass_type != AGX_PASS_TYPE_PUNCH_THROUGH &&
        pass_type != AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)
       return hk_g17p_bind_tail_refused(__LINE__);
-   secondary_fields.words[0] |= linked_fragment_control & UINT32_C(0xe6600000);
-   /* Native forces bit26 for type2 and conditionally for type3 from the
-    * draw-buffer state. Conservatively disabling merging for every coverage
-    * shader is equivalent and avoids depending on the legacy draw-buffer
-    * predicate while its HAL200 layout remains opaque. */
-   if (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
-       pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)
-      secondary_fields.words[0] |= UINT32_C(1) << 26;
    /* Native458934..45896c retains both stencil-control bits in the
     * same per-draw record as depth. No extra state allocation or launch. */
    uint32_t fragment_control = raster_state->fragment_control |
       (stencil_test ? UINT32_C(0x000c0000) : 0);
+   const struct agx_ppp_hal200_fragment_control_fields control_fields = {
+      .linked_control = linked_fragment_control,
+
+      /* Apple G17P shader metadata leaves bit26 clear for texture gradients,
+       * storage writes, framebuffer fetch, sample-rate execution, and shadows.
+       * Multisampled depth/depth-stencil variants set it. */
+      .shader_tri_merge_disable =
+         render->tilebuffer.nr_samples > 1 && fs->info.fs.epilog_key.write_z,
+
+      /* Native forces bit26 for type2 and conditionally for type3 from the
+       * draw-buffer state. Keep the already-qualified conservative type3
+       * policy until that draw-buffer field is decoded. */
+      .coverage_tri_merge_disable =
+         pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
+         pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
+
+      /* encodeISPPrimitiveType selects the runtime override for points,
+       * lines, and non-filled triangles, then applies it to both controls. */
+      .primitive_tri_merge_disable =
+         object_type != AGX_OBJECT_TYPE_TRIANGLE ||
+         polygon_mode != VK_POLYGON_MODE_FILL,
+   };
+   if (!agx_ppp_hal200_fragment_controls_pack(
+          dev->dev.chip, &control_fields, fragment_control,
+          secondary_fields.words[0], &fragment_control,
+          &secondary_fields.words[0]))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
    uint32_t occlusion_query;
    if (!agx_ppp_hal200_occlusion_pack(
           dev->dev.chip, gfx->occlusion.mode, gfx->occlusion.index,

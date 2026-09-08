@@ -107,6 +107,48 @@ agx_ppp_hal200_rasterizer_discard_pack(
 }
 
 bool
+agx_ppp_hal200_fragment_controls_pack(
+   enum agx_chip chip,
+   const struct agx_ppp_hal200_fragment_control_fields *fields,
+   uint32_t primary_original, uint32_t secondary_original,
+   uint32_t *primary_out, uint32_t *secondary_out)
+{
+   if (chip != AGX_CHIP_G17P || !fields || !primary_out || !secondary_out)
+      return false;
+
+   const uint32_t pass_type = fields->linked_control >> 29;
+   if (pass_type > 3)
+      return false;
+
+   const uint32_t tri_merge_disable = UINT32_C(1) << 26;
+
+   /* updateFragmentShaderISPState masks these semantic fields into the
+    * HAL200 SECONDARY word.  Bit 26 is deliberately absent: Apple's G17P
+    * metadata leaves it clear for implicit texture gradients, explicit
+    * gradients, storage writes, and shadow sampling.  The generation-neutral
+    * linker sets its legacy bit for all of those cases, so it cannot be copied
+    * as native shader metadata. */
+   const uint32_t linked_native_mask = UINT32_C(0xe2600000);
+   uint32_t secondary = (secondary_original & ~tri_merge_disable) |
+                        (fields->linked_control & linked_native_mask);
+
+   if (fields->shader_tri_merge_disable ||
+       fields->coverage_tri_merge_disable ||
+       fields->primitive_tri_merge_disable)
+      secondary |= tri_merge_disable;
+
+   /* encodeAndEmitRenderState applies only the primitive-derived override to
+    * both controls.  Shader and coverage policy belong to SECONDARY. */
+   uint32_t primary = primary_original & ~tri_merge_disable;
+   if (fields->primitive_tri_merge_disable)
+      primary |= tri_merge_disable;
+
+   *primary_out = primary;
+   *secondary_out = secondary;
+   return true;
+}
+
+bool
 agx_ppp_hal200_occlusion_pack(enum agx_chip chip, unsigned mode,
                               unsigned index,
                               uint32_t original_fragment_control,

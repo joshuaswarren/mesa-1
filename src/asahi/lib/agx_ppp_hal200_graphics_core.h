@@ -74,6 +74,24 @@ bool agx_ppp_hal200_rasterizer_discard_pack(
    enum agx_chip chip, bool discard, uint32_t secondary_original,
    uint32_t cull_original, uint32_t *secondary_out, uint32_t *cull_out);
 
+/* Translate the linker's generation-independent fragment control into the
+ * two native HAL200 controls.  Triangle merging is not ABI-compatible: the
+ * linker's bit 26 describes the legacy helper-invocation policy, while G17P
+ * derives its bit from native shader metadata, coverage, and primitive state.
+ */
+struct agx_ppp_hal200_fragment_control_fields {
+   uint32_t linked_control;
+   bool shader_tri_merge_disable;
+   bool coverage_tri_merge_disable;
+   bool primitive_tri_merge_disable;
+};
+
+bool agx_ppp_hal200_fragment_controls_pack(
+   enum agx_chip chip,
+   const struct agx_ppp_hal200_fragment_control_fields *fields,
+   uint32_t primary_original, uint32_t secondary_original,
+   uint32_t *primary_out, uint32_t *secondary_out);
+
 /* Native G17P visibility state: mode occupies fragment-control bits14..15;
  * the 64-bit counter byte offset is encoded as byteOffset<<14. */
 bool agx_ppp_hal200_occlusion_pack(enum agx_chip chip, unsigned mode,
