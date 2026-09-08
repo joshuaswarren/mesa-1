@@ -31,9 +31,23 @@ main(void)
    for (unsigned i = 0; i < sizeof(bc) / sizeof(bc[0]); ++i)
       CHECK(hk_g17p_bc_format_supported(bc[i]));
 
-   CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK));
-   CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_ASTC_4x4_UNORM_BLOCK));
+   CHECK(hk_g17p_block_format_family(VK_FORMAT_BC1_RGB_UNORM_BLOCK) ==
+         HK_G17P_BLOCK_FORMAT_BC);
+   for (VkFormat format = VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+        format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK; ++format) {
+      CHECK(hk_g17p_block_format_family(format) ==
+            HK_G17P_BLOCK_FORMAT_ETC2_EAC);
+      CHECK(!hk_g17p_bc_format_supported(format));
+   }
+   for (VkFormat format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; ++format) {
+      CHECK(hk_g17p_block_format_family(format) ==
+            HK_G17P_BLOCK_FORMAT_ASTC_LDR);
+      CHECK(!hk_g17p_bc_format_supported(format));
+   }
    CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_R8G8B8A8_UNORM));
+   CHECK(hk_g17p_block_format_family(VK_FORMAT_R8G8B8A8_UNORM) ==
+         HK_G17P_BLOCK_FORMAT_NONE);
 
    const struct hk_g17p_buffer_to_image_copy vkcube = {
       .chip = AGX_CHIP_G17P,

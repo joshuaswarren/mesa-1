@@ -617,6 +617,24 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-etc2-rgba8-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ETC2_RGBA8_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-astc4x4-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ASTC4X4_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-draw-indirect',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],

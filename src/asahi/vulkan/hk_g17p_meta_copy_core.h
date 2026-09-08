@@ -46,6 +46,19 @@ bool hk_g17p_transfer_dst_layout_supported(VkImageLayout layout);
  * hardware-validated Morton-of-4x4-blocks layout. */
 bool hk_g17p_bc_format_supported(VkFormat format);
 
+enum hk_g17p_block_format_family {
+   HK_G17P_BLOCK_FORMAT_NONE,
+   HK_G17P_BLOCK_FORMAT_BC,
+   HK_G17P_BLOCK_FORMAT_ETC2_EAC,
+   HK_G17P_BLOCK_FORMAT_ASTC_LDR,
+};
+
+/* Classify every Vulkan 1.0 LDR block-compressed family carried by the
+ * native G17P texture descriptors. ASTC HDR/SFLOAT is deliberately separate
+ * from textureCompressionASTC_LDR and is not admitted here. */
+enum hk_g17p_block_format_family
+hk_g17p_block_format_family(VkFormat format);
+
 /* Native uncompressed color uploads preserve rectangles and mip/layer
  * subresources. Multi-layer regions are split into native single-layer
  * passes without changing source layout or copying index/pixel data. */

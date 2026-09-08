@@ -19,12 +19,25 @@
 
 #define WIDTH 8
 #define HEIGHT 8
+#if defined(G17P_ETC2_RGBA8_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
+#define NAME "g17p-vulkan-etc2-rgba8-decode"
+#elif defined(G17P_ASTC4X4_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_ASTC_4x4_UNORM_BLOCK
+#define NAME "g17p-vulkan-astc4x4-decode"
+#else
 #define BLOCK_BYTES 8
 #define BLOCK_DATA_BYTES 32
+#define TEST_FORMAT VK_FORMAT_BC1_RGBA_UNORM_BLOCK
+#define NAME "g17p-vulkan-bc1-decode"
+#endif
 #define PIXEL_BYTES (WIDTH * HEIGHT * 4)
 #define GUARD_BYTES 64
 #define DEVICE_ID 0x8140
-#define NAME "g17p-vulkan-bc1-decode"
 
 #define FN(name) static PFN_##name name
 FN(vkGetInstanceProcAddr);
@@ -127,6 +140,7 @@ fnv1a64(const uint8_t *data, size_t size)
    return hash;
 }
 
+#if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC4X4_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -199,6 +213,55 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
       }
    }
 }
+#elif defined(G17P_ETC2_RGBA8_DECODE)
+static void
+build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
+{
+   /* A zero ETC2/EAC RGBA8 block is individual RGB mode with table-0/index-0
+    * (+2 from a zero base) and zero alpha after EAC clamping. */
+   memset(blocks, 0, BLOCK_DATA_BYTES);
+   for (unsigned i = 0; i < WIDTH * HEIGHT; ++i) {
+      reference[4 * i + 0] = 2;
+      reference[4 * i + 1] = 2;
+      reference[4 * i + 2] = 2;
+      reference[4 * i + 3] = 0;
+   }
+}
+#else
+static void
+put_astc_void_extent(uint8_t *block, uint16_t r, uint16_t g, uint16_t b,
+                     uint16_t a)
+{
+   const uint16_t words[8] = {0x0dfc, 0, 0, 0, r, g, b, a};
+   for (unsigned i = 0; i < 8; ++i) {
+      block[2 * i] = words[i];
+      block[2 * i + 1] = words[i] >> 8;
+   }
+}
+
+static void
+build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
+{
+   static const uint16_t colours[4][4] = {
+      {0xffff, 0, 0, 0xffff},
+      {0, 0xffff, 0, 0xffff},
+      {0, 0, 0xffff, 0xffff},
+      {0xffff, 0xffff, 0xffff, 0xffff},
+   };
+   for (unsigned block = 0; block < 4; ++block)
+      put_astc_void_extent(blocks + block * BLOCK_BYTES, colours[block][0],
+                           colours[block][1], colours[block][2],
+                           colours[block][3]);
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         uint8_t *pixel = reference + (y * WIDTH + x) * 4;
+         for (unsigned c = 0; c < 4; ++c)
+            pixel[c] = colours[block][c] >> 8;
+      }
+   }
+}
+#endif
 
 static void
 verify(const uint8_t *upload, const uint8_t *output,
@@ -228,7 +291,9 @@ verify(const uint8_t *upload, const uint8_t *output,
 int
 main(void)
 {
-   const bool record_only = getenv("G17P_BC1_DECODE_RECORD_ONLY") != NULL;
+   const bool record_only =
+      getenv("G17P_COMPRESSED_DECODE_RECORD_ONLY") != NULL ||
+      getenv("G17P_BC1_DECODE_RECORD_ONLY") != NULL;
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -281,8 +346,16 @@ main(void)
 
    VkPhysicalDeviceFeatures features;
    vkGetPhysicalDeviceFeatures(physical, &features);
+#if defined(G17P_ETC2_RGBA8_DECODE)
+   if (!features.textureCompressionBC || !features.textureCompressionETC2 ||
+       features.textureCompressionASTC_LDR)
+#elif defined(G17P_ASTC4X4_DECODE)
+   if (!features.textureCompressionBC || features.textureCompressionETC2 ||
+       !features.textureCompressionASTC_LDR)
+#else
    if (!features.textureCompressionBC || features.textureCompressionETC2 ||
        features.textureCompressionASTC_LDR)
+#endif
       die("compressed-family feature gating is incorrect");
 
    static const VkFormat bc_formats[] = {
@@ -304,8 +377,13 @@ main(void)
          die("a BC family format lacks sampled/upload support");
    }
    static const VkFormat closed[] = {
+#if !defined(G17P_ETC2_RGBA8_DECODE)
       VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
+#endif
+#if !defined(G17P_ASTC4X4_DECODE)
       VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
+#endif
+      VK_FORMAT_UNDEFINED,
    };
    for (unsigned i = 0; i < sizeof(closed) / sizeof(closed[0]); ++i) {
       VkFormatProperties props;
@@ -313,6 +391,10 @@ main(void)
       if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
          die("an unqualified compressed family is advertised");
    }
+   VkFormatProperties target_props;
+   vkGetPhysicalDeviceFormatProperties(physical, TEST_FORMAT, &target_props);
+   if ((target_props.optimalTilingFeatures & required) != required)
+      die("target compressed format lacks sampled/upload support");
 
    uint32_t qcount = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &qcount, NULL);
@@ -422,6 +504,10 @@ main(void)
    }
 
    uint8_t *blocks = maps[0] + GUARD_BYTES;
+#if defined(G17P_ETC2_RGBA8_DECODE) || defined(G17P_ASTC4X4_DECODE)
+   uint8_t reference[PIXEL_BYTES];
+   build_blocks_and_reference(blocks, reference);
+#else
    put_block(blocks, 0, 0xf800, 0x0000, 0);
    put_block(blocks, 1, 0x07e0, 0x0000, 0);
    put_block(blocks, 2, 0x001f, 0x0000, 0);
@@ -431,11 +517,12 @@ main(void)
    put_block(blocks, 3, 0x0000, 0xffff, UINT32_C(0x74747474));
    uint8_t reference[PIXEL_BYTES];
    build_reference(blocks, reference);
+#endif
 
    const VkImageCreateInfo imci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+      .format = TEST_FORMAT,
       .extent = {WIDTH, HEIGHT, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -464,7 +551,7 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+      .format = TEST_FORMAT,
       .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
    };
    VkImageView view;
@@ -652,7 +739,7 @@ main(void)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
-      puts(NAME ": PASS - complete BC family advertised, BC1 decode recorded");
+      puts(NAME ": PASS - compressed upload/sample dispatch recorded");
       return EXIT_SUCCESS;
    }
 

@@ -16,27 +16,25 @@ hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 bool
 hk_g17p_bc_format_supported(VkFormat format)
 {
-   switch (format) {
-   case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
-   case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
-   case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
-   case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
-   case VK_FORMAT_BC2_UNORM_BLOCK:
-   case VK_FORMAT_BC2_SRGB_BLOCK:
-   case VK_FORMAT_BC3_UNORM_BLOCK:
-   case VK_FORMAT_BC3_SRGB_BLOCK:
-   case VK_FORMAT_BC4_UNORM_BLOCK:
-   case VK_FORMAT_BC4_SNORM_BLOCK:
-   case VK_FORMAT_BC5_UNORM_BLOCK:
-   case VK_FORMAT_BC5_SNORM_BLOCK:
-   case VK_FORMAT_BC6H_UFLOAT_BLOCK:
-   case VK_FORMAT_BC6H_SFLOAT_BLOCK:
-   case VK_FORMAT_BC7_UNORM_BLOCK:
-   case VK_FORMAT_BC7_SRGB_BLOCK:
-      return true;
-   default:
-      return false;
-   }
+   return hk_g17p_block_format_family(format) == HK_G17P_BLOCK_FORMAT_BC;
+}
+
+enum hk_g17p_block_format_family
+hk_g17p_block_format_family(VkFormat format)
+{
+   if (format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK &&
+       format <= VK_FORMAT_BC7_SRGB_BLOCK)
+      return HK_G17P_BLOCK_FORMAT_BC;
+
+   if (format >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK &&
+       format <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK)
+      return HK_G17P_BLOCK_FORMAT_ETC2_EAC;
+
+   if (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+       format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK)
+      return HK_G17P_BLOCK_FORMAT_ASTC_LDR;
+
+   return HK_G17P_BLOCK_FORMAT_NONE;
 }
 
 bool

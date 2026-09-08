@@ -1700,9 +1700,21 @@ hk_g17p_copy_buffer_to_image_supported(
 }
 
 static bool
-hk_g17p_block_upload_format(VkFormat format)
+hk_g17p_block_upload_format(struct hk_device *dev, VkFormat format)
 {
-   return hk_g17p_bc_format_supported(format);
+   if (!dev || dev->dev.chip != AGX_CHIP_G17P)
+      return false;
+
+   switch (hk_g17p_block_format_family(format)) {
+   case HK_G17P_BLOCK_FORMAT_BC:
+      return true;
+   case HK_G17P_BLOCK_FORMAT_ETC2_EAC:
+      return hk_g17p_unverified_feature("etc2_eac");
+   case HK_G17P_BLOCK_FORMAT_ASTC_LDR:
+      return hk_g17p_unverified_feature("astc_ldr");
+   default:
+      return false;
+   }
 }
 
 static bool
@@ -1711,7 +1723,7 @@ hk_g17p_copy_compressed_buffer_to_image(
    const VkCopyBufferToImageInfo2 *info)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!hk_g17p_block_upload_format(image->vk.format) ||
+   if (!hk_g17p_block_upload_format(dev, image->vk.format) ||
        image->plane_count != 1 || image->vk.image_type != VK_IMAGE_TYPE_2D ||
        image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
        image->planes[0].layout.tiling != AIL_TILING_GPU ||
@@ -1723,8 +1735,7 @@ hk_g17p_copy_compressed_buffer_to_image(
    const uint32_t block_w = util_format_get_blockwidth(format);
    const uint32_t block_h = util_format_get_blockheight(format);
    const uint32_t block_B = util_format_get_blocksize(format);
-   if (block_w != 4 || block_h != 4 ||
-       (block_B != 8 && block_B != 16))
+   if (!block_w || !block_h || (block_B != 8 && block_B != 16))
       return false;
 
    for (unsigned r = 0; r < info->regionCount; ++r) {
@@ -1810,7 +1821,7 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      if (hk_g17p_block_upload_format(dst_image->vk.format)) {
+      if (hk_g17p_block_upload_format(dev, dst_image->vk.format)) {
          struct hk_meta_save save;
          hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
          if (!hk_g17p_copy_compressed_buffer_to_image(
