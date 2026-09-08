@@ -40,7 +40,7 @@ main(void)
    };
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
-      if (i == LIBAGX_FILL_UINT4)
+      if (i == LIBAGX_FILL_UINT4 || i == LIBAGX_COPY_XFB_COUNTERS)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -67,6 +67,34 @@ main(void)
    CHECK(info->agx3_staging_known);
    CHECK(info->agx3_staging_halfs == 0);
    CHECK(memcmp(binary, expected, sizeof(expected)) == 0);
+
+   /* Transform feedback now uses its dedicated native compute counter-copy
+    * kernel. Its byte-exact store behavior is covered by the XFB oracle; keep
+    * this table test responsible for the generated launch contract. */
+   const uint32_t *xfb_blob = libagx_g17p[LIBAGX_COPY_XFB_COUNTERS];
+   CHECK(xfb_blob != NULL);
+   if (!xfb_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *xfb_info =
+      (const void *)xfb_blob;
+   const uint8_t *xfb_binary =
+      (const uint8_t *)xfb_blob + sizeof(*xfb_info);
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(xfb_info->preamble_offset == 0);
+   CHECK(xfb_info->main_offset == 0);
+   CHECK(xfb_info->main_size == 176);
+   CHECK(xfb_info->binary_size == 176);
+   CHECK(xfb_info->nr_gprs == 12);
+   CHECK(xfb_info->push_count == 4);
+   CHECK(xfb_info->workgroup_size[0] == 4);
+   CHECK(xfb_info->workgroup_size[1] == 1);
+   CHECK(xfb_info->workgroup_size[2] == 1);
+   CHECK(xfb_info->local_size == 0);
+   CHECK(!xfb_info->uses_txf);
+   CHECK(xfb_info->agx3_staging_known);
+   CHECK(xfb_info->agx3_staging_halfs == 0);
+   CHECK(memcmp(xfb_binary + xfb_info->binary_size - sizeof(end), end,
+                sizeof(end)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",
