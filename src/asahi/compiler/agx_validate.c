@@ -104,7 +104,14 @@ agx_validate_sources(agx_instr *I)
           * standard floats, so we treat them as such in the IR, with an
           * implicit f16->f32 for 32-bit floating point operations.
           */
-         agx_validate_assert(src.size == AGX_SIZE_16);
+         /* G17P texture offsets are an immediate byte in the instruction,
+          * but the logical compare/offset source is modelled as 32-bit. This
+          * is the sole immediate form whose IR width is wider than its field.
+          */
+         bool texture_offset = I->op == AGX_OPCODE_TEXTURE_SAMPLE && s == 5 &&
+                               I->offset && !I->shadow;
+         agx_validate_assert(src.size ==
+                             (texture_offset ? AGX_SIZE_32 : AGX_SIZE_16));
          agx_validate_assert(src.value < (1 << (ldst ? 16 : 8)));
       } else if (I->op == AGX_OPCODE_COLLECT && !agx_is_null(src)) {
          agx_validate_assert(src.size == I->src[0].size);

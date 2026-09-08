@@ -274,6 +274,19 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->cube && (tk != 1 || sk != 1))
       return false;
 
+   /* Apple's G17P offset witnesses are immediate-descriptor, implicit-LOD
+    * 2D samples. Offset (0, 0) is folded to the plain form by native, so do
+    * not manufacture the enabled encoding without a corresponding witness.
+    */
+   if (d->offset &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xy == 0 || tk != 1 ||
+        sk != 1 || d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d ||
+        d->cube || d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
+      return false;
+
+   if (!d->offset && d->offset_xy != 0)
+      return false;
+
    /* Every gather witness is a plain 2D implicit-LOD gather on AGX3b. */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
        (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
@@ -339,7 +352,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[30];
+   struct agx3_field_kv ov[33];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -405,6 +418,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    }
    if (d->shadow)
       ov[n++] = (struct agx3_field_kv)KV(143, 1);
+   if (d->offset) {
+      ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xy);
+      ov[n++] = (struct agx3_field_kv)KV(51, 1);
+      ov[n++] = (struct agx3_field_kv)KV(141, 1);
+   }
    if (enc == AGX_ISA_ENCODING_AGX3B)
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);
    else

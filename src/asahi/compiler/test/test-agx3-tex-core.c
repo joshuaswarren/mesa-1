@@ -352,6 +352,38 @@ test_sample_witnesses(void)
         .coord_kill = true, .final = true},
        "05800cb8b0000000010010000100",
        "0f061600418060290118010000000000008000000000"},
+      /* Apple's G17P texture.sample offset differential sets f141/f51 and
+       * packs signed x/y nibbles in f43. These three result shapes prove the
+       * offset fields are orthogonal to both width and mask:
+       *
+       *   f32x4 plain       05800cb8b0000000010010001200
+       *   f32x4 +(0, 0)     05800cb8b0000000010010001200
+       *   f32x4 +(1,-1)     05800cb8b000010201881000120e
+       *   f16x4 +(1,-1)     35000cb8b000010201881000120e
+       *   f32x1 +(1,-1)     1d800ca09000010201881000120e
+       *
+       * The expected bytes below retain this encoder's hardware-qualified
+       * descriptor profile (f83=0/f112=4); only that independent profile
+       * differs from Apple's fragment bytes above.
+       */
+      {"ts_auto offset +(1,-1)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .offset = true,
+        .offset_xy = 0xf1},
+       "05800cb8b000010201881000010e", NULL},
+      {"ts_auto offset half +(1,-1)",
+       {.dest = 6, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .offset = true,
+        .offset_xy = 0xf1},
+       "35000cb8b000010201881000010e", NULL},
+      {"ts_auto offset x-only result",
+       {.dest = 6, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .offset = true,
+        .offset_xy = 0xf1},
+       "1d800ca09000010201881000010e", NULL},
       {"ts_array direct register layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -864,6 +896,25 @@ test_sample_fail_closed(void)
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
    d.wait_mask = 3;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = good;
+   d.offset = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.offset_xy = 0xf1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d.lod = AGX3_TEX_LOD_LEVEL;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.array = true;
+   d.array_layer = 2;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.array = false;
+   d.array_layer = 0;
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = good;
+   d.offset_xy = 0xf1;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
    /* Stage-copy edges: odd registers, bad slots, wide waits. */

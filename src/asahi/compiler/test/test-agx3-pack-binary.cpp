@@ -3150,6 +3150,71 @@ TEST_F(AGX3PackBinary, TextureFetchRefusesUngroundedAxes)
    pack(b, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_16);
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   coord.discard = true;
+
+   agx_index offset = agx_immediate(0xf1);
+   offset.size = AGX_SIZE_32;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D,
+      AGX_LOD_MODE_AUTO_LOD, 0, true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 4, 4, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 6, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 8, .coord = 4, .width = AGX3_TEX_W16, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .final = true, .offset = true, .offset_xy = 0xf1,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, TextureSampleOffsetRefusesRegisterAndAGX3C)
+{
+   for (unsigned shape = 0; shape < 2; ++shape) {
+      const auto enc = shape ? AGX_ISA_ENCODING_AGX3C
+                             : AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      agx_index dest = agx_register(8, AGX_SIZE_16);
+      agx_index coord = agx_register(4, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      coord.channels_m1 = 1;
+      agx_index offset = shape ? agx_immediate(0xf1)
+                               : agx_register(0, AGX_SIZE_32);
+      offset.size = AGX_SIZE_32;
+      agx_instr *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         true, false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/false);
+   }
+}
+
 TEST_F(AGX3PackBinary, TextureFetch2DMSPackedSample)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

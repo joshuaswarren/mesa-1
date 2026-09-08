@@ -3263,7 +3263,22 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_backend2:
-         packed_offset = index;
+         /* G17P's witnessed 2D texture offset is an immediate byte in SMP,
+          * with signed x/y nibbles. Keep the constant produced by
+          * agx_nir_lower_texture in that form instead of materializing a GPR
+          * that the native instruction does not read.
+          */
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             nir_src_is_const(instr->src[i].src) &&
+             nir_src_as_uint(instr->src[i].src) <= UINT8_MAX) {
+            const uint32_t value = nir_src_as_uint(instr->src[i].src);
+            /* Apple's compiler emits offset (0, 0) as a plain sample. */
+            packed_offset = value ? agx_immediate(value) : agx_null();
+         } else {
+            packed_offset = index;
+         }
+         if (packed_offset.type == AGX_INDEX_IMMEDIATE)
+            packed_offset.size = AGX_SIZE_32;
          break;
 
       case nir_tex_src_lod:

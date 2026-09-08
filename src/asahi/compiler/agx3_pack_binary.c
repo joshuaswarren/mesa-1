@@ -1198,6 +1198,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * rather than alias onto a real channel. */
    const bool gather = I->gather != AGX_GATHER_NONE;
    const bool shadow = I->shadow;
+   const bool offset = I->offset;
    enum agx3_tex_gather gather_component = AGX3_TEX_GATHER_NONE;
    switch (I->gather) {
    case AGX_GATHER_NONE: break;
@@ -1254,6 +1255,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
+   const bool immediate_offset = offset &&
+      I->src[5].type == AGX_INDEX_IMMEDIATE &&
+      I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
+      !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
+      !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
    /* Array and 3D coordinates are copied to the fixed staging bank before SMP,
     * while the layer is named directly by the sample's 8-bit register field.
     * The third scalar must not wrap that field. Plain 2D samples name
@@ -1283,7 +1289,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
               agx_channels(I->src[5]) != 1 || I->src[5].value > 254)
-           : !agx_is_null(I->src[5])) ||
+           : offset ? !immediate_offset : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
@@ -1293,7 +1299,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate)) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       I->offset || I->query_lod || I->sparse ||
+       I->query_lod || I->sparse ||
+       (offset &&
+        (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate ||
+         array || three_d || cube || shadow || gather)) ||
        (shadow && (array || three_d || cube || !implicit_lod || gather || I->mask != 1 ||
                    enc != AGX_ISA_ENCODING_AGX3B)) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d || cube ||
@@ -1401,6 +1410,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .sampler_kill = !immediate && I->src[4].kill,
       .gather = gather_component,
       .shadow = shadow,
+      .offset = offset,
+      .offset_xy = offset ? I->src[5].value : 0,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER

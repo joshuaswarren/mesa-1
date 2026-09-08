@@ -11,6 +11,12 @@
  * register with f37=3/f31=<half-register>. This is distinct from the older
  * staged f77=2 shape and is witnessed for implicit, level, bias and gradient
  * LOD as well as immediate and uniform texture/sampler operands.
+ *
+ * Native G17P 2D texture offsets are carried directly in SMP: f141 enables
+ * the offset, f51 selects its packed field, and f43 contains signed four-bit
+ * x/y offsets in its low/high nibbles. The bounded form exposed here is the
+ * immediate texture/sampler, implicit-LOD sample witnessed by Apple's own
+ * compiler across both result widths and result masks.
  */
 
 #pragma once
@@ -260,6 +266,8 @@ struct agx3_tex_sample_desc {
    bool sampler_kill;
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
    bool shadow;                 /* compare against the scalar in bank 4 */
+   bool offset;                 /* signed nibble-packed 2D texel offset */
+   uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate
