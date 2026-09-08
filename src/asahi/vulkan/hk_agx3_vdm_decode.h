@@ -23,7 +23,7 @@ extern "C" {
 /* Bump whenever the Honeykrisp shader payload below changes.  Vulkan shader
  * binaries carry this version outside the driver-private blob, so stale
  * layouts are rejected before any fields are consumed. */
-#define HK_AGX3_SHADER_BINARY_VERSION 10u
+#define HK_AGX3_SHADER_BINARY_VERSION 9u
 
 /* Native VS witnesses export position plus seven float4 user locations. */
 #define HK_AGX3_G17P_MAX_USER_WORDS 28u
@@ -48,7 +48,6 @@ struct hk_agx3_g17p_vertex_compile_info {
    uint16_t nr_preamble_gprs;
    uint32_t preamble_scratch_size;
    uint64_t uvs_written;
-   bool writes_layer;
    uint8_t position_off;
    uint8_t varyings_off;
    uint8_t psiz_off;

@@ -136,7 +136,6 @@ hk_agx3_g17p_vertex_program_info(
        (compiler_info->clip_off != compiler_info->layer_viewport_off &&
         compiler_info->clip_off != compiler_info->layer_viewport_off + 1) ||
        compiler_info->uvs_size != compiler_info->clip_off ||
-       (compiler_info->writes_layer && !writes_layer_viewport) ||
        compiler_info->position_only != position_only ||
        (compiler_info->position_only && compiler_info->uvs_written != 0) ||
        compiler_info->user_size > HK_AGX3_G17P_MAX_USER_WORDS ||
@@ -162,11 +161,7 @@ hk_agx3_g17p_vertex_program_info(
             .raw_vs_output_count_2 = 0,
             .raw_vs_output_count_1_extra = false,
             .raw_vs_output_selector = 0,
-            /* Native G17G change-one-output captures identify bit 6 in the
-             * second VDM vertex-output word as the layered-rendering enable:
-             * render_target_array_index changes 0x01000000 to 0x01000040.
-             * Viewport-only output does not set it. */
-            .raw_vs_output_flag_6 = compiler_info->writes_layer,
+            .raw_vs_output_flag_6 = false,
             .pre_hal300_flag_group_nonzero = true,
             .pre_hal300_flag_bit_4 = false,
             .variant = AGX_VDM_STATE_UPDATE_TEMPLATE_00,

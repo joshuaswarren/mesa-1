@@ -216,41 +216,11 @@ test_g17p_vertex_program_info(void)
     * lowering produces this exact position + packed-layer shape. */
    struct hk_agx3_g17p_vertex_compile_info layer_info = compiler_info;
    layer_info.position_only = false;
-   layer_info.writes_layer = true;
    layer_info.clip_off = layer_info.uvs_size = 5;
    CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &layer_info,
                                           &program));
    CHECK(program.template_info.raw_vs_output_count_0 == 5);
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
-   CHECK(program.template_info.raw_vs_output_flag_6);
-
-   program.template_info.pipeline = UINT64_C(0x10000128000);
-   const struct agx_vdm_state_update_draw_info layer_draw = {
-      .source_layout = program.source_layout,
-      .draw_path = AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
-      .rasterization_enabled = true,
-      .raw_provoking_selector = 0,
-      .template_info = program.template_info,
-   };
-   struct agx_vdm_state_update layered;
-   CHECK(hk_agx3_encode_vdm_state_update_draw(AGX_CHIP_G17P, &layer_draw,
-                                               &layered));
-   struct agx_vdm_decoded_record layered_record;
-   CHECK(hk_agx3_decode_vdm_record(AGX_CHIP_G17P, layered.bytes,
-                                    layered.length, &layered_record));
-   CHECK(layered_record.data.state_update.raw_vertex_outputs[0] ==
-         UINT32_C(0x00000505));
-   CHECK((layered_record.data.state_update.raw_vertex_outputs[1] &
-          UINT32_C(0x00000040)) != 0);
-
-   layer_info.writes_layer = false;
-   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &layer_info,
-                                          &program));
-   CHECK(!program.template_info.raw_vs_output_flag_6);
-   layer_info.writes_layer = true;
-   layer_info.clip_off = layer_info.layer_viewport_off;
-   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &layer_info,
-                                            &program));
 
    const struct hk_agx3_g17p_vertex_compile_info vkcube_info = {
       .hardware_vertex = true,
