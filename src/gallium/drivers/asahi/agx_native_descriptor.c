@@ -110,6 +110,14 @@ agx_gallium_pack_native_texture(
           semantic->height > 16384)
          return false;
 
+      /* The recovered cube form requires an uncompressed face-range end VA.
+       * Compression metadata aliases that word, so there is no grounded
+       * representation for the combination yet. */
+      if (semantic->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
+          (semantic->compressed || !semantic->extended ||
+           !semantic->acceleration_buffer))
+         return false;
+
       struct AGX_TEXTURE_GEN9 cfg = {
          .dimension = semantic->dimension,
          .layout = semantic->layout,
@@ -131,10 +139,10 @@ agx_gallium_pack_native_texture(
          .depth = semantic->layout == AGX_LAYOUT_LINEAR ? 1 : semantic->depth,
          .page_aligned_layers = semantic->page_aligned_layers,
          .extended = extended,
+         /* Gen9 reuses this wire address as the face-range end VA for an
+          * uncompressed cube descriptor. */
          .acceleration_buffer =
-            semantic->compressed && semantic->extended
-               ? semantic->acceleration_buffer
-               : 0,
+            semantic->extended ? semantic->acceleration_buffer : 0,
          .depth_linear = semantic->layout == AGX_LAYOUT_LINEAR &&
                                semantic->extended
                             ? semantic->depth_linear
@@ -148,6 +156,15 @@ agx_gallium_pack_native_texture(
       };
 
       AGX_TEXTURE_GEN9_pack(out->opaque, &cfg);
+
+      /* All recovered native A18 cube descriptors carry word1 bit 27 together
+       * with their extended face-range end VA.  Keep this selector bounded to
+       * the exact semantic; ordinary and compressed 2D descriptors retain
+       * their independently witnessed state control. */
+      if (semantic->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
+          semantic->extended && semantic->acceleration_buffer)
+         out->opaque[1] |= BITFIELD_BIT(27);
+
       return true;
    }
 

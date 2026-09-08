@@ -385,6 +385,36 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_9, &native, &semantic));
    CHECK(native.opaque[6] == 0 && native.opaque[7] == 0);
 
+   /* A18 Pro EXP-0015 type_cube.  Unlike an ordinary uncompressed texture,
+    * native Gen9 cube descriptors carry the end VA of the six-face range in
+    * word 2 and word1 bit 27.  This is the exact descriptor Gallium's
+    * samplerCube path must produce before a fragment may execute. */
+   static const uint8_t gen9_cube_bytes[32] = {
+      0x26, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x08,
+      0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
+      0xd0, 0x1d, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_TEXTURE cube = semantic;
+   cube.dimension = AGX_TEXTURE_DIMENSION_CUBE;
+   cube.layout = AGX_LAYOUT_GPU;
+   cube.width = 16;
+   cube.height = 16;
+   cube.address = UINT64_C(0x1000001c500);
+   cube.extended = true;
+   cube.acceleration_buffer = UINT64_C(0x1000001dd00);
+   CHECK(agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
+   CHECK(memcmp(native.opaque, gen9_cube_bytes, sizeof(gen9_cube_bytes)) == 0);
+
+   cube.extended = false;
+   CHECK(!agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
+   cube.extended = true;
+   cube.compressed = true;
+   CHECK(!agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
+
    CHECK(agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_10, &native, &semantic));
    CHECK(native.opaque[6] == 0 && native.opaque[7] == 0);

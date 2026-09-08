@@ -799,6 +799,26 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
             (first_layer * rsrc->layout.compression_layer_stride_B);
       }
 
+      /* Native Gen9 cube descriptors carry a secondary VA immediately after
+       * the selected face range.  A18 captures advance it by exactly six
+       * layer strides for one cube.  This is not compression metadata: the
+       * same word is reused by the cube descriptor shape. */
+      if (agx_device(rsrc->base.screen)->chip == AGX_CHIP_G17P &&
+          state->target == PIPE_TEXTURE_CUBE) {
+         const unsigned faces =
+            state->u.tex.last_layer - state->u.tex.first_layer + 1;
+
+         /* The recovered descriptor has one uncompressed six-face range.
+          * Compression metadata or a different range would alias the same
+          * secondary word, so reject those shapes instead of guessing. */
+         if (rsrc->layout.compressed || faces != 6)
+            return false;
+
+         cfg.extended = true;
+         cfg.acceleration_buffer =
+            cfg.address + (rsrc->layout.layer_stride_B * faces);
+      }
+
       if (state->target == PIPE_TEXTURE_3D) {
          cfg.depth = rsrc->base.depth0;
       } else if (state->target == PIPE_BUFFER) {
