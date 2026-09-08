@@ -277,6 +277,8 @@ if with_tests
       'hk_agx3_ioto_program_core_test',
       files('tests/test-hk-agx3-ioto-program-core.c',
             'hk_agx3_ioto_program_core.c',
+            '../compiler/agx3_compute_program.c',
+            '../compiler/agx3_graphics_program.c',
             '../compiler/agx3_ioto_uniform_program.c',
             '../compiler/agx3_ioto_load_packer.c',
             '../compiler/agx3_mem_core.c',
