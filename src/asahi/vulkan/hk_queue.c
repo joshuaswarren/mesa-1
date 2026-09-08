@@ -244,6 +244,38 @@ asahi_g17p_vdm_bisect(struct hk_device *dev, struct hk_cs *cs, size_t len)
 }
 
 static void
+hk_g17p_trace_render_command(const struct hk_device *dev,
+                              const struct drm_asahi_cmd_render *c)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_RENDER_TRACE", false);
+
+   if (!enabled || dev->dev.chip != AGX_CHIP_G17P)
+      return;
+
+   hk_g17p_trace_line("render-uapi", c->vdm_ctrl_stream_base, c,
+                      sizeof(*c));
+   fprintf(stderr,
+           "G17P render-uapi-decoded: flags=%#x size=%ux%u layers=%u "
+           "samples=%u sample-size=%u utile=%ux%u vdm=%#" PRIx64
+           " scissor=%#" PRIx64 " dbias=%#" PRIx64
+           " zls=%#" PRIx64 " zls-pixels=%#x ppp=%#x msaa=%#" PRIx64
+           " bg=%#x/%#x eot=%#x/%#x partial-bg=%#x/%#x "
+           "partial-eot=%#x/%#x sampler=%#" PRIx64 "/%u\n",
+           c->flags, c->width_px, c->height_px, c->layers, c->samples,
+           c->sample_size_B, c->utile_width_px, c->utile_height_px,
+           (uint64_t)c->vdm_ctrl_stream_base, (uint64_t)c->isp_scissor_base,
+           (uint64_t)c->isp_dbias_base, (uint64_t)c->zls_ctrl,
+           c->isp_zls_pixels, c->ppp_ctrl, (uint64_t)c->ppp_multisamplectl,
+           c->bg.usc, c->bg.rsrc_spec, c->eot.usc, c->eot.rsrc_spec,
+           c->partial_bg.usc, c->partial_bg.rsrc_spec, c->partial_eot.usc,
+           c->partial_eot.rsrc_spec, (uint64_t)c->sampler_heap,
+           c->sampler_count);
+   fflush(stderr);
+}
+
+static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_render *c)
 {
@@ -428,6 +460,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->ts_frag.end.offset = cs->timestamp.end.offset_B;
    }
 
+   hk_g17p_trace_render_command(dev, c);
 }
 
 static void

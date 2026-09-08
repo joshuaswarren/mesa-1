@@ -31,8 +31,12 @@
 #include "g17p_wsi_triangle_vert.h"
 
 #define T8140_DEVICE_ID 0x8140
+#ifndef IMAGE_WIDTH
 #define IMAGE_WIDTH 32
+#endif
+#ifndef IMAGE_HEIGHT
 #define IMAGE_HEIGHT 32
+#endif
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
 #ifdef G17P_VDM_CAPACITY
 #define COMMAND_BUFFER_COUNT 193
@@ -160,6 +164,9 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 int
 main(void)
 {
+#ifdef G17P_TINY_RENDER_RECORD
+   const bool clear_only = getenv("G17P_TINY_CLEAR_ONLY") != NULL;
+#endif
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -686,6 +693,9 @@ main(void)
    };
    vkCmdBeginRenderPass(command_buffer, &render_begin,
                         VK_SUBPASS_CONTENTS_INLINE);
+#if defined(G17P_TINY_RENDER_RECORD)
+   if (!clear_only) {
+#endif
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
    const VkDeviceSize vertex_offset = 0;
@@ -696,6 +706,9 @@ main(void)
                    VK_QUERY_CONTROL_PRECISE_BIT);
 #endif
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#if defined(G17P_TINY_RENDER_RECORD)
+   }
+#endif
 #ifdef G17P_OCCLUSION_QUERY
    vkCmdEndQuery(command_buffer, occlusion_pool, 0);
    /* A second, empty precise interval proves reset and post-graphics
@@ -713,6 +726,13 @@ main(void)
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+#ifdef G17P_TINY_RENDER_RECORD
+   if (getenv("G17P_TINY_RENDER_SUBMIT") == NULL) {
+      printf("g17p-tiny-render-record: 2x2 %s command buffer recorded\n",
+             clear_only ? "clear-only" : "draw");
+      return EXIT_SUCCESS;
+   }
+#endif
 #ifdef G17P_VDM_CAPACITY
    }
    puts("g17p-vdm-capacity: 193 live command buffers across 193 pools recorded");

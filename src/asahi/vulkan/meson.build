@@ -1080,6 +1080,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Record the exact tiny render shape used by startup-sized engine targets.
+    # G17P_TINY_CLEAR_ONLY=1 records the corresponding clear-only stream.
+    executable(
+      'g17p-vulkan-tiny-render-record',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TINY_RENDER_RECORD=1',
+                '-DIMAGE_WIDTH=2', '-DIMAGE_HEIGHT=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Record more live graphics command buffers than the 192-slot G17P VDM
     # aperture. Their compact command spans must share command-pool slabs.
     executable(
