@@ -24,11 +24,10 @@
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
 #define NAME "g17p-vulkan-etc2-rgba8-decode"
-#elif defined(G17P_ASTC4X4_DECODE)
+#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
-#define TEST_FORMAT VK_FORMAT_ASTC_4x4_UNORM_BLOCK
-#define NAME "g17p-vulkan-astc4x4-decode"
+#define NAME "g17p-vulkan-astc-decode"
 #else
 #define BLOCK_BYTES 8
 #define BLOCK_DATA_BYTES 32
@@ -140,7 +139,8 @@ fnv1a64(const uint8_t *data, size_t size)
    return hash;
 }
 
-#if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC4X4_DECODE)
+#if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
+   !defined(G17P_ASTC4X4_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -228,6 +228,46 @@ build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
    }
 }
 #else
+struct astc_variant {
+   const char *name;
+   VkFormat format;
+   uint8_t block_width;
+   uint8_t block_height;
+};
+
+#define ASTC_VARIANT(w, h)                                                    \
+   {#w "x" #h "-unorm", VK_FORMAT_ASTC_##w##x##h##_UNORM_BLOCK, w, h},     \
+   {#w "x" #h "-srgb", VK_FORMAT_ASTC_##w##x##h##_SRGB_BLOCK, w, h}
+
+static const struct astc_variant astc_variants[] = {
+   ASTC_VARIANT(4, 4),   ASTC_VARIANT(5, 4),
+   ASTC_VARIANT(5, 5),   ASTC_VARIANT(6, 5),
+   ASTC_VARIANT(6, 6),   ASTC_VARIANT(8, 5),
+   ASTC_VARIANT(8, 6),   ASTC_VARIANT(8, 8),
+   ASTC_VARIANT(10, 5),  ASTC_VARIANT(10, 6),
+   ASTC_VARIANT(10, 8),  ASTC_VARIANT(10, 10),
+   ASTC_VARIANT(12, 10), ASTC_VARIANT(12, 12),
+};
+
+#undef ASTC_VARIANT
+
+static const struct astc_variant *
+select_astc_variant(void)
+{
+   const char *requested = getenv("G17P_ASTC_VARIANT");
+   if (!requested || !requested[0])
+      return &astc_variants[0];
+
+   for (unsigned i = 0; i < sizeof(astc_variants) / sizeof(astc_variants[0]);
+        ++i) {
+      if (strcmp(requested, astc_variants[i].name) == 0)
+         return &astc_variants[i];
+   }
+
+   fprintf(stderr, NAME ": unknown G17P_ASTC_VARIANT '%s'\n", requested);
+   exit(EXIT_FAILURE);
+}
+
 static void
 put_astc_void_extent(uint8_t *block, uint16_t r, uint16_t g, uint16_t b,
                      uint16_t a)
@@ -245,7 +285,8 @@ put_astc_void_extent(uint8_t *block, uint16_t r, uint16_t g, uint16_t b,
 }
 
 static void
-build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
+build_blocks_and_reference(uint8_t *blocks, uint8_t *reference,
+                           unsigned block_width, unsigned block_height)
 {
    static const uint16_t colours[4][4] = {
       {0xffff, 0, 0, 0xffff},
@@ -253,16 +294,25 @@ build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
       {0, 0, 0xffff, 0xffff},
       {0xffff, 0xffff, 0xffff, 0xffff},
    };
-   for (unsigned block = 0; block < 4; ++block)
-      put_astc_void_extent(blocks + block * BLOCK_BYTES, colours[block][0],
-                           colours[block][1], colours[block][2],
-                           colours[block][3]);
+   const unsigned blocks_x = (WIDTH + block_width - 1) / block_width;
+   const unsigned blocks_y = (HEIGHT + block_height - 1) / block_height;
+   const unsigned block_count = blocks_x * blocks_y;
+   if (block_count > BLOCK_DATA_BYTES / BLOCK_BYTES)
+      die("ASTC block upload exceeds fixture capacity");
+
+   memset(blocks, 0, BLOCK_DATA_BYTES);
+   for (unsigned block = 0; block < block_count; ++block)
+      put_astc_void_extent(blocks + block * BLOCK_BYTES,
+                           colours[block % 4][0],
+                           colours[block % 4][1], colours[block % 4][2],
+                           colours[block % 4][3]);
    for (unsigned y = 0; y < HEIGHT; ++y) {
       for (unsigned x = 0; x < WIDTH; ++x) {
-         const unsigned block = (y / 4) * 2 + x / 4;
+         const unsigned block =
+            (y / block_height) * blocks_x + x / block_width;
          uint8_t *pixel = reference + (y * WIDTH + x) * 4;
          for (unsigned c = 0; c < 4; ++c)
-            pixel[c] = colours[block][c] >> 8;
+            pixel[c] = colours[block % 4][c] >> 8;
       }
    }
 }
@@ -296,6 +346,12 @@ verify(const uint8_t *upload, const uint8_t *output,
 int
 main(void)
 {
+#if defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
+   const struct astc_variant *astc = select_astc_variant();
+   const VkFormat test_format = astc->format;
+#else
+   const VkFormat test_format = TEST_FORMAT;
+#endif
    const bool record_only =
       getenv("G17P_COMPRESSED_DECODE_RECORD_ONLY") != NULL ||
       getenv("G17P_BC1_DECODE_RECORD_ONLY") != NULL;
@@ -354,7 +410,7 @@ main(void)
 #if defined(G17P_ETC2_RGBA8_DECODE)
    if (!features.textureCompressionBC || !features.textureCompressionETC2 ||
        features.textureCompressionASTC_LDR)
-#elif defined(G17P_ASTC4X4_DECODE)
+#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
    if (!features.textureCompressionBC || features.textureCompressionETC2 ||
        !features.textureCompressionASTC_LDR)
 #else
@@ -385,7 +441,7 @@ main(void)
 #if !defined(G17P_ETC2_RGBA8_DECODE)
       VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
 #endif
-#if !defined(G17P_ASTC4X4_DECODE)
+#if !defined(G17P_ASTC_DECODE) && !defined(G17P_ASTC4X4_DECODE)
       VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
 #endif
       VK_FORMAT_UNDEFINED,
@@ -396,8 +452,51 @@ main(void)
       if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
          die("an unqualified compressed family is advertised");
    }
+#if defined(G17P_ETC2_RGBA8_DECODE)
+   static const VkFormat etc2_formats[] = {
+      VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK,
+      VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK,
+      VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK,
+      VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK,
+      VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
+      VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK,
+      VK_FORMAT_EAC_R11_UNORM_BLOCK,
+      VK_FORMAT_EAC_R11_SNORM_BLOCK,
+      VK_FORMAT_EAC_R11G11_UNORM_BLOCK,
+      VK_FORMAT_EAC_R11G11_SNORM_BLOCK,
+   };
+   for (unsigned i = 0; i < sizeof(etc2_formats) / sizeof(etc2_formats[0]);
+        ++i) {
+      VkFormatProperties props;
+      vkGetPhysicalDeviceFormatProperties(physical, etc2_formats[i], &props);
+      if ((props.optimalTilingFeatures & required) != required)
+         die("an ETC2/EAC family format lacks sampled/upload support");
+   }
+#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
+   static const VkFormat astc_formats[] = {
+#define ASTC_FORMATS(w, h)                                                     \
+      VK_FORMAT_ASTC_##w##x##h##_UNORM_BLOCK,                                 \
+      VK_FORMAT_ASTC_##w##x##h##_SRGB_BLOCK
+      ASTC_FORMATS(4, 4),   ASTC_FORMATS(5, 4),
+      ASTC_FORMATS(5, 5),   ASTC_FORMATS(6, 5),
+      ASTC_FORMATS(6, 6),   ASTC_FORMATS(8, 5),
+      ASTC_FORMATS(8, 6),   ASTC_FORMATS(8, 8),
+      ASTC_FORMATS(10, 5),  ASTC_FORMATS(10, 6),
+      ASTC_FORMATS(10, 8),  ASTC_FORMATS(10, 10),
+      ASTC_FORMATS(12, 10), ASTC_FORMATS(12, 12),
+#undef ASTC_FORMATS
+   };
+   for (unsigned i = 0; i < sizeof(astc_formats) / sizeof(astc_formats[0]);
+        ++i) {
+      VkFormatProperties props;
+      vkGetPhysicalDeviceFormatProperties(physical, astc_formats[i], &props);
+      if ((props.optimalTilingFeatures & required) != required)
+         die("an ASTC LDR family format lacks sampled/upload support");
+   }
+#endif
+
    VkFormatProperties target_props;
-   vkGetPhysicalDeviceFormatProperties(physical, TEST_FORMAT, &target_props);
+   vkGetPhysicalDeviceFormatProperties(physical, test_format, &target_props);
    if ((target_props.optimalTilingFeatures & required) != required)
       die("target compressed format lacks sampled/upload support");
 
@@ -509,9 +608,13 @@ main(void)
    }
 
    uint8_t *blocks = maps[0] + GUARD_BYTES;
-#if defined(G17P_ETC2_RGBA8_DECODE) || defined(G17P_ASTC4X4_DECODE)
+#if defined(G17P_ETC2_RGBA8_DECODE)
    uint8_t reference[PIXEL_BYTES];
    build_blocks_and_reference(blocks, reference);
+#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
+   uint8_t reference[PIXEL_BYTES];
+   build_blocks_and_reference(blocks, reference, astc->block_width,
+                              astc->block_height);
 #else
    put_block(blocks, 0, 0xf800, 0x0000, 0);
    put_block(blocks, 1, 0x07e0, 0x0000, 0);
@@ -527,7 +630,7 @@ main(void)
    const VkImageCreateInfo imci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = TEST_FORMAT,
+      .format = test_format,
       .extent = {WIDTH, HEIGHT, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -556,7 +659,7 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = TEST_FORMAT,
+      .format = test_format,
       .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
    };
    VkImageView view;
