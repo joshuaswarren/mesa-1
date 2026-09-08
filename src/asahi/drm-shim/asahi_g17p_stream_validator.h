@@ -54,6 +54,7 @@ struct asahi_g17p_stream_config {
 struct asahi_g17p_compute_stats {
    unsigned launches;
    unsigned barriers;
+   unsigned strong_barriers;
    bool terminated;
 };
 

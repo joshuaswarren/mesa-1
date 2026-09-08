@@ -200,6 +200,13 @@ bool agx3_g17p_native_compute_dispatch_append(
    const struct agx3_compute_direct_grid *grid,
    struct agx3_compute_dispatch_sink *sink);
 
+/* Same native dispatch with a caller-selected canonical post-dispatch
+ * barrier. The plain entry point preserves the minimal flags-0 form. */
+bool agx3_g17p_native_compute_dispatch_append_with_barrier(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
+
 /* Append the byte-exact main/helper record pair used by native G17P indirect
  * compute.  The caller owns the helper program, its resources, and geometry
  * storage; this encoder only publishes their already-established GPU VAs. */

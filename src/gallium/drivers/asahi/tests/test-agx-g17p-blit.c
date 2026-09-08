@@ -70,6 +70,26 @@ make_2d(struct pipe_screen *screen, enum pipe_format format, unsigned w,
    return screen->resource_create(screen, &templ);
 }
 
+static struct pipe_resource *
+make_buffer(struct pipe_screen *screen, unsigned size)
+{
+   struct pipe_resource templ = {
+      .target = PIPE_BUFFER,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .width0 = size,
+      .height0 = 1,
+      .depth0 = 1,
+      .array_size = 1,
+      .last_level = 0,
+      .nr_samples = 1,
+      .nr_storage_samples = 1,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_GLOBAL,
+   };
+
+   return screen->resource_create(screen, &templ);
+}
+
 int
 main(void)
 {
@@ -171,6 +191,22 @@ main(void)
 
    pctx->blit(pctx, &info);
 
+   /* G17P's one admitted precompiled kernel is the vector buffer fill used
+    * by clear_buffer. It feeds later graphics, so AGX_BARRIER_ALL must survive
+    * native CDM lowering as the strong flags-5 cache barrier. The shim audits
+    * the actual production stream and its nested Ioto argument source. */
+   struct pipe_resource *filled = make_buffer(screen, 256);
+   const uint32_t fill[4] = {
+      UINT32_C(0x11223344), UINT32_C(0x55667788),
+      UINT32_C(0x99aabbcc), UINT32_C(0xddeeff00),
+   };
+   if (!filled) {
+      fprintf(stderr, "buffer resource_create failed\n");
+      return 1;
+   }
+   pctx->clear_buffer(pctx, filled, 0, 256, fill, sizeof(fill));
+   pctx->flush(pctx, NULL, 0);
+
    struct agx_context *ctx = agx_context(pctx);
    struct agx_device *dev = agx_device(screen);
    const bool agx2 =
@@ -230,6 +266,7 @@ main(void)
 
    pipe_resource_reference(&src, NULL);
    pipe_resource_reference(&dst, NULL);
+   pipe_resource_reference(&filled, NULL);
    pctx->destroy(pctx);
    screen->destroy(screen);
    close(fd);

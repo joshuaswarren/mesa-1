@@ -207,6 +207,28 @@ test_g17p_native_compute_join(void)
    CHECK(dispatch[0] == 0xa5 && dispatch[sink.length] == 0xa5);
    CHECK(memcmp(dispatch + 1, expected, sizeof(expected)) == 0);
 
+   uint8_t strong_dispatch[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE + 2];
+   memset(strong_dispatch, 0xa5, sizeof(strong_dispatch));
+   struct agx3_compute_dispatch_sink strong_sink = {
+      .data = strong_dispatch,
+      .capacity = sizeof(strong_dispatch),
+      .length = 1,
+   };
+   CHECK(agx3_g17p_native_compute_dispatch_append_with_barrier(
+      &program, &grid, 0x5, &strong_sink));
+   CHECK(strong_sink.length == 1 + sizeof(expected));
+   CHECK(memcmp(strong_dispatch + 1, expected,
+                AGX3_CDM_DIRECT_LAUNCH_SIZE) == 0);
+   static const uint8_t strong_barrier[4] = {
+      0x60, 0x15, 0x00, 0x60,
+   };
+   CHECK(memcmp(strong_dispatch + 1 + AGX3_CDM_DIRECT_LAUNCH_SIZE,
+                strong_barrier, sizeof(strong_barrier)) == 0);
+   const size_t strong_length = strong_sink.length;
+   CHECK(!agx3_g17p_native_compute_dispatch_append_with_barrier(
+      &program, &grid, 0x10, &strong_sink));
+   CHECK(strong_sink.length == strong_length);
+
    struct agx3_cdm_direct_template_sources indirect_sources;
    CHECK(agx3_cdm_direct_template_sources_compute(false, false, false,
                                                    &indirect_sources));

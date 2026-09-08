@@ -3719,8 +3719,14 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
          .data = batch->cdm.current,
          .capacity = batch->cdm.end - batch->cdm.current,
       };
-      if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
-                                                     &sink))
+      /* Meta copies and fills feed later graphics and CPU transfers. Preserve
+       * AGX_BARRIER_ALL's cache-visibility contract with Apple's grounded
+       * strong post-dispatch barrier. Direct API compute remains on the
+       * existing minimal flags-0 barrier. */
+      const uint8_t barrier_flags =
+         (barrier & AGX_BARRIER_ALL) ? 0x5 : 0;
+      if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+             &native.launch, &direct, barrier_flags, &sink))
          agx_native_descriptor_rejected(dev, "precompiled compute launch");
       batch->cdm.current += sink.length;
       agx_batch_add_bo(batch, cs->bo);

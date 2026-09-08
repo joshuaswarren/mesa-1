@@ -231,12 +231,14 @@ check_compute_coverage(void)
 
    if (!compute_stats.launches ||
        compute_stats.launches != compute_stats.barriers ||
-       !compute_stats.terminated) {
+       !compute_stats.terminated ||
+       (getenv("ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER") &&
+        !compute_stats.strong_barriers)) {
       fprintf(stderr,
               "shim: incomplete G17P compute coverage: launches=%u "
-              "barriers=%u terminated=%u\n",
+              "barriers=%u strong=%u terminated=%u\n",
               compute_stats.launches, compute_stats.barriers,
-              compute_stats.terminated);
+              compute_stats.strong_barriers, compute_stats.terminated);
       _Exit(EXIT_FAILURE);
    }
 }
@@ -602,10 +604,12 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             return -EINVAL;
          compute_stats.launches += stats.launches;
          compute_stats.barriers += stats.barriers;
+         compute_stats.strong_barriers += stats.strong_barriers;
          compute_stats.terminated |= stats.terminated;
          fprintf(stderr,
-                 "shim: G17P CDM validated: %u launches, %u barriers\n",
-                 stats.launches, stats.barriers);
+                 "shim: G17P CDM validated: %u launches, %u barriers "
+                 "(%u strong)\n",
+                 stats.launches, stats.barriers, stats.strong_barriers);
       }
 
       cursor += command_size;

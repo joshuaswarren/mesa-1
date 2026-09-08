@@ -378,9 +378,11 @@ asahi_g17p_compute_validate(
       }
 
       case AGX3_CDM_RECORD_BARRIER:
-         if (!need_barrier || record.data.barrier.flags != 0)
+         if (!need_barrier || (record.data.barrier.flags != 0 &&
+                               record.data.barrier.flags != 0x5))
             return fail_at(cursor, "compute barrier is not canonical");
          local.barriers++;
+         local.strong_barriers += record.data.barrier.flags == 0x5;
          need_barrier = false;
          break;
 

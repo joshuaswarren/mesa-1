@@ -198,9 +198,10 @@ agx3_g17p_native_compute_launch_pack(
 }
 
 bool
-agx3_g17p_native_compute_dispatch_append(
+agx3_g17p_native_compute_dispatch_append_with_barrier(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid,
+   uint8_t barrier_flags,
    struct agx3_compute_dispatch_sink *sink)
 {
    if (!program || !grid || !sink ||
@@ -217,7 +218,7 @@ agx3_g17p_native_compute_dispatch_append(
 
    const struct agx3_cdm_barrier_info barrier = {
       .chip = AGX_CHIP_G17P,
-      .flags = 0,
+      .flags = barrier_flags,
    };
    if (!agx3_cdm_barrier_pack(&barrier,
                               staged + AGX3_CDM_DIRECT_LAUNCH_SIZE))
@@ -226,6 +227,16 @@ agx3_g17p_native_compute_dispatch_append(
    memcpy(sink->data + sink->length, staged, sizeof(staged));
    sink->length += sizeof(staged);
    return true;
+}
+
+bool
+agx3_g17p_native_compute_dispatch_append(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   return agx3_g17p_native_compute_dispatch_append_with_barrier(
+      program, grid, 0, sink);
 }
 
 static void

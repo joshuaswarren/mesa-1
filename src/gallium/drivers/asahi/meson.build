@@ -85,7 +85,12 @@ if with_tests and with_tools.contains('drm-shim')
       libasahi_noop_drm_shim,
       asahi_g17p_blit_test,
     ],
-    env : ['ASAHI_SHIM_CHIP=g17p'],
+    env : [
+      'ASAHI_SHIM_CHIP=g17p',
+      'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+      'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
+      'ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER=1',
+    ],
     suite : ['asahi'],
   )
 
