@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WIDTH  8
 #define HEIGHT 8
@@ -87,6 +88,28 @@ make_program(void)
    return program;
 }
 
+static bool
+read_pixel(const char *phase, unsigned x, unsigned y,
+           const uint8_t expected[4], bool noop)
+{
+   uint8_t pixel[4] = {0};
+   glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+   if (!gl_ok(phase))
+      return false;
+   if (noop || !memcmp(pixel, expected, sizeof(pixel))) {
+      printf("texture-path phase %s %s\n", phase,
+             noop ? "submitted" : "exact");
+      return true;
+   }
+
+   fprintf(stderr,
+           "texture-path phase %s pixel {%u,%u,%u,%u}, expected "
+           "{%u,%u,%u,%u}\n",
+           phase, pixel[0], pixel[1], pixel[2], pixel[3], expected[0],
+           expected[1], expected[2], expected[3]);
+   return false;
+}
+
 int
 main(void)
 {
@@ -143,8 +166,9 @@ main(void)
       70,  80,  90,  255, 100, 110, 120, 255, 130, 140, 150, 255,
       160, 170, 180, 255, 190, 200, 210, 255, 220, 230, 240, 255,
    };
-   GLuint texture;
-   glGenTextures(1, &texture);
+   GLuint textures[3];
+   glGenTextures(3, textures);
+   const GLuint texture = textures[0];
    glBindTexture(GL_TEXTURE_2D, texture);
    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 3, 3, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                 pixels);
@@ -153,34 +177,61 @@ main(void)
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+   /* Keep upload/readback separate from the texture consumed by the shader,
+    * so completing the diagnostic read cannot make the sample pass by
+    * accident. */
+   glBindTexture(GL_TEXTURE_2D, textures[1]);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 3, 3, 0, GL_RGBA,
+                GL_UNSIGNED_BYTE, pixels);
+
+   GLuint fbo;
+   glGenFramebuffers(1, &fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          textures[1], 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      return 1;
+   static const uint8_t uploaded[4] = {17, 93, 201, 255};
+   if (!read_pixel("uploaded-source", 2, 0, uploaded, noop))
+      return 1;
+
+   glBindTexture(GL_TEXTURE_2D, textures[2]);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, WIDTH, HEIGHT);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          textures[2], 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      return 1;
+
    GLuint vao;
    glGenVertexArrays(1, &vao);
    glBindVertexArray(vao);
    glViewport(0, 0, WIDTH, HEIGHT);
    glUseProgram(program);
+   glBindTexture(GL_TEXTURE_2D, texture);
    glUniform1i(glGetUniformLocation(program, "source"), 0);
    glDrawArrays(GL_TRIANGLES, 0, 3);
    glFinish();
 
-   uint8_t pixel[4] = {0};
-   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-   if (!gl_ok("textureOffset draw/readback"))
+   static const uint8_t sampled[4] = {17, 93, 201, 17};
+   if (!read_pixel("sample-to-user-fbo", WIDTH / 2, HEIGHT / 2, sampled,
+                   noop))
       return 1;
-   if (!noop && (pixel[0] != 17 || pixel[1] != 93 || pixel[2] != 201 ||
-                 pixel[3] != 17)) {
-      fprintf(stderr, "texture offset pixel {%u,%u,%u,%u}\n", pixel[0],
-              pixel[1], pixel[2], pixel[3]);
-      return 1;
-   }
 
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glFinish();
+   if (!read_pixel("sample-to-default", WIDTH / 2, HEIGHT / 2, sampled, noop))
+      return 1;
+
+   glDeleteFramebuffers(1, &fbo);
    glDeleteVertexArrays(1, &vao);
-   glDeleteTextures(1, &texture);
+   glDeleteTextures(3, textures);
    glDeleteProgram(program);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
-   puts(noop ? "G17P WebGL2 textureOffset/texelFetchOffset submitted"
-             : "G17P WebGL2 textureOffset/texelFetchOffset pixel exact");
+   puts(noop ? "G17P WebGL2 texture upload/FBO/default sampling submitted"
+             : "G17P WebGL2 texture upload/FBO/default sampling exact");
    return 0;
 }
