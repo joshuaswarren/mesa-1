@@ -130,6 +130,18 @@ hk_rast_discard(struct hk_cmd_buffer *cmd)
    return dyn->rs.rasterizer_discard_enable;
 }
 
+static bool
+hk_g17p_xfb_vertex_side_effects(struct hk_cmd_buffer *cmd,
+                                struct hk_shader *hw_vs)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
+
+   return hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P &&
+          gfx->xfb_enabled && gs && gs->is_passthrough &&
+          hw_vs == &gs->variants[HK_GS_VARIANT_RAST];
+}
+
 static void
 hk_cmd_buffer_dirty_render_pass(struct hk_cmd_buffer *cmd)
 {
@@ -4387,8 +4399,14 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                      : AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED),
             /* RenderPipeline+0x2f0 is populated from
              * isRasterizationEnabled; the selected template carries 0x30
-             * when this is false on pre-HAL300. */
-            .rasterization_enabled = !hk_rast_discard(cmd),
+             * when this is false on pre-HAL300.  Software XFB stores live in
+             * the raster variant's vertex program, so it must use the live
+             * vertex template even when Vulkan discards rasterization.  The
+             * independently packed HAL200 PPP discard bits still suppress
+             * fragments. */
+            .rasterization_enabled =
+               !hk_rast_discard(cmd) ||
+               hk_g17p_xfb_vertex_side_effects(cmd, hw_vs),
             /* hk already stores the actual hardware provoking vertex 0..2.
              * Apple's setter maps its API mode to this same value before
              * selecting one of the six templates. */
