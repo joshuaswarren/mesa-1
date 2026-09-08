@@ -115,6 +115,10 @@ struct ra_ctx {
 
    /* SSA values that must begin in G17P's corpus-grounded low store bank. */
    BITSET_WORD *low_gpr;
+
+   /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
+    * register bank. */
+   BITSET_WORD *high_gpr;
 };
 
 /*
@@ -331,9 +335,11 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
 
 static bool
 find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
-                 unsigned align, unsigned limit, unsigned *out)
+                 unsigned align, unsigned minimum, unsigned limit,
+                 unsigned *out)
 {
-   for (unsigned reg = 0; reg + count <= limit; reg += align) {
+   for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
+        reg += align) {
       if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
          *out = reg;
          return true;
@@ -357,6 +363,17 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
        BITSET_TEST(rctx->low_gpr, I->dest[d].value))
       limit = MIN2(limit, 16);
    return limit;
+}
+
+static unsigned
+dest_minimum(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
+{
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       BITSET_TEST(rctx->high_gpr, I->dest[d].value))
+      return 16;
+
+   return 0;
 }
 
 /*
@@ -476,8 +493,8 @@ insert_copy(struct ra_ctx *rctx, struct util_dynarray *copies, unsigned new_reg,
 }
 
 static unsigned
-find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned limit,
-                        unsigned *span_out)
+find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
+                        unsigned limit, unsigned *span_out)
 {
    unsigned best = ~0u, best_moves = ~0u, best_span = 0;
    /* RA vectors are naturally aligned powers of two, at most 16 halves.
@@ -486,6 +503,8 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned limit,
    for (unsigned span = count; span <= 16; span *= 2) {
       for (unsigned base = 0; base + span <= limit; base += span) {
          if (base < reserved_size(rctx->shader))
+            continue;
+         if (base < minimum)
             continue;
          unsigned moves = 0;
          bool valid = true;
@@ -526,7 +545,8 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned limit,
 
 static unsigned
 assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
-                       struct util_dynarray *copies, unsigned limit)
+                       struct util_dynarray *copies, unsigned minimum,
+                       unsigned limit)
 {
    BITSET_DECLARE(clobbered, AGX_NUM_REGS) = {0};
    assert(dest.type == AGX_INDEX_NORMAL);
@@ -535,9 +555,10 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
    unsigned blocked_vars[16] = {dest.value};
    size_t nr_blocked = 1;
 
-   if (limit < rctx->bound[RA_GPR]) {
+   if (minimum > 0 || limit < rctx->bound[RA_GPR]) {
       unsigned count = rctx->ncomps[dest.value], span;
-      unsigned base = find_constrained_region(rctx, count, limit, &span);
+      unsigned base = find_constrained_region(rctx, count, minimum, limit,
+                                              &span);
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
          if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
@@ -700,9 +721,10 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
    assert(count == align);
 
    enum ra_class cls = ra_class_for_index(I->dest[dest_idx]);
+   unsigned minimum = dest_minimum(rctx, I, dest_idx);
    unsigned limit = dest_limit(rctx, I, dest_idx);
 
-   if (find_regs_simple(rctx, cls, count, align, limit, &reg)) {
+   if (find_regs_simple(rctx, cls, count, align, minimum, limit, &reg)) {
       return reg;
    } else {
       assert(!rctx->early_killed && "no live range splits with early kill");
@@ -710,7 +732,8 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
 
       struct util_dynarray copies = UTIL_DYNARRAY_INIT;
 
-      reg = assign_regs_by_copying(rctx, I->dest[dest_idx], I, &copies, limit);
+      reg = assign_regs_by_copying(rctx, I->dest[dest_idx], I, &copies,
+                                   minimum, limit);
 
       /* Insert the necessary copies. Phis need special handling since we can't
        * insert instructions before the phi.
@@ -946,7 +969,8 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
          return out;
    }
 
-   if (dest_limit(rctx, I, d) < rctx->bound[cls])
+   if (dest_minimum(rctx, I, d) > 0 ||
+       dest_limit(rctx, I, d) < rctx->bound[cls])
       return find_regs(rctx, I, d, count, align);
 
    /* Try to allocate entire phi webs compatibly */
@@ -1660,12 +1684,22 @@ agx_ra(agx_context *ctx)
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
    agx_foreach_instr_global(ctx, I) {
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(low_gpr, I->src[0].value);
+
+      /* G17P cube CEM rereads its XYZ vector after writing fixed scratch r0
+       * and r7. Constrain the coordinate vector itself above that bank; its
+       * scalar producers remain free to coalesce elsewhere and are copied by
+       * the ordinary collect when necessary. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_CUBE &&
+          I->src[0].type == AGX_INDEX_NORMAL)
+         BITSET_SET(high_gpr, I->src[0].value);
 
       /* Record collects/phis so we can coalesce when assigning */
       if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
@@ -1737,6 +1771,7 @@ agx_ra(agx_context *ctx)
          .classes = classes,
          .visited = visited,
          .low_gpr = low_gpr,
+         .high_gpr = high_gpr,
          .bound[RA_GPR] = max_regs,
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
          .count[RA_GPR] = &reg_count,
@@ -1896,6 +1931,7 @@ agx_ra(agx_context *ctx)
 
    free(phi_web);
    free(low_gpr);
+   free(high_gpr);
    free(src_to_collect_phi);
    free(ncomps);
    free(ncomps_unrounded);

@@ -59,7 +59,8 @@ check(struct fixture *f, unsigned count)
    agx_index dest = {.type = AGX_INDEX_NORMAL, .value = 511,
                     .size = f->sizes[511]};
    struct util_dynarray copies = UTIL_DYNARRAY_INIT;
-   unsigned result = assign_regs_by_copying(&f->ra, dest, NULL, &copies, 128);
+   unsigned result =
+      assign_regs_by_copying(&f->ra, dest, NULL, &copies, 0, 128);
    assert(result + count <= 128 && result % count == 0);
    uint16_t after[AGX_NUM_REGS];
    memcpy(after, f->values, sizeof(after));

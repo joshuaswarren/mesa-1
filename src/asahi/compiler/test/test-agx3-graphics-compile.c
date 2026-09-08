@@ -1512,7 +1512,7 @@ test_g17p_native_cube_sample(void)
    struct agx_shader_part part = {0};
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
 
-   bool native_smp = false, cube_z = false;
+   bool native_smp = false, cube_z = false, safe_cem_input = false;
    uint8_t candidate[AGX3_TEX_MAX_LENGTH], length;
    for (unsigned slot = 1; slot <= 6 && part.binary; ++slot) {
       for (unsigned dest = 0; dest < 128; dest += 2) {
@@ -1543,7 +1543,19 @@ test_g17p_native_cube_sample(void)
          }
       }
    }
-   ok &= native_smp && cube_z;
+   /* The exact application shape once allocated its coordinate at r0, which
+    * CEM axis 0 overwrites before axes 1/2 reread it. Require a native CEM
+    * record whose complete XYZ run is above the fixed r0/r2/r7 scratch bank. */
+   for (unsigned src = 16; src <= 120; src += 4) {
+      if (!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, src, src + 2,
+                                  src + 4, 0, false, candidate, &length))
+         continue;
+
+      for (unsigned off = 0; off + length <= part.info.binary_size; ++off)
+         safe_cem_input |= !memcmp((uint8_t *)part.binary + off, candidate,
+                                   length);
+   }
+   ok &= native_smp && cube_z && safe_cem_input;
    free(part.binary);
    ralloc_free(b.shader);
    return ok;

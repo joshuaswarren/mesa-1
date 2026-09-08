@@ -7830,6 +7830,30 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+
+   for (unsigned coord_base : {0u, 12u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(24, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(coord_base, AGX_SIZE_32);
+      coord.channels_m1 = 2;
+      coord.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_CUBE,
+         AGX_LOD_MODE_AUTO_LOD, 0, false, false, false,
+         AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+
+      pack(b, /*expect_ok=*/false);
+   }
+}
+
 TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
 {
    for (unsigned dynamic = 0; dynamic < 2; ++dynamic) {

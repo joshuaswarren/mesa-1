@@ -1319,6 +1319,23 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
+   /* CEM axis 0 overwrites r0 before axes 1/2 reread XYZ, and axis 1
+    * overwrites r7 before axis 2. These fixed destinations are part of the
+    * native CEM ABI rather than explicit AGX IR destinations. Reject a
+    * manually constructed/corrupt post-RA stream that aliases either early
+    * scratch register. Production RA reserves their containing r0..r7 bank
+    * whenever a cube sample is present. r2 may overlap because its CEM write
+    * happens only after the final XYZ read. */
+   if (cube) {
+      const unsigned coord_first = I->src[0].value;
+      const unsigned coord_last = coord_first + 6;
+      const bool aliases_r0 = coord_first < 2;
+      const bool aliases_r7 = coord_first < 16 && coord_last > 14;
+
+      if (aliases_r0 || aliases_r7)
+         return false;
+   }
+
    /* The witnessed copy form carries at most one producer dependency. */
    if (wait_mask & (wait_mask - 1))
       return false;
