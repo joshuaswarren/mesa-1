@@ -4305,23 +4305,6 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   /* With rasterization disabled, XFB is completed entirely by the software
-    * vertex/geometry dispatches.  Stop only after publishing the vertex and
-    * geometry parameter buffers and their root table: those are the compute
-    * ABI consumed by the dispatches.  No hardware vertex or PPP state belongs
-    * in the VDM stream. */
-   const struct hk_api_shader *bound_gs =
-      gfx->shaders[MESA_SHADER_GEOMETRY];
-   if (dev->dev.chip == AGX_CHIP_G17P && gfx->xfb_enabled &&
-       hk_rast_discard(cmd) && bound_gs && bound_gs->is_passthrough) {
-      vk_dynamic_graphics_state_clear_dirty(dyn);
-      gfx->shaders_dirty = 0;
-      gfx->linked_dirty = 0;
-      gfx->dirty = 0;
-      gfx->descriptors.root_dirty = false;
-      return;
-   }
-
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
     */
@@ -5004,12 +4987,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if (geom) {
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
       }
-
-      /* The dispatches above are the complete draw when rasterization is
-       * disabled: they run the original vertex shader, write XFB, and update
-       * its counter.  No Index List belongs in the VDM stream. */
-      if (dev->dev.chip == AGX_CHIP_G17P && geom && hk_rast_discard(cmd))
-         continue;
 
       if (adj) {
          assert(!geom && "geometry shaders handle adj directly");

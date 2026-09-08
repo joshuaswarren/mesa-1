@@ -1068,6 +1068,17 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
                 AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
    }
 
+   /* The raster variant produced by poly_nir_lower_gs is a hardware vertex
+    * program while retaining the API geometry stage in hk_shader_info.  It
+    * pulls generated vertices through the root ABI rather than vertex
+    * attributes, then performs the XFB stores before rasterization. */
+   if (s->info.stage == MESA_SHADER_GEOMETRY &&
+       s->b.info.stage == MESA_SHADER_VERTEX) {
+      return !linked->sw_indexing &&
+             s->agx3_vdm_state_update.source_layout ==
+                AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+   }
+
    return s->info.stage == MESA_SHADER_FRAGMENT &&
           hk_g17p_smooth_varyings_supported(cmd, linked) &&
           hk_g17p_basic_fragment_layout(cmd);
@@ -1128,6 +1139,11 @@ hk_g17p_graphics_uniform_ranges(
       }
 
       root_uniform = AGX_ABI_VUNI_COUNT_VK(nr_attribs);
+   } else if (s->info.stage == MESA_SHADER_GEOMETRY &&
+              s->b.info.stage == MESA_SHADER_VERTEX) {
+      /* poly's raster variant lowers its geometry parameter loads against the
+       * compute-style root at uniform zero. */
+      root_uniform = 0;
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       root_uniform = AGX_ABI_FUNI_ROOT;
    } else {
