@@ -150,7 +150,7 @@ pixel_ok(const struct guarded_readback *readback, unsigned x, unsigned y,
 
 static bool
 draw_and_read(GLuint program, GLuint vbo, GLuint ibo,
-              struct guarded_readback *readback, float red_scale)
+              struct guarded_readback *readback, float red_scale, bool noop)
 {
    memset(readback, GUARD_BYTE, sizeof(*readback));
 
@@ -184,8 +184,13 @@ draw_and_read(GLuint program, GLuint vbo, GLuint ibo,
    const uint8_t top_left[4] = {0, 0, 255, 255};
    const uint8_t top_right[4] = {red, 255, 255, 255};
 
-   return gl_ok("draw/readback") && guard_ok(readback->before) &&
-          guard_ok(readback->after) &&
+   const bool sequence_ok = gl_ok("draw/readback") &&
+                            guard_ok(readback->before) &&
+                            guard_ok(readback->after);
+   if (noop)
+      return sequence_ok;
+
+   return sequence_ok &&
           pixel_ok(readback, WIDTH / 4, HEIGHT / 4, bottom_left) &&
           pixel_ok(readback, 3 * WIDTH / 4, HEIGHT / 4, bottom_right) &&
           pixel_ok(readback, WIDTH / 4, 3 * HEIGHT / 4, top_left) &&
@@ -195,6 +200,7 @@ draw_and_read(GLuint program, GLuint vbo, GLuint ibo,
 int
 main(void)
 {
+   const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major, minor;
    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
@@ -310,7 +316,7 @@ main(void)
       return 1;
 
    struct guarded_readback readback;
-   if (!draw_and_read(program, vbo, ibo, &readback, 1.0f))
+   if (!draw_and_read(program, vbo, ibo, &readback, 1.0f, noop))
       return 1;
 
    if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
@@ -326,7 +332,7 @@ main(void)
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
    glActiveTexture(GL_TEXTURE0);
    glBindTexture(GL_TEXTURE_2D, sampled);
-   if (!draw_and_read(program, vbo, ibo, &readback, 0.4f))
+   if (!draw_and_read(program, vbo, ibo, &readback, 0.4f, noop))
       return 1;
 
    if (!guard_ok(vertices.before) || !guard_ok(vertices.after) ||
@@ -350,7 +356,9 @@ main(void)
    eglDestroySurface(display, surface);
    eglTerminate(display);
 
-   puts("GL03 resource sequence completed twice; pixels, sources and guards "
-        "exact");
+   puts(noop ? "GL03 resource sequence completed twice; no-op pixels skipped; "
+               "sources and guards exact"
+             : "GL03 resource sequence completed twice; pixels, sources and "
+               "guards exact");
    return 0;
 }
