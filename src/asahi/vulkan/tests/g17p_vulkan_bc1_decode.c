@@ -87,8 +87,7 @@
 #elif defined(G17P_ETC2_RGBA8_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
-#define TEST_FORMAT VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
-#define NAME "g17p-vulkan-etc2-rgba8-decode"
+#define NAME "g17p-vulkan-etc2-eac-decode"
 #elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
@@ -102,6 +101,8 @@
 #define PIXEL_BYTES (WIDTH * HEIGHT * 4)
 #define GUARD_BYTES 64
 #define DEVICE_ID 0x8140
+
+static const char *test_name = NAME;
 
 #define FN(name) static PFN_##name name
 FN(vkGetInstanceProcAddr);
@@ -148,7 +149,7 @@ FN(vkWaitForFences);
 static void
 die(const char *message)
 {
-   fprintf(stderr, NAME ": %s\n", message);
+   fprintf(stderr, "%s: %s\n", test_name, message);
    exit(EXIT_FAILURE);
 }
 
@@ -156,7 +157,7 @@ static void
 check(VkResult result, const char *call)
 {
    if (result != VK_SUCCESS) {
-      fprintf(stderr, NAME ": %s returned %d\n", call, result);
+      fprintf(stderr, "%s: %s returned %d\n", test_name, call, result);
       exit(EXIT_FAILURE);
    }
 }
@@ -521,17 +522,138 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
 #endif
 }
 #elif defined(G17P_ETC2_RGBA8_DECODE)
-static void
-build_blocks_and_reference(uint8_t *blocks, uint8_t *reference)
+enum etc2_variant_kind {
+   ETC2_RGB8,
+   ETC2_SRGB8,
+   ETC2_RGB8A1,
+   ETC2_SRGB8A1,
+   ETC2_RGBA8,
+   ETC2_SRGBA8,
+   EAC_R11,
+   EAC_R11_SIGNED,
+   EAC_RG11,
+   EAC_RG11_SIGNED,
+};
+
+struct etc2_variant {
+   const char *name;
+   VkFormat format;
+   enum etc2_variant_kind kind;
+};
+
+static const struct etc2_variant etc2_variants[] = {
+   {"rgb8-unorm", VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK, ETC2_RGB8},
+   {"rgb8-srgb", VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK, ETC2_SRGB8},
+   {"rgb8a1-unorm", VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK, ETC2_RGB8A1},
+   {"rgb8a1-srgb", VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK, ETC2_SRGB8A1},
+   {"rgba8-unorm", VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK, ETC2_RGBA8},
+   {"rgba8-srgb", VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK, ETC2_SRGBA8},
+   {"r11-unorm", VK_FORMAT_EAC_R11_UNORM_BLOCK, EAC_R11},
+   {"r11-snorm", VK_FORMAT_EAC_R11_SNORM_BLOCK, EAC_R11_SIGNED},
+   {"rg11-unorm", VK_FORMAT_EAC_R11G11_UNORM_BLOCK, EAC_RG11},
+   {"rg11-snorm", VK_FORMAT_EAC_R11G11_SNORM_BLOCK, EAC_RG11_SIGNED},
+};
+
+static const struct etc2_variant *
+select_etc2_variant(void)
 {
-   /* A zero ETC2/EAC RGBA8 block is individual RGB mode with table-0/index-0
-    * (+2 from a zero base) and zero alpha after EAC clamping. */
+   const char *requested = getenv("G17P_ETC2_VARIANT");
+   if (!requested || !requested[0])
+      requested = "rgba8-unorm";
+
+   for (unsigned i = 0; i < sizeof(etc2_variants) / sizeof(etc2_variants[0]);
+        ++i) {
+      if (strcmp(requested, etc2_variants[i].name) == 0)
+         return &etc2_variants[i];
+   }
+
+   fprintf(stderr, "%s: unknown G17P_ETC2_VARIANT '%s'\n", NAME, requested);
+   exit(EXIT_FAILURE);
+}
+
+static void
+build_blocks_and_reference(const struct etc2_variant *variant,
+                           uint8_t *blocks, uint8_t *reference)
+{
    memset(blocks, 0, BLOCK_DATA_BYTES);
-   for (unsigned i = 0; i < WIDTH * HEIGHT; ++i) {
-      reference[4 * i + 0] = 2;
-      reference[4 * i + 1] = 2;
-      reference[4 * i + 2] = 2;
-      reference[4 * i + 3] = 0;
+
+   const bool signed_eac = variant->kind == EAC_R11_SIGNED ||
+                           variant->kind == EAC_RG11_SIGNED;
+   const bool rg_eac = variant->kind == EAC_RG11 ||
+                       variant->kind == EAC_RG11_SIGNED;
+   const bool eac = variant->kind >= EAC_R11;
+
+   /* With multiplier/table/index zero, EAC R11 decodes an unsigned base B
+    * as clamp(B*8 + 4 - 3), then bit-replicates 11->16.  Signed R11 uses
+    * clamp(B*8 - 3) and signed 11->16 replication.  These are the exact
+    * packUnorm4x8 results after that specified normalization. */
+   static const uint8_t unsigned_base[4] = {0, 64, 128, 255};
+   static const uint8_t unsigned_value[4] = {0, 64, 128, 254};
+   static const uint8_t signed_base[4] = {1, 32, 64, 127};
+   static const uint8_t signed_value[4] = {1, 63, 127, 253};
+   static const uint8_t etc_base[4] = {0x00, 0x44, 0x88, 0xcc};
+   static const uint8_t etc_value[4] = {2, 70, 138, 206};
+   static const uint8_t etc_srgb_value[4] = {0, 16, 65, 157};
+
+   if (eac) {
+      const unsigned block_bytes = rg_eac ? 16 : 8;
+      const uint8_t *base = signed_eac ? signed_base : unsigned_base;
+      for (unsigned block = 0; block < 4; ++block) {
+         blocks[block * block_bytes] = base[block];
+         if (rg_eac)
+            blocks[block * block_bytes + 8] = base[3 - block];
+      }
+   } else if (variant->kind == ETC2_RGB8 ||
+              variant->kind == ETC2_SRGB8 ||
+              variant->kind == ETC2_RGBA8 ||
+              variant->kind == ETC2_SRGBA8) {
+      const bool rgba = variant->kind == ETC2_RGBA8 ||
+                        variant->kind == ETC2_SRGBA8;
+      const unsigned block_bytes = rgba ? 16 : 8;
+      const unsigned color_offset = rgba ? 8 : 0;
+      for (unsigned block = 0; block < 4; ++block) {
+         uint8_t *color = blocks + block * block_bytes + color_offset;
+         color[0] = color[1] = color[2] = etc_base[block];
+      }
+   } else {
+      /* Zero RGB8A1 is nonopaque differential mode.  Select index 2 in the
+       * odd blocks to prove punch-through alpha independently of RGB. */
+      for (unsigned block = 1; block < 4; block += 2) {
+         uint8_t *color = blocks + block * 8;
+         color[4] = color[5] = 0xff;
+      }
+   }
+
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         uint8_t *pixel = reference + (y * WIDTH + x) * 4;
+         pixel[0] = 0;
+         pixel[1] = 0;
+         pixel[2] = 0;
+         pixel[3] = 255;
+
+         if (eac) {
+            const uint8_t *value =
+               signed_eac ? signed_value : unsigned_value;
+            pixel[0] = value[block];
+            if (rg_eac)
+               pixel[1] = value[3 - block];
+         } else if (variant->kind == ETC2_RGB8 ||
+                    variant->kind == ETC2_RGBA8) {
+            pixel[0] = pixel[1] = pixel[2] = etc_value[block];
+            if (variant->kind == ETC2_RGBA8)
+               pixel[3] = 0;
+         } else if (variant->kind == ETC2_SRGB8 ||
+                    variant->kind == ETC2_SRGBA8) {
+            pixel[0] = pixel[1] = pixel[2] = etc_srgb_value[block];
+            if (variant->kind == ETC2_SRGBA8)
+               pixel[3] = 0;
+         } else if ((variant->kind == ETC2_RGB8A1 ||
+                     variant->kind == ETC2_SRGB8A1) && (block & 1)) {
+            pixel[3] = 0;
+         }
+      }
    }
 }
 #else
@@ -641,9 +763,9 @@ verify(const uint8_t *upload, const uint8_t *output,
    if (memcmp(actual, reference, PIXEL_BYTES) != 0) {
       for (size_t i = 0; i < PIXEL_BYTES; ++i) {
          if (actual[i] != reference[i]) {
-            fprintf(stderr, NAME ": %s pixel %zu channel %zu is %02x, "
-                                 "expected %02x\n",
-                    when, i / 4, i % 4, actual[i], reference[i]);
+            fprintf(stderr, "%s: %s pixel %zu channel %zu is %02x, "
+                            "expected %02x\n",
+                    test_name, when, i / 4, i % 4, actual[i], reference[i]);
             exit(EXIT_FAILURE);
          }
       }
@@ -656,6 +778,10 @@ main(void)
 #if defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
    const struct astc_variant *astc = select_astc_variant();
    const VkFormat test_format = astc->format;
+#elif defined(G17P_ETC2_RGBA8_DECODE)
+   const struct etc2_variant *etc2 = select_etc2_variant();
+   const VkFormat test_format = etc2->format;
+   test_name = etc2->name;
 #else
    const VkFormat test_format = TEST_FORMAT;
 #endif
@@ -672,7 +798,7 @@ main(void)
 
    const VkApplicationInfo app = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-      .pApplicationName = NAME,
+      .pApplicationName = test_name,
       .apiVersion = VK_API_VERSION_1_1,
    };
    const VkInstanceCreateInfo ici = {
@@ -917,7 +1043,7 @@ main(void)
    uint8_t *blocks = maps[0] + GUARD_BYTES;
 #if defined(G17P_ETC2_RGBA8_DECODE)
    uint8_t reference[PIXEL_BYTES];
-   build_blocks_and_reference(blocks, reference);
+   build_blocks_and_reference(etc2, blocks, reference);
 #elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
    uint8_t reference[PIXEL_BYTES];
    build_blocks_and_reference(blocks, reference, astc->block_width,
@@ -1168,7 +1294,8 @@ main(void)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
-      puts(NAME ": PASS - compressed upload/sample dispatch recorded");
+      printf("%s: PASS - compressed upload/sample dispatch recorded\n",
+             test_name);
       return EXIT_SUCCESS;
    }
 
@@ -1192,8 +1319,8 @@ main(void)
    if (nanosleep(&stable, NULL))
       die("stability sleep interrupted");
    verify(maps[0], maps[1], reference, "after three seconds");
-   printf(NAME ": PASS - 64 decoded pixels exact immediately/3s, "
-               "256 guard bytes unchanged, checksum %016" PRIx64 "\n",
-          fnv1a64(maps[1] + GUARD_BYTES, PIXEL_BYTES));
+   printf("%s: PASS - 64 decoded pixels exact immediately/3s, "
+          "256 guard bytes unchanged, checksum %016" PRIx64 "\n",
+          test_name, fnv1a64(maps[1] + GUARD_BYTES, PIXEL_BYTES));
    return EXIT_SUCCESS;
 }
