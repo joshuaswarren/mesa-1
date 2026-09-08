@@ -287,6 +287,10 @@
 #define G17P_RGBA8_MRT 0
 #endif
 
+#ifndef G17P_DYNAMIC_BLEND
+#define G17P_DYNAMIC_BLEND 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -304,7 +308,8 @@
      G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
-     G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT) > 1
+     G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
+     G17P_DYNAMIC_BLEND) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -1223,6 +1228,11 @@
 #define READBACK_GUARD_BYTES 64
 #define READBACK_IMAGE1_OFFSET (2 * READBACK_GUARD_BYTES + IMAGE_BYTES)
 #define READBACK_BYTES (2 * IMAGE_BYTES + 3 * READBACK_GUARD_BYTES)
+#elif G17P_DYNAMIC_BLEND
+#define PROBE_NAME "g17p-vulkan-dynamic-blend"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1242,7 +1252,7 @@ VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
-   G17P_MULTIVIEW
+   G17P_MULTIVIEW || G17P_DYNAMIC_BLEND
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1293,6 +1303,12 @@ VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
+#if G17P_DYNAMIC_BLEND
+VK_FN(vkCmdSetScissor);
+VK_FN(vkCmdSetColorBlendEnableEXT);
+VK_FN(vkCmdSetColorBlendEquationEXT);
+VK_FN(vkCmdSetColorWriteMaskEXT);
+#endif
 #if G17P_INDIRECT_DRAW
 VK_FN(vkCmdDrawIndirect);
 VK_FN(vkCmdDrawIndexedIndirect);
@@ -1625,6 +1641,13 @@ verify_readback(const uint8_t *map)
     * contribution. These are independently rounded RGBA8 results for
     * constants (0.25, 0.5, 0.75, 0.125). */
    static const uint8_t expected[4] = {64, 36, 10, 32};
+#elif G17P_DYNAMIC_BLEND
+   static const uint8_t expected[2][4] = {
+      /* Left: dynamic reverse-subtract blend with only R/G enabled. */
+      {0, 56, 191, 255},
+      /* Right: dynamic blend disable with only B/A enabled. */
+      {64, 128, 13, 255},
+   };
 #elif G17P_BGRA8_SNORM
    static const uint8_t expected[4] = {0x60, 0x11, 0xc0, 0xdf};
 #elif G17P_RGBA8_SNORM
@@ -1705,6 +1728,9 @@ verify_readback(const uint8_t *map)
          cube_face_diagnostic < 0 || cube_face_diagnostic == (int)face
             ? expected[face]
             : clear;
+#elif G17P_DYNAMIC_BLEND
+      const uint8_t *expected_pixel =
+         expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
 #else
       const uint8_t *expected_pixel = expected;
 #endif
@@ -1826,6 +1852,8 @@ main(void)
       (G17P_BLEND_CONSTANT &&
        getenv("G17P_BLEND_CONSTANT_RECORD_ONLY") != NULL) ||
       (G17P_RGBA8_MRT && getenv("G17P_RGBA8_MRT_RECORD_ONLY") != NULL) ||
+      (G17P_DYNAMIC_BLEND &&
+       getenv("G17P_DYNAMIC_BLEND_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -1860,9 +1888,10 @@ main(void)
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
-   G17P_MULTIVIEW
+   G17P_MULTIVIEW || G17P_DYNAMIC_BLEND
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
+
 #if G17P_INDIRECT_DRAW
    LOAD_INSTANCE(instance, vkEnumerateDeviceExtensionProperties);
 #endif
@@ -1918,6 +1947,22 @@ main(void)
    free(physical_devices);
    if (!physical)
       die("no T8140 device has a graphics-and-transfer queue");
+
+#if G17P_DYNAMIC_BLEND
+   VkPhysicalDeviceExtendedDynamicState3FeaturesEXT available_dynamic3 = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 available_dynamic = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_dynamic3,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available_dynamic);
+   if (!available_dynamic3.extendedDynamicState3ColorBlendEnable ||
+       !available_dynamic3.extendedDynamicState3ColorBlendEquation ||
+       !available_dynamic3.extendedDynamicState3ColorWriteMask)
+      die("required extended dynamic blend state is not advertised");
+#endif
 
 #if G17P_F16_IO || G17P_MULTIVIEW
    VkPhysicalDeviceVulkan11Features available11 = {
@@ -2071,6 +2116,18 @@ main(void)
       .logicOp = G17P_LOGIC_OP_XOR,
    };
 #endif
+#if G17P_DYNAMIC_BLEND
+   const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT enabled_dynamic3 = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+      .extendedDynamicState3ColorBlendEnable = VK_TRUE,
+      .extendedDynamicState3ColorBlendEquation = VK_TRUE,
+      .extendedDynamicState3ColorWriteMask = VK_TRUE,
+   };
+   const char *dynamic_device_extensions[] = {
+      VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_F16_IO || G17P_MULTIVIEW
@@ -2081,6 +2138,8 @@ main(void)
       .pNext = &host_copy_features,
 #elif G17P_INDIRECT_DRAW
       .pNext = &indirect_enabled12,
+#elif G17P_DYNAMIC_BLEND
+      .pNext = &enabled_dynamic3,
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
@@ -2095,6 +2154,9 @@ main(void)
 #if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
+#elif G17P_DYNAMIC_BLEND
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = dynamic_device_extensions,
 #endif
    };
    VkDevice device;
@@ -2141,6 +2203,12 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
+#if G17P_DYNAMIC_BLEND
+   LOAD_DEVICE(device, vkCmdSetScissor);
+   LOAD_DEVICE(device, vkCmdSetColorBlendEnableEXT);
+   LOAD_DEVICE(device, vkCmdSetColorBlendEquationEXT);
+   LOAD_DEVICE(device, vkCmdSetColorWriteMaskEXT);
+#endif
 #if G17P_INDIRECT_DRAW
    LOAD_DEVICE(device, vkCmdDrawIndirect);
    LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
@@ -3312,6 +3380,19 @@ main(void)
 #endif
       .blendConstants = {0.25f, 0.5f, 0.75f, 0.125f},
    };
+#if G17P_DYNAMIC_BLEND
+   const VkDynamicState dynamic_states[] = {
+      VK_DYNAMIC_STATE_SCISSOR,
+      VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT,
+      VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
+      VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT,
+   };
+   const VkPipelineDynamicStateCreateInfo dynamic_state = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = sizeof(dynamic_states) / sizeof(dynamic_states[0]),
+      .pDynamicStates = dynamic_states,
+   };
+#endif
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
       .stageCount = 2,
@@ -3322,6 +3403,9 @@ main(void)
       .pRasterizationState = &raster,
       .pMultisampleState = &multisample,
       .pColorBlendState = &blend,
+#if G17P_DYNAMIC_BLEND
+      .pDynamicState = &dynamic_state,
+#endif
       .layout = pipeline_layout,
       .renderPass = render_pass,
    };
@@ -3558,6 +3642,10 @@ main(void)
       {.color = {.float32 = {0.0625f, 0.125f, 0.1875f, 0.25f}}},
       {.color = {.float32 = {0.3125f, 0.375f, 0.4375f, 0.5f}}},
    };
+#elif G17P_DYNAMIC_BLEND
+   const VkClearValue clear = {
+      .color = {.float32 = {0.25f, 0.5f, 0.75f, 1.0f}},
+   };
 #elif G17P_R32_SINT || G17P_RG16_SINT || G17P_RG32_SINT ||              \
    G17P_RG8_SINT || G17P_RGBA8_SINT || G17P_R8_SINT ||                \
    G17P_RGBA16_SINT || G17P_RGBA32_SINT || G17P_R16_SINT
@@ -3666,6 +3754,45 @@ main(void)
    }
 #elif G17P_BRESENHAM_LINES
    vkCmdDraw(command_buffer, 2, 1, 0, 0);
+#elif G17P_DYNAMIC_BLEND
+   const VkRect2D dynamic_scissors[2] = {
+      {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT}},
+      {
+         .offset = {IMAGE_WIDTH / 2, 0},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT},
+      },
+   };
+   const VkColorBlendEquationEXT reverse_subtract = {
+      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .colorBlendOp = VK_BLEND_OP_REVERSE_SUBTRACT,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+   };
+   const VkColorBlendEquationEXT overwrite = {
+      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+   };
+   const VkBool32 enables[2] = {VK_TRUE, VK_FALSE};
+   const VkColorComponentFlags masks[2] = {
+      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT,
+      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+   };
+   const VkColorBlendEquationEXT equations[2] = {
+      reverse_subtract, overwrite,
+   };
+   for (unsigned i = 0; i < 2; ++i) {
+      vkCmdSetScissor(command_buffer, 0, 1, &dynamic_scissors[i]);
+      vkCmdSetColorBlendEnableEXT(command_buffer, 0, 1, &enables[i]);
+      vkCmdSetColorBlendEquationEXT(command_buffer, 0, 1, &equations[i]);
+      vkCmdSetColorWriteMaskEXT(command_buffer, 0, 1, &masks[i]);
+      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   }
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #endif
@@ -3753,7 +3880,7 @@ main(void)
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
-   G17P_RGBA8_MRT ||                                                     \
+   G17P_RGBA8_MRT || G17P_DYNAMIC_BLEND ||                              \
    G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -3863,6 +3990,7 @@ main(void)
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
    G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT || G17P_RGBA8_MRT ||        \
+   G17P_DYNAMIC_BLEND ||                                                 \
    G17P_RG16_UNORM ||                                                     \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -4101,6 +4229,11 @@ main(void)
    printf(PROBE_NAME ": PASS — exact independent constant-color/alpha "
                      "blend immediately/3s, guards unchanged, checksum %016"
                      PRIx64 "\n", checksum);
+#elif G17P_DYNAMIC_BLEND
+   printf(PROBE_NAME ": PASS — dynamic blend enable/equation/write-mask "
+                     "updates produced exact split output immediately/3s, "
+                     "guards unchanged, checksum %016" PRIx64 "\n",
+          checksum);
 #elif G17P_RGBA16_UINT
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UINT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
