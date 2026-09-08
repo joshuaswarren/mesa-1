@@ -4522,11 +4522,73 @@ TEST_F(AGX3PackBinary, G17PColourPackingKeepsNativeUniformSources)
 TEST_F(AGX3PackBinary, G17PTexelFetchLODMaterializesUniform)
 {
    EXPECT_FALSE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX3B,
-      AGX_OPCODE_TEXTURE_LOAD, 1, 16, AGX_SIZE_16));
+      AGX_OPCODE_TEXTURE_LOAD, 1, 16, AGX_SIZE_32));
    EXPECT_TRUE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX3B,
       AGX_OPCODE_TEXTURE_LOAD, 2, 16, AGX_SIZE_64));
    EXPECT_TRUE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX2,
       AGX_OPCODE_TEXTURE_LOAD, 1, 16, AGX_SIZE_16));
+}
+
+TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_register(4, AGX_SIZE_32), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_typed_lod(
+      enc, 4, 1, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_fetch_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.coord_kill = true;
+   d.final = true;
+   d.register_lod = true;
+   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(enc);
+   bad->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index bad_dest = agx_register(8, AGX_SIZE_32);
+   bad_dest.channels_m1 = 3;
+   agx_index bad_coord = agx_register(12, AGX_SIZE_32);
+   bad_coord.channels_m1 = 1;
+   agx_instr *bad_I = agx_texture_sample_to(
+      bad, bad_dest, bad_coord, agx_register(4, AGX_SIZE_16),
+      agx_immediate(0), agx_immediate(0), agx_immediate(0), agx_null(),
+      AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0, false, false, false,
+      AGX_GATHER_NONE, false);
+   bad_I->op = AGX_OPCODE_TEXTURE_LOAD;
+   bad_I->mask = 15;
+   pack(bad, /*expect_ok=*/false);
 }
 
 TEST_F(AGX3PackBinary, G17PFltnormStartMatchesNativeF32Uniforms)

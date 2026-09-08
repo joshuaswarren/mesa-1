@@ -398,6 +398,22 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);
             const bool fetch = tex->op == nir_texop_txf;
             nir_def *sampler = fetch ? NULL : g17p_sample_heap_index(tex);
+
+            /* texture2d::read takes a uint level on AGX3.  The shared AGX2
+             * texture lowering narrows every NIR LOD source to 16 bits, but
+             * G17P's integer PACK_SMPIR form consumes a full 32-bit scalar.
+             * Leaving the upper half unwritten makes the native sampler see
+             * an indeterminate, usually out-of-range level and return zero.
+             * Restore the API integer width before AIR is formed. */
+            if (fetch) {
+               const int lod =
+                  nir_tex_instr_src_index(tex, nir_tex_src_lod);
+               assert(lod >= 0);
+               nir_src_rewrite(&tex->src[lod].src,
+                               nir_imm_intN_t(
+                                  &b, nir_src_as_uint(tex->src[lod].src), 32));
+            }
+
             nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));
             /* Descriptor offsets are 32-bit and valid sets fit far below
              * 4GiB. Add the field offset before widening so native LDDEV can

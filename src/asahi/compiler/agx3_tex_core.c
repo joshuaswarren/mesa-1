@@ -604,8 +604,9 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
 }
 
 /* Fresh native G17P LOD fragment witnesses use this 12-byte PACK_SMPIR for a
- * scalar half LOD, preserving the source when it remains live. f5=6 selects
- * operand bank 6, not architectural r3. */
+ * scalar LOD, preserving the source when it remains live. f5=6 selects
+ * operand bank 6, not architectural r3. The FLOAT source is a half, while the
+ * INTEGER source is the full uint required by texture2d::read. */
 bool
 agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                          uint16_t wait_mask, bool src_cache, bool src_discard,

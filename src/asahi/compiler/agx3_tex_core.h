@@ -259,8 +259,9 @@ struct agx3_tex_sample_desc {
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate
  * from GPRs and the coordinate staging bank. `kind` selects how the level is
- * typed: FLOAT for the filtered sample's `level(x)`, INTEGER for a texel
- * fetch's level. */
+ * typed: FLOAT for the filtered sample's 16-bit `level(x)`, INTEGER for a
+ * texel fetch's 32-bit uint level. `src` is a half-register address in either
+ * case, so integer callers must name an aligned 32-bit register. */
 bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
                               uint8_t slot, uint16_t wait_mask,
                               bool src_cache, bool src_discard,

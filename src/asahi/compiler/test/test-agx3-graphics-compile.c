@@ -1102,6 +1102,90 @@ lower_test_descriptor_set(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static bool
+contains_integer_lod_stage(const struct agx_shader_part *part)
+{
+   const uint8_t *binary = part->binary;
+   uint8_t candidate[AGX3_TEX_MAX_LENGTH], length;
+
+   for (unsigned src = 0; src < 256; src += 2) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         for (unsigned wait = 0; wait < 64; ++wait) {
+            for (unsigned hint = 0; hint < 3; ++hint) {
+               if (!agx3_tex_stage_typed_lod(
+                      AGX_ISA_ENCODING_AGX3B, src, slot, wait,
+                      hint == 1, hint == 2, AGX3_TEX_LEVEL_INTEGER,
+                      candidate, &length))
+                  continue;
+
+               for (unsigned offset = 0;
+                    offset + length <= part->info.binary_size; ++offset) {
+                  if (!memcmp(binary + offset, candidate, length))
+                     return true;
+               }
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
+/* Keep the cross-generation width conversion tied to the full compiler path.
+ * NIR legalizes texture LODs to 16 bits for AGX2, but native G17P read() has a
+ * uint level. This is the exact nonzero fragment fetch shape used by the
+ * hardware oracle, with constant promotion enabled as Honeykrisp enables it. */
+static bool
+test_g17p_nonzero_fetch_lod_compile(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P nonzero texel-fetch level");
+   nir_def *image =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_backend1, nir_imm_ivec2(&b, 3, 4));
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(
+      nir_tex_src_lod, nir_imm_intN_t(&b, 2, 16));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+   const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   ok &= lod >= 0 && nir_src_bit_size(tex->src[lod].src) == 32 &&
+         nir_src_is_const(tex->src[lod].src) &&
+         nir_src_as_uint(tex->src[lod].src) == 2;
+
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .no_stop = true,
+      .promote_constants = true,
+      .reserved_preamble = 16,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary &&
+         contains_integer_lod_stage(&part);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
 test_g17p_cube_sample_lowering(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1307,6 +1391,7 @@ test_indexed_fetch_sets(void)
                ok &= si<0 && tex->op==nir_texop_txf;
                int li=nir_tex_instr_src_index(tex,nir_tex_src_lod);
                ok &= li>=0 && nir_src_is_const(tex->src[li].src) &&
+                     nir_src_bit_size(tex->src[li].src)==32 &&
                      nir_src_as_uint(tex->src[li].src)==
                         (tex->is_array ? 63 : 2);
                fetches++;
@@ -2831,7 +2916,8 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-fetch-only")) {
-      const bool ok=test_indexed_fetch_sets();
+      const bool ok=test_indexed_fetch_sets() &&
+                    test_g17p_nonzero_fetch_lod_compile();
       printf("mixed indexed texture reads, sample, sets and arrays: %s\n",ok?"PASS":"FAIL");
       return ok?0:1;
    }
@@ -2935,6 +3021,11 @@ main(int argc, char **argv)
 
    if (!test_txf_lowering()) {
       fputs("static TXF descriptor lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_nonzero_fetch_lod_compile()) {
+      fputs("G17P nonzero texel-fetch LOD lost its uint staging\n", stderr);
       all_ok = false;
    }
 

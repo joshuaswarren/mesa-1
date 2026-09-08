@@ -870,7 +870,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       I->src[3].type == AGX_INDEX_IMMEDIATE;
    const bool register_lod =
       I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
-      agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_16 &&
+      agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_32 &&
       agx_channels(I->src[1]) == 1;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
