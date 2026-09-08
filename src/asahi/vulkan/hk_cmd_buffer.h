@@ -504,7 +504,9 @@ struct hk_cmd_buffer {
    } state;
 
    struct {
-      struct hk_uploader main, usc;
+      /* VDM roots and nested payloads have a finite low alias aperture on
+       * G17P. Keep them densely packed away from ordinary main uploads. */
+      struct hk_uploader main, usc, vdm;
    } uploader;
 
    /* List of all recorded control streams */
@@ -603,6 +605,8 @@ hk_bound_sw_vs_before_gs(struct hk_graphics_state *gfx)
 
 struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
                                       uint32_t alignment, bool usc);
+struct agx_ptr hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd,
+                                         uint32_t size, uint32_t alignment);
 
 uint64_t hk_g17p_vdm_compact(struct hk_cmd_buffer *cmd, uint64_t primary);
 uint64_t hk_g17p_vdm_alias(struct hk_cmd_buffer *cmd, uint64_t primary);
@@ -642,7 +646,7 @@ hk_pool_usc_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 static inline struct agx_ptr
 hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   struct agx_ptr T = hk_pool_alloc(cmd, size, alignment);
+   struct agx_ptr T = hk_pool_vdm_primary_alloc(cmd, size, alignment);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    if (T.gpu && hk_g17p_vdm_low_window_enabled(&dev->dev)) {
@@ -664,11 +668,17 @@ static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
                              bool compute)
 {
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return NULL;
+
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       size_t initial_size = hk_cs_root_size(dev->dev.chip, compute);
-      struct agx_ptr root = hk_pool_alloc(cmd, initial_size, 1024);
+      struct agx_ptr root = compute
+                               ? hk_pool_alloc(cmd, initial_size, 1024)
+                               : hk_pool_vdm_primary_alloc(cmd, initial_size,
+                                                           1024);
       if (!root.cpu)
          return NULL;
 
@@ -688,9 +698,14 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
 
-      if (!compute && !hk_cs_init_graphics(cmd, cs)) {
-         free(cs);
-         return NULL;
+      if (!compute) {
+         const bool initialized = hk_cs_init_graphics(cmd, cs);
+         if (!hk_graphics_cs_publishable(
+                dev->dev.chip, initialized,
+                cs->agx3_active_context_selector_valid)) {
+            free(cs);
+            return NULL;
+         }
       }
 
       /* Insert into the command buffer. We usually append to the end of the

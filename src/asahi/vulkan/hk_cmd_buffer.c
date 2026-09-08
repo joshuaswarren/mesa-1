@@ -58,25 +58,32 @@ hk_g17p_vdm_lookup(struct hk_cmd_buffer *cmd, uint64_t primary, bool bind)
    if (!hk_g17p_vdm_low_window_enabled(&dev->dev))
       return primary;
 
-   list_for_each_entry(struct hk_cmd_bo, bo, &cmd->uploader.main.bos, link) {
-      const uint64_t start = bo->bo->va->addr;
-      if (primary < start || primary - start >= bo->bo->size)
-         continue;
+   struct list_head *lists[] = {
+      &cmd->uploader.vdm.bos,
+      &cmd->uploader.main.bos,
+   };
 
-      if (bind) {
-         const VkResult result =
-            hk_cmd_bo_ensure_vdm_alias(hk_cmd_buffer_pool(cmd), bo);
-         if (result != VK_SUCCESS) {
-            vk_command_buffer_set_error(&cmd->vk, result);
-            return 0;
+   for (unsigned l = 0; l < ARRAY_SIZE(lists); ++l) {
+      list_for_each_entry(struct hk_cmd_bo, bo, lists[l], link) {
+         const uint64_t start = bo->bo->va->addr;
+         if (primary < start || primary - start >= bo->bo->size)
+            continue;
+
+         if (bind) {
+            const VkResult result =
+               hk_cmd_bo_ensure_vdm_alias(hk_cmd_buffer_pool(cmd), bo);
+            if (result != VK_SUCCESS) {
+               vk_command_buffer_set_error(&cmd->vk, result);
+               return 0;
+            }
          }
-      }
 
-      const uint64_t alias = bo->g17p_vdm_alias + (primary - start);
-      uint32_t compact = 0;
-      if (agx_g17p_vdm_alias_compact(alias, &compact))
-         return compact;
-      break;
+         const uint64_t alias = bo->g17p_vdm_alias + (primary - start);
+         uint32_t compact = 0;
+         if (agx_g17p_vdm_alias_compact(alias, &compact))
+            return compact;
+         break;
+      }
    }
 
    mesa_loge("G17P VDM address %#" PRIx64 " has no low command-BO alias",
@@ -122,6 +129,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    hk_cmd_pool_free_bo_list(pool, &cmd->uploader.main.bos);
    hk_cmd_pool_free_usc_bo_list(pool, &cmd->uploader.usc.bos);
+   hk_cmd_pool_free_vdm_bo_list(pool, &cmd->uploader.vdm.bos);
 
    list_for_each_entry_safe(struct hk_cs, it, &cmd->control_streams, node) {
       list_del(&it->node);
@@ -179,6 +187,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
 
    list_inithead(&cmd->uploader.main.bos);
    list_inithead(&cmd->uploader.usc.bos);
+   list_inithead(&cmd->uploader.vdm.bos);
    list_inithead(&cmd->control_streams);
 
    *cmd_buffer_out = &cmd->vk;
@@ -202,6 +211,9 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->uploader.usc.map = NULL;
    cmd->uploader.usc.base = 0;
    cmd->uploader.usc.offset = 0;
+   cmd->uploader.vdm.map = NULL;
+   cmd->uploader.vdm.base = 0;
+   cmd->uploader.vdm.offset = 0;
 
    cmd->current_cs.gfx = NULL;
    cmd->current_cs.cs = NULL;
@@ -244,33 +256,36 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 }
 
 static VkResult
-hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,
+hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc, bool vdm,
                        struct hk_cmd_bo **bo_out)
 {
-   VkResult result = hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, bo_out);
+   VkResult result =
+      hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, vdm, bo_out);
    if (result != VK_SUCCESS)
       return result;
 
    if (usc)
       list_addtail(&(*bo_out)->link, &cmd->uploader.usc.bos);
+   else if (vdm)
+      list_addtail(&(*bo_out)->link, &cmd->uploader.vdm.bos);
    else
       list_addtail(&(*bo_out)->link, &cmd->uploader.main.bos);
 
    return VK_SUCCESS;
 }
 
-struct agx_ptr
-hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
-                       uint32_t alignment, bool usc)
+static struct agx_ptr
+hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
+                   uint32_t size, uint32_t alignment, bool usc, bool vdm)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_uploader *uploader =
-      usc ? &cmd->uploader.usc : &cmd->uploader.main;
+   assert(!(usc && vdm));
 
    /* Specially handle large allocations owned by the command buffer, e.g. used
     * for statically allocated vertex output buffers with geometry shaders.
     */
    if (size > HK_CMD_BO_SIZE) {
+      assert(!vdm && "large VDM allocations need explicit alias tracking");
       uint32_t flags = usc ? AGX_BO_LOW_VA : 0;
       struct agx_bo *bo =
          agx_bo_create(&dev->dev, size, 0, flags, "Large pool allocation");
@@ -303,10 +318,18 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
    }
 
    struct hk_cmd_bo *bo;
-   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, &bo);
+   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, vdm, &bo);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);
       return (struct agx_ptr){0};
+   }
+
+   if (vdm) {
+      result = hk_cmd_bo_ensure_vdm_alias(hk_cmd_buffer_pool(cmd), bo);
+      if (unlikely(result != VK_SUCCESS)) {
+         vk_command_buffer_set_error(&cmd->vk, result);
+         return (struct agx_ptr){0};
+      }
    }
 
    /* Pick whichever of the current upload BO and the new BO will have more
@@ -325,6 +348,27 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
       .gpu = bo->bo->va->addr,
       .cpu = bo->map,
    };
+}
+
+struct agx_ptr
+hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
+                       uint32_t alignment, bool usc)
+{
+   struct hk_uploader *uploader =
+      usc ? &cmd->uploader.usc : &cmd->uploader.main;
+   return hk_pool_alloc_from(cmd, uploader, size, alignment, usc, false);
+}
+
+struct agx_ptr
+hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
+                          uint32_t alignment)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (!hk_g17p_vdm_low_window_enabled(&dev->dev))
+      return hk_pool_alloc(cmd, size, alignment);
+
+   return hk_pool_alloc_from(cmd, &cmd->uploader.vdm, size, alignment, false,
+                             true);
 }
 
 uint64_t
@@ -1806,7 +1850,9 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * by the batch to simplify lifetime management for the BO.
     */
    size_t size = 65536;
-   struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
+   struct agx_ptr T = vdm
+                         ? hk_pool_vdm_primary_alloc(cmd, size, 256)
+                         : hk_pool_alloc(cmd, size, 256);
 
    /* Jump from the old control stream to the new control stream. */
    void *link_end =

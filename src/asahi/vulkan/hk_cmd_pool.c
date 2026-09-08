@@ -153,7 +153,11 @@ hk_CreateCommandPool(VkDevice _device,
    }
 
    list_inithead(&pool->free_bos);
+   pool->num_free_bos = 0;
    list_inithead(&pool->free_usc_bos);
+   pool->num_free_usc_bos = 0;
+   list_inithead(&pool->free_vdm_bos);
+   pool->num_free_vdm_bos = 0;
 
    *pCmdPool = hk_cmd_pool_to_handle(pool);
 
@@ -167,22 +171,36 @@ hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
       hk_cmd_bo_destroy(pool, bo);
 
    list_inithead(&pool->free_bos);
+   pool->num_free_bos = 0;
 
    list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_usc_bos, link)
       hk_cmd_bo_destroy(pool, bo);
 
    list_inithead(&pool->free_usc_bos);
+   pool->num_free_usc_bos = 0;
+
+   list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_vdm_bos, link)
+      hk_cmd_bo_destroy(pool, bo);
+
+   list_inithead(&pool->free_vdm_bos);
+   pool->num_free_vdm_bos = 0;
 }
 
 VkResult
-hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool usc,
+hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool usc, bool vdm,
                      struct hk_cmd_bo **bo_out)
 {
+   assert(!(usc && vdm));
    struct hk_cmd_bo *bo = NULL;
    if (usc) {
       if (!list_is_empty(&pool->free_usc_bos)) {
          bo = list_first_entry(&pool->free_usc_bos, struct hk_cmd_bo, link);
          pool->num_free_usc_bos--;
+      }
+   } else if (vdm) {
+      if (!list_is_empty(&pool->free_vdm_bos)) {
+         bo = list_first_entry(&pool->free_vdm_bos, struct hk_cmd_bo, link);
+         pool->num_free_vdm_bos--;
       }
    } else {
       if (!list_is_empty(&pool->free_bos)) {
@@ -223,6 +241,20 @@ hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
       } else {
          list_addtail(&bo->link, &pool->free_usc_bos);
          pool->num_free_usc_bos++;
+      }
+   }
+}
+
+void
+hk_cmd_pool_free_vdm_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
+{
+   list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
+      list_del(&bo->link);
+      if (pool->num_free_vdm_bos >= HK_CMD_POOL_BO_MAX) {
+         hk_cmd_bo_destroy(pool, bo);
+      } else {
+         list_addtail(&bo->link, &pool->free_vdm_bos);
+         pool->num_free_vdm_bos++;
       }
    }
 }

@@ -38,3 +38,11 @@ hk_g17p_vdm_needs_render_split(enum agx_chip chip, unsigned commands,
    return chip == AGX_CHIP_G17P && commands > 0 &&
           !hk_cs_space_fits(remaining, HK_GFX_DRAW_RESERVATION, link_length);
 }
+
+static inline bool
+hk_graphics_cs_publishable(enum agx_chip chip, bool initialized,
+                           bool active_context_selector_valid)
+{
+   return initialized &&
+          (chip != AGX_CHIP_G17P || active_context_selector_valid);
+}

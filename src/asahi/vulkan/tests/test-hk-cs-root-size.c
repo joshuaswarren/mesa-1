@@ -50,6 +50,35 @@ main(void)
    assert(offset == 128 * 1024);
    assert(HK_G17P_VDM_ROOT_SIZE > command_bo_size - offset);
 
+   /* vkQuake exposed the previous one-general-BO-per-alias failure only after
+    * filling all 192 slots in the native 24 MiB aperture. A dedicated VDM
+    * uploader must pack more than that many simultaneously live roots without
+    * exhausting the aperture. */
+   const unsigned live_roots = 193;
+   const unsigned alias_slots = (24 * 1024 * 1024) / command_bo_size;
+   unsigned packed_bos = 1;
+   offset = 0;
+   for (unsigned i = 0; i < live_roots; ++i) {
+      offset = (offset + 1023) & ~((size_t)1023);
+      if (HK_G17P_VDM_ROOT_SIZE > command_bo_size - offset) {
+         packed_bos++;
+         offset = 0;
+      }
+      offset += HK_G17P_VDM_ROOT_SIZE;
+   }
+   assert(alias_slots == 192);
+   assert(packed_bos == 49);
+   assert(packed_bos < alias_slots);
+
+   /* A failed or reset graphics initialization cannot publish a G17P VDM
+    * stream, even if stale storage happens to contain a selector. Conversely,
+    * successful initialization still has to establish the selector itself. */
+   assert(!hk_graphics_cs_publishable(AGX_CHIP_G17P, false, false));
+   assert(!hk_graphics_cs_publishable(AGX_CHIP_G17P, false, true));
+   assert(!hk_graphics_cs_publishable(AGX_CHIP_G17P, true, false));
+   assert(hk_graphics_cs_publishable(AGX_CHIP_G17P, true, true));
+   assert(hk_graphics_cs_publishable(AGX_CHIP_G14G, true, false));
+
    puts("G17P graphics root sizing and command-BO sharing PASS");
    return 0;
 }
