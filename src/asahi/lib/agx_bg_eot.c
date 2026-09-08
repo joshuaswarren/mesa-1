@@ -244,7 +244,8 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
 static nir_def *
 build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
-                    unsigned nr, bool msaa, bool layered, bool wide_coords)
+                    unsigned nr, bool source_msaa, bool layered,
+                    bool wide_coords)
 {
    if (op == AGX_BG_LOAD) {
       nir_def *coord = nir_load_pixel_coord(b);
@@ -252,7 +253,7 @@ build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
       /* MSAA/array lowerings assume 32-bit coordinates, could be lifted but
        * that's going to need more work.
        */
-      if (layered || msaa || wide_coords)
+      if (layered || source_msaa || wide_coords)
          coord = nir_u2u32(b, coord);
 
       if (layered) {
@@ -260,12 +261,12 @@ build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
                           nir_load_layer_id(b));
       }
 
-      b->shader->info.fs.uses_sample_shading |= msaa;
+      b->shader->info.fs.uses_sample_shading |= source_msaa;
 
       nir_def *tex = nir_txf(
-         b, coord, .ms_index = msaa ? nir_load_sample_id(b) : NULL,
+         b, coord, .ms_index = source_msaa ? nir_load_sample_id(b) : NULL,
          .texture_index = rt * 2,
-         .dim = msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+         .dim = source_msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
          .is_array = layered,
 
          /* The type doesn't matter as long as it matches the store */
@@ -305,11 +306,12 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
 
       unsigned nr = util_format_get_nr_components(key->tib.logical_format[rt]);
       bool msaa = key->tib.nr_samples > 1;
+      bool source_msaa = msaa && !key->single_sample_reload;
       bool layered = key->tib.layered;
       assert(nr > 0);
 
       nir_store_output(
-         &b, build_background_op(&b, key->op[rt], rt, nr, msaa, layered,
+         &b, build_background_op(&b, key->op[rt], rt, nr, source_msaa, layered,
                                  cache->dev->chip == AGX_CHIP_G17P),
          nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(nr),
          .src_type = nir_type_uint32,

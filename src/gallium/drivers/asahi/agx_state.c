@@ -1197,6 +1197,10 @@ agx_set_framebuffer_state(struct pipe_context *pctx,
                                ctx->framebuffer.cbufs[i].format);
    }
 
+   if (state->resolve)
+      agx_legalize_compression(ctx, agx_resource(state->resolve),
+                               state->resolve->format);
+
    agx_legalize_compression(ctx, agx_resource(ctx->framebuffer.zsbuf.texture),
                             ctx->framebuffer.zsbuf.format);
 
@@ -1222,6 +1226,45 @@ image_view_for_surface(const struct pipe_surface *surf)
       .u.tex.last_layer = surf->last_layer,
       .u.tex.level = surf->level,
    };
+}
+
+/* The Gen9 path proven by Honeykrisp resolves a 2x/4x colour tile directly
+ * into an ordinary single-sample PBE target. Gallium exposes exactly that WSI
+ * contract through pipe_framebuffer_state::resolve: the multisample colour
+ * attachment is transient and resolve names the image presented by the
+ * loader. Keep every other resolve shape on the existing fail-closed path.
+ */
+static bool
+agx_g17p_direct_resolve_surface(struct agx_batch *batch,
+                                struct pipe_surface *out)
+{
+   const struct pipe_framebuffer_state *fb = &batch->key;
+   const struct pipe_surface *source = &fb->cbufs[0];
+   struct pipe_resource *target = fb->resolve;
+   if (agx_device(batch->ctx->base.screen)->chip != AGX_CHIP_G17P ||
+       fb->nr_cbufs != 1 || !source->texture || !target ||
+       (util_res_sample_count(source->texture) != 2 &&
+        util_res_sample_count(source->texture) != 4) ||
+       util_res_sample_count(target) != 1 || source->level != 0 ||
+       source->first_layer != 0 || source->last_layer != 0 ||
+       (target->target != PIPE_TEXTURE_2D &&
+        target->target != PIPE_TEXTURE_RECT) ||
+       target->last_level != 0 || target->array_size != 1 ||
+       target->depth0 != 1 || target->format != source->format ||
+       target->width0 != fb->width || target->height0 != fb->height ||
+       source->texture->width0 != fb->width ||
+       source->texture->height0 != fb->height ||
+       !agx_g17p_rt0_tile_layout_supported(&batch->tilebuffer_layout))
+      return false;
+
+   *out = (struct pipe_surface){
+      .format = source->format,
+      .first_layer = 0,
+      .last_layer = 0,
+      .level = 0,
+      .texture = target,
+   };
+   return true;
 }
 
 /* Similarly, to read render targets, surfaces are bound as textures */
@@ -3878,7 +3921,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       agx_native_descriptor_rejected(dev, "background heap geometry");
 
    /* Construct the key */
-   struct agx_bg_eot_key key = {.tib = batch->tilebuffer_layout};
+   struct agx_bg_eot_key key = {
+      .tib = batch->tilebuffer_layout,
+      .single_sample_reload =
+         dev->chip == AGX_CHIP_G17P && !store &&
+         batch->tilebuffer_layout.nr_samples > 1 && batch->key.resolve,
+   };
 
    bool needs_textures_for_spilled_rts =
       agx_tilebuffer_spills(&batch->tilebuffer_layout) && !partial_render &&
@@ -3961,7 +4009,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          agx_get_bg_eot_shader(&ctx->bg_eot, &key);
       const bool shader_supported =
          shader && shader->bo && shader->bo->va && shader->ptr &&
-         shader->info.binary_size && shader->info.binary_size <= 256 &&
+         shader->info.binary_size && shader->info.binary_size <= 512 &&
          shader->info.main_offset < shader->info.binary_size &&
          shader->info.main_size <=
             shader->info.binary_size - shader->info.main_offset &&
@@ -4005,6 +4053,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       uint64_t resource_spec = 0;
       if (store && op == AGX_EOT_STORE) {
          const struct pipe_surface *surf = &batch->key.cbufs[0];
+         struct pipe_surface resolve_surf;
+         if (key.tib.nr_samples > 1) {
+            if (!agx_g17p_direct_resolve_surface(batch, &resolve_surf))
+               agx_native_descriptor_rejected(dev, "direct colour resolve");
+            surf = &resolve_surf;
+         }
          const struct pipe_surface *surf1 =
             dual_mrt_active ? &batch->key.cbufs[1] : NULL;
          if (!surf->texture || (dual_mrt_active && !surf1->texture) ||
@@ -4017,7 +4071,8 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          struct agx_ptr pbe =
             agx_pool_alloc_aligned(&batch->pool, pbe_size, 32);
          for (unsigned rt = 0; rt < (dual_mrt_active ? 2 : 1); ++rt) {
-            const struct pipe_surface *attachment = &batch->key.cbufs[rt];
+            const struct pipe_surface *attachment =
+               rt == 0 ? surf : &batch->key.cbufs[rt];
             struct pipe_image_view view = image_view_for_surface(attachment);
             view.format = util_format_linear(view.format);
             const bool no_compress =
@@ -4073,6 +4128,13 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          program_length = native.length;
       } else {
          const struct pipe_surface *surf = &batch->key.cbufs[0];
+         struct pipe_surface resolve_surf;
+         if (key.single_sample_reload) {
+            if (!agx_g17p_direct_resolve_surface(batch, &resolve_surf))
+               agx_native_descriptor_rejected(dev,
+                                              "single-sample WSI reload");
+            surf = &resolve_surf;
+         }
          if (!surf->texture)
             agx_native_descriptor_rejected(dev, "background attachment");
 
@@ -4523,6 +4585,12 @@ agx_batch_init_state(struct agx_batch *batch)
          agx_batch_writes(batch, rsrc, level);
          assert(agx_resource_valid(rsrc, level));
       }
+   }
+
+   if (batch->key.resolve) {
+      struct agx_resource *resolve = agx_resource(batch->key.resolve);
+      agx_batch_writes(batch, resolve, 0);
+      assert(agx_resource_valid(resolve, 0));
    }
 
    /* Set up standard sample positions */

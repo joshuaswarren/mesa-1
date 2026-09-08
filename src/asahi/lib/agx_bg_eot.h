@@ -53,6 +53,8 @@ struct agx_bg_eot_key {
    struct agx_tilebuffer_layout tib;
    enum agx_bg_eot_op op[8];
    unsigned reserved_preamble;
+   /* Replicate a single-sample WSI colour into every multisample tile lane. */
+   bool single_sample_reload;
 };
 
 struct agx_bg_eot_shader {
