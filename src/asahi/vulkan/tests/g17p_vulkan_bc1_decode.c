@@ -232,7 +232,12 @@ static void
 put_astc_void_extent(uint8_t *block, uint16_t r, uint16_t g, uint16_t b,
                      uint16_t a)
 {
-   const uint16_t words[8] = {0x0dfc, 0, 0, 0, r, g, b, a};
+   /* 0xdfc is the 2D LDR void-extent mode.  All four 13-bit extent
+    * coordinates must be either a valid increasing rectangle or 0x1fff;
+    * use the all-ones no-extent form so every texel takes the constant. */
+   const uint16_t words[8] = {
+      0xfdfc, 0xffff, 0xffff, 0xffff, r, g, b, a,
+   };
    for (unsigned i = 0; i < 8; ++i) {
       block[2 * i] = words[i];
       block[2 * i + 1] = words[i] >> 8;
