@@ -210,8 +210,13 @@
 #define G17P_TEXTURE_GATHER 0
 #endif
 
+#ifndef G17P_SATURATE_TEXTURE
+#define G17P_SATURATE_TEXTURE 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
-#define G17P_TEXTURE_ORACLE (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER)
+#define G17P_TEXTURE_ORACLE                                                \
+   (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE)
 
 #if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
@@ -274,6 +279,11 @@
 #include "g17p_vulkan_texture_gather_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texture_gather_frag_spv
+#elif G17P_SATURATE_TEXTURE
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_saturate_texture_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_saturate_texture_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -812,6 +822,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SATURATE_TEXTURE
+#define PROBE_NAME "g17p-vulkan-saturate-texture"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1278,6 +1293,9 @@ verify_readback(const uint8_t *map)
    /* For P=(0.5,0.5) on mip 0, gather returns the red component from
     * (31,32), (32,32), (32,31), (31,31), in that order. */
    static const uint8_t expected[4] = {170, 255, 85, 0};
+#elif G17P_SATURATE_TEXTURE
+   /* White multiplied by (-1, 2, 0.5, 0.25), then clamped to [0, 1]. */
+   static const uint8_t expected[4] = {0, 255, 128, 64};
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1419,6 +1437,8 @@ main(void)
        getenv("G17P_TEXTURE_GRAD_RECORD_ONLY") != NULL) ||
       (G17P_TEXTURE_GATHER &&
        getenv("G17P_TEXTURE_GATHER_RECORD_ONLY") != NULL) ||
+      (G17P_SATURATE_TEXTURE &&
+       getenv("G17P_SATURATE_TEXTURE_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -2070,9 +2090,15 @@ main(void)
    uint8_t texture_upload_expected[TEXTURE_UPLOAD_BYTES];
    memset(texture_upload_expected, 0xa5, sizeof(texture_upload_expected));
    static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
+#if G17P_SATURATE_TEXTURE
+      {0xff, 0xff, 0xff, 0xff},
+      {0xff, 0xff, 0xff, 0xff},
+      {0xff, 0xff, 0xff, 0xff},
+#else
       {0xff, 0x00, 0x00, 0xff},
       {0x00, 0xff, 0x00, 0xff},
       {0x00, 0x00, 0xff, 0xff},
+#endif
    };
    const size_t mip_offsets[TEXTURE_LEVELS] = {
       TEXTURE_GUARD_BYTES,
@@ -2953,6 +2979,12 @@ main(void)
    printf(PROBE_NAME ": PASS — textureGather red-component footprint and "
                      "lane order exact immediately/3s, all source/readback "
                      "guards unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_SATURATE_TEXTURE
+   printf(PROBE_NAME ": PASS — explicitly lowered saturated texture multiply "
+                     "produced exact lower, upper, and interior lanes "
+                     "immediately/3s; all source/readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n",
           checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
