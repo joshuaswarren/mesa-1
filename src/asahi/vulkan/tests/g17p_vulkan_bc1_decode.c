@@ -24,6 +24,11 @@
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC2_UNORM_BLOCK
 #define NAME "g17p-vulkan-bc2-decode"
+#elif defined(G17P_BC4_DECODE)
+#define BLOCK_BYTES 8
+#define BLOCK_DATA_BYTES 32
+#define TEST_FORMAT VK_FORMAT_BC4_UNORM_BLOCK
+#define NAME "g17p-vulkan-bc4-decode"
 #elif defined(G17P_BC5_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
@@ -156,7 +161,7 @@ fnv1a64(const uint8_t *data, size_t size)
 
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
-#if !defined(G17P_BC5_DECODE)
+#if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -218,7 +223,7 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
-#if defined(G17P_BC5_DECODE)
+#if defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
    static const uint8_t rg[4][2] = {
       {0x20, 0xe0}, {0x60, 0xa0}, {0xa0, 0x60}, {0xe0, 0x20},
    };
@@ -227,7 +232,9 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
    (void)indices;
    memset(out, 0, BLOCK_BYTES);
    out[0] = rg[block][0];
+#if defined(G17P_BC5_DECODE)
    out[8] = rg[block][1];
+#endif
 #else
 #if defined(G17P_BC2_DECODE)
    static const uint8_t alpha4[4] = {1, 5, 10, 15};
@@ -247,14 +254,18 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
-#if defined(G17P_BC5_DECODE)
+#if defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
    for (unsigned y = 0; y < HEIGHT; ++y) {
       for (unsigned x = 0; x < WIDTH; ++x) {
          const unsigned block = (y / 4) * 2 + x / 4;
          const uint8_t *encoded = blocks + block * BLOCK_BYTES;
          uint8_t *pixel = reference + (y * WIDTH + x) * 4;
          pixel[0] = encoded[0];
+#if defined(G17P_BC5_DECODE)
          pixel[1] = encoded[8];
+#else
+         pixel[1] = 0;
+#endif
          pixel[2] = 0;
          pixel[3] = 255;
       }
