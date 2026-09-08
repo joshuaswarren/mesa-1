@@ -741,8 +741,14 @@ hk_get_device_features(
       features->tessellationShader = false;
       features->sampleRateShading = false;
       features->pipelineStatisticsQuery = false;
-      features->vertexPipelineStoresAndAtomics = false;
-      features->fragmentStoresAndAtomics = false;
+      /* The graphics-stage descriptor, storage-write and atomic paths are
+       * complete and record through HAL200.  Keep their public promise behind
+       * the consolidated exact-side-effect qualification run. */
+      features->vertexPipelineStoresAndAtomics =
+         instance->vertex_stores &&
+         hk_g17p_unverified_feature("graphics_memory");
+      features->fragmentStoresAndAtomics =
+         hk_g17p_unverified_feature("graphics_memory");
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->shaderResourceMinLod = false;
@@ -789,14 +795,17 @@ hk_get_device_features(
       /* VK_KHR_shader_quad_control permits quad operations and derivatives
        * inside divergent control flow.  The ordinary subgroup quad shuffles
        * exposed below do not establish that stronger execution guarantee. */
-      features->shaderQuadControl = false;
+      features->shaderQuadControl =
+         hk_g17p_unverified_feature("shader_quad_control");
       /* HAL200's native storage-image fetch is memory-safe, but its TEX
        * descriptor does not bounds-check against the Vulkan image view.
        * Hardware qualification returned adjacent in-image texels for both
        * X- and Y-out-of-range coordinates, violating the zero RGB guarantee
        * shared by robustImageAccess and robustImageAccess2. */
-      features->robustImageAccess = false;
-      features->robustImageAccess2 = false;
+      features->robustImageAccess =
+         hk_g17p_unverified_feature("robust_images");
+      features->robustImageAccess2 =
+         hk_g17p_unverified_feature("robust_images");
    }
 }
 
@@ -1147,7 +1156,8 @@ hk_get_device_properties(const struct agx_device *dev,
       .defaultRobustnessVertexInputs =
          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
       .defaultRobustnessImages =
-         dev->chip == AGX_CHIP_G17P
+         dev->chip == AGX_CHIP_G17P &&
+               !hk_g17p_unverified_feature("robust_images")
             ? VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT
             : VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT,
 
@@ -1487,7 +1497,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
-      supported_extensions.KHR_shader_quad_control = false;
+      if (!hk_g17p_unverified_feature("shader_quad_control"))
+         supported_extensions.KHR_shader_quad_control = false;
    }
 
    struct vk_features supported_features;
