@@ -327,14 +327,12 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
    if (use->src[0].neg || use->src[0].abs)
       return false;
 
-   /* AGX3b's transcendental/rounding forms have no native saturation bit.
-    * Keep the following saturating fmov separate, matching Apple's native
-    * lowering, so the funop remains encodable and the clamp still happens. */
+   /* G17P's native saturate is a standalone f32add.ep2 of the value and -0.
+    * Pulling that modifier into its producer invents saturated forms for
+    * operations such as fmul and transcendental functions. Keep the exact
+    * Apple sequence intact for every producer. */
    if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       use->saturate &&
-       (I->op == AGX_OPCODE_FLOOR || I->op == AGX_OPCODE_CEIL ||
-        I->op == AGX_OPCODE_TRUNC || I->op == AGX_OPCODE_LOG2 ||
-        I->op == AGX_OPCODE_EXP2))
+       use->saturate)
       return false;
 
    /* We can fold f2f16 into 32-bit instructions, but we can't fold f2f32 into

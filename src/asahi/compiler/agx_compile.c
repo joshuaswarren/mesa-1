@@ -5045,11 +5045,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p) {
       agx3_options = *original_options;
       agx3_options.lower_iabs = false;
-      /* G17P's exact saturate form is the witnessed f32add.ep2 operation;
-       * fused saturation on arbitrary producers such as fmul is not encoded.
-       * Keep NIR's clamp as explicit min/max operations, whose native G17P
-       * forms are already byte-grounded. */
-      agx3_options.lower_fsat = true;
+      /* G17P's exact saturate form is the witnessed standalone f32add.ep2
+       * operation. Preserve fsat so isel emits that form; the backend
+       * optimizer keeps it separate from producers with no saturation bit. */
+      agx3_options.lower_fsat = false;
       /* The G17P integer encoder has no witnessed saturating-subtract form.
        * Lower it to the canonical unsigned compare, subtract, and select;
        * each resulting operation already has an Apple-exact encoding.  XFB

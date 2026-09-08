@@ -131,8 +131,9 @@ main(void)
    }
    printf("total=%u refused=%u\n", total, refused);
 
-   /* Measured 2026-09-07 under this tree. Lower it when a gap closes. */
-   const unsigned ceiling = 33136;
+   /* Keeping G17P fsat as its native standalone f32add.ep2 closes 416
+    * producer shapes without inventing saturated forms for those producers. */
+   const unsigned ceiling = 32720;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",

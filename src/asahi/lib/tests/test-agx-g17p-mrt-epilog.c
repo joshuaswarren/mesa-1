@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "agx_compile.h"
+#include "agx3_pixel_core.h"
 #include "agx_linker.h"
 #include "nir_builder.h"
 #include "util/format/u_formats.h"
@@ -105,7 +106,10 @@ main(void)
    const bool ok = compile_epilog(&actual_link, PIPE_FORMAT_R8_UNORM, false,
                                   true, &part) &&
                    part.info.agx3_colour_link.entry_emitted &&
-                   part.info.agx3_colour_link.straight_line;
+                   part.info.agx3_colour_link.straight_line &&
+                   part.info.agx3_colour_link.entry_offset == 0 &&
+                   part.info.main_offset == 0 &&
+                   part.info.main_size == part.info.binary_size;
    if (!ok)
       fprintf(stderr, "G17P RGBA16F+R8 MRT epilog did not compile\n");
    static const uint8_t expected_epilog[] = {
@@ -120,10 +124,30 @@ main(void)
       0x01,0x42,0x00,0x00,0x00,0x00,0x07,0x02,0x54,0x0c,0x02,0x00,
       0x0e,0x00,0x00,0x00,
    };
+   uint8_t entry[AGX3_PIXEL_MAX_LENGTH] = {0};
+   uint8_t entry_size = 0;
+   static const uint8_t stop[] = {0x0e, 0x00, 0x00, 0x00};
+   if (ok &&
+       (!agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, entry,
+                                 &entry_size) ||
+        entry_size != AGX3_PIXEL_MAX_LENGTH ||
+        memcmp((uint8_t *)part.binary + part.info.main_offset, entry,
+               entry_size) != 0 ||
+        memcmp((uint8_t *)part.binary + part.info.main_offset +
+                  part.info.main_size - sizeof(stop),
+               stop, sizeof(stop)) != 0)) {
+      fprintf(stderr, "G17P MRT epilog entry/stop ABI changed\n");
+      return 1;
+   }
    if (ok && (part.info.main_size != sizeof(expected_epilog) ||
               memcmp((uint8_t *)part.binary + part.info.main_offset,
                      expected_epilog, sizeof(expected_epilog)) != 0)) {
-      fprintf(stderr, "G17P MRT epilog bytes changed\n");
+      fprintf(stderr, "G17P MRT epilog bytes changed size=%u bytes=",
+              part.info.main_size);
+      for (unsigned i = 0; i < part.info.main_size; ++i)
+         fprintf(stderr, "%02x", ((uint8_t *)part.binary +
+                                   part.info.main_offset)[i]);
+      fputc('\n', stderr);
       return 1;
    }
    free(part.binary);

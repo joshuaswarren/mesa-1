@@ -385,6 +385,33 @@ TEST_F(Optimizer, FmulFsatF2F16)
       { agx_fmul_to(b, out, wx, wy)->saturate = true; });
 }
 
+TEST_F(Optimizer, G17PPreservesStandaloneSaturate)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_index product = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_fmul_to(actual, product, wx, wy);
+   agx_instr *sat = agx_fmov_to(actual, out, product);
+   sat->saturate = true;
+   agx_unit_test(actual, out);
+
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   product = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_fmul_to(expected, product, wx, wy);
+   sat = agx_fmov_to(expected, out, product);
+   sat->saturate = true;
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(Optimizer, FsatWithPhi)
 {
    /*
