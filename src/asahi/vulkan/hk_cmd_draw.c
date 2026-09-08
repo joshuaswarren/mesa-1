@@ -4423,8 +4423,38 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          struct agx_vdm_state_update encoded;
          if (!hk_agx3_encode_vdm_state_update_draw(dev->dev.chip, &info,
                                                     &encoded)) {
-            mesa_loge("no complete AGX3 VertexProgramVariant state for %s",
-                      agx_chip_name(dev->dev.chip));
+            const char *reason =
+               !pipeline_va_valid ? "pipeline-va"
+               : program->source_layout !=
+                    AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT
+                  ? "shader-layout"
+               : !cs->agx3_active_context_selector_valid ? "active-context"
+               : !ordinary_draw_path ? "transformed-draw"
+                                     : "template-fields";
+            mesa_loge_once(
+               "no complete AGX3 VertexProgramVariant state for %s: "
+               "reason=%s pipeline=0x%" PRIx64
+               " layout=%u active=%u/0x%08x ordinary=%u hw_eq_sw=%u "
+               "draw=%u indexed=%u indirect=%u restart=%u raster=%u "
+               "provoking=%u prim_id=%u topology=%u template="
+               "%u/%u/%u/%u/%u/%u/%u/%u",
+               agx_chip_name(dev->dev.chip), reason, pipeline_program,
+               (unsigned)program->source_layout,
+               cs->agx3_active_context_selector_valid,
+               cs->agx3_raw_active_context_selector, ordinary_draw_path,
+               hw_vs == sw_vs, (unsigned)info.draw_path, draw.indexed,
+               agx_is_indirect(draw.b), draw.restart,
+               info.rasterization_enabled, info.raw_provoking_selector,
+               gfx->generate_primitive_id,
+               (unsigned)dyn->ia.primitive_topology,
+               info.template_info.raw_state_load_count_12,
+               info.template_info.raw_state_load_count_18,
+               info.template_info.raw_vs_output_count_0,
+               info.template_info.raw_vs_output_count_2,
+               info.template_info.raw_vs_output_count_1_extra,
+               info.template_info.raw_vs_output_selector,
+               info.template_info.raw_vs_output_flag_6,
+               info.template_info.pre_hal300_flag_group_nonzero);
             vk_command_buffer_set_error(&cmd->vk,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             cs->current = out;
