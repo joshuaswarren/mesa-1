@@ -2003,7 +2003,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * us fold in an inot) but meh?
        */
       return agx_icmp_to(b, dst,
-                         agx_get_sr_coverage(b, 32, AGX_SR_IS_ACTIVE_THREAD),
+                         agx_get_sr_coverage(
+                            b, b->shader->key->dev.encoding ==
+                                  AGX_ISA_ENCODING_AGX2 ? 32 : 16,
+                            AGX_SR_IS_ACTIVE_THREAD),
                          agx_zero(), AGX_ICOND_UEQ, false);
 
    case nir_intrinsic_load_vertex_id_zero_base:

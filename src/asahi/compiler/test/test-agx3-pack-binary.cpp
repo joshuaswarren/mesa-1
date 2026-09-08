@@ -41,6 +41,7 @@ extern "C" {
 #include "agx3_pixel_core.h"
 #include "agx3_select_core.h"
 #include "agx3_vary_core.h"
+#include "agx3_zs_core.h"
 
 /* agx_nir_lower_tilebuffer's ALL_SAMPLES: the pixel-rate sample mask, and the
  * only immediate AGX3's single-sample tile group can represent. */
@@ -5680,6 +5681,55 @@ TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
       .dest = 8, .rhw = 8, .coef_index = 0,
    };
    ASSERT_TRUE(agx3_persp_rcp_encode(enc, &rcp, bytes, &len));
+   append(want, bytes, len);
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, FragmentHelperCoverageMatchesNativeAtomicPipeline)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_get_sr_coverage_to(b, agx_register(0, AGX_SIZE_16),
+                          AGX_SR_IS_ACTIVE_THREAD);
+   agx_stop(b);
+   const std::vector<uint8_t> native = {
+      0x04,0x84,0x10,0x06, 0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+}
+
+TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_wait_pix(b, 1);
+   agx_index depth = agx_register(4, AGX_SIZE_32);
+   depth.discard = true;
+   agx_zs_emit(b, agx_immediate(0xff), depth, 1);
+   agx_signal_pix(b, 1);
+   agx_stop(b);
+
+   /* Fresh Apple fragment-atomic tail from the same d150404a... AIR /
+    * 32cf4963... native pipeline: entry, stage Z, acquire class1, depthf,
+    * release. Construct every instruction independently, then compare the
+    * complete backend stream. */
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_stage_copy_kill(enc, 0, 4, true, 1, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_wait(enc, 1, 0, bytes, &len));
+   append(want, bytes, len);
+   const struct agx3_zs_desc zs = {
+      .value = 0, .value_kill = true, .slot = 1, .wait_mask = 1,
+   };
+   ASSERT_TRUE(agx3_zs_encode_depth_stencil(enc, &zs, true, false, bytes,
+                                            &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_release(enc, 1, false, 0, bytes, &len));
    append(want, bytes, len);
    want.insert(want.end(), {0x0e, 0, 0, 0});
    EXPECT_EQ(pack(b), want);

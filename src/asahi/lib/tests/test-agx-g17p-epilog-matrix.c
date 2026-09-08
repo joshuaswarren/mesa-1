@@ -133,7 +133,9 @@ main(void)
 
    /* Keeping G17P fsat as its native standalone f32add.ep2 closes 416
     * producer shapes without inventing saturated forms for those producers. */
-   const unsigned ceiling = 32720;
+   /* Depth-only late tests now use Apple's staged depthf protocol; stencil,
+    * multisample and unrelated format/ALU gaps remain in the refusal set. */
+   const unsigned ceiling = 30480;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",

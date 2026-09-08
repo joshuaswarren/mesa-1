@@ -1242,6 +1242,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Exact vertex+fragment SSBO store/atomic oracle. Record-only runs under
+    # the G17P drm-shim; execution additionally checks every result and guard.
+    executable(
+      'g17p-vulkan-graphics-side-effects',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_GRAPHICS_SIDE_EFFECTS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Game-feature probe: enables every advertised Vulkan 1.1/1.2/1.3
     # feature, then compiles AND records a dispatch for each SPIR-V module.
     # The record half is what catches a feature the compiler accepts but the

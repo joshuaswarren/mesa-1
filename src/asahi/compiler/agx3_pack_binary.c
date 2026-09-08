@@ -579,6 +579,7 @@ agx3_is_async(const agx_instr *I)
 
    return I->op == AGX_OPCODE_DEVICE_LOAD || I->op == AGX_OPCODE_LOCAL_LOAD ||
           I->op == AGX_OPCODE_LDCF || I->op == AGX_OPCODE_GET_SR ||
+          I->op == AGX_OPCODE_GET_SR_COVERAGE ||
           I->op == AGX_OPCODE_GET_COVERAGE_1X_AGX3 ||
           I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD ||
           I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_LD_TILE ||
@@ -1501,17 +1502,11 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
  *   shaders). movmsk's operand roles (f13/f17) are not isolated and the
  *   staged-register ABI below applies equally, so both spellings stay closed.
  *
- * - zs_emit (depthf). depthf's enable bits are grade A (f25 depth, f26
- *   stencil), but the instruction carries no value register: the values are
- *   staged by a preceding `copy` whose destination field is 0 (r0) in all
- *   nine witnesses (five corpus + four fresh RA-contrast probes, 2026-08-27),
- *   with the stencil byte reaching r0h via a 32-bit copy in the stencil
- *   probes. Two things are still missing before emitting it: the depth value
- *   is produced by an un-decomposed iadd(imm15)/fsel cluster whose
- *   destination-field identity is unproven (so "r0" is a strong correlation,
- *   not a traced ABI), and that cluster may be a required format transform --
- *   Apple never stages the raw float. Emitting depthf against a guessed ABI
- *   would write undefined bits into the depth test.
+ * - zs_emit stencil and combined depth/stencil. The depth-only staging ABI is
+ *   now independently grounded by Apple's fragment-atomic late-test path.
+ *   Stencil still reaches r0h through an extra conversion/copy sequence whose
+ *   exact input contract has not been isolated, so those two forms remain
+ *   closed rather than inheriting the depth-only route.
  *
  * See research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md sections 4 and 6.
  */
@@ -4195,6 +4190,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned texture_samples_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
+   bool has_zs_emit = false;
    bool uniform_half_used[512] = {false};
    unsigned count = 0;
 
@@ -4216,8 +4212,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
          if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
-             scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
+             scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3 ||
+             scan_I->op == AGX_OPCODE_ZS_EMIT)
             has_coverage_write = true;
+         if (scan_I->op == AGX_OPCODE_ZS_EMIT)
+            has_zs_emit = true;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_LOAD)
@@ -4319,6 +4318,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
    unsigned g17p_link_packs_seen = 0;
    bool g17p_colour_open = false;
+   const agx_instr *g17p_deferred_zs_wait = NULL;
    const bool g17p_position_protocol =
       agx3_is_g17p_float2_position_vs(ctx, enc);
    unsigned g17p_positions_staged = 0;
@@ -4765,6 +4765,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_WAIT_PIX ||
              I->op == AGX_OPCODE_SIGNAL_PIX) {
+            /* A late depth test for fragment memory side effects stages the
+             * pass-through Z value before acquiring class 1 in Apple's fresh
+             * G17P atomic fragment. Hold this wait until ZS_EMIT can reproduce
+             * that ordering; SIGNAL_PIX remains in its original position. */
+            if (has_zs_emit && I->op == AGX_OPCODE_WAIT_PIX &&
+                I->writeout == 1) {
+               if (g17p_deferred_zs_wait || wait != 0)
+                  AGX3_REFUSE(I);
+               g17p_deferred_zs_wait = I;
+               continue;
+            }
             if (I == g17p_deferred_write) {
                /* The scoreboard has already retired these dependencies here.
                 * Keep that retirement at the original instruction, independent
@@ -4978,6 +4989,76 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
             outstanding = 0;
             ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 2);
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_GET_SR_COVERAGE) {
+            /* Fresh Apple G17P fragment-atomic pipeline
+             * d150404ac02e.../32cf4963515f... reads SR2 as W16 before the
+             * helper-thread predicate (`04 84 10 06`). This is the exact
+             * active-lane source used to suppress fragment side effects on
+             * helper invocations; other coverage pseudo-registers remain
+             * closed until separately witnessed. */
+            if (enc != AGX_ISA_ENCODING_AGX3B ||
+                ctx->stage != MESA_SHADER_FRAGMENT ||
+                I->sr != AGX_SR_IS_ACTIVE_THREAD || I->nr_dests != 1 ||
+                I->nr_srcs != 0 || !agx3_src_is_register(I->dest[0]) ||
+                I->dest[0].memory || I->dest[0].size != AGX_SIZE_16 ||
+                agx_channels(I->dest[0]) != 1)
+               AGX3_REFUSE(I);
+            const struct agx3_sr_desc d = {
+               .dest = I->dest[0].value, .width = AGX3_SR_W16,
+               .sr = 2, .slot = slot, .wait_mask = wait,
+            };
+            uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
+            if (!agx3_sr_encode(enc, &d, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_ZS_EMIT) {
+            /* Fragment stores without early tests inject a pass-through depth
+             * write so side effects obey late depth testing. Apple's fresh
+             * G17P fragment-atomic pipeline stages that scalar in staging[0]
+             * on slot1, then emits pixwait(1), depthf(depth, wait slot1), and
+             * the ordinary pixrel. Admit precisely that depth-only graph. */
+            const agx_index samples = I->src[0], depth = I->src[1];
+            if (enc != AGX_ISA_ENCODING_AGX3B ||
+                ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests != 0 ||
+                I->nr_srcs != 2 || I->zs != 1 ||
+                samples.type != AGX_INDEX_IMMEDIATE ||
+                samples.size != AGX_SIZE_16 || samples.value != 0xff ||
+                !agx3_vary_reg32(depth) || agx_channels(depth) != 1 ||
+                !depth.discard || depth.kill || depth.cache ||
+                !g17p_deferred_zs_wait)
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
+            if (!g17p_colour_open) {
+               if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               ctx->agx3_colour_link.entry_emitted = true;
+               ctx->agx3_colour_link.entry_offset =
+                  emission->size - len - initial_size;
+               g17p_colour_open = true;
+            }
+            if (!agx3_stage_copy_kill(enc, 0, depth.value, true, 1, wait,
+                                      bytes, &len) ||
+                !agx3_append(emission, bytes, len) ||
+                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+               AGX3_REFUSE(I);
+            const struct agx3_zs_desc d = {
+               .value = 0, .value_kill = true, .slot = 1, .wait_mask = 1,
+            };
+            if (!agx3_zs_encode_depth_stencil(enc, &d, true, false, bytes,
+                                               &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            outstanding &= (uint16_t)~wait;
+            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 2);
+            g17p_deferred_zs_wait = NULL;
             continue;
          }
 

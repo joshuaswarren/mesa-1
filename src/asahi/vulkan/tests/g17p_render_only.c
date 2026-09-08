@@ -21,14 +21,24 @@
 #include <dlfcn.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#include "g17p_vulkan_graphics_side_effects_frag.h"
+#include "g17p_vulkan_graphics_side_effects_vert.h"
+#define G17P_VERTEX_SPV g17p_vulkan_graphics_side_effects_vert_spv
+#define G17P_FRAGMENT_SPV g17p_vulkan_graphics_side_effects_frag_spv
+#else
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
+#define G17P_VERTEX_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAGMENT_SPV g17p_wsi_triangle_frag_spv
+#endif
 
 #define T8140_DEVICE_ID 0x8140
 #ifndef IMAGE_WIDTH
@@ -38,6 +48,17 @@
 #define IMAGE_HEIGHT 32
 #endif
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#define SIDE_EFFECT_GUARD UINT32_C(0xc09b5eed)
+struct side_effect_output {
+   uint32_t prefix_guard[4];
+   uint32_t vertex_atomic;
+   uint32_t vertex_values[3];
+   uint32_t fragment_atomic;
+   uint32_t fragment_value;
+   uint32_t suffix_guard[4];
+};
+#endif
 #ifdef G17P_VDM_CAPACITY
 #define COMMAND_BUFFER_COUNT 193
 #else
@@ -51,7 +72,7 @@ VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceProperties);
-#ifdef G17P_OCCLUSION_QUERY
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
 VK_FN(vkGetPhysicalDeviceFeatures);
 #endif
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
@@ -71,6 +92,12 @@ VK_FN(vkCreateImageView);
 VK_FN(vkCreateRenderPass);
 VK_FN(vkCreateShaderModule);
 VK_FN(vkCreatePipelineLayout);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+VK_FN(vkCreateDescriptorSetLayout);
+VK_FN(vkCreateDescriptorPool);
+VK_FN(vkAllocateDescriptorSets);
+VK_FN(vkUpdateDescriptorSets);
+#endif
 VK_FN(vkCreateGraphicsPipelines);
 VK_FN(vkCreateFramebuffer);
 VK_FN(vkCreateCommandPool);
@@ -79,6 +106,9 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+VK_FN(vkCmdBindDescriptorSets);
+#endif
 VK_FN(vkCmdDraw);
 VK_FN(vkCmdEndRenderPass);
 VK_FN(vkEndCommandBuffer);
@@ -196,7 +226,7 @@ main(void)
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
-#ifdef G17P_OCCLUSION_QUERY
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
@@ -290,6 +320,14 @@ main(void)
    free(query_queues);
 #endif
 
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   VkPhysicalDeviceFeatures physical_features;
+   vkGetPhysicalDeviceFeatures(physical, &physical_features);
+   if (!physical_features.vertexPipelineStoresAndAtomics ||
+       !physical_features.fragmentStoresAndAtomics)
+      die("G17P graphics shader side effects were not explicitly enabled");
+#endif
+
    const float queue_priority = 1.0f;
    const VkDeviceQueueCreateInfo queue_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -304,6 +342,11 @@ main(void)
 #ifdef G17P_OCCLUSION_QUERY
       .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
          .occlusionQueryPrecise = VK_TRUE,
+      },
+#elif defined(G17P_GRAPHICS_SIDE_EFFECTS)
+      .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
+         .vertexPipelineStoresAndAtomics = VK_TRUE,
+         .fragmentStoresAndAtomics = VK_TRUE,
       },
 #endif
    };
@@ -324,6 +367,12 @@ main(void)
    LOAD_DEVICE(device, vkCreateRenderPass);
    LOAD_DEVICE(device, vkCreateShaderModule);
    LOAD_DEVICE(device, vkCreatePipelineLayout);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
+   LOAD_DEVICE(device, vkCreateDescriptorPool);
+   LOAD_DEVICE(device, vkAllocateDescriptorSets);
+   LOAD_DEVICE(device, vkUpdateDescriptorSets);
+#endif
    LOAD_DEVICE(device, vkCreateGraphicsPipelines);
    LOAD_DEVICE(device, vkCreateFramebuffer);
    LOAD_DEVICE(device, vkCreateCommandPool);
@@ -332,6 +381,9 @@ main(void)
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   LOAD_DEVICE(device, vkCmdBindDescriptorSets);
+#endif
    LOAD_DEVICE(device, vkCmdDraw);
    LOAD_DEVICE(device, vkCmdEndRenderPass);
    LOAD_DEVICE(device, vkEndCommandBuffer);
@@ -388,6 +440,43 @@ main(void)
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   const VkBufferCreateInfo side_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = sizeof(struct side_effect_output),
+      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   VkBuffer side_buffer;
+   check(vkCreateBuffer(device, &side_info, NULL, &side_buffer),
+         "vkCreateBuffer(side effects)");
+   VkMemoryRequirements side_requirements;
+   vkGetBufferMemoryRequirements(device, side_buffer, &side_requirements);
+   const uint32_t side_memory_type = find_memory_type(
+      &memory_properties, side_requirements.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+   const VkMemoryAllocateInfo side_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = side_requirements.size,
+      .memoryTypeIndex = side_memory_type,
+   };
+   VkDeviceMemory side_memory;
+   check(vkAllocateMemory(device, &side_memory_info, NULL, &side_memory),
+         "vkAllocateMemory(side effects)");
+   check(vkBindBufferMemory(device, side_buffer, side_memory, 0),
+         "vkBindBufferMemory(side effects)");
+   struct side_effect_output *side_map = NULL;
+   check(vkMapMemory(device, side_memory, 0, sizeof(*side_map), 0,
+                     (void **)&side_map),
+         "vkMapMemory(side effects)");
+   memset(side_map, 0, sizeof(*side_map));
+   for (unsigned i = 0; i < 4; ++i) {
+      side_map->prefix_guard[i] = SIDE_EFFECT_GUARD;
+      side_map->suffix_guard[i] = SIDE_EFFECT_GUARD;
+   }
+#endif
 
 
    const VkImageCreateInfo image_info = {
@@ -501,13 +590,13 @@ main(void)
 
    const VkShaderModuleCreateInfo vert_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_wsi_triangle_vert_spv),
-      .pCode = g17p_wsi_triangle_vert_spv,
+      .codeSize = sizeof(G17P_VERTEX_SPV),
+      .pCode = G17P_VERTEX_SPV,
    };
    const VkShaderModuleCreateInfo frag_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_wsi_triangle_frag_spv),
-      .pCode = g17p_wsi_triangle_frag_spv,
+      .codeSize = sizeof(G17P_FRAGMENT_SPV),
+      .pCode = G17P_FRAGMENT_SPV,
    };
    VkShaderModule vert_module, frag_module;
    check(vkCreateShaderModule(device, &vert_module_info, NULL, &vert_module),
@@ -515,8 +604,68 @@ main(void)
    check(vkCreateShaderModule(device, &frag_module_info, NULL, &frag_module),
          "vkCreateShaderModule(fragment)");
 
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   const VkDescriptorSetLayoutBinding side_binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+   };
+   const VkDescriptorSetLayoutCreateInfo side_layout_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 1,
+      .pBindings = &side_binding,
+   };
+   VkDescriptorSetLayout side_layout;
+   check(vkCreateDescriptorSetLayout(device, &side_layout_info, NULL,
+                                     &side_layout),
+         "vkCreateDescriptorSetLayout(side effects)");
+
+   const VkDescriptorPoolSize side_pool_size = {
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+   };
+   const VkDescriptorPoolCreateInfo side_pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = 1,
+      .pPoolSizes = &side_pool_size,
+   };
+   VkDescriptorPool side_pool;
+   check(vkCreateDescriptorPool(device, &side_pool_info, NULL, &side_pool),
+         "vkCreateDescriptorPool(side effects)");
+   const VkDescriptorSetAllocateInfo side_allocate = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = side_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &side_layout,
+   };
+   VkDescriptorSet side_set;
+   check(vkAllocateDescriptorSets(device, &side_allocate, &side_set),
+         "vkAllocateDescriptorSets(side effects)");
+   const VkDescriptorBufferInfo side_descriptor = {
+      .buffer = side_buffer,
+      .offset = offsetof(struct side_effect_output, vertex_atomic),
+      .range = offsetof(struct side_effect_output, suffix_guard) -
+               offsetof(struct side_effect_output, vertex_atomic),
+   };
+   const VkWriteDescriptorSet side_write = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = side_set,
+      .dstBinding = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &side_descriptor,
+   };
+   vkUpdateDescriptorSets(device, 1, &side_write, 0, NULL);
+#endif
+
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+      .setLayoutCount = 1,
+      .pSetLayouts = &side_layout,
+#endif
    };
    VkPipelineLayout pipeline_layout;
    check(vkCreatePipelineLayout(device, &layout_info, NULL, &pipeline_layout),
@@ -698,6 +847,10 @@ main(void)
 #endif
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline_layout, 0, 1, &side_set, 0, NULL);
+#endif
    const VkDeviceSize vertex_offset = 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
@@ -747,6 +900,12 @@ main(void)
       return EXIT_SUCCESS;
    }
 #endif
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   if (getenv("G17P_GRAPHICS_SIDE_EFFECTS_RECORD_ONLY")) {
+      puts("g17p-graphics-side-effects: record-only PASS");
+      return EXIT_SUCCESS;
+   }
+#endif
 
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -775,6 +934,26 @@ main(void)
               waited);
       return EXIT_FAILURE;
    }
+
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+   for (unsigned i = 0; i < 4; ++i) {
+      if (side_map->prefix_guard[i] != SIDE_EFFECT_GUARD ||
+          side_map->suffix_guard[i] != SIDE_EFFECT_GUARD)
+         die("graphics side effect crossed an SSBO guard");
+   }
+   if (side_map->vertex_atomic != 3 ||
+       side_map->vertex_values[0] != UINT32_C(0x17000000) ||
+       side_map->vertex_values[1] != UINT32_C(0x17000001) ||
+       side_map->vertex_values[2] != UINT32_C(0x17000002) ||
+       side_map->fragment_atomic != IMAGE_WIDTH * IMAGE_HEIGHT ||
+       side_map->fragment_value != UINT32_C(0xf17e0001))
+      die("vertex/fragment SSBO stores or atomics are not exact");
+
+   const struct side_effect_output stable_side = *side_map;
+   sleep(3);
+   if (memcmp(side_map, &stable_side, sizeof(stable_side)) != 0)
+      die("graphics side effects changed after three seconds");
+#endif
 
 #ifdef G17P_OCCLUSION_QUERY
    struct query_result {

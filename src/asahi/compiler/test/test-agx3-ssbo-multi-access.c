@@ -85,6 +85,14 @@ start(const char *name)
    return b;
 }
 
+static nir_builder
+start_graphics(enum mesa_shader_stage stage, const char *name)
+{
+   nir_builder b =
+      nir_builder_init_simple_shader(stage, &agx_nir_options, "%s", name);
+   return b;
+}
+
 /* The global invocation id in the shape the Vulkan path delivers it. */
 static nir_def *
 gid(nir_builder *b)
@@ -132,6 +140,50 @@ run(const char *name, void (*body)(nir_builder *b, nir_def *base, nir_def *g),
                  want_stores);
          ++failures;
       }
+   }
+
+   free(part.binary);
+   ralloc_free(b.shader);
+}
+
+/* Graphics stages use the same native device-memory instructions, but travel
+ * through different backend epilogues and pipeline keys.  Compile one
+ * returned atomic plus a following store in each advertised stage so a
+ * compute-only success cannot accidentally qualify the Vulkan feature bits. */
+static void
+run_graphics_stage(enum mesa_shader_stage stage, const char *name)
+{
+   nir_builder b = start_graphics(stage, name);
+   nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *old = nir_global_atomic(&b, 32, base, nir_imm_int(&b, 1),
+                                    .atomic_op = nir_atomic_op_iadd);
+   nir_store_global(&b, old, nir_iadd_imm(&b, base, 4), .align_mul = 4);
+
+   if (stage == MESA_SHADER_VERTEX) {
+      nir_def *pos[4] = {
+         nir_imm_float(&b, 0.0f), nir_imm_float(&b, 0.0f),
+         nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f),
+      };
+      for (unsigned c = 0; c < 4; ++c)
+         nir_store_uvs_agx(&b, pos[c], nir_imm_intN_t(&b, c, 16));
+      b.shader->info.outputs_written = VARYING_BIT_POS;
+   }
+
+   struct agx_shader_part part = {0};
+   const bool ok = compile_shape(&b, &part);
+   if (!ok) {
+      ++checks;
+      ++failures;
+      fprintf(stderr, "FAIL %s: refused by agx_compile_shader_nir\n", name);
+   } else {
+      ++checks;
+   }
+   if (ok) {
+      CHECK(part.binary != NULL && part.info.binary_size > sizeof(agx3_stop));
+      CHECK(count_stores(&part) == 1);
+      CHECK(memcmp((const uint8_t *)part.binary + part.info.binary_size -
+                      sizeof(agx3_stop),
+                   agx3_stop, sizeof(agx3_stop)) == 0);
    }
 
    free(part.binary);
@@ -319,6 +371,9 @@ main(void)
    run("atomic-and", atomic_and, 0);
    run("atomic-xchg", atomic_xchg, 0);
    run("atomic-return-store", atomic_return_store, 1);
+
+   run_graphics_stage(MESA_SHADER_VERTEX, "vertex-atomic-return-store");
+   run_graphics_stage(MESA_SHADER_FRAGMENT, "fragment-atomic-return-store");
 
    glsl_type_singleton_decref();
 

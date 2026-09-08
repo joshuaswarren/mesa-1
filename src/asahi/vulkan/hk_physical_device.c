@@ -747,12 +747,15 @@ hk_get_device_features(
       features->pipelineStatisticsQuery =
          hk_g17p_unverified_feature("pipeline_statistics");
       /* The graphics-stage descriptor, storage-write and atomic paths are
-       * complete and record through HAL200.  Keep their public promise behind
-       * the consolidated exact-side-effect qualification run. */
+       * complete and record through HAL200. Keep their public promise behind
+       * the exact side-effect qualification run; retain the older
+       * `graphics_memory` token as an alias for existing qualification jobs. */
       features->vertexPipelineStoresAndAtomics =
          instance->vertex_stores &&
-         hk_g17p_unverified_feature("graphics_memory");
+         (hk_g17p_unverified_feature("graphics_shader_side_effects") ||
+          hk_g17p_unverified_feature("graphics_memory"));
       features->fragmentStoresAndAtomics =
+         hk_g17p_unverified_feature("graphics_shader_side_effects") ||
          hk_g17p_unverified_feature("graphics_memory");
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
