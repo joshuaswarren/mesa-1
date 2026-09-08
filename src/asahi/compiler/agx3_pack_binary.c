@@ -4051,6 +4051,95 @@ agx3_is_g17p_wboit_mrt_eot(const agx_context *ctx,
           x_reg == coord_reg && y_reg == coord_reg + 2;
 }
 
+/* Fresh applegpu_g17p builtin EOT with two RGBA8 attachments (mask 3) is a
+ * distinct 120-byte program. Its two attachment entries use identical
+ * format3/layout2/components4 keys; their vector positions select RT0/RT1,
+ * while the imageblock byte offsets are 0/4. Match the complete allocated
+ * graph before substituting it so no other MRT layout inherits these target
+ * selectors or offsets. */
+static bool
+agx3_is_g17p_rgba8_mrt_eot(const agx_context *ctx,
+                           enum agx_isa_encoding enc)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
+       ctx->is_preamble || ctx->key->no_stop)
+      return false;
+
+   unsigned instructions = 0, get_x = 0, get_y = 0, stores = 0;
+   unsigned x_reg = UINT_MAX, y_reg = UINT_MAX, coord_reg = UINT_MAX;
+   unsigned zero_reg = UINT_MAX, four_reg = UINT_MAX;
+
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op == AGX_OPCODE_STOP)
+            continue;
+         instructions++;
+
+         if (I->op == AGX_OPCODE_GET_SR) {
+            if (I->nr_dests != 1 || I->nr_srcs != 0 ||
+                !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                I->dest[0].size != AGX_SIZE_32 ||
+                agx_channels(I->dest[0]) != 1)
+               return false;
+
+            if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_X) {
+               get_x++;
+               x_reg = I->dest[0].value;
+            } else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_Y) {
+               get_y++;
+               y_reg = I->dest[0].value;
+            } else {
+               return false;
+            }
+         } else if (I->op == AGX_OPCODE_MOV_IMM) {
+            if (I->nr_dests != 1 || I->nr_srcs != 0 ||
+                !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                I->dest[0].size != AGX_SIZE_32 ||
+                agx_channels(I->dest[0]) != 1)
+               return false;
+
+            if (I->imm == 0)
+               zero_reg = I->dest[0].value;
+            else if (I->imm == 4)
+               four_reg = I->dest[0].value;
+            else
+               return false;
+         } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
+            if (I->nr_dests != 0 || I->nr_srcs != 4 ||
+                I->format != AGX_FORMAT_U8NORM || I->dim != AGX_DIM_2D ||
+                !I->explicit_coords ||
+                I->src[0].type != AGX_INDEX_IMMEDIATE ||
+                I->src[0].value != 0 || I->src[0].size != AGX_SIZE_16 ||
+                I->src[1].type != AGX_INDEX_IMMEDIATE ||
+                I->src[1].value != stores || I->src[1].size != AGX_SIZE_16 ||
+                !agx3_src_is_register(I->src[2]) || I->src[2].memory ||
+                I->src[2].abs || I->src[2].neg ||
+                I->src[2].size != AGX_SIZE_32 ||
+                agx_channels(I->src[2]) != 1 ||
+                !agx3_src_is_register(I->src[3]) || I->src[3].memory ||
+                I->src[3].abs || I->src[3].neg ||
+                I->src[3].size != AGX_SIZE_32 ||
+                agx_channels(I->src[3]) != 2 ||
+                (stores == 0 && I->src[2].value != zero_reg) ||
+                (stores == 1 && I->src[2].value != four_reg) || stores >= 2)
+               return false;
+
+            if (stores == 0)
+               coord_reg = I->src[3].value;
+            else if (I->src[3].value != coord_reg)
+               return false;
+            stores++;
+         } else {
+            return false;
+         }
+      }
+   }
+
+   return instructions == 6 && get_x == 1 && get_y == 1 && stores == 2 &&
+          zero_reg != UINT_MAX && four_reg != UINT_MAX &&
+          x_reg == coord_reg && y_reg == coord_reg + 2;
+}
+
 static bool
 agx3_g17p_8norm_format(enum agx_format format)
 {
@@ -4306,6 +4395,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const unsigned initial_size = emission->size;
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;
+
+   if (agx3_is_g17p_rgba8_mrt_eot(ctx, enc)) {
+      /* applegpu_g17p builtin EOT generated from two
+       * format3/layout2/components4 attachment keys. SHA256 of the native
+       * image: b464eff17eb9adb2a6a68da4ea8a5b43ae6eee16edb28065c474ea2d51026f6c. */
+      static const uint8_t g17p_rgba8_mrt_eot[] = {
+         0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+         0x0c,0x9d,0x10,0x26,0x24,0xa9,0x10,0x26,
+         0x9f,0x10,0x54,0x02,0x03,0x04,0x14,0x00,
+         0x50,0x26,0x0a,0x00,0x9f,0x20,0x54,0x00,
+         0x03,0x00,0x10,0x00,0x50,0x26,0x0a,0x00,
+         0x97,0x05,0x54,0x04,0x00,0x08,0x00,0x00,
+         0xd0,0x40,0x10,0x00,0x0b,0x82,0x21,0x04,
+         0x1b,0x80,0x21,0x04,0x97,0x05,0x54,0x0c,
+         0x00,0x10,0x00,0x00,0xd0,0x44,0x10,0x00,
+         0x4b,0x03,0x2f,0x00,0x42,0x00,0x00,0x04,
+         0x00,0x00,0x5b,0x01,0x2f,0x00,0x42,0x00,
+         0x00,0x04,0x00,0x00,0x57,0x10,0x54,0x00,
+         0x00,0x00,0x00,0x80,0xa8,0x75,0x00,0x00,
+         0x57,0x20,0x54,0x08,0x00,0x10,0x00,0x90,
+         0xa8,0x75,0x00,0x00,0x0e,0x00,0x00,0x00,
+      };
+      static_assert(sizeof(g17p_rgba8_mrt_eot) == 120,
+                    "RGBA8 MRT EOT native length");
+      ctx->max_reg = MAX2(ctx->max_reg, 7);
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
+      return agx3_append(emission, g17p_rgba8_mrt_eot,
+                         sizeof(g17p_rgba8_mrt_eot));
+   }
 
    if (agx3_is_g17p_wboit_mrt_eot(ctx, enc)) {
       static const uint8_t g17p_wboit_mrt_eot[] = {

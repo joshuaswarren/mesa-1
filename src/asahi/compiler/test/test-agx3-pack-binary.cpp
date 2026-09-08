@@ -234,6 +234,61 @@ TEST_F(AGX3PackBinary, G17PLayeredU8NormEOTUsesExactNativeArrayWire)
    EXPECT_TRUE(pack(build(AGX_DIM_2D_ARRAY, 10), false).empty());
 }
 
+TEST_F(AGX3PackBinary, G17PRGBA8MRTEOTUsesExactNativeProgram)
+{
+   static const uint8_t native[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0xa9,0x10,0x26,
+      0x9f,0x10,0x54,0x02,0x03,0x04,0x14,0x00,
+      0x50,0x26,0x0a,0x00,0x9f,0x20,0x54,0x00,
+      0x03,0x00,0x10,0x00,0x50,0x26,0x0a,0x00,
+      0x97,0x05,0x54,0x04,0x00,0x08,0x00,0x00,
+      0xd0,0x40,0x10,0x00,0x0b,0x82,0x21,0x04,
+      0x1b,0x80,0x21,0x04,0x97,0x05,0x54,0x0c,
+      0x00,0x10,0x00,0x00,0xd0,0x44,0x10,0x00,
+      0x4b,0x03,0x2f,0x00,0x42,0x00,0x00,0x04,
+      0x00,0x00,0x5b,0x01,0x2f,0x00,0x42,0x00,
+      0x00,0x04,0x00,0x00,0x57,0x10,0x54,0x00,
+      0x00,0x00,0x00,0x80,0xa8,0x75,0x00,0x00,
+      0x57,0x20,0x54,0x08,0x00,0x10,0x00,0x90,
+      0xa8,0x75,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+
+   auto build = [&](unsigned second_index, unsigned second_offset,
+                    enum agx_format second_format) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index coords = agx_register(0, AGX_SIZE_32);
+      coords.channels_m1 = 1;
+      agx_get_sr_to(b, agx_register(0, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_X);
+      agx_get_sr_to(b, agx_register(2, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_Y);
+      agx_mov_imm_to(b, agx_register(4, AGX_SIZE_32), 0);
+      agx_block_image_store(b, agx_immediate(0), agx_immediate(0),
+                            agx_register(4, AGX_SIZE_32), coords,
+                            AGX_FORMAT_U8NORM, AGX_DIM_2D, true);
+      agx_mov_imm_to(b, agx_register(4, AGX_SIZE_32), second_offset);
+      agx_block_image_store(b, agx_immediate(0),
+                            agx_immediate(second_index),
+                            agx_register(4, AGX_SIZE_32), coords,
+                            second_format, AGX_DIM_2D, true);
+      agx_stop(b);
+      return b;
+   };
+
+   agx_builder *good = build(1, 4, AGX_FORMAT_U8NORM);
+   EXPECT_EQ(pack(good), std::vector<uint8_t>(std::begin(native),
+                                              std::end(native)));
+   EXPECT_EQ(good->shader->max_reg, 7);
+   EXPECT_TRUE(good->shader->agx3_staging_known);
+   EXPECT_EQ(good->shader->agx3_staging_halfs, 16);
+
+   EXPECT_TRUE(pack(build(0, 4, AGX_FORMAT_U8NORM), false).empty());
+   EXPECT_TRUE(pack(build(1, 8, AGX_FORMAT_U8NORM), false).empty());
+   EXPECT_TRUE(pack(build(1, 4, AGX_FORMAT_S8NORM), false).empty());
+}
+
 TEST_F(AGX3PackBinary, G17PF16EOTUsesExactNativeI16Program)
 {
    key.g17p_rt0_eot_words = 1;
