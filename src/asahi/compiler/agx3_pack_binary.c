@@ -3865,6 +3865,94 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    return AGX3_G17P_RT0_EOT_SELECTOR_75;
 }
 
+/* A fresh applegpu_g17p AIR differential between the 2D and 2D-array
+ * imgwblk intrinsics proves the array wire protocol: publish the layer with
+ * its own PACK_IMGWIR, move XY to wire destination 6, then select array
+ * dimension 2 in IMGWBLK. Match the complete allocated Mesa EOT graph and
+ * its registers before substituting the byte-exact 110-byte program; no
+ * general array block-store shape is implied. */
+static bool
+agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
+                                enum agx_isa_encoding enc)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
+       ctx->is_preamble || ctx->key->no_stop ||
+       ctx->key->g17p_rt0_eot_words != 1 || ctx->key->g17p_rt0_eot_i32)
+      return false;
+
+   unsigned instruction = 0;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_STOP)
+         continue;
+
+      switch (instruction++) {
+      case 0:
+      case 1:
+      case 2: {
+         const enum agx_sr expected[] = {
+            AGX_SR_THREAD_POSITION_IN_GRID_X,
+            AGX_SR_THREAD_POSITION_IN_GRID_Y,
+            AGX_SR_THREADGROUP_POSITION_IN_GRID_Z,
+         };
+         if (I->op != AGX_OPCODE_GET_SR || I->nr_dests != 1 ||
+             I->nr_srcs != 0 || I->sr != expected[instruction - 1] ||
+             I->dest[0].type != AGX_INDEX_REGISTER ||
+             I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
+             agx_channels(I->dest[0]) != 1 ||
+             I->dest[0].value != 2 * (instruction - 1))
+            return false;
+         break;
+      }
+      case 3:
+         if (I->op != AGX_OPCODE_MOV_IMM || I->nr_dests != 1 ||
+             I->nr_srcs != 0 || I->imm != 0 ||
+             I->dest[0].type != AGX_INDEX_REGISTER ||
+             I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
+             agx_channels(I->dest[0]) != 1 || I->dest[0].value != 6)
+            return false;
+         break;
+      case 4:
+      case 5:
+      case 6: {
+         const unsigned lane = instruction - 5;
+         if (I->op != AGX_OPCODE_MOV || I->nr_dests != 1 ||
+             I->nr_srcs != 1 || I->dest[0].type != AGX_INDEX_REGISTER ||
+             I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
+             agx_channels(I->dest[0]) != 1 ||
+             I->dest[0].value != 8 + 2 * lane ||
+             I->src[0].type != AGX_INDEX_REGISTER ||
+             I->src[0].size != AGX_SIZE_32 || I->src[0].memory ||
+             I->src[0].abs || I->src[0].neg ||
+             agx_channels(I->src[0]) != 1 || I->src[0].value != 2 * lane)
+            return false;
+         break;
+      }
+      case 7:
+         if (I->op != AGX_OPCODE_BLOCK_IMAGE_STORE || I->nr_dests != 0 ||
+             I->nr_srcs != 4 || I->format != AGX_FORMAT_U8NORM ||
+             I->dim != AGX_DIM_2D_ARRAY || !I->explicit_coords ||
+             I->src[0].type != AGX_INDEX_IMMEDIATE ||
+             I->src[0].value != 0 || I->src[0].size != AGX_SIZE_16 ||
+             I->src[1].type != AGX_INDEX_IMMEDIATE ||
+             I->src[1].value != 0 || I->src[1].size != AGX_SIZE_16 ||
+             I->src[2].type != AGX_INDEX_REGISTER ||
+             I->src[2].size != AGX_SIZE_32 || I->src[2].memory ||
+             !I->src[2].discard || I->src[2].abs || I->src[2].neg ||
+             agx_channels(I->src[2]) != 1 || I->src[2].value != 6 ||
+             I->src[3].type != AGX_INDEX_REGISTER ||
+             I->src[3].size != AGX_SIZE_32 || I->src[3].memory ||
+             !I->src[3].discard || I->src[3].abs || I->src[3].neg ||
+             agx_channels(I->src[3]) != 3 || I->src[3].value != 8)
+            return false;
+         break;
+      default:
+         return false;
+      }
+   }
+
+   return instruction == 8;
+}
+
 /* Native EOT key {RGBA16F RT0, R8 RT1} (mask 3) has a distinct, complete
  * 120-byte program.  As above, match the whole post-RA graph before replacing
  * it: this is the exact mixed-width layout used by Quake's WBOIT pass. */
@@ -4238,6 +4326,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
       return agx3_append(emission, g17p_wboit_mrt_eot,
                          sizeof(g17p_wboit_mrt_eot));
+   }
+
+   if (agx3_is_g17p_layered_u8norm_eot(ctx, enc)) {
+      static const uint8_t g17p_layered_u8norm_eot[] = {
+         /* Exact Mesa GET_SR X/Y/layer, MOV0 and MOV1 prefix. */
+         0x0c,0xa0,0x10,0x06,0x1c,0xa1,0x10,0x26,
+         0x2c,0x9e,0x10,0x46,0x3b,0x00,0x00,0x00,
+         0x4c,0x80,0x02,0x00,0x00,0x20,0x00,0x00,
+         0x9f,0x11,0x54,0x08,0x02,0x00,0x00,0x88,0x11,0x04,
+         0x5c,0x80,0x02,0x00,0x00,0x40,0x00,0x00,
+         0x9f,0x11,0x54,0x0a,0x02,0x00,0x08,0x88,0x11,0x04,
+         0x6c,0x80,0x02,0x00,0x00,0x80,0x00,0x00,
+         0x9f,0x11,0x54,0x0c,0x02,0x00,0x10,0x88,0x11,0x04,
+         /* applegpu_g17p array wire: layer r6, then XY r4:r5. */
+         0x97,0x15,0x54,0x04,0x00,0x18,0x10,0x00,0xf0,0xc0,0x00,0x00,
+         0x97,0x05,0x54,0x06,0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,
+         0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,0x28,0x75,0x00,0x00,
+         0x0e,0x00,0x00,0x00,
+      };
+      static_assert(sizeof(g17p_layered_u8norm_eot) == 110,
+                    "layered EOT native length");
+      ctx->max_reg = MAX2(ctx->max_reg, 13);
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
+      return agx3_append(emission, g17p_layered_u8norm_eot,
+                         sizeof(g17p_layered_u8norm_eot));
    }
 
    const enum agx3_g17p_rt0_eot_kind rt0_eot =
