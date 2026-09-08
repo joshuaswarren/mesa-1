@@ -161,6 +161,27 @@ agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
    };
 }
 
+static void
+agx_resource_set_damage_region(struct pipe_screen *screen,
+                               struct pipe_resource *resource,
+                               unsigned int nrects,
+                               const struct pipe_box *rects)
+{
+   /* A valid Asahi render target is conservatively reloaded in full when a
+    * batch starts. That is already the strongest implementation of
+    * KHR_partial_update's preservation contract: pixels outside the supplied
+    * region survive even when an application underestimates its damage.
+    *
+    * Keep the hint side-effect free until the command stream has a native
+    * tile-enable map. Restricting the render area without one would skip the
+    * stores needed to preserve untouched tiles across GBM buffer reuse.
+    */
+   (void)screen;
+   (void)resource;
+   (void)nrects;
+   (void)rects;
+}
+
 static struct pipe_resource *
 agx_resource_from_handle(struct pipe_screen *pscreen,
                          const struct pipe_resource *templat,
@@ -2567,6 +2588,7 @@ agx_screen_create(int fd, struct renderonly *ro,
    screen->resource_get_handle = agx_resource_get_handle;
    screen->resource_get_param = agx_resource_get_param;
    screen->resource_create_with_modifiers = agx_resource_create_with_modifiers;
+   screen->set_damage_region = agx_resource_set_damage_region;
    screen->get_timestamp = agx_get_timestamp;
    screen->fence_reference = agx_fence_reference;
    screen->fence_finish = agx_fence_finish;

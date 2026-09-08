@@ -9,10 +9,12 @@
 #include "drm-uapi/drm_fourcc.h"
 #include <fcntl.h>
 #include <gbm.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #define FIRST_WIDTH  240
@@ -20,6 +22,162 @@
 #define NEXT_WIDTH   320
 #define NEXT_HEIGHT  192
 #define FRAMES       8
+#define FENCE_WIDTH  1024
+#define FENCE_HEIGHT 1024
+#define FENCE_DRAWS  256
+
+struct native_fence_api {
+   PFNEGLCREATESYNCKHRPROC create;
+   PFNEGLDESTROYSYNCKHRPROC destroy;
+   PFNEGLWAITSYNCKHRPROC wait;
+   PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_fd;
+   PFNEGLSETDAMAGEREGIONKHRPROC set_damage;
+};
+
+static bool gl_ok(const char *where);
+
+static bool
+has_extension(const char *extensions, const char *name)
+{
+   const size_t length = strlen(name);
+   const char *match = extensions;
+   while ((match = strstr(match, name))) {
+      if ((match == extensions || match[-1] == ' ') &&
+          (match[length] == '\0' || match[length] == ' '))
+         return true;
+      match += length;
+   }
+   return false;
+}
+
+static bool
+native_fence_handoff(EGLDisplay display, EGLContext consumer_context,
+                     EGLSurface consumer_surface, EGLContext producer_context,
+                     const struct native_fence_api *api, GLuint program)
+{
+   int acquire_fd = -1, release_fd = -1;
+   EGLSyncKHR source = EGL_NO_SYNC_KHR;
+   EGLSyncKHR acquire = EGL_NO_SYNC_KHR;
+   EGLSyncKHR release = EGL_NO_SYNC_KHR;
+   GLuint vao = 0, texture = 0, fbo = 0;
+   bool producer_current = false;
+   bool ok = false;
+
+   /* Retire the consumer first. Its next exported fence must therefore stay
+    * unsignalled only because of the foreign server wait below. */
+   glFinish();
+   if (!gl_ok("pre-handoff consumer finish") ||
+       !eglMakeCurrent(display, consumer_surface, consumer_surface,
+                       producer_context))
+      goto out;
+   producer_current = true;
+
+   glGenVertexArrays(1, &vao);
+   glBindVertexArray(vao);
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, FENCE_WIDTH, FENCE_HEIGHT);
+   glGenFramebuffers(1, &fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          texture, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      goto out;
+   glUseProgram(program);
+   glViewport(0, 0, FENCE_WIDTH, FENCE_HEIGHT);
+   const GLint colour = glGetUniformLocation(program, "colour");
+   glUniform4f(colour, 0.125f, 0.5f, 0.875f, 1.0f);
+   for (unsigned draw = 0; draw < FENCE_DRAWS; ++draw)
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+
+   const EGLint export_attrs[] = {
+      EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+      EGL_NO_NATIVE_FENCE_FD_ANDROID,
+      EGL_NONE,
+   };
+   source = api->create(display, EGL_SYNC_NATIVE_FENCE_ANDROID, export_attrs);
+   if (!gl_ok("native-fence producer draw") || source == EGL_NO_SYNC_KHR)
+      goto out;
+   acquire_fd = api->dup_fd(display, source);
+   if (acquire_fd < 0 || !(fcntl(acquire_fd, F_GETFD, 0) & FD_CLOEXEC))
+      goto out;
+
+   struct pollfd source_poll = {.fd = acquire_fd, .events = POLLIN};
+   const int source_ready = poll(&source_poll, 1, 0);
+   if (source_ready < 0 ||
+       (source_ready > 0 && !(source_poll.revents & POLLIN)))
+      goto out;
+   if (!api->destroy(display, source))
+      goto out;
+   source = EGL_NO_SYNC_KHR;
+   if (!eglMakeCurrent(display, consumer_surface, consumer_surface,
+                       consumer_context))
+      goto out;
+   producer_current = false;
+
+   const EGLint acquire_attrs[] = {
+      EGL_SYNC_NATIVE_FENCE_FD_ANDROID, acquire_fd, EGL_NONE,
+   };
+   acquire = api->create(display, EGL_SYNC_NATIVE_FENCE_ANDROID,
+                         acquire_attrs);
+   if (acquire == EGL_NO_SYNC_KHR)
+      goto out;
+   /* EGL owns acquire_fd after successful import. */
+   acquire_fd = -1;
+   if (!api->wait(display, acquire, 0) || !api->destroy(display, acquire))
+      goto out;
+   acquire = EGL_NO_SYNC_KHR;
+
+   release = api->create(display, EGL_SYNC_NATIVE_FENCE_ANDROID, export_attrs);
+   if (release == EGL_NO_SYNC_KHR)
+      goto out;
+   release_fd = api->dup_fd(display, release);
+   if (release_fd < 0 || !(fcntl(release_fd, F_GETFD, 0) & FD_CLOEXEC))
+      goto out;
+
+   struct pollfd pollfd = {.fd = release_fd, .events = POLLIN};
+   if (source_ready == 0 && poll(&pollfd, 1, 0) != 0) {
+      fprintf(stderr, "native release fence bypassed foreign acquire\n");
+      goto out;
+   }
+
+   pollfd.revents = 0;
+   if (poll(&pollfd, 1, 5000) != 1 || !(pollfd.revents & POLLIN)) {
+      fprintf(stderr, "native release fence timed out\n");
+      goto out;
+   }
+
+   ok = true;
+
+out:
+   if (release_fd >= 0)
+      close(release_fd);
+   if (release != EGL_NO_SYNC_KHR)
+      api->destroy(display, release);
+   if (acquire != EGL_NO_SYNC_KHR)
+      api->destroy(display, acquire);
+   else if (acquire_fd >= 0)
+      close(acquire_fd);
+   if (source != EGL_NO_SYNC_KHR)
+      api->destroy(display, source);
+   if (vao || fbo || texture) {
+      if (!producer_current &&
+          eglMakeCurrent(display, consumer_surface, consumer_surface,
+                         producer_context))
+         producer_current = true;
+      if (producer_current) {
+         if (fbo)
+            glDeleteFramebuffers(1, &fbo);
+         if (texture)
+            glDeleteTextures(1, &texture);
+         glDeleteVertexArrays(1, &vao);
+      }
+   }
+   if (producer_current)
+      eglMakeCurrent(display, consumer_surface, consumer_surface,
+                     consumer_context);
+   return ok;
+}
 
 static bool
 gl_ok(const char *where)
@@ -115,18 +273,38 @@ choose_config(EGLDisplay display)
 
 static struct gbm_bo *
 render_frames(EGLDisplay display, EGLSurface surface, struct gbm_surface *gbm,
-              struct gbm_device *device, GLuint program, unsigned width,
-              unsigned height, unsigned generation)
+              struct gbm_device *device, EGLContext consumer_context,
+              EGLContext producer_context,
+              const struct native_fence_api *fence_api, bool noop,
+              GLuint program, unsigned width, unsigned height,
+              unsigned generation)
 {
    struct gbm_bo *retained = NULL;
    const GLint colour = glGetUniformLocation(program, "colour");
    glUseProgram(program);
 
    for (unsigned frame = 0; frame < FRAMES; ++frame) {
+      EGLint age = 0;
+      EGLint damage[] = {
+         (EGLint)(width / 4),
+         (EGLint)(height / 4),
+         (EGLint)(width / 2),
+         (EGLint)(height / 2),
+      };
+      if (!eglQuerySurface(display, surface, EGL_BUFFER_AGE_EXT, &age) ||
+          !fence_api->set_damage(display, surface, damage, 1)) {
+         fprintf(stderr, "EGL partial update %u/%u failed: %#x\n",
+                 generation, frame, eglGetError());
+         return NULL;
+      }
+
       glViewport(0, 0, width, height);
+      glEnable(GL_SCISSOR_TEST);
+      glScissor(damage[0], damage[1], damage[2], damage[3]);
       glUniform4f(colour, (float)(frame + 1) / (float)FRAMES,
                   (float)(generation + 1) / 3.0f, 0.25f, 1.0f);
       glDrawArrays(GL_TRIANGLES, 0, 3);
+      glDisable(GL_SCISSOR_TEST);
       if (!gl_ok("animated window draw") || !eglSwapBuffers(display, surface)) {
          fprintf(stderr, "EGL window swap %u failed: %#x\n", frame,
                  eglGetError());
@@ -197,6 +375,14 @@ render_frames(EGLDisplay display, EGLSurface surface, struct gbm_surface *gbm,
       }
 
       gbm_surface_release_buffer(gbm, front);
+      if (!noop && generation == 0 && frame == 0 &&
+          !native_fence_handoff(display, consumer_context, surface,
+                                producer_context, fence_api, program)) {
+         fprintf(stderr, "native fence handoff %u/%u failed: %#x\n",
+                 generation, frame, eglGetError());
+         gbm_bo_destroy(alias);
+         return NULL;
+      }
       if (retained)
          gbm_bo_destroy(retained);
       retained = alias;
@@ -221,6 +407,7 @@ retained_bo_ok(struct gbm_bo *bo, unsigned width, unsigned height)
 int
 main(void)
 {
+   const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
    const int drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
    struct gbm_device *device =
       drm_fd >= 0 ? gbm_create_device(drm_fd) : NULL;
@@ -238,6 +425,28 @@ main(void)
       return 1;
    }
 
+   const char *extensions = eglQueryString(display, EGL_EXTENSIONS);
+   const struct native_fence_api fence_api = {
+      .create = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR"),
+      .destroy =
+         (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR"),
+      .wait = (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR"),
+      .dup_fd = (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress(
+         "eglDupNativeFenceFDANDROID"),
+      .set_damage = (PFNEGLSETDAMAGEREGIONKHRPROC)eglGetProcAddress(
+         "eglSetDamageRegionKHR"),
+   };
+   if (!extensions ||
+       !has_extension(extensions, "EGL_ANDROID_native_fence_sync") ||
+       !has_extension(extensions, "EGL_KHR_wait_sync") ||
+       !has_extension(extensions, "EGL_EXT_buffer_age") ||
+       !has_extension(extensions, "EGL_KHR_partial_update") ||
+       !fence_api.create || !fence_api.destroy || !fence_api.wait ||
+       !fence_api.dup_fd || !fence_api.set_damage) {
+      fprintf(stderr, "required EGL fence/damage extensions missing\n");
+      return 1;
+   }
+
    EGLConfig config = choose_config(display);
    const EGLint context_attrs[] = {
       EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE,
@@ -248,6 +457,15 @@ main(void)
                                : EGL_NO_CONTEXT;
    if (!config || context == EGL_NO_CONTEXT)
       return 1;
+
+   EGLContext producer_context =
+      noop ? EGL_NO_CONTEXT
+           : eglCreateContext(display, config, context, context_attrs);
+   if (!noop && producer_context == EGL_NO_CONTEXT) {
+      fprintf(stderr, "native-fence producer setup failed: %#x\n",
+              eglGetError());
+      return 1;
+   }
 
    const unsigned widths[2] = {FIRST_WIDTH, NEXT_WIDTH};
    const unsigned heights[2] = {FIRST_HEIGHT, NEXT_HEIGHT};
@@ -284,7 +502,8 @@ main(void)
          return 1;
 
       struct gbm_bo *retained =
-         render_frames(display, surface, gbm_surface, device, program,
+         render_frames(display, surface, gbm_surface, device, context,
+                       producer_context, &fence_api, noop, program,
                        widths[generation], heights[generation], generation);
       if (!retained)
          return 1;
@@ -310,10 +529,14 @@ main(void)
    if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                        EGL_NO_CONTEXT))
       return 1;
+   if (!noop) {
+      eglDestroyContext(display, producer_context);
+   }
    eglDestroyContext(display, context);
    eglTerminate(display);
    gbm_device_destroy(device);
    close(drm_fd);
-   puts("GL05 EGL/GBM swap, dma-buf retention, resize and 16 frames exact");
+   puts("GL05 EGL/GBM swap, partial update, native-fence handoff, dma-buf "
+        "retention, resize and 16 frames exact");
    return 0;
 }
