@@ -1790,14 +1790,13 @@ verify_readback(const uint8_t *map)
       const uint8_t *expected_pixel = expected;
 #endif
       if (memcmp(actual, expected_pixel, IMAGE_PIXEL_BYTES) != 0) {
-         fprintf(stderr, PROBE_NAME ": pixel %zu differs at byte", pixel);
-         for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte) {
-            if (actual[byte] != expected_pixel[byte]) {
-               fprintf(stderr, " %zu: got 0x%02x, expected 0x%02x\n", byte,
-                       actual[byte], expected_pixel[byte]);
-               break;
-            }
-         }
+         fprintf(stderr, PROBE_NAME ": pixel %zu differs: got", pixel);
+         for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte)
+            fprintf(stderr, " %02x", actual[byte]);
+         fprintf(stderr, ", expected");
+         for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte)
+            fprintf(stderr, " %02x", expected_pixel[byte]);
+         fputc('\n', stderr);
          return false;
       }
    }
