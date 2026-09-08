@@ -214,9 +214,24 @@
 #define G17P_SATURATE_TEXTURE 0
 #endif
 
+#ifndef G17P_SHADOW_COMPARE
+#define G17P_SHADOW_COMPARE 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
-   (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE)
+   (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
+    G17P_SHADOW_COMPARE)
+
+#if G17P_SHADOW_COMPARE
+#define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
+#define TEXTURE_ASPECT VK_IMAGE_ASPECT_DEPTH_BIT
+#define TEXTURE_PIXEL_BYTES 2
+#else
+#define TEXTURE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#define TEXTURE_ASPECT VK_IMAGE_ASPECT_COLOR_BIT
+#define TEXTURE_PIXEL_BYTES 4
+#endif
 
 #if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
@@ -284,6 +299,11 @@
 #include "g17p_vulkan_saturate_texture_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_saturate_texture_frag_spv
+#elif G17P_SHADOW_COMPARE
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_shadow_compare_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_shadow_compare_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -827,6 +847,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SHADOW_COMPARE
+#define PROBE_NAME "g17p-vulkan-shadow-compare"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1111,7 +1136,11 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 #if G17P_TEXTURE_ORACLE
 VK_FN(vkCmdPipelineBarrier);
+#if G17P_SHADOW_COMPARE
+VK_FN(vkCmdClearDepthStencilImage);
+#else
 VK_FN(vkCmdCopyBufferToImage);
+#endif
 VK_FN(vkCmdBindDescriptorSets);
 #endif
 VK_FN(vkCmdBindPipeline);
@@ -1296,6 +1325,13 @@ verify_readback(const uint8_t *map)
 #elif G17P_SATURATE_TEXTURE
    /* White multiplied by (-1, 2, 0.5, 0.25), then clamped to [0, 1]. */
    static const uint8_t expected[4] = {0, 255, 128, 64};
+#elif G17P_SHADOW_COMPARE
+   /* With depth 0.5 and LESS, reference 0.125 passes on the left while
+    * reference 0.75 fails on the right. */
+   static const uint8_t expected[2][4] = {
+      {255, 255, 255, 255},
+      {0, 0, 0, 0},
+   };
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1410,13 +1446,19 @@ verify_readback(const uint8_t *map)
    static const uint8_t expected[4] = {255, 71, 13, 255};
 #endif
    for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
-      const uint8_t *actual = &pixels[pixel * sizeof(expected)];
-      if (memcmp(actual, expected, sizeof(expected)) != 0) {
+      const uint8_t *actual = &pixels[pixel * IMAGE_PIXEL_BYTES];
+#if G17P_SHADOW_COMPARE
+      const uint8_t *expected_pixel =
+         expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
+#else
+      const uint8_t *expected_pixel = expected;
+#endif
+      if (memcmp(actual, expected_pixel, IMAGE_PIXEL_BYTES) != 0) {
          fprintf(stderr, PROBE_NAME ": pixel %zu differs at byte", pixel);
-         for (size_t byte = 0; byte < sizeof(expected); ++byte) {
-            if (actual[byte] != expected[byte]) {
+         for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte) {
+            if (actual[byte] != expected_pixel[byte]) {
                fprintf(stderr, " %zu: got 0x%02x, expected 0x%02x\n", byte,
-                       actual[byte], expected[byte]);
+                       actual[byte], expected_pixel[byte]);
                break;
             }
          }
@@ -1439,6 +1481,8 @@ main(void)
        getenv("G17P_TEXTURE_GATHER_RECORD_ONLY") != NULL) ||
       (G17P_SATURATE_TEXTURE &&
        getenv("G17P_SATURATE_TEXTURE_RECORD_ONLY") != NULL) ||
+      (G17P_SHADOW_COMPARE &&
+       getenv("G17P_SHADOW_COMPARE_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -1631,14 +1675,14 @@ main(void)
 
 #if G17P_TEXTURE_ORACLE
    VkFormatProperties texture_format_properties;
-   vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
+   vkGetPhysicalDeviceFormatProperties(physical, TEXTURE_FORMAT,
                                        &texture_format_properties);
    const VkFormatFeatureFlags required_texture_format =
       VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
       VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
    if ((texture_format_properties.optimalTilingFeatures &
         required_texture_format) != required_texture_format)
-      die("RGBA8 optimal images lack sampled/upload support");
+      die("texture optimal images lack sampled/upload support");
 #endif
 
 #if G17P_VERTEX_FORMAT
@@ -1730,7 +1774,11 @@ main(void)
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
 #if G17P_TEXTURE_ORACLE
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
+#if G17P_SHADOW_COMPARE
+   LOAD_DEVICE(device, vkCmdClearDepthStencilImage);
+#else
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
+#endif
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
 #endif
    LOAD_DEVICE(device, vkCmdBindPipeline);
@@ -2080,13 +2128,14 @@ main(void)
       TEXTURE_HEIGHT = 64,
       TEXTURE_LEVELS = 3,
       TEXTURE_GUARD_BYTES = 64,
-      TEXTURE_LEVEL0_BYTES = 64 * 64 * 4,
-      TEXTURE_LEVEL1_BYTES = 32 * 32 * 4,
-      TEXTURE_LEVEL2_BYTES = 16 * 16 * 4,
+      TEXTURE_LEVEL0_BYTES = 64 * 64 * TEXTURE_PIXEL_BYTES,
+      TEXTURE_LEVEL1_BYTES = 32 * 32 * TEXTURE_PIXEL_BYTES,
+      TEXTURE_LEVEL2_BYTES = 16 * 16 * TEXTURE_PIXEL_BYTES,
       TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
                            TEXTURE_LEVEL2_BYTES,
       TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
    };
+#if !G17P_SHADOW_COMPARE
    uint8_t texture_upload_expected[TEXTURE_UPLOAD_BYTES];
    memset(texture_upload_expected, 0xa5, sizeof(texture_upload_expected));
    static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
@@ -2108,8 +2157,10 @@ main(void)
    const size_t mip_pixels[TEXTURE_LEVELS] = {64 * 64, 32 * 32, 16 * 16};
    for (unsigned level = 0; level < TEXTURE_LEVELS; ++level) {
       uint8_t *dst = texture_upload_expected + mip_offsets[level];
-      for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel)
-         memcpy(dst + pixel * 4, mip_colours[level], 4);
+      for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel) {
+         memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, mip_colours[level],
+                TEXTURE_PIXEL_BYTES);
+      }
    }
 #if G17P_TEXTURE_GATHER
    struct gather_texel {
@@ -2135,11 +2186,12 @@ main(void)
       VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture-oracle upload");
    memcpy(texture_upload.map, texture_upload_expected,
           sizeof(texture_upload_expected));
+#endif
 
    const VkImageCreateInfo texture_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = TEXTURE_FORMAT,
       .extent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
       .mipLevels = TEXTURE_LEVELS,
       .arrayLayers = 1,
@@ -2283,9 +2335,9 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = texture,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = TEXTURE_FORMAT,
       .subresourceRange = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = TEXTURE_ASPECT,
          .levelCount = TEXTURE_LEVELS,
          .layerCount = 1,
       },
@@ -2301,6 +2353,10 @@ main(void)
       .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+#if G17P_SHADOW_COMPARE
+      .compareEnable = VK_TRUE,
+      .compareOp = VK_COMPARE_OP_LESS,
+#endif
       .minLod = 0.0f,
       .maxLod = 2.0f,
    };
@@ -2680,7 +2736,7 @@ main(void)
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .image = texture,
       .subresourceRange = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = TEXTURE_ASPECT,
          .levelCount = TEXTURE_LEVELS,
          .layerCount = 1,
       },
@@ -2688,27 +2744,39 @@ main(void)
    vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
                         1, &texture_barrier);
+#if G17P_SHADOW_COMPARE
+   const VkClearDepthStencilValue depth_clear = {.depth = 0.5f};
+   const VkImageSubresourceRange depth_range = {
+      .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+      .levelCount = TEXTURE_LEVELS,
+      .layerCount = 1,
+   };
+   vkCmdClearDepthStencilImage(command_buffer, texture,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               &depth_clear, 1, &depth_range);
+#else
    const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
       {
          .bufferOffset = TEXTURE_GUARD_BYTES,
-         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 0, 0, 1},
          .imageExtent = {64, 64, 1},
       },
       {
          .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
-         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 0, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 1, 0, 1},
          .imageExtent = {32, 32, 1},
       },
       {
          .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES +
                          TEXTURE_LEVEL1_BYTES,
-         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 0, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 2, 0, 1},
          .imageExtent = {16, 16, 1},
       },
    };
    vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           TEXTURE_LEVELS, texture_copies);
+#endif
    texture_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
    texture_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
    texture_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -2905,9 +2973,13 @@ main(void)
 #endif
 #if G17P_TEXTURE_ORACLE
    if (!verify_upload(&texture_vertex, texture_vertex_expected,
-                      "vertex input") ||
+                      "vertex input")
+#if !G17P_SHADOW_COMPARE
+       ||
        !verify_upload(&texture_upload, texture_upload_expected,
-                      "texture upload"))
+                      "texture upload")
+#endif
+   )
       return EXIT_FAILURE;
 #endif
 
@@ -2955,9 +3027,13 @@ main(void)
 #endif
 #if G17P_TEXTURE_ORACLE
    if (!verify_upload(&texture_vertex, texture_vertex_expected,
-                      "vertex input") ||
+                      "vertex input")
+#if !G17P_SHADOW_COMPARE
+       ||
        !verify_upload(&texture_upload, texture_upload_expected,
-                      "texture upload"))
+                      "texture upload")
+#endif
+   )
       return EXIT_FAILURE;
 #endif
 #endif
@@ -2985,6 +3061,11 @@ main(void)
                      "produced exact lower, upper, and interior lanes "
                      "immediately/3s; all source/readback guards unchanged, "
                      "checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_SHADOW_COMPARE
+   printf(PROBE_NAME ": PASS — two depth references split the exact "
+                     "white/black halves immediately/3s; all source/readback guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
           checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "

@@ -1101,6 +1101,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * three-bit field, so map them one by one: an unspelled value must refuse
     * rather than alias onto a real channel. */
    const bool gather = I->gather != AGX_GATHER_NONE;
+   const bool shadow = I->shadow;
    enum agx3_tex_gather gather_component = AGX3_TEX_GATHER_NONE;
    switch (I->gather) {
    case AGX_GATHER_NONE: break;
@@ -1180,11 +1181,17 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          I->src[3].size != AGX_SIZE_64 || I->src[4].size != AGX_SIZE_64 ||
          agx_channels(I->src[3]) != 1 || agx_channels(I->src[4]) != 1 ||
          (I->src[3].value & 1) || (I->src[4].value & 1))) ||
-       !agx_is_null(I->src[5]) ||
+       (shadow
+           ? (!agx3_tex_plain_reg(I->src[5]) ||
+              I->src[5].size != AGX_SIZE_32 ||
+              agx_channels(I->src[5]) != 1 || I->src[5].value > 254)
+           : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
        (array && (enc != AGX_ISA_ENCODING_AGX3B || explicit_lod)) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       I->offset || I->shadow || I->query_lod || I->sparse ||
+       I->offset || I->query_lod || I->sparse ||
+       (shadow && (array || !implicit_lod || gather || I->mask != 1 ||
+                   enc != AGX_ISA_ENCODING_AGX3B)) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
@@ -1207,7 +1214,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * register-indexed shaders whose physical coordinates live elsewhere.
     * PACK_SMPIR publishes only the layer, so explicitly copy x/y to bank 0. */
    const uint16_t coord = (explicit_lod || register_bias || array ||
-                           gradient_lod)
+                           gradient_lod || shadow)
                              ? 0
                              : I->src[0].value;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
@@ -1231,6 +1238,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
           enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard, bytes, &len) ||
        !agx3_append(emission, bytes, len))
+      return false;
+
+   if (shadow &&
+       (!agx3_tex_stage_copy_hints(
+           enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
+           I->src[5].discard, bytes, &len) ||
+        !agx3_append(emission, bytes, len)))
       return false;
 
    if (array &&
@@ -1276,6 +1290,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .texture_kill = !immediate && I->src[3].kill,
       .sampler_kill = !immediate && I->src[4].kill,
       .gather = gather_component,
+      .shadow = shadow,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER

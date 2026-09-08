@@ -254,6 +254,7 @@ struct agx3_tex_sample_desc {
    bool texture_kill;
    bool sampler_kill;
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
+   bool shadow;                 /* compare against the scalar in bank 4 */
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate

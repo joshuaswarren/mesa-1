@@ -646,6 +646,30 @@ test_gradient_and_register_bias(void)
                                     &length));
    }
 
+   /* Apple's depth2d sample_compare differs from the ordinary sample by
+    * f143=1, f75=1 and the absence of f74.  Normalize Apple's destination
+    * half6 to half0; the trailing profile byte is Mesa's hardware-qualified
+    * fragment profile. */
+   struct agx3_tex_sample_desc shadow = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1u << 0,
+      .coord_kill = true, .final = true, .shadow = true,
+   };
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &shadow, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800ca090002000010000000100"));
+   struct agx3_tex_sample_desc bad_shadow = shadow;
+   bad_shadow.mask = 3;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
+                                 &length));
+   bad_shadow = shadow;
+   bad_shadow.array = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
+                                 &length));
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &shadow, bytes,
+                                 &length));
+
    /* Fail closed on everything unwitnessed: both forms are AGX3b-only,
     * neither carries the immediate LOD operand, and a gradient array sample
     * would need the immediate layer selector Apple pairs with it. */

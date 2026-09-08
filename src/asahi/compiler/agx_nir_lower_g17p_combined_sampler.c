@@ -16,15 +16,25 @@ g17p_sample_shape(const nir_tex_instr *tex)
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
        tex->op != nir_texop_tg4) ||
        tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
-       tex->is_shadow || tex->is_sparse ||
+       tex->is_sparse ||
        tex->coord_components != (tex->is_array ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
        tex->backend_flags == (AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                               AGX_TEXTURE_FLAG_NO_CLAMP) ||
-       tex->dest_type != nir_type_float32 || tex->def.num_components != 4 ||
+       tex->dest_type != nir_type_float32 ||
+       tex->def.num_components != (tex->is_shadow ? 1 : 4) ||
        tex->def.bit_size != 32)
       return false;
+
+   if (tex->is_shadow) {
+      const int comparator =
+         nir_tex_instr_src_index(tex, nir_tex_src_comparator);
+      if (tex->op != nir_texop_tex || tex->is_array || comparator < 0 ||
+          nir_src_num_components(tex->src[comparator].src) != 1 ||
+          nir_src_bit_size(tex->src[comparator].src) != 32)
+         return false;
+   }
 
    const bool has_bias =
       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0;
@@ -32,7 +42,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
-   if (tex->num_srcs != (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) ||
+   const unsigned expected_srcs =
+      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) + tex->is_shadow;
+   if (tex->num_srcs != expected_srcs ||
        has_lod != (tex->op == nir_texop_txl) ||
        has_bias != (tex->op == nir_texop_txb) ||
        has_grad != (tex->op == nir_texop_txd))

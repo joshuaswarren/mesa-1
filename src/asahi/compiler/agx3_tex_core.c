@@ -227,6 +227,13 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         d->lod != AGX3_TEX_LOD_AUTO || d->array))
       return false;
 
+   /* Apple's depth2d sample_compare witness is a plain 2D implicit sample
+    * with one result component and its reference value in fixed bank 4. */
+   if (d->shadow &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO ||
+        d->array || d->gather != AGX3_TEX_GATHER_NONE || d->mask != 1))
+      return false;
+
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
@@ -257,7 +264,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(23, 5);
    base[nb++] = (struct agx3_field_kv)KV(38, 1);
    base[nb++] = (struct agx3_field_kv)KV(52, 1);
-   if (d->gather == AGX3_TEX_GATHER_NONE)
+   if (d->gather == AGX3_TEX_GATHER_NONE && !d->shadow)
       base[nb++] = (struct agx3_field_kv)KV(74, 1);
    base[nb++] = (struct agx3_field_kv)KV(89, 3);
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
@@ -324,6 +331,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
          ov[n++] = (struct agx3_field_kv)KV(145, d->gather -
                                                  AGX3_TEX_GATHER_R);
    }
+   if (d->shadow)
+      ov[n++] = (struct agx3_field_kv)KV(143, 1);
    if (enc == AGX_ISA_ENCODING_AGX3B)
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);
    else
