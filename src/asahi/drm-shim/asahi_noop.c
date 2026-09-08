@@ -102,6 +102,7 @@ static struct {
 } shim_mappings;
 
 static unsigned invalid_vm_binds;
+static bool failed_submit_once;
 
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
@@ -733,6 +734,12 @@ static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
+   if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
+      failed_submit_once = true;
+      errno = EIO;
+      return -1;
+   }
+
    const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
    if (!validate || !strcmp(validate, "0") || shim_params() != &params_g17p)
       return 0;

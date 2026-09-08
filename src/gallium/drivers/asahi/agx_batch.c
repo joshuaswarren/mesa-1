@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
+#include <string.h>
 #include <xf86drm.h>
 #include "asahi/lib/agx_device_virtio.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
@@ -991,28 +993,56 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    };
 
    int ret = dev->ops.submit(dev, &submit, &virt);
+   const int submit_errno =
+      ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
 
    u_rwlock_rdunlock(&screen->destroy_lock);
 
    if (ret) {
       if (compute) {
-         fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %m\n");
+         fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %s\n",
+                 strerror(submit_errno));
       }
 
       if (render) {
          struct drm_asahi_cmd_render *c = render;
          fprintf(
             stderr,
-            "DRM_IOCTL_ASAHI_SUBMIT render failed: %m (%dx%d tile %dx%d layers %d samples %d)\n",
+            "DRM_IOCTL_ASAHI_SUBMIT render failed: %s (%dx%d tile %dx%d layers %d samples %d)\n",
+            strerror(submit_errno),
             c->width_px, c->height_px, c->utile_width_px, c->utile_height_px,
             c->layers, c->samples);
       }
 
-      assert(0);
-   }
+      /* Shared BO input waits use temporary syncobj handles. The kernel did
+       * not consume the submission, so release those handles without
+       * publishing the nonexistent output fence back to the dma-bufs. */
+      for (unsigned i = 0; i < shared_bo_count; ++i) {
+         if (shared_bos[i])
+            drmSyncobjDestroy(dev->fd, syncs[i].handle);
+      }
 
-   if (ret == ENODEV)
-      abort();
+      free(syncs);
+      free(shared_bos);
+      free(virt.extres);
+      util_dynarray_fini(&cmdbuf);
+
+      /* No GPU work owns this batch. Retire its resources immediately and
+       * expose a context reset instead of leaving an unsignalled batch fence
+       * that can deadlock EGL, GBM, or a compositor during teardown. */
+      if (ctx->batch == batch)
+         ctx->batch = NULL;
+      agx_batch_mark_submitted(batch);
+      agx_batch_cleanup(ctx, batch, false);
+
+      const bool first_fault = !ctx->any_faults;
+      ctx->any_faults = true;
+      if (first_fault && ctx->reset.reset)
+         ctx->reset.reset(ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
+
+      errno = submit_errno;
+      return;
+   }
 
    /* Now stash our batch fence into any shared BOs. */
    if (shared_bo_count) {

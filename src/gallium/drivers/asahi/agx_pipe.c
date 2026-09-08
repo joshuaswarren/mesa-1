@@ -1787,6 +1787,18 @@ asahi_get_device_reset_status(struct pipe_context *pipe)
 }
 
 static void
+asahi_set_device_reset_callback(struct pipe_context *pipe,
+                                const struct pipe_device_reset_callback *cb)
+{
+   struct agx_context *ctx = agx_context(pipe);
+
+   if (cb)
+      ctx->reset = *cb;
+   else
+      memset(&ctx->reset, 0, sizeof(ctx->reset));
+}
+
+static void
 asahi_clear_buffer(struct pipe_context *pipe, struct pipe_resource *resource,
                    unsigned offset, unsigned size, const void *clear_value,
                    int clear_value_size)
@@ -1893,6 +1905,7 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->fence_server_sync = agx_fence_server_sync;
 
    pctx->get_device_reset_status = asahi_get_device_reset_status;
+   pctx->set_device_reset_callback = asahi_set_device_reset_callback;
 
    agx_init_state_functions(pctx);
    agx_init_query_functions(pctx);

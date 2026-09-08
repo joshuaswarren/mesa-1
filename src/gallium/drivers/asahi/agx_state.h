@@ -717,6 +717,7 @@ struct agx_context {
    struct agx_bg_eot_cache bg_eot;
 
    bool any_faults;
+   struct pipe_device_reset_callback reset;
 
    uint32_t syncobj;
    uint32_t dummy_syncobj;

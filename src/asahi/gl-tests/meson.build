@@ -735,6 +735,23 @@ test(
   suite : ['asahi'],
 )
 
+test(
+  'asahi-g17p-egl-gbm-failed-submit-reset',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_gbm_swap,
+  ],
+  env : [
+    'ASAHI_SHIM_FAIL_SUBMIT_ONCE=1',
+    'ASAHI_GL_EXPECT_SUBMIT_FAILURE=1',
+  ],
+  suite : ['asahi'],
+)
+
 run_target(
   'asahi-g17p-egl-dmabuf-image-shim',
   command : [

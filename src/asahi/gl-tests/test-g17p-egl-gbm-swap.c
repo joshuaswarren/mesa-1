@@ -408,6 +408,8 @@ int
 main(void)
 {
    const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
+   const bool expect_submit_failure =
+      getenv("ASAHI_GL_EXPECT_SUBMIT_FAILURE") != NULL;
    const int drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
    struct gbm_device *device =
       drm_fd >= 0 ? gbm_create_device(drm_fd) : NULL;
@@ -451,16 +453,26 @@ main(void)
    const EGLint context_attrs[] = {
       EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE,
    };
+   const EGLint robust_context_attrs[] = {
+      EGL_CONTEXT_CLIENT_VERSION, 3,
+      EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT, EGL_TRUE,
+      EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT,
+      EGL_LOSE_CONTEXT_ON_RESET_EXT,
+      EGL_NONE,
+   };
+   const EGLint *selected_context_attrs =
+      expect_submit_failure ? robust_context_attrs : context_attrs;
    EGLContext context = config ? eglCreateContext(display, config,
                                                    EGL_NO_CONTEXT,
-                                                   context_attrs)
+                                                   selected_context_attrs)
                                : EGL_NO_CONTEXT;
    if (!config || context == EGL_NO_CONTEXT)
       return 1;
 
    EGLContext producer_context =
       noop ? EGL_NO_CONTEXT
-           : eglCreateContext(display, config, context, context_attrs);
+           : eglCreateContext(display, config, context,
+                              selected_context_attrs);
    if (!noop && producer_context == EGL_NO_CONTEXT) {
       fprintf(stderr, "native-fence producer setup failed: %#x\n",
               eglGetError());
@@ -500,6 +512,24 @@ main(void)
       }
       if (!program)
          return 1;
+
+      if (expect_submit_failure) {
+         glUseProgram(program);
+         glViewport(0, 0, widths[generation], heights[generation]);
+         glDrawArrays(GL_TRIANGLES, 0, 3);
+         eglSwapBuffers(display, surface);
+
+         const GLenum status = glGetGraphicsResetStatus();
+         if (status != GL_GUILTY_CONTEXT_RESET) {
+            fprintf(stderr, "failed submit returned reset status %#x\n",
+                    status);
+            return 1;
+         }
+
+         puts("GL05 failed submit retired without a fence hang and reported "
+              "a guilty reset");
+         return 0;
+      }
 
       struct gbm_bo *retained =
          render_frames(display, surface, gbm_surface, device, context,
