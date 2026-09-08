@@ -657,7 +657,7 @@ hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
    return T;
 }
 
-void hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 
 static inline struct hk_cs *
@@ -688,6 +688,11 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
 
+      if (!compute && !hk_cs_init_graphics(cmd, cs)) {
+         free(cs);
+         return NULL;
+      }
+
       /* Insert into the command buffer. We usually append to the end of the
        * command buffer, except for pre-graphics streams which go right before
        * the graphics workload. (This implies a level of out-of-order processing
@@ -702,8 +707,6 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       *ptr = cs;
 
-      if (!compute)
-         hk_cs_init_graphics(cmd, cs);
    }
 
    assert(*ptr != NULL);

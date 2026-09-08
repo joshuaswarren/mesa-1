@@ -1506,7 +1506,7 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                                prog->b.workgroup);
 }
 
-void
+bool
 hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -1517,7 +1517,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
     * Linked chunks acquire theirs in hk_cmd_buffer_emit_cs_jump. */
    if (hk_g17p_vdm_low_window_enabled(&dev->dev) &&
        !hk_g17p_vdm_compact(cmd, cs->addr))
-      return;
+      return false;
 
    hk_drm_attachment_set_init(&cs->fragment_attachments);
 
@@ -1625,7 +1625,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk,
                                      VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
+         return false;
       }
 
       memcpy(map, barrier.bytes, barrier.length);
@@ -1638,7 +1638,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       mesa_loge("unknown VDM command-stream generation for %s",
                 agx_chip_name(dev->dev.chip));
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return;
+      return false;
    }
 
    if (agx_chip_command_stream_generation(dev->dev.chip) ==
@@ -1665,7 +1665,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          mesa_loge("no grounded HAL300 initial PPP payload for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
+         return false;
       }
 
       const uint64_t depth_stencil_gpu = hk_pool_upload(
@@ -1683,7 +1683,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          mesa_loge("failed to emit HAL300 initial PPP state for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
+         return false;
       }
 
       memcpy(map, records, sizeof(records));
@@ -1706,7 +1706,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk,
                                      VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
+         return false;
       }
 
       struct agx_ptr T =
@@ -1718,7 +1718,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
           * then appended to a half-built prelude, and the size assert below
           * aborts a debug build instead of reporting anything. */
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
+         return false;
       }
 
       memcpy(T.cpu, initial.bytes, initial.length);
@@ -1726,7 +1726,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          mesa_loge("failed to emit G17P initial PPP state for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
+         return false;
       }
 
       if (hk_g17p_launch_trace_enabled())
@@ -1743,7 +1743,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       size_t size = agx_ppp_update_size(&present);
       struct agx_ptr T = hk_pool_vdm_alloc(cmd, size, AGX_PPP_HEADER_ALIGN);
       if (!T.cpu)
-         return;
+         return false;
 
       struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
 
@@ -1760,7 +1760,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
          mesa_loge("no grounded legacy PPP payload/finalizer for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
+         return false;
       }
 
       if (hk_g17p_launch_trace_enabled())
@@ -1777,6 +1777,8 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 
    if (dev->dev.chip == AGX_CHIP_G17P)
       assert((cs->current - cs->start) == HK_G17P_VDM_INITIAL_SIZE);
+
+   return true;
 }
 
 void
