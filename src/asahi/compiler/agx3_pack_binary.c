@@ -867,8 +867,9 @@ agx3_tex_plain_uniform64(agx_index index)
 }
 
 /* Translate the corpus-grounded 2D texel fetch. Dynamic integer LOD is
- * published into operand bank 6; every other texture axis remains a
- * deliberate refusal. */
+ * published into operand bank 6 on staging slot 2, then the fetch returns on
+ * result slot 1 while waiting for that independent staging generation. Every
+ * other texture axis remains a deliberate refusal. */
 static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I,
@@ -894,7 +895,6 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * staging slot 2, then issues the texture result on slot 1. Keep those two
     * independent scoreboard domains; reusing slot 1 for both is not a native
     * dependency shape. */
-   const uint8_t staging_slot = bindless_image && register_lod ? 2 : slot;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -931,6 +931,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * like ordinary texture loads, use the bank0 coordinate ABI. */
    const uint16_t staging_coord =
       I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image ? 16 : 0;
+   const uint8_t staging_slot = register_lod ? 2 : slot;
+   if (register_lod && slot != 1)
+      return false;
    if (stage_coordinates) {
       uint16_t staging_wait = wait_mask;
       if (register_lod) {
@@ -4358,6 +4361,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I);
+         /* Apple's register-LOD texel fetch has two independent scoreboard
+          * generations: PACK_SMPIR/COPY publish staging on slot 2 and TEX
+          * consumes it while returning the sampled vector on slot 1. Model
+          * slot 2 as transient so a prior generation is retired before the
+          * compound encoding reuses it and later users do not wait it again. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             (I->op == AGX_OPCODE_TEXTURE_LOAD ||
+              I->op == AGX_OPCODE_IMAGE_LOAD) &&
+             I->lod_mode == AGX_LOD_MODE_LOD_MIN && I->nr_srcs >= 2 &&
+             agx3_tex_plain_reg(I->src[1]) &&
+             I->src[1].size == AGX_SIZE_32 &&
+             agx_channels(I->src[1]) == 1) {
+            e->preferred_slot = 1;
+            e->transient_slots = 1u << 1;
+         }
          if ((enc == AGX_ISA_ENCODING_AGX3B &&
               I->op == AGX_OPCODE_IMAGE_LOAD) ||
              (g17p_storage_image_protocol &&

@@ -160,6 +160,30 @@ int main(void)
       CHECK(r[5].wait_mask == 1);
    }
 
+   /* A compound texture instruction stages an operand on slot 2, consumes
+    * that generation internally, and publishes its actual result on slot 1.
+    * A prior slot-2 load must be waited before staging reuses the slot; its
+    * later GPR consumer is already satisfied, while the texture result still
+    * carries the independent slot-1 dependency. */
+   {
+      struct agx3_slot_instr texture = ld(4);
+      texture.preferred_slot = 1;
+      texture.transient_slots = 1u << 1;
+      struct agx3_slot_instr p[] = {
+         ld(0), ld(2), texture, st(2), st(4),
+      };
+      CHECK(agx3_slot_assign(p, 5, 6, r));
+      CHECK(r[0].slot == 1 && r[1].slot == 2);
+      CHECK(r[2].slot == 1 && r[2].wait_mask == (1u << 1));
+      CHECK(r[3].wait_mask == 0);
+      CHECK(r[4].wait_mask == (1u << 0));
+
+      texture.transient_slots = 1u << 0;
+      CHECK(!agx3_slot_assign(&texture, 1, 6, r));
+      texture.transient_slots = 1u << 6;
+      CHECK(!agx3_slot_assign(&texture, 1, 6, r));
+   }
+
    /* Static copy produces a TPS dependency token and a later rld consumes it.
     * The reload must wait the copy even though the two operations share no
     * architectural GPR. Its own GPR result then remains async as usual. */

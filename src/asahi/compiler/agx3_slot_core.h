@@ -44,6 +44,10 @@ extern "C" {
 struct agx3_slot_instr {
    bool is_async;   /* produces a scoreboard-tracked result */
    uint8_t preferred_slot; /* 0=round-robin, otherwise required slot */
+   /* Slots used and fully consumed by this instruction's multi-op encoding.
+    * A live prior generation is waited before the internal producer reuses
+    * the slot; its register aliases are then synchronously complete. */
+   uint16_t transient_slots;
    uint8_t nr_dsts; /* dependency tokens this instruction writes */
    uint8_t nr_srcs; /* dependency tokens this instruction reads */
    uint16_t dst[AGX3_SLOT_MAX_REGS];
@@ -66,6 +70,9 @@ struct agx3_slot_result {
  * contributes no wait. The default slot policy is round-robin. A caller may
  * request a corpus-witnessed slot for one async instruction with
  * preferred_slot; dependencies then follow that actual slot normally.
+ * transient_slots models a compound encoding which publishes an internal
+ * staging value on a slot and consumes it before the logical instruction
+ * ends. It may not overlap the instruction's result slot.
  */
 bool agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
                       unsigned nslots, struct agx3_slot_result *out);

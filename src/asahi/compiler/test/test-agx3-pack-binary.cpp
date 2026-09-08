@@ -4908,12 +4908,12 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    ASSERT_TRUE(agx3_tex_stage_typed_lod(
-      enc, 4, 1, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
+      enc, 4, 2, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 1, 0, false, false,
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 2, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 1, 0, false, false,
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 2, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
    struct agx3_tex_fetch_desc d = {};
@@ -4921,7 +4921,7 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    d.width = AGX3_TEX_W32;
    d.mask = 15;
    d.slot = 1;
-   d.wait_mask = 1;
+   d.wait_mask = 1u << 1;
    d.coord_kill = true;
    d.final = true;
    d.register_lod = true;

@@ -32,6 +32,11 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
          return false;
       if (I->preferred_slot > nslots || (!I->is_async && I->preferred_slot))
          return false;
+      const uint16_t valid_slots = (uint16_t)((1u << nslots) - 1u);
+      if ((I->transient_slots & ~valid_slots) ||
+          (I->preferred_slot &&
+           (I->transient_slots & (1u << (I->preferred_slot - 1)))))
+         return false;
 
       uint16_t wait_mask = 0;
       for (unsigned s = 0; s < I->nr_srcs; ++s) {
@@ -66,6 +71,29 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
             wait_mask |= (uint16_t)(1u << (slot - 1));
             slot_waited[slot] = true;
          }
+      }
+
+      /* A compound instruction may use a scoreboard slot internally, for
+       * example PACK_SMPIR/COPY producers followed by a TEX which waits for
+       * them. Retire a prior generation before reusing the slot, then forget
+       * its aliases: the prewait has made those GPR values synchronous and
+       * the internal generation is consumed before this logical instruction
+       * returns. */
+      for (unsigned slot = 1; slot <= nslots; ++slot) {
+         const uint16_t bit = (uint16_t)(1u << (slot - 1));
+         if (!(I->transient_slots & bit))
+            continue;
+
+         bool live = false;
+         for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r) {
+            if (reg_slot[r] == slot) {
+               live = true;
+               reg_slot[r] = 0;
+            }
+         }
+         if (live && !slot_waited[slot])
+            wait_mask |= bit;
+         slot_waited[slot] = true;
       }
 
       out[i].wait_mask = wait_mask;
