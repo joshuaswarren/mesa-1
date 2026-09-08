@@ -1697,7 +1697,8 @@ agx_ra(agx_context *ctx)
        * scalar producers remain free to coalesce elsewhere and are copied by
        * the ordinary collect when necessary. */
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_CUBE &&
+          I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+          (I->dim == AGX_DIM_CUBE || I->dim == AGX_DIM_CUBE_ARRAY) &&
           I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(high_gpr, I->src[0].value);
 

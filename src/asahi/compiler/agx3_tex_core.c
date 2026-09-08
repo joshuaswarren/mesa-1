@@ -263,7 +263,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * fixed coordinate bank 0. Implicit LOD and the ordinary immediate and
     * register explicit-LOD selectors are independently witnessed. */
    if (d->cube &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->three_d ||
+       (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
          d->lod != AGX3_TEX_LOD_REGISTER) ||

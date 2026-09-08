@@ -255,10 +255,10 @@ struct agx3_tex_sample_desc {
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
    bool coord_kill;
    bool final;          /* witnessed final texture-op marker */
-   bool array;          /* 2D array: layer is named directly by f31/f37 */
+   bool array;          /* array layer is named directly by f31/f37 */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
-   bool cube;           /* native cube: third coordinate in cube operand bank */
+   bool cube;           /* native cube; combine with array for cube-array */
    enum agx3_tex_operand_kind texture_kind;
    enum agx3_tex_operand_kind sampler_kind;
    uint16_t texture_value;

@@ -7818,12 +7818,13 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    d.lod = AGX3_TEX_LOD_AUTO;
    d.slot = 1;
    d.wait_mask = 1;
+   d.coord_kill = true;
    d.final = true;
    d.cube = true;
    d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    static const uint8_t native_sample[] = {
-      0x25,0x80,0x0c,0x98,0xb0,0x00,0x10,
+      0x25,0x80,0x0c,0xb8,0xb0,0x00,0x10,
       0x00,0x01,0x00,0x10,0x00,0x12,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
@@ -7858,6 +7859,64 @@ TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
 
       pack(b, /*expect_ok=*/false);
    }
+}
+
+TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(16, AGX_SIZE_32);
+   coord.channels_m1 = 3;
+   coord.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_CUBE_ARRAY,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      ASSERT_TRUE(agx3_tex_cube_cem_calc(enc, 16, 18, 20, axis, axis == 2,
+                                         bytes, &len));
+      append(want, bytes, len);
+      if (axis == 0) {
+         ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
+         append(want, bytes, len);
+      }
+   }
+   for (unsigned component = 0; component < 2; ++component) {
+      ASSERT_TRUE(agx3_tex_cube_cem_finalize(enc, component,
+                                             component == 1, bytes, &len));
+      append(want, bytes, len);
+   }
+   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
+                                    bytes, &len));
+   append(want, bytes, len);
+
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .array = true,
+      .array_layer = 22, .cube = true,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   static const uint8_t native_sample[] = {
+      0x25,0x80,0x0c,0xb8,0xb0,0x00,0x13,
+      0xb5,0x01,0x00,0x10,0x00,0x12,0x00,
+   };
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(native_sample,
+                                  native_sample + sizeof(native_sample)));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
@@ -7914,16 +7973,17 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       d.lod_x64 = dynamic ? 0 : 128;
       d.slot = 1;
       d.wait_mask = 1;
+      d.coord_kill = true;
       d.final = true;
       d.cube = true;
       d.g17p_fragment_profile = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       static const uint8_t native_immediate[] = {
-         0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x13,
+         0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x13,
          0x00, 0x01, 0x00, 0x10, 0x08, 0x12, 0x00,
       };
       static const uint8_t native_register[] = {
-         0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x00,
+         0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00,
          0x03, 0x01, 0x00, 0x10, 0x00, 0x12, 0x00,
       };
       const uint8_t *native = dynamic ? native_register : native_immediate;
@@ -7995,6 +8055,7 @@ TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
       d.lod_x64 = 64;
       d.slot = slot;
       d.wait_mask = 1u << i;
+      d.coord_kill = true;
       d.final = i == 1;
       d.cube = true;
       d.g17p_fragment_profile = true;

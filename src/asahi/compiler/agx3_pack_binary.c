@@ -1229,9 +1229,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool valid_immediate_bias = immediate_lod && integral_x64;
    const uint16_t immediate_x64_field =
       (uint16_t)(((int)immediate_level_x64) & 0xfff);
-   const bool array = I->dim == AGX_DIM_2D_ARRAY;
+   const bool cube_array = I->dim == AGX_DIM_CUBE_ARRAY;
+   const bool array = I->dim == AGX_DIM_2D_ARRAY || cube_array;
    const bool three_d = I->dim == AGX_DIM_3D;
-   const bool cube = I->dim == AGX_DIM_CUBE;
+   const bool cube = I->dim == AGX_DIM_CUBE || cube_array;
    /* A per-lane level and a per-lane bias share one staging form, so they
     * share one operand test: a live single-channel 16-bit register. */
    const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
@@ -1277,7 +1278,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
-       agx_channels(I->src[0]) != ((array || three_d || cube) ? 3 : 2) ||
+       agx_channels(I->src[0]) != (cube_array ? 4 :
+                                    (array || three_d || cube) ? 3 : 2) ||
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
        (cube && !I->src[0].discard) ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
@@ -1308,7 +1310,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (!valid_immediate_lod && !implicit_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
-         (!implicit_lod && !explicit_lod) || !immediate)) ||
+         (!implicit_lod && !explicit_lod) ||
+         (!cube_array && !immediate))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
        (offset &&
@@ -1329,7 +1332,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * happens only after the final XYZ read. */
    if (cube) {
       const unsigned coord_first = I->src[0].value;
-      const unsigned coord_last = coord_first + 6;
+      const unsigned coord_last = coord_first + (cube_array ? 8 : 6);
       const bool aliases_r0 = coord_first < 2;
       const bool aliases_r7 = coord_first < 16 && coord_last > 14;
 
@@ -1484,12 +1487,17 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                               : AGX3_TEX_LOD_AUTO,
       .lod_x64 = immediate_lod ? immediate_x64_field : 0,
       .array = array,
-      .array_layer = array ? I->src[0].value + 4 : 0,
+      .array_layer = array ? I->src[0].value + (cube_array ? 6 : 4) : 0,
       .three_d = three_d,
       .cube = cube,
       .slot = slot,
       .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
-      .coord_kill = I->src[0].kill,
+      /* CEM consumes and discards the source XYZ before SMP. Apple's cube
+       * and cube-array samples consequently set SMP f27 even though the
+       * sampler reads CEM's private coordinate bank rather than the original
+       * AGX IR source. Ordinary dimensions retain their existing last-use
+       * mapping. */
+      .coord_kill = cube ? I->src[0].discard : I->src[0].kill,
       .final = final,
       .g17p_fragment_profile =
          fragment_profile && enc == AGX_ISA_ENCODING_AGX3B,
@@ -4945,7 +4953,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * room for these three exact scratch destinations. */
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             I->dim == AGX_DIM_CUBE) {
+             (I->dim == AGX_DIM_CUBE ||
+              I->dim == AGX_DIM_CUBE_ARRAY)) {
             assert(nd + 3 <= AGX3_SLOT_MAX_REGS);
             e->dst[nd++] = 0;
             e->dst[nd++] = 14;
@@ -5295,7 +5304,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * its fixed scratch writes above, so materialize that dependency
              * immediately before the compound pipeline and let its own
              * PACK_SMPIR/SMP pair use the newly assigned result slot. */
-            if (I->dim == AGX_DIM_CUBE && sample_wait != 0) {
+            if ((I->dim == AGX_DIM_CUBE ||
+                 I->dim == AGX_DIM_CUBE_ARRAY) &&
+                sample_wait != 0) {
                if (!agx3_retire_slots_noop(emission, enc, sample_wait))
                   AGX3_REFUSE(I);
                sample_wait = 0;

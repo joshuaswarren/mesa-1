@@ -414,6 +414,18 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
        "05800cb8b0000003010010001200", NULL},
+      {"native cube-array dynamic layer implicit LOD",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b00013b5010010001200", NULL},
+      {"native cube-array dynamic layer level zero",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b00007b7010010001200", NULL},
       /*
        * Implicit LOD plus a constant bias.  Apple's own fragment samples of
        * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in

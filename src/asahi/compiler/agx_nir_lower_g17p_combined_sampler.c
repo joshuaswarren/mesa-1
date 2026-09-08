@@ -14,6 +14,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
 {
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+   const bool cube_array = cube && tex->is_array;
 
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
@@ -23,9 +24,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
         (tex->is_array || tex->is_shadow ||
          tex->op != nir_texop_txl)) ||
        (cube &&
-        (tex->is_array || tex->is_shadow || tex->op != nir_texop_tex)) ||
+        (tex->is_shadow ||
+         (tex->op != nir_texop_tex &&
+          !(cube_array && tex->op == nir_texop_txl)))) ||
        tex->is_sparse ||
-       tex->coord_components != ((tex->is_array || three_d || cube) ? 3 : 2) ||
+       tex->coord_components != (cube_array ? 4 :
+                                (tex->is_array || three_d || cube) ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
        tex->backend_flags == (AGX_TEXTURE_FLAG_CLAMP_TO_0 |
@@ -214,6 +218,47 @@ g17p_has_descriptor_access(const nir_shader *shader)
    return false;
 }
 
+/* Array-coordinate legalization reads the texture descriptor to clamp the
+ * API layer before the sample.  The combined-sampler fragment ABI already
+ * publishes that exact 32-byte descriptor pointer in preamble halves 0..3;
+ * retaining the original descriptor-set handle as well would require a
+ * second, unavailable root.  Replace only compiler-generated descriptor
+ * crawls of the selected texture with the native pointer.  Any independent
+ * handle/use remains below and makes the specialization fail closed. */
+static bool
+g17p_rewrite_combined_texture_crawls(nir_shader *shader, uint8_t set,
+                                     uint32_t texture_offset_B)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_builder b = nir_builder_create(impl);
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+            if (load->intrinsic !=
+                nir_intrinsic_load_from_texture_handle_agx)
+               continue;
+
+            nir_intrinsic_instr *handle = nir_src_as_intrinsic(load->src[0]);
+            if (!handle ||
+                handle->intrinsic != nir_intrinsic_bindless_image_agx ||
+                nir_intrinsic_desc_set(handle) != set ||
+                !nir_src_is_const(handle->src[0]) ||
+                nir_src_as_uint(handle->src[0]) != texture_offset_B)
+               return false;
+
+            b.cursor = nir_before_instr(instr);
+            nir_def_replace(&load->def,
+                            nir_load_preamble(&b, 1, 64, .base = 0));
+         }
+      }
+   }
+
+   return true;
+}
+
 bool
 agx_nir_lower_g17p_combined_sampler(
    nir_shader *shader, struct agx_g17p_combined_sampler_binding *binding)
@@ -275,6 +320,9 @@ agx_nir_lower_g17p_combined_sampler(
     * an extra entry in this sampler table.
     */
    sample->sampler_index = 0;
+
+   if (!g17p_rewrite_combined_texture_crawls(shader, 0, texture_offset_B))
+      return false;
 
    NIR_PASS(_, shader, nir_opt_dce);
    /* The initial fragment ABI replaces the whole descriptor root. Compute

@@ -1561,6 +1561,83 @@ test_g17p_native_cube_sample(void)
    return ok;
 }
 
+static bool
+test_g17p_native_cube_array_sample(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P native cube-array sample");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *coord = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+   nir_def *image =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+   nir_def *heap_index = nir_load_global_constant(
+      &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2,
+      .access = ACCESS_CAN_SPECULATE);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 32), heap_index, .desc_set = 0);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->is_array = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 4;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+   struct agx_g17p_combined_sampler_binding binding;
+   bool shape = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && tex->is_array &&
+                ci >= 0 && nir_src_num_components(tex->src[ci].src) == 4;
+   bool ok = shape &&
+             agx_nir_lower_g17p_combined_sampler(b.shader, &binding) &&
+             binding.texture_offset_B == 0 &&
+             binding.sampler_index_offset_B == 40;
+
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   key.reserved_preamble = 24;
+   struct agx_shader_part part = {0};
+   bool compiled = ok && agx_compile_shader_nir(b.shader, &key, &part) &&
+                   part.binary != NULL;
+   ok &= compiled;
+
+   bool native_smp = false;
+   /* The combined HK ABI keeps the descriptor pointers in r8:r11 and the
+    * post-RA layer in r15. This is the exact SMP tail produced from that ABI;
+    * its cube/array/layer selectors are independently identical to Apple's
+    * dynamic cube-array sample witness. */
+   static const uint8_t hk_native_smp[] = {
+      0x05,0x80,0x0c,0xb8,0x30,0x25,0x13,
+      0xb5,0x01,0x00,0x10,0x00,0x12,0x00,
+   };
+   for (unsigned off = 0;
+        part.binary && off + sizeof(hk_native_smp) <= part.info.binary_size;
+        ++off)
+      native_smp |= !memcmp((uint8_t *)part.binary + off, hk_native_smp,
+                            sizeof(hk_native_smp));
+   ok &= native_smp;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_tex_instr *
 custom_border_sample(nir_builder *b, nir_def *image, nir_def *sampler,
                      nir_def *coord, unsigned flags)
@@ -3691,8 +3768,9 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--cube-sample-lowering-only")) {
-      const bool ok = test_g17p_native_cube_sample();
-      fprintf(stderr, "G17P native cube sample: %s\n",
+      const bool ok = test_g17p_native_cube_sample() &&
+                      test_g17p_native_cube_array_sample();
+      fprintf(stderr, "G17P native cube/cube-array sample: %s\n",
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -3781,6 +3859,11 @@ main(int argc, char **argv)
 
    if (!test_g17p_native_cube_sample()) {
       fputs("native cube sample mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_native_cube_array_sample()) {
+      fputs("native cube-array sample mismatch\n", stderr);
       all_ok = false;
    }
 

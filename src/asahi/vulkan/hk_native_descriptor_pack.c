@@ -132,7 +132,8 @@ hk_pack_native_texture(unsigned generation,
        * with their extended face-range end VA.  This bit is also present on
        * Metal's larger tiled 2D resources, so keep the policy dimension-
        * bounded until the wider layout selector is named. */
-      if (legacy->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
+      if ((legacy->dimension == AGX_TEXTURE_DIMENSION_CUBE ||
+           legacy->dimension == AGX_TEXTURE_DIMENSION_CUBE_ARRAY) &&
           legacy->extended && legacy->acceleration_buffer)
          out->opaque[1] |= BITFIELD_BIT(27);
       return true;
