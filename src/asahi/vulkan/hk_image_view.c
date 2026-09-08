@@ -358,6 +358,17 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
       } else {
          cfg.page_aligned_layers = layout->page_aligned_layers;
       }
+
+      /* Native Gen9 cube descriptors carry a secondary VA at the end of the
+       * selected face range. Apple's A18 captures advance it by exactly six
+       * layer strides for one cube. */
+      if (dev->dev.chip == AGX_CHIP_G17P && !cubes_to_2d &&
+          (view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
+           view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)) {
+         cfg.extended = true;
+         cfg.acceleration_buffer =
+            cfg.address + layout->layer_stride_B * view->vk.layer_count;
+      }
    }
 
    return hk_pack_native_texture(

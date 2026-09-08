@@ -162,6 +162,39 @@ check_gen9_astc_4x4_texture(void)
 }
 
 static void
+check_gen9_cube_texture(void)
+{
+   /* A18 Pro EXP-0015 type_cube: the secondary VA is exactly six 16x16
+    * RGBA8 face strides after the primary VA. */
+   static const uint8_t expected[32] = {
+      0x26,0x0a,0x88,0xf6,0x00,0x3c,0x00,0x08,
+      0x50,0x1c,0x00,0x00,0x10,0x00,0x00,0x80,
+      0xd0,0x1d,0x00,0x00,0x10,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+   };
+   const struct AGX_TEXTURE semantic = {
+      AGX_TEXTURE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_CUBE,
+      .layout = AGX_LAYOUT_GPU,
+      .channels = AGX_CHANNELS_R8G8B8A8,
+      .type = AGX_TEXTURE_TYPE_UNORM,
+      .swizzle_r = AGX_CHANNEL_R,
+      .swizzle_g = AGX_CHANNEL_G,
+      .swizzle_b = AGX_CHANNEL_B,
+      .swizzle_a = AGX_CHANNEL_A,
+      .width = 16,
+      .height = 16,
+      .depth = 1,
+      .address = UINT64_C(0x1000001c500),
+      .extended = true,
+      .acceleration_buffer = UINT64_C(0x1000001dd00),
+   };
+   struct hk_native_texture_descriptor packed;
+   assert(hk_pack_native_texture(9, &packed, &semantic));
+   assert(memcmp(&packed, expected, sizeof(expected)) == 0);
+}
+
+static void
 check_gen9_bc_textures(void)
 {
    static const uint8_t bc1_rgba_capture[32] = {
@@ -235,6 +268,7 @@ main(void)
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();
+   check_gen9_cube_texture();
    check_gen9_bc_textures();
 
    /* Ordinary HAL200 2D has no layer-mode bit, even when its backing BO

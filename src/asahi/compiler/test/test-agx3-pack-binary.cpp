@@ -7445,7 +7445,7 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0x98,0xb0,0x00,0x10,
-      0x00,0x01,0x00,0x10,0x00,0x01,0x00,
+      0x00,0x01,0x00,0x10,0x00,0x12,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,

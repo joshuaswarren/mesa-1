@@ -324,9 +324,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] = (struct agx3_field_kv)KV(104, immediate ? 1 : 2);
-   if (d->array)
+   if (d->array || d->cube)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
-   base[nb++] = (struct agx3_field_kv)KV(112, d->array ? 8 : 4);
+   base[nb++] =
+      (struct agx3_field_kv)KV(112, (d->array || d->cube) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
