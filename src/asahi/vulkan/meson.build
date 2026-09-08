@@ -1152,6 +1152,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    executable(
+      'g17p-vulkan-advanced-blend',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ADVANCED_BLEND=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for exact G17P A2R10G10B10 UNORM storage.
     executable(
       'g17p-vulkan-a2r10g10b10-unorm',
