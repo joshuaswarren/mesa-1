@@ -209,7 +209,8 @@ TEST_F(AGX3PackBinary, G17PLayeredU8NormEOTUsesExactNativeArrayWire)
       for (unsigned lane = 0; lane < 3; ++lane) {
          agx_index src = agx_register(2 * lane, AGX_SIZE_32);
          src.discard = true;
-         agx_mov_to(b, agx_register(8 + 2 * lane, AGX_SIZE_32), src);
+         agx_bitop_to(b, agx_register(8 + 2 * lane, AGX_SIZE_32), src,
+                      agx_immediate(0), AGX3_SEL_TT_MOV);
       }
       agx_index offset = agx_register(6, AGX_SIZE_32);
       offset.discard = true;

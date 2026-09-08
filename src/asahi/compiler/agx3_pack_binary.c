@@ -3916,15 +3916,20 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
       case 5:
       case 6: {
          const unsigned lane = instruction - 5;
-         if (I->op != AGX_OPCODE_MOV || I->nr_dests != 1 ||
-             I->nr_srcs != 1 || I->dest[0].type != AGX_INDEX_REGISTER ||
+         if (I->op != AGX_OPCODE_BITOP ||
+             (I->truth_table & 0xfu) != AGX3_SEL_TT_MOV || I->saturate ||
+             I->nr_dests != 1 || I->nr_srcs != 2 ||
+             I->dest[0].type != AGX_INDEX_REGISTER ||
              I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
              agx_channels(I->dest[0]) != 1 ||
              I->dest[0].value != 8 + 2 * lane ||
              I->src[0].type != AGX_INDEX_REGISTER ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].memory ||
              I->src[0].abs || I->src[0].neg ||
-             agx_channels(I->src[0]) != 1 || I->src[0].value != 2 * lane)
+             agx_channels(I->src[0]) != 1 ||
+             I->src[0].value != 2 * lane ||
+             I->src[1].type != AGX_INDEX_IMMEDIATE ||
+             I->src[1].value != 0)
             return false;
          break;
       }
