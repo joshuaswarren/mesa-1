@@ -840,7 +840,12 @@ hk_get_device_properties(const struct agx_device *dev,
     * giving a theoretical limit of 119. We round down to 116 to give a sensible
     * limit in vec4s.
     */
-   unsigned max_vgt_output_components = 116;
+   /* The legacy pipeline can address 119 components. HAL200 is currently
+    * qualified through Apple's position + sixteen-float4 (68 total UVS word)
+    * program, giving Vulkan's required 64 user interface components. Keep the
+    * public limit paired with the encoder and VDM-state bounds. */
+   unsigned max_vgt_output_components =
+      dev->chip == AGX_CHIP_G17P ? HK_AGX3_G17P_MAX_USER_WORDS : 116;
 
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),
