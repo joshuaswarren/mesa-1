@@ -801,15 +801,18 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
    }
 
-   if (!nir_src_is_const(intr->src[src]))
-      return false;
-
    const unsigned samples = *(const unsigned *)data;
-   const unsigned mask = nir_src_as_uint(intr->src[src]);
    unsigned encoded;
    if (samples == 1) {
+      /* Per-sample epilogs still carry a dynamic active-sample mask, but
+       * there is only sample zero. The native 1x tile instruction has no
+       * sample operand; preserve its whole-pixel form for these epilogs. */
       encoded = 0xff;
    } else {
+      if (!nir_src_is_const(intr->src[src]))
+         return false;
+
+      const unsigned mask = nir_src_as_uint(intr->src[src]);
       if (mask != 0xff &&
           (!util_is_power_of_two_nonzero(mask) || mask >= (1u << samples)))
          return false;
@@ -817,7 +820,8 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       encoded = (samples << 4) | (mask == 0xff ? 0 : mask);
    }
 
-   if (mask == encoded)
+   if (nir_src_is_const(intr->src[src]) &&
+       nir_src_as_uint(intr->src[src]) == encoded)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);

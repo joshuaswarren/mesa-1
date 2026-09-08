@@ -156,8 +156,13 @@ main(void)
       nir_builder_init_simple_shader(0, &agx_nir_options, "G17P FS epilog");
    agx_nir_fs_epilog(&b, &epilog_key);
    if (count_dynamic_tile_samples(b.shader) != 1 ||
+       agx_nir_lower_g17p_tile_samples(b.shader, 2) ||
+       agx_nir_lower_g17p_tile_samples(b.shader, 4) ||
+       agx_nir_lower_g17p_tile_samples(b.shader, 8) ||
+       count_dynamic_tile_samples(b.shader) != 1 ||
        !agx_nir_lower_g17p_1x_tile_samples(b.shader) ||
-       count_dynamic_tile_samples(b.shader) != 0) {
+       count_dynamic_tile_samples(b.shader) != 0 ||
+       agx_nir_lower_g17p_1x_tile_samples(b.shader)) {
       fprintf(stderr, "G17P 1x sample-shaded epilog was not canonicalized\n");
       return 1;
    }
