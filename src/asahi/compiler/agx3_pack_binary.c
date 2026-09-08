@@ -3413,9 +3413,10 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
           uvs_mask == 0xf;
 }
 
-/* Native 11/16/32-output VSs use contiguous scalar UVSW indices and distinct
- * staging addresses. Recycle the six scoreboard slots after waiting for
- * earlier writes; keep the four-position golden independent. */
+/* Native 11/16/32/36-output VSs use a dense set of scalar UVSW indices and
+ * distinct staging addresses. The stores may be grouped by varying rather
+ * than sorted by scalar index. Recycle the six scoreboard slots after waiting
+ * for earlier writes; keep the four-position golden independent. */
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
 {
@@ -3473,21 +3474,32 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
              ? util_bitcount64(outputs) : 0;
 }
 
-/* The sources of a contiguous terminal store bundle cannot be overwritten
- * before their injected staging COPY reads retire. Each batch has distinct staging addresses
- * and scoreboard slots. Original producers retire on first COPY;
- * only the final UVSWs need wait for the new staging producers. */
+/* The sources of a dense terminal store bundle cannot be overwritten before
+ * their injected staging COPY reads retire. Each six-store batch must use all
+ * six distinct scoreboard slots; preserve its real output order so grouped
+ * Vulkan varyings do not get silently renumbered. Original producers retire
+ * on the first COPY and UVSWs retire the staging producers. */
 static bool
-agx3_outputs_are_terminal(agx_context *ctx, unsigned count)
+agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
+                          uint8_t order[AGX3_MAX_VERTEX_OUTPUTS])
 {
    unsigned next = 0;
+   unsigned slot_mask = 0;
    bool stopped = false;
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
          return false;
       if (I->op == AGX_OPCODE_ST_VARY) {
-         if (I->src[0].value != next++)
+         if (next >= count || I->src[0].type != AGX_INDEX_IMMEDIATE)
             return false;
+         const unsigned component = I->src[0].value;
+         const unsigned slot = component % 6;
+         if (slot_mask & BITFIELD_BIT(slot))
+            return false;
+         slot_mask |= BITFIELD_BIT(slot);
+         order[next++] = component;
+         if ((next % 6) == 0)
+            slot_mask = 0;
       } else if (I->op == AGX_OPCODE_STOP) {
          if (next != count)
             return false;
@@ -4311,8 +4323,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       agx3_is_g17p_float2_position_vs(ctx, enc);
    unsigned g17p_positions_staged = 0;
    const unsigned g17p_output_count = agx3_g17p_vertex_output_count(ctx, enc);
+   uint8_t g17p_output_order[AGX3_MAX_VERTEX_OUTPUTS] = {0};
    const bool g17p_terminal_outputs = g17p_output_count &&
-      agx3_outputs_are_terminal(ctx, g17p_output_count);
+      agx3_outputs_are_terminal(ctx, g17p_output_count, g17p_output_order);
    /* Only the old six-output fallback supports intervening physical GPR
     * reuse. Wider outputs require the pre-RA terminal bundle. */
    const bool g17p_user_output_protocol = g17p_output_count == 6 ||
@@ -4523,9 +4536,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  ctx->stage != MESA_SHADER_FRAGMENT ||
                  !agx3_private_rhw_use(ctx, block, I)))
                AGX3_REFUSE(I);
+            uint16_t interp_wait = wait;
+            /* The native projective-RHW opcode has no witnessed scoreboard
+             * fields. Real GTK shaders reuse an LDCF destination for RHW,
+             * which creates a required WAW wait. Retire that dependency with
+             * the grounded band no-op before emitting the unchanged native
+             * RHW instruction instead of inventing wait bits. */
+            if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 && interp_wait) {
+               if (!agx3_retire_slots_noop(emission, enc, interp_wait))
+                  AGX3_REFUSE(I);
+               outstanding &= (uint16_t)~interp_wait;
+               interp_wait = 0;
+            }
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_FRAGMENT && !interpolation_started;
-            if (!agx3_emit_interp(emission, enc, I, wait, first,
+            if (!agx3_emit_interp(emission, enc, I, interp_wait, first,
                                   ctx->stage == MESA_SHADER_FRAGMENT))
                AGX3_REFUSE(I);
             interpolation_started = true;
@@ -4639,8 +4664,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    g17p_outputs_staged == g17p_output_count) {
                   const unsigned first =
                      ((g17p_outputs_staged - 1) / nslots) * nslots;
-                  for (unsigned component = first;
-                       component < g17p_outputs_staged; ++component) {
+                  for (unsigned position = first;
+                       position < g17p_outputs_staged; ++position) {
+                     const unsigned component = g17p_terminal_outputs
+                        ? g17p_output_order[position] : position;
                      uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
                      if (!agx3_vary_uvsw(enc, component * 2, component,
                                           component % nslots + 1, true,
@@ -5352,9 +5379,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * the 2x2 quad, and every witness is a fragment shader. */
          const int fop = agx3_map_funop(I->op);
          if (fop >= 0) {
+            uint16_t funop_wait = wait;
+            /* Apple gradient witnesses expose no wait-field map. A real
+             * desktop shader may nevertheless reach DFDX/DFDY with an
+             * outstanding interpolation/coefficient dependency. Retire it
+             * through the already-grounded scoreboard no-op, then preserve
+             * the byte-exact zero-wait gradient encoding. */
+            if ((fop == AGX3_FUNOP_DFDX || fop == AGX3_FUNOP_DFDY) &&
+                funop_wait) {
+               if (!agx3_retire_slots_noop(emission, enc, funop_wait))
+                  AGX3_REFUSE(I);
+               outstanding &= (uint16_t)~funop_wait;
+               funop_wait = 0;
+            }
             if (((fop == AGX3_FUNOP_DFDX || fop == AGX3_FUNOP_DFDY) &&
                  ctx->stage != MESA_SHADER_FRAGMENT) ||
-                !agx3_emit_funop(emission, enc, I, (enum agx3_funop)fop, wait))
+                !agx3_emit_funop(emission, enc, I, (enum agx3_funop)fop,
+                                 funop_wait))
                AGX3_REFUSE(I);
             continue;
          }

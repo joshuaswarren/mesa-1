@@ -26,6 +26,7 @@ extern "C" {
 #include "agx3_copy_core.h"
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
+#include "agx3_funop_core.h"
 #include "agx3_local_tps_core.h"
 #include "agx3_mem_core.h"
 #include "agx3_pack.h"
@@ -5477,21 +5478,26 @@ TEST_F(AGX3PackBinary, SixOutputVertexAddressArithmeticSurvivesRA)
 TEST_F(AGX3PackBinary, NativeHighVertexOutputIndices)
 {
    const struct {
-      unsigned component, slot, wait;
+      unsigned value, component, slot, wait;
+      bool kill;
       uint8_t bytes[8];
    } native[] = {
-      {4, 5, 16, {0x57,0x06,0x55,0x08,0x80,0x40,0x4c,0x00}},
-      {8, 6, 16, {0x57,0x06,0x55,0x10,0x00,0x41,0x4d,0x00}},
-      {9, 5, 0, {0x57,0x06,0x54,0x12,0x20,0x41,0x4c,0x00}},
-      {10, 4, 8, {0x57,0x86,0x54,0x14,0x40,0x41,0x4b,0x00}},
-      {31, 2, 2, {0x57,0x26,0x54,0x3e,0xe0,0x43,0x49,0x00}},
+      {8, 4, 5, 16, true, {0x57,0x06,0x55,0x08,0x80,0x40,0x4c,0x00}},
+      {16, 8, 6, 16, true, {0x57,0x06,0x55,0x10,0x00,0x41,0x4d,0x00}},
+      {18, 9, 5, 0, true, {0x57,0x06,0x54,0x12,0x20,0x41,0x4c,0x00}},
+      {20, 10, 4, 8, true, {0x57,0x86,0x54,0x14,0x40,0x41,0x4b,0x00}},
+      {62, 31, 2, 2, true, {0x57,0x26,0x54,0x3e,0xe0,0x43,0x49,0x00}},
+      /* Fresh Apple G17P 36-scalar vertex output, AIR 0b42132b9e9a... /
+       * native b92aedf08dfd...; the final user scalar is UVS index 35. */
+      {72, 35, 4, 0, true, {0x57,0x06,0x54,0x48,0x60,0x44,0x4b,0x00}},
    };
    for (auto &v : native) {
       uint8_t out[AGX3_VARY_MAX_LENGTH], len;
-      ASSERT_TRUE(agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B, v.component * 2,
-                                v.component, v.slot, true, v.wait, out, &len));
+      ASSERT_TRUE(agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B, v.value,
+                                v.component, v.slot, v.kill, v.wait, out, &len));
       ASSERT_EQ(len, 8u);
-      EXPECT_EQ(memcmp(out, v.bytes, 8), 0);
+      EXPECT_EQ(std::vector<uint8_t>(out, out + 8),
+                std::vector<uint8_t>(v.bytes, v.bytes + 8));
    }
 }
 
@@ -5577,6 +5583,106 @@ TEST_F(AGX3PackBinary, WideVertexOutputsPreserveValuesAndRecycleSlotsAfterWrites
       ASSERT_EQ(at + 4, bytes.size());
       EXPECT_EQ(bytes[at], 14);
    }
+}
+
+TEST_F(AGX3PackBinary, ReorderedWideVertexOutputsMatchNativeStagingProtocol)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   const unsigned order[] = {
+      4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,
+      26,27,28,29,30,31,32,33,0,1,2,3,
+   };
+   for (unsigned component : order)
+      agx_st_vary(b, agx_immediate(component),
+                  agx_register(4, AGX_SIZE_32));
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   for (unsigned position = 0; position < ARRAY_SIZE(order); ++position) {
+      const unsigned component = order[position];
+      uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
+      const uint16_t wait = position && (position % 6) == 0 ? 0x3f : 0;
+      ASSERT_TRUE(agx3_stage_copy_source(enc, component * 2, 4, false,
+                                        component % 6 + 1, wait, bytes, &len));
+      append(want, bytes, len);
+      if (((position + 1) % 6) == 0 || position + 1 == ARRAY_SIZE(order)) {
+         const unsigned first = position - (position % 6);
+         for (unsigned i = first; i <= position; ++i) {
+            const unsigned output = order[i];
+            ASSERT_TRUE(agx3_vary_uvsw(enc, output * 2, output,
+                                      output % 6 + 1, true,
+                                      1u << (output % 6), bytes, &len));
+            append(want, bytes, len);
+         }
+      }
+   }
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+   const auto got = pack(b);
+   if (got != want) {
+      size_t first = 0;
+      while (first < got.size() && first < want.size() &&
+             got[first] == want[first])
+         ++first;
+      ADD_FAILURE() << "first reordered-output byte mismatch at " << first
+                    << ", got size " << got.size() << ", want " << want.size();
+   }
+}
+
+TEST_F(AGX3PackBinary, GradientRetiresAsyncSourceBeforeNativeDfdx)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(0), 1);
+   agx_index source = agx_register(8, AGX_SIZE_32);
+   source.cache = true;
+   agx_dfdx_to(b, agx_register(2, AGX_SIZE_32), source);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_funop_encode(enc, AGX3_FUNOP_DFDX, 2, 8, false, false,
+                                 false, 0, bytes, &len));
+   append(want, bytes, len);
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(0), 1);
+   agx_index rhw = agx_register(8, AGX_SIZE_32);
+   agx_rhw_interp_agx3_to(b, rhw, agx_immediate(0), agx_immediate(0),
+                         AGX_INTERPOLATION_CENTER);
+   agx_persp_rcp_agx3_to(b, rhw, rhw, 0);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_vary_projective_rhw(enc, 8, 0, true, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_persp_rcp_desc rcp = {
+      .dest = 8, .rhw = 8, .coef_index = 0,
+   };
+   ASSERT_TRUE(agx3_persp_rcp_encode(enc, &rcp, bytes, &len));
+   append(want, bytes, len);
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, WideVertexOutputsRefuseNonterminalAndOutOfRange)
