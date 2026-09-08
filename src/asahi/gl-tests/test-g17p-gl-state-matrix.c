@@ -95,6 +95,52 @@ make_program(bool varying)
    return program;
 }
 
+static GLuint
+make_webgl2_compiler_program(void)
+{
+   static const char *vs_source =
+      "#version 300 es\n"
+      "void main() {\n"
+      "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+      "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+      "}\n";
+   static const char *fs_source =
+      "#version 300 es\n"
+      "precision highp float;\n"
+      "precision highp int;\n"
+      "uniform highp usampler2D words;\n"
+      "uniform highp sampler2DShadow depthMap;\n"
+      "out vec4 colour;\n"
+      "void main() {\n"
+      "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+      "  uint x = bitfieldReverse(texelFetch(words, p, 0).x);\n"
+      "  int bits = bitCount(x) + findMSB(x | 1u);\n"
+      "  float shadow = texture(depthMap, vec3(gl_FragCoord.xy / 64.0, .5));\n"
+      "  colour = vec4(float(bits) / 64.0 + shadow);\n"
+      "}\n";
+
+   GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
+   GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_source);
+   if (!vs || !fs)
+      return 0;
+   GLuint program = glCreateProgram();
+   glAttachShader(program, vs);
+   glAttachShader(program, fs);
+   glLinkProgram(program);
+   glDeleteShader(vs);
+   glDeleteShader(fs);
+   GLint linked = GL_FALSE;
+   glGetProgramiv(program, GL_LINK_STATUS, &linked);
+   if (!linked) {
+      char log[4096] = {0};
+      glGetProgramInfoLog(program, sizeof(log), NULL, log);
+      fprintf(stderr, "WebGL2 compiler corpus link failed: %s\n", log);
+      glDeleteProgram(program);
+      return 0;
+   }
+   return program;
+}
+
 static char *
 read_shader(const char *path)
 {
@@ -231,8 +277,10 @@ main(int argc, char **argv)
 
    GLuint varying_program = make_program(true);
    GLuint solid_program = make_program(false);
-   if (!varying_program || !solid_program)
+   GLuint webgl2_program = make_webgl2_compiler_program();
+   if (!varying_program || !solid_program || !webgl2_program)
       return 1;
+   glDeleteProgram(webgl2_program);
 
    static const float vertices[][4] = {
       {-0.8f, -0.8f, 0.25f, 1.0f},

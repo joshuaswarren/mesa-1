@@ -4347,7 +4347,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned g17p_positions_staged = 0;
    const unsigned g17p_output_count = agx3_g17p_vertex_output_count(ctx, enc);
    uint8_t g17p_output_order[AGX3_MAX_VERTEX_OUTPUTS] = {0};
-   const bool g17p_terminal_outputs = g17p_output_count &&
+   /* The original six-output protocol has an exact per-COPY retirement
+    * contract, including when the stores happen to be terminal.  Reserve the
+    * batched terminal schedule for the wider native programs that required
+    * it; treating six as a batch drops the r0-preserving wait ratcheted below
+    * and can expose an injected COPY source to later physical reuse. */
+   const bool g17p_terminal_outputs = g17p_output_count > nslots &&
       agx3_outputs_are_terminal(ctx, g17p_output_count, g17p_output_order);
    /* Only the old six-output fallback supports intervening physical GPR
     * reuse. Wider outputs require the pre-RA terminal bundle. */

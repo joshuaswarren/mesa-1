@@ -1895,7 +1895,14 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    /* By default all samples are enabled */
    ctx->sample_mask = ~0;
 
-   ctx->support_lod_bias = !(flags & PIPE_CONTEXT_NO_LOD_BIAS);
+   /* HAL200's native sampler descriptor carries the API sampler-state bias.
+    * Asking nir_lower_tex to add it again manufactures a register-biased
+    * texture operation, including for shadow samplers, and applies the bias
+    * twice. Keep the Gen4 software path; G17P consumes the descriptor field
+    * packed by agx_upload_samplers(). */
+   ctx->support_lod_bias =
+      !(flags & PIPE_CONTEXT_NO_LOD_BIAS) &&
+      agx_chip_isa_encoding(dev->chip) != AGX_ISA_ENCODING_AGX3B;
    ctx->robust = (flags & PIPE_CONTEXT_ROBUST_BUFFER_ACCESS);
 
    agx_scratch_init(agx_device(screen), &ctx->scratch_vs);

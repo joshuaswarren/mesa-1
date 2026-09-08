@@ -47,10 +47,48 @@
 #include "util/xmlconfig.h"
 
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/genxml/agx_pack.h"
 #include "compiler/nir/nir_builder.h"
 
 #include "agx_public.h"
 #include "agx_state.h"
+
+static bool
+check_g17p_sampler_bias_record(void)
+{
+   /* applegpu-nt's HAL200 record for a compare-enabled sampler with a
+    * nonzero bias. This is the native evidence that G17P consumes sampler
+    * state bias in the descriptor rather than requiring nir_lower_tex to add
+    * a second per-instruction bias. The heap stride is 32 bytes; only the
+    * first eight are populated. */
+   static const uint8_t expected[32] = {
+      0x40, 0x00, 0xbe, 0x30, 0x5a, 0xfc, 0x3d, 0xc0,
+   };
+   uint8_t record[32] = {0};
+   agx_pack(record, SAMPLER_HAL200, cfg) {
+      cfg.minimum_lod = 1.0f;
+      cfg.maximum_lod = 100.0f;
+      cfg.lod_bias = -1.015625f;
+      cfg.maximum_anisotropy = 8;
+      cfg.magnify = AGX_FILTER_LINEAR;
+      cfg.minify = AGX_FILTER_NEAREST;
+      cfg.mip_filter = AGX_MIP_FILTER_LINEAR;
+      cfg.wrap_s = AGX_WRAP_REPEAT;
+      cfg.wrap_t = AGX_WRAP_MIRRORED_REPEAT;
+      cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+      cfg.compare_func = AGX_COMPARE_FUNC_LEQUAL;
+      cfg.border_colour = AGX_BORDER_COLOUR_OPAQUE_WHITE;
+      cfg.pixel_coordinates = true;
+      cfg.compare_enable = true;
+      cfg.seamful_cube_maps = true;
+   }
+
+   if (memcmp(record, expected, sizeof(record)) != 0) {
+      fprintf(stderr, "G17P HAL200 sampler bias record changed\n");
+      return false;
+   }
+   return true;
+}
 
 static nir_shader *
 build_es3_bitops_txf(void)
@@ -106,28 +144,36 @@ build_es3_bitops_txf(void)
 }
 
 static nir_shader *
-build_webgl_refused_fs(void)
+build_webgl_shadow_fs(enum glsl_sampler_dim dim, bool array)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options,
-      "G17P WebGL compile-refusal fragment shader");
+      dim == GLSL_SAMPLER_DIM_CUBE
+         ? (array ? "G17P WebGL cube-array shadow refusal fragment shader"
+                  : "G17P WebGL cube shadow refusal fragment shader")
+         : (array ? "G17P WebGL 2D-array shadow refusal fragment shader"
+                  : "G17P WebGL 2D shadow fragment shader"));
    nir_def *frag = nir_load_frag_coord(&b);
 
-   /* sampler2DShadow is valid WebGL2. G17P's plain implicit compare mode is
-    * byte-grounded, but Mesa's API path supplies the sampler's register bias
-    * and that biased shadow form is not yet witnessed. This is a stable,
-    * API-realistic refusal rather than a malformed backend instruction. */
+   /* Both sampler2DShadow and sampler2DArrayShadow are valid WebGL2. The
+    * former is byte-grounded on G17P. The array coordinate/staging form is a
+    * stable API-realistic refusal until it has independent native bytes. */
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
    tex->op = nir_texop_tex;
-   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->sampler_dim = dim;
+   tex->is_array = array;
    tex->is_shadow = true;
    tex->dest_type = nir_type_float32;
-   tex->coord_components = 2;
+   const unsigned coord_components =
+      dim == GLSL_SAMPLER_DIM_CUBE ? (array ? 4 : 3) : (array ? 3 : 2);
+   tex->coord_components = coord_components;
    tex->texture_index = 0;
    tex->sampler_index = 0;
    tex->src[0] = nir_tex_src_for_ssa(
-      nir_tex_src_coord, nir_fmul_imm(&b, nir_channels(&b, frag, 0x3),
-                                     1.0f / 64.0f));
+      nir_tex_src_coord,
+      nir_fmul_imm(&b, nir_channels(&b, frag,
+                                    BITFIELD_MASK(coord_components)),
+                   1.0f / 64.0f));
    tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator,
                                      nir_channel(&b, frag, 2));
    nir_builder_instr_insert(&b, &tex->instr);
@@ -162,25 +208,57 @@ check_es3_compile_contract(struct pipe_context *pctx)
    }
    pctx->delete_fs_state(pctx, ok);
 
-   struct pipe_shader_state refused = {
+   struct pipe_shader_state shadow = {
       .type = PIPE_SHADER_IR_NIR,
       .report_compile_error = true,
-      .ir.nir = build_webgl_refused_fs(),
+      .ir.nir = build_webgl_shadow_fs(GLSL_SAMPLER_DIM_2D, false),
    };
-   void *bad = pctx->create_fs_state(pctx, &refused);
-   const bool propagated =
-      bad == NULL && refused.error_message != NULL &&
-      strstr(refused.error_message, "fragment") != NULL &&
-      strstr(refused.error_message, "G17P") != NULL;
-   if (!propagated) {
-      fprintf(stderr,
-              "WebGL-visible shader refusal was not propagated (shader=%p, "
-              "message=%s)\n",
-              bad, refused.error_message ? refused.error_message : "none");
+   void *shadow_ok = pctx->create_fs_state(pctx, &shadow);
+   if (!shadow_ok || shadow.error_message) {
+      fprintf(stderr, "WebGL2 sampler2DShadow did not compile: %s\n",
+              shadow.error_message ? shadow.error_message : "no shader");
+      free(shadow.error_message);
+      if (shadow_ok)
+         pctx->delete_fs_state(pctx, shadow_ok);
+      return false;
    }
-   if (bad)
-      pctx->delete_fs_state(pctx, bad);
-   free(refused.error_message);
+   pctx->delete_fs_state(pctx, shadow_ok);
+
+   static const struct {
+      enum glsl_sampler_dim dim;
+      bool array;
+      const char *name;
+   } unwitnessed[] = {
+      {GLSL_SAMPLER_DIM_2D, true, "sampler2DArrayShadow"},
+      {GLSL_SAMPLER_DIM_CUBE, false, "samplerCubeShadow"},
+      {GLSL_SAMPLER_DIM_CUBE, true, "samplerCubeArrayShadow"},
+   };
+
+   bool propagated = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(unwitnessed); ++i) {
+      struct pipe_shader_state refused = {
+         .type = PIPE_SHADER_IR_NIR,
+         .report_compile_error = true,
+         .ir.nir = build_webgl_shadow_fs(unwitnessed[i].dim,
+                                         unwitnessed[i].array),
+      };
+      void *bad = pctx->create_fs_state(pctx, &refused);
+      const bool this_propagated =
+         bad == NULL && refused.error_message != NULL &&
+         strstr(refused.error_message, "fragment") != NULL &&
+         strstr(refused.error_message, "G17P") != NULL;
+      if (!this_propagated) {
+         fprintf(stderr,
+                 "WebGL2 %s refusal was not propagated (shader=%p, "
+                 "message=%s)\n",
+                 unwitnessed[i].name, bad,
+                 refused.error_message ? refused.error_message : "none");
+      }
+      if (bad)
+         pctx->delete_fs_state(pctx, bad);
+      free(refused.error_message);
+      propagated &= this_propagated;
+   }
    return propagated;
 }
 
@@ -260,9 +338,12 @@ main(void)
       return 1;
    }
 
+   if (!check_g17p_sampler_bias_record())
+      return 1;
+
    if (!check_es3_compile_contract(pctx))
       return 1;
-   printf("ES3 bitops/texelFetch compile and WebGL refusal propagation passed\n");
+   printf("ES3 bitops/texelFetch and WebGL2 shadow compile contract passed\n");
 
    /* Exactly the blit core 983 died on: 4x8, BGRA8_UNORM source, RGBA8_UNORM
     * destination, one level, one layer, nearest. u_blitter turns this into a
