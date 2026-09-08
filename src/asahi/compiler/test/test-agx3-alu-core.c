@@ -22,6 +22,9 @@ test_native_popcount(void)
                                  0x02, 0x00, 0x5c, 0x04};
    static const uint8_t u16_cached[] = {0x27, 0x05, 0x56, 0x02,
                                         0x03, 0x04, 0x50, 0x04};
+   /* applegpu-nt 32023.917: popcount of a still-live SIMD ballot mask. */
+   static const uint8_t u32_live[] = {0x27, 0x05, 0x54, 0x04,
+                                      0x03, 0x00, 0x4e, 0x04};
    assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
                             AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
    assert(len == sizeof(u16) && !memcmp(bytes, u16, len));
@@ -31,6 +34,9 @@ test_native_popcount(void)
    assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
                             AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
    assert(len == sizeof(u16_cached) && !memcmp(bytes, u16_cached, len));
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 4, 0, false,
+                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
+   assert(len == sizeof(u32_live) && !memcmp(bytes, u32_live, len));
 
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));

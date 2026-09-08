@@ -170,6 +170,19 @@ test_ballot_vectors(void)
    static const uint8_t float_lt_c[] = {
       0x27, 0x00, 0x00, 0x1a, 0x25, 0x00, 0xaf, 0x02, 0x30, 0x80, 0x02, 0x40,
    };
+   /* applegpu-nt 32023.917, apple-g17p, simd_ballot(tid < 16/5). */
+   static const uint8_t uint_lt16_live_b[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x40, 0x18, 0x22, 0x0c,
+   };
+   static const uint8_t uint_lt16_cached_b[] = {
+      0x17, 0x17, 0x54, 0x00, 0x03, 0x04, 0x40, 0x18, 0x22, 0x0c,
+   };
+   static const uint8_t uint_lt5_live_b[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x14, 0x18, 0x22, 0x0c,
+   };
+   static const uint8_t uint_lt16_dead_b[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x00, 0x40, 0x58, 0x22, 0x0c,
+   };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    struct agx3_subgroup_ballot_desc d = {
       .type = AGX3_SUBGROUP_BALLOT_INTEGER,
@@ -216,6 +229,38 @@ test_ballot_vectors(void)
    CHECK(bytes_equal(out, length, float_lt_b, sizeof(float_lt_b)));
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, float_lt_c, sizeof(float_lt_c)));
+
+   d = (struct agx3_subgroup_ballot_desc) {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .src = 2,
+      .condition = 1,
+      .compare_immediate = true,
+      .compare_value = 16,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, uint_lt16_live_b,
+                     sizeof(uint_lt16_live_b)));
+   d.dest_cache = true;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, uint_lt16_cached_b,
+                     sizeof(uint_lt16_cached_b)));
+   d.dest_cache = false;
+   d.compare_value = 5;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, uint_lt5_live_b,
+                     sizeof(uint_lt5_live_b)));
+   d.src = 0;
+   d.compare_value = 16;
+   d.src_live = false;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, uint_lt16_dead_b,
+                     sizeof(uint_lt16_dead_b)));
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out,
+                                      &length));
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
    return 0;
 }
 

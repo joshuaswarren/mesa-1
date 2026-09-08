@@ -64,6 +64,11 @@ struct agx3_subgroup_ballot_desc {
    enum agx3_subgroup_ballot_type type;
    uint16_t dest;
    uint16_t src;
+   /* The G17P SIMD integer form can compare against a 16-bit immediate. */
+   bool compare_immediate;
+   uint16_t compare_value;
+   bool dest_cache;
+   bool src_live;
    uint8_t condition;
    bool invert;
    uint16_t wait_mask;
@@ -110,7 +115,8 @@ bool agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
                                   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
                                   uint8_t *length);
 
-/* The recovered ballot subset compares a register against exact zero. */
+/* The recovered ballot subset compares a register against zero or, for the
+ * native G17P SIMD unsigned-less-than form, a 16-bit immediate. */
 bool agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                                  const struct agx3_subgroup_ballot_desc *desc,
                                  uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],

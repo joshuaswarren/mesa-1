@@ -2159,6 +2159,61 @@ TEST_F(AGX3PackBinary, BallotWaitsForDeviceLoad)
    EXPECT_EQ(tail, want);
 }
 
+TEST_F(AGX3PackBinary, G17PBallotUnsignedImmediate)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index source = agx_register(2, AGX_SIZE_32);
+   source.cache = true;
+   agx_icmp_ballot_to(b, agx_register(0, AGX_SIZE_32), source,
+                      agx_immediate(16), AGX_ICOND_ULT, false);
+   agx_stop(b);
+
+   static const uint8_t native[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x40, 0x18, 0x22, 0x0c,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_icmp_quad_ballot_to(bad, agx_register(0, AGX_SIZE_32),
+                           agx_register(2, AGX_SIZE_32), agx_immediate(16),
+                           AGX_ICOND_ULT, false);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, G17PBallotMaskStaysLiveThroughPopcount)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index predicate = agx_register(2, AGX_SIZE_32);
+   predicate.cache = true;
+   agx_index mask = agx_register(0, AGX_SIZE_32);
+   mask.cache = true;
+   agx_icmp_ballot_to(b, mask, predicate, agx_immediate(16), AGX_ICOND_ULT,
+                      false);
+   agx_index live_mask = agx_register(0, AGX_SIZE_32);
+   live_mask.cache = true;
+   agx_index count = agx_register(4, AGX_SIZE_32);
+   count.cache = true;
+   agx_popcount_to(b, count, live_mask);
+   agx_stop(b);
+
+   /* applegpu-nt 32023.917, the exact ballot+popcount prefix generated for
+    * mask + popcount(mask), with both intermediate values still live. */
+   static const uint8_t native[] = {
+      0x17, 0x17, 0x54, 0x00, 0x03, 0x04, 0x40, 0x18, 0x22, 0x0c,
+      0x27, 0x05, 0x54, 0x04, 0x03, 0x00, 0x4e, 0x04,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 static enum agx_simd_op
 mesa_reduce_op(unsigned op)
 {

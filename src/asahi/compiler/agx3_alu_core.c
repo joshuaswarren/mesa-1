@@ -17,17 +17,21 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *   ushort: 27 05 56 02 02 04 50 04
     *   uint:   27 05 56 00 02 00 5c 04
     * byte3 is the destination half, byte5 is twice the source half, and the
-    * source descriptor distinguishes 16 from 32 bits.  Both witnesses consume
-    * their source.  Refuse unwitnessed cache/wait/lifetime combinations. */
+    * source descriptor distinguishes 16 from 32 bits. A fresh subgroup-count
+    * witness adds the live uint source form (descriptor 0x4e). Refuse every
+    * other unwitnessed cache/wait/lifetime combination. */
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 128 || (!half && ((dest | src) & 1)) ||
-       hint != AGX3_ALU_HINT_DISCARD || wait_mask)
+       (hint != AGX3_ALU_HINT_DISCARD &&
+        !(hint == AGX3_ALU_HINT_CACHE && !half)) || wait_mask)
       return false;
 
    const uint8_t bytes[8] = {
-      0x27, 0x05, 0x56, (uint8_t)dest, dest_cache ? 0x03 : 0x02,
+      0x27, 0x05,
+      hint == AGX3_ALU_HINT_CACHE ? 0x54 : 0x56,
+      (uint8_t)dest, dest_cache ? 0x03 : 0x02,
       (uint8_t)(src << 1),
-      half ? 0x50 : 0x5c, 0x04,
+      half ? 0x50 : (hint == AGX3_ALU_HINT_CACHE ? 0x4e : 0x5c), 0x04,
    };
    memcpy(out, bytes, sizeof(bytes));
    *len = sizeof(bytes);

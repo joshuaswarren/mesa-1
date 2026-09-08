@@ -2619,13 +2619,16 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
    if (I->nr_dests != 1 || I->nr_srcs != 2 || I->saturate ||
        !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
        !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER) ||
-       I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != 0 ||
+       I->src[1].type != AGX_INDEX_IMMEDIATE ||
        I->src[1].memory || I->src[1].abs || I->src[1].neg ||
        I->src[1].cache || I->src[1].discard || I->src[1].kill)
       return false;
 
+   const bool compare_immediate = I->src[1].value != 0;
    uint8_t condition;
    if (is_float) {
+      if (compare_immediate)
+         return false;
       condition = I->fcond;
    } else {
       switch (I->icond) {
@@ -2633,8 +2636,15 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       case AGX_ICOND_SEQ: condition = 4; break;
       case AGX_ICOND_SLT: condition = 5; break;
       case AGX_ICOND_SGT: condition = 6; break;
+      case AGX_ICOND_ULT:
+         if (!compare_immediate)
+            return false;
+         condition = 1;
+         break;
       default: return false;
       }
+      if (compare_immediate && I->icond != AGX_ICOND_ULT)
+         return false;
    }
 
    /* The native ballot itself has no witnessed scoreboard field.  A ballot
@@ -2651,6 +2661,10 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
                        : AGX3_SUBGROUP_BALLOT_INTEGER,
       .dest = I->dest[0].value,
       .src = I->src[0].value,
+      .compare_immediate = compare_immediate,
+      .compare_value = I->src[1].value,
+      .dest_cache = I->dest[0].cache,
+      .src_live = !I->src[0].discard,
       .condition = condition,
       .invert = I->invert_cond,
       .wait_mask = 0,

@@ -193,7 +193,14 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
        (unsigned)d->type > AGX3_SUBGROUP_BALLOT_FLOAT)
       return false;
 
-   if (d->type == AGX3_SUBGROUP_BALLOT_INTEGER) {
+   if (d->compare_immediate) {
+      /* Fresh applegpu-nt G17P witnesses use this exact form for
+       * simd_ballot(tid < 5/16). Keep every unwitnessed axis closed. */
+      if (enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
+          d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->condition != 1 ||
+          d->invert)
+         return false;
+   } else if (d->type == AGX3_SUBGROUP_BALLOT_INTEGER) {
       if (d->condition != 4 && d->condition != 5 && d->condition != 6)
          return false;
    } else if (d->condition != 0 && d->condition != 1 && d->condition != 2 &&
@@ -205,17 +212,22 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    unsigned nb = 0;
    ADD_FIELD(9, 2);
    ADD_FIELD(10, 2);
-   if (d->quad)
+   if (d->quad || d->dest_cache)
       ADD_FIELD(11, 1);
    ADD_FIELD(23, 2);
    ADD_FIELD(24, 2);
-   ADD_FIELD(27, 1);
+   if (!d->compare_immediate || !d->src_live)
+      ADD_FIELD(27, 1);
 
    const char *mnemonic;
    uint16_t cond_field, invert_field;
    if (d->type == AGX3_SUBGROUP_BALLOT_INTEGER) {
       mnemonic = d->quad ? "quadiballot" : "simdiballot";
-      if (d->condition == 4) {
+      if (d->compare_immediate) {
+         ADD_FIELD(38, 1);
+         ADD_FIELD(39, 1);
+         ADD_FIELD(46, 1);
+      } else if (d->condition == 4) {
          ADD_FIELD(38, 2);
          ADD_FIELD(39, 2);
          ADD_FIELD(42, 1);
@@ -241,13 +253,16 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       }
    }
 
-   struct agx3_field_kv ov[] = {
+   struct agx3_field_kv ov[5] = {
       {2, d->dest},
       {16, d->src},
       {cond_field, d->condition},
       {invert_field, d->invert},
    };
-   return agx3_bind_compose(enc, mnemonic, 0, base, nb, ov, 4, out, length);
+   unsigned no = 4;
+   if (d->compare_immediate)
+      ov[no++] = (struct agx3_field_kv){30, d->compare_value};
+   return agx3_bind_compose(enc, mnemonic, 0, base, nb, ov, no, out, length);
 }
 
 struct reduce_form {
