@@ -149,6 +149,7 @@ enum hk_agx3_g17p_rt0_bg_op {
 
 #define HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
 #define HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
+#define HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 
 /* Resource spec for the bounded one-RT background shaders, not an ordinary
  * fragment shader or EOT. CLEAR/RELOAD write every live RT0 component; NONE
@@ -222,8 +223,8 @@ bool hk_agx3_g17p_rt0_eot_program_generate(
 bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
                                         uint32_t layer_count);
 
-/* Admit the bounded one-attachment physical tilebuffer. Layer selection is
- * carried independently by the array BG/EOT programs. */
+/* Admit the bounded single-target, layered and exactly witnessed two-target
+ * physical tilebuffer layouts. */
 bool hk_agx3_g17p_rt0_tile_layout_supported(
    struct agx_tilebuffer_layout *tib);
 

@@ -337,6 +337,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    const bool wboit_mrt =
       key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
       key->tib.logical_format[1] == PIPE_FORMAT_R8_UNORM;
+   const bool rgba8_mrt =
+      key->tib.logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+      key->tib.logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM;
+   const bool dual_mrt = wboit_mrt || rgba8_mrt;
+   if (rgba8_mrt && !hk_g17p_unverified_feature("mrt")) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return (struct hk_bg_eot){0};
+   }
 
    for (unsigned rt = 0; rt < HK_MAX_RTS; ++rt) {
       const enum agx_bg_eot_op op = key->op[rt];
@@ -344,36 +352,38 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                                     ? (op == AGX_EOT_STORE || op == AGX_BG_EOT_NONE)
                                     : (op == AGX_BG_EOT_NONE ||
                                        op == AGX_BG_CLEAR || op == AGX_BG_LOAD);
-      const bool wboit_mrt_rt1 =
-         rt == 1 && wboit_mrt &&
+      const bool dual_mrt_rt1 =
+         rt == 1 && dual_mrt &&
          (store ? op == AGX_EOT_STORE
                 : (op == AGX_BG_CLEAR || op == AGX_BG_LOAD));
       if ((rt == 0 && !rt0_supported) ||
-          (rt != 0 && op != AGX_BG_EOT_NONE && !wboit_mrt_rt1)) {
+          (rt != 0 && op != AGX_BG_EOT_NONE && !dual_mrt_rt1)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
    }
 
    const enum agx_bg_eot_op op = key->op[0];
-   const bool wboit_mrt_active = wboit_mrt &&
-                                 key->op[1] != AGX_BG_EOT_NONE;
-   if (wboit_mrt_active &&
+   const bool dual_mrt_active = dual_mrt && key->op[1] != AGX_BG_EOT_NONE;
+   if (dual_mrt_active &&
        (key->op[1] != op || info->colorAttachmentCount < 2)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return (struct hk_bg_eot){0};
    }
    if (!store && op == AGX_BG_CLEAR)
-      key->reserved_preamble = wboit_mrt_active
-         ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
-         : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+      key->reserved_preamble =
+         rgba8_mrt && dual_mrt_active
+            ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+         : wboit_mrt && dual_mrt_active
+            ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
+            : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
    static int rt1_via_slot0 = -1;
    if (rt1_via_slot0 < 0)
       rt1_via_slot0 = debug_get_bool_option(
          "HK_G17P_WBOIT_EOT_RT1_VIA_SLOT0", false);
    const bool diagnostic_rt1_slot0 =
-      store && wboit_mrt_active && rt1_via_slot0;
+      store && wboit_mrt && dual_mrt_active && rt1_via_slot0;
    static int rt1_from_rt0 = -1;
    if (rt1_from_rt0 < 0)
       rt1_from_rt0 = debug_get_bool_option(
@@ -419,9 +429,12 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       program_capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
       program_label = "G17P RT0 EOT Ioto program";
    } else if (op == AGX_BG_CLEAR) {
-      program_capacity = wboit_mrt_active
-         ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
-         : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE;
+      program_capacity =
+         rgba8_mrt && dual_mrt_active
+            ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+         : wboit_mrt && dual_mrt_active
+            ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
+            : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE;
       program_label = "G17P RT0 clear Ioto program";
    } else {
       program_capacity = AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
@@ -452,7 +465,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             att->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
       struct hk_image_view *target = direct_resolve
          ? cmd->state.gfx.render.color_att[0].resolve_iview : iview;
-      struct hk_image_view *iview1 = wboit_mrt_active
+      struct hk_image_view *iview1 = dual_mrt_active
          ? cmd->state.gfx.render.color_att[1].iview : NULL;
       const bool target_pbe_valid =
          target && (key->tib.layered
@@ -468,7 +481,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             target->vk.format != iview->vk.format)) ||
           !target_pbe_valid ||
           info->pColorAttachments[0].imageView == VK_NULL_HANDLE ||
-          (wboit_mrt_active &&
+          (dual_mrt_active &&
            (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
@@ -490,18 +503,18 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          key->tib.layered ? target->planes[0].layered_eot
                           : target->planes[0].eot;
       struct hk_native_pbe_descriptor target1_pbe = {0};
-      if (wboit_mrt_active) {
+      if (dual_mrt_active) {
          target1_pbe = key->tib.layered ? iview1->planes[0].layered_eot
                                         : iview1->planes[0].eot;
       }
       struct hk_native_pbe_descriptor pbe_arguments[2] = {
          diagnostic_rt1_slot0 ? target1_pbe : target_pbe,
       };
-      if (wboit_mrt_active && !diagnostic_rt1_slot0)
+      if (dual_mrt_active && !diagnostic_rt1_slot0)
          pbe_arguments[1] = target1_pbe;
       const size_t pbe_argument_size =
-         wboit_mrt_active && !diagnostic_rt1_slot0
-         ? AGX_IOTO_G17P_WBOIT_MRT_PBE_ARGUMENT_SIZE
+         dual_mrt_active && !diagnostic_rt1_slot0
+         ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
          : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
       const uint64_t pbe_argument_va =
          hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
@@ -516,9 +529,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             &key->tib, diagnostic_rt1_from_rt0 ? 0
                                                : diagnostic_rt1_slot0 ? 1 : 0),
          .attachment_count =
-            wboit_mrt_active && !diagnostic_rt1_slot0 ? 2 : 1,
+            dual_mrt_active && !diagnostic_rt1_slot0 ? 2 : 1,
          .imageblock_offset1_B =
-            wboit_mrt_active && !diagnostic_rt1_slot0
+            dual_mrt_active && !diagnostic_rt1_slot0
             ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
@@ -577,11 +590,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       const VkRenderingAttachmentInfo *att_info = &info->pColorAttachments[0];
       struct hk_image_view *iview = cmd->state.gfx.render.color_att[0].iview;
       const VkRenderingAttachmentInfo *att_info1 =
-         wboit_mrt_active ? &info->pColorAttachments[1] : NULL;
+         dual_mrt_active ? &info->pColorAttachments[1] : NULL;
       struct hk_image_view *iview1 =
-         wboit_mrt_active ? cmd->state.gfx.render.color_att[1].iview : NULL;
+         dual_mrt_active ? cmd->state.gfx.render.color_att[1].iview : NULL;
       if (!iview || att_info->imageView == VK_NULL_HANDLE ||
-          (wboit_mrt_active &&
+          (dual_mrt_active &&
            (!iview1 || att_info1->imageView == VK_NULL_HANDLE))) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
@@ -613,9 +626,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          VkClearColorValue clear_values[2] = {
             att_info->clearValue.color,
          };
-         if (wboit_mrt_active)
+         if (dual_mrt_active)
             clear_values[1] = att_info1->clearValue.color;
-         const size_t clear_size = wboit_mrt_active ? 20 : 16;
+         const size_t clear_size =
+            rgba8_mrt && dual_mrt_active ? 32
+            : wboit_mrt && dual_mrt_active ? 20 : 16;
          desc.clear_value_va =
             hk_pool_upload(cmd, clear_values, clear_size, 16);
          if (!desc.clear_value_va)
@@ -631,11 +646,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             key->tib.layered ? iview->planes[0].layered_background
                              : iview->planes[0].background,
          };
-         if (wboit_mrt_active)
+         if (dual_mrt_active)
             textures[2] = key->tib.layered
                              ? iview1->planes[0].layered_background
                              : iview1->planes[0].background;
-         const size_t texture_size = wboit_mrt_active
+         const size_t texture_size = dual_mrt_active
             ? 3 * AGX_TEXTURE_GEN9_LENGTH : AGX_TEXTURE_GEN9_LENGTH;
          const uint64_t texture_va =
             hk_pool_upload(cmd, textures, texture_size,

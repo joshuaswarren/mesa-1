@@ -329,7 +329,8 @@ hk_agx3_g17p_rt0_bg_program_generate(
       if (!desc->clear_value_va || desc->texture_pointer_va ||
           desc->sampler_pointer_va ||
           (clear_push_halfs != HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
-           clear_push_halfs != HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS))
+           clear_push_halfs != HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
          .start_halfs = 4,
@@ -430,10 +431,12 @@ hk_agx3_g17p_rt0_bg_program_generate(
           &written) ||
        written > UINT16_MAX ||
        (desc->op == HK_AGX3_G17P_RT0_BG_CLEAR &&
-        written > (desc->clear_push_halfs ==
-                      HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
-                      ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
-                      : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE)))
+        written >
+           (desc->clear_push_halfs == HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+            : desc->clear_push_halfs == HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
+               : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE)))
       return false;
 
    staged.length = (uint16_t)written;
@@ -456,17 +459,18 @@ hk_agx3_g17p_rt0_eot_program_generate(
                             desc->nr_gprs == 16 &&
                             desc->staging_halfs == 8 &&
                             desc->attachment_count == 1;
-   const bool wboit_mrt = desc && desc->shader_binary_size == 120 &&
-                          desc->nr_gprs == 8 &&
-                          desc->staging_halfs == 16 &&
-                          desc->attachment_count == 2 &&
-                          desc->imageblock_offset_B == 0 &&
-                          desc->imageblock_offset1_B == 8;
+   const bool dual_mrt = desc && desc->shader_binary_size == 120 &&
+                         desc->nr_gprs == 8 &&
+                         desc->staging_halfs == 16 &&
+                         desc->attachment_count == 2 &&
+                         desc->imageblock_offset_B == 0 &&
+                          (desc->imageblock_offset1_B == 4 ||
+                           desc->imageblock_offset1_B == 8);
    if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (!rt0 && !layered_rt0 && !wboit_mrt) ||
+       (!rt0 && !layered_rt0 && !dual_mrt) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
-          (wboit_mrt ? 63 : 31) ||
+          (dual_mrt ? 63 : 31) ||
        (desc->pbe_argument_va & 31))
       return false;
 
@@ -514,7 +518,7 @@ hk_agx3_g17p_rt0_eot_program_generate(
       return false;
    body_size += offset_length;
 
-   if (wboit_mrt) {
+   if (dual_mrt) {
       if (!agx_ioto_load_pack_ldimm(chip, 10, desc->imageblock_offset1_B,
                                     body + body_size, &offset_length))
          return false;
@@ -526,7 +530,7 @@ hk_agx3_g17p_rt0_eot_program_generate(
     */
    uint8_t copies[20];
    const struct agx3_field_kv baseline[] = {{9,3},{10,2},{23,2},{24,2}};
-   const unsigned copy_count = wboit_mrt ? 5 : 3;
+   const unsigned copy_count = dual_mrt ? 5 : 3;
    const unsigned copy_sources[] = {4, 6, 8, 8, 10};
    for (unsigned i = 0; i < copy_count; ++i) {
       const struct agx3_field_kv operands[] = {

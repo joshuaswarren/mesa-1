@@ -27,23 +27,23 @@ agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
 {
    /* Admit only complete native builtin texts: the common 68-byte RT0
     * program, its exact 110-byte layered array-wire form, the signed RGBA16
-    * 84-byte RT0 program, or the exact 120-byte RGBA16F+R8 WBOIT MRT program.
-    * None has a synthetic compute preamble; the CODE container supplies the
-    * stop constant. */
+    * 84-byte RT0 program, or an exact 120-byte two-target program
+    * (RGBA16F+R8 or two RGBA8). None has a synthetic compute preamble; the
+    * CODE container supplies the stop constant. */
    const bool rt0 = bin && bin->info.binary_size == 68 &&
                     bin->info.nr_gprs == 8 &&
                     bin->info.agx3_staging_halfs == 8;
    const bool layered_rt0 = bin && bin->info.binary_size == 110 &&
                             bin->info.nr_gprs == 16 &&
                             bin->info.agx3_staging_halfs == 8;
-   const bool wboit_mrt = bin && bin->info.binary_size == 120 &&
-                          bin->info.nr_gprs == 8 &&
-                          bin->info.agx3_staging_halfs == 16;
+   const bool dual_mrt = bin && bin->info.binary_size == 120 &&
+                         bin->info.nr_gprs == 8 &&
+                         bin->info.agx3_staging_halfs == 16;
    const bool rgba16_sint = bin && bin->info.binary_size == 84 &&
                             bin->info.nr_gprs == 8 &&
                             bin->info.agx3_staging_halfs == 8;
    return bin && bin->binary &&
-          (rt0 || layered_rt0 || rgba16_sint || wboit_mrt) &&
+          (rt0 || layered_rt0 || rgba16_sint || dual_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;
