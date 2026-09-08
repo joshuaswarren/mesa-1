@@ -692,6 +692,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-bc6h-sfloat-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BC6H_SFLOAT_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-bc4-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),
       include_directories : [inc_include],

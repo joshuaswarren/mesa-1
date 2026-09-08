@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC6H_UFLOAT_DECODE)
+#if defined(G17P_BC6H_SFLOAT_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC6H_SFLOAT_BLOCK
+#define NAME "g17p-vulkan-bc6h-sfloat-decode"
+#elif defined(G17P_BC6H_UFLOAT_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC6H_UFLOAT_BLOCK
@@ -172,6 +177,7 @@ fnv1a64(const uint8_t *data, size_t size)
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
 #if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE) &&               \
+   !defined(G17P_BC6H_SFLOAT_DECODE) &&                                \
    !defined(G17P_BC6H_UFLOAT_DECODE) && !defined(G17P_BC7_DECODE)
 static uint8_t
 expand5(unsigned value)
@@ -234,7 +240,18 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
-#if defined(G17P_BC6H_UFLOAT_DECODE)
+#if defined(G17P_BC6H_SFLOAT_DECODE)
+   static const uint8_t encoded[4][16] = {
+      {0xc3,0x1a,0x9d,0xbd,0xf1,0xe6,0x1d,0x6b,0x40,0xf8,0x40,0xf8,0x40,0xf8,0x40,0xf8},
+      {0xa3,0x9d,0x5a,0xb4,0xd1,0xa6,0x9e,0x76,0x10,0x9f,0x10,0x9f,0x10,0x9f,0x10,0x9f},
+      {0x23,0x9c,0x73,0xd0,0xb9,0xe7,0x9d,0x75,0xf0,0x02,0xf0,0x02,0xf0,0x02,0xf0,0x02},
+      {0x83,0xe4,0x7b,0x48,0xbe,0x87,0xe4,0x7b,0x70,0xf0,0x70,0xf0,0x70,0xf0,0x70,0xf0},
+   };
+   (void)c0;
+   (void)c1;
+   (void)indices;
+   memcpy(out, encoded[block], BLOCK_BYTES);
+#elif defined(G17P_BC6H_UFLOAT_DECODE)
    static const uint8_t encoded[4][16] = {
       {0x43,0x3a,0xce,0x7a,0xeb,0xcd,0x3b,0xe9,0x60,0xfd,0x60,0xfd,0x60,0xfd,0x60,0xfd},
       {0x43,0xbb,0xd2,0x94,0x53,0x6e,0x3d,0xed,0x10,0xbf,0x10,0xbf,0x10,0xbf,0x10,0xbf},
@@ -287,7 +304,21 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
-#if defined(G17P_BC6H_UFLOAT_DECODE)
+#if defined(G17P_BC6H_SFLOAT_DECODE)
+   (void)blocks;
+   static const uint8_t decoded[4][4] = {
+      {0x3f, 0x00, 0x5e, 0xff},
+      {0xb0, 0x10, 0x4e, 0xff},
+      {0x69, 0x82, 0x89, 0xff},
+      {0x00, 0xfd, 0x00, 0xff},
+   };
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         memcpy(reference + (y * WIDTH + x) * 4, decoded[block], 4);
+      }
+   }
+#elif defined(G17P_BC6H_UFLOAT_DECODE)
    (void)blocks;
    static const uint8_t decoded[4][4] = {
       {0x8f, 0x2f, 0x5f, 0xff},
