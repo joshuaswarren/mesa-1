@@ -1372,7 +1372,13 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                         zres ? &zres->layout : NULL,
                         sres ? &sres->layout : NULL, &zls);
 
-   if (dev->debug & AGX_DBG_NOCLUSTER)
+   /* G17P treats an absent ZLS allocation as an inactive depth surface.  Its
+    * native render command keeps the clear register at 1.0 in that state;
+    * zero is only a real clear value when depth or stencil storage exists. */
+   if (dev->chip == AGX_CHIP_G17P && !zres && !sres)
+      c->isp_bgobjdepth = fui(1.0f);
+
+   if ((dev->debug & AGX_DBG_NOCLUSTER) && dev->chip != AGX_CHIP_G17P)
       c->flags |= DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING;
 
    memcpy(&c->bg.rsrc_spec, &pipeline_clear.counts,
