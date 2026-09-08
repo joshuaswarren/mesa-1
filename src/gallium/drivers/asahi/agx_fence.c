@@ -11,11 +11,13 @@
  */
 
 #include <xf86drm.h>
+#include <string.h>
 
 #include "agx_fence.h"
 #include "agx_state.h"
 
 #include "util/libsync.h"
+#include "util/os_file.h"
 #include "util/os_time.h"
 #include "util/u_inlines.h"
 
@@ -52,7 +54,11 @@ agx_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
    ret = drmSyncobjWait(dev->fd, &fence->syncobj, 1, abs_timeout,
                         DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
 
-   assert(ret >= 0 || ret == -ETIME);
+   if (ret < 0 && ret != -ETIME) {
+      agx_msg("fence wait failed: %s\n", strerror(-ret));
+      return false;
+   }
+
    fence->signaled = (ret >= 0);
    return fence->signaled;
 }
@@ -64,8 +70,10 @@ agx_fence_get_fd(struct pipe_screen *screen, struct pipe_fence_handle *f)
    int fd = -1;
 
    int ret = drmSyncobjExportSyncFile(dev->fd, f->syncobj, &fd);
-   assert(ret >= 0);
-   assert(fd >= 0);
+   if (ret || fd < 0) {
+      agx_msg("fence export failed\n");
+      return -1;
+   }
 
    return fd;
 }
@@ -124,10 +132,42 @@ agx_fence_create(struct agx_context *ctx)
     * same syncobj).
     */
    ret = drmSyncobjExportSyncFile(dev->fd, ctx->syncobj, &fd);
-   assert(ret >= 0 && fd != -1 && "export failed");
    if (ret || fd == -1) {
       agx_msg("export failed\n");
       return NULL;
+   }
+
+   /* fence_server_sync() defers an imported native fence until the next GPU
+    * submission.  A fence-only flush has no batch to consume that dependency,
+    * but the newly exported fence is still ordered after the server wait.  In
+    * particular, Wayland explicit-sync clients use exactly this sequence when
+    * forwarding an acquire fence to a release fence without drawing.
+    *
+    * Snapshot both the last rendering fence and the pending server waits.  A
+    * completed rendering fence can be discarded, avoiding a sync-file merge
+    * for the common no-work handoff.  Leave ctx->in_sync_fd intact: a later
+    * real submission must wait on it too.
+    */
+   if (ctx->in_sync_fd >= 0) {
+      ret = drmSyncobjWait(dev->fd, &ctx->syncobj, 1, 0,
+                           DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+
+      if (ret == 0) {
+         close(fd);
+         fd = os_dupfd_cloexec(ctx->in_sync_fd);
+      } else if (ret == -ETIME) {
+         int merged = sync_merge("asahi-fence", fd, ctx->in_sync_fd);
+         close(fd);
+         fd = merged;
+      } else {
+         close(fd);
+         fd = -1;
+      }
+
+      if (fd < 0) {
+         agx_msg("failed to snapshot pending server wait\n");
+         return NULL;
+      }
    }
 
    struct pipe_fence_handle *f =
@@ -156,8 +196,16 @@ agx_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f,
    assert(!value);
 
    ret = drmSyncobjExportSyncFile(dev->fd, f->syncobj, &fd);
-   assert(!ret);
+   if (ret || fd < 0) {
+      agx_msg("server-wait fence export failed\n");
+      ctx->any_faults = true;
+      return;
+   }
 
-   sync_accumulate("asahi", &ctx->in_sync_fd, fd);
+   ret = sync_accumulate("asahi", &ctx->in_sync_fd, fd);
    close(fd);
+   if (ret || ctx->in_sync_fd < 0) {
+      agx_msg("server-wait fence accumulation failed\n");
+      ctx->any_faults = true;
+   }
 }
