@@ -98,7 +98,8 @@ TEST_F(LowerPseudo, Agx3DivergentShuffleUsesFullRegisterLane)
    expected->shader->key = &key;
    expected->shader->any_cf = true;
    expected->shader->any_quad_divergent_shuffle = true;
-   agx_index scratch = agx_register(0, AGX_SIZE_32);
+   /* AGX3 reserves r1 so r0h remains the control-flow nesting counter. */
+   agx_index scratch = agx_register(2, AGX_SIZE_32);
    agx_mov_imm_to(expected, scratch, 0);
    agx_mov_to(expected, scratch, lane);
    agx_shuffle_to(expected, result, value, scratch);

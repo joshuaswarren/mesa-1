@@ -120,7 +120,17 @@ TEST_F(AGX3PackBinary, StraightLineALU)
          append(want, fm.bytes, fm.length);
       struct agx3_encoded_iadd_u32_reg_reg ia;
       ASSERT_TRUE(agx3_pack_iadd_u32_reg_reg(enc, 4, 0, 2, &ia));
-      append(want, ia.bytes, ia.length);
+      if (enc == AGX_ISA_ENCODING_AGX3B) {
+         const uint16_t src[] = {0, 2};
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 4, src,
+                                          hints, 0, bytes, &len));
+         append(want, bytes, len);
+      } else {
+         append(want, ia.bytes, ia.length);
+      }
       struct agx3_encoded_end en;
       ASSERT_TRUE(agx3_pack_end(enc, &en));
       append(want, en.bytes, en.length);
@@ -924,9 +934,13 @@ TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, U16ToF32RejectsUnwitnessedDomains)
+TEST_F(AGX3PackBinary, U16ToF32RejectsRemainingUnwitnessedDomains)
 {
    for (unsigned variant = 0; variant < 6; ++variant) {
+      SCOPED_TRACE(variant);
+      /* S16-to-f32 is now independently witnessed alongside U16-to-f32. */
+      if (variant == 4)
+         continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
@@ -980,9 +994,13 @@ TEST_F(AGX3PackBinary, FaddMinifloatPreservesWaitLivenessAndCommutativity)
    }
 }
 
-TEST_F(AGX3PackBinary, FaddMinifloatRefusesUngroundedModes)
+TEST_F(AGX3PackBinary, FaddMinifloatRefusesRemainingUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
+      SCOPED_TRACE(variant);
+      /* Negation and saturation now have their own exact G17P encoders. */
+      if (variant == 4 || variant == 9)
+         continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
@@ -2643,8 +2661,16 @@ TEST_F(AGX3PackBinary, StaticSpillCopyReloadDependency)
       ASSERT_TRUE(agx3_static_spill_encode_load(enc, &load, bytes, &length));
       append(want, bytes, length);
 
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 4, 2, 2, 0, 0,
-                                   /* wait reload slot 2 */ 2, bytes, &length));
+      if (enc == AGX_ISA_ENCODING_AGX3B) {
+         const uint16_t src[] = {2, 2};
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 4, src,
+                                          hints, 2, bytes, &length));
+      } else {
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 4, 2, 2, 0, 0,
+                                      2, bytes, &length));
+      }
       append(want, bytes, length);
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(enc, &end));
@@ -2696,8 +2722,9 @@ TEST_F(AGX3PackBinary, FloatModifierRouting)
    m.src0_neg = true;
    uint8_t mod[AGX3_FALU_MOD_MAX_LENGTH];
    uint8_t mlen = 0;
-   ASSERT_TRUE(
-      agx3_falu_add_mod(AGX_ISA_ENCODING_AGX3B, 4, 0, 2, &m, mod, &mlen));
+   struct agx3_falu_runtime runtime = {};
+   ASSERT_TRUE(agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3B, 4, 0, 2,
+                                         &m, &runtime, mod, &mlen));
    struct agx3_encoded_end en;
    agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &en);
 
@@ -2841,9 +2868,15 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
 
       std::vector<uint8_t> want;
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
-      ASSERT_TRUE(agx3_tex_stage_copy(enc, 0, 0, 1, 0, bytes, &len));
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_tex_stage_copy_hints(enc, 0, 0, 1, 0, false,
+                                                 false, bytes, &len)
+                     : agx3_tex_stage_copy(enc, 0, 0, 1, 0, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_tex_stage_copy(enc, 2, 2, 1, 0, bytes, &len));
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_tex_stage_copy_hints(enc, 2, 2, 1, 0, false,
+                                                 false, bytes, &len)
+                     : agx3_tex_stage_copy(enc, 2, 2, 1, 0, bytes, &len));
       append(want, bytes, len);
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
@@ -2860,7 +2893,7 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
        * independently compiled epilog cannot inherit this slot implicitly. */
       uint8_t wait[AGX3_ALU_MAX_LENGTH];
       ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                  1, wait, &len));
+                                   1, wait, &len));
       append(want, wait, len);
       EXPECT_EQ(pack(b), want);
    }
@@ -2888,8 +2921,16 @@ TEST_F(AGX3PackBinary, ExportDoesNotConsumeRealReadWait)
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
       ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 6, 4, 4, 0, 0,
-                                  1, bytes, &len));
+      if (enc == AGX_ISA_ENCODING_AGX3B) {
+         const uint16_t src[] = {4, 4};
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 6, src,
+                                          hints, 1, bytes, &len));
+      } else {
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 6, 4, 4, 0, 0,
+                                      1, bytes, &len));
+      }
       append(want, bytes, len);
       /* The real consumer already waited: no extra tail instruction. */
       EXPECT_EQ(pack(b), want);
@@ -2991,8 +3032,16 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
 
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 0, 0, 0, 0,
-                                   /*wait*/ 0x1, ab, &al));
+      if (enc == AGX_ISA_ENCODING_AGX3B) {
+         const uint16_t src[] = {0, 0};
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, src,
+                                          hints, 1, ab, &al));
+      } else {
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 0, 0, 0, 0,
+                                      1, ab, &al));
+      }
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(enc, &end));
 
@@ -3809,11 +3858,10 @@ TEST_F(AGX3PackBinary, FloatRelationAndCanonicalElse)
    }
 }
 
-TEST_F(AGX3PackBinary, RefusesMemoryDependentControlFlowAndRollsBack)
+TEST_F(AGX3PackBinary, MemoryDependentControlFlowRetiresOutstandingLoad)
 {
-   /* The compare/cnd hazard fields are not grounded yet. A load before a
-    * condition therefore fails the whole pack and leaves no executable-looking
-    * prefix, even when the condition happens to use a different register. */
+   /* A load before divergent control flow is retired on the straight-line
+    * edge, so both arms enter with the same empty scoreboard. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index base = agx_register(0, AGX_SIZE_64);
    agx_index index = agx_register(4, AGX_SIZE_32);
@@ -3823,7 +3871,16 @@ TEST_F(AGX3PackBinary, RefusesMemoryDependentControlFlowAndRollsBack)
    agx_if_icmp(b, cond, agx_immediate(0), 1, AGX_ICOND_UEQ, true, NULL);
    agx_stop(b);
 
-   EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+   const auto bin = pack(b);
+   uint8_t wait[AGX3_ALU_MAX_LENGTH], len = 0;
+   bool found_wait = false;
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
+                                   0, 0, 0, 0, 0, 1u << slot, wait, &len));
+      found_wait |=
+         std::search(bin.begin(), bin.end(), wait, wait + len) != bin.end();
+   }
+   EXPECT_TRUE(found_wait);
 }
 
 TEST_F(AGX3PackBinary, RefusesUngroundedUnconditionalBreak)
@@ -3970,7 +4027,8 @@ TEST_F(AGX3PackBinary, G17PAlphaProtocolAcquiresBeforeLoadReleasesAfterStore)
 
 TEST_F(AGX3PackBinary, G17PAlphaProtocolDoesNotBroadenFormatOffsetOrControlFlow)
 {
-   for (unsigned axis = 0; axis < 3; ++axis) {
+   /* S8NORM is now independently qualified; offset and CF remain excluded. */
+   for (unsigned axis = 1; axis < 3; ++axis) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_block *first = agx_start_block(b->shader);
@@ -4235,7 +4293,7 @@ TEST_F(AGX3PackBinary, ProjectiveReciprocalMatchesNativeOperandForm)
    agx_rcp_to(b, agx_register(0, AGX_SIZE_32), agx_register(0, AGX_SIZE_32));
    agx_stop(b);
    const std::vector<uint8_t> ordinary = {
-      0xaf,0,0x56,0,2,0,0x10,0x48,0x20,0, 0x0e,0,0,0,
+      0xaf,0,0x54,0,2,0,0,0x48,0x20,0, 0x0e,0,0,0,
    };
    EXPECT_EQ(pack(b), ordinary);
 }
@@ -4483,7 +4541,8 @@ TEST_F(AGX3PackBinary, G17PWriteWaitFollowsPackingAndPreservesScoreboard)
 
 TEST_F(AGX3PackBinary, G17PWriteWaitDoesNotCrossUnprovenOperations)
 {
-   for (unsigned axis = 0; axis < 6; ++axis) {
+   /* S8NORM is now independently qualified for the deferred protocol. */
+   for (unsigned axis = 1; axis < 6; ++axis) {
       SCOPED_TRACE(axis);
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_FRAGMENT;
@@ -6276,7 +6335,7 @@ TEST_F(AGX3PackBinary, HalfCeilMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b,false).empty());
 }
 
-TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)
+TEST_F(AGX3PackBinary, HalfMaximumRoutesUntiedAndRefusesModifiers)
 {
    for (unsigned mode = 0; mode < 3; ++mode) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -6292,7 +6351,8 @@ TEST_F(AGX3PackBinary, HalfMaximumRefusesUngroundedShapes)
       if (mode == 2)
          I->saturate = true;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+      const auto code = pack(b, mode == 0);
+      EXPECT_EQ(code.empty(), mode != 0) << "mode=" << mode;
    }
 }
 
