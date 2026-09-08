@@ -5442,7 +5442,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
              !I->saturate &&
-             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT) &&
+             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT ||
+              I->fcond == AGX_FCOND_GE) &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              (I->dest[0].size == AGX_SIZE_16 ||
               I->dest[0].size == AGX_SIZE_32) &&
@@ -5887,15 +5888,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
              (I->src[0].size == AGX_SIZE_16 || I->src[0].size == AGX_SIZE_32) &&
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
-             !I->src[0].abs && !I->src[0].neg &&
-             !I->src[1].abs && !I->src[1].neg &&
+             !I->src[0].abs && !I->src[1].abs &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
-            const uint16_t src[] = {I->src[0].value, I->src[1].value};
+            /* Apple spells `-a < b` as the equivalent `b > -a`, placing the
+             * only witnessed negate bit on the second full-width comparator.
+             * Do not generalize that modifier to another slot or condition. */
+            const bool neg_second = I->src[0].neg && !I->src[1].neg &&
+                                    I->fcond == AGX_FCOND_LT &&
+                                    !I->invert_cond &&
+                                    I->dest[0].size == AGX_SIZE_16 &&
+                                    I->src[0].size == AGX_SIZE_32 &&
+                                    I->src[1].size == AGX_SIZE_32 &&
+                                    I->src[2].value == 255 &&
+                                    I->src[3].value == 0;
+            const unsigned order[2] = {neg_second ? 1u : 0u,
+                                       neg_second ? 0u : 1u};
+            const uint16_t src[] = {I->src[order[0]].value,
+                                    I->src[order[1]].value};
             const enum agx3_alu_hint hints[] = {
-               agx3_post_ra_hint(I->src[0]), agx3_post_ra_hint(I->src[1])};
-            const bool src_16[] = {I->src[0].size == AGX_SIZE_16,
-                                   I->src[1].size == AGX_SIZE_16};
+               agx3_post_ra_hint(I->src[order[0]]),
+               agx3_post_ra_hint(I->src[order[1]])};
+            const bool src_16[] = {
+               I->src[order[0]].size == AGX_SIZE_16,
+               I->src[order[1]].size == AGX_SIZE_16};
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             unsigned condition = I->fcond;
             bool swap = I->invert_cond;
@@ -5906,6 +5922,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                condition = AGX_FCOND_LE;
                swap = !swap;
             }
+            if (neg_second)
+               condition = agx3_fcond_reverse(condition);
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
                if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
@@ -5915,13 +5933,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->saturate || I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
+                ((!neg_second) && (I->src[0].neg || I->src[1].neg)) ||
                 I->src[2].abs || I->src[2].neg ||
                 I->src[3].abs || I->src[3].neg ||
-                !agx3_alu_fcmp_select_imm_width(enc, I->dest[0].value, src, src_16, hints,
-                    condition, I->src[swap ? 3 : 2].value,
-                    I->src[swap ? 2 : 3].value, I->dest[0].size == AGX_SIZE_16,
-                    I->dest[0].cache,
-                    fsel_wait, bytes, &len) ||
+                !(neg_second
+                     ? agx3_alu_fcmp_select_imm_width_neg_second(
+                          enc, I->dest[0].value, src, src_16, hints,
+                          condition, I->src[swap ? 3 : 2].value,
+                          I->src[swap ? 2 : 3].value,
+                          I->dest[0].size == AGX_SIZE_16,
+                          I->dest[0].cache, fsel_wait, bytes, &len)
+                     : agx3_alu_fcmp_select_imm_width(
+                          enc, I->dest[0].value, src, src_16, hints,
+                          condition, I->src[swap ? 3 : 2].value,
+                          I->src[swap ? 2 : 3].value,
+                          I->dest[0].size == AGX_SIZE_16,
+                          I->dest[0].cache, fsel_wait, bytes, &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

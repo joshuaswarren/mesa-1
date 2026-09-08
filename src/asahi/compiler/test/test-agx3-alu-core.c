@@ -1241,6 +1241,18 @@ static void test_native_u16_arithmetic(void)
    const bool mixed_width[] = {false, true};
    assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B,2,mixed_src,mixed_width,dead,1,255,0,true,false,32,out,&len));
    exact(out,len,"12031d04a2ff03c02080");
+   const uint16_t neg_src[] = {8, 0};
+   const bool full_width[] = {false, false};
+   assert(agx3_alu_fcmp_select_imm_width_neg_second(
+      AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
+      2, 255, 0, true, false, 32, out, &len));
+   exact(out, len, "02091d01a2ff02c82080");
+   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+      AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
+      1, 255, 0, true, false, 32, out, &len));
+   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+      AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
+      2, 255, 0, false, false, 32, out, &len));
    puts("Native u16 ALU and mixed-width FSEL: six native byte vectors PASS");
 }
 
@@ -1449,6 +1461,19 @@ static void test_native_minifloat_mixed_select(void)
       exact(bytes, len, "02010bc1228003c20002");
    }
    {
+      /* Fresh G17P vector witness for `a >= 0.25 ? v : 0`. */
+      const uint16_t selected[] = {0, 0};
+      const bool immediate[] = {false, true};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 8, 0x20, selected, immediate, hints,
+         5, false, false, 32, bytes, &len));
+      exact(bytes, len, "02090b91248002c2");
+   }
+   {
       const uint16_t selected[] = {255, 0};
       const bool immediate[] = {true, true};
       const enum agx3_alu_hint hints[] = {
@@ -1510,7 +1535,7 @@ static void test_native_minifloat_mixed_select(void)
          AGX_ISA_ENCODING_AGX3B, 2, 22, 0x40, glitch_selected,
          glitch_immediate, glitch_hints, 1, false, true, 0, bytes, &len));
    }
-   puts("Native minifloat mixed select: six exact Apple vectors and bounds PASS");
+   puts("Native minifloat mixed select: seven exact Apple vectors and bounds PASS");
 }
 
 static void test_native_fadd_abs_mixed_half(void)

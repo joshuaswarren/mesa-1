@@ -102,6 +102,16 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Exact G17P `b > -a ? 255 : 0` half-result form. The second full-width
+ * comparator carries Apple's native negate field; other negate placements
+ * and selected values stay outside this deliberately narrow entry point. */
+bool agx3_alu_fcmp_select_imm_width_neg_second(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
+   bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P f32-register == minifloat comparison selecting a half register or
  * immediate.  This is the exact vectorized native form used for half masks. */
 bool agx3_alu_fcmp_minifloat_select_half(

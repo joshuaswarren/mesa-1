@@ -790,6 +790,69 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+
+   /* Exact post-RA blurprepare.frag shape: r4 >= 0.25 ? r5 : 0. */
+   agx_builder *b = builder(enc);
+   agx_index compare = agx_register(8, AGX_SIZE_32);
+   agx_index selected = agx_register(10, AGX_SIZE_32);
+   compare.cache = selected.cache = true;
+   agx_fcmpsel_to(b, agx_register(12, AGX_SIZE_32), compare,
+                  agx_immediate(0x20), selected, agx_immediate(0),
+                  AGX_FCOND_GE);
+   agx_stop(b);
+
+   const uint16_t blur_selected[] = {10, 0};
+   const bool blur_immediate[] = {false, true};
+   const enum agx3_alu_hint blur_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE,
+   };
+   ASSERT_TRUE(agx3_alu_fcmp_minifloat_select_mixed(
+      enc, 12, 8, 0x20, blur_selected, blur_immediate, blur_hints,
+      AGX_FCOND_GE, false, false, 0, bytes, &len));
+   std::vector<uint8_t> want;
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* Apple canonicalizes inner_glow's `-a < b` as `b > -a`. */
+   b = builder(enc);
+   agx_index a = agx_register(8, AGX_SIZE_32);
+   a.neg = true;
+   agx_index c = agx_register(16, AGX_SIZE_32);
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+
+   const uint16_t glow_src[] = {16, 8};
+   const bool glow_width[] = {false, false};
+   const enum agx3_alu_hint glow_hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   ASSERT_TRUE(agx3_alu_fcmp_select_imm_width_neg_second(
+      enc, 1, glow_src, glow_width, glow_hints, AGX_FCOND_GT, 255, 0,
+      true, false, 0, bytes, &len));
+   want.clear();
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* No Apple witness permits the negate modifier on the other operand. */
+   b = builder(enc);
+   a = agx_register(8, AGX_SIZE_32);
+   c = agx_register(16, AGX_SIZE_32);
+   c.neg = true;
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

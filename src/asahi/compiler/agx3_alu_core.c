@@ -823,19 +823,24 @@ agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
 
 /* Native float comparison selects two integer immediates. Field 11 selects
  * the result width; a 16-bit result can target either register half. */
-bool
-agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
+static bool
+agx3_alu_fcmp_select_imm_width_internal(enum agx_isa_encoding enc,
+                        uint16_t dest,
                         const uint16_t src[2], const bool src_16[2],
                         const enum agx3_alu_hint hints[2],
                         unsigned condition, uint8_t if_true, uint8_t if_false,
                         bool dest_16, bool dest_cache, uint16_t wait_mask,
+                        bool src1_neg,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !src_16 || !hints ||
        (src_16[0] && src_16[1]) ||
        dest >= 256 || (!dest_16 && (dest & 1)) || (condition != 0 && condition != 1 && condition != 2 &&
-        condition != 5 && condition != 6) ||
+       condition != 5 && condition != 6) ||
        (wait_mask != 0 && wait_mask != 32))
+      return false;
+   if (src1_neg && (src_16[0] || src_16[1] || condition != 2 ||
+                    if_true != 255 || if_false != 0 || !dest_16))
       return false;
    for (unsigned i = 0; i < 2; ++i)
       if (src[i] >= 256 || (!src_16[i] && (src[i] & 1)) ||
@@ -851,13 +856,39 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
       {44, hints[0] == AGX3_ALU_HINT_CACHE},
       {46, hints[0] == AGX3_ALU_HINT_DISCARD},
       {61, hints[1] == AGX3_ALU_HINT_CACHE},
-      {63, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {63, hints[1] == AGX3_ALU_HINT_DISCARD}, {65, src1_neg},
       {68, if_true}, {85, if_false}, {110, condition}, {107, wait_mask == 32},
    };
    for (unsigned ep = 20; ep < 28; ++ep)
-      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 12, out, len))
+      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 13, out, len))
          return true;
    return false;
+}
+
+bool
+agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
+                        const uint16_t src[2], const bool src_16[2],
+                        const enum agx3_alu_hint hints[2],
+                        unsigned condition, uint8_t if_true, uint8_t if_false,
+                        bool dest_16, bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_fcmp_select_imm_width_internal(
+      enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
+      dest_cache, wait_mask, false, out, len);
+}
+
+bool
+agx3_alu_fcmp_select_imm_width_neg_second(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
+   bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_fcmp_select_imm_width_internal(
+      enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
+      dest_cache, wait_mask, true, out, len);
 }
 
 bool
@@ -912,7 +943,7 @@ agx3_alu_fcmp_minifloat_select_mixed(
    if (enc != AGX_ISA_ENCODING_AGX3B || !selected ||
        !selected_immediate || !hints || !out || !len || dest >= 256 ||
        compare >= 256 || (compare & 1) || (!dest_16 && (dest & 1)) ||
-       (condition != 0 && condition != 1) ||
+       (condition != 0 && condition != 1 && condition != 5) ||
        (wait_mask != 0 && wait_mask != 32) ||
        (unsigned)hints[0] > AGX3_ALU_HINT_CACHE)
       return false;
@@ -921,6 +952,13 @@ agx3_alu_fcmp_minifloat_select_mixed(
     * selects exactly one full register and one byte constant. */
    if (dest_16 ? (!selected_immediate[0] || !selected_immediate[1])
                : (selected_immediate[0] == selected_immediate[1]))
+      return false;
+
+   /* The only measured GE family is Hyprland's full-width
+    * `a >= 0.25 ? register : 0` form. */
+   if (condition == 5 &&
+       (dest_16 || minifloat != 0x20 || selected_immediate[0] ||
+        !selected_immediate[1] || selected[1] != 0))
       return false;
 
    for (unsigned i = 0; i < 2; ++i) {
@@ -956,7 +994,9 @@ agx3_alu_fcmp_minifloat_select_mixed(
       {dest_16 ? 3 : 17, dest},
       {dest_16 ? 12 : 26, dest_cache},
       {35, compare},
-      {51, minifloat},
+      /* The ep10 LUT aliases logical minifloat 0x20 with field value 0x10.
+       * Apple's G17P binary chooses the latter spelling for this GE form. */
+      {51, condition == 5 ? 0x10 : minifloat},
       {selected_immediate[0] ? 68 : 69, selected[0]},
       {selected_immediate[1] ? 85 : 86, selected[1]},
       {44, hints[0] == AGX3_ALU_HINT_CACHE},
@@ -975,7 +1015,11 @@ agx3_alu_fcmp_minifloat_select_mixed(
       }
    }
 
-   const unsigned preferred = dest_16 ? ((dest & 1) ? 26 : 25) : 22;
+   /* Apple's witnessed GE/minifloat vector uses the eight-byte ep10 form;
+    * the older EQ/LT corpus uses ep22/25/26 according to result width. */
+   const unsigned preferred = condition == 5
+                                 ? 10
+                                 : (dest_16 ? ((dest & 1) ? 26 : 25) : 22);
    if (agx3_bind_compose(enc, "fsel", preferred, base, nbase, fields, n,
                          out, len))
       return true;
