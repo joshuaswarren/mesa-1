@@ -2193,7 +2193,23 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->max_vertex_element_src_offset = 0xffff;
 
-   caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
+   /* On AGX3, advertising blit-based transfers routes a format-mismatched
+    * glReadPixels through u_blitter.  In particular, the WSI-native
+    * B8G8R8A8_UNORM -> API R8G8B8A8_UNORM conversion silently returns zero on
+    * G17P even though the same drawable is byte-exact through a dma-buf CPU
+    * map after both CPU upload and GPU clear.  Keep using the ordinary mapped
+    * transfer path, which performs the format conversion on the CPU, until
+    * the AGX3 render-blitter pixel path is hardware-grounded.
+    *
+    * This is correctness-critical for every default EGL surface: the DRI
+    * pbuffer/window colour buffer is BGRA while GLES glReadPixels(GL_RGBA)
+    * requests RGBA.  AGX2 retains its established accelerated path.
+    */
+   caps->texture_transfer_modes =
+      agx_chip_command_stream_generation(agx_device(pscreen)->chip) ==
+            AGX_CS_GENERATION_AGX2
+         ? PIPE_TEXTURE_TRANSFER_BLIT
+         : PIPE_TEXTURE_TRANSFER_DEFAULT;
 
    caps->endianness = PIPE_ENDIAN_LITTLE;
 

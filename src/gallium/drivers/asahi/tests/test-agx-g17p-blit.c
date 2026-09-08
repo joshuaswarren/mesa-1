@@ -431,6 +431,18 @@ main(void)
    struct agx_device *dev = agx_device(screen);
    const bool agx2 =
       agx_chip_command_stream_generation(dev->chip) == AGX_CS_GENERATION_AGX2;
+   int status = 0;
+
+   /* The state tracker must not insert this same ungrounded render blit for
+    * BGRA default-surface readback on AGX3.  The explicit pctx->blit above is
+    * retained as a compiler/stream ratchet, while API transfers take the
+    * mapped CPU conversion path until the pixel result is hardware-proven. */
+   if (!agx2 &&
+       screen->caps.texture_transfer_modes != PIPE_TEXTURE_TRANSFER_DEFAULT) {
+      fprintf(stderr, "AGX3 still advertises blit-based texture transfers\n");
+      status = 1;
+   }
+
    const bool vs_ok = ctx->vs != NULL && ctx->vs->bo != NULL;
    const bool fs_ok = ctx->fs != NULL && ctx->fs->bo != NULL;
    const bool linked_ok = ctx->linked.vs != NULL && ctx->linked.fs != NULL;
@@ -438,8 +450,6 @@ main(void)
    printf("blit returned on %s; vs=%s fs=%s linked=%s\n",
           agx_chip_name(dev->chip), vs_ok ? "ok" : "refused",
           fs_ok ? "ok" : "refused", linked_ok ? "ok" : "refused");
-
-   int status = 0;
 
    if (!agx2 && agx_resource(dst)->layout.compressed) {
       fprintf(stderr,
