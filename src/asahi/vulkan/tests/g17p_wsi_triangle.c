@@ -2,13 +2,17 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * One-queue XCB smoke test for the bounded G17P graphics path. It uses one
+ * One-queue XCB/Wayland smoke test for the bounded G17P graphics path. It uses one
  * 24-byte vertex buffer and no descriptors. The render pass has one
  * single-sample colour attachment and no depth or stencil attachment.
  */
 
 #define VK_NO_PROTOTYPES
+#ifdef G17P_WSI_WAYLAND
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#else
 #define VK_USE_PLATFORM_XCB_KHR
+#endif
 #include <vulkan/vulkan.h>
 
 #include <dlfcn.h>
@@ -17,7 +21,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef G17P_WSI_WAYLAND
+#include <wayland-client.h>
+#include "xdg-shell-client-protocol.h"
+#else
 #include <xcb/xcb.h>
+#endif
 
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -34,7 +43,11 @@ VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 VK_FN(vkGetPhysicalDeviceSurfaceSupportKHR);
 VK_FN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
 VK_FN(vkGetPhysicalDeviceSurfaceFormatsKHR);
+#ifdef G17P_WSI_WAYLAND
+VK_FN(vkCreateWaylandSurfaceKHR);
+#else
 VK_FN(vkCreateXcbSurfaceKHR);
+#endif
 VK_FN(vkCreateDevice);
 VK_FN(vkGetDeviceQueue);
 VK_FN(vkCreateSwapchainKHR);
@@ -105,6 +118,92 @@ check(VkResult result, const char *what)
          die("device is missing " #name);                                     \
    } while (0)
 
+#ifdef G17P_WSI_WAYLAND
+struct wayland_window {
+   struct wl_display *display;
+   struct wl_compositor *compositor;
+   struct xdg_wm_base *wm_base;
+   struct wl_surface *surface;
+   struct xdg_surface *xdg_surface;
+   struct xdg_toplevel *toplevel;
+   bool configured;
+   bool closed;
+};
+
+static void
+registry_global(void *data, struct wl_registry *registry, uint32_t name,
+                const char *interface, uint32_t version)
+{
+   struct wayland_window *window = data;
+   if (!strcmp(interface, wl_compositor_interface.name)) {
+      window->compositor = wl_registry_bind(
+         registry, name, &wl_compositor_interface, version < 4 ? version : 4);
+   } else if (!strcmp(interface, xdg_wm_base_interface.name)) {
+      window->wm_base =
+         wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+   }
+}
+
+static void
+registry_remove(void *data, struct wl_registry *registry, uint32_t name)
+{
+   (void)data;
+   (void)registry;
+   (void)name;
+}
+
+static const struct wl_registry_listener registry_listener = {
+   .global = registry_global,
+   .global_remove = registry_remove,
+};
+
+static void
+wm_base_ping(void *data, struct xdg_wm_base *wm_base, uint32_t serial)
+{
+   (void)data;
+   xdg_wm_base_pong(wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener wm_base_listener = {
+   .ping = wm_base_ping,
+};
+
+static void
+xdg_surface_configure(void *data, struct xdg_surface *surface,
+                      uint32_t serial)
+{
+   struct wayland_window *window = data;
+   xdg_surface_ack_configure(surface, serial);
+   window->configured = true;
+}
+
+static const struct xdg_surface_listener xdg_surface_listener = {
+   .configure = xdg_surface_configure,
+};
+
+static void
+toplevel_configure(void *data, struct xdg_toplevel *toplevel, int32_t width,
+                   int32_t height, struct wl_array *states)
+{
+   (void)data;
+   (void)toplevel;
+   (void)width;
+   (void)height;
+   (void)states;
+}
+
+static void
+toplevel_close(void *data, struct xdg_toplevel *toplevel)
+{
+   (void)toplevel;
+   ((struct wayland_window *)data)->closed = true;
+}
+
+static const struct xdg_toplevel_listener toplevel_listener = {
+   .configure = toplevel_configure,
+   .close = toplevel_close,
+};
+#else
 static xcb_screen_t *
 get_screen(xcb_connection_t *connection, int screen_number)
 {
@@ -116,6 +215,7 @@ get_screen(xcb_connection_t *connection, int screen_number)
 
    return iter.data;
 }
+#endif
 
 static VkSurfaceFormatKHR
 choose_surface_format(const VkSurfaceFormatKHR *formats, uint32_t count)
@@ -197,6 +297,35 @@ main(int argc, char **argv)
 
    LOAD_GLOBAL(vkCreateInstance);
 
+#ifdef G17P_WSI_WAYLAND
+   struct wayland_window window = {0};
+   window.display = wl_display_connect(NULL);
+   if (!window.display)
+      die("cannot connect to WAYLAND_DISPLAY");
+   struct wl_registry *registry = wl_display_get_registry(window.display);
+   if (!registry)
+      die("Wayland registry is missing");
+   wl_registry_add_listener(registry, &registry_listener, &window);
+   if (wl_display_roundtrip(window.display) < 0 || !window.compositor ||
+       !window.wm_base)
+      die("Wayland compositor has no wl_compositor/xdg_wm_base");
+   xdg_wm_base_add_listener(window.wm_base, &wm_base_listener, &window);
+   window.surface = wl_compositor_create_surface(window.compositor);
+   window.xdg_surface =
+      xdg_wm_base_get_xdg_surface(window.wm_base, window.surface);
+   window.toplevel = xdg_surface_get_toplevel(window.xdg_surface);
+   if (!window.surface || !window.xdg_surface || !window.toplevel)
+      die("cannot create Wayland xdg-toplevel");
+   xdg_surface_add_listener(window.xdg_surface, &xdg_surface_listener,
+                            &window);
+   xdg_toplevel_add_listener(window.toplevel, &toplevel_listener, &window);
+   xdg_toplevel_set_title(window.toplevel, "G17P Vulkan RT0 triangle");
+   wl_surface_commit(window.surface);
+   while (!window.configured) {
+      if (wl_display_dispatch(window.display) < 0)
+         die("Wayland initial configure failed");
+   }
+#else
    int screen_number = 0;
    xcb_connection_t *xcb = xcb_connect(NULL, &screen_number);
    if (!xcb || xcb_connection_has_error(xcb))
@@ -216,10 +345,15 @@ main(int argc, char **argv)
                        XCB_ATOM_STRING, 8, sizeof(title) - 1, title);
    xcb_map_window(xcb, window);
    xcb_flush(xcb);
+#endif
 
    const char *instance_extensions[] = {
       VK_KHR_SURFACE_EXTENSION_NAME,
+#ifdef G17P_WSI_WAYLAND
+      VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+#else
       VK_KHR_XCB_SURFACE_EXTENSION_NAME,
+#endif
    };
    const VkApplicationInfo app_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -247,17 +381,34 @@ main(int argc, char **argv)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceSupportKHR);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceFormatsKHR);
+#ifdef G17P_WSI_WAYLAND
+   LOAD_INSTANCE(instance, vkCreateWaylandSurfaceKHR);
+#else
    LOAD_INSTANCE(instance, vkCreateXcbSurfaceKHR);
+#endif
    LOAD_INSTANCE(instance, vkCreateDevice);
 
+#ifdef G17P_WSI_WAYLAND
+   const VkWaylandSurfaceCreateInfoKHR surface_info = {
+      .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+      .display = window.display,
+      .surface = window.surface,
+   };
+#else
    const VkXcbSurfaceCreateInfoKHR surface_info = {
       .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
       .connection = xcb,
       .window = window,
    };
+#endif
    VkSurfaceKHR surface;
+#ifdef G17P_WSI_WAYLAND
+   check(vkCreateWaylandSurfaceKHR(instance, &surface_info, NULL, &surface),
+         "vkCreateWaylandSurfaceKHR");
+#else
    check(vkCreateXcbSurfaceKHR(instance, &surface_info, NULL, &surface),
          "vkCreateXcbSurfaceKHR");
+#endif
 
    uint32_t physical_count = 0;
    check(vkEnumeratePhysicalDevices(instance, &physical_count, NULL),
@@ -737,6 +888,12 @@ main(int argc, char **argv)
            frame_count, extent.width, extent.height, surface_format.format);
 
    for (unsigned frame = 0; frame < frame_count; ++frame) {
+#ifdef G17P_WSI_WAYLAND
+      if (window.closed)
+         break;
+      if (wl_display_dispatch_pending(window.display) < 0)
+         die("Wayland dispatch failed");
+#endif
       check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
             "vkWaitForFences");
       check(vkResetFences(device, 1, &fence), "vkResetFences");
@@ -777,6 +934,10 @@ main(int argc, char **argv)
       if ((frame + 1) % 60 == 0 || frame + 1 == frame_count)
          fprintf(stderr, "g17p-wsi-triangle: frame %u/%u\n", frame + 1,
                  frame_count);
+#ifdef G17P_WSI_WAYLAND
+      if (wl_display_flush(window.display) < 0)
+         die("Wayland flush failed");
+#endif
    }
 
    check(vkQueueWaitIdle(queue), "vkQueueWaitIdle");

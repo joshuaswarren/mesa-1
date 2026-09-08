@@ -482,6 +482,22 @@ if with_tests
     )
   endif
 
+  if with_platform_wayland
+    g17p_xdg_shell = mod_wl.scan_xml(
+      mod_wl.find_protocol('xdg-shell'),
+      include_core_only : false,
+    )
+    executable(
+      'g17p-wsi-wayland-triangle',
+      files('tests/g17p_wsi_triangle.c'),
+      g17p_xdg_shell,
+      include_directories : [inc_include],
+      dependencies : [dep_dl, dep_wayland_client],
+      c_args : [c_msvc_compat_args, '-DG17P_WSI_WAYLAND'],
+      gnu_symbol_visibility : 'hidden',
+    )
+  endif
+
   if host_machine.system() == 'linux'
     executable(
       'asahi-vulkan-g17p-enumerate',
