@@ -2378,6 +2378,7 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
    VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
                           pPropertyCount);
+<<<<<<< HEAD
    if (pdev->vk.supported_features.cooperativeMatrix &&
        agx_chip_g17_m5(pdev->dev.chip)) {
       /* The order of this list is implementation-defined. List the 8x8x8
@@ -2439,21 +2440,34 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
          }
       }
    } else if (getenv("AGX_SIMDMAT")) {
-      /* Hardware 8x8x8 fp32 matrix MAC (simd_matrix_fmadd32), G13 only: the
-       * native path above owns M5-generation devices. */
-      vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p)
-      {
-         p->sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-         p->pNext = NULL;
-         p->MSize = 8;
-         p->NSize = 8;
-         p->KSize = 8;
-         p->AType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-         p->BType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-         p->CType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-         p->ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-         p->saturatingAccumulation = VK_FALSE;
-         p->scope = VK_SCOPE_SUBGROUP_KHR;
+      /* G13 hardware 8x8x8 matrix MAC (simd_matrix_fmadd16/32), G13 only: the
+       * native path above owns M5-generation devices. The unit
+       * takes fp16 or fp32 A/B and accumulates in fp32 (fmadd32) or fp16
+       * (fmadd16); 16x16x16 is a 2x2x2 tiling of 8x8x8 ops in
+       * agx_nir_lower_simdmat.c. Every shape here is GPU-verified exact.
+       */
+      static const struct {
+         VkComponentTypeKHR ab, c;
+      } types[] = {
+         {VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+         {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+         {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
+      };
+      for (unsigned n = 8; n <= 16; n *= 2) {
+         for (unsigned t = 0; t < ARRAY_SIZE(types); t++) {
+            vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p)
+            {
+               p->MSize = n;
+               p->NSize = n;
+               p->KSize = n;
+               p->AType = types[t].ab;
+               p->BType = types[t].ab;
+               p->CType = types[t].c;
+               p->ResultType = types[t].c;
+               p->saturatingAccumulation = VK_FALSE;
+               p->scope = VK_SCOPE_SUBGROUP_KHR;
+            }
+         }
       }
    }
 
