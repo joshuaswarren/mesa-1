@@ -160,6 +160,8 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    matrix_stats.indexed_draws += stats->indexed_draws;
    matrix_stats.state_updates += stats->state_updates;
    matrix_stats.links += stats->links;
+   matrix_stats.viewport_count =
+      MAX2(matrix_stats.viewport_count, stats->viewport_count);
    matrix_stats.primitive_mask |= stats->primitive_mask;
    matrix_stats.index_size_mask |= stats->index_size_mask;
 #define MERGE_FLAG(name) matrix_stats.name |= stats->name
@@ -172,6 +174,7 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    MERGE_FLAG(varying_fs);
    MERGE_FLAG(no_varying_fs);
    MERGE_FLAG(viewport_changed);
+   MERGE_FLAG(multi_viewport);
    MERGE_FLAG(scissor_changed);
    MERGE_FLAG(cull_enabled);
    MERGE_FLAG(depth_enabled);
@@ -221,6 +224,26 @@ check_matrix_coverage(void)
    }
 
    fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
+}
+
+static void __attribute__((destructor))
+check_multi_viewport_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT"))
+      return;
+
+   if (!matrix_stats.multi_viewport || matrix_stats.viewport_count != 16 ||
+       matrix_stats.draws != 1 || matrix_stats.state_updates != 1) {
+      fprintf(stderr,
+              "shim: incomplete G17P multi-viewport coverage: count=%u "
+              "draws=%u state=%u exact=%u\n",
+              matrix_stats.viewport_count, matrix_stats.draws,
+              matrix_stats.state_updates, matrix_stats.multi_viewport);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P 16-viewport index-1 stream coverage\n");
 }
 
 static void __attribute__((destructor))

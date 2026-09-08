@@ -6,6 +6,7 @@
 #include "../agx_ppp_hal200_graphics_core.h"
 #include "../agx_ppp_viewport_payload_core.h"
 #include "../agx_ppp_w_clamp_cull2_core.h"
+#include "../agx_g17p_draw_state_upload.h"
 #include "../agx_va_runtime_hole.h"
 #include "../agx_vdm_hal200_bind_tail_core.h"
 #include "../agx_vdm_index_list_core.h"
@@ -88,6 +89,15 @@ load_le32(const uint8_t *p)
 {
    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void
+store_le32(uint8_t *p, uint32_t value)
+{
+   p[0] = value;
+   p[1] = value >> 8;
+   p[2] = value >> 16;
+   p[3] = value >> 24;
 }
 
 static bool
@@ -314,6 +324,85 @@ check_legacy_rejections(void)
    assert(!audit_bind_state(bind_trailing, sizeof(bind_trailing)));
 }
 
+static void
+check_multi_viewport_state(void)
+{
+   struct agx_ppp_viewport_payload_fields fields = {
+      .viewport_count = AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS,
+   };
+   for (unsigned i = 0; i < fields.viewport_count; ++i) {
+      fields.region_clip_raw[i] = UINT64_C(0x8000000100000001) + i;
+      fields.viewports[i] = (struct agx_ppp_viewport_transform_raw){
+         .translate_x = UINT32_C(0x41000000) + i,
+         .scale_x = UINT32_C(0x40000000) + i,
+         .translate_y = UINT32_C(0x42000000) + i,
+         .scale_y = UINT32_C(0x3f800000) + i,
+         .translate_z = UINT32_C(0x3e800000) + i,
+         .scale_z = UINT32_C(0x3f000000) + i,
+      };
+   }
+
+   struct agx_ppp_viewport_payload_core viewport;
+   assert(agx_ppp_viewport_payload_core_pack(AGX_CHIP_G17P, &fields,
+                                              &viewport));
+   assert(viewport.length == AGX_G17P_VIEWPORT_RECORD_MAX_BYTES);
+
+   uint8_t bind_group[AGX_G17P_BIND_GROUP_BYTES];
+   memcpy(bind_group, gl03_bind_state, sizeof(bind_group));
+   uint32_t count_word;
+   assert(agx_ppp_hal200_viewport_count_pack(
+      AGX_CHIP_G17P, fields.viewport_count, &count_word));
+   store_le32(bind_group + 0x28, count_word);
+
+   uint8_t state[AGX_G17P_BIND_STATE_MAX_BYTES + 1];
+   memset(state, 0xa5, sizeof(state));
+   struct agx_g17p_bind_state_upload upload;
+   const uint64_t compact = UINT64_C(0x00880b80);
+   const size_t state_size = agx_g17p_bind_state_size(viewport.length);
+   assert(state_size == AGX_G17P_BIND_STATE_MAX_BYTES);
+   assert(agx_g17p_upload_bind_state(
+      state, state_size, compact, bind_group, viewport.bytes, viewport.length,
+      2, 0, &upload));
+   assert(state[state_size] == 0xa5);
+   assert(upload.pairs[5].context_offset ==
+          compact + AGX_G17P_BIND_GROUP_BYTES);
+   assert(upload.pairs[0].context_offset ==
+          compact + AGX_G17P_BIND_GROUP_BYTES + viewport.length);
+   assert(upload.pairs[0].control == 0x700 &&
+          upload.pairs[5].control == 0x300);
+   assert(load_le32(state + 0x28) == 15);
+
+   struct agx_ppp_viewport_payload_fields decoded;
+   assert(agx_ppp_viewport_payload_core_unpack(
+      AGX_CHIP_G17P, state + AGX_G17P_BIND_GROUP_BYTES, viewport.length,
+      &decoded));
+   assert(decoded.viewport_count == 16);
+   /* A shader selecting viewport 1 must land on a distinct complete record. */
+   assert(decoded.region_clip_raw[1] == fields.region_clip_raw[1]);
+   assert(!memcmp(&decoded.viewports[1], &fields.viewports[1],
+                  sizeof(fields.viewports[1])));
+
+   uint8_t indices[8];
+   assert(agx_g17p_ppp_indices_base_pack(19 * 16, 21 * 12, 16, indices));
+   assert(load_le32(indices) == UINT32_C(0x100));
+   assert(load_le32(indices + 4) == UINT32_C(0x00050003));
+
+   /* Every size/count boundary fails closed before touching live streams. */
+   assert(!agx_g17p_upload_bind_state(
+      state, state_size - 1, compact, bind_group, viewport.bytes,
+      viewport.length, 2, 0, &upload));
+   assert(!agx_g17p_upload_bind_state(
+      state, state_size, compact, bind_group, viewport.bytes,
+      viewport.length - 1, 2, 0, &upload));
+   assert(!agx_g17p_upload_bind_state(
+      state, state_size, AGX_G17P_VDM_ALIAS_OFFSET_END - state_size + 4,
+      bind_group, viewport.bytes, viewport.length, 2, 0, &upload));
+   assert(!agx_g17p_ppp_indices_base_pack(16 * 16, 16 * 12, 0, indices));
+   assert(!agx_g17p_ppp_indices_base_pack(16 * 16, 16 * 12, 17, indices));
+   assert(!agx_g17p_ppp_indices_base_pack(15 * 16, 16 * 12, 16, indices));
+   assert(!agx_g17p_ppp_indices_base_pack(16 * 16, 15 * 12, 16, indices));
+}
+
 int
 main(void)
 {
@@ -329,7 +418,8 @@ main(void)
       AGX_CHIP_G17P, gl03_initial_ppp, sizeof(gl03_initial_ppp), &initial));
    assert(initial.w_clamp_raw == 0 && initial.cull2_raw == 0x80);
    check_legacy_rejections();
+   check_multi_viewport_state();
 
-   puts("G17P Gallium GL03 AGX3-only stream audit passed byte 0 through terminate");
+   puts("G17P Gallium GL03 stream and 16-viewport bind state audit passed");
    return 0;
 }

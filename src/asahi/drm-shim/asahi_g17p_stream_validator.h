@@ -25,6 +25,7 @@ struct asahi_g17p_stream_stats {
    unsigned indexed_draws;
    unsigned state_updates;
    unsigned links;
+   unsigned viewport_count;
    uint32_t primitive_mask;
    uint8_t index_size_mask;
    bool clear_only;
@@ -36,6 +37,7 @@ struct asahi_g17p_stream_stats {
    bool varying_fs;
    bool no_varying_fs;
    bool viewport_changed;
+   bool multi_viewport;
    bool scissor_changed;
    bool cull_enabled;
    bool depth_enabled;

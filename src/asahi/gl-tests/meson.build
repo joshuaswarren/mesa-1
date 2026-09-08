@@ -22,6 +22,53 @@ gl_state_matrix = executable(
   build_by_default : false,
 )
 
+gl_multi_viewport = executable(
+  'asahi-g17p-gl-multi-viewport',
+  files('test-g17p-gl-multi-viewport.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-multi-viewport-software-control',
+  gl_multi_viewport,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+run_target(
+  'asahi-g17p-gl-multi-viewport-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_multi_viewport,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1'],
+)
+
+test(
+  'asahi-g17p-gl-multi-viewport-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_multi_viewport,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1'],
+  suite : ['asahi'],
+)
+
 test(
   'asahi-g17p-gl-state-matrix-software-control',
   gl_state_matrix,

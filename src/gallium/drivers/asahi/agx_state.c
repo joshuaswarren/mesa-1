@@ -4423,9 +4423,17 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_rasterizer *rast = ctx->rast;
-   if (dev->chip != AGX_CHIP_G17P || !draw_state_offset ||
-       vs->b.info.nonzero_viewport)
+   if (dev->chip != AGX_CHIP_G17P || !draw_state_offset)
       return NULL;
+
+   /* Gallium does not track the highest initialized viewport. When a shader
+    * can select a nonzero viewport, preserve the established AGX path and
+    * upload the complete API-visible array. Keep ordinary shaders on the
+    * byte-identical one-viewport fast path. */
+   const unsigned viewport_count =
+      vs->b.info.nonzero_viewport ? AGX_MAX_VIEWPORTS : 1;
+   static_assert(AGX_MAX_VIEWPORTS ==
+                 AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS);
 
    const bool is_points = batch->reduced_prim == MESA_PRIM_POINTS;
    const bool is_lines = batch->reduced_prim == MESA_PRIM_LINES;
@@ -4434,68 +4442,80 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
       : is_lines ? AGX_OBJECT_TYPE_LINE
                  : AGX_OBJECT_TYPE_TRIANGLE;
 
-   unsigned minx, miny, maxx, maxy;
-   agx_get_scissor_extents(&ctx->viewport[0],
-                           rast->base.scissor ? &ctx->scissor[0] : NULL,
-                           &batch->key, &minx, &miny, &maxx, &maxy);
-   float minz, maxz;
-   util_viewport_zmin_zmax(&ctx->viewport[0], rast->base.clip_halfz, &minz,
-                           &maxz);
-
    const bool depth_bias_enable =
       rast->depth_bias && object_type == AGX_OBJECT_TYPE_TRIANGLE;
-   const struct agx_ppp_hal200_raster_fields raster_fields = {
-      .scissor_enable = true,
-      .depth_bias_enable = depth_bias_enable,
-      .max_x = MIN2(maxx, UINT16_MAX),
-      .min_x = MIN2(minx, UINT16_MAX),
-      .max_y = MIN2(maxy, UINT16_MAX),
-      .min_y = MIN2(miny, UINT16_MAX),
-      .min_z_raw = fui(minz),
-      .max_z_raw = fui(maxz),
-      .depth_bias_raw = fui(depth_bias_enable ? rast->base.offset_units * 2.0f
-                                               : 0.0f),
-      .slope_scale_raw =
-         fui(depth_bias_enable ? rast->base.offset_scale : 0.0f),
-      .clamp_raw = fui(depth_bias_enable ? rast->base.offset_clamp : 0.0f),
-   };
-   struct agx_ppp_hal200_raster_state raster_state;
-   if (!agx_ppp_hal200_raster_state_build(dev->chip, &raster_fields,
-                                           &raster_state))
-      return NULL;
+   unsigned minx[AGX_MAX_VIEWPORTS], miny[AGX_MAX_VIEWPORTS];
+   unsigned maxx[AGX_MAX_VIEWPORTS], maxy[AGX_MAX_VIEWPORTS];
+   struct agx_ppp_hal200_raster_state raster_states[AGX_MAX_VIEWPORTS];
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      agx_get_scissor_extents(
+         &ctx->viewport[i], rast->base.scissor ? &ctx->scissor[i] : NULL,
+         &batch->key, &minx[i], &miny[i], &maxx[i], &maxy[i]);
+      float minz, maxz;
+      util_viewport_zmin_zmax(&ctx->viewport[i], rast->base.clip_halfz, &minz,
+                              &maxz);
+      const struct agx_ppp_hal200_raster_fields raster_fields = {
+         .scissor_enable = true,
+         .depth_bias_enable = depth_bias_enable,
+         .max_x = MIN2(maxx[i], UINT16_MAX),
+         .min_x = MIN2(minx[i], UINT16_MAX),
+         .max_y = MIN2(maxy[i], UINT16_MAX),
+         .min_y = MIN2(miny[i], UINT16_MAX),
+         .min_z_raw = fui(minz),
+         .max_z_raw = fui(maxz),
+         .depth_bias_raw =
+            fui(depth_bias_enable ? rast->base.offset_units * 2.0f : 0.0f),
+         .slope_scale_raw =
+            fui(depth_bias_enable ? rast->base.offset_scale : 0.0f),
+         .clamp_raw = fui(depth_bias_enable ? rast->base.offset_clamp : 0.0f),
+      };
+      if (!agx_ppp_hal200_raster_state_build(
+             dev->chip, &raster_fields, &raster_states[i]))
+         return NULL;
+   }
 
-   void *scissor = util_dynarray_grow_bytes(
-      &batch->scissor, 1, sizeof(raster_state.scissor));
-   void *depth_bias = util_dynarray_grow_bytes(
-      &batch->depth_bias, 1, sizeof(raster_state.depth_bias));
-   memcpy(scissor, raster_state.scissor, sizeof(raster_state.scissor));
-   memcpy(depth_bias, raster_state.depth_bias, sizeof(raster_state.depth_bias));
+   uint8_t *scissors = util_dynarray_grow_bytes(
+      &batch->scissor, viewport_count, sizeof(raster_states[0].scissor));
+   uint8_t *depth_bias_records = util_dynarray_grow_bytes(
+      &batch->depth_bias, viewport_count,
+      sizeof(raster_states[0].depth_bias));
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      memcpy(scissors + i * sizeof(raster_states[i].scissor),
+             raster_states[i].scissor, sizeof(raster_states[i].scissor));
+      memcpy(depth_bias_records + i * sizeof(raster_states[i].depth_bias),
+             raster_states[i].depth_bias,
+             sizeof(raster_states[i].depth_bias));
+   }
+   const struct agx_ppp_hal200_raster_state *raster_state = &raster_states[0];
 
    struct agx_ppp_viewport_payload_fields viewport_fields = {
-      .viewport_count = 1,
+      .viewport_count = viewport_count,
    };
-   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
-   agx_pack(region_clip, REGION_CLIP, cfg) {
-      cfg.enable = true;
-      cfg.min_x = minx / 32;
-      cfg.min_y = miny / 32;
-      cfg.max_x = DIV_ROUND_UP(MAX2(maxx, 1), 32);
-      cfg.max_y = DIV_ROUND_UP(MAX2(maxy, 1), 32);
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+      agx_pack(region_clip, REGION_CLIP, cfg) {
+         cfg.enable = true;
+         cfg.min_x = minx[i] / 32;
+         cfg.min_y = miny[i] / 32;
+         cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
+         cfg.max_y = DIV_ROUND_UP(MAX2(maxy[i], 1), 32);
+      }
+      memcpy(&viewport_fields.region_clip_raw[i], region_clip,
+             sizeof(region_clip));
+      const struct pipe_viewport_state *vp = &ctx->viewport[i];
+      viewport_fields.viewports[i] =
+         (struct agx_ppp_viewport_transform_raw){
+            .translate_x = fui(vp->translate[0]),
+            .scale_x = fui(vp->scale[0]),
+            .translate_y = fui(vp->translate[1]),
+            .scale_y = fui(vp->scale[1]),
+            .translate_z = fui(rast->base.clip_halfz
+                                  ? vp->translate[2]
+                                  : vp->translate[2] - vp->scale[2]),
+            .scale_z = fui(rast->base.clip_halfz ? vp->scale[2]
+                                                 : vp->scale[2] * 2.0f),
+         };
    }
-   memcpy(&viewport_fields.region_clip_raw[0], region_clip,
-          sizeof(region_clip));
-   const struct pipe_viewport_state *vp = &ctx->viewport[0];
-   viewport_fields.viewports[0] = (struct agx_ppp_viewport_transform_raw){
-      .translate_x = fui(vp->translate[0]),
-      .scale_x = fui(vp->scale[0]),
-      .translate_y = fui(vp->translate[1]),
-      .scale_y = fui(vp->scale[1]),
-      .translate_z = fui(rast->base.clip_halfz
-                            ? vp->translate[2]
-                            : vp->translate[2] - vp->scale[2]),
-      .scale_z = fui(rast->base.clip_halfz ? vp->scale[2]
-                                           : vp->scale[2] * 2.0f),
-   };
    struct agx_ppp_viewport_payload_core viewport;
    if (!agx_ppp_viewport_payload_core_pack(dev->chip, &viewport_fields,
                                             &viewport))
@@ -4519,6 +4539,10 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
    uint32_t output_size;
    if (!agx_ppp_hal200_output_size_pack(vs->uvs.size, 0, &output_size))
       return NULL;
+   uint32_t viewport_count_word;
+   if (!agx_ppp_hal200_viewport_count_pack(dev->chip, viewport_count,
+                                            &viewport_count_word))
+      return NULL;
 
    const bool stencil_test = ctx->zs->base.stencil[0].enabled;
    enum agx_visibility_mode visibility = AGX_VISIBILITY_MODE_NONE;
@@ -4529,7 +4553,7 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
                       : AGX_VISIBILITY_MODE_BOOLEAN;
       query_index = agx_get_oq_index(batch, ctx->occlusion_query);
    }
-   uint32_t fragment_control = raster_state.fragment_control |
+   uint32_t fragment_control = raster_state->fragment_control |
                                (stencil_test ? UINT32_C(0x000c0000) : 0);
    uint32_t occlusion_query;
    if (!agx_ppp_hal200_occlusion_pack(dev->chip, visibility, query_index,
@@ -4576,7 +4600,7 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
    const struct agx_ppp_hal200_graphics_fields output_fields = {
       .words = {(ctx->linked.fs->cf.nr_bindings ? UINT32_C(0x10000) : 0) |
                    (ctx->linked.fs->cf.reads_z ? UINT32_C(0x200000) : 0),
-                0, 0, output_size,
+                0, viewport_count_word, output_size,
                 AGX_PPP_HAL200_PRIMARY_FACE_HEADER, fragment_control},
    };
    const struct agx_ppp_hal200_graphics_fields primary_fields = {
@@ -4641,14 +4665,15 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
    memcpy(&bind_group[0x60], w_cull2.bytes, w_cull2.length);
    memcpy(&bind_group[0x6c], cull_record.bytes, cull_record.length);
 
-   struct agx_ptr state = agx_pool_alloc_aligned(
-      &batch->pool, AGX_G17P_BIND_STATE_BYTES, 64);
+   const size_t state_size = agx_g17p_bind_state_size(viewport.length);
+   struct agx_ptr state =
+      agx_pool_alloc_aligned(&batch->pool, state_size, 64);
    uint64_t compact_state;
    struct agx_g17p_bind_state_upload uploaded;
-   if (!state.cpu ||
+   if (!state_size || !state.cpu ||
        !agx_gallium_vdm_compact(batch, state.gpu, &compact_state) ||
        !agx_g17p_upload_bind_state(
-          state.cpu, AGX_G17P_BIND_STATE_BYTES, compact_state, bind_group,
+          state.cpu, state_size, compact_state, bind_group,
           viewport.bytes, viewport.length,
           batch->linked_varyings.counts_32.opaque[0],
           batch->linked_varyings.counts_16.opaque[0], &uploaded))
@@ -4660,7 +4685,7 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
        !agx_gallium_vdm_compact(batch, indices.gpu, &compact_indices) ||
        !agx_g17p_upload_draw_indices(
           indices.cpu, 8, compact_indices, batch->scissor.size,
-          batch->depth_bias.size, 1, draw_state_offset))
+          batch->depth_bias.size, viewport_count, draw_state_offset))
       return NULL;
 
    memcpy(out, uploaded.tail.bytes, uploaded.tail.length);

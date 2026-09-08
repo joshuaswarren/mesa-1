@@ -491,7 +491,7 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
               uint64_t address, size_t size,
               struct asahi_g17p_stream_stats *stats)
 {
-   uint8_t bytes[40];
+   uint8_t bytes[AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH];
    if (size > sizeof(bytes) || !read_owned(memory, address, bytes, size))
       return fail_at(address, "bind slot has no owning VM mapping");
 
@@ -585,6 +585,21 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
       if (!agx_ppp_viewport_payload_core_unpack(
              AGX_CHIP_G17P, bytes, size, &viewport))
          return fail_at(address, "invalid viewport slot");
+      stats->viewport_count = viewport.viewport_count;
+      if (memory->verbose && viewport.viewport_count > 1) {
+         fprintf(stderr,
+                 "shim: viewport[1] tx=%#x sx=%#x ty=%#x sy=%#x\n",
+                 viewport.viewports[1].translate_x,
+                 viewport.viewports[1].scale_x,
+                 viewport.viewports[1].translate_y,
+                 viewport.viewports[1].scale_y);
+      }
+      stats->multi_viewport |=
+         viewport.viewport_count == 16 &&
+         viewport.viewports[1].translate_x == UINT32_C(0x41b80000) &&
+         viewport.viewports[1].scale_x == UINT32_C(0x41200000) &&
+         viewport.viewports[1].translate_y == UINT32_C(0x42180000) &&
+         viewport.viewports[1].scale_y == UINT32_C(0xc1100000);
       stats->viewport_changed |=
          viewport.viewports[0].translate_x == UINT32_C(0x41d80000) &&
          viewport.viewports[0].scale_x == UINT32_C(0x41c00000) &&
@@ -705,23 +720,34 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             return fail_at(cursor, "draw-state selector is not owned");
          if (load_le32(indices) != UINT32_C(0x100))
             return fail_at(selector, "draw-state selector flags are invalid");
-         const uint64_t scissor = config->scissor_base +
-                                  (uint64_t)load_le16(indices + 4) * 16;
-         const uint64_t depth_bias = config->depth_bias_base +
-                                     (uint64_t)load_le16(indices + 6) * 12;
-         uint8_t scissor_record[16], depth_bias_record[12];
-         if (!read_owned(memory, scissor, scissor_record,
-                         sizeof(scissor_record)) ||
-             !read_owned(memory, depth_bias, depth_bias_record,
-                         sizeof(depth_bias_record)))
-            return fail_at(selector, "selected raster records are not owned");
-         if (load_le16(scissor_record) < load_le16(scissor_record + 2) ||
-             load_le16(scissor_record + 4) < load_le16(scissor_record + 6))
-            return fail_at(scissor, "selected scissor extents are inverted");
-         local.scissor_changed |= load_le16(scissor_record) == 30 &&
-                                  load_le16(scissor_record + 2) == 7 &&
-                                  load_le16(scissor_record + 4) == 28 &&
-                                  load_le16(scissor_record + 6) == 9;
+         if (local.viewport_count == 0 ||
+             local.viewport_count > AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS)
+            return fail_at(selector, "selector has no bounded viewport state");
+         const uint64_t scissor_base =
+            config->scissor_base + (uint64_t)load_le16(indices + 4) * 16;
+         const uint64_t depth_bias_base =
+            config->depth_bias_base + (uint64_t)load_le16(indices + 6) * 12;
+         for (unsigned i = 0; i < local.viewport_count; ++i) {
+            const uint64_t scissor = scissor_base + (uint64_t)i * 16;
+            const uint64_t depth_bias = depth_bias_base + (uint64_t)i * 12;
+            uint8_t scissor_record[16], depth_bias_record[12];
+            if (!read_owned(memory, scissor, scissor_record,
+                            sizeof(scissor_record)) ||
+                !read_owned(memory, depth_bias, depth_bias_record,
+                            sizeof(depth_bias_record)))
+               return fail_at(selector,
+                              "selected raster array is not fully owned");
+            if (load_le16(scissor_record) < load_le16(scissor_record + 2) ||
+                load_le16(scissor_record + 4) < load_le16(scissor_record + 6))
+               return fail_at(scissor,
+                              "selected scissor extents are inverted");
+            if (i == 0) {
+               local.scissor_changed |= load_le16(scissor_record) == 30 &&
+                                        load_le16(scissor_record + 2) == 7 &&
+                                        load_le16(scissor_record + 4) == 28 &&
+                                        load_le16(scissor_record + 6) == 9;
+            }
+         }
          pending_selector = false;
          cursor += 4;
          continue;
