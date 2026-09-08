@@ -3,6 +3,7 @@
 
 #include "agx_va_runtime_hole.h"
 #include "agx_vdm_hal200_bind_tail_core.h"
+#include "agx_ppp_viewport_payload_core.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -11,16 +12,33 @@
 
 #define AGX_G17P_BIND_GROUP_BYTES 0x80u
 #define AGX_G17P_VIEWPORT_RECORD_BYTES 40u
+#define AGX_G17P_VIEWPORT_RECORD_MAX_BYTES                              \
+   AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH
 #define AGX_G17P_VARYING_RECORD_BYTES 20u
 #define AGX_G17P_VARYING_RECORD_OFFSET                                  \
    (AGX_G17P_BIND_GROUP_BYTES + AGX_G17P_VIEWPORT_RECORD_BYTES)
 #define AGX_G17P_BIND_STATE_BYTES                                        \
    (AGX_G17P_VARYING_RECORD_OFFSET + AGX_G17P_VARYING_RECORD_BYTES)
+#define AGX_G17P_BIND_STATE_MAX_BYTES                                    \
+   (AGX_G17P_BIND_GROUP_BYTES + AGX_G17P_VIEWPORT_RECORD_MAX_BYTES +     \
+    AGX_G17P_VARYING_RECORD_BYTES)
 
 struct agx_g17p_bind_state_upload {
    struct agx_vdm_hal200_bind_pair pairs[AGX_VDM_HAL200_BIND_COUNT];
    struct agx_vdm_hal200_bind_tail tail;
 };
+
+static inline size_t
+agx_g17p_bind_state_size(size_t viewport_size)
+{
+   if (viewport_size < AGX_PPP_VIEWPORT_PAYLOAD_MIN_LENGTH ||
+       viewport_size > AGX_G17P_VIEWPORT_RECORD_MAX_BYTES ||
+       ((viewport_size - 8u) % 32u) != 0)
+      return 0;
+
+   return AGX_G17P_BIND_GROUP_BYTES + viewport_size +
+          AGX_G17P_VARYING_RECORD_BYTES;
+}
 
 /* Compact state lives in the retained +8 MiB..+32 MiB VDM aperture. */
 static inline bool
@@ -62,18 +80,18 @@ agx_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
                            uint32_t counts_32, uint32_t counts_16,
                            struct agx_g17p_bind_state_upload *out)
 {
+   const size_t required = agx_g17p_bind_state_size(viewport_size);
+   const size_t varying_offset = AGX_G17P_BIND_GROUP_BYTES + viewport_size;
    if (!cpu || !bind_group || !viewport || !out ||
-       capacity < AGX_G17P_BIND_STATE_BYTES ||
+       !required || capacity < required ||
        ((counts_32 | counts_16) & UINT32_C(0xff000000)) != 0 ||
-       viewport_size != AGX_G17P_VIEWPORT_RECORD_BYTES ||
-       !agx_g17p_draw_state_range_valid(compact,
-                                         AGX_G17P_BIND_STATE_BYTES))
+       !agx_g17p_draw_state_range_valid(compact, required))
       return false;
 
    const uint32_t group = (uint32_t)compact;
    struct agx_g17p_bind_state_upload encoded = {
       .pairs = {
-         {group + AGX_G17P_VARYING_RECORD_OFFSET, 0x700},
+         {group + varying_offset, 0x700},
          {group + 0x00, 0x500},
          {group + 0x1c, 0x700},
          {group + 0x30, 0x500},
@@ -96,7 +114,7 @@ agx_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
    const uint32_t words[5] = {
       UINT32_C(0x10040000), counts_32, counts_16, 0, 0,
    };
-   uint8_t *varyings = (uint8_t *)cpu + AGX_G17P_VARYING_RECORD_OFFSET;
+   uint8_t *varyings = (uint8_t *)cpu + varying_offset;
    for (unsigned i = 0; i < 5; ++i) {
       for (unsigned byte = 0; byte < 4; ++byte)
          varyings[4 * i + byte] = words[i] >> (8 * byte);
@@ -107,14 +125,41 @@ agx_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
 }
 
 static inline bool
+agx_g17p_ppp_indices_base_pack(size_t scissor_bytes,
+                               size_t depth_bias_bytes,
+                               unsigned viewport_count, uint8_t output[8])
+{
+   if (!output || viewport_count == 0 ||
+       viewport_count > AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS ||
+       scissor_bytes % 16 != 0 || depth_bias_bytes % 12 != 0 ||
+       scissor_bytes / 16 < viewport_count ||
+       depth_bias_bytes / 12 < viewport_count)
+      return false;
+
+   const size_t scissor_index = scissor_bytes / 16 - viewport_count;
+   const size_t depth_bias_index = depth_bias_bytes / 12 - viewport_count;
+   if (scissor_index > UINT16_MAX || depth_bias_index > UINT16_MAX)
+      return false;
+
+   const uint8_t record[8] = {
+      0x00, 0x01, 0x00, 0x00,
+      (uint8_t)scissor_index, (uint8_t)(scissor_index >> 8),
+      (uint8_t)depth_bias_index, (uint8_t)(depth_bias_index >> 8),
+   };
+   memcpy(output, record, sizeof(record));
+   return true;
+}
+
+static inline bool
 agx_g17p_upload_draw_indices(void *cpu, size_t capacity, uint64_t compact,
                              size_t scissor_bytes, size_t depth_bias_bytes,
-                             uint32_t *offset)
+                             unsigned viewport_count, uint32_t *offset)
 {
    uint8_t indices[8];
    if (!cpu || !offset || capacity < sizeof(indices) ||
        !agx_g17p_draw_state_range_valid(compact, sizeof(indices)) ||
-       !agx_g17p_ppp_indices_pack(scissor_bytes, depth_bias_bytes, indices))
+       !agx_g17p_ppp_indices_base_pack(scissor_bytes, depth_bias_bytes,
+                                       viewport_count, indices))
       return false;
 
    memcpy(cpu, indices, sizeof(indices));

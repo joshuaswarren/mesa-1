@@ -78,7 +78,8 @@ int main(void)
       /* A:first0, A:next1, independently recorded B:first0. */
       const unsigned index = i == 1;
       assert(hk_g17p_upload_draw_indices(indices[i], sizeof(indices[i]),
-                bases[i] + 0xc0, 16 * (index + 1), 12 * (index + 1), &pointers[i]));
+                bases[i] + 0xc0, 16 * (index + 1), 12 * (index + 1), 1,
+                &pointers[i]));
       const struct agx_vdm_hal200_direct_draw_fields fields = {
          .draw_state_context_offset = pointers[i], .primitive = 6,
          .vertex_count = 3, .instance_count = 1,
@@ -101,12 +102,37 @@ int main(void)
       assert(!hk_g17p_upload_bind_state(retained[0], sizeof(retained[0]),
                  bad[i], group, viewport, sizeof(viewport), 2, 0, &uploads[0]));
       assert(!memcmp(saved[0], retained[0], sizeof(saved[0])));
-      assert(!hk_g17p_upload_draw_indices(indices[0], 8, bad[i], 16, 12, &untouched));
+      assert(!hk_g17p_upload_draw_indices(indices[0], 8, bad[i], 16, 12, 1,
+                                          &untouched));
       assert(untouched == 0xdeadbeef && indices[0][4] == 0);
    }
    assert(!hk_g17p_upload_bind_state(retained[0], sizeof(retained[0]),
               bases[0], group, viewport, sizeof(viewport), 0x1000000, 0, &uploads[0]));
    assert(!memcmp(saved[0], retained[0], sizeof(saved[0])));
+
+   /* A two-viewport PPP record grows from 40 to 72 bytes. Its varying record
+    * follows the complete payload and the draw selector names the first of
+    * the two consecutive scissor/depth records. */
+   uint8_t multi[256], viewport2[72], multi_indices[8];
+   memset(multi, 0xa5, sizeof(multi));
+   memset(viewport2, 0x6d, sizeof(viewport2));
+   assert(hk_g17p_upload_bind_state(
+      multi, sizeof(multi), bases[0], group, viewport2, sizeof(viewport2),
+      0x12, 0x34, &uploads[0]));
+   assert(uploads[0].pairs[0].context_offset == bases[0] + 128 + 72);
+   assert(uploads[0].pairs[5].context_offset == bases[0] + 128);
+   const uint32_t multi_varyings[5] = {0x10040000, 0x12, 0x34, 0, 0};
+   assert(!memcmp(multi + 128 + 72, multi_varyings,
+                  sizeof(multi_varyings)));
+   assert(agx_g17p_bind_state_size(sizeof(viewport2)) == 220);
+   for (unsigned i = 220; i < sizeof(multi); ++i)
+      assert(multi[i] == 0xa5);
+   assert(hk_g17p_upload_draw_indices(multi_indices, sizeof(multi_indices),
+                                     bases[0] + 0xc0, 48, 36, 2,
+                                     &pointers[0]));
+   assert(indices[0][4] == 0);
+   assert(multi_indices[4] == 1 && multi_indices[6] == 1);
+
    assert(hk_g17p_draw_state_range_valid(0x1fffff8, 8));
    assert(!hk_g17p_draw_state_range_valid(0x1fffff8, 9));
    puts("immutable G17P draw state: per-draw smooth/linear/zero counts, Bind0 parity, aliases, retained records and transactional guards PASS");

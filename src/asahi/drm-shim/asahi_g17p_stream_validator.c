@@ -546,7 +546,8 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
              AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_OUTPUT, bytes, size,
              &graphics) ||
           (graphics.words[0] & ~UINT32_C(0x00210000)) || graphics.words[1] ||
-          graphics.words[2] || (graphics.words[3] & UINT32_C(0xff00ff00)) ||
+          graphics.words[2] > 15 ||
+          (graphics.words[3] & UINT32_C(0xff00ff00)) ||
           graphics.words[4] != AGX_PPP_HAL200_PRIMARY_FACE_HEADER ||
           (graphics.words[5] & UINT32_C(0x00040200)) !=
              UINT32_C(0x00040200) ||
@@ -581,9 +582,8 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
       return true;
    }
    case 5:
-      if (size != 40 || !agx_ppp_viewport_payload_core_unpack(
-                              AGX_CHIP_G17P, bytes, size, &viewport) ||
-          viewport.viewport_count != 1)
+      if (!agx_ppp_viewport_payload_core_unpack(
+             AGX_CHIP_G17P, bytes, size, &viewport))
          return fail_at(address, "invalid viewport slot");
       stats->viewport_changed |=
          viewport.viewports[0].translate_x == UINT32_C(0x41d80000) &&
@@ -618,7 +618,7 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
    static const uint32_t controls[8] = {
       0x700, 0x500, 0x700, 0x500, 0xa00, 0x300, 0x200, 0x200,
    };
-   static const uint8_t lengths[8] = {20, 28, 28, 28, 20, 40, 12, 8};
+   size_t lengths[8] = {20, 28, 28, 28, 20, 0, 12, 8};
    uint8_t bytes[AGX_VDM_HAL200_BIND_TAIL_LENGTH];
    struct agx_vdm_hal200_bind_pair decoded[8];
 
@@ -627,6 +627,22 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
        !agx_vdm_hal200_bind_tail_unpack(AGX_CHIP_G17P, bytes, sizeof(bytes),
                                         decoded))
       return fail_at(address, "invalid 68-byte HAL200 bind tail");
+
+   /* The complete viewport payload is immediately followed by the varying
+    * record. Their independently addressed bind slots therefore make the
+    * variable 1..16 viewport length self-describing. */
+   if (decoded[0].context_offset <= decoded[5].context_offset)
+      return fail_at(address, "viewport/varying slots are not ordered");
+   lengths[5] = decoded[0].context_offset - decoded[5].context_offset;
+   if (lengths[5] < AGX_PPP_VIEWPORT_PAYLOAD_MIN_LENGTH ||
+       lengths[5] > AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH)
+      return fail_at(address, "viewport slot length is out of range");
+   const unsigned viewport_count = (lengths[5] - 8) / 32;
+   uint8_t output_record[AGX_PPP_HAL200_OUTPUT_LENGTH];
+   if (!read_owned(memory, compact_address(decoded[2].context_offset),
+                   output_record, sizeof(output_record)) ||
+       load_le32(output_record + 12) != viewport_count - 1)
+      return fail_at(address, "output/viewport counts disagree");
 
    for (unsigned i = 0; i < 8; ++i) {
       /* Fixed controls and lengths are intentionally independent of the

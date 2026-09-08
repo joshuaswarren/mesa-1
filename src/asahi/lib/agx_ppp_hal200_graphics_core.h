@@ -152,6 +152,12 @@ uint32_t agx_ppp_hal200_stencil_pack(bool enabled, unsigned compare,
 bool agx_ppp_hal200_output_size_pack(uint32_t count_0,
                                       uint32_t count_2, uint32_t *out);
 
+/* Native vertex-state update writes viewport_count - 1 to context+0x1f94;
+ * the HAL200 output bundle consumes that word unchanged. */
+bool agx_ppp_hal200_viewport_count_pack(enum agx_chip chip,
+                                       unsigned viewport_count,
+                                       uint32_t *out);
+
 #ifdef __cplusplus
 }
 #endif

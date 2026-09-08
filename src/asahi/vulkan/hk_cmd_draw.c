@@ -2989,8 +2989,12 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_rendering_state *render = &gfx->render;
+   const unsigned viewport_count = MAX2(dyn->vp.viewport_count, 1);
 
    if (dev->dev.chip != AGX_CHIP_G17P || !out || !*out)
+      return hk_g17p_bind_tail_refused(__LINE__);
+   if (!hk_g17p_viewport_state_supported(dyn->vp.viewport_count,
+                                         dyn->vp.scissor_count))
       return hk_g17p_bind_tail_refused(__LINE__);
 
    struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
@@ -3040,6 +3044,9 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 0, 0, output_size,
                 AGX_PPP_HAL200_PRIMARY_FACE_HEADER, 0},
    };
+   if (!agx_ppp_hal200_viewport_count_pack(
+          dev->dev.chip, viewport_count, &output_fields.words[2]))
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core primary_record;
    struct agx_ppp_hal200_graphics_fields primary_fields = {
@@ -3137,33 +3144,33 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .cull2_raw = UINT32_C(0x80),
    };
 
-   /* Everything below builds one viewport transform and one region clip from
-    * element zero.  Refuse rather than render the remaining viewports and
-    * scissors through viewport 0 without saying so. */
-   if (!hk_g17p_single_viewport_state(dyn->vp.viewport_count,
-                                      dyn->vp.scissor_count))
-      return hk_g17p_bind_tail_refused(__LINE__);
-
    struct agx_ppp_viewport_payload_fields viewport_fields = {
-      .viewport_count = 1,
+      .viewport_count = viewport_count,
    };
-   const VkViewport *vp = &dyn->vp.viewports[0];
-   unsigned minx = MIN2(vp->x, vp->x + vp->width);
-   unsigned miny = MIN2(vp->y, vp->y + vp->height);
-   unsigned maxx = MAX2(vp->x, vp->x + vp->width);
-   unsigned maxy = MAX2(vp->y, vp->y + vp->height);
-   minx = MIN2(minx, render->cr.width);
-   miny = MIN2(miny, render->cr.height);
-   maxx = MIN2(maxx, render->cr.width);
-   maxy = MIN2(maxy, render->cr.height);
-   if (dyn->vp.scissor_count > 0) {
-      const VkRect2D *s = &dyn->vp.scissors[0];
-      minx = MAX2(minx, s->offset.x);
-      miny = MAX2(miny, s->offset.y);
-      maxx = MIN2(maxx, s->offset.x + s->extent.width);
-      maxy = MIN2(maxy, s->offset.y + s->extent.height);
+   unsigned minx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
+   unsigned miny[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
+   unsigned maxx[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
+   unsigned maxy[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS] = {0};
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      const VkViewport *vp = &dyn->vp.viewports[i];
+      minx[i] = MIN2(vp->x, vp->x + vp->width);
+      miny[i] = MIN2(vp->y, vp->y + vp->height);
+      maxx[i] = MAX2(vp->x, vp->x + vp->width);
+      maxy[i] = MAX2(vp->y, vp->y + vp->height);
+      minx[i] = MIN2(minx[i], render->cr.width);
+      miny[i] = MIN2(miny[i], render->cr.height);
+      maxx[i] = MIN2(maxx[i], render->cr.width);
+      maxy[i] = MIN2(maxy[i], render->cr.height);
+      if (i < dyn->vp.scissor_count) {
+         const VkRect2D *s = &dyn->vp.scissors[i];
+         minx[i] = MAX2(minx[i], s->offset.x);
+         miny[i] = MAX2(miny[i], s->offset.y);
+         maxx[i] = MIN2(maxx[i], s->offset.x + s->extent.width);
+         maxy[i] = MIN2(maxy[i], s->offset.y + s->extent.height);
+      }
    }
 
+   const VkViewport *vp = &dyn->vp.viewports[0];
    const struct hk_image_view *color = render->color_att_count == 1
                                          ? render->color_att[0].iview : NULL;
    const VkRect2D api_scissor = dyn->vp.scissor_count
@@ -3209,36 +3216,41 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const bool force_unorm =
       dyn->rs.depth_bias.representation ==
       VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT;
-   const float min_z = dyn->rs.depth_clamp_enable
-                          ? MIN2(vp->minDepth, vp->maxDepth)
-                          : 0.0f;
-   const float max_z = dyn->rs.depth_clamp_enable
-                          ? MAX2(vp->minDepth, vp->maxDepth)
-                          : 1.0f;
    const float depth_bias =
       depth_bias_enable
          ? dyn->rs.depth_bias.constant_factor /
               hk_depth_bias_factor(render->depth_att.vk_format, exact,
                                    force_unorm)
          : 0.0f;
-   const struct agx_ppp_hal200_raster_fields raster_fields = {
-      .scissor_enable = scissor_enable,
-      .depth_bias_enable = depth_bias_enable,
-      .max_x = MIN2(maxx, UINT16_MAX),
-      .min_x = MIN2(minx, UINT16_MAX),
-      .max_y = MIN2(maxy, UINT16_MAX),
-      .min_y = MIN2(miny, UINT16_MAX),
-      .min_z_raw = fui(min_z),
-      .max_z_raw = fui(max_z),
-      .depth_bias_raw = fui(depth_bias),
-      .slope_scale_raw =
-         depth_bias_enable ? fui(dyn->rs.depth_bias.slope_factor) : 0,
-      .clamp_raw = depth_bias_enable ? fui(dyn->rs.depth_bias.clamp) : 0,
-   };
-   struct agx_ppp_hal200_raster_state raster_state;
-   if (!agx_ppp_hal200_raster_state_build(dev->dev.chip, &raster_fields,
-                                           &raster_state))
-      return hk_g17p_bind_tail_refused(__LINE__);
+   struct agx_ppp_hal200_raster_state
+      raster_states[AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS];
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      const VkViewport *current_vp = &dyn->vp.viewports[i];
+      const float min_z = dyn->rs.depth_clamp_enable
+                             ? MIN2(current_vp->minDepth, current_vp->maxDepth)
+                             : 0.0f;
+      const float max_z = dyn->rs.depth_clamp_enable
+                             ? MAX2(current_vp->minDepth, current_vp->maxDepth)
+                             : 1.0f;
+      const struct agx_ppp_hal200_raster_fields raster_fields = {
+         .scissor_enable = scissor_enable,
+         .depth_bias_enable = depth_bias_enable,
+         .max_x = MIN2(maxx[i], UINT16_MAX),
+         .min_x = MIN2(minx[i], UINT16_MAX),
+         .max_y = MIN2(maxy[i], UINT16_MAX),
+         .min_y = MIN2(miny[i], UINT16_MAX),
+         .min_z_raw = fui(min_z),
+         .max_z_raw = fui(max_z),
+         .depth_bias_raw = fui(depth_bias),
+         .slope_scale_raw =
+            depth_bias_enable ? fui(dyn->rs.depth_bias.slope_factor) : 0,
+         .clamp_raw = depth_bias_enable ? fui(dyn->rs.depth_bias.clamp) : 0,
+      };
+      if (!agx_ppp_hal200_raster_state_build(
+             dev->dev.chip, &raster_fields, &raster_states[i]))
+         return hk_g17p_bind_tail_refused(__LINE__);
+   }
+   const struct agx_ppp_hal200_raster_state *raster_state = &raster_states[0];
 
    /* Native update 0x46c6ac..0x46c6dc stores pass type at context+0x1f78.
     * The 0x46ff78 path emits it in SECONDARY header 0x02000048's first
@@ -3263,7 +3275,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       secondary_fields.words[0] |= UINT32_C(1) << 26;
    /* Native458934..45896c retains both stencil-control bits in the
     * same per-draw record as depth. No extra state allocation or launch. */
-   uint32_t fragment_control = raster_state.fragment_control |
+   uint32_t fragment_control = raster_state->fragment_control |
       (stencil_test ? UINT32_C(0x000c0000) : 0);
    uint32_t occlusion_query;
    if (!agx_ppp_hal200_occlusion_pack(
@@ -3291,13 +3303,17 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                          &w_cull2_record))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   void *scissor = util_dynarray_grow_bytes(
-      &cs->scissor, 1, sizeof(raster_state.scissor));
-   void *depth_bias_record = util_dynarray_grow_bytes(
-      &cs->depth_bias, 1, sizeof(raster_state.depth_bias));
-   memcpy(scissor, raster_state.scissor, sizeof(raster_state.scissor));
-   memcpy(depth_bias_record, raster_state.depth_bias,
-          sizeof(raster_state.depth_bias));
+   uint8_t *scissors = util_dynarray_grow_bytes(
+      &cs->scissor, viewport_count, sizeof(raster_states[0].scissor));
+   uint8_t *depth_bias_records = util_dynarray_grow_bytes(
+      &cs->depth_bias, viewport_count, sizeof(raster_states[0].depth_bias));
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      memcpy(scissors + i * sizeof(raster_states[i].scissor),
+             raster_states[i].scissor, sizeof(raster_states[i].scissor));
+      memcpy(depth_bias_records + i * sizeof(raster_states[i].depth_bias),
+             raster_states[i].depth_bias,
+             sizeof(raster_states[i].depth_bias));
+   }
 
    /* Preserve the physical +0x00..+0x73 layout from Metal.  The complete
     * 28-byte FS record occupies +0x00..+0x1b; in particular, +0x14 is the
@@ -3315,25 +3331,28 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    memcpy(&bind_group[0x60], w_cull2_record.bytes, w_cull2_record.length);
    memcpy(&bind_group[0x6c], cull_record.bytes, cull_record.length);
 
-   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
-   agx_pack(region_clip, REGION_CLIP, cfg) {
-      cfg.enable = true;
-      cfg.min_x = minx / 32;
-      cfg.min_y = miny / 32;
-      cfg.max_x = DIV_ROUND_UP(MAX2(maxx, 1), 32);
-      cfg.max_y = DIV_ROUND_UP(MAX2(maxy, 1), 32);
+   for (unsigned i = 0; i < viewport_count; ++i) {
+      uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+      agx_pack(region_clip, REGION_CLIP, cfg) {
+         cfg.enable = true;
+         cfg.min_x = minx[i] / 32;
+         cfg.min_y = miny[i] / 32;
+         cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
+         cfg.max_y = DIV_ROUND_UP(MAX2(maxy[i], 1), 32);
+      }
+      memcpy(&viewport_fields.region_clip_raw[i], region_clip,
+             sizeof(region_clip));
+      const VkViewport *current_vp = &dyn->vp.viewports[i];
+      viewport_fields.viewports[i] =
+         (struct agx_ppp_viewport_transform_raw){
+            .translate_x = fui(current_vp->x + 0.5f * current_vp->width),
+            .scale_x = fui(current_vp->width * 0.5f),
+            .translate_y = fui(current_vp->y + 0.5f * current_vp->height),
+            .scale_y = fui(current_vp->height * 0.5f),
+            .translate_z = fui(current_vp->minDepth),
+            .scale_z = fui(current_vp->maxDepth - current_vp->minDepth),
+         };
    }
-   memcpy(&viewport_fields.region_clip_raw[0], region_clip,
-          sizeof(region_clip));
-   viewport_fields.viewports[0] =
-      (struct agx_ppp_viewport_transform_raw){
-         .translate_x = fui(vp->x + 0.5f * vp->width),
-         .scale_x = fui(vp->width * 0.5f),
-         .translate_y = fui(vp->y + 0.5f * vp->height),
-         .scale_y = fui(vp->height * 0.5f),
-         .translate_z = fui(vp->minDepth),
-         .scale_z = fui(vp->maxDepth - vp->minDepth),
-      };
 
    struct agx_ppp_viewport_payload_core viewport_record;
    if (!agx_ppp_viewport_payload_core_pack(dev->dev.chip, &viewport_fields,
@@ -3343,11 +3362,11 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* A VDM fetch happens after recording. Never point earlier draws at a
     * device-global record that another draw/CB can overwrite. This upload
     * and its architectural low alias live until command-buffer reset. */
-   struct agx_ptr state =
-      hk_pool_vdm_alloc(cmd, HK_G17P_BIND_STATE_BYTES, 64);
+   const size_t state_size = agx_g17p_bind_state_size(viewport_record.length);
+   struct agx_ptr state = hk_pool_vdm_alloc(cmd, state_size, 64);
    struct hk_g17p_bind_state_upload uploaded;
-   if (!state.cpu ||
-       !hk_g17p_upload_bind_state(state.cpu, HK_G17P_BIND_STATE_BYTES, state.gpu,
+   if (!state_size || !state.cpu ||
+       !hk_g17p_upload_bind_state(state.cpu, state_size, state.gpu,
                                   bind_group, viewport_record.bytes,
                                   viewport_record.length,
                                   gfx->linked_varyings.counts_32.opaque[0],
@@ -3379,7 +3398,6 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
               pairs[6].context_offset, pairs[7].context_offset);
    }
 
-   (void)cs;
    return true;
 }
 
@@ -5161,8 +5179,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             struct agx_ptr draw_state = hk_pool_vdm_alloc(cmd, 8, 4);
             uint32_t draw_state_offset;
             if (!draw_state.cpu ||
-                !hk_g17p_upload_draw_indices(draw_state.cpu, 8, draw_state.gpu,
-                    cs->scissor.size, cs->depth_bias.size, &draw_state_offset)) {
+                !hk_g17p_upload_draw_indices(
+                   draw_state.cpu, 8, draw_state.gpu, cs->scissor.size,
+                   cs->depth_bias.size,
+                   MAX2(cmd->vk.dynamic_graphics_state.vp.viewport_count, 1),
+                   &draw_state_offset)) {
                vk_command_buffer_set_error(&cmd->vk,
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;

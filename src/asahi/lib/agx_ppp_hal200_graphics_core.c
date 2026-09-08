@@ -280,6 +280,18 @@ agx_ppp_hal200_output_size_pack(uint32_t count_0, uint32_t count_2,
    return true;
 }
 
+bool
+agx_ppp_hal200_viewport_count_pack(enum agx_chip chip,
+                                   unsigned viewport_count, uint32_t *out)
+{
+   if (chip != AGX_CHIP_G17P || viewport_count == 0 ||
+       viewport_count > 16 || !out)
+      return false;
+
+   *out = viewport_count - 1;
+   return true;
+}
+
 /* Native HAL200 setDepthStencilState, 0x458878..0x458894, derives inverted
  * write-enable at bit21 and comparison at bits24..26. 0x458970..0x4589ac
  * merges those fields into both front and back face state. The depth descriptor

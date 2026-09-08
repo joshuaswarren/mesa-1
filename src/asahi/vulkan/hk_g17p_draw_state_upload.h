@@ -8,6 +8,7 @@
 #define HK_G17P_VARYING_RECORD_BYTES AGX_G17P_VARYING_RECORD_BYTES
 #define HK_G17P_VARYING_RECORD_OFFSET AGX_G17P_VARYING_RECORD_OFFSET
 #define HK_G17P_BIND_STATE_BYTES AGX_G17P_BIND_STATE_BYTES
+#define HK_G17P_BIND_STATE_MAX_BYTES AGX_G17P_BIND_STATE_MAX_BYTES
 #define hk_g17p_bind_state_upload agx_g17p_bind_state_upload
 
 static inline bool
@@ -31,8 +32,9 @@ hk_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
 static inline bool
 hk_g17p_upload_draw_indices(void *cpu, size_t capacity, uint64_t compact,
                             size_t scissor_bytes, size_t depth_bias_bytes,
-                            uint32_t *offset)
+                            unsigned viewport_count, uint32_t *offset)
 {
    return agx_g17p_upload_draw_indices(cpu, capacity, compact, scissor_bytes,
-                                       depth_bias_bytes, offset);
+                                       depth_bias_bytes, viewport_count,
+                                       offset);
 }

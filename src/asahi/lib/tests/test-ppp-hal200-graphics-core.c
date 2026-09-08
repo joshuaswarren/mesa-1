@@ -157,6 +157,18 @@ main(void)
    assert(!agx_ppp_hal200_output_size_pack(256, 0, &output_size));
    assert(!agx_ppp_hal200_output_size_pack(4, 256, &output_size));
    assert(!agx_ppp_hal200_output_size_pack(4, 2, NULL));
+   uint32_t viewport_count;
+   for (unsigned count = 1; count <= 16; ++count) {
+      assert(agx_ppp_hal200_viewport_count_pack(
+         AGX_CHIP_G17P, count, &viewport_count));
+      assert(viewport_count == count - 1);
+   }
+   assert(!agx_ppp_hal200_viewport_count_pack(
+      AGX_CHIP_G17P, 0, &viewport_count));
+   assert(!agx_ppp_hal200_viewport_count_pack(
+      AGX_CHIP_G17P, 17, &viewport_count));
+   assert(!agx_ppp_hal200_viewport_count_pack(
+      AGX_CHIP_G17G, 1, &viewport_count));
 
    static const uint32_t output_words[] = {
       0, 0, 0, 4, AGX_PPP_HAL200_PRIMARY_FACE_HEADER, 0x00010200,

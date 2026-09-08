@@ -787,14 +787,12 @@ hk_get_device_features(
        * alongside it in hk_get_device_properties(); this is unimplemented,
        * not hardware-impossible -- it needs layered BG/EOT programs. */
       features->shaderOutputLayer = false;
-      /* hk_g17p_bind_tail builds one viewport transform and one region clip
-       * from dyn->vp.viewports[0] / dyn->vp.scissors[0], and the native
-       * vertex-state update that would select among several has no witness
-       * for how the vertex program names one.  Advertising multiViewport
-       * here made every draw of a multi-viewport pipeline render through
-       * viewport 0 with nothing reported.  maxViewports drops to 1 with it,
-       * as the spec requires when this feature is false. */
-      features->multiViewport = false;
+      /* The HAL300 bind tail now emits the complete viewport/region-clip and
+       * consecutive scissor/depth arrays, and the vertex compiler writes the
+       * native packed layer/viewport UVS sysval. Keep public exposure opt-in
+       * until a two-viewport image oracle confirms routing on hardware. */
+      features->multiViewport =
+         hk_g17p_unverified_feature("multi_viewport");
       /* VK_KHR_shader_quad_control permits quad operations and derivatives
        * inside divergent control flow.  The ordinary subgroup quad shuffles
        * exposed below do not establish that stronger execution guarantee. */
@@ -1215,8 +1213,9 @@ hk_get_device_properties(const struct agx_device *dev,
    };
 
    if (dev->chip == AGX_CHIP_G17P) {
-      /* Required pairing for features->multiViewport == false. */
-      properties->maxViewports = 1;
+      /* Pair the limit with the qualification gate above. */
+      if (!hk_g17p_unverified_feature("multi_viewport"))
+         properties->maxViewports = 1;
 
       /* Pairs with features->shaderOutputLayer == false: the G17P tile layout
        * has no layered form, so one layer is all a render pass can bind.
