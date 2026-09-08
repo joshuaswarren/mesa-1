@@ -2,9 +2,12 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * One-queue XCB/Wayland smoke test for the bounded G17P graphics path. It uses one
- * 24-byte vertex buffer and no descriptors. The render pass has one
- * single-sample colour attachment and no depth or stencil attachment.
+ * One-queue XCB/Wayland lifecycle test for the bounded G17P graphics path. It
+ * recreates resized swapchains through oldSwapchain, cycles every useful
+ * present mode, handles suboptimal/out-of-date returns, and explicitly tears
+ * down every Vulkan and window-system object. Rendering itself stays minimal:
+ * one 24-byte vertex buffer, no descriptors, one single-sample colour target,
+ * and no depth or stencil attachment.
  */
 
 #define VK_NO_PROTOTYPES
@@ -43,6 +46,7 @@ VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 VK_FN(vkGetPhysicalDeviceSurfaceSupportKHR);
 VK_FN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
 VK_FN(vkGetPhysicalDeviceSurfaceFormatsKHR);
+VK_FN(vkGetPhysicalDeviceSurfacePresentModesKHR);
 #ifdef G17P_WSI_WAYLAND
 VK_FN(vkCreateWaylandSurfaceKHR);
 #else
@@ -80,6 +84,22 @@ VK_FN(vkAcquireNextImageKHR);
 VK_FN(vkQueueSubmit);
 VK_FN(vkQueuePresentKHR);
 VK_FN(vkQueueWaitIdle);
+VK_FN(vkDestroyFence);
+VK_FN(vkDestroySemaphore);
+VK_FN(vkDestroyCommandPool);
+VK_FN(vkDestroyFramebuffer);
+VK_FN(vkDestroyPipeline);
+VK_FN(vkDestroyPipelineLayout);
+VK_FN(vkDestroyShaderModule);
+VK_FN(vkDestroyRenderPass);
+VK_FN(vkDestroyImageView);
+VK_FN(vkDestroySwapchainKHR);
+VK_FN(vkUnmapMemory);
+VK_FN(vkFreeMemory);
+VK_FN(vkDestroyBuffer);
+VK_FN(vkDestroyDevice);
+VK_FN(vkDestroySurfaceKHR);
+VK_FN(vkDestroyInstance);
 
 static void
 die(const char *what)
@@ -272,19 +292,57 @@ clamp_u32(uint32_t value, uint32_t min, uint32_t max)
    return value;
 }
 
+static VkPresentModeKHR
+choose_present_mode(const VkPresentModeKHR *modes, uint32_t count,
+                    unsigned generation)
+{
+   const VkPresentModeKHR preference[] = {
+      VK_PRESENT_MODE_FIFO_KHR,
+      VK_PRESENT_MODE_MAILBOX_KHR,
+      VK_PRESENT_MODE_IMMEDIATE_KHR,
+      VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+   };
+   VkPresentModeKHR supported[4];
+   unsigned supported_count = 0;
+
+   for (unsigned p = 0; p < 4; ++p) {
+      for (uint32_t i = 0; i < count; ++i) {
+         if (modes[i] == preference[p]) {
+            supported[supported_count++] = preference[p];
+            break;
+         }
+      }
+   }
+
+   if (!supported_count)
+      die("surface reports no usable present mode");
+
+   return supported[generation % supported_count];
+}
+
 int
 main(int argc, char **argv)
 {
    unsigned frame_count = 300;
-   if (argc > 2)
-      die("usage: g17p-wsi-triangle [frame-count]");
-   if (argc == 2) {
+   unsigned generation_count = 4;
+   if (argc > 3)
+      die("usage: g17p-wsi-triangle [frame-count [swapchain-generations]]");
+   if (argc >= 2) {
       char *end = NULL;
       unsigned long value = strtoul(argv[1], &end, 10);
       if (!end || *end || value == 0 || value > 100000)
          die("frame-count must be 1..100000");
       frame_count = value;
    }
+   if (argc == 3) {
+      char *end = NULL;
+      unsigned long value = strtoul(argv[2], &end, 10);
+      if (!end || *end || value == 0 || value > 1000)
+         die("swapchain-generations must be 1..1000");
+      generation_count = value;
+   }
+   if (generation_count > frame_count)
+      generation_count = frame_count;
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -381,12 +439,15 @@ main(int argc, char **argv)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceSupportKHR);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfaceFormatsKHR);
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceSurfacePresentModesKHR);
 #ifdef G17P_WSI_WAYLAND
    LOAD_INSTANCE(instance, vkCreateWaylandSurfaceKHR);
 #else
    LOAD_INSTANCE(instance, vkCreateXcbSurfaceKHR);
 #endif
    LOAD_INSTANCE(instance, vkCreateDevice);
+   LOAD_INSTANCE(instance, vkDestroySurfaceKHR);
+   LOAD_INSTANCE(instance, vkDestroyInstance);
 
 #ifdef G17P_WSI_WAYLAND
    const VkWaylandSurfaceCreateInfoKHR surface_info = {
@@ -508,6 +569,20 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkQueueSubmit);
    LOAD_DEVICE(device, vkQueuePresentKHR);
    LOAD_DEVICE(device, vkQueueWaitIdle);
+   LOAD_DEVICE(device, vkDestroyFence);
+   LOAD_DEVICE(device, vkDestroySemaphore);
+   LOAD_DEVICE(device, vkDestroyCommandPool);
+   LOAD_DEVICE(device, vkDestroyFramebuffer);
+   LOAD_DEVICE(device, vkDestroyPipeline);
+   LOAD_DEVICE(device, vkDestroyPipelineLayout);
+   LOAD_DEVICE(device, vkDestroyShaderModule);
+   LOAD_DEVICE(device, vkDestroyRenderPass);
+   LOAD_DEVICE(device, vkDestroyImageView);
+   LOAD_DEVICE(device, vkDestroySwapchainKHR);
+   LOAD_DEVICE(device, vkUnmapMemory);
+   LOAD_DEVICE(device, vkFreeMemory);
+   LOAD_DEVICE(device, vkDestroyBuffer);
+   LOAD_DEVICE(device, vkDestroyDevice);
 
    VkQueue queue;
    vkGetDeviceQueue(device, queue_family, 0, &queue);
@@ -563,6 +638,34 @@ main(int argc, char **argv)
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
 
+   VkSwapchainKHR old_swapchain = VK_NULL_HANDLE;
+   unsigned frames_completed = 0;
+   unsigned acquire_suboptimal = 0;
+   unsigned present_suboptimal = 0;
+   unsigned out_of_date = 0;
+
+   for (unsigned generation = 0; generation < generation_count; ++generation) {
+   const uint32_t desired_width = (generation & 1) ? 800 : 640;
+   const uint32_t desired_height = (generation & 1) ? 600 : 480;
+#ifdef G17P_WSI_WAYLAND
+   xdg_surface_set_window_geometry(window.xdg_surface, 0, 0, desired_width,
+                                   desired_height);
+   wl_surface_commit(window.surface);
+   if (wl_display_flush(window.display) < 0)
+      die("Wayland resize flush failed");
+#else
+   const uint32_t resize_values[] = {desired_width, desired_height};
+   xcb_configure_window(xcb, window,
+                        XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                        resize_values);
+   xcb_flush(xcb);
+   xcb_get_geometry_reply_t *geometry =
+      xcb_get_geometry_reply(xcb, xcb_get_geometry(xcb, window), NULL);
+   if (!geometry)
+      die("XCB resize round-trip failed");
+   free(geometry);
+#endif
+
    VkSurfaceCapabilitiesKHR capabilities;
    check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface,
                                                     &capabilities),
@@ -587,11 +690,30 @@ main(int argc, char **argv)
       choose_surface_format(formats, format_count);
    free(formats);
 
+   uint32_t present_mode_count = 0;
+   check(vkGetPhysicalDeviceSurfacePresentModesKHR(
+            physical, surface, &present_mode_count, NULL),
+         "vkGetPhysicalDeviceSurfacePresentModesKHR(count)");
+   if (!present_mode_count)
+      die("surface has no present modes");
+   VkPresentModeKHR *present_modes =
+      calloc(present_mode_count, sizeof(*present_modes));
+   if (!present_modes)
+      die("out of host memory");
+   check(vkGetPhysicalDeviceSurfacePresentModesKHR(
+            physical, surface, &present_mode_count, present_modes),
+         "vkGetPhysicalDeviceSurfacePresentModesKHR(list)");
+   const VkPresentModeKHR present_mode =
+      choose_present_mode(present_modes, present_mode_count, generation);
+   free(present_modes);
+
    VkExtent2D extent = capabilities.currentExtent;
    if (extent.width == UINT32_MAX) {
-      extent.width = clamp_u32(640, capabilities.minImageExtent.width,
+      extent.width = clamp_u32(desired_width,
+                               capabilities.minImageExtent.width,
                                capabilities.maxImageExtent.width);
-      extent.height = clamp_u32(480, capabilities.minImageExtent.height,
+      extent.height = clamp_u32(desired_height,
+                                capabilities.minImageExtent.height,
                                 capabilities.maxImageExtent.height);
    }
 
@@ -613,12 +735,17 @@ main(int argc, char **argv)
       .preTransform = capabilities.currentTransform,
       .compositeAlpha =
          choose_composite_alpha(capabilities.supportedCompositeAlpha),
-      .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+      .presentMode = present_mode,
       .clipped = true,
+      .oldSwapchain = old_swapchain,
    };
    VkSwapchainKHR swapchain;
    check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &swapchain),
          "vkCreateSwapchainKHR");
+   if (old_swapchain) {
+      vkDestroySwapchainKHR(device, old_swapchain, NULL);
+      old_swapchain = VK_NULL_HANDLE;
+   }
 
    check(vkGetSwapchainImagesKHR(device, swapchain, &swapchain_image_count,
                                  NULL),
@@ -870,11 +997,16 @@ main(int argc, char **argv)
    const VkSemaphoreCreateInfo semaphore_info = {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
    };
-   VkSemaphore acquired, finished;
+   VkSemaphore acquired;
+   VkSemaphore *finished = calloc(swapchain_image_count, sizeof(*finished));
+   if (!finished)
+      die("out of host memory");
    check(vkCreateSemaphore(device, &semaphore_info, NULL, &acquired),
          "vkCreateSemaphore(acquired)");
-   check(vkCreateSemaphore(device, &semaphore_info, NULL, &finished),
-         "vkCreateSemaphore(finished)");
+   for (uint32_t i = 0; i < swapchain_image_count; ++i) {
+      check(vkCreateSemaphore(device, &semaphore_info, NULL, &finished[i]),
+            "vkCreateSemaphore(finished)");
+   }
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
       .flags = VK_FENCE_CREATE_SIGNALED_BIT,
@@ -882,12 +1014,19 @@ main(int argc, char **argv)
    VkFence fence;
    check(vkCreateFence(device, &fence_info, NULL, &fence), "vkCreateFence");
 
+   const unsigned generations_left = generation_count - generation;
+   const unsigned frames_this_generation =
+      (frame_count - frames_completed + generations_left - 1) /
+      generations_left;
+   unsigned frames_presented = 0;
    fprintf(stderr,
-           "g17p-wsi-triangle: rendering %u frames, %ux%u, format %u, "
-           "one layer, 24-byte VBO, no depth, 1x MSAA\n",
-           frame_count, extent.width, extent.height, surface_format.format);
+           "g17p-wsi-triangle: generation %u/%u: %u frames, %ux%u, "
+           "format %u, present mode %u, oldSwapchain=%s\n",
+           generation + 1, generation_count, frames_this_generation,
+           extent.width, extent.height, surface_format.format, present_mode,
+           generation ? "yes" : "no");
 
-   for (unsigned frame = 0; frame < frame_count; ++frame) {
+   for (unsigned frame = 0; frame < frames_this_generation; ++frame) {
 #ifdef G17P_WSI_WAYLAND
       if (window.closed)
          break;
@@ -902,7 +1041,13 @@ main(int argc, char **argv)
       VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                               acquired, VK_NULL_HANDLE,
                                               &image_index);
-      if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+      if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+         ++out_of_date;
+         break;
+      }
+      if (result == VK_SUBOPTIMAL_KHR)
+         ++acquire_suboptimal;
+      else if (result != VK_SUCCESS)
          check(result, "vkAcquireNextImageKHR");
 
       const VkPipelineStageFlags wait_stage =
@@ -915,25 +1060,33 @@ main(int argc, char **argv)
          .commandBufferCount = 1,
          .pCommandBuffers = &command_buffers[image_index],
          .signalSemaphoreCount = 1,
-         .pSignalSemaphores = &finished,
+         .pSignalSemaphores = &finished[image_index],
       };
       check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
 
       const VkPresentInfoKHR present = {
          .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
          .waitSemaphoreCount = 1,
-         .pWaitSemaphores = &finished,
+         .pWaitSemaphores = &finished[image_index],
          .swapchainCount = 1,
          .pSwapchains = &swapchain,
          .pImageIndices = &image_index,
       };
       result = vkQueuePresentKHR(queue, &present);
-      if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+      ++frames_presented;
+      if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+         ++out_of_date;
+         break;
+      }
+      if (result == VK_SUBOPTIMAL_KHR)
+         ++present_suboptimal;
+      else if (result != VK_SUCCESS)
          check(result, "vkQueuePresentKHR");
 
-      if ((frame + 1) % 60 == 0 || frame + 1 == frame_count)
-         fprintf(stderr, "g17p-wsi-triangle: frame %u/%u\n", frame + 1,
-                 frame_count);
+      if ((frames_completed + frames_presented) % 60 == 0 ||
+          frame + 1 == frames_this_generation)
+         fprintf(stderr, "g17p-wsi-triangle: frame %u/%u\n",
+                 frames_completed + frames_presented, frame_count);
 #ifdef G17P_WSI_WAYLAND
       if (wl_display_flush(window.display) < 0)
          die("Wayland flush failed");
@@ -941,6 +1094,59 @@ main(int argc, char **argv)
    }
 
    check(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
-   fprintf(stderr, "g17p-wsi-triangle: completed\n");
-   return 0;
+   frames_completed += frames_presented;
+
+   vkDestroyFence(device, fence, NULL);
+   for (uint32_t i = 0; i < swapchain_image_count; ++i)
+      vkDestroySemaphore(device, finished[i], NULL);
+   free(finished);
+   vkDestroySemaphore(device, acquired, NULL);
+   vkDestroyCommandPool(device, command_pool, NULL);
+   for (uint32_t i = 0; i < swapchain_image_count; ++i) {
+      vkDestroyFramebuffer(device, framebuffers[i], NULL);
+      vkDestroyImageView(device, views[i], NULL);
+   }
+   vkDestroyPipeline(device, pipeline, NULL);
+   vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+   vkDestroyShaderModule(device, frag_module, NULL);
+   vkDestroyShaderModule(device, vert_module, NULL);
+   vkDestroyRenderPass(device, render_pass, NULL);
+   free(command_buffers);
+   free(framebuffers);
+   free(views);
+   free(images);
+   old_swapchain = swapchain;
+   }
+
+   if (old_swapchain)
+      vkDestroySwapchainKHR(device, old_swapchain, NULL);
+   vkUnmapMemory(device, vertex_memory);
+   vkDestroyBuffer(device, vertex_buffer, NULL);
+   vkFreeMemory(device, vertex_memory, NULL);
+   vkDestroyDevice(device, NULL);
+   vkDestroySurfaceKHR(instance, surface, NULL);
+   vkDestroyInstance(instance, NULL);
+#ifdef G17P_WSI_WAYLAND
+   xdg_toplevel_destroy(window.toplevel);
+   xdg_surface_destroy(window.xdg_surface);
+   wl_surface_destroy(window.surface);
+   xdg_wm_base_destroy(window.wm_base);
+   wl_compositor_destroy(window.compositor);
+   wl_registry_destroy(registry);
+   wl_display_disconnect(window.display);
+#else
+   xcb_destroy_window(xcb, window);
+   xcb_disconnect(xcb);
+#endif
+   dlclose(loader);
+
+   const bool completed_all_frames = frames_completed == frame_count;
+   fprintf(stderr,
+           "g17p-wsi-triangle: completed %u/%u frames across %u swapchains; "
+           "acquire-suboptimal=%u present-suboptimal=%u out-of-date=%u\n",
+           frames_completed, frame_count, generation_count,
+           acquire_suboptimal, present_suboptimal, out_of_date);
+   if (!completed_all_frames)
+      fprintf(stderr, "g17p-wsi-triangle: lifecycle ended before frame target\n");
+   return completed_all_frames ? 0 : 1;
 }
