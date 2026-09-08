@@ -297,6 +297,21 @@ hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
 }
 
 bool
+hk_agx3_g17p_fragment_blend_constants_range(
+   uint64_t blend_constants_va, struct agx3_ioto_uniform_range *range)
+{
+   if (!blend_constants_va || !range)
+      return false;
+
+   *range = (struct agx3_ioto_uniform_range){
+      .start_halfs = 4,
+      .size_halfs = 8,
+      .address = blend_constants_va,
+   };
+   return true;
+}
+
+bool
 hk_agx3_g17p_rt0_bg_resource_spec(
    enum agx_chip chip, enum hk_agx3_g17p_rt0_bg_op op, uint64_t *resource_spec)
 {

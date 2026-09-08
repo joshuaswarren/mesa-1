@@ -1459,6 +1459,17 @@ test_g17p_root_range(void)
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
    CHECK(!hk_agx3_g17p_root_range(12, 0, 0, &range));
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
+
+   struct agx3_ioto_uniform_range blend = {0};
+   CHECK(hk_agx3_g17p_fragment_blend_constants_range(
+      UINT64_C(0x10000028040), &blend));
+   CHECK(blend.start_halfs == 4 && blend.size_halfs == 8 &&
+         blend.address == UINT64_C(0x10000028040));
+   const struct agx3_ioto_uniform_range blend_before = blend;
+   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(0, &blend));
+   CHECK(memcmp(&blend, &blend_before, sizeof(blend)) == 0);
+   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(
+      UINT64_C(0x10000028040), NULL));
    return 0;
 }
 

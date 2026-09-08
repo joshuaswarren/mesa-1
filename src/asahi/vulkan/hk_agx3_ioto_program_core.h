@@ -129,8 +129,13 @@ bool hk_agx3_g17p_indexed_storage_pointers(
 /* Load one root descriptor followed by every descriptor-set pointer named by
  * the shader's pipeline layout. */
 bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
-                            uint64_t root_va,
-                            struct agx3_ioto_uniform_range *range);
+                             uint64_t root_va,
+                             struct agx3_ioto_uniform_range *range);
+
+/* Fragment blend constants occupy uniform halves4..11, immediately before
+ * the root at half12. */
+bool hk_agx3_g17p_fragment_blend_constants_range(
+   uint64_t blend_constants_va, struct agx3_ioto_uniform_range *range);
 
 /* Build the bounded G17P vertex or fragment Ioto program.  A zero-range
  * fragment uses the valid ordinary-FS PIXREL suffix; a zero-range vertex uses

@@ -1219,6 +1219,21 @@ hk_g17p_graphics_uniform_ranges(
        * compute-style root at uniform zero. */
       root_uniform = 0;
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
+      if (cmd->state.gfx.uses_blend_constant) {
+         /* The non-monolithic blend epilog reads the four constants from
+          * AGX_ABI_FUNI_BLEND_R..A (halves4..11). The legacy USC path bound
+          * this range, but the HAL200 Ioto path omitted it, leaving every
+          * factor zero on G17P. Texture pointer ranges currently occupy
+          * halves0..7, so fail closed for the overlapping combined case
+          * until its independently witnessed ABI is implemented. */
+         if (s->info.agx3_combined_sampler_valid ||
+             s->info.agx3_indexed_sampler_valid || !root_ptr ||
+             !hk_agx3_g17p_fragment_blend_constants_range(
+                root_ptr + hk_root_descriptor_offset(draw.blend_constant),
+                &ranges[count]))
+            return false;
+         count++;
+      }
       root_uniform = AGX_ABI_FUNI_ROOT;
    } else {
       return false;
