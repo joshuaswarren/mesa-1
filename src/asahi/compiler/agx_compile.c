@@ -7543,9 +7543,11 @@ agx_calc_stats(agx_context *ctx, unsigned size, struct agx2_stats *stats)
 }
 
 static bool
-agx_lower_sincos_filter(const nir_instr *instr, UNUSED const void *_)
+agx_lower_sincos_filter(const nir_instr *instr, const void *g17p)
 {
-   if (instr->type != nir_instr_type_alu)
+   /* Only the native G17P sequence is lowered here; every other target goes
+    * through agx_nir_lower_sincos, the exact reduction. */
+   if (!(uintptr_t)g17p || instr->type != nir_instr_type_alu)
       return false;
 
    nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -10993,6 +10995,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
     * FMAs only. Other shaders keep the lowering here. */
    if (!g17p || !agx_nir_fma_rte_applies(nir))
       NIR_PASS(_, nir, agx_lower_sincos, g17p ? 1 : native_fragment_depth ? 2 : 0);
+   NIR_PASS(_, nir, agx_nir_lower_sincos);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_lower_front_face,
             nir_metadata_control_flow, NULL);
    if (g17p)
@@ -11018,9 +11021,11 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
 
    NIR_PASS(_, nir, nir_lower_idiv, &idiv_options);
 
-   /* Has to run after nir_lower_idiv */
-   NIR_PASS(_, nir, nir_shader_alu_pass, agx_nir_lower_fdiv,
-            nir_metadata_control_flow, NULL);
+   /* Has to run after nir_lower_idiv, and before the log lowering so the
+    * reciprocals it builds are not refined twice.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_fdiv);
+   NIR_PASS(_, nir, agx_nir_lower_log);
 
    NIR_PASS(_, nir, nir_opt_deref);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

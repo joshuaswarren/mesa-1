@@ -57,6 +57,9 @@ bool agx_nir_lower_word_bounds(struct nir_shader *s);
 bool agx_nir_share_bounds(struct nir_shader *s);
 bool agx_nir_lower_atomics(struct nir_shader *s, bool native_fadd);
 bool agx_nir_opt_canonical_minmax(struct nir_shader *s);
+bool agx_nir_lower_fdiv(struct nir_shader *s);
+bool agx_nir_lower_log(struct nir_shader *s);
+bool agx_nir_lower_sincos(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
 bool agx_nir_lower_g17p_helper_samples(struct nir_shader *s);
