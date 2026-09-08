@@ -186,13 +186,11 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        tib->layered || tib->spilled[0])
       return false;
 
-   if (tib->nr_samples == 4 && tib->sample_size_B == 8 &&
-       tib->tile_size == 32 * 16) {
-      tib->tile_size = 32 * 32;
-      agx_tilebuffer_pack_usc(tib);
-   }
-
-   if (tib->tile_size != 32 * 32)
+   /* Four 8-byte samples fill exactly 32 KiB at 32x32, but the hardware
+    * limit is strictly smaller. Keep the generic allocator's valid 32x16
+    * layout; BG/EOT use pixel coordinates and the render UAPI publishes the
+    * utile geometry to firmware. */
+   if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16)
       return false;
 
    if (tib->nr_samples > 1 &&

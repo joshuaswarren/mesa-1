@@ -2073,9 +2073,16 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
       &tib, 1, true, true, true));
    tib = agx_build_tilebuffer_layout(rgba, 1, 4, false);
+   const struct agx_usc_shared_packed msaa4_usc = tib.usc;
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    CHECK(tib.nr_samples == 4 && tib.sample_size_B == 8 &&
-         tib.tile_size == 32 * 32 && !tib.spilled[0]);
+         tib.tile_size == 32 * 16 && !tib.spilled[0]);
+   CHECK(memcmp(&tib.usc, &msaa4_usc, sizeof(tib.usc)) == 0);
+   struct drm_asahi_cmd_render msaa4_cmd = {0};
+   agx_tilebuffer_set_drm_cmd(&msaa4_cmd, &tib);
+   CHECK(msaa4_cmd.utile_width_px == 32);
+   CHECK(msaa4_cmd.utile_height_px == 16);
+   CHECK(agx_tilebuffer_total_size(&tib) < 32768);
    CHECK(hk_agx3_g17p_direct_color_resolve_supported(
       &tib, 1, true, true, false));
    tib = agx_build_tilebuffer_layout(rgba, 1, 8, false);
