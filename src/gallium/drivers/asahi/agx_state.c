@@ -18,6 +18,7 @@
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
 #include "asahi/lib/agx_vdm_barrier_core.h"
+#include "asahi/lib/agx_vdm_state_update_core.h"
 #include "asahi/lib/agx_vdm_stream_link_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
@@ -3166,7 +3167,7 @@ static uint32_t
 agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
                    struct agx_linked_shader *linked,
                    mesa_shader_stage phys_stage, unsigned variable_shared_mem,
-                   size_t max_subgroups)
+                   size_t max_subgroups, uint64_t *full_va)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
@@ -3283,6 +3284,9 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
       agx_usc_pack(&b, NO_PRESHADER, cfg)
          ;
    }
+
+   if (full_va)
+      *full_va = t.gpu;
 
    return agx_usc_addr(dev, t.gpu);
 }
@@ -3805,14 +3809,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
    }
 
    if (IS_DIRTY(VS) || varyings_dirty) {
-      agx_push(out, VDM_STATE, cfg) {
-         cfg.vertex_shader_word_0_present = true;
-         cfg.vertex_shader_word_1_present = true;
-         cfg.vertex_outputs_present = true;
-         cfg.vertex_unknown_present = true;
-      }
-
-      agx_push(out, VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
+      struct agx_vdm_state_vertex_shader_word_0_packed counts;
+      agx_pack(&counts, VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
          cfg.uniform_register_count = vs->b.info.push_count;
          cfg.preshader_register_count = vs->b.info.nr_preamble_gprs;
          cfg.texture_state_register_count = agx_nr_tex_descriptors(batch, vs);
@@ -3820,26 +3818,59 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
             translate_sampler_state_count(ctx, vs->stage);
       }
 
-      agx_push(out, VDM_STATE_VERTEX_SHADER_WORD_1, cfg) {
-         cfg.pipeline =
-            agx_build_pipeline(batch, vs, ctx->gs ? NULL : ctx->linked.vs,
-                               MESA_SHADER_VERTEX, 0, 0);
+      uint64_t pipeline = 0;
+      const uint32_t packed_pipeline =
+         agx_build_pipeline(batch, vs, ctx->gs ? NULL : ctx->linked.vs,
+                            MESA_SHADER_VERTEX, 0, 0, &pipeline);
+
+      if (dev->chip == AGX_CHIP_G17P) {
+         const uint32_t provoking = ctx->rast->base.flatshade_first ? 0 : 2;
+         const struct agx_vdm_state_update_info info = {
+            .raw_vertex_shader_word0 = counts.opaque[0],
+            .pipeline = pipeline,
+            .raw_pipeline_template = 0,
+            .raw_vertex_outputs = {
+               vs->uvs.vdm.opaque[0],
+               ctx->rast->base.rasterizer_discard ? 0x30 + provoking
+                                                   : provoking,
+            },
+            .raw_vertex_unknown = 0,
+         };
+         struct agx_vdm_state_update encoded;
+         const bool packed =
+            !batch->generate_primitive_id &&
+            agx_vdm_state_update_pack(dev->chip, &info, &encoded);
+         assert(packed);
+         if (!packed)
+            return NULL;
+
+         memcpy(out, encoded.bytes, encoded.length);
+         out += encoded.length;
+      } else {
+         agx_push(out, VDM_STATE, cfg) {
+            cfg.vertex_shader_word_0_present = true;
+            cfg.vertex_shader_word_1_present = true;
+            cfg.vertex_outputs_present = true;
+            cfg.vertex_unknown_present = true;
+         }
+         agx_push_packed(out, counts, VDM_STATE_VERTEX_SHADER_WORD_0);
+         agx_push(out, VDM_STATE_VERTEX_SHADER_WORD_1, cfg) {
+            cfg.pipeline = packed_pipeline;
+         }
+         agx_push_packed(out, vs->uvs.vdm, VDM_STATE_VERTEX_OUTPUTS);
+         agx_push(out, VDM_STATE_VERTEX_UNKNOWN, cfg) {
+            cfg.flat_shading_control = ctx->rast->base.flatshade_first
+                                          ? AGX_VDM_VERTEX_0
+                                          : AGX_VDM_VERTEX_2;
+            cfg.unknown_4 = cfg.unknown_5 =
+               ctx->rast->base.rasterizer_discard;
+            cfg.generate_primitive_id = batch->generate_primitive_id;
+         }
+
+         /* Pad up to a multiple of 8 bytes */
+         memset(out, 0, 4);
+         out += 4;
       }
-
-      agx_push_packed(out, vs->uvs.vdm, VDM_STATE_VERTEX_OUTPUTS);
-
-      agx_push(out, VDM_STATE_VERTEX_UNKNOWN, cfg) {
-         cfg.flat_shading_control = ctx->rast->base.flatshade_first
-                                       ? AGX_VDM_VERTEX_0
-                                       : AGX_VDM_VERTEX_2;
-         cfg.unknown_4 = cfg.unknown_5 = ctx->rast->base.rasterizer_discard;
-
-         cfg.generate_primitive_id = batch->generate_primitive_id;
-      }
-
-      /* Pad up to a multiple of 8 bytes */
-      memset(out, 0, 4);
-      out += 4;
    }
 
    struct agx_pool *pool = &batch->pool;
@@ -4015,7 +4046,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
 
       agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
          cfg.pipeline = agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
-                                           MESA_SHADER_FRAGMENT, 0, 0);
+                                           MESA_SHADER_FRAGMENT, 0, 0, NULL);
       }
 
       agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_2, cfg) {
@@ -5631,6 +5662,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          AGX_INDEX_LIST_START_LENGTH + AGX_INDEX_LIST_BUFFER_SIZE_LENGTH);
 
    uint8_t *out = agx_encode_state(batch, batch->vdm.current);
+   if (!out)
+      return;
 
    struct agx_device *dev = agx_device(ctx->base.screen);
    if (dev->chip != AGX_CHIP_G17P && info->index_size &&
@@ -5772,7 +5805,8 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
 #endif
 
    uint32_t usc = agx_build_pipeline(batch, cs, linked, MESA_SHADER_COMPUTE,
-                                     variable_shared_mem, subgroups_per_core);
+                                     variable_shared_mem, subgroups_per_core,
+                                     NULL);
 
    if (cs)
       agx_batch_add_bo(batch, cs->bo);

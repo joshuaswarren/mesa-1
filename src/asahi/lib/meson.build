@@ -841,6 +841,26 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-gallium-command-stream',
+    executable(
+      'asahi-g17p-gallium-command-stream',
+      files(
+        'agx_va_runtime_hole.c',
+        'agx_vdm_barrier_core.c',
+        'agx_vdm_index_list_core.c',
+        'agx_vdm_ppp_state_core.c',
+        'agx_vdm_state_core.c',
+        'agx_vdm_state_update_core.c',
+        'agx_vdm_stream_terminate_core.c',
+        'tests/test-g17p-gallium-command-stream.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_mesautil],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-vdm-state-core',
     executable(
       'asahi-vdm-state-core',
