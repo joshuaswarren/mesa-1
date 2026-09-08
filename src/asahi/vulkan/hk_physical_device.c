@@ -588,7 +588,7 @@ hk_get_device_features(
       .extendedDynamicState3TessellationDomainOrigin =
          dev->chip != AGX_CHIP_G17P,
       .extendedDynamicState3DepthClampEnable = true,
-      .extendedDynamicState3PolygonMode = dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3PolygonMode = true,
       .extendedDynamicState3RasterizationSamples = true,
       .extendedDynamicState3SampleMask = dev->chip != AGX_CHIP_G17P,
       .extendedDynamicState3AlphaToCoverageEnable =
@@ -742,7 +742,8 @@ hk_get_device_features(
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->shaderResourceMinLod = false;
-      features->advancedBlendCoherentOperations = false;
+      features->advancedBlendCoherentOperations =
+         hk_g17p_unverified_feature("advanced_blend");
       features->sparseBinding = false;
       features->sparseResidencyAliased = false;
       features->sparseResidencyImage2D = false;
@@ -1223,12 +1224,14 @@ hk_get_device_properties(const struct agx_device *dev,
        * fragment stages.  Keep subgroupQuadOperationsInAllStages false until
        * every other advertised graphics stage is independently witnessed. */
       properties->subgroupQuadOperationsInAllStages = false;
-      properties->advancedBlendMaxColorAttachments = 0;
-      properties->advancedBlendIndependentBlend = false;
-      properties->advancedBlendNonPremultipliedSrcColor = false;
-      properties->advancedBlendNonPremultipliedDstColor = false;
-      properties->advancedBlendCorrelatedOverlap = false;
-      properties->advancedBlendAllOperations = false;
+      if (!hk_g17p_unverified_feature("advanced_blend")) {
+         properties->advancedBlendMaxColorAttachments = 0;
+         properties->advancedBlendIndependentBlend = false;
+         properties->advancedBlendNonPremultipliedSrcColor = false;
+         properties->advancedBlendNonPremultipliedDstColor = false;
+         properties->advancedBlendCorrelatedOverlap = false;
+         properties->advancedBlendAllOperations = false;
+      }
    }
 
    strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
@@ -1471,7 +1474,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* HAL200 advanced blend epilogs currently complete without a fault but
        * write zero instead of the blended colour. */
-      supported_extensions.EXT_blend_operation_advanced = false;
+      if (!hk_g17p_unverified_feature("advanced_blend"))
+         supported_extensions.EXT_blend_operation_advanced = false;
 
       /* The base indirect Index List is native, but count variants require a
        * predicate kernel that is not yet available on this path. */
