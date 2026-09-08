@@ -1265,10 +1265,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
       !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
       !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
-   /* Array and 3D coordinates are copied to the fixed staging bank before SMP,
-    * while the layer is named directly by the sample's 8-bit register field.
-    * The third scalar must not wrap that field. Plain 2D samples name
-    * the coordinate directly in SMP and retain its narrower bound. */
+   /* Array and 3D coordinates are copied to the fixed staging bank before SMP.
+    * Ordinary array layers are named directly by the sample's 8-bit register
+    * field; shadow-array layers use the packed producer witnessed below. The
+    * third scalar must not wrap either form. Plain 2D samples name the
+    * coordinate directly in SMP and retain its narrower bound. */
    /* CEM's three recovered GPR source fields are seven bits. */
    const unsigned max_coord = (array || cube) ? 120 : three_d ? 248 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
@@ -1318,8 +1319,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (offset &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate ||
          array || three_d || cube || shadow || gather)) ||
-       (shadow && (array || three_d || cube || !implicit_lod || gather || I->mask != 1 ||
-                   enc != AGX_ISA_ENCODING_AGX3B)) ||
+       (shadow && (three_d || cube || !implicit_lod || gather ||
+                   I->mask != 1 || enc != AGX_ISA_ENCODING_AGX3B ||
+                   (array && !immediate))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
@@ -1424,6 +1426,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (!agx3_tex_stage_copy_hints(
            enc, coord + 4, I->src[0].value + 4, stage_slot, 0,
            I->src[0].cache, I->src[0].discard, bytes, &len) ||
+        !agx3_append(emission, bytes, len)))
+      return false;
+
+   if (array && shadow &&
+       (!agx3_tex_stage_array_layer(
+           enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
+           I->src[0].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;
 

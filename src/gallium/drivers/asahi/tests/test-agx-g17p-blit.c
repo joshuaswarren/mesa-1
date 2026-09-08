@@ -155,9 +155,9 @@ build_webgl_shadow_fs(enum glsl_sampler_dim dim, bool array)
                   : "G17P WebGL 2D shadow fragment shader"));
    nir_def *frag = nir_load_frag_coord(&b);
 
-   /* Both sampler2DShadow and sampler2DArrayShadow are valid WebGL2. The
-    * former is byte-grounded on G17P. The array coordinate/staging form is a
-    * stable API-realistic refusal until it has independent native bytes. */
+   /* Both sampler2DShadow and sampler2DArrayShadow are valid WebGL2 and
+    * byte-grounded on G17P. Cube comparisons remain stable API-realistic
+    * refusals until their CEM/compare composition has independent bytes. */
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
    tex->op = nir_texop_tex;
    tex->sampler_dim = dim;
@@ -224,12 +224,28 @@ check_es3_compile_contract(struct pipe_context *pctx)
    }
    pctx->delete_fs_state(pctx, shadow_ok);
 
+   struct pipe_shader_state array_shadow = {
+      .type = PIPE_SHADER_IR_NIR,
+      .report_compile_error = true,
+      .ir.nir = build_webgl_shadow_fs(GLSL_SAMPLER_DIM_2D, true),
+   };
+   void *array_shadow_ok = pctx->create_fs_state(pctx, &array_shadow);
+   if (!array_shadow_ok || array_shadow.error_message) {
+      fprintf(stderr, "WebGL2 sampler2DArrayShadow did not compile: %s\n",
+              array_shadow.error_message ? array_shadow.error_message
+                                         : "no shader");
+      free(array_shadow.error_message);
+      if (array_shadow_ok)
+         pctx->delete_fs_state(pctx, array_shadow_ok);
+      return false;
+   }
+   pctx->delete_fs_state(pctx, array_shadow_ok);
+
    static const struct {
       enum glsl_sampler_dim dim;
       bool array;
       const char *name;
    } unwitnessed[] = {
-      {GLSL_SAMPLER_DIM_2D, true, "sampler2DArrayShadow"},
       {GLSL_SAMPLER_DIM_CUBE, false, "samplerCubeShadow"},
       {GLSL_SAMPLER_DIM_CUBE, true, "samplerCubeArrayShadow"},
    };

@@ -807,8 +807,26 @@ test_gradient_and_register_bias(void)
    bad_shadow.mask = 3;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
                                  &length));
-   bad_shadow = shadow;
-   bad_shadow.array = true;
+   /* applegpu-nt 32023.917 / apple-g17p. The array comparison clears the
+    * ordinary array register/profile fields and selects packed layer f77=2. */
+   struct agx3_tex_sample_desc shadow_array = shadow;
+   shadow_array.array = true;
+   shadow_array.array_layer = 6;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &shadow_array, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800ca090002004010000000100"));
+   bad_shadow = shadow_array;
+   bad_shadow.array_layer = 3;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
+                                 &length));
+   bad_shadow = shadow_array;
+   bad_shadow.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   bad_shadow.texture_value = 2;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
+                                 &length));
+   bad_shadow = shadow_array;
+   bad_shadow.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
                                  &length));
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &shadow, bytes,
@@ -1684,6 +1702,12 @@ test_register_array_layer(void)
       0x17, 0x05, 0x54, 0x06, 0x00, 0x18,
       0x00, 0x00, 0xf0, 0xe4, 0x04, 0x00,
    };
+   /* applegpu-nt 32023.917 depth2d_array::sample_compare: discarded r3
+    * publishes the dynamic layer on slot 1. */
+   const uint8_t native_shadow_array[] = {
+      0x17, 0x05, 0x54, 0x06, 0x00, 0x0c,
+      0x00, 0x00, 0xf0, 0xc0, 0x04, 0x00,
+   };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    CHECK(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3B, 4, 1, 0,
                                     false, true, bytes, &len));
@@ -1695,6 +1719,10 @@ test_register_array_layer(void)
                                     false, true, bytes, &len));
    CHECK(len == sizeof(native_register) &&
          !memcmp(bytes, native_register, len));
+   CHECK(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3B, 6, 1, 0,
+                                    false, true, bytes, &len));
+   CHECK(len == sizeof(native_shadow_array) &&
+         !memcmp(bytes, native_shadow_array, len));
    return 0;
 }
 

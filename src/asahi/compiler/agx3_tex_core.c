@@ -283,6 +283,15 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
+   /* The packed-layer comparison witness uses fixed texture/sampler state
+    * and the driver's descriptor profile. Keep indexed/profile variants
+    * closed until they have their own native instructions. */
+   if (d->shadow && d->array &&
+       (tk != AGX3_TEX_OPERAND_IMMEDIATE ||
+        sk != AGX3_TEX_OPERAND_IMMEDIATE ||
+        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
+      return false;
+
    if (d->cube && (tk != 1 || sk != 1))
       return false;
 
@@ -306,11 +315,13 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       return false;
 
    /* Apple's depth2d sample_compare witness is a plain 2D implicit sample
-    * with one result component and its reference value in fixed bank 4. */
+    * with one result component and its reference value in fixed bank 4.
+    * depth2d_array uses the same comparison contract, with its layer packed
+    * separately and f77=2 selecting that array operand. */
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO ||
-        d->array || d->three_d || d->cube ||
-        d->gather != AGX3_TEX_GATHER_NONE || d->mask != 1))
+        d->three_d || d->cube || d->gather != AGX3_TEX_GATHER_NONE ||
+        d->mask != 1))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -339,6 +350,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool immediate = tk == 1 && sk == 1;
    const bool apple_fragment_abi =
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   const bool shadow_array = d->shadow && d->array;
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
 
    /* Diagnostic-only four-way matrix for the indirect implicit fragment
@@ -365,10 +377,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   if ((operand_profile & 1) || d->array || d->cube)
+   if ((operand_profile & 1) || (d->array && !shadow_array) || d->cube)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
-      112, ((operand_profile & 2) || d->array || d->cube) ? 8 : 4);
+      112, ((operand_profile & 2) || (d->array && !shadow_array) || d->cube)
+              ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -393,9 +406,13 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(76, d->cube ? 4 : d->three_d ? 3 : 1);
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
    if (d->array) {
-      ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
-      ov[n++] = (struct agx3_field_kv)KV(37, 3);
-      ov[n++] = (struct agx3_field_kv)KV(77, 1);
+      if (shadow_array) {
+         ov[n++] = (struct agx3_field_kv)KV(77, 2);
+      } else {
+         ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
+         ov[n++] = (struct agx3_field_kv)KV(37, 3);
+         ov[n++] = (struct agx3_field_kv)KV(77, 1);
+      }
    }
    ov[n++] = (struct agx3_field_kv)KV(94 + tk, tk == 1 ? d->texture : d->texture_value);
    ov[n++] = (struct agx3_field_kv)KV(123 + sk, sk == 1 ? d->sampler : d->sampler_value);

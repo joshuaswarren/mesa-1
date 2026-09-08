@@ -8667,6 +8667,61 @@ TEST_F(AGX3PackBinary, GatherRefusesUnwitnessedShapes)
    }
 }
 
+TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   agx_index compare = agx_register(2, AGX_SIZE_32);
+   compare.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D_ARRAY, AGX_LOD_MODE_AUTO_LOD, 0,
+      false, true, false, AGX_GATHER_NONE, false);
+   I->mask = 1;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 8, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 10, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 12, 1, 0, false, true,
+                                          bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 4, 2, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_TEX_W32;
+   d.mask = 1;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   d.array = true;
+   d.array_layer = 12;
+   d.shadow = true;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1, bytes, &len));
+   append(want, bytes, len);
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
 TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
