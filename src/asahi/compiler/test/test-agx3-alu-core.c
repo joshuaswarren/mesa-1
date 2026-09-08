@@ -1513,6 +1513,49 @@ static void test_native_minifloat_mixed_select(void)
    puts("Native minifloat mixed select: six exact Apple vectors and bounds PASS");
 }
 
+static void test_native_fadd_abs_mixed_half(void)
+{
+   static const struct {
+      uint16_t dest, f32, f16, wait;
+      enum agx3_alu_hint hint32, hint16;
+      bool dest_cache;
+      const char *bytes;
+   } vectors[] = {
+      {0, 0, 4, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011c04020000800100"},
+      {0, 0, 4, 1, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_CACHE, false,
+       "09010c84022000000100"},
+      {0, 2, 0, 32, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD, false,
+       "09031400020000800100"},
+      {0, 0, 2, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, true,
+       "09013c02020000800100"},
+      {0, 2, 3, 1, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, false,
+       "09030402122000000100"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fadd_abs_mixed_half(
+         AGX_ISA_ENCODING_AGX3B, vectors[i].dest, vectors[i].f32,
+         vectors[i].f16, vectors[i].hint32, vectors[i].hint16,
+         vectors[i].dest_cache, vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   assert(agx3_alu_fadd_abs_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 8, 8, 28, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_abs_mixed_half(
+      AGX_ISA_ENCODING_AGX3C, 8, 8, 28, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_abs_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 9, 8, 28, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_abs_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 8, 8, 28, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_CACHE, false, 64, bytes, &len));
+   puts("Native abs-f32 plus half add: five exact Apple vectors and bounds PASS");
+}
+
 static void test_native_half_add(void)
 {
    {
@@ -2377,6 +2420,7 @@ int main(void){
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
    test_native_minifloat_mixed_select();
+   test_native_fadd_abs_mixed_half();
    test_native_half_fma();
    test_native_narrow_multiply();
    test_native_sqrt_step();

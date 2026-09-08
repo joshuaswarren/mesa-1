@@ -790,6 +790,27 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index f32 = agx_register(8, AGX_SIZE_32);
+   f32.abs = true;
+   f32.discard = true;
+   agx_index f16 = agx_register(28, AGX_SIZE_16);
+   f16.cache = true;
+   agx_fadd_to(b, agx_register(8, AGX_SIZE_32), f32, f16);
+   agx_stop(b);
+   const auto code = pack(b);
+   ASSERT_EQ(code.size(), 14u);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   f32 = agx_register(8, AGX_SIZE_32);
+   f32.abs = f32.neg = true;
+   agx_fadd_to(b, agx_register(8, AGX_SIZE_32), f32, f16);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

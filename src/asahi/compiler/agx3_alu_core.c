@@ -574,6 +574,42 @@ agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_alu_fadd_abs_mixed_half(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t f32, uint16_t f16,
+   enum agx3_alu_hint hint32, enum agx3_alu_hint hint16, bool dest_cache,
+   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       f32 >= 256 || f16 >= 256 || ((dest | f32) & 1) ||
+       (unsigned)hint32 > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hint16 > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Fresh G17P Metal output uses f32add.ep3 directly: the first source is
+    * absolute f32, while the second retains its physical half register. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {25, 2}, {26, 2}, {30, 1}, {42, 2}, {43, 1},
+   };
+   struct agx3_field_kv fields[15] = {
+      {2, dest},
+      {11, dest_cache},
+      {18, f32},
+      {35, f16},
+      {27, hint32 == AGX3_ALU_HINT_CACHE},
+      {29, hint32 == AGX3_ALU_HINT_DISCARD},
+      {44, hint16 == AGX3_ALU_HINT_CACHE},
+      {46, hint16 == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned i = 0; i < 6; ++i)
+      fields[8 + i] = (struct agx3_field_kv){52 + i,
+                                            !!(wait_mask & (1u << i))};
+
+   return agx3_bind_compose(enc, "f32add", 3, base, 7, fields, 14, out,
+                            len);
+}
+
+bool
 agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t f32, uint16_t f16,
                          enum agx3_alu_hint hint32,

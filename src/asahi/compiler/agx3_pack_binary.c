@@ -7142,6 +7142,32 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* G17P adds an absolute f32 source directly to a scalar-half
+          * register. Keep the half in its assigned register rather than
+          * widening it through a temporary. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_vary_reg32(I->dest[0]) &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_mod_src_ok(I->src[0]) &&
+             agx_channels(I->src[0]) == 1 && I->src[0].abs &&
+             !I->src[0].neg && agx3_half_reg(I->src[1]) &&
+             agx_channels(I->src[1]) == 1 && !I->src[1].abs &&
+             !I->src[1].neg) {
+            const agx_index dst = I->dest[0], f32 = I->src[0],
+                            f16 = I->src[1];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (f32.kill || f16.kill || (f32.cache && f32.discard) ||
+                (f16.cache && f16.discard) ||
+                !agx3_alu_fadd_abs_mixed_half(
+                   enc, dst.value, f32.value, f16.value,
+                   agx3_post_ra_hint(f32), agx3_post_ra_hint(f16), dst.cache,
+                   wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Modified G17P ADD/FMA carry their native dependency waits and the
           * actual post-RA hints, without draining unrelated texture slots. */
          const int mod = agx3_try_float_modifier(emission, enc, I, wait);
