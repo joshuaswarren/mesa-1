@@ -29,6 +29,7 @@ same(const struct agx3_tex_fetch_desc *a,
           a->wait_mask == b->wait_mask && a->coord_kill == b->coord_kill &&
           a->final == b->final &&
           a->array == b->array &&
+          a->multisample == b->multisample && a->sample == b->sample &&
           (a->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
              (b->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) &&
           (a->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
@@ -1450,11 +1451,90 @@ test_register_array_layer(void)
    return 0;
 }
 
+static int
+test_multisample_fetch(void)
+{
+   /* A18 Pro own-MSL texture2d_ms reads, isolated for samples 0..3. */
+   static const uint8_t native[4][14] = {
+      {0x05,0x80,0x0c,0xb8,0xb0,0x00,0x80,0x14,0,0,0,0,1,0},
+      {0x05,0x80,0x0c,0xb8,0xb0,0x02,0x80,0x14,0,0,0,0,1,0},
+      {0x05,0x80,0x0c,0xb8,0xb0,0x04,0x80,0x14,0,0,0,0,1,0},
+      {0x05,0x80,0x0c,0xb8,0xb0,0x06,0x80,0x14,0,0,0,0,1,0},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   struct agx3_tex_fetch_desc d = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .multisample = true,
+   };
+
+   for (d.sample = 0; d.sample < 4; ++d.sample) {
+      CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+      CHECK(len == sizeof(native[d.sample]));
+      CHECK(!memcmp(bytes, native[d.sample], len));
+   }
+
+   d.sample = 4;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sample = 0;
+   d.coord = 16;
+   d.array = true;
+   d.texture = 1;
+   d.wait_mask = 2;
+   static const uint8_t native_ms_array[14] = {
+      0x05,0x80,0x0c,0xb9,0x30,0x01,0xd9,0x11,0x80,0,0,0,1,0,
+   };
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(len == sizeof(native_ms_array) &&
+         !memcmp(bytes, native_ms_array, len));
+   d.sample = 1;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sample = 0;
+   d.coord = 0;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.array = false;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes, &len));
+   d.multisample = false;
+   d.sample = 1;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sample = 0;
+   d.multisample = true;
+   d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_value = 2;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   return 0;
+}
+
+static int
+test_multisample_sample_stage(void)
+{
+   /* Own-MSL buffer-indexed sample: discarded r2h is published before the
+    * otherwise sample-0 texture2d_ms read. */
+   static const uint8_t native[] = {
+      0x17,0x05,0x54,0x04,0x00,0x00,
+      0x00,0x00,0xd0,0xc0,0x08,0x00,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                  false, true, bytes, &len));
+   CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
+                                   false, false, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0,
+                                   false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0x40,
+                                   false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                   true, true, bytes, &len));
+   return 0;
+}
+
 int
 main(void)
 {
    if (test_register_lod() || test_fetch_lod() ||
-       test_register_array_layer() ||
+       test_register_array_layer() || test_multisample_fetch() ||
+       test_multisample_sample_stage() ||
        test_staging_source_lifetime() || test_exact_witnesses() ||
        test_supported_axes() || test_fail_closed() ||
        test_sample_witnesses() || test_copy_witnesses() ||

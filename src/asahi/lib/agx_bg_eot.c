@@ -179,12 +179,28 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
                NULL, NULL, false, cache->dev->chip == AGX_CHIP_G17P);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
-      if (cache->dev->chip == AGX_CHIP_G17P)
-         NIR_PASS(_, shader, agx_nir_lower_g17p_tile_samples,
-                  tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_texture);
       NIR_PASS(_, shader, nir_shader_intrinsics_pass, lower_tex_handle_to_u0,
                nir_metadata_control_flow, &descriptor_size);
+      if (cache->dev->chip == AGX_CHIP_G17P) {
+         /* Monolithic MSAA introduces a small sample loop after the common
+          * preprocessing pass has already run. Fold that loop here so each
+          * local-pixel access has the static one-hot sample mask required by
+          * the native G17P tile selector. */
+         bool progress;
+         do {
+            progress = false;
+            NIR_PASS(progress, shader, nir_lower_vars_to_ssa);
+            NIR_PASS(progress, shader, nir_opt_copy_prop);
+            NIR_PASS(progress, shader, nir_opt_constant_folding);
+            NIR_PASS(progress, shader, nir_opt_loop_unroll);
+            NIR_PASS(progress, shader, nir_opt_dead_cf);
+            NIR_PASS(progress, shader, nir_opt_dce);
+         } while (progress);
+
+         NIR_PASS(_, shader, agx_nir_lower_g17p_tile_samples,
+                  tib->nr_samples);
+      }
    }
 
    struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);

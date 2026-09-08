@@ -1012,6 +1012,7 @@ test_g17p_basic_graphics_program(void)
       {1, 0x04},   {64, 0x04},  {65, 0x00},  {128, 0x00},
       {129, 0x00}, {192, 0x00}, {193, 0x02}, {256, 0x02},
       {257, 0x02}, {320, 0x02}, {321, 0x06}, {344, 0x06},
+      {392, 0x06}, {512, 0x06},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(proven_fetch_lines); ++i) {
       boundary.shader_binary_size = proven_fetch_lines[i].size;

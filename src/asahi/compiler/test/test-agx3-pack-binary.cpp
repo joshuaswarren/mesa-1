@@ -3150,6 +3150,113 @@ TEST_F(AGX3PackBinary, TextureFetchRefusesUngroundedAxes)
    pack(b, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, TextureFetch2DMSPackedSample)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   agx_index coord = agx_register(16, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D_MS,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE,
+      false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3B, 0, 16, 1,
+                                         0, false, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3B, 2, 18, 1,
+                                         0, false, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 20, 0,
+                                        false, true, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_fetch_desc fetch = {
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .multisample = true,
+   };
+   ASSERT_TRUE(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &fetch,
+                                     bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, TextureFetch2DMSArrayBindless)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   agx_index coord = agx_register(16, AGX_SIZE_32);
+   agx_index texture = agx_register(6, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_uniform(8, AGX_SIZE_64),
+      texture, agx_immediate(0), agx_null(), AGX_DIM_2D_MS_ARRAY,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE,
+      false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3B, 16, 16, 2,
+                                         0, false, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3B, 18, 18, 2,
+                                         0, false, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3B, 20, 2, 0,
+                                          false, true, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_tex_fetch_desc fetch = {
+      .dest = 8, .coord = 16, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 2, .coord_kill = true, .final = true,
+      .array = true, .multisample = true,
+      .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+      .texture_value = 6,
+   };
+   ASSERT_TRUE(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &fetch,
+                                     bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* The MS-array native form is G17P-only and requires its packed layer. */
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   dest = agx_register(8, AGX_SIZE_32);
+   coord = agx_register(16, AGX_SIZE_32);
+   texture = agx_register(6, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_uniform(8, AGX_SIZE_64),
+      texture, agx_immediate(0), agx_null(), AGX_DIM_2D_MS_ARRAY,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE,
+      false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+   pack(b, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
 {
    for (int e = 0; e < 2; ++e) {

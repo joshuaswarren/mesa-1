@@ -314,7 +314,7 @@ static bool
 hk_g17p_bg_eot_shader_supported(const struct agx_bg_eot_shader *shader)
 {
    return shader && shader->bo && shader->bo->va && shader->ptr != 0 &&
-          shader->info.binary_size > 0 && shader->info.binary_size <= 256 &&
+          shader->info.binary_size > 0 && shader->info.binary_size <= 512 &&
           shader->info.main_offset < shader->info.binary_size &&
           shader->info.main_size <=
              shader->info.binary_size - shader->info.main_offset &&

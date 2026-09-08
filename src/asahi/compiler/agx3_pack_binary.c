@@ -895,6 +895,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
       agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_32 &&
       agx_channels(I->src[1]) == 1;
+   const bool ms_2d = I->dim == AGX_DIM_2D_MS;
+   const bool ms_array = I->dim == AGX_DIM_2D_MS_ARRAY;
    const bool bindless_image = I->op == AGX_OPCODE_IMAGE_LOAD && !immediate &&
       agx3_tex_plain_reg(I->src[3]) && I->src[3].size == AGX_SIZE_64 &&
       agx_channels(I->src[3]) == 1 && !(I->src[3].value & 1) &&
@@ -905,6 +907,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * staging slot 2, then issues the texture result on slot 1. Keep those two
     * independent scoreboard domains; reusing slot 1 for both is not a native
     * dependency shape. */
+   const uint8_t staging_slot =
+      ms_array ? 2 : register_lod ? 2 : slot;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -913,23 +917,33 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
-       agx_channels(I->src[0]) != (I->dim == AGX_DIM_2D_ARRAY ? 3 : 2) ||
+       agx_channels(I->src[0]) !=
+          ((I->dim == AGX_DIM_2D_ARRAY || ms_array || ms_2d) ? 3 : 2) ||
        (stage_coordinates ? ((I->src[0].value & 1) ||
          I->src[0].value + 2 * agx_channels(I->src[0]) > 256) :
          ((I->src[0].value & 3) || I->src[0].value > 60)) ||
-       (!(I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
-          agx3_tex_imm(I->src[1], 0)) && !immediate_lod && !register_lod) ||
+       ((ms_array || ms_2d)
+           ? !agx3_tex_imm(I->src[1], 0)
+           : (!(I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
+                agx3_tex_imm(I->src[1], 0)) &&
+              !immediate_lod && !register_lod)) ||
+       ((ms_array || ms_2d) && I->lod_mode != AGX_LOD_MODE_AUTO_LOD) ||
        (register_lod && !stage_coordinates) ||
-       (!agx3_tex_imm(I->src[2], 0) && !bindless_image) ||
+       !(agx3_tex_imm(I->src[2], 0) ||
+         (ms_array && agx3_tex_plain_uniform64(I->src[2])) ||
+         bindless_image) ||
        (immediate ? I->src[3].value > 15 :
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (I->src[3].type != AGX_INDEX_REGISTER && I->src[3].type != AGX_INDEX_UNIFORM) ||
-         I->src[3].size != AGX_SIZE_64 || agx_channels(I->src[3]) != 1 ||
+         (I->src[3].size != AGX_SIZE_64 &&
+          !(ms_array && I->src[3].size == AGX_SIZE_32)) ||
+         agx_channels(I->src[3]) != 1 ||
          (I->src[3].value & 1) || I->src[3].value > 252)) ||
        I->src[3].memory || I->src[3].abs || I->src[3].neg ||
        !agx3_tex_imm(I->src[4], 0) ||
        !agx_is_null(I->src[5]) ||
-       (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
+       (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY &&
+        !ms_2d && !ms_array) ||
        (enc == AGX_ISA_ENCODING_AGX3B ? (!I->mask || (I->mask & ~15u))
                                     : (I->mask != 1 && I->mask != 15)) ||
        I->offset || I->shadow ||
@@ -940,8 +954,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * them disjoint from imgwci's halves0/2. Native read-only indexed images,
     * like ordinary texture loads, use the bank0 coordinate ABI. */
    const uint16_t staging_coord =
-      I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image ? 16 : 0;
-   const uint8_t staging_slot = register_lod ? 2 : slot;
+      (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image) || ms_array ? 16 : 0;
    if (register_lod && slot != 1)
       return false;
    if (stage_coordinates) {
@@ -957,7 +970,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
          staging_wait = 0;
       }
 
-      for (unsigned i = 0; i < agx_channels(I->src[0]); i++) {
+      const unsigned plain_coords =
+         (ms_2d || ms_array) ? 2 : agx_channels(I->src[0]);
+      for (unsigned i = 0; i < plain_coords; i++) {
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
                                   I->src[0].value + 2 * i,
@@ -966,6 +981,31 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                                   enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard,
                                   copy, &copy_len) ||
              !agx3_append(emission, copy, copy_len))
+            return false;
+      }
+
+      /* The lowered MS-array coordinate packs sample in the low half and
+       * layer in the high half of its third word. Native publishes that word
+       * through the same PACK_SMPIR array operand as ordinary array fetches. */
+      if (ms_array) {
+         uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
+         if (!agx3_tex_stage_array_layer(
+                enc, I->src[0].value + 4, staging_slot, 0,
+                I->src[0].cache, I->src[0].discard,
+                packed, &packed_len) ||
+             !agx3_append(emission, packed, packed_len))
+            return false;
+      }
+
+      /* For non-array MSAA, the third 32-bit coordinate is the sample index.
+       * Publish it through native's dedicated integer PACK_SMPIR operand. */
+      if (ms_2d) {
+         uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
+         if (!agx3_tex_stage_ms_sample(
+                enc, I->src[0].value + 4, 0,
+                I->src[0].cache, I->src[0].discard,
+                packed, &packed_len) ||
+             !agx3_append(emission, packed, packed_len))
             return false;
       }
    }
@@ -986,7 +1026,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       .wait_mask = stage_coordinates ? (1u << (staging_slot - 1)) : wait_mask,
       .coord_kill = stage_coordinates || I->src[0].kill,
       .final = final,
-      .array = I->dim == AGX_DIM_2D_ARRAY,
+      .array = I->dim == AGX_DIM_2D_ARRAY || ms_array,
+      .multisample = ms_2d || ms_array,
       .lod_x64 = immediate_lod ? I->src[1].value * 64 : 0,
       .register_lod = register_lod,
    };
@@ -4466,6 +4507,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * the generic round-robin starting point. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_LD_TILE)
             e->preferred_slot = 6;
+         /* Native multisample reloads keep the texture result on slot 1 and
+          * publish the packed sample/layer coordinate independently on slot
+          * 2. This prevents the fetch from waiting on its own generation. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_TEXTURE_LOAD &&
+             (I->dim == AGX_DIM_2D_MS ||
+              I->dim == AGX_DIM_2D_MS_ARRAY))
+            e->preferred_slot = 1;
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
              vertex_loads_scheduled++ == 0)
             e->preferred_slot = 6;
@@ -4754,19 +4803,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                 ctx->stage == MESA_SHADER_COMPUTE;
             if (staged) {
                const unsigned coord_base =
-                  I->op == AGX_OPCODE_IMAGE_LOAD &&
-                        I->src[2].type == AGX_INDEX_IMMEDIATE
+                  (I->op == AGX_OPCODE_IMAGE_LOAD &&
+                   I->src[2].type == AGX_INDEX_IMMEDIATE) ||
+                        I->dim == AGX_DIM_2D_MS_ARRAY
                      ? 16
                      : 0;
+               const unsigned coord_count =
+                  (I->dim == AGX_DIM_2D_MS ||
+                   I->dim == AGX_DIM_2D_MS_ARRAY)
+                     ? 2
+                     : agx_channels(I->src[0]);
                ctx->agx3_staging_halfs = MAX2(
                   ctx->agx3_staging_halfs,
-                  coord_base + 2 * agx_channels(I->src[0]));
+                  coord_base + 2 * coord_count);
             }
             else
                ctx->agx3_staging_known = false;
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
-            if (!agx3_emit_texture_fetch(emission, enc, I, slot, wait, final, staged))
+            const uint16_t fetch_wait =
+               wait | ((I->dim == AGX_DIM_2D_MS ||
+                         I->dim == AGX_DIM_2D_MS_ARRAY)
+                          ? (outstanding_here & 1u)
+                          : 0);
+            if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
+                                         final, staged))
                AGX3_REFUSE(I);
             continue;
          }

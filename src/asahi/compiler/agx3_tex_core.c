@@ -32,6 +32,16 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        d->texture > 15)
       return false;
 
+   /* A18 Pro witnesses both 2D-MS and 2D-MS-array reads.  The non-array
+    * form uses staging halves 0/2 and carries a bounded immediate sample.
+    * The array form uses halves 16/18 and PACK_SMPIR publishes the packed
+    * sample/layer word separately. */
+   if ((d->sample && !d->multisample) ||
+       (d->multisample &&
+        (enc != AGX_ISA_ENCODING_AGX3B || d->sample > 3 ||
+         (d->array && d->sample) || d->coord != (d->array ? 16 : 0))))
+      return false;
+
    const unsigned tk = d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    const unsigned sk = d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    if (tk > AGX3_TEX_OPERAND_UNIFORM || sk > AGX3_TEX_OPERAND_UNIFORM ||
@@ -39,13 +49,16 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
         ((d->texture_value & 1) || d->texture_value > 252)) ||
        (sk == AGX3_TEX_OPERAND_IMMEDIATE ? d->sampler_value > 15
          : ((d->sampler_value & 1) || d->sampler_value > 252)) ||
-       (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER))
+       (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
+       (d->multisample &&
+        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0)))
       return false;
 
    /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
     * immediate at all, and is witnessed on AGX3b only. */
    if (d->lod_x64 > 2047 || (d->register_lod && d->lod_x64) ||
-       (d->register_lod && enc != AGX_ISA_ENCODING_AGX3B))
+       (d->register_lod && enc != AGX_ISA_ENCODING_AGX3B) ||
+       (d->multisample && (d->lod_x64 || d->register_lod)))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -103,17 +116,21 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(19, d->coord);
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot);
    ov[n++] = (struct agx3_field_kv)KV(27, d->coord_kill ? 1 : 0);
-   /* An immediate level carries the operand (f37) and the level in f29; the
-    * per-lane level has neither and selects f139 = 4 below. */
-   if (!d->register_lod) {
+   /* MS-array names its packed third coordinate with f29=2. Non-MS fetches
+    * use f29 for immediate LOD and f37 to mark that operand. */
+   if (d->multisample && d->array) {
+      ov[n++] = (struct agx3_field_kv)KV(29, 2);
       ov[n++] = (struct agx3_field_kv)KV(37, 1);
+   } else if (!d->register_lod) {
+      ov[n++] = (struct agx3_field_kv)KV(37, d->multisample ? 0 : 1);
       if (d->lod_x64)
          ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
    }
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
-   ov[n++] = (struct agx3_field_kv)KV(76, 1);  /* 2D */
+   ov[n++] = (struct agx3_field_kv)KV(76, d->multisample ? 2 : 1);
    if (d->array)
-      ov[n++] = (struct agx3_field_kv)KV(77, 2); /* array, register layer */
+      ov[n++] = (struct agx3_field_kv)KV(
+         77, d->multisample ? 1 : 2); /* MS array vs register-layer array */
    ov[n++] = (struct agx3_field_kv)KV(78, 1);  /* texel fetch */
    /* Each operand lands in the field its kind selects: 95/96/97 for the
     * texture, 124/125/126 for the sampler. */
@@ -128,7 +145,8 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
                                          : 126,
       d->sampler_value);
    ov[n++] = (struct agx3_field_kv)KV(107, d->texture_kill);
-   ov[n++] = (struct agx3_field_kv)KV(139, d->register_lod ? 4 : 2);
+   ov[n++] = (struct agx3_field_kv)KV(
+      139, d->multisample ? 0 : d->register_lod ? 4 : 2);
    if (enc == AGX_ISA_ENCODING_AGX3B)
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);
    else {
@@ -152,6 +170,17 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;
       return false;
+   }
+
+   if (d->multisample && !d->array) {
+      /* Own-MSL reads of samples 0..3 isolate this two-bit immediate: byte 5
+       * is 00/02/04/06 while the remaining sample-0 instruction is fixed. */
+      if (out[5] & 0x06) {
+         memset(out, 0, AGX3_TEX_MAX_LENGTH);
+         *len = 0;
+         return false;
+      }
+      out[5] |= d->sample << 1;
    }
    return true;
 }
@@ -720,4 +749,39 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+/* Own-MSL texture2d_ms reads publish a variable integer sample with this
+ * distinct PACK_SMPIR before the otherwise sample-0 MS fetch. The exact
+ * discarded-r2h witness is 1705540400000000d0c00800. */
+bool
+agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
+                         uint16_t wait_mask, bool src_cache,
+                         bool src_discard,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 ||
+       (wait_mask & ~0x3f) || (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(9, 5),  KV(10, 2), KV(12, 1), KV(23, 2), KV(24, 1), KV(37, 1),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 9), KV(75, 12),
+      KV(76, 1), KV(77, 16),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(5, src);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }

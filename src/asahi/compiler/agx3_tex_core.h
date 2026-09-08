@@ -84,6 +84,8 @@ struct agx3_tex_fetch_desc {
    bool coord_kill;
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer in the register after the pair */
+   bool multisample;    /* 2D MS read; sample/layer may be staged separately */
+   uint8_t sample;      /* immediate non-array sample index, values 0..3 */
    bool texture_kill;   /* Last use of an indirect texture index */
    /* Operand kinds. Zero is treated as IMMEDIATE so existing callers, which
     * set only `texture`, keep their exact previous encoding. */
@@ -280,6 +282,14 @@ bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish a register-valued integer 2D-MS sample index into the sampler
+ * operand bank. The following MS fetch uses the sample-0 instruction form;
+ * the staged value selects the sample. */
+bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
+                              uint16_t wait_mask, bool src_cache,
+                              bool src_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
                             const struct agx3_tex_sample_desc *d,
