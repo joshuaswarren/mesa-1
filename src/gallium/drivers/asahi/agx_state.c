@@ -18,6 +18,7 @@
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
 #include "asahi/lib/agx_vdm_barrier_core.h"
+#include "asahi/lib/agx_vdm_stream_link_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "asahi/libagx/compression.h"
@@ -4196,10 +4197,28 @@ agx_ensure_cmdbuf_has_space(struct agx_batch *batch, struct agx_encoder *enc,
     * by the batch to simplify lifetime management for the BO.
     */
    size_t size = 65536;
-   struct agx_ptr T = agx_pool_alloc_aligned(&batch->pool, size, 256);
+   struct agx_bo *target_bo = NULL;
+   struct agx_ptr T = agx_pool_alloc_aligned_with_bo(
+      &batch->pool, size, 256, &target_bo);
 
    /* Jump from the old command buffer to the new command buffer */
-   agx_cs_jump((uint32_t *)enc->current, T.gpu, vdm);
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   if (vdm && dev->chip == AGX_CHIP_G17P) {
+      const uint64_t alias =
+         agx_batch_get_g17p_vdm_alias(batch, target_bo, T.gpu);
+      uint32_t compact = 0;
+      struct agx_vdm_stream_link_core link;
+      const bool packed = agx_g17p_vdm_alias_compact(alias, &compact) &&
+                          agx_vdm_stream_link_core_pack(dev->chip, compact,
+                                                       &link);
+      assert(packed);
+      if (!packed)
+         return;
+
+      memcpy(enc->current, link.bytes, link.length);
+   } else {
+      agx_cs_jump((uint32_t *)enc->current, T.gpu, vdm);
+   }
 
    /* Swap out the command buffer */
    enc->current = T.cpu;
