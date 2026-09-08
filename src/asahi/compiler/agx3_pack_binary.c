@@ -5395,6 +5395,70 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Hyprland's blur/mask paths compare f32 against a minifloat and
+          * select either one full register plus zero, or two half-width byte
+          * constants. Both shapes are direct native FSEL forms. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             !I->saturate &&
+             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT) &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             (I->dest[0].size == AGX_SIZE_16 ||
+              I->dest[0].size == AGX_SIZE_32) &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[0]) &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].value <= UINT8_MAX &&
+             ((I->dest[0].size == AGX_SIZE_16 &&
+               I->src[2].type == AGX_INDEX_IMMEDIATE &&
+               I->src[3].type == AGX_INDEX_IMMEDIATE) ||
+              (I->dest[0].size == AGX_SIZE_32 &&
+               ((I->src[2].type == AGX_INDEX_IMMEDIATE) !=
+                (I->src[3].type == AGX_INDEX_IMMEDIATE))))) {
+            const bool dest_16 = I->dest[0].size == AGX_SIZE_16;
+            bool selected_immediate[2];
+            uint16_t selected[2];
+            enum agx3_alu_hint hints[3] = {
+               agx3_post_ra_hint(I->src[0]),
+               AGX3_ALU_HINT_NONE,
+               AGX3_ALU_HINT_NONE,
+            };
+            bool invalid = false;
+            for (unsigned i = 0; i < 4; ++i)
+               invalid |= I->src[i].memory || I->src[i].abs ||
+                          I->src[i].neg || I->src[i].kill ||
+                          (I->src[i].cache && I->src[i].discard) ||
+                          agx_channels(I->src[i]) != 1;
+            for (unsigned i = 0; i < 2; ++i) {
+               const agx_index value = I->src[i + 2];
+               selected_immediate[i] = value.type == AGX_INDEX_IMMEDIATE;
+               invalid |= selected_immediate[i]
+                             ? value.value > UINT8_MAX
+                             : (!agx3_src_is_register(value) ||
+                                value.size != I->dest[0].size);
+               selected[i] = value.value;
+               if (!selected_immediate[i])
+                  hints[i + 1] = agx3_post_ra_hint(value);
+            }
+
+            uint16_t fsel_wait = wait;
+            if (fsel_wait != 0 && fsel_wait != 32) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (invalid ||
+                !agx3_alu_fcmp_minifloat_select_mixed(
+                   enc, I->dest[0].value, I->src[0].value,
+                   I->src[1].value, selected, selected_immediate, hints,
+                   I->fcond, dest_16, I->dest[0].cache, fsel_wait, bytes,
+                   &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Native scalar half comparison/select.  This is the general
           * shaderFloat16 ternary form: compare two half registers and select
           * either of two half registers without widening or materializing a

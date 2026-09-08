@@ -103,6 +103,15 @@ bool agx3_alu_fcmp_minifloat_select_half(
    unsigned condition, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Compare f32 against a minifloat and select the observed mixed register /
+ * byte-immediate result shapes used by Hyprland shaders. */
+bool agx3_alu_fcmp_minifloat_select_mixed(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
+   uint8_t minifloat, const uint16_t selected[2],
+   const bool selected_immediate[2], const enum agx3_alu_hint hints[3],
+   unsigned condition, bool dest_16, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Plain f32 register FADD/FMUL/FMA with actual post-RA source hints and
  * scheduler waits. Compact witnessed forms only; unsupported wait combinations
  * return false so the caller can retire them explicitly before retrying. */

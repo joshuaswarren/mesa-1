@@ -838,6 +838,93 @@ agx3_alu_fcmp_minifloat_select_half(
    return false;
 }
 
+bool
+agx3_alu_fcmp_minifloat_select_mixed(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
+   uint8_t minifloat, const uint16_t selected[2],
+   const bool selected_immediate[2], const enum agx3_alu_hint hints[3],
+   unsigned condition, bool dest_16, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !selected ||
+       !selected_immediate || !hints || !out || !len || dest >= 256 ||
+       compare >= 256 || (compare & 1) || (!dest_16 && (dest & 1)) ||
+       (condition != 0 && condition != 1) ||
+       (wait_mask != 0 && wait_mask != 32) ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   /* The observed half result selects two byte constants; the full result
+    * selects exactly one full register and one byte constant. */
+   if (dest_16 ? (!selected_immediate[0] || !selected_immediate[1])
+               : (selected_immediate[0] == selected_immediate[1]))
+      return false;
+
+   for (unsigned i = 0; i < 2; ++i) {
+      if (selected[i] >= 256 ||
+          (selected_immediate[i]
+              ? hints[i + 1] != AGX3_ALU_HINT_NONE
+              : ((!dest_16 && (selected[i] & 1)) ||
+                 (unsigned)hints[i + 1] > AGX3_ALU_HINT_CACHE)))
+         return false;
+   }
+
+   struct agx3_field_kv base[11];
+   unsigned nbase = 0;
+   if (dest_16) {
+      base[nbase++] = (struct agx3_field_kv){10, 2};
+      base[nbase++] = (struct agx3_field_kv){11, 1};
+   } else {
+      base[nbase++] = (struct agx3_field_kv){0, 1};
+      base[nbase++] = (struct agx3_field_kv){24, 2};
+      base[nbase++] = (struct agx3_field_kv){25, 2};
+   }
+   base[nbase++] = (struct agx3_field_kv){42, 2};
+   base[nbase++] = (struct agx3_field_kv){43, 2};
+   base[nbase++] = (struct agx3_field_kv){59, 1};
+   base[nbase++] = (struct agx3_field_kv){60, 2};
+   base[nbase++] = (struct agx3_field_kv){76,
+                                          selected_immediate[0] ? 1 : 2};
+   base[nbase++] = (struct agx3_field_kv){77, dest_16 ? 1 : 2};
+   base[nbase++] = (struct agx3_field_kv){93,
+                                          selected_immediate[1] ? 1 : 2};
+   base[nbase++] = (struct agx3_field_kv){94, dest_16 ? 1 : 2};
+   struct agx3_field_kv fields[16] = {
+      {dest_16 ? 3 : 17, dest},
+      {dest_16 ? 12 : 26, dest_cache},
+      {35, compare},
+      {51, minifloat},
+      {selected_immediate[0] ? 68 : 69, selected[0]},
+      {selected_immediate[1] ? 85 : 86, selected[1]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {107, wait_mask == 32},
+      {110, condition},
+   };
+   unsigned n = 10;
+   const unsigned cache[] = {78, 95}, discard[] = {80, 97};
+   for (unsigned i = 0; i < 2; ++i) {
+      if (!selected_immediate[i]) {
+         fields[n++] = (struct agx3_field_kv){cache[i],
+                                              hints[i + 1] == AGX3_ALU_HINT_CACHE};
+         fields[n++] = (struct agx3_field_kv){discard[i],
+                                              hints[i + 1] == AGX3_ALU_HINT_DISCARD};
+      }
+   }
+
+   const unsigned preferred = dest_16 ? ((dest & 1) ? 26 : 25) : 22;
+   if (agx3_bind_compose(enc, "fsel", preferred, base, nbase, fields, n,
+                         out, len))
+      return true;
+   for (unsigned ep = 0; ep < 28; ++ep) {
+      if (ep != preferred &&
+          agx3_bind_compose(enc, "fsel", ep, base, nbase, fields, n, out,
+                            len))
+         return true;
+   }
+   return false;
+}
+
 /* Compare a half/full float register with floating zero, selecting full float
  * registers. The three source lifetimes are independent (including aliases).
  * Native Metal uses these compact forms for mixed-precision shader selects. */

@@ -1383,6 +1383,108 @@ static void test_native_half_multiply_minifloat(void)
    puts("Native half/minifloat multiply: eight exact Apple vectors and bounds PASS");
 }
 
+static void test_native_minifloat_mixed_select(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   {
+      const uint16_t selected[] = {2, 0};
+      const bool immediate[] = {false, true};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, selected, immediate, hints,
+         1, false, false, 32, bytes, &len));
+      exact(bytes, len, "02010bb1020203c22080");
+   }
+   {
+      const uint16_t selected[] = {4, 0};
+      const bool immediate[] = {false, true};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, selected, immediate, hints,
+         1, false, true, 32, bytes, &len));
+      exact(bytes, len, "02012bb1020403c22080");
+   }
+   {
+      const uint16_t selected[] = {0, 2};
+      const bool immediate[] = {true, false};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0x40, selected, immediate, hints,
+         1, false, false, 32, bytes, &len));
+      exact(bytes, len, "02010bc1228003c20002");
+   }
+   {
+      const uint16_t selected[] = {255, 0};
+      const bool immediate[] = {true, true};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 2, 2, 0x30, selected, immediate, hints,
+         0, true, false, 32, bytes, &len));
+      exact(bytes, len, "12030db1a6ff00c22080");
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 2, 2, 0x30, selected, immediate, hints,
+         1, true, false, 32, bytes, &len));
+      exact(bytes, len, "12030db1a2ff03c22080");
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 3, 2, 0x30, selected, immediate, hints,
+         0, true, false, 32, bytes, &len));
+      exact(bytes, len, "1a030db1a6ff00c22080");
+   }
+
+   const uint16_t selected[] = {2, 0};
+   const bool immediate[] = {false, true};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   assert(!agx3_alu_fcmp_minifloat_select_mixed(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 0x30, selected, immediate, hints, 1,
+      false, false, 0, bytes, &len));
+   assert(!agx3_alu_fcmp_minifloat_select_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, selected, immediate, hints, 2,
+      false, false, 0, bytes, &len));
+   /* The three measured Hyprland post-RA physical-register shapes. */
+   {
+      const uint16_t blur_selected[] = {24, 0};
+      const bool blur_immediate[] = {false, true};
+      const enum agx3_alu_hint blur_hints[] = {
+         AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 24, 20, 0x30, blur_selected,
+         blur_immediate, blur_hints, 1, false, true, 0, bytes, &len));
+   }
+   {
+      const uint16_t ext_selected[] = {255, 0};
+      const bool ext_immediate[] = {true, true};
+      const enum agx3_alu_hint ext_hints[] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 1, 14, 0x30, ext_selected,
+         ext_immediate, ext_hints, 0, true, true, 0, bytes, &len));
+   }
+   {
+      const uint16_t glitch_selected[] = {0, 2};
+      const bool glitch_immediate[] = {true, false};
+      const enum agx3_alu_hint glitch_hints[] = {
+         AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 2, 22, 0x40, glitch_selected,
+         glitch_immediate, glitch_hints, 1, false, true, 0, bytes, &len));
+   }
+   puts("Native minifloat mixed select: six exact Apple vectors and bounds PASS");
+}
+
 static void test_native_half_add(void)
 {
    {
@@ -2245,6 +2347,7 @@ int main(void){
    test_native_half_add();
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
+   test_native_minifloat_mixed_select();
    test_native_half_fma();
    test_native_narrow_multiply();
    test_native_sqrt_step();

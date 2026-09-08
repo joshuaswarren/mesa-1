@@ -737,6 +737,59 @@ TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index compare = agx_register(4, AGX_SIZE_32);
+   compare.cache = true;
+   agx_index selected = agx_register(2, AGX_SIZE_32);
+   selected.cache = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_32), compare,
+                  agx_immediate(0x30), selected, agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const uint8_t native[] = {
+      0x02, 0x85, 0x03, 0xb1, 0x02, 0x82, 0x03, 0x02, 0x20, 0x80,
+   };
+   const auto code = pack(b);
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* Exact post-RA ext.frag mask shape. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   compare = agx_register(14, AGX_SIZE_32);
+   agx_index dest = agx_register(1, AGX_SIZE_16);
+   dest.cache = true;
+   agx_fcmpsel_to(b, dest, compare,
+                  agx_immediate(0x30), agx_immediate(255), agx_immediate(0),
+                  AGX_FCOND_EQ);
+   agx_stop(b);
+   EXPECT_GT(pack(b).size(), 4u);
+
+   /* Exact post-RA glitch.frag shape. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   compare = agx_register(22, AGX_SIZE_32);
+   compare.cache = true;
+   selected = agx_register(2, AGX_SIZE_32);
+   selected.discard = true;
+   dest = agx_register(2, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fcmpsel_to(b, dest, compare,
+                  agx_immediate(0x40), agx_immediate(0), selected,
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   EXPECT_GT(pack(b).size(), 4u);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   compare = agx_register(2, AGX_SIZE_32);
+   compare.abs = true;
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), compare,
+                  agx_immediate(0x30), agx_immediate(255), agx_immediate(0),
+                  AGX_FCOND_EQ);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
