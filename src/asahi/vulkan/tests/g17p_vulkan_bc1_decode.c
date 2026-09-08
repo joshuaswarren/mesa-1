@@ -19,7 +19,22 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC4_SNORM_DECODE)
+#if defined(G17P_BC1_SRGB_DECODE)
+#define BLOCK_BYTES 8
+#define BLOCK_DATA_BYTES 32
+#define TEST_FORMAT VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+#define NAME "g17p-vulkan-bc1-srgb-decode"
+#elif defined(G17P_BC2_SRGB_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC2_SRGB_BLOCK
+#define NAME "g17p-vulkan-bc2-srgb-decode"
+#elif defined(G17P_BC3_SRGB_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC3_SRGB_BLOCK
+#define NAME "g17p-vulkan-bc3-srgb-decode"
+#elif defined(G17P_BC4_SNORM_DECODE)
 #define BLOCK_BYTES 8
 #define BLOCK_DATA_BYTES 32
 #define TEST_FORMAT VK_FORMAT_BC4_SNORM_BLOCK
@@ -238,6 +253,29 @@ decode_bc1(const uint8_t *block, uint8_t pixels[16][4])
       memcpy(pixels[i], palette[(indices >> (2 * i)) & 3], 4);
 }
 
+#if defined(G17P_BC1_SRGB_DECODE) || defined(G17P_BC2_SRGB_DECODE) ||     \
+   defined(G17P_BC3_SRGB_DECODE)
+static uint8_t
+srgb_endpoint_to_linear_unorm8(uint8_t endpoint)
+{
+   /* Exact round-to-nearest results of the Vulkan sRGB EOTF for every
+    * RGB565-expanded endpoint used by this fixture. */
+   switch (endpoint) {
+   case 0:   return 0;
+   case 65:  return 13;
+   case 66:  return 14;
+   case 130: return 57;
+   case 132: return 59;
+   case 195: return 139;
+   case 198: return 144;
+   case 255: return 255;
+   default: die("unexpected sRGB endpoint in reference decoder");
+   }
+
+   return 0;
+}
+#endif
+
 static void
 put_bc1_payload(uint8_t *out, uint16_t c0, uint16_t c1, uint32_t indices)
 {
@@ -315,11 +353,11 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
    out[8] = rg[block][1];
 #endif
 #else
-#if defined(G17P_BC2_DECODE)
+#if defined(G17P_BC2_DECODE) || defined(G17P_BC2_SRGB_DECODE)
    static const uint8_t alpha4[4] = {1, 5, 10, 15};
    memset(out, alpha4[block] | (alpha4[block] << 4), 8);
    out += 8;
-#elif defined(G17P_BC3_DECODE)
+#elif defined(G17P_BC3_DECODE) || defined(G17P_BC3_SRGB_DECODE)
    static const uint8_t alpha[4] = {0x20, 0x60, 0xa0, 0xff};
    out[0] = alpha[block];
    out[1] = 0;
@@ -408,6 +446,36 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
       for (unsigned x = 0; x < WIDTH; ++x) {
          const unsigned block = (y / 4) * 2 + x / 4;
          memcpy(reference + (y * WIDTH + x) * 4, decoded[block], 4);
+      }
+   }
+#elif defined(G17P_BC1_SRGB_DECODE) || defined(G17P_BC2_SRGB_DECODE) ||    \
+   defined(G17P_BC3_SRGB_DECODE)
+   uint8_t decoded[4][16][4];
+   for (unsigned block = 0; block < 4; ++block) {
+      const uint8_t *encoded = blocks + block * BLOCK_BYTES;
+#if defined(G17P_BC2_SRGB_DECODE)
+      decode_bc1(encoded + 8, decoded[block]);
+      for (unsigned texel = 0; texel < 16; ++texel)
+         decoded[block][texel][3] = (encoded[0] & 0xf) * 17;
+#elif defined(G17P_BC3_SRGB_DECODE)
+      decode_bc1(encoded + 8, decoded[block]);
+      for (unsigned texel = 0; texel < 16; ++texel)
+         decoded[block][texel][3] = encoded[0];
+#else
+      decode_bc1(encoded, decoded[block]);
+#endif
+   }
+
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         const unsigned texel = (y % 4) * 4 + x % 4;
+         uint8_t *pixel = reference + (y * WIDTH + x) * 4;
+         for (unsigned c = 0; c < 3; ++c) {
+            pixel[c] =
+               srgb_endpoint_to_linear_unorm8(decoded[block][texel][c]);
+         }
+         pixel[3] = decoded[block][texel][3];
       }
    }
 #elif defined(G17P_BC4_DECODE) || defined(G17P_BC5_DECODE)
@@ -855,6 +923,15 @@ main(void)
    build_blocks_and_reference(blocks, reference, astc->block_width,
                               astc->block_height);
 #else
+#if defined(G17P_BC1_SRGB_DECODE) || defined(G17P_BC2_SRGB_DECODE) ||     \
+   defined(G17P_BC3_SRGB_DECODE)
+   /* Each block selects a nontrivial RGB565 endpoint.  The reference above
+    * independently applies the Vulkan sRGB decode before packUnorm4x8. */
+   put_block(blocks, 0, 0x8410, 0x0000, 0);
+   put_block(blocks, 1, 0x4208, 0x0000, 0);
+   put_block(blocks, 2, 0xc618, 0x0000, 0);
+   put_block(blocks, 3, 0xffff, 0x0000, 0);
+#else
    put_block(blocks, 0, 0xf800, 0x0000, 0);
    put_block(blocks, 1, 0x07e0, 0x0000, 0);
    put_block(blocks, 2, 0x001f, 0x0000, 0);
@@ -865,6 +942,7 @@ main(void)
     * interpolation rounding: c0 <= c1 selects BC1 alpha mode and 0/1/3 use
     * only black, white and transparent black. */
    put_block(blocks, 3, 0x0000, 0xffff, UINT32_C(0x74747474));
+#endif
 #endif
    uint8_t reference[PIXEL_BYTES];
    build_reference(blocks, reference);

@@ -669,6 +669,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-bc1-srgb-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BC1_SRGB_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-bc3-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),
       include_directories : [inc_include],
@@ -678,11 +687,29 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-bc3-srgb-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BC3_SRGB_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-bc2-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_BC2_DECODE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-bc2-srgb-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BC2_SRGB_DECODE=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
