@@ -226,6 +226,18 @@
 #define G17P_COMPOSITE_FRACTIONAL_INSET 0
 #endif
 
+#ifndef G17P_COMPOSITE_NO_FLAT
+#define G17P_COMPOSITE_NO_FLAT 0
+#endif
+
+#ifndef G17P_COMPOSITE_EXPLICIT_LOD
+#define G17P_COMPOSITE_EXPLICIT_LOD 0
+#endif
+
+#if G17P_COMPOSITE_NO_FLAT && G17P_COMPOSITE_EXPLICIT_LOD
+#error "select one alpha-composite diagnostic shader"
+#endif
+
 #define G17P_COMPOSITE_OPACITY_COUNT 17
 
 #if G17P_COMPOSITE_SPLIT < 0 || G17P_COMPOSITE_SPLIT > 3
@@ -372,10 +384,22 @@
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rgba8_mrt_frag_spv
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_COMPOSITE_NO_FLAT
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_texture_alpha_composite_no_flat_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texture_alpha_composite_no_flat_frag_spv
+#elif G17P_COMPOSITE_EXPLICIT_LOD
+#include "g17p_vulkan_texture_alpha_composite_vert.h"
+#include "g17p_vulkan_texture_alpha_composite_lod1_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_texture_alpha_composite_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texture_alpha_composite_lod1_frag_spv
+#else
 #include "g17p_vulkan_texture_alpha_composite_vert.h"
 #include "g17p_vulkan_texture_alpha_composite_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_texture_alpha_composite_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texture_alpha_composite_frag_spv
+#endif
 #elif G17P_IMPLICIT_LOD
 #include "g17p_vulkan_implicit_lod_frag.h"
 #include "g17p_vulkan_implicit_lod_vert.h"
