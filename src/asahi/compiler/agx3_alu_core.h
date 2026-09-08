@@ -80,6 +80,12 @@ bool agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
                             enum agx3_alu_hint hint, uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native unsigned32 to scalar-half conversion. */
+bool agx3_alu_u32_to_f16(enum agx_isa_encoding enc, uint16_t dest,
+                         uint16_t src, enum agx3_alu_hint hint,
+                         bool dest_cache, uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native f32 comparison with byte-sized integer alternatives and a16/32-bit result. */
 bool agx3_alu_fcmp_select_zero(enum agx_isa_encoding enc, uint16_t dest,
                              const uint16_t src[3], bool compare_16,
@@ -249,6 +255,12 @@ bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src, uint16_t immediate, enum agx3_alu_hint hint,
                             uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native scalar-half times minifloat with a float32 result. */
+bool agx3_alu_fmul_half_minifloat_to_f32(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 /* Unsigned G17P extract into a zero base, with a fixed1..31-bit width.
  * Native srl performs shift+mask in one instruction. Dynamic shifts and
  * immediate14, dead/live sources and slot6 waits are native witnesses. */

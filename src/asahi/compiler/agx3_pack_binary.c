@@ -6849,6 +6849,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* shaderFloat16 commonly converts an invocation/index value directly
+          * from unsigned32 into a scalar half. This has a native result-width
+          * form distinct from the established u32-to-f32 conversion. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->round == AGX_ROUND_RTE &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[0].value == AGX_CONVERT_U32_TO_F &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[1]) && agx_channels(I->src[1]) == 1 &&
+             !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
+             !(I->src[1].cache && I->src[1].discard)) {
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_u32_to_f16(
+                   enc, I->dest[0].value, I->src[1].value,
+                   agx3_post_ra_hint(I->src[1]), I->dest[0].cache, wait,
+                   bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Coordinates and loop counters use16-bit halves. Apple has a direct
           * signed/unsigned half int2flt form, distinct from the32-bit form.
           * Preserve liveness and async producer waits; do not reinterpret the
@@ -6893,6 +6917,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                          I->dest[0].cache,
                                          wait,bytes,&len) ||
                    !agx3_append(emission,bytes,len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+         }
+
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FMUL &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_vary_reg32(I->dest[0]) &&
+             agx_channels(I->dest[0]) == 1 &&
+             (I->src[0].type == AGX_INDEX_IMMEDIATE ||
+              I->src[1].type == AGX_INDEX_IMMEDIATE)) {
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index imm = I->src[immediate_first ? 0 : 1];
+            const agx_index half = I->src[immediate_first ? 1 : 0];
+            if (imm.value <= UINT8_MAX && !imm.memory && !imm.abs &&
+                !imm.neg && agx3_half_reg(half) &&
+                agx_channels(half) == 1 && !half.abs && !half.neg &&
+                !half.kill && !(half.cache && half.discard)) {
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               if (!agx3_alu_fmul_half_minifloat_to_f32(
+                      enc, I->dest[0].value, half.value, imm.value,
+                      agx3_post_ra_hint(half), wait, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                continue;
             }

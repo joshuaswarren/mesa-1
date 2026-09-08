@@ -691,6 +691,30 @@ test_fmul_minifloat(void)
         " all256 immediates, all65536 scaled pixel centres PASS");
 }
 
+static void test_fmul_half_minifloat_to_f32(void)
+{
+   static const uint8_t native[] = {0x09, 0xf1, 0x35, 0x00, 0x80, 0x00};
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_fmul_half_minifloat_to_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 112, AGX3_ALU_HINT_NONE, 0, out,
+      &len));
+   assert(len == sizeof(native) && !memcmp(out, native, len));
+   assert(!agx3_alu_fmul_half_minifloat_to_f32(
+      AGX_ISA_ENCODING_AGX3C, 2, 0, 112, AGX3_ALU_HINT_DISCARD, 0, out,
+      &len));
+   assert(!agx3_alu_fmul_half_minifloat_to_f32(
+      AGX_ISA_ENCODING_AGX3B, 3, 0, 112, AGX3_ALU_HINT_DISCARD, 0, out,
+      &len));
+   assert(!agx3_alu_fmul_half_minifloat_to_f32(
+      AGX_ISA_ENCODING_AGX3B, 2, 0, 112, AGX3_ALU_HINT_CACHE, 0, out,
+      &len));
+   assert(!agx3_alu_fmul_half_minifloat_to_f32(
+      AGX_ISA_ENCODING_AGX3B, 2, 0, 112, AGX3_ALU_HINT_DISCARD, 1, out,
+      &len));
+   puts("Native half times minifloat to f32: exact Apple vector and "
+        "refusals PASS");
+}
+
 static void test_u16_to_f32(void)
 {
    /* Literal applegpu-nt32023 G17P ushort/ushort2/reused-ushort witnesses.
@@ -1138,6 +1162,26 @@ static void test_int_to_float_liveness(void)
    assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3B,0,2,true,AGX3_ALU_HINT_NONE,32,out,&len));
    exact(out,len,"a707560002048c60");
    puts("Integer-to-float: four native signed/unsigned live/dead vectors PASS");
+}
+
+static void test_u32_to_f16(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                              AGX3_ALU_HINT_NONE, true, 0, out, &len));
+   exact(out, len, "a717540003048820");
+   assert(agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 0,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   exact(out, len, "a717540202008820");
+   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3C, 0, 2,
+                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3,
+                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                               AGX3_ALU_HINT_CACHE, false, 0, out, &len));
+   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                               AGX3_ALU_HINT_NONE, false, 1, out, &len));
+   puts("Native u32-to-f16: two exact Apple vectors and refusals PASS");
 }
 
 static void
@@ -2507,6 +2551,7 @@ int main(void){
    test_native_u16_arithmetic();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
+   test_u32_to_f16();
    test_float_compare_select();
    test_float_compare_zero();
    test_integer_lifetimes();
@@ -2514,6 +2559,7 @@ int main(void){
    test_modified_minifloat_add();
    test_half_uv();
    test_fmul_minifloat();
+   test_fmul_half_minifloat_to_f32();
    test_fadd_minifloat();
    test_u16_to_f32();
    unsigned pass=0,fail=0,unsupported=0;

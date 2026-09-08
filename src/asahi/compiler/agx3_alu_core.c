@@ -157,6 +157,32 @@ agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_fmul_half_minifloat_to_f32(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || (dest & 1) || immediate > UINT8_MAX ||
+       (hint != AGX3_ALU_HINT_NONE && hint != AGX3_ALU_HINT_DISCARD) ||
+       wait_mask)
+      return false;
+
+   /* Apple u32_to_half_math multiplies the scalar half by minifloat 16
+    * directly into float32: f43=1 selects the half source, while f25=1 and
+    * fields17/60/74 retain the established minifloat operand routing. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {11, 1}, {25, 1}, {26, 2},
+      {42, 2}, {43, 1}, {46, 1}, {60, 2}, {74, 2},
+   };
+   const struct agx3_field_kv fields[] = {
+      {2, dest}, {17, immediate}, {35, src},
+   };
+   return agx3_bind_compose(enc, "f32mul", 1, base, 10, fields, 3, out,
+                            len);
+}
+
+bool
 agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        uint16_t immediate, enum agx3_alu_hint hint, uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
@@ -1113,6 +1139,27 @@ agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
    for (unsigned i = 0; i < 6; ++i)
       fields[n++] = (struct agx3_field_kv){33 + i, !!(wait_mask & (1u << i))};
    return agx3_bind_compose(enc, "int2flt", 0, base, 4, fields, n, out, len);
+}
+
+bool
+agx3_alu_u32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    enum agx3_alu_hint hint, bool dest_cache,
+                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                    uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (src & 1) || hint != AGX3_ALU_HINT_NONE || wait_mask)
+      return false;
+
+   /* applegpu-nt 32023.917 emits int2flt with f10=1 for a half result,
+    * f25/f26=2 for unsigned32 input, and f33=1 for this conversion form. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {25, 2}, {26, 2}, {33, 1},
+   };
+   const struct agx3_field_kv fields[] = {
+      {2, dest}, {11, dest_cache}, {18, src},
+   };
+   return agx3_bind_compose(enc, "int2flt", 0, base, 5, fields, 3, out, len);
 }
 
 bool

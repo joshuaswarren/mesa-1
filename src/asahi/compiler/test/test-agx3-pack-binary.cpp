@@ -1288,6 +1288,9 @@ TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
+      /* A scalar-half source is now covered by the exact widening witness. */
+      if (variant == 8)
+         continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
@@ -1816,6 +1819,59 @@ TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
    absolute.abs = true;
    agx_hfma_to(bad, agx_register(0, AGX_SIZE_16), absolute,
                agx_register(3, AGX_SIZE_16), agx_immediate(56));
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, G17PU32ToHalfMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(0, AGX_SIZE_16);
+   dest.cache = true;
+   agx_convert_to(b, dest, agx_immediate(AGX_CONVERT_U32_TO_F),
+                  agx_register(2, AGX_SIZE_32), AGX_ROUND_RTE);
+   agx_stop(b);
+
+   static const uint8_t native[] = {
+      0xa7, 0x17, 0x54, 0x00, 0x03, 0x04, 0x88, 0x20,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index cached = agx_register(2, AGX_SIZE_32);
+   cached.cache = true;
+   agx_convert_to(bad, agx_register(0, AGX_SIZE_16),
+                  agx_immediate(AGX_CONVERT_U32_TO_F), cached,
+                  AGX_ROUND_RTE);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, G17PHalfTimesMinifloatWidensToF32)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index half = agx_register(0, AGX_SIZE_16);
+   agx_fmul_to(b, agx_register(0, AGX_SIZE_32), half, agx_immediate(112));
+   agx_stop(b);
+
+   static const uint8_t native[] = {
+      0x09, 0xf1, 0x35, 0x00, 0x80, 0x00,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index live = agx_register(0, AGX_SIZE_16);
+   live.cache = true;
+   agx_fmul_to(bad, agx_register(2, AGX_SIZE_32), live,
+               agx_immediate(112));
    agx_stop(bad);
    pack(bad, /*expect_ok=*/false);
 }
