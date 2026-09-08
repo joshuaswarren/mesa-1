@@ -147,13 +147,14 @@ bool agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  *    present for explicit LOD; it does not itself select implicit derivatives.
  *
  * G17P also supports directly witnessed 2D-array forms with a register-valued
- * layer for implicit, level, bias and gradient LOD.
+ * layer for implicit, level, bias and gradient LOD, and cube samples with
+ * implicit or explicit immediate/register LOD.
  * G17P 3D immediate-level samples use the same operand ABI, with f76=3
  * selecting the third contiguous coordinate.
  * Everything else about the sampler family -- remaining dimensions, min-LOD,
- * offsets, 3D shadow/gather/gradient, and array combinations -- remains a
- * deliberate refusal: those axes need additional operand marshalling and
- * qualification.
+ * offset shapes beyond witnessed 2D sampling, 3D/cube shadow/gather/gradient,
+ * and array combinations -- remains a deliberate refusal: those axes need
+ * additional operand marshalling and qualification.
  */
 enum agx3_tex_lod {
    AGX3_TEX_LOD_AUTO,

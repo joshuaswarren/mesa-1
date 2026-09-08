@@ -1297,7 +1297,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         (enc != AGX_ISA_ENCODING_AGX3B ||
          !valid_immediate_lod)) ||
        (cube &&
-        (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate)) ||
+        (enc != AGX_ISA_ENCODING_AGX3B ||
+         (!implicit_lod && !explicit_lod) || !immediate)) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
        (offset &&

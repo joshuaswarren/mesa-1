@@ -229,6 +229,43 @@ gl_texture_array = executable(
   build_by_default : false,
 )
 
+gl_texture_cube_lod = executable(
+  'asahi-g17p-gl-texture-cube-lod',
+  files('test-g17p-gl-texture-cube-lod.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-texture-cube-lod-software-control',
+  gl_texture_cube_lod,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-texture-cube-lod-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_texture_cube_lod,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
 test(
   'asahi-g17p-gl-texture-array-software-control',
   gl_texture_array,

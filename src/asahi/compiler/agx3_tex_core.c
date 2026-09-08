@@ -254,11 +254,14 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       return false;
 
    /* Native cube sampling is a distinct dimension (SMP f76=4). Apple
-    * publishes its third f32 coordinate with PACK_SMPIR f74=10, then issues
-    * a plain implicit-LOD sample from fixed coordinate bank 0. */
+    * publishes its third f32 coordinate with PACK_SMPIR f74=10, then samples
+    * fixed coordinate bank 0. Implicit LOD and the ordinary immediate and
+    * register explicit-LOD selectors are independently witnessed. */
    if (d->cube &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->three_d ||
-        d->coord != 0 || d->lod != AGX3_TEX_LOD_AUTO ||
+        d->coord != 0 ||
+        (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
+         d->lod != AGX3_TEX_LOD_REGISTER) ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -399,7 +402,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * staged scalars are the derivative. */
       ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
-      if (d->array)
+      if (d->array || d->cube)
          ov[n++] = (struct agx3_field_kv)KV(156, 1);
       if (d->array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
