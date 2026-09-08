@@ -3950,24 +3950,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
 
             const unsigned sampler_size =
                agx_chip_sampler_heap_element_size(dev->chip);
-            if (sampler_size != 32)
+            if (sampler_size != AGX_GALLIUM_SAMPLER_AGX3_SIZE)
                agx_native_descriptor_rejected(dev, "background sampler geometry");
             struct agx_ptr sampler =
                agx_pool_alloc_aligned(&batch->pool, sampler_size, 64);
-            memset(sampler.cpu, 0, sampler_size);
-            agx_pack(sampler.cpu, SAMPLER_HAL200, cfg) {
-               cfg.minimum_lod = 0.0f;
-               cfg.maximum_lod = INFINITY;
-               cfg.maximum_anisotropy = 1;
-               cfg.magnify = AGX_FILTER_LINEAR;
-               cfg.minify = AGX_FILTER_NEAREST;
-               cfg.mip_filter = AGX_MIP_FILTER_NONE;
-               cfg.wrap_s = AGX_WRAP_CLAMP_TO_EDGE;
-               cfg.wrap_t = AGX_WRAP_CLAMP_TO_EDGE;
-               cfg.wrap_r = AGX_WRAP_CLAMP_TO_EDGE;
-               cfg.pixel_coordinates = true;
-               cfg.compare_func = AGX_COMPARE_FUNC_ALWAYS;
-            }
+            if (!agx_gallium_pack_g17p_txf_sampler(dev->chip, sampler.cpu))
+               agx_native_descriptor_rejected(dev, "background texel-fetch sampler");
 
             const uint64_t pointers[2] = {texture.gpu, sampler.gpu};
             const uint64_t table = agx_pool_upload_aligned(

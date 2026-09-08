@@ -19,6 +19,7 @@
 #define AGX_GALLIUM_DESCRIPTOR_AGX2_SIZE 24u
 #define AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE 32u
 #define AGX_GALLIUM_DESCRIPTOR_MAX_SIZE  AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE
+#define AGX_GALLIUM_SAMPLER_AGX3_SIZE    32u
 
 struct agx_gallium_texture_descriptor {
    uint32_t opaque[AGX_GALLIUM_DESCRIPTOR_MAX_SIZE / 4];
@@ -26,6 +27,10 @@ struct agx_gallium_texture_descriptor {
 
 struct agx_gallium_pbe_descriptor {
    uint32_t opaque[AGX_GALLIUM_DESCRIPTOR_MAX_SIZE / 4];
+};
+
+struct agx_gallium_sampler_descriptor {
+   uint32_t opaque[AGX_GALLIUM_SAMPLER_AGX3_SIZE / 4];
 };
 
 struct agx_gallium_storage_descriptor_layout {
@@ -195,6 +200,10 @@ bool agx_gallium_pack_native_texture(
    enum agx_descriptor_generation generation,
    struct agx_gallium_texture_descriptor *out,
    const struct AGX_TEXTURE *semantic);
+
+/* Exact sampler zero used by native G17P texture.read()/texel-fetch paths. */
+bool agx_gallium_pack_g17p_txf_sampler(
+   enum agx_chip chip, struct agx_gallium_sampler_descriptor *out);
 
 bool agx_gallium_set_null_native_texture(
    enum agx_descriptor_generation generation,

@@ -136,6 +136,27 @@ test_feature_gates(void)
       AGX_DESCRIPTOR_GENERATION_UNKNOWN));
 }
 
+static void
+test_g17p_txf_sampler(void)
+{
+   /* Same byte-exact sampler-zero vector as Honeykrisp's known-good G17P
+    * texture.read() path. The full hardware heap element is 32 bytes. */
+   static const uint8_t expected[AGX_GALLIUM_SAMPLER_AGX3_SIZE] = {
+      0x00, 0x00, 0x0e, 0x68, 0x1b, 0x00, 0x00, 0x00,
+   };
+   struct agx_gallium_sampler_descriptor sampler;
+   memset(&sampler, 0xa5, sizeof(sampler));
+   CHECK(agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17P, &sampler));
+   CHECK(memcmp(&sampler, expected, sizeof(expected)) == 0);
+
+   memset(&sampler, 0xa5, sizeof(sampler));
+   CHECK(!agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17G, &sampler));
+   CHECK(memcmp(&sampler,
+                &(struct agx_gallium_sampler_descriptor){0},
+                sizeof(sampler)) == 0);
+   CHECK(!agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17P, NULL));
+}
+
 /* A plain 2D render target: exactly what the end-of-tile store binds. */
 static struct AGX_PBE
 render_target_pbe(void)
@@ -530,6 +551,7 @@ main(void)
 {
    test_chip_routing();
    test_feature_gates();
+   test_g17p_txf_sampler();
    test_native_packers();
    test_agx3_pbe();
    printf("Gallium AGX native descriptors: %u checks passed\n", checks);

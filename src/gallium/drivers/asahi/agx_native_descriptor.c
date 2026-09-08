@@ -12,6 +12,36 @@
 #include <string.h>
 
 bool
+agx_gallium_pack_g17p_txf_sampler(
+   enum agx_chip chip, struct agx_gallium_sampler_descriptor *out)
+{
+   if (!out)
+      return false;
+
+   memset(out, 0, sizeof(*out));
+   if (chip != AGX_CHIP_G17P)
+      return false;
+
+   /* Honeykrisp's passing G17P texture.read() path reserves sampler zero with
+    * these exact HAL200 semantics. In particular, texel fetch does not use
+    * the legacy background path's pixel-coordinate/linear/edge-clamp state.
+    * Keep the remaining 24 bytes in the 32-byte heap slot zero. */
+   agx_pack(out->opaque, SAMPLER_HAL200, cfg) {
+      cfg.minimum_lod = 0.0f;
+      cfg.maximum_lod = INFINITY;
+      cfg.maximum_anisotropy = 1;
+      cfg.mip_filter = AGX_MIP_FILTER_NEAREST;
+      cfg.wrap_s = AGX_WRAP_CLAMP_TO_BORDER;
+      cfg.wrap_t = AGX_WRAP_CLAMP_TO_BORDER;
+      cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+      cfg.compare_func = AGX_COMPARE_FUNC_LEQUAL;
+      cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+   }
+
+   return true;
+}
+
+bool
 agx_gallium_pack_native_texture(
    enum agx_descriptor_generation generation,
    struct agx_gallium_texture_descriptor *out,
