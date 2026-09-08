@@ -639,9 +639,13 @@ test_g17p_resource_program(void)
    uint8_t before[sizeof(output)];
    memcpy(before, output, sizeof(output));
    written = 41;
+   /* Copy instructions are now valid before the state tail as well as after
+    * the profile prefix: preamble uniform stores use exactly that shape.
+    * Truncate the final instruction instead so this remains a malformed-body
+    * control and continues to verify transactional failure. */
    CHECK(!agx_ioto_g17p_resource_program_compose(
-      UINT64_C(0x10001990240), copies, sizeof(copies), copies, sizeof(copies),
-      &tail, output, sizeof(output), &written));
+      UINT64_C(0x10001990240), copies, sizeof(copies) - 1, copies,
+      sizeof(copies), &tail, output, sizeof(output), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 41);
    static const uint8_t nop[] = {0x06, 0x00};
    CHECK(!agx_ioto_g17p_resource_program_compose(
@@ -753,7 +757,7 @@ test_g17p_fragment_resource_program(void)
              sizeof(copies), &tail, sizeof(expected) - 1);
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), copies,
              sizeof(copies), NULL, sizeof(expected));
-   BG_REJECT(UINT64_C(0x10000130640), copies, sizeof(copies), copies,
+   BG_REJECT(UINT64_C(0x10000130640), copies, sizeof(copies) - 1, copies,
              sizeof(copies), &tail, sizeof(expected));
    static const uint8_t bad_copy[] = {0x06, 0x00};
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), bad_copy,
