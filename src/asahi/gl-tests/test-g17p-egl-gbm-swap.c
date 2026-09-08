@@ -276,6 +276,7 @@ render_frames(EGLDisplay display, EGLSurface surface, struct gbm_surface *gbm,
               struct gbm_device *device, EGLContext consumer_context,
               EGLContext producer_context,
               const struct native_fence_api *fence_api, bool noop,
+              bool inject_implicit_sync_failures,
               GLuint program, unsigned width, unsigned height,
               unsigned generation)
 {
@@ -386,6 +387,14 @@ render_frames(EGLDisplay display, EGLSurface surface, struct gbm_surface *gbm,
       if (retained)
          gbm_bo_destroy(retained);
       retained = alias;
+
+      /* By this point the first swapchain generation has exported all of its
+       * front buffers. Arm failures only now, so they exercise an already
+       * shared render target's acquire and release synchronization. */
+      if (inject_implicit_sync_failures && generation == 0 && frame == 2) {
+         setenv("ASAHI_SHIM_FAIL_DMABUF_EXPORT_ONCE", "1", 1);
+         setenv("ASAHI_SHIM_FAIL_DMABUF_IMPORT_ONCE", "1", 1);
+      }
    }
 
    return retained;
@@ -410,6 +419,12 @@ main(void)
    const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
    const bool expect_submit_failure =
       getenv("ASAHI_GL_EXPECT_SUBMIT_FAILURE") != NULL;
+   const bool expect_implicit_sync_fallback =
+      getenv("ASAHI_GL_EXPECT_IMPLICIT_SYNC_FALLBACK") != NULL;
+   if (expect_implicit_sync_fallback) {
+      unsetenv("ASAHI_SHIM_FAIL_DMABUF_EXPORT_ONCE");
+      unsetenv("ASAHI_SHIM_FAIL_DMABUF_IMPORT_ONCE");
+   }
    const int drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
    struct gbm_device *device =
       drm_fd >= 0 ? gbm_create_device(drm_fd) : NULL;
@@ -533,7 +548,8 @@ main(void)
 
       struct gbm_bo *retained =
          render_frames(display, surface, gbm_surface, device, context,
-                       producer_context, &fence_api, noop, program,
+                       producer_context, &fence_api, noop,
+                       expect_implicit_sync_fallback, program,
                        widths[generation], heights[generation], generation);
       if (!retained)
          return 1;
@@ -566,7 +582,10 @@ main(void)
    eglTerminate(display);
    gbm_device_destroy(device);
    close(drm_fd);
-   puts("GL05 EGL/GBM swap, partial update, native-fence handoff, dma-buf "
-        "retention, resize and 16 frames exact");
+   puts(expect_implicit_sync_fallback
+           ? "GL05 dma-buf acquire/release sync failures fell back without "
+             "losing 16-frame swap progress"
+           : "GL05 EGL/GBM swap, partial update, native-fence handoff, "
+             "dma-buf retention, resize and 16 frames exact");
    return 0;
 }

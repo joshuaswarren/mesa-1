@@ -62,19 +62,36 @@ struct shim_device shim_device;
 
 long shim_page_size;
 static bool failed_prime_export_once;
+static bool failed_dmabuf_export_once;
+static bool failed_dmabuf_import_once;
+static unsigned dmabuf_fallback_sync_calls;
+static bool waited_after_dmabuf_import_failure;
 
 static void __attribute__((destructor))
-check_prime_export_failure(void)
+check_injected_sync_failures(void)
 {
-   if (!getenv("ASAHI_SHIM_EXPECT_PRIME_EXPORT_FAILURE"))
-      return;
-
-   if (!failed_prime_export_once) {
+   if (getenv("ASAHI_SHIM_EXPECT_PRIME_EXPORT_FAILURE") &&
+       !failed_prime_export_once) {
       fprintf(stderr, "shim: expected PRIME export failure was not injected\n");
       _Exit(EXIT_FAILURE);
    }
 
-   fprintf(stderr, "shim: injected PRIME export failure exactly once\n");
+   if (getenv("ASAHI_SHIM_EXPECT_DMABUF_SYNC_FAILURES") &&
+       (!failed_dmabuf_export_once || !failed_dmabuf_import_once ||
+        dmabuf_fallback_sync_calls != 2 ||
+        !waited_after_dmabuf_import_failure)) {
+      fprintf(stderr,
+              "shim: dma-buf sync fallback incomplete: export=%u import=%u "
+              "cpu_sync=%u out_wait=%u\n",
+              failed_dmabuf_export_once, failed_dmabuf_import_once,
+              dmabuf_fallback_sync_calls, waited_after_dmabuf_import_failure);
+      _Exit(EXIT_FAILURE);
+   }
+
+   if (failed_prime_export_once)
+      fprintf(stderr, "shim: injected PRIME export failure exactly once\n");
+   if (failed_dmabuf_export_once && failed_dmabuf_import_once)
+      fprintf(stderr, "shim: injected dma-buf sync failures exactly once\n");
 }
 
 static uint32_t
@@ -265,26 +282,41 @@ drm_shim_prime_ioctl(int fd, unsigned long request, void *arg)
                                              DMA_BUF_SYNC_END);
       const uint64_t known = DMA_BUF_SYNC_RW | DMA_BUF_SYNC_START |
                              DMA_BUF_SYNC_END;
-      return access && (phase == DMA_BUF_SYNC_START ||
-                        phase == DMA_BUF_SYNC_END) && !(sync->flags & ~known)
-                ? 0
-                : -EINVAL;
+      const bool valid = access && (phase == DMA_BUF_SYNC_START ||
+                                    phase == DMA_BUF_SYNC_END) &&
+                         !(sync->flags & ~known);
+      if (valid && failed_dmabuf_export_once &&
+          !failed_dmabuf_import_once)
+         dmabuf_fallback_sync_calls++;
+      return valid ? 0 : -EINVAL;
    }
    case DMA_BUF_IOCTL_EXPORT_SYNC_FILE: {
       struct dma_buf_export_sync_file *export = arg;
       if (!export || !(export->flags & DMA_BUF_SYNC_RW) ||
           (export->flags & ~DMA_BUF_SYNC_RW))
          return -EINVAL;
+      if (getenv("ASAHI_SHIM_FAIL_DMABUF_EXPORT_ONCE") &&
+          !failed_dmabuf_export_once) {
+         failed_dmabuf_export_once = true;
+         errno = EMFILE;
+         return -EMFILE;
+      }
       export->fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
       return export->fd < 0 ? -errno : 0;
    }
    case DMA_BUF_IOCTL_IMPORT_SYNC_FILE: {
       const struct dma_buf_import_sync_file *import = arg;
-      return import && import->fd >= 0 &&
-                    (import->flags & DMA_BUF_SYNC_RW) &&
-                    !(import->flags & ~DMA_BUF_SYNC_RW)
-                ? 0
-                : -EINVAL;
+      if (!import || import->fd < 0 ||
+          !(import->flags & DMA_BUF_SYNC_RW) ||
+          (import->flags & ~DMA_BUF_SYNC_RW))
+         return -EINVAL;
+      if (getenv("ASAHI_SHIM_FAIL_DMABUF_IMPORT_ONCE") &&
+          failed_dmabuf_export_once && !failed_dmabuf_import_once) {
+         failed_dmabuf_import_once = true;
+         errno = ENOMEM;
+         return -ENOMEM;
+      }
+      return 0;
    }
    default:
       return -ENOTTY;
@@ -459,6 +491,14 @@ drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+static int
+drm_shim_ioctl_syncobj_wait(int fd, unsigned long request, void *arg)
+{
+   if (failed_dmabuf_import_once)
+      waited_after_dmabuf_import_failure = true;
+   return 0;
+}
+
 ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_VERSION)] = drm_shim_ioctl_version,
    [_IOC_NR(DRM_IOCTL_GET_UNIQUE)] = drm_shim_ioctl_get_unique,
@@ -469,7 +509,7 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] =
       drm_shim_ioctl_syncobj_handle_to_fd,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_syncobj_wait,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_RESET)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] = drm_shim_ioctl_stub,

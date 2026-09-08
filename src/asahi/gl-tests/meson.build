@@ -770,6 +770,23 @@ test(
   suite : ['asahi'],
 )
 
+test(
+  'asahi-g17p-egl-gbm-implicit-sync-fallback',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_gbm_swap,
+  ],
+  env : [
+    'ASAHI_SHIM_EXPECT_DMABUF_SYNC_FAILURES=1',
+    'ASAHI_GL_EXPECT_IMPLICIT_SYNC_FALLBACK=1',
+  ],
+  suite : ['asahi'],
+)
+
 run_target(
   'asahi-g17p-egl-dmabuf-image-shim',
   command : [

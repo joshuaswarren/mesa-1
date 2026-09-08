@@ -10,7 +10,9 @@
 #include "asahi/lib/agx_device_virtio.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/decode.h"
+#include "drm-uapi/dma-buf.h"
 #include "util/bitset.h"
+#include "util/libsync.h"
 #include "util/u_dynarray.h"
 #include "util/u_range.h"
 #include "agx_device.h"
@@ -703,23 +705,34 @@ agx_batch_writes_range(struct agx_batch *batch, struct agx_resource *rsrc,
                   offset + size);
 }
 
-static int
-agx_get_in_sync(struct agx_context *ctx)
+static bool
+agx_get_in_sync(struct agx_context *ctx, uint32_t *syncobj)
 {
    struct agx_device *dev = agx_device(ctx->base.screen);
+   *syncobj = 0;
 
    if (ctx->in_sync_fd >= 0) {
       int ret =
          drmSyncobjImportSyncFile(dev->fd, ctx->in_sync_obj, ctx->in_sync_fd);
-      assert(!ret);
+
+      /* A native-fence import can fail under transient kernel allocation
+       * pressure. Waiting on the original sync file preserves the acquire
+       * ordering without losing the submission or poisoning the context. */
+      if (ret && sync_wait(ctx->in_sync_fd, -1)) {
+         agx_msg("native acquire fence import and fallback wait failed\n");
+         close(ctx->in_sync_fd);
+         ctx->in_sync_fd = -1;
+         return false;
+      }
 
       close(ctx->in_sync_fd);
       ctx->in_sync_fd = -1;
 
-      return ctx->in_sync_obj;
-   } else {
-      return 0;
+      if (!ret)
+         *syncobj = ctx->in_sync_obj;
    }
+
+   return true;
 }
 
 static void
@@ -740,6 +753,60 @@ struct attachments {
    struct drm_asahi_attachment list[MAX_ATTACHMENTS];
    size_t count;
 };
+
+struct agx_shared_bo_sync {
+   struct agx_bo *bo;
+   uint32_t in_syncobj;
+};
+
+static bool
+agx_wait_shared_bo(struct agx_bo *bo)
+{
+   struct dma_buf_sync sync = {
+      .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW,
+   };
+
+   if (bo->prime_fd < 0 || drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_SYNC, &sync))
+      return false;
+
+   sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
+   return drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_SYNC, &sync) == 0;
+}
+
+static void
+agx_retire_failed_submit(struct agx_context *ctx, struct agx_batch *batch,
+                         struct drm_asahi_sync *syncs,
+                         struct agx_shared_bo_sync *shared_bos,
+                         unsigned shared_bo_count, void *extres,
+                         struct util_dynarray *cmdbuf, int error)
+{
+   struct agx_device *dev = agx_device(ctx->base.screen);
+
+   for (unsigned i = 0; i < shared_bo_count; ++i) {
+      if (shared_bos[i].in_syncobj)
+         drmSyncobjDestroy(dev->fd, shared_bos[i].in_syncobj);
+   }
+
+   free(syncs);
+   free(shared_bos);
+   free(extres);
+   util_dynarray_fini(cmdbuf);
+
+   /* No GPU work owns this batch. Retire its resources immediately and
+    * expose a context reset instead of leaving an unsignalled batch fence
+    * that can deadlock EGL, GBM, or a compositor during teardown. */
+   if (ctx->batch == batch)
+      ctx->batch = NULL;
+   agx_batch_mark_submitted(batch);
+   agx_batch_cleanup(ctx, batch, false);
+
+   const bool first_fault = !ctx->any_faults;
+   ctx->any_faults = true;
+   if (first_fault && ctx->reset.reset)
+      ctx->reset.reset(ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
+
+   errno = error;
+}
 
 static void
 asahi_add_attachment(struct attachments *att, struct agx_resource *rsrc)
@@ -770,7 +837,15 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    unsigned shared_bo_count = 0;
    struct drm_asahi_sync *syncs =
       malloc(sync_capacity * sizeof(*syncs));
-   struct agx_bo **shared_bos = malloc(max_syncs * sizeof(struct agx_bo *));
+   struct agx_shared_bo_sync *shared_bos =
+      malloc(max_syncs * sizeof(*shared_bos));
+   struct util_dynarray cmdbuf = UTIL_DYNARRAY_INIT;
+
+   if (!syncs || !shared_bos) {
+      agx_retire_failed_submit(ctx, batch, syncs, shared_bos, 0, NULL,
+                               &cmdbuf, ENOMEM);
+      return;
+   }
 
    uint64_t wait_seqid = p_atomic_read(&screen->flush_wait_seqid);
 
@@ -822,24 +897,46 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
          /* Get a sync file fd from the buffer */
          int in_sync_fd = agx_export_sync_file(dev, bo);
-         assert(in_sync_fd >= 0);
+         uint32_t sync_handle = 0;
+         int ret = in_sync_fd >= 0
+                      ? drmSyncobjCreate(dev->fd, 0, &sync_handle)
+                      : -1;
 
-         /* Create a new syncobj */
-         uint32_t sync_handle;
-         int ret = drmSyncobjCreate(dev->fd, 0, &sync_handle);
-         assert(ret >= 0);
+         if (!ret) {
+            ret = drmSyncobjImportSyncFile(dev->fd, sync_handle, in_sync_fd);
+            if (ret) {
+               drmSyncobjDestroy(dev->fd, sync_handle);
+               sync_handle = 0;
+            }
+         }
 
-         /* Import the sync file into it */
-         ret = drmSyncobjImportSyncFile(dev->fd, sync_handle, in_sync_fd);
-         assert(ret >= 0);
-         assert(sync_handle);
-         close(in_sync_fd);
+         /* Preserve correctness if a sync-file fd or temporary syncobj cannot
+          * be allocated. The dma-buf ioctl waits all prior implicit access;
+          * if we already have the sync file, waiting it avoids cache-domain
+          * transitions. */
+         if (in_sync_fd < 0 ? !agx_wait_shared_bo(bo)
+                            : (ret && sync_wait(in_sync_fd, -1))) {
+            const int sync_errno = errno ? errno : EIO;
+            if (in_sync_fd >= 0)
+               close(in_sync_fd);
+            u_rwlock_rdunlock(&screen->destroy_lock);
+            agx_retire_failed_submit(ctx, batch, syncs, shared_bos,
+                                     shared_bo_count, virt.extres, &cmdbuf,
+                                     sync_errno);
+            return;
+         }
 
-         /* Add it to our wait list */
-         agx_add_sync(syncs, &in_sync_count, sync_handle);
+         if (in_sync_fd >= 0)
+            close(in_sync_fd);
+
+         if (sync_handle)
+            agx_add_sync(syncs, &in_sync_count, sync_handle);
 
          /* And keep track of the BO for cloning the out_sync */
-         shared_bos[shared_bo_count++] = bo;
+         shared_bos[shared_bo_count++] = (struct agx_shared_bo_sync){
+            .bo = bo,
+            .in_syncobj = sync_handle,
+         };
          if (dev->is_virtio)
             virt.extres_count++;
       } else {
@@ -855,22 +952,23 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                bo->va->addr, queue_id);
 
             agx_add_sync(syncs, &in_sync_count, agx_bo_writer_syncobj(writer));
-            shared_bos[shared_bo_count++] = NULL;
          }
       }
    }
 
    if (dev->is_virtio && virt.extres_count) {
-      struct agx_bo **p = shared_bos;
       virt.extres =
          malloc(virt.extres_count * sizeof(struct asahi_ccmd_submit_res));
+      if (!virt.extres) {
+         u_rwlock_rdunlock(&screen->destroy_lock);
+         agx_retire_failed_submit(ctx, batch, syncs, shared_bos,
+                                  shared_bo_count, NULL, &cmdbuf, ENOMEM);
+         return;
+      }
 
       for (unsigned i = 0; i < virt.extres_count; i++) {
-         while (!*p)
-            p++; // Skip inter-context slots which are not recorded here
-         virt.extres[i].res_id = (*p)->uapi_handle;
+         virt.extres[i].res_id = shared_bos[i].bo->uapi_handle;
          virt.extres[i].flags = ASAHI_EXTRES_READ | ASAHI_EXTRES_WRITE;
-         p++;
       }
    }
 
@@ -884,7 +982,16 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    }
 
    /* Add an explicit fence from gallium, if any */
-   agx_add_sync(syncs, &in_sync_count, agx_get_in_sync(ctx));
+   uint32_t explicit_syncobj = 0;
+   if (!agx_get_in_sync(ctx, &explicit_syncobj)) {
+      const int sync_errno = errno ? errno : EIO;
+      u_rwlock_rdunlock(&screen->destroy_lock);
+      agx_retire_failed_submit(ctx, batch, syncs, shared_bos,
+                               shared_bo_count, virt.extres, &cmdbuf,
+                               sync_errno);
+      return;
+   }
+   agx_add_sync(syncs, &in_sync_count, explicit_syncobj);
 
    /* Add an implicit cross-context flush sync point, if any */
    if (wait_seqid) {
@@ -931,8 +1038,6 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    };
 
    /* Submit! */
-   struct util_dynarray cmdbuf = UTIL_DYNARRAY_INIT;
-
    if (compute) {
       /* Barrier on previous submission */
       struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
@@ -1014,33 +1119,9 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             c->layers, c->samples);
       }
 
-      /* Shared BO input waits use temporary syncobj handles. The kernel did
-       * not consume the submission, so release those handles without
-       * publishing the nonexistent output fence back to the dma-bufs. */
-      for (unsigned i = 0; i < shared_bo_count; ++i) {
-         if (shared_bos[i])
-            drmSyncobjDestroy(dev->fd, syncs[i].handle);
-      }
-
-      free(syncs);
-      free(shared_bos);
-      free(virt.extres);
-      util_dynarray_fini(&cmdbuf);
-
-      /* No GPU work owns this batch. Retire its resources immediately and
-       * expose a context reset instead of leaving an unsignalled batch fence
-       * that can deadlock EGL, GBM, or a compositor during teardown. */
-      if (ctx->batch == batch)
-         ctx->batch = NULL;
-      agx_batch_mark_submitted(batch);
-      agx_batch_cleanup(ctx, batch, false);
-
-      const bool first_fault = !ctx->any_faults;
-      ctx->any_faults = true;
-      if (first_fault && ctx->reset.reset)
-         ctx->reset.reset(ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
-
-      errno = submit_errno;
+      agx_retire_failed_submit(ctx, batch, syncs, shared_bos,
+                               shared_bo_count, virt.extres, &cmdbuf,
+                               submit_errno);
       return;
    }
 
@@ -1049,25 +1130,45 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       /* Convert our handle to a sync file */
       int out_sync_fd = -1;
       int ret = drmSyncobjExportSyncFile(dev->fd, batch->syncobj, &out_sync_fd);
-      assert(ret >= 0);
-      assert(out_sync_fd >= 0);
+      bool transfer_failed = ret || out_sync_fd < 0;
 
       for (unsigned i = 0; i < shared_bo_count; i++) {
-         if (!shared_bos[i])
-            continue;
-
          batch_debug(batch, "Signals shared BO @ 0x%" PRIx64,
-                     shared_bos[i]->va->addr);
+                     shared_bos[i].bo->va->addr);
 
          /* Free the in_sync handle we just acquired */
-         ret = drmSyncobjDestroy(dev->fd, syncs[i].handle);
-         assert(ret >= 0);
+         if (shared_bos[i].in_syncobj) {
+            ret = drmSyncobjDestroy(dev->fd, shared_bos[i].in_syncobj);
+            if (ret)
+               transfer_failed = true;
+            shared_bos[i].in_syncobj = 0;
+         }
+
          /* And then import the out_sync sync file into it */
-         ret = agx_import_sync_file(dev, shared_bos[i], out_sync_fd);
-         assert(ret >= 0);
+         if (out_sync_fd >= 0 &&
+             agx_import_sync_file(dev, shared_bos[i].bo, out_sync_fd))
+            transfer_failed = true;
       }
 
-      close(out_sync_fd);
+      if (out_sync_fd >= 0)
+         close(out_sync_fd);
+
+      /* Once submitted, a missing implicit release fence cannot be repaired
+       * by dropping the batch. Wait for completion before returning so every
+       * dma-buf is safe for its next owner even when sync-file transfer runs
+       * out of kernel resources. */
+      if (transfer_failed) {
+         ret = drmSyncobjWait(dev->fd, &batch->syncobj, 1, INT64_MAX,
+                              DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+         if (ret) {
+            agx_msg("shared BO release-fence fallback wait failed: %s\n",
+                    strerror(ret < -1 ? -ret : (errno ? errno : EIO)));
+            const bool first_fault = !ctx->any_faults;
+            ctx->any_faults = true;
+            if (first_fault && ctx->reset.reset)
+               ctx->reset.reset(ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
+         }
+      }
    }
 
    /* Record the syncobj on each BO we write, so it can be added post-facto as a
