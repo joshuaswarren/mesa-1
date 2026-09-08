@@ -174,6 +174,41 @@ gl_buffer_sync = executable(
   build_by_default : false,
 )
 
+egl_shared_context = executable(
+  'asahi-g17p-egl-shared-context',
+  files('test-g17p-egl-shared-context.c'),
+  include_directories : inc_include,
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-egl-shared-context-software-control',
+  egl_shared_context,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-egl-shared-context-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_shared_context,
+  ],
+  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  suite : ['asahi'],
+)
+
 gl_compute = executable(
   'asahi-g17p-gl-compute',
   files('test-g17p-gl-compute.c'),

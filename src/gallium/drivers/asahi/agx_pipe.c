@@ -2349,6 +2349,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    return true;
 }
 
+static bool
+agx_dmabuf_modifier_external_only(struct pipe_screen *screen, uint64_t modifier)
+{
+   /* AGX3 can sample imported compressed images, but its compressed PBE
+    * encoding is not recovered.  Advertising this modifier as renderable
+    * lets EGL/GBM allocate a surface that will fail at end-of-tile.
+    */
+   return modifier == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED &&
+          !agx_gallium_native_compressed_pbe_supported(
+             agx_gallium_descriptor_generation(agx_device(screen)->chip));
+}
+
 static void
 agx_query_dmabuf_modifiers(struct pipe_screen *screen, enum pipe_format format,
                            int max, uint64_t *modifiers,
@@ -2363,7 +2375,8 @@ agx_query_dmabuf_modifiers(struct pipe_screen *screen, enum pipe_format format,
 
    for (i = 0; i < ARRAY_SIZE(agx_best_modifiers) && i < max; i++) {
       if (external_only)
-         external_only[i] = 0;
+         external_only[i] =
+            agx_dmabuf_modifier_external_only(screen, agx_best_modifiers[i]);
 
       modifiers[i] = agx_best_modifiers[i];
    }
@@ -2376,13 +2389,18 @@ static bool
 agx_is_dmabuf_modifier_supported(struct pipe_screen *screen, uint64_t modifier,
                                  enum pipe_format format, bool *external_only)
 {
+   for (unsigned i = 0; i < ARRAY_SIZE(agx_best_modifiers); ++i) {
+      if (agx_best_modifiers[i] == modifier) {
+         if (external_only)
+            *external_only =
+               agx_dmabuf_modifier_external_only(screen, modifier);
+
+         return true;
+      }
+   }
+
    if (external_only)
       *external_only = false;
-
-   for (unsigned i = 0; i < ARRAY_SIZE(agx_best_modifiers); ++i) {
-      if (agx_best_modifiers[i] == modifier)
-         return true;
-   }
 
    return false;
 }
