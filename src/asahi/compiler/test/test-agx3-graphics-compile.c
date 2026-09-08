@@ -534,6 +534,34 @@ build_vs_vkcube_varyings(void)
    return b.shader;
 }
 
+/* Apple G17P accepts position plus eight float4 user locations: its vs36
+ * pipeline writes UVS words 0..35 and __GPU_LD_MD field0 is exactly 36.
+ * Keep the complete backend writeout path covered at that native limit. */
+static nir_shader *
+build_vs_g17p_36_outputs(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17P 36-word vertex output VS");
+   nir_def *vertex = nir_load_vertex_id(&b);
+
+   for (unsigned group = 0; group < 9; ++group) {
+      nir_def *values = nir_load_agx(
+         &b, 4, 32, nir_imm_int64(&b, UINT64_C(0x1000) + group * 16),
+         vertex, .access = 0, .base = 0, .format = PIPE_FORMAT_R32_UINT,
+         .sign_extend = false);
+      for (unsigned c = 0; c < 4; ++c) {
+         nir_store_uvs_agx(&b, nir_channel(&b, values, c),
+                           nir_imm_intN_t(&b, group * 4 + c, 16));
+      }
+   }
+
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS |
+      (BITFIELD64_MASK(8) << VARYING_SLOT_VAR0);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 /* The bounded live vkcube vertex shape: position and texture coordinates come
  * from two VBO CProg bases, while set 0 binding 0 supplies a column-major MVP
  * matrix through the descriptor-set pointer following the root pointer.
@@ -3184,6 +3212,8 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_binary_size = sizeof(mesa_g17p_half2_varying_vs),
     .expected_g17p_loads = 2, .g17p_only = true},
    {"vs-vkcube-varyings", build_vs_vkcube_varyings, true},
+   {"vs-g17p-36-outputs", build_vs_g17p_36_outputs, true,
+    .g17p_only = true},
    {"vs-vkcube-vbo-ubo", build_vs_vkcube_vbo_ubo, true, false,
     AGX_ABI_VUNI_COUNT_VK(2) + 8, 257},
    {"fs-flat-colour", build_fs_flat, true,

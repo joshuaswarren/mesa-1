@@ -273,6 +273,19 @@ test_g17p_vertex_program_info(void)
    CHECK(program.template_info.raw_vs_output_count_0 == 32);
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
 
+   /* Fresh Apple G17P vs36/fs36 pipeline: position plus eight float4 user
+    * locations.  __GPU_LD_MD reports field0=36 and the shader writes all 36
+    * f32 UVS words.  GTK's wide vertex variants use 30 and 32 user words, so
+    * the earlier seven-location bound rejected valid desktop pipelines. */
+   struct hk_agx3_g17p_vertex_compile_info native36 = vkcube_info;
+   native36.user_size = 32;
+   native36.psiz_off = native36.layer_viewport_off = native36.clip_off = 36;
+   native36.uvs_size = 36;
+   native36.uvs_written = BITFIELD64_MASK(8) << VARYING_SLOT_VAR0;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &native36, &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 36);
+   CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
    struct hk_agx3_g17p_vertex_compile_info invalid_info = vkcube_info;
    invalid_info.has_preamble = true;
    CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &invalid_info,
