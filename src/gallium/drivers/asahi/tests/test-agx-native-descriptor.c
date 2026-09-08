@@ -445,6 +445,34 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_9, &native, &semantic));
    CHECK(native.opaque[6] == 0 && native.opaque[7] == 0);
 
+   /* HAL200's exact 2x2 RGBA8 descriptor clears word1[62] for an ordinary
+    * one-level 2D texture.  AIL's page-aligned backing-allocation flag is not
+    * that native layer-mode bit, so both allocation choices must produce the
+    * same packet here.  This is the ubiquitous compositor/WebGL sampling
+    * shape, not an array-layer policy.
+    */
+   static const uint8_t gen9_plain_2d_bytes[32] = {
+      0x22, 0x0a, 0x88, 0x16, 0x00, 0x04, 0x00, 0x00,
+      0x00, 0xfc, 0xfe, 0x7f, 0x08, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_TEXTURE plain_2d = semantic;
+   plain_2d.layout = AGX_LAYOUT_GPU;
+   plain_2d.width = 2;
+   plain_2d.height = 2;
+   plain_2d.address = UINT64_C(0x87ffefc000);
+   struct agx_gallium_texture_descriptor plain_unaligned, plain_aligned;
+   plain_2d.page_aligned_layers = false;
+   CHECK(agx_gallium_pack_native_texture(AGX_DESCRIPTOR_GENERATION_9,
+                                          &plain_unaligned, &plain_2d));
+   plain_2d.page_aligned_layers = true;
+   CHECK(agx_gallium_pack_native_texture(AGX_DESCRIPTOR_GENERATION_9,
+                                          &plain_aligned, &plain_2d));
+   CHECK(memcmp(&plain_aligned, gen9_plain_2d_bytes,
+                sizeof(gen9_plain_2d_bytes)) == 0);
+   CHECK(memcmp(&plain_aligned, &plain_unaligned, sizeof(plain_aligned)) == 0);
+
    /* A18 Pro EXP-0015 type_cube.  Unlike an ordinary uncompressed texture,
     * native Gen9 cube descriptors carry the end VA of the six-face range in
     * word 2 and word1 bit 27.  This is the exact descriptor Gallium's
@@ -489,6 +517,16 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_9, &native, &array2));
    CHECK(memcmp(native.opaque, gen9_array2_bytes,
                 sizeof(gen9_array2_bytes)) == 0);
+
+   /* The correction is deliberately plain-2D-only.  A valid extended array
+    * still preserves the inherited layer policy, changing exactly bit 126.
+    */
+   struct agx_gallium_texture_descriptor array2_aligned;
+   array2.page_aligned_layers = true;
+   CHECK(agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &array2_aligned, &array2));
+   array2_aligned.opaque[3] ^= BITFIELD_BIT(30);
+   CHECK(memcmp(&array2_aligned, &native, sizeof(array2_aligned)) == 0);
 
    /* A18 Pro EXP-0015 mip_2: two levels make a plain 2D descriptor extended
     * even when the caller did not redundantly set semantic.extended. */

@@ -164,6 +164,18 @@ agx_gallium_pack_native_texture(
            !semantic->acceleration_buffer))
          return false;
 
+      /* HAL200 encodeImageReadState clears word1[62] for an ordinary
+       * non-array 2D texture.  Its conditional layer-mode writer is not the
+       * inherited AIL page-aligned-allocation flag.  Keep this correction
+       * bounded to the fully represented plain one-level case; arrays,
+       * compression, and image modes retain their existing policies.
+       */
+      const bool plain_2d =
+         semantic->dimension == AGX_TEXTURE_DIMENSION_2D &&
+         semantic->layout == AGX_LAYOUT_GPU && semantic->depth == 1 &&
+         !semantic->compressed && !extended &&
+         semantic->mode == AGX_IMAGE_MODE_NORMAL;
+
       struct AGX_TEXTURE_GEN9 cfg = {
          .dimension = semantic->dimension,
          .layout = semantic->layout,
@@ -183,7 +195,8 @@ agx_gallium_pack_native_texture(
          .srgb_2_channel = semantic->srgb_2_channel,
          .stride = semantic->layout == AGX_LAYOUT_LINEAR ? semantic->stride : 0,
          .depth = semantic->layout == AGX_LAYOUT_LINEAR ? 1 : semantic->depth,
-         .page_aligned_layers = semantic->page_aligned_layers,
+         .page_aligned_layers =
+            plain_2d ? false : semantic->page_aligned_layers,
          .extended = extended,
          /* Gen9 reuses this wire address as the exclusive range end for an
           * ordinary extended texture, or compression metadata otherwise. */
