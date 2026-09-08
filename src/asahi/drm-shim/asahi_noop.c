@@ -134,7 +134,13 @@ matrix_case_matches(const char *name,
       return stats->clear_only;
    if (!strcmp(name, "nonindexed unchanged-state body"))
       return stats->draws == 2 && stats->state_updates == 1 &&
-             stats->body_only;
+             stats->body_only && !stats->primary_tri_merge_disable &&
+             !stats->secondary_tri_merge_disable;
+   if (!strcmp(name, "nonindexed line topology"))
+      return stats->draws == 1 &&
+             (stats->primitive_mask & (UINT32_C(1) << 1)) &&
+             stats->primary_tri_merge_disable &&
+             stats->secondary_tri_merge_disable;
    if (!strcmp(name, "indexed u8 without restart"))
       return stats->indexed_draws == 1 && stats->index_size_mask == 1 &&
              stats->restart_disabled;
@@ -157,7 +163,8 @@ matrix_case_matches(const char *name,
    if (!strcmp(name, "blend"))
       return stats->draws == 1 && stats->varying_fs;
    if (!strcmp(name, "fragment program without varyings"))
-      return stats->no_varying_fs;
+      return stats->no_varying_fs && stats->primary_tri_merge_disable &&
+             stats->secondary_tri_merge_disable;
    if (!strcmp(name, "rasterizer discard"))
       return stats->rasterizer_discard;
    if (!strcmp(name, "linked stream with state re-emission"))
@@ -204,6 +211,8 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    MERGE_FLAG(stencil_enabled);
    MERGE_FLAG(blend_enabled);
    MERGE_FLAG(rasterizer_discard);
+   MERGE_FLAG(primary_tri_merge_disable);
+   MERGE_FLAG(secondary_tri_merge_disable);
    MERGE_FLAG(layer_output);
 #undef MERGE_FLAG
 }

@@ -4832,8 +4832,35 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
                       : AGX_VISIBILITY_MODE_BOOLEAN;
       query_index = agx_get_oq_index(batch, ctx->occlusion_query);
    }
+   const uint32_t linked_fragment_control =
+      ctx->linked.fs->fragment_control.opaque[0];
+   const uint32_t pass_type = linked_fragment_control >> 29;
+   if (pass_type != AGX_PASS_TYPE_OPAQUE &&
+       pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
+       pass_type != AGX_PASS_TYPE_PUNCH_THROUGH &&
+       pass_type != AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)
+      return NULL;
+
    uint32_t fragment_control = raster_state->fragment_control |
                                (stencil_test ? UINT32_C(0x000c0000) : 0);
+   uint32_t secondary_control = UINT32_C(0x00000200);
+   const struct agx_ppp_hal200_fragment_control_fields control_fields = {
+      .linked_control = linked_fragment_control,
+      .shader_tri_merge_disable =
+         batch->tilebuffer_layout.nr_samples > 1 &&
+         ctx->fs->epilog_key.write_z,
+      .coverage_tri_merge_disable =
+         pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
+         pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
+      .primitive_tri_merge_disable =
+         object_type != AGX_OBJECT_TYPE_TRIANGLE ||
+         rast->polygon_mode != AGX_POLYGON_MODE_FILL,
+   };
+   if (!agx_ppp_hal200_fragment_controls_pack(
+          dev->chip, &control_fields, fragment_control, secondary_control,
+          &fragment_control, &secondary_control))
+      return NULL;
+
    uint32_t occlusion_query;
    if (!agx_ppp_hal200_occlusion_pack(dev->chip, visibility, query_index,
                                       fragment_control, &fragment_control,
@@ -4866,15 +4893,6 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
 
    struct agx_fragment_face_2_packed face_2;
    agx_pack_fragment_face_2(&face_2, object_type, &ctx->fs->b.info);
-
-   const uint32_t pass_type = ctx->linked.fs->fragment_control.opaque[0] >> 29;
-   if (pass_type != AGX_PASS_TYPE_OPAQUE &&
-       pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
-       pass_type != AGX_PASS_TYPE_PUNCH_THROUGH)
-      return NULL;
-   uint32_t secondary_control = UINT32_C(0x00000200) | (pass_type << 29);
-   if (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH)
-      secondary_control |= UINT32_C(1) << 26;
 
    const struct agx_ppp_hal200_graphics_fields output_fields = {
       .words = {(ctx->linked.fs->cf.nr_bindings ? UINT32_C(0x10000) : 0) |

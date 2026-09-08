@@ -559,7 +559,7 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           graphics.words[4] != AGX_PPP_HAL200_PRIMARY_FACE_HEADER ||
           (graphics.words[5] & UINT32_C(0x00040200)) !=
              UINT32_C(0x00040200) ||
-          (graphics.words[5] & ~UINT32_C(0x000fc200)))
+          (graphics.words[5] & ~UINT32_C(0x040fc200)))
          return fail_at(address, "output slot has non-canonical semantics");
       return true;
    }
@@ -573,6 +573,8 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
                               !(graphics.words[1] & (UINT32_C(1) << 21));
       stats->stencil_enabled |= graphics.words[2] != UINT32_C(0x0e000000) ||
                                 graphics.words[4] != UINT32_C(0x0e000000);
+      stats->primary_tri_merge_disable |=
+         (graphics.words[0] & (UINT32_C(1) << 26)) != 0;
       return true;
    }
    case 4: {
@@ -587,6 +589,8 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
       stats->blend_enabled |= (graphics.words[0] >> 29) != 0;
       stats->rasterizer_discard |=
          (graphics.words[0] & (UINT32_C(1) << 21)) != 0;
+      stats->secondary_tri_merge_disable |=
+         (graphics.words[0] & (UINT32_C(1) << 26)) != 0;
       return true;
    }
    case 5:
@@ -672,10 +676,17 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
       return fail_at(address, "viewport slot length is out of range");
    const unsigned viewport_count = (lengths[5] - 8) / 32;
    uint8_t output_record[AGX_PPP_HAL200_OUTPUT_LENGTH];
+   uint8_t primary_record[AGX_PPP_HAL200_PRIMARY_FACE_LENGTH];
    if (!read_owned(memory, compact_address(decoded[2].context_offset),
                    output_record, sizeof(output_record)) ||
+       !read_owned(memory, compact_address(decoded[3].context_offset),
+                   primary_record, sizeof(primary_record)) ||
        load_le32(output_record + 12) != viewport_count - 1)
       return fail_at(address, "output/viewport counts disagree");
+
+   if (!!(load_le32(output_record + 24) & (UINT32_C(1) << 26)) !=
+       !!(load_le32(primary_record + 4) & (UINT32_C(1) << 26)))
+      return fail_at(address, "output/primary triangle-merge controls disagree");
 
    /* OUTPUT bits 19 and 20 are the paired viewport/layer UVS selector.  A
     * multiview stream is not complete merely because it exposes two image
