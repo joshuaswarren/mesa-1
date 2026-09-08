@@ -1129,8 +1129,21 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
           s->b.info.sampler_state_count == 1)) ||
        s->b.info.uses_sampler_heap ||
        (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid) ||
-       s->data_size != 0 || s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS)
+       s->data_size != 0 || s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS) {
+      mesa_loge_once(
+         "G17P graphics program refused: linked=%u bo=%u va=%u size=%zu "
+         "preamble=%u scratch=%u/%u/%u textures=%u samplers=%u "
+         "indexed_sampler=%u sampler_heap=%u txf=%u data=%u sets=%u",
+         linked != NULL, linked && linked->b.bo != NULL,
+         linked && linked->b.bo && linked->b.bo->va != NULL,
+         linked ? linked->b.size : 0, s->b.info.has_preamble,
+         s->b.info.scratch_size, s->b.info.preamble_scratch_size,
+         linked ? linked->b.scratch_size : 0,
+         s->b.info.texture_state_count, s->b.info.sampler_state_count,
+         s->info.agx3_indexed_sampler_valid, s->b.info.uses_sampler_heap,
+         linked ? linked->b.uses_txf : 0, s->data_size, s->info.set_count);
       return false;
+   }
 
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
@@ -1377,6 +1390,15 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
       size_t range_count;
       if (!hk_g17p_graphics_uniform_ranges(cmd, s, ranges, &range_count)) {
+         mesa_loge_once(
+            "G17P graphics uniform ranges refused: stage=%u root=%" PRIx64
+            " sets=%u uses_root=%u combined=%u indexed=%u blend_constants=%u "
+            "rodata=%u@%u",
+            (unsigned)s->info.stage, cmd->state.gfx.root, s->info.set_count,
+            s->info.agx3_uses_root, s->info.agx3_combined_sampler_valid,
+            s->info.agx3_indexed_sampler_valid,
+            cmd->state.gfx.uses_blend_constant, s->b.info.rodata.size_16,
+            s->b.info.rodata.base_uniform);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
       }
@@ -1384,6 +1406,8 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       size_t program_capacity;
       if (!hk_agx3_g17p_graphics_program_bound(dev->dev.chip, ranges,
                                               range_count, &program_capacity)) {
+         mesa_loge_once("G17P graphics program bound refused: stage=%u ranges=%zu",
+                        (unsigned)s->info.stage, range_count);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
       }
@@ -1451,6 +1475,12 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       struct hk_agx3_g17p_graphics_program program;
       if (!hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,
                                                         &program)) {
+         mesa_loge_once(
+            "G17P graphics program generation refused: stage=%u ranges=%zu "
+            "binary=%u scratch=%u gprs=%u compiler_d=%u/%u sample_mask=%u",
+            (unsigned)s->info.stage, range_count, desc.shader_binary_size,
+            desc.scratch_size, desc.nr_gprs, desc.compiler_d_valid,
+            desc.compiler_d, desc.writes_sample_mask);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
       }

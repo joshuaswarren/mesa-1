@@ -3061,10 +3061,21 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return hk_g17p_bind_tail_refused(__LINE__);
 
    const uint64_t fragment_program = hk_upload_usc_words(cmd, fs, linked_fs);
-   if (!fragment_program || (fragment_program & UINT64_C(0x3f)) != 0 ||
-       fragment_program >= (UINT64_C(1) << 48) ||
-       !hk_g17p_smooth_varyings_supported(cmd, linked_fs) ||
-       (linked_fs->b.cf.nr_bindings != 0) != (gfx->varyings != 0))
+   if (!fragment_program)
+      return hk_g17p_bind_tail_refused(__LINE__);
+   if ((fragment_program & UINT64_C(0x3f)) != 0 ||
+       fragment_program >= (UINT64_C(1) << 48))
+      return hk_g17p_bind_tail_refused(__LINE__);
+   if (!hk_g17p_smooth_varyings_supported(cmd, linked_fs)) {
+      mesa_loge_once(
+         "G17P varying layout refused: bindings=%u cf=%u reads_z=%u "
+         "table=%" PRIx64 " topology=%u provoking=%u",
+         linked_fs->b.cf.nr_bindings, linked_fs->b.cf.nr_cf,
+         linked_fs->b.cf.reads_z, gfx->varyings, gfx->topology,
+         gfx->provoking);
+      return hk_g17p_bind_tail_refused(__LINE__);
+   }
+   if ((linked_fs->b.cf.nr_bindings != 0) != (gfx->varyings != 0))
       return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core fs_record;
