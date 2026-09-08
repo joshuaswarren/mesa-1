@@ -273,7 +273,8 @@ hk_g17p_unverified_feature(const char *name)
    for (const char *p = list; *p;) {
       const char *end = strchr(p, ',');
       const size_t n = end ? (size_t)(end - p) : strlen(p);
-      if (n == len && !strncmp(p, name, len))
+      if ((n == len && !strncmp(p, name, len)) ||
+          (n == 3 && !strncmp(p, "all", 3)))
          return true;
       if (!end)
          break;
@@ -766,17 +767,12 @@ hk_get_device_features(
       features->transformFeedback =
          hk_g17p_unverified_feature("transform_feedback");
       features->geometryStreams = false;
-      /* vkCmdDrawIndirectCount/vkCmdDrawIndexedIndirectCount reach
-       * libagx_predicate_indirect, and every libagx precompiled kernel is
-       * dispatched through hk_dispatch_precomp() -> hk_dispatch_with_usc_launch(),
-       * which refuses AGX_CS_GENERATION_HAL200 outright: `usc` names an AGX2
-       * USC block and an AGX3 direct launch needs a dispatch-local Ioto
-       * program VA instead.  So the count form is not merely untested here,
-       * it fails every time, and it fails at vkEndCommandBuffer rather than
-       * at device selection.  Direct and indirect draws without a count
-       * buffer keep their native HAL200 path and stay advertised.  Re-enable
-       * this with the Ioto meta-kernel launch, not before. */
-      features->drawIndirectCount = false;
+      /* Precompiled predicate kernels now use the same direct HAL200 Ioto
+       * launch as the public compute path, followed by native indirect Index
+       * Lists.  Keep the API bit paired with its extension until the complete
+       * count/clamp/stride oracle batch is qualified. */
+      features->drawIndirectCount =
+         hk_g17p_unverified_feature("draw_indirect_count");
       /* hk_agx3_g17p_rt0_tile_layout_supported() refuses any tilebuffer
        * layout with `layered` set, so a render pass with more than one layer
        * has no BG/EOT program and is refused at vkCmdBeginRendering.  Writing
@@ -1491,9 +1487,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
 
-      /* The base indirect Index List is native, but count variants require a
-       * predicate kernel that is not yet available on this path. */
-      supported_extensions.KHR_draw_indirect_count = false;
+      if (!hk_g17p_unverified_feature("draw_indirect_count"))
+         supported_extensions.KHR_draw_indirect_count = false;
 
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
