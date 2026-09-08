@@ -3529,6 +3529,26 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
    return next == count && stopped;
 }
 
+static bool
+agx3_vertex_outputs_share_source(agx_context *ctx)
+{
+   agx_index first = agx_null();
+   bool found = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_ST_VARY)
+         continue;
+      if (!found) {
+         first = I->src[1];
+         found = true;
+      } else if (!agx_is_equiv(first, I->src[1]) ||
+                 first.size != I->src[1].size ||
+                 first.abs != I->src[1].abs || first.neg != I->src[1].neg) {
+         return false;
+      }
+   }
+   return found;
+}
+
 /* Apple's real builtin EOT factory (BTNF kind5, EOT key0x10020300) emits
  * this complete 68-byte fragment program. Its ESL contract is a PBE table
  * pointer in uniform halves0..3 and imageblock byte offset in halves4..5.
@@ -4347,13 +4367,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned g17p_positions_staged = 0;
    const unsigned g17p_output_count = agx3_g17p_vertex_output_count(ctx, enc);
    uint8_t g17p_output_order[AGX3_MAX_VERTEX_OUTPUTS] = {0};
-   /* The original six-output protocol has an exact per-COPY retirement
-    * contract, including when the stores happen to be terminal.  Reserve the
-    * terminal schedule for the other qualified programs that require it;
-    * treating exactly six as a batch drops the r0-preserving wait ratcheted
-    * below and can expose an injected COPY source to later physical reuse. */
-   const bool g17p_terminal_outputs = g17p_output_count != nslots &&
-      g17p_output_count &&
+   /* The original six-output/single-source protocol has an exact per-COPY
+    * retirement contract even when its stores are terminal. Other terminal
+    * six-output programs need batching to preserve distinct values through
+    * RA, just like wider programs. */
+   const bool g17p_legacy_single_source =
+      g17p_output_count == nslots && agx3_vertex_outputs_share_source(ctx);
+   const bool g17p_terminal_outputs = g17p_output_count &&
+      !g17p_legacy_single_source &&
       agx3_outputs_are_terminal(ctx, g17p_output_count, g17p_output_order);
    /* Only the old six-output fallback supports intervening physical GPR
     * reuse. Wider outputs require the pre-RA terminal bundle. */
