@@ -246,8 +246,17 @@
 #define G17P_COMPOSITE_REPEATED_FULL 0
 #endif
 
+#ifndef G17P_COMPOSITE_NARROW_TWO
+#define G17P_COMPOSITE_NARROW_TWO 0
+#endif
+
+#ifndef G17P_COMPOSITE_NARROW_TWO_CHANGED
+#define G17P_COMPOSITE_NARROW_TWO_CHANGED 0
+#endif
+
 #if (G17P_COMPOSITE_SINGLE_DRAW + G17P_COMPOSITE_NARROW_SINGLE +            \
-     G17P_COMPOSITE_REPEATED_FULL) > 1
+     G17P_COMPOSITE_REPEATED_FULL + G17P_COMPOSITE_NARROW_TWO +             \
+     G17P_COMPOSITE_NARROW_TWO_CHANGED) > 1
 #error "select one alpha-composite draw/scissor diagnostic"
 #endif
 
@@ -1879,7 +1888,8 @@ verify_readback(const uint8_t *map)
       const unsigned x = pixel % IMAGE_WIDTH;
       const unsigned y = pixel / IMAGE_WIDTH;
       const bool covered =
-         G17P_COMPOSITE_NARROW_SINGLE ? x < 2 :
+         (G17P_COMPOSITE_NARROW_SINGLE || G17P_COMPOSITE_NARROW_TWO ||
+          G17P_COMPOSITE_NARROW_TWO_CHANGED) ? x < 2 :
          (!G17P_COMPOSITE_FRACTIONAL_INSET ||
           (x >= 4 && x < 14 && y >= 3 && y < 12));
       uint8_t expected_pixel[4] = {128, 64, 128, 255};
@@ -1896,7 +1906,8 @@ verify_readback(const uint8_t *map)
       }
       const unsigned opacity_sixteenths =
          (G17P_COMPOSITE_SINGLE_DRAW || G17P_COMPOSITE_REPEATED_FULL) ? 16 :
-         G17P_COMPOSITE_NARROW_SINGLE ? 1 :
+         (G17P_COMPOSITE_NARROW_SINGLE || G17P_COMPOSITE_NARROW_TWO ||
+          G17P_COMPOSITE_NARROW_TWO_CHANGED) ? 1 :
          (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
       const unsigned product = coverage_eighths * opacity_sixteenths;
       expected_pixel[0] -= product;
@@ -4376,6 +4387,24 @@ main(void)
       const uint32_t dynamic_offset =
          (step + 1 == COMPOSITE_OPACITY_COUNT ? 16 : 0) *
          COMPOSITE_UNIFORM_STRIDE;
+      vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
+      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline_layout, 0, 1, &descriptor_set, 1,
+                              &dynamic_offset);
+      vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+   }
+#elif G17P_COMPOSITE_NARROW_TWO || G17P_COMPOSITE_NARROW_TWO_CHANGED
+   /* Select the same narrow record at indices 0 and 1, or change width 1 to
+    * width 2 while advancing to index 1. The transparent first draw makes
+    * both cases share one exact final image. */
+   for (uint32_t step = 0; step < 2; ++step) {
+      const VkRect2D alpha_scissor = {
+         .extent = {
+            G17P_COMPOSITE_NARROW_TWO_CHANGED && step == 0 ? 1 : 2,
+            IMAGE_HEIGHT,
+         },
+      };
+      const uint32_t dynamic_offset = step * COMPOSITE_UNIFORM_STRIDE;
       vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
       vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipeline_layout, 0, 1, &descriptor_set, 1,
