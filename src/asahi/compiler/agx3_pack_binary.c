@@ -7102,7 +7102,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                continue;
             }
             if (imm.memory || imm.abs || imm.neg ||
-                !agx3_src_is_register(reg) || (!multiply && reg.abs) ||
+                !agx3_src_is_register(reg) ||
                 (reg.kill && !reg.discard) ||
                 (multiply && reg.neg) ||
                 (reg.cache && reg.discard) ||
@@ -7110,7 +7110,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
 
             bool encoded;
-            if (!multiply && (I->saturate || reg.neg)) {
+            if (!multiply && !reg.abs && (I->saturate || reg.neg)) {
                encoded = agx3_alu_fadd_minifloat_mod(
                   enc, I->dest[0].value, reg.value, imm.value, reg.neg,
                   I->saturate, agx3_post_ra_hint(reg), wait, bytes, &len);
@@ -7119,6 +7119,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   enc, I->dest[0].value, reg.value, imm.value,
                   I->dest[0].cache, reg.abs, agx3_post_ra_hint(reg), wait,
                   bytes, &len);
+            } else if (reg.abs) {
+               encoded = agx3_alu_fadd_abs_minifloat(
+                  enc, I->dest[0].value, reg.value, imm.value,
+                  I->dest[0].cache, reg.neg, I->saturate,
+                  agx3_post_ra_hint(reg), wait, bytes, &len);
             } else {
                encoded = agx3_alu_fadd_minifloat(
                   enc, I->dest[0].value, reg.value, imm.value,

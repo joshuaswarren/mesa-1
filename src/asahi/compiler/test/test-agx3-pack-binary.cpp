@@ -1017,8 +1017,9 @@ TEST_F(AGX3PackBinary, FaddMinifloatRefusesRemainingUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
       SCOPED_TRACE(variant);
-      /* Negation, two-minifloat folding, and saturation have exact paths. */
-      if (variant == 4 || variant == 7 || variant == 9)
+      /* Negation, absolute, two-minifloat folding and saturation all have
+       * exact, independently tested G17P paths. */
+      if (variant == 4 || variant == 5 || variant == 7 || variant == 9)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -1040,6 +1041,24 @@ TEST_F(AGX3PackBinary, FaddMinifloatRefusesRemainingUngroundedModes)
       add->saturate = variant == 9;
       EXPECT_TRUE(pack(b, false).empty());
    }
+}
+
+TEST_F(AGX3PackBinary, FaddAbsoluteMinifloatMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_abs(agx_register(0, AGX_SIZE_32));
+   src.discard = true;
+   agx_fadd_to(b, agx_register(0, AGX_SIZE_32), src,
+               agx_immediate(0x20));
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x09, 0xa1, 0x14, 0x01, 0x82, 0x00, 0x00, 0x00, 0x02, 0x00,
+   };
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, FaddOneMinusAbsMatchesNativeLiveForm)

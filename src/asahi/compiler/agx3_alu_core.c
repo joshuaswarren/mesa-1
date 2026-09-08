@@ -294,6 +294,46 @@ agx3_alu_fadd_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_alu_fadd_abs_minifloat(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool negate_src, bool saturate,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || ((dest | src) & 1) || immediate > UINT8_MAX ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3f))
+      return false;
+
+   /* Fresh applegpu_g17p kernels independently cover abs(x) plus
+    * minifloat {0.5, 1.5, 2.0}, negated abs, and saturation. They all select
+    * ep3: f47/f48 are the absolute/negate bits and f14 is saturation. The
+    * existing one-minus-abs witnesses establish destination retention,
+    * source lifetime and all wait fields on this same endpoint. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {25, 1}, {26, 2}, {42, 2}, {43, 2},
+   };
+   struct agx3_field_kv fields[20] = {
+      {2, dest}, {35, src}, {17, immediate}, {11, dest_cache},
+      {47, 1}, {48, negate_src}, {14, saturate},
+      {44, hint == AGX3_ALU_HINT_CACHE},
+      {46, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 9;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){52 + slot,
+                                          (wait_mask >> slot) & 1};
+
+   uint8_t encoded[AGX3_ALU_MAX_LENGTH], encoded_len = 0;
+   if (!agx3_bind_compose(enc, "f32add", 3, base, 6, fields, n,
+                          encoded, &encoded_len))
+      return false;
+   memcpy(out, encoded, encoded_len);
+   *len = encoded_len;
+   return true;
+}
+
+bool
 agx3_alu_fadd_one_absneg(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t src, bool dest_cache,
                          enum agx3_alu_hint hint, uint16_t wait_mask,

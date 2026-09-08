@@ -911,6 +911,57 @@ test_modified_minifloat_add(void)
    assert(!agx3_alu_fadd_abs_negzero(AGX_ISA_ENCODING_AGX3C, 8, 2, true,
                                      AGX3_ALU_HINT_CACHE, 1, out, &len));
 
+   static const struct {
+      uint16_t imm;
+      bool neg, sat;
+      uint16_t wait;
+      const char *hex;
+   } abs_add[] = {
+      {0x20, false, false, 32, "09a11401820000800200"},
+      {0x38, false, false, 32, "09b91401820000800200"},
+      {0x40, false, false, 32, "09c11401820000800200"},
+      {0x20, true,  false, 32, "09a11401820800800200"},
+      {0x20, false, true,  32, "09a11401820000820200"},
+   };
+   for (unsigned i = 0; i < sizeof(abs_add) / sizeof(abs_add[0]); ++i) {
+      assert(agx3_alu_fadd_abs_minifloat(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, abs_add[i].imm, false,
+         abs_add[i].neg, abs_add[i].sat, AGX3_ALU_HINT_DISCARD,
+         abs_add[i].wait,
+         out, &len));
+      exact(out, len, abs_add[i].hex);
+   }
+
+   unsigned abs_shapes = 0;
+   for (unsigned imm = 0; imm <= UINT8_MAX; ++imm)
+      for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache)
+         for (unsigned neg = 0; neg < 2; ++neg)
+            for (unsigned sat = 0; sat < 2; ++sat)
+               for (unsigned hint = AGX3_ALU_HINT_NONE;
+                    hint <= AGX3_ALU_HINT_CACHE; ++hint)
+                  for (unsigned wait = 0; wait < 64; ++wait) {
+                     assert(agx3_alu_fadd_abs_minifloat(
+                        AGX_ISA_ENCODING_AGX3B, 254, 128, imm,
+                        dest_cache, neg, sat, hint, wait, out, &len));
+                     assert(len == 10);
+                     abs_shapes++;
+                  }
+   memset(out, 0xa5, sizeof(out));
+   len = 0xa5;
+   assert(!agx3_alu_fadd_abs_minifloat(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 0x20, false, false, false,
+      AGX3_ALU_HINT_NONE, 0, out, &len));
+   assert(len == 0xa5 && out[0] == 0xa5);
+   assert(!agx3_alu_fadd_abs_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, 0x20, false, false, false,
+      AGX3_ALU_HINT_NONE, 0, out, &len));
+   assert(!agx3_alu_fadd_abs_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, 0x20, false, false, false,
+      AGX3_ALU_HINT_NONE, 0, out, &len));
+   assert(!agx3_alu_fadd_abs_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x100, false, false, false,
+      AGX3_ALU_HINT_NONE, 0, out, &len));
+
    const unsigned regs[] = {0, 2, 30, 62, 126, 128, 254};
    const unsigned immediates[] = {0, 0x20, 0x30, 0x80, 0xb0, 0xff};
    unsigned shapes = 0;
@@ -969,7 +1020,8 @@ test_modified_minifloat_add(void)
                                      false, true, 0, 64, out, &len));
    assert(!agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30,
                                      true, false, 0, 63, out, &len));
-   printf("Modified minifloat add:9 native witnesses +%u physical bit checks passed\n", shapes);
+   printf("Modified minifloat add:14 native witnesses +%u regular and %u "
+          "absolute physical forms passed\n", shapes, abs_shapes);
 }
 
 static void test_half_uv(void)
