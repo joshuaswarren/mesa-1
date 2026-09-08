@@ -1088,6 +1088,96 @@ test_indexed_sampler_sets(void)
 }
 
 static bool
+test_indexed_storage_image_read(void)
+{
+   for (unsigned mode = 0; mode < 4; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options,
+         "indexed read-only storage image");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+
+      nir_def *handle = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 128), .desc_set = 4);
+      /* Keep the original descriptor handle live as the real robustness
+       * lowering does. The hardware image read gets a distinct heap-indexed
+       * handle; this crawl must continue to use the descriptor set. */
+      nir_def *descriptor = nir_load_from_texture_handle_agx(&b, handle);
+      nir_def *width = nir_load_global_constant(
+         &b, 1, 32, descriptor, .align_mul = 4);
+      nir_def *zero = nir_imm_int(&b, 0);
+      nir_def *coord = nir_vec4(&b, nir_iand(&b, width, zero), zero,
+                                zero, zero);
+      nir_def *value = nir_bindless_image_load(
+         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         .image_dim = mode == 3 ? GLSL_SAMPLER_DIM_3D
+                                : GLSL_SAMPLER_DIM_2D,
+         .image_array = false,
+         .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
+                             : PIPE_FORMAT_R8G8B8A8_UNORM,
+         .access = ACCESS_RESTRICT | ACCESS_NON_WRITEABLE |
+                   (mode == 2 ? ACCESS_COHERENT : 0));
+      nir_export_agx(&b, nir_channel(&b, value, 0), .base = 0);
+
+      const bool lowered = agx_nir_lower_g17p_indexed_samplers(b.shader);
+      unsigned original_handles = 0, native_handles = 0;
+      unsigned heap_index_loads = 0, set4_loads = 0;
+      nir_intrinsic_instr *read = NULL;
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic == nir_intrinsic_bindless_image_agx) {
+                  if (nir_intrinsic_desc_set(intr) == 4)
+                     original_handles++;
+                  else if (nir_intrinsic_desc_set(intr) == 0)
+                     native_handles++;
+               } else if (intr->intrinsic ==
+                          nir_intrinsic_load_descriptor_set_agx) {
+                  set4_loads += nir_intrinsic_desc_set(intr) == 4;
+               } else if (intr->intrinsic ==
+                             nir_intrinsic_load_global_constant &&
+                          intr->def.bit_size == 32) {
+                  heap_index_loads++;
+               } else if (intr->intrinsic ==
+                          nir_intrinsic_bindless_image_load) {
+                  read = intr;
+               }
+            }
+         }
+      }
+
+      bool ok;
+      if (mode == 0) {
+         nir_intrinsic_instr *native =
+            read ? nir_src_as_intrinsic(read->src[0]) : NULL;
+         nir_alu_instr *extend = native ?
+            nir_def_as_alu_or_null(native->src[0].ssa) : NULL;
+         nir_intrinsic_instr *index =
+            extend && extend->op == nir_op_u2u64 ?
+               nir_src_as_intrinsic(extend->src[0].src) : NULL;
+         ok = lowered && read && native &&
+              native->intrinsic == nir_intrinsic_bindless_image_agx &&
+              nir_intrinsic_desc_set(native) == 0 &&
+              native->src[0].ssa->bit_size == 64 && index &&
+              index->intrinsic == nir_intrinsic_load_global_constant &&
+              index->def.bit_size == 32 && original_handles == 1 &&
+              native_handles == 1 && heap_index_loads == 2 && set4_loads == 1;
+      } else {
+         ok = !lowered && original_handles == 1 && native_handles == 0;
+      }
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+
+   return true;
+}
+
+static bool
 lower_test_descriptor_set(nir_builder *b, nir_intrinsic_instr *intr,
                           UNUSED void *data)
 {
@@ -2954,8 +3044,9 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-samplers-only")) {
       const bool ok = test_indexed_sampler_sets() &&
-                      test_indexed_compute_sample();
-      printf("indexed graphics/compute sampler sets and live roots: %s\n",
+                      test_indexed_compute_sample() &&
+                      test_indexed_storage_image_read();
+      printf("indexed graphics/compute sampler and image reads: %s\n",
              ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -3062,6 +3153,11 @@ main(int argc, char **argv)
 
    if (!test_indexed_compute_sample()) {
       fputs("indexed compute sampler lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_indexed_storage_image_read()) {
+      fputs("indexed storage-image read lowering mismatch\n", stderr);
       all_ok = false;
    }
 

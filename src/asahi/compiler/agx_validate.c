@@ -341,7 +341,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          return agx_coordinate_registers(I, I->src[0].size);
       } else if (s == 1) {
          /* LOD */
-         if (I->op == AGX_OPCODE_TEXTURE_LOAD &&
+         if ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
+              I->op == AGX_OPCODE_IMAGE_LOAD) &&
              ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
              I->src[s].type != AGX_INDEX_IMMEDIATE)

@@ -7606,6 +7606,55 @@ TEST_F(AGX3PackBinary, BindlessStorageImageWriteMatchesNativeIndexForm)
    EXPECT_TRUE(pack(bad, false).empty());
 }
 
+TEST_F(AGX3PackBinary, BindlessStorageImageReadMatchesNativeIndexAndLOD)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_index lod = agx_register(4, AGX_SIZE_32);
+   lod.discard = true;
+   agx_index texture = agx_register(0, AGX_SIZE_64);
+   texture.discard = true;
+   agx_instr *read = agx_image_load_to(
+      b, dest, coord, lod, agx_uniform(0, AGX_SIZE_64), texture,
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN,
+      15, false, false, false);
+   read->mask = 15;
+   agx_stop(b);
+
+   const std::vector<uint8_t> code = pack(b);
+   /* applegpu-nt 32023.917 / apple-g17p, lane-selected argument-buffer
+    * texture plus a uint level widened from ushort. Coordinates and LOD are
+    * published on slot 2; the image result independently occupies slot 1. */
+   static const uint8_t native_lod[] = {
+      0x17,0x05,0x54,0x06,0x00,0x08,0x00,0x04,0xf0,0xc4,0x0c,0x00,
+   };
+   static const uint8_t native_read[] = {
+      0x05,0x80,0x0c,0xb8,0x30,0x01,0x80,0x24,0x00,0x02,
+      0x80,0x00,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,
+   };
+   EXPECT_NE(std::search(code.begin(), code.end(), native_lod,
+                         native_lod + sizeof(native_lod)), code.end());
+   EXPECT_NE(std::search(code.begin(), code.end(), native_read,
+                         native_read + sizeof(native_read)), code.end());
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   bad->shader->stage = MESA_SHADER_COMPUTE;
+   lod = agx_register(4, AGX_SIZE_16);
+   lod.discard = true;
+   read = agx_image_load_to(
+      bad, dest, coord, lod, agx_uniform(0, AGX_SIZE_64), texture,
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN,
+      15, false, false, false);
+   read->mask = 15;
+   agx_stop(bad);
+   EXPECT_TRUE(pack(bad, false).empty());
+}
+
 TEST_F(AGX3PackBinary, SampledRgba8WriteUsesNativeStateOneProtocol)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

@@ -41,6 +41,9 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
 /* Existing reserved software tail, relative to a Gen9 sampled texture. */
 #define AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET 68
+/* G17P appends one native texture-heap index after the 64-byte texture/PBE
+ * storage descriptor pair. Other generations retain their existing ABI. */
+#define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
 
 bool agx_nir_lower_g17p_indexed_samplers(struct nir_shader *s);
 

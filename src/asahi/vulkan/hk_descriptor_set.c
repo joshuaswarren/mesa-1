@@ -18,6 +18,7 @@
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
+#include "asahi/compiler/agx_nir.h"
 
 #include "util/u_debug.h"
 
@@ -186,6 +187,8 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
 
          desc.tex = view->planes[plane].ro_storage;
          desc.pbe = view->planes[plane].storage;
+         desc.texture_heap_index =
+            view->planes[plane].storage_heap_index;
       }
    }
 
@@ -198,6 +201,10 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    memcpy(packed + native.texture, &desc.tex,
           hk_texture_descriptor_size(generation));
    memcpy(packed + native.pbe, &desc.pbe, hk_pbe_descriptor_size(generation));
+   const uint32_t stride = set->layout->binding[binding].stride;
+   if (stride >= AGX_G17P_STORAGE_HEAP_INDEX_OFFSET + sizeof(uint64_t))
+      memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
+             &desc.texture_heap_index, sizeof(desc.texture_heap_index));
    if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64
@@ -206,11 +213,11 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
               set->layout->binding[binding].offset +
                  elem * set->layout->binding[binding].stride,
               supported);
-      for (unsigned i = 0; i < native.stride; ++i)
+      for (unsigned i = 0; i < stride; ++i)
          fprintf(stderr, "%02x", packed[i]);
       fputc('\n', stderr);
    }
-   write_desc(set, binding, elem, packed, native.stride);
+   write_desc(set, binding, elem, packed, stride);
 }
 
 static struct hk_buffer_address

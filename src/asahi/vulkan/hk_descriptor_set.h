@@ -60,8 +60,10 @@ static_assert(sizeof(struct hk_sampled_image_descriptor) == 72,
 struct hk_storage_image_descriptor {
    struct hk_native_texture_descriptor tex;
    struct hk_native_pbe_descriptor pbe;
+   uint32_t texture_heap_index;
+   uint32_t pad;
 };
-static_assert(sizeof(struct hk_storage_image_descriptor) == 64,
+static_assert(sizeof(struct hk_storage_image_descriptor) == 72,
               "maximum storage descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */

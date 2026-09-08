@@ -46,6 +46,13 @@ hk_descriptor_stride_align_for_type(
       break;
 
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+      *stride = hk_storage_image_descriptor_layout(
+                   agx_chip_descriptor_generation(pdev->dev.chip)).stride;
+      if (pdev->dev.chip == AGX_CHIP_G17P)
+         *stride += 8;
+      *alignment = 8;
+      break;
+
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
       *stride = hk_storage_image_descriptor_layout(

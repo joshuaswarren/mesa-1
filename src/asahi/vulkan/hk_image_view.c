@@ -593,6 +593,13 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
+         if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+            result = hk_descriptor_table_add(
+               dev, &dev->sampled_images, &view->planes[p].ro_storage, 32,
+               &view->planes[p].storage_heap_index);
+            if (result != VK_SUCCESS)
+               return result;
+         }
          /* Input attachments use an array-shaped descriptor independently
           * of the application sampled view. Keep the exact native bytes in
           * the indexed heap rather than sampling through the wrong shape. */
@@ -631,6 +638,9 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       for (unsigned p = 0; p < view->plane_count; ++p) {
+         if (view->planes[p].storage_heap_index)
+            hk_descriptor_table_remove(dev, &dev->sampled_images,
+                                        view->planes[p].storage_heap_index);
          if (view->planes[p].input_heap_index)
             hk_descriptor_table_remove(dev, &dev->sampled_images,
                                         view->planes[p].input_heap_index);

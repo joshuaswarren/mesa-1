@@ -350,6 +350,35 @@ g17p_sample_heap_index(const nir_tex_instr *tex)
              ? value : NULL;
 }
 
+/* Read-only storage images use the same native texture heap and texel-fetch
+ * sampler as ordinary indexed txf. The software descriptor tail supplies the
+ * heap index; the original handle remains live for robust descriptor bounds
+ * loads, which are independent of the hardware fetch operand. */
+static bool
+g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
+{
+   if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
+       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
+       nir_intrinsic_image_array(intr) ||
+       nir_intrinsic_format(intr) != PIPE_FORMAT_R8G8B8A8_UNORM ||
+       intr->def.num_components != 4 || intr->def.bit_size != 32 ||
+       nir_src_num_components(intr->src[1]) != 4 ||
+       nir_src_bit_size(intr->src[1]) != 32 ||
+       !nir_src_is_const(intr->src[2]) ||
+       nir_src_as_uint(intr->src[2]) != 0 ||
+       !nir_src_is_const(intr->src[3]) ||
+       nir_src_as_uint(intr->src[3]) != 0 ||
+       (nir_intrinsic_access(intr) &
+        (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_NON_READABLE)))
+      return false;
+
+   nir_intrinsic_instr *image = nir_src_as_intrinsic(intr->src[0]);
+   return image && image->intrinsic == nir_intrinsic_bindless_image_agx &&
+          nir_intrinsic_desc_set(image) <= UINT8_MAX &&
+          nir_src_is_const(image->src[0]) &&
+          (nir_src_as_uint(image->src[0]) & 7) == 0;
+}
+
 /* Native indexed samples consume zero-extended heap indices, loaded by the
  * GPU from the descriptor set. Keep descriptor-set roots alive so updates
  * after command recording and dynamically selected array elements are visible.
@@ -361,10 +390,19 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                    shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
 
-   unsigned samples = 0;
+   unsigned samples = 0, image_reads = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
+                  if (!g17p_indexed_image_fetch_shape(intr))
+                     return false;
+                  image_reads++;
+               }
+               continue;
+            }
             if (instr->type != nir_instr_type_tex)
                continue;
             nir_tex_instr *tex = nir_instr_as_tex(instr);
@@ -383,13 +421,38 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
          }
       }
    }
-   if (!samples)
+   if (!samples && !image_reads)
       return false;
 
    nir_foreach_function_impl(impl, shader) {
       nir_builder b = nir_builder_create(impl);
       nir_foreach_block(block, impl) {
          nir_foreach_instr_safe(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic) {
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_bindless_image_load)
+                  continue;
+
+               b.cursor = nir_before_instr(instr);
+               nir_intrinsic_instr *image =
+                  nir_src_as_intrinsic(intr->src[0]);
+               assert(image &&
+                      image->intrinsic == nir_intrinsic_bindless_image_agx);
+               nir_def *set = nir_load_descriptor_set_agx(
+                  &b, nir_intrinsic_desc_set(image));
+               nir_def *offset = nir_iadd_imm(
+                  &b, image->src[0].ssa,
+                  AGX_G17P_STORAGE_HEAP_INDEX_OFFSET);
+               nir_def *address =
+                  nir_iadd(&b, set, nir_u2u64(&b, offset));
+               nir_def *texture_index = nir_load_global_constant(
+                  &b, 1, 32, address, .align_mul = 4);
+               texture_index = nir_u2u64(&b, texture_index);
+               nir_def *native_handle = nir_bindless_image_agx(
+                  &b, texture_index, .desc_set = 0);
+               nir_src_rewrite(&intr->src[0], native_handle);
+               continue;
+            }
             if (instr->type != nir_instr_type_tex)
                continue;
             nir_tex_instr *tex = nir_instr_as_tex(instr);

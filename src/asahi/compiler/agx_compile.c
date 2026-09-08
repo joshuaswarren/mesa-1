@@ -1627,6 +1627,19 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
       lod = agx_zero();
    }
 
+   /* G17P's dynamic integer-level PACK_SMPIR reads a 32-bit GPR. Apple's
+    * native ushort-level image kernel widens the loaded ushort before the
+    * otherwise byte-identical staging/fetch sequence. Robust bindless image
+    * lowering can synthesize the same semantic uint level in a 16-bit
+    * register, so make that required widening explicit before RA. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       lod_mode == AGX_LOD_MODE_LOD_MIN && lod.size == AGX_SIZE_16 &&
+       lod.type != AGX_INDEX_IMMEDIATE) {
+      agx_index lod32 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_mov_to(b, lod32, lod);
+      lod = lod32;
+   }
+
    agx_index coords = agx_emit_collect(b, coord_comps, coord);
    agx_index tmp = agx_vec_temp(b->shader, dst.size, sparse ? 8 : 4);
 

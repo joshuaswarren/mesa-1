@@ -884,6 +884,17 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
       agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_32 &&
       agx_channels(I->src[1]) == 1;
+   const bool bindless_image = I->op == AGX_OPCODE_IMAGE_LOAD && !immediate &&
+      agx3_tex_plain_reg(I->src[3]) && I->src[3].size == AGX_SIZE_64 &&
+      agx_channels(I->src[3]) == 1 && !(I->src[3].value & 1) &&
+      I->src[3].value <= 252 &&
+      !(I->src[3].cache && (I->src[3].discard || I->src[3].kill)) &&
+      agx3_tex_plain_uniform64(I->src[2]);
+   /* Apple's lane-indexed image read publishes coordinates and uint LOD on
+    * staging slot 2, then issues the texture result on slot 1. Keep those two
+    * independent scoreboard domains; reusing slot 1 for both is not a native
+    * dependency shape. */
+   const uint8_t staging_slot = bindless_image && register_lod ? 2 : slot;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -899,7 +910,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        (!(I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
           agx3_tex_imm(I->src[1], 0)) && !immediate_lod && !register_lod) ||
        (register_lod && !stage_coordinates) ||
-       !agx3_tex_imm(I->src[2], 0) ||
+       (!agx3_tex_imm(I->src[2], 0) && !bindless_image) ||
        (immediate ? I->src[3].value > 15 :
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (I->src[3].type != AGX_INDEX_REGISTER && I->src[3].type != AGX_INDEX_UNIFORM) ||
@@ -915,17 +926,17 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        I->query_lod || I->gather != AGX_GATHER_NONE || I->sparse)
       return false;
 
-   /* Native image read() stages coordinates at halves16/18, keeping them
-    * disjoint from imgwci's halves0/2 while the asynchronous read is live.
-    * Ordinary texture loads retain the original bank0 staging ABI. */
+   /* A read/write image stages its read coordinates at halves16/18, keeping
+    * them disjoint from imgwci's halves0/2. Native read-only indexed images,
+    * like ordinary texture loads, use the bank0 coordinate ABI. */
    const uint16_t staging_coord =
-      I->op == AGX_OPCODE_IMAGE_LOAD ? 16 : 0;
+      I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image ? 16 : 0;
    if (stage_coordinates) {
       uint16_t staging_wait = wait_mask;
       if (register_lod) {
          uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
          if (!agx3_tex_stage_typed_lod(
-                enc, I->src[1].value, slot, staging_wait,
+                enc, I->src[1].value, staging_slot, staging_wait,
                 I->src[1].cache, I->src[1].discard,
                 AGX3_TEX_LEVEL_INTEGER, lod, &lod_len) ||
              !agx3_append(emission, lod, lod_len))
@@ -937,7 +948,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
                                   I->src[0].value + 2 * i,
-                                  slot, i == 0 ? staging_wait : 0,
+                                  staging_slot, i == 0 ? staging_wait : 0,
                                   enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
                                   enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard,
                                   copy, &copy_len) ||
@@ -959,7 +970,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       .texture_kill = !immediate && I->src[3].type == AGX_INDEX_REGISTER &&
          (I->src[3].discard || I->src[3].kill),
       .slot = slot,
-      .wait_mask = stage_coordinates ? (1u << (slot - 1)) : wait_mask,
+      .wait_mask = stage_coordinates ? (1u << (staging_slot - 1)) : wait_mask,
       .coord_kill = stage_coordinates || I->src[0].kill,
       .final = final,
       .array = I->dim == AGX_DIM_2D_ARRAY,
@@ -4307,8 +4318,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I);
-         if (g17p_storage_image_protocol &&
-             (I->op == AGX_OPCODE_IMAGE_LOAD ||
+         if ((enc == AGX_ISA_ENCODING_AGX3B &&
+              I->op == AGX_OPCODE_IMAGE_LOAD) ||
+             (g17p_storage_image_protocol &&
               I->op == AGX_OPCODE_TEXTURE_SAMPLE))
             e->preferred_slot = 1;
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
@@ -4585,7 +4597,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                 ctx->stage == MESA_SHADER_COMPUTE;
             if (staged) {
                const unsigned coord_base =
-                  I->op == AGX_OPCODE_IMAGE_LOAD ? 16 : 0;
+                  I->op == AGX_OPCODE_IMAGE_LOAD &&
+                        I->src[2].type == AGX_INDEX_IMMEDIATE
+                     ? 16
+                     : 0;
                ctx->agx3_staging_halfs = MAX2(
                   ctx->agx3_staging_halfs,
                   coord_base + 2 * agx_channels(I->src[0]));
