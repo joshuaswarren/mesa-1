@@ -5948,6 +5948,35 @@ TEST_F(AGX3PackBinary, WideVertexOutputsPreserveValuesAndRecycleSlotsAfterWrites
    }
 }
 
+TEST_F(AGX3PackBinary, SideEffectBeforeWideTerminalVertexOutputs)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+
+   /* Apple's explicit-level vertex texture operation is independent of the
+    * terminal UVSW protocol. This is the shape emitted by Firefox WebRender:
+    * a texture read followed by a dense, wide output suffix. */
+   agx_index tex_dest = agx_register(20, AGX_SIZE_32);
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   tex_dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   agx_instr *tex = agx_texture_sample_to(
+      b, tex_dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   tex->op = AGX_OPCODE_TEXTURE_LOAD;
+   tex->mask = 15;
+
+   for (unsigned c = 0; c < 51; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   EXPECT_FALSE(bytes.empty());
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 102u);
+}
+
 TEST_F(AGX3PackBinary, ReorderedWideVertexOutputsMatchNativeStagingProtocol)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

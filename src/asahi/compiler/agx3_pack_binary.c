@@ -3539,10 +3539,16 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
           uvs_mask == 0xf;
 }
 
-/* Native 11/16/32/36-output VSs use a dense set of scalar UVSW indices and
+/* Native 11/16/32/36/52-output VSs use a dense set of scalar UVSW indices and
  * distinct staging addresses. The stores may be grouped by varying rather
  * than sorted by scalar index. Recycle the six scoreboard slots after waiting
- * for earlier writes; keep the four-position golden independent. */
+ * for earlier writes; keep the four-position golden independent. Instructions
+ * before the terminal output suffix are encoded and validated normally. In
+ * particular, real WebRender vertex shaders perform texture reads before a
+ * dense 51-scalar suffix; requiring every preceding producer to be DCE-safe
+ * incorrectly excluded that native-shaped stream even though no instruction
+ * crosses a writeout.
+ */
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
 {
@@ -3589,9 +3595,11 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
                return 0;
             break;
          default:
-            if (!agx_opcodes_info[I->op].can_eliminate)
+            /* Once writeout begins only ST_VARY followed by STOP is safe.
+             * Before it begins, side-effecting instructions are fine: they
+             * stay in place and normal packing validates their encoding. */
+            if (outputs)
                return 0;
-            /* Normal packing still validates each operand/width/encoding. */
             break;
          }
       }
