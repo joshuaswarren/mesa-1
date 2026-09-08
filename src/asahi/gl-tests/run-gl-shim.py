@@ -33,5 +33,7 @@ with tempfile.TemporaryDirectory(prefix="asahi-gl-shim-") as tmp:
     env["EGL_PLATFORM"] = "surfaceless"
     env.setdefault("ASAHI_SHIM_CHIP", "g17p")
     env["ASAHI_GL_NOOP_SHIM"] = "1"
+    env.setdefault("ASAHI_SHIM_VALIDATE_G17P_STREAM", "1")
+    env.setdefault("ASAHI_GL_RENDER_NODE", "/dev/dri/renderD128")
 
     sys.exit(subprocess.call([str(binary), *binary_args], env=env))

@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct drm_asahi_cmd_render;
+
 struct asahi_g17p_stream_memory {
    void *data;
    bool (*read)(void *data, uint64_t address, void *dst, size_t size);
@@ -52,3 +54,7 @@ bool asahi_g17p_stream_validate(
    const struct asahi_g17p_stream_memory *memory,
    const struct asahi_g17p_stream_config *config,
    struct asahi_g17p_stream_stats *stats);
+
+bool asahi_g17p_render_aux_validate(
+   const struct asahi_g17p_stream_memory *memory,
+   const struct drm_asahi_cmd_render *render);

@@ -121,6 +121,8 @@ bool agx_tilebuffer_supports_mask(struct agx_tilebuffer_layout *tib,
 
 void agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib);
 
+bool agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib);
+
 #ifdef __cplusplus
 } /* extern C */
 #endif

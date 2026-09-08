@@ -7,17 +7,20 @@
 
 #include "asahi/lib/agx_ppp_hal200_graphics_core.h"
 #include "asahi/lib/agx_ioto_core.h"
+#include "asahi/lib/agx_ioto_program_core.h"
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/agx_vdm_decode_core.h"
 #include "asahi/lib/agx_vdm_hal200_bind_tail_core.h"
 #include "asahi/isa/disasm.h"
+#include "drm-uapi/asahi_drm.h"
 
 #include <stdio.h>
 #include <string.h>
 
 #define G17P_CONTEXT_BASE UINT64_C(0x1000000000)
+#define G17P_USC_BASE UINT64_C(0x10000000000)
 #define MAX_RECORDS 65536
 #define MAX_IOTO_PROGRAM_SIZE 6144
 
@@ -145,7 +148,7 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
 
 static bool
 validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
-                      uint64_t address, bool fragment,
+                      uint64_t address, bool fragment, bool nested_tables,
                       struct asahi_g17p_stream_stats *stats)
 {
    size_t available;
@@ -225,11 +228,14 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                      return fail_at(cursor, "Ioto load source is unowned");
 
                   uint8_t nested[16];
-                  if (memory->read(memory->data, source, nested,
+                  if (nested_tables &&
+                      memory->read(memory->data, source, nested,
                                    sizeof(nested))) {
                      const uint64_t a = load_le64(nested);
                      const uint64_t b = load_le64(nested + 8);
                      if (a > UINT32_MAX && b > UINT32_MAX &&
+                         a < (UINT64_C(1) << 48) &&
+                         b < (UINT64_C(1) << 48) &&
                          (!memory->owned(memory->data, a, 32) ||
                           !memory->owned(memory->data, b, 32)))
                         return fail_at(cursor,
@@ -284,6 +290,82 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
    return fail_at(cursor, "Ioto program has no bounded terminator");
 }
 
+static uint64_t
+render_resource_spec(const struct drm_asahi_bg_eot *program, uint32_t high)
+{
+   return program->rsrc_spec | ((uint64_t)high << 32);
+}
+
+static bool
+validate_render_aux_program(const struct asahi_g17p_stream_memory *memory,
+                            const struct drm_asahi_bg_eot *program,
+                            const char *name, bool fragment,
+                            bool nested_tables)
+{
+   if ((program->usc & 0xf) != 4) {
+      fprintf(stderr, "shim: G17P %s USC tag is not 4\n", name);
+      return false;
+   }
+
+   const uint64_t address = G17P_USC_BASE | (program->usc & ~UINT32_C(0xf));
+   struct asahi_g17p_stream_stats stats = {0};
+   if (!validate_ioto_program(memory, address, fragment, nested_tables,
+                              &stats)) {
+      fprintf(stderr, "shim: G17P %s Ioto program %#llx is invalid\n", name,
+              (unsigned long long)address);
+      return false;
+   }
+
+   return true;
+}
+
+bool
+asahi_g17p_render_aux_validate(
+   const struct asahi_g17p_stream_memory *memory,
+   const struct drm_asahi_cmd_render *render)
+{
+   if (!memory || !render)
+      return false;
+
+   const uint64_t bg =
+      render_resource_spec(&render->bg, render->bg_rsrc_spec_hi);
+   const uint64_t partial_bg = render_resource_spec(
+      &render->partial_bg, render->bg_partial_rsrc_spec_hi);
+   const uint64_t eot =
+      render_resource_spec(&render->eot, render->bg_eot_rsrc_spec_hi);
+   const uint64_t partial_eot = render_resource_spec(
+      &render->partial_eot, render->bg_eot_partial_rsrc_spec_hi);
+   const uint32_t high = render->bg_rsrc_spec_hi |
+                         render->bg_partial_rsrc_spec_hi |
+                         render->bg_eot_rsrc_spec_hi |
+                         render->bg_eot_partial_rsrc_spec_hi;
+   if (!!high != !!(render->flags & DRM_ASAHI_RENDER_RSRC_SPEC_HI))
+      return fail_at(0, "render resource-spec high flag disagrees with payload");
+
+   const uint64_t bg_resources =
+      AGX_IOTO_G17P_BG_RESOURCE_SPEC & ((UINT64_C(1) << 47) - 1);
+   const uint64_t bg_writes = bg_resources | (UINT64_C(0x1ffff) << 47);
+   if ((bg != bg_resources && bg != bg_writes) ||
+       (partial_bg != bg_resources && partial_bg != bg_writes) ||
+       (eot != AGX_IOTO_G17P_EOT_RESOURCE_SPEC && eot != bg_resources) ||
+       (partial_eot != AGX_IOTO_G17P_EOT_RESOURCE_SPEC &&
+        partial_eot != bg_resources))
+      return fail_at(0, "render auxiliary resource spec is not canonical");
+
+   return validate_render_aux_program(memory, &render->bg, "background",
+                                      true, true) &&
+          validate_render_aux_program(memory, &render->partial_bg,
+                                      "partial background", true, true) &&
+          validate_render_aux_program(memory, &render->eot, "end-of-tile",
+                                      eot != AGX_IOTO_G17P_EOT_RESOURCE_SPEC,
+                                      false) &&
+          validate_render_aux_program(memory, &render->partial_eot,
+                                      "partial end-of-tile",
+                                      partial_eot !=
+                                         AGX_IOTO_G17P_EOT_RESOURCE_SPEC,
+                                      false);
+}
+
 static bool
 validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
               uint64_t address, size_t size,
@@ -326,7 +408,7 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
       if ((vit & 63) || (program & 63) || load_le32(bytes + 12) ||
           load_le32(bytes + 24) ||
           (vit && !memory->owned(memory->data, vit, 4)) || !program ||
-          !validate_ioto_program(memory, program, true, stats)) {
+          !validate_ioto_program(memory, program, true, true, stats)) {
          fprintf(stderr,
                  "shim: G17P fragment slot %#llx has unowned VIT %#llx or "
                  "program %#llx\n",
@@ -543,6 +625,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
                     (unsigned long long)record.data.state_update.pipeline);
          if (!validate_ioto_program(memory,
                                     record.data.state_update.pipeline, false,
+                                    true,
                                     &local)) {
             fprintf(stderr,
                     "shim: G17P vertex program %#llx at VDM %#llx is "

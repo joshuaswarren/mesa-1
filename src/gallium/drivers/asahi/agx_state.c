@@ -3609,7 +3609,204 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       }
    }
 
-   /* Begin building the pipeline */
+   if (dev->chip == AGX_CHIP_G17P) {
+      /* The exact HAL200 background/EOT programs currently cover the ordinary
+       * single-colour-buffer tile layout used by desktop compositors and GL
+       * FBOs.  Never feed its Ioto grammar a spilled, layered, or MRT key. */
+      if (!agx_g17p_rt0_tile_layout_supported(&batch->tilebuffer_layout))
+         agx_native_descriptor_rejected(dev, "background tile layout");
+
+      for (unsigned rt = 1; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
+         if (key.op[rt] != AGX_BG_EOT_NONE)
+            agx_native_descriptor_rejected(dev, "background MRT program");
+      }
+
+      const enum agx_bg_eot_op op = key.op[0];
+      if (store ? (op != AGX_EOT_STORE && op != AGX_BG_EOT_NONE)
+                : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD &&
+                   op != AGX_BG_EOT_NONE))
+         agx_native_descriptor_rejected(dev, "background operation");
+
+      if (!store && op == AGX_BG_CLEAR)
+         key.reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+
+      struct agx_bg_eot_shader *shader =
+         agx_get_bg_eot_shader(&ctx->bg_eot, &key);
+      const bool shader_supported =
+         shader && shader->bo && shader->bo->va && shader->ptr &&
+         shader->info.binary_size && shader->info.binary_size <= 256 &&
+         shader->info.main_offset < shader->info.binary_size &&
+         shader->info.main_size <=
+            shader->info.binary_size - shader->info.main_offset &&
+         !shader->info.has_preamble && !shader->info.rodata.size_16 &&
+         shader->info.nr_gprs;
+      const bool resources_match =
+         shader &&
+         (store ||
+          (op == AGX_BG_EOT_NONE
+              ? shader->info.push_count == 0 && !shader->info.uses_txf
+              : agx3_g17p_rt0_bg_shader_resources_match(
+                   op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
+                                      : AGX3_G17P_RT0_BG_RELOAD,
+                   shader->info.push_count, shader->info.uses_txf)));
+      if (!shader_supported || !resources_match)
+         agx_native_descriptor_rejected(dev, "background shader");
+      agx_batch_add_bo(batch, shader->bo);
+
+      const size_t capacity =
+         op == AGX_BG_EOT_NONE
+            ? AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
+         : store ? AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE
+         : op == AGX_BG_CLEAR ? AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE
+                              : AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
+      struct agx_bo *program_bo = NULL;
+      struct agx_ptr program_ptr = agx_pool_alloc_aligned_with_bo(
+         &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT,
+         &program_bo);
+      if (!program_ptr.cpu || !program_bo ||
+          !agx_va_in_usc_window(dev, program_ptr.gpu) ||
+          !agx_va_in_usc_window(dev,
+                                shader->ptr + shader->info.main_offset))
+         agx_native_descriptor_rejected(dev, "background program allocation");
+
+      size_t program_length = 0;
+      uint64_t resource_spec = 0;
+      if (store && op == AGX_EOT_STORE) {
+         const struct pipe_surface *surf = &batch->key.cbufs[0];
+         if (!surf->texture || descriptor_size !=
+                                  AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE)
+            agx_native_descriptor_rejected(dev, "end-of-tile attachment");
+
+         struct pipe_image_view view = image_view_for_surface(surf);
+         struct agx_ptr pbe =
+            agx_pool_alloc_aligned(&batch->pool, descriptor_size, 256);
+         view.format = util_format_linear(view.format);
+         const bool no_compress = batch->feedback & PIPE_CLEAR_COLOR0;
+         if (!agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false,
+                                   no_compress))
+            agx_native_descriptor_rejected(dev, "end-of-tile PBE");
+
+         const struct agx3_g17p_rt0_eot_program_desc desc = {
+            .program_va = program_ptr.gpu,
+            .shader_va = shader->ptr + shader->info.main_offset,
+            .pbe_argument_va = pbe.gpu,
+            .imageblock_offset_B =
+               agx_tilebuffer_offset_B(&key.tib, 0),
+            .attachment_count = 1,
+            .shader_binary_size = shader->info.binary_size,
+            .scratch_size = shader->info.scratch_size,
+            .nr_gprs = shader->info.nr_gprs,
+            .staging_halfs = shader->info.agx3_staging_known
+                                ? shader->info.agx3_staging_halfs
+                                : 0,
+         };
+         struct agx3_g17p_rt0_eot_program native;
+         if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &native) ||
+             native.length > capacity)
+            agx_native_descriptor_rejected(dev, "end-of-tile Ioto program");
+         memcpy(program_ptr.cpu, native.bytes, native.length);
+         program_length = native.length;
+         resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
+      } else if (op == AGX_BG_EOT_NONE) {
+         const struct agx3_g17p_graphics_program_desc desc = {
+            .program_va = program_ptr.gpu,
+            .shader_va = shader->ptr + shader->info.main_offset,
+            .shader_binary_size = shader->info.binary_size,
+            .scratch_size = shader->info.scratch_size,
+            .nr_gprs = shader->info.nr_gprs,
+            .compiler_d_valid = shader->info.agx3_staging_known,
+            .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
+            .fragment = true,
+         };
+         struct agx3_g17p_graphics_program native;
+         if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &native) ||
+             native.length > capacity ||
+             !agx3_g17p_rt0_bg_resource_spec(
+                dev->chip, AGX3_G17P_RT0_BG_NONE, &resource_spec))
+            agx_native_descriptor_rejected(dev, "empty background Ioto program");
+         memcpy(program_ptr.cpu, native.bytes, native.length);
+         program_length = native.length;
+      } else {
+         const struct pipe_surface *surf = &batch->key.cbufs[0];
+         if (!surf->texture)
+            agx_native_descriptor_rejected(dev, "background attachment");
+
+         struct agx3_g17p_rt0_bg_program_desc desc = {
+            .program_va = program_ptr.gpu,
+            .shader_va = shader->ptr + shader->info.main_offset,
+            .shader_binary_size = shader->info.binary_size,
+            .scratch_size = shader->info.scratch_size,
+            .nr_gprs = shader->info.nr_gprs,
+            .staging_halfs = shader->info.agx3_staging_halfs,
+            .clear_push_halfs = shader->info.push_count,
+            .staging_known = shader->info.agx3_staging_known,
+            .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
+                                     : AGX3_G17P_RT0_BG_RELOAD,
+         };
+
+         if (op == AGX_BG_CLEAR) {
+            if (!batch->uploaded_clear_color[0])
+               agx_native_descriptor_rejected(dev, "background clear value");
+            desc.clear_value_va = batch->uploaded_clear_color[0];
+         } else {
+            struct agx_ptr texture =
+               agx_pool_alloc_aligned(&batch->pool, descriptor_size, 64);
+            struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
+            if (!agx_pack_texture(descriptor_generation, texture.cpu,
+                                  agx_resource(surf->texture), surf->format,
+                                  &sampler_view))
+               agx_native_descriptor_rejected(dev, "background texture");
+
+            const unsigned sampler_size =
+               agx_chip_sampler_heap_element_size(dev->chip);
+            if (sampler_size != 32)
+               agx_native_descriptor_rejected(dev, "background sampler geometry");
+            struct agx_ptr sampler =
+               agx_pool_alloc_aligned(&batch->pool, sampler_size, 64);
+            memset(sampler.cpu, 0, sampler_size);
+            agx_pack(sampler.cpu, SAMPLER_HAL200, cfg) {
+               cfg.minimum_lod = 0.0f;
+               cfg.maximum_lod = INFINITY;
+               cfg.maximum_anisotropy = 1;
+               cfg.magnify = AGX_FILTER_LINEAR;
+               cfg.minify = AGX_FILTER_NEAREST;
+               cfg.mip_filter = AGX_MIP_FILTER_NONE;
+               cfg.wrap_s = AGX_WRAP_CLAMP_TO_EDGE;
+               cfg.wrap_t = AGX_WRAP_CLAMP_TO_EDGE;
+               cfg.wrap_r = AGX_WRAP_CLAMP_TO_EDGE;
+               cfg.pixel_coordinates = true;
+               cfg.compare_func = AGX_COMPARE_FUNC_ALWAYS;
+            }
+
+            const uint64_t pointers[2] = {texture.gpu, sampler.gpu};
+            const uint64_t table = agx_pool_upload_aligned(
+               &batch->pool, pointers, sizeof(pointers), 8);
+            desc.texture_pointer_va = table;
+            desc.sampler_pointer_va = table + sizeof(uint64_t);
+         }
+
+         struct agx3_g17p_rt0_bg_program native;
+         if (!agx3_g17p_rt0_bg_program_generate(dev->chip, &desc, &native) ||
+             native.length > capacity ||
+             !agx3_g17p_rt0_bg_resource_spec(dev->chip, desc.op,
+                                              &resource_spec))
+            agx_native_descriptor_rejected(dev, "background Ioto program");
+         memcpy(program_ptr.cpu, native.bytes, native.length);
+         program_length = native.length;
+      }
+
+      if (agx_bo_sync_for_device(program_bo,
+                                 program_ptr.gpu - program_bo->va->addr,
+                                 program_length))
+         agx_native_descriptor_rejected(dev, "background program upload");
+
+      return (struct asahi_bg_eot){
+         .usc = agx_usc_addr(dev, program_ptr.gpu),
+         .rsrc_spec = resource_spec,
+      };
+   }
+
+   /* Begin building the legacy pipeline. */
    size_t usc_size = agx_usc_size(3 + PIPE_MAX_COLOR_BUFS);
    struct agx_ptr t =
       agx_pool_alloc_aligned(&batch->pipeline_pool, usc_size, 64);
@@ -3755,7 +3952,8 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
 
    struct asahi_bg_eot ret = {.usc = t.gpu};
 
-   agx_pack(&ret.counts, COUNTS, cfg) {
+   struct agx_counts_packed counts;
+   agx_pack(&counts, COUNTS, cfg) {
       cfg.uniform_register_count = shader->info.push_count;
       cfg.preshader_register_count = shader->info.nr_preamble_gprs;
       cfg.texture_state_register_count = nr_tex;
@@ -3765,6 +3963,8 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       if (!store)
          cfg.unknown = 0xFFFF;
    }
+
+   memcpy(&ret.rsrc_spec, &counts, sizeof(counts));
 
    return ret;
 }

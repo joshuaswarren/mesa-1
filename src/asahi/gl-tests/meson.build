@@ -7,6 +7,7 @@ gl_resources = executable(
   dependencies : [
     cc.find_library('EGL'),
     cc.find_library('GLESv2'),
+    dep_gbm,
   ],
   build_by_default : false,
 )

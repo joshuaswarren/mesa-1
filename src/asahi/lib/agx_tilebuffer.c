@@ -176,3 +176,88 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
       }
    }
 }
+
+bool
+agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
+{
+   if (!tib || (tib->nr_samples != 1 && tib->nr_samples != 2) ||
+       tib->layered || tib->tile_size != 32 * 32 || tib->spilled[0])
+      return false;
+
+   const bool mixed_mrt =
+      tib->nr_samples == 1 &&
+      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
+      tib->logical_format[1] == PIPE_FORMAT_R8_UNORM && !tib->spilled[1] &&
+      tib->_offset_B[0] == 0 && tib->_offset_B[1] == 8 &&
+      tib->sample_size_B == 16;
+
+   for (unsigned rt = mixed_mrt ? 2 : 1; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
+         return false;
+   }
+
+   if (tib->logical_format[0] == PIPE_FORMAT_NONE)
+      return tib->sample_size_B == 0;
+
+   const bool scalar_r32f = tib->nr_samples == 1 &&
+                            tib->logical_format[0] == PIPE_FORMAT_R32_FLOAT;
+   const bool scalar_r32i = tib->nr_samples == 1 &&
+                            tib->logical_format[0] == PIPE_FORMAT_R32_SINT;
+   const bool pair_r32f = tib->nr_samples == 1 &&
+                          tib->logical_format[0] == PIPE_FORMAT_R32G32_FLOAT;
+   const bool pair_r32i = tib->nr_samples == 1 &&
+                          tib->logical_format[0] == PIPE_FORMAT_R32G32_SINT;
+   const bool pair_r32u = tib->nr_samples == 1 &&
+                          tib->logical_format[0] == PIPE_FORMAT_R32G32_UINT;
+   const bool scalar_r8u = tib->nr_samples == 1 &&
+                           tib->logical_format[0] == PIPE_FORMAT_R8_UINT;
+   const bool scalar_r8i = tib->nr_samples == 1 &&
+                           tib->logical_format[0] == PIPE_FORMAT_R8_SINT;
+   const bool rgba16u = tib->nr_samples == 1 &&
+      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UINT;
+   const bool rgba16i = tib->nr_samples == 1 &&
+      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT;
+   const bool rgba32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT &&
+      agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
+   const bool rgba32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT &&
+      agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
+   const bool rgba32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT &&
+      agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
+   const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
+      tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
+      agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
+
+   return mixed_mrt || rgba32u || rgba32i || rgba32f || rgb10a2u ||
+          (tib->sample_size_B == 8 &&
+           (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
+            agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_FLOAT ||
+            agx_tilebuffer_physical_format(tib, 0) ==
+               PIPE_FORMAT_R10G10B10A2_UNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R32_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16_UNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16_FLOAT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_FLOAT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
+            scalar_r32f || scalar_r32i || pair_r32f || pair_r32i ||
+            pair_r32u || scalar_r8u || scalar_r8i || rgba16u || rgba16i));
+}

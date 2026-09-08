@@ -364,8 +364,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble = wboit_mrt_active
-         ? HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
-         : HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+         ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
+         : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
    static int rt1_via_slot0 = -1;
    if (rt1_via_slot0 < 0)
@@ -393,9 +393,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       shader &&
       (store || (op == AGX_BG_EOT_NONE
                     ? shader->info.push_count == 0 && !shader->info.uses_txf
-                 : hk_agx3_g17p_rt0_bg_shader_resources_match(
-                      op == AGX_BG_CLEAR ? HK_AGX3_G17P_RT0_BG_CLEAR
-                                         : HK_AGX3_G17P_RT0_BG_RELOAD,
+                 : agx3_g17p_rt0_bg_shader_resources_match(
+                      op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
+                                         : AGX3_G17P_RT0_BG_RELOAD,
                       shader->info.push_count, shader->info.uses_txf)));
    if (!store && debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && shader)
       fprintf(stderr, "G17P BG metadata: op=%u size=%u gprs=%u push=%u "
@@ -479,7 +479,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       if (!pbe_argument_va)
          return (struct hk_bg_eot){0};
 
-      const struct hk_agx3_g17p_rt0_eot_program_desc desc = {
+      const struct agx3_g17p_rt0_eot_program_desc desc = {
          .program_va = program_bo->va->addr,
          .shader_va = shader->ptr + shader->info.main_offset,
          .pbe_argument_va = pbe_argument_va,
@@ -497,9 +497,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .staging_halfs = shader->info.agx3_staging_known
                             ? shader->info.agx3_staging_halfs : 0,
       };
-      struct hk_agx3_g17p_rt0_eot_program program;
-      if (!hk_agx3_g17p_rt0_eot_program_generate(dev->dev.chip, &desc,
-                                                  &program)) {
+      struct agx3_g17p_rt0_eot_program program;
+      if (!agx3_g17p_rt0_eot_program_generate(dev->dev.chip, &desc,
+                                               &program)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
@@ -536,8 +536,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 
       memcpy(program_map, program.bytes, program.length);
       program_length = program.length;
-      if (!hk_agx3_g17p_rt0_bg_resource_spec(
-             dev->dev.chip, HK_AGX3_G17P_RT0_BG_NONE, &resource_spec)) {
+      if (!agx3_g17p_rt0_bg_resource_spec(
+             dev->dev.chip, AGX3_G17P_RT0_BG_NONE, &resource_spec)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
@@ -563,7 +563,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          return (struct hk_bg_eot){0};
       }
 
-      struct hk_agx3_g17p_rt0_bg_program_desc desc = {
+      struct agx3_g17p_rt0_bg_program_desc desc = {
          .program_va = program_bo->va->addr,
          .shader_va = shader->ptr + shader->info.main_offset,
          .shader_binary_size = shader->info.binary_size,
@@ -572,8 +572,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .staging_halfs = shader->info.agx3_staging_halfs,
          .clear_push_halfs = shader->info.push_count,
          .staging_known = shader->info.agx3_staging_known,
-         .op = op == AGX_BG_CLEAR ? HK_AGX3_G17P_RT0_BG_CLEAR
-                                  : HK_AGX3_G17P_RT0_BG_RELOAD,
+         .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
+                                  : AGX3_G17P_RT0_BG_RELOAD,
       };
 
       if (op == AGX_BG_CLEAR) {
@@ -617,17 +617,17 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          desc.sampler_pointer_va = table + sizeof(uint64_t);
       }
 
-      struct hk_agx3_g17p_rt0_bg_program program;
-      if (!hk_agx3_g17p_rt0_bg_program_generate(dev->dev.chip, &desc,
-                                                &program)) {
+      struct agx3_g17p_rt0_bg_program program;
+      if (!agx3_g17p_rt0_bg_program_generate(dev->dev.chip, &desc,
+                                             &program)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
 
       memcpy(program_map, program.bytes, program.length);
       program_length = program.length;
-      if (!hk_agx3_g17p_rt0_bg_resource_spec(dev->dev.chip, desc.op,
-                                            &resource_spec)) {
+      if (!agx3_g17p_rt0_bg_resource_spec(dev->dev.chip, desc.op,
+                                          &resource_spec)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }

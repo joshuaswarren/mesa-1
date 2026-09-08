@@ -1197,7 +1197,7 @@ void agx_batch_init_state(struct agx_batch *batch);
 
 struct asahi_bg_eot {
    uint64_t usc;
-   struct agx_counts_packed counts;
+   uint64_t rsrc_spec;
 };
 
 struct asahi_bg_eot agx_build_bg_eot(struct agx_batch *batch, bool store,

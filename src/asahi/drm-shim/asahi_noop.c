@@ -541,7 +541,8 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .scissor_base = render.isp_scissor_base,
             .depth_bias_base = render.isp_dbias_base,
          };
-         if (!asahi_g17p_stream_validate(&memory, &config, &stats))
+         if (!asahi_g17p_render_aux_validate(&memory, &render) ||
+             !asahi_g17p_stream_validate(&memory, &config, &stats))
             return -EINVAL;
          const char *matrix_case = getenv("ASAHI_SHIM_G17P_CASE");
          const bool auxiliary_clear = stats.clear_only && matrix_case &&

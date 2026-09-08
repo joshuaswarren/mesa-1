@@ -6,6 +6,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <fcntl.h>
+#include <gbm.h>
+#include <unistd.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,6 +20,7 @@
 #define HEIGHT 64
 #define GUARD_SIZE 32
 #define GUARD_BYTE 0xa5
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static bool
 gl_ok(const char *where)
@@ -201,7 +205,49 @@ int
 main(void)
 {
    const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
-   EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+   const char *render_node = getenv("ASAHI_GL_RENDER_NODE");
+   int drm_fd = -1;
+   struct gbm_device *gbm = NULL;
+   EGLDisplay display = EGL_NO_DISPLAY;
+   if (render_node && !noop) {
+      drm_fd = open(render_node, O_RDWR | O_CLOEXEC);
+      gbm = drm_fd >= 0 ? gbm_create_device(drm_fd) : NULL;
+      PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display =
+         (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
+            "eglGetPlatformDisplayEXT");
+      PFNEGLQUERYDEVICESEXTPROC query_devices =
+         (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
+      PFNEGLQUERYDEVICESTRINGEXTPROC query_device_string =
+         (PFNEGLQUERYDEVICESTRINGEXTPROC)eglGetProcAddress(
+            "eglQueryDeviceStringEXT");
+      EGLDeviceEXT devices[32];
+      EGLint device_count = 0;
+      if (!gbm || !get_platform_display || !query_devices ||
+          !query_device_string ||
+          !query_devices(ARRAY_SIZE(devices), devices, &device_count)) {
+         fprintf(stderr, "explicit GBM render-node setup failed\n");
+         return 1;
+      }
+
+      EGLDeviceEXT selected = EGL_NO_DEVICE_EXT;
+      for (EGLint i = 0; i < device_count; ++i) {
+         const char *node =
+            query_device_string(devices[i], EGL_DRM_RENDER_NODE_FILE_EXT);
+         if (node && !strcmp(node, render_node)) {
+            selected = devices[i];
+            break;
+         }
+      }
+      if (selected == EGL_NO_DEVICE_EXT) {
+         fprintf(stderr, "EGL did not enumerate requested render node %s\n",
+                 render_node);
+         return 1;
+      }
+      display =
+         get_platform_display(EGL_PLATFORM_DEVICE_EXT, selected, NULL);
+   } else {
+      display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+   }
    EGLint major, minor;
    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
       fprintf(stderr, "EGL surfaceless initialization failed: 0x%04x\n",
@@ -244,9 +290,16 @@ main(void)
        !eglMakeCurrent(display, surface, surface, context))
       return 1;
 
+   const char *renderer = (const char *)glGetString(GL_RENDERER);
    printf("EGL %d.%d; GL %s; renderer %s\n", major, minor,
-          (const char *)glGetString(GL_VERSION),
-          (const char *)glGetString(GL_RENDERER));
+          (const char *)glGetString(GL_VERSION), renderer);
+   if (render_node && !noop &&
+       (!renderer || !strstr(renderer, "Apple A18 Pro") ||
+        strstr(renderer, "zink"))) {
+      fprintf(stderr,
+              "explicit render node did not select native A18 Pro Gallium\n");
+      return 1;
+   }
 
    GLuint program = make_program();
    if (!program)
@@ -355,6 +408,10 @@ main(void)
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
+   if (gbm)
+      gbm_device_destroy(gbm);
+   if (drm_fd >= 0)
+      close(drm_fd);
 
    puts(noop ? "GL03 resource sequence completed twice; no-op pixels skipped; "
                "sources and guards exact"

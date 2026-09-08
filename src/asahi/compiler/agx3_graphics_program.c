@@ -5,6 +5,7 @@
 
 #include "agx3_graphics_program.h"
 
+#include "agx3_binder.h"
 #include "asahi/lib/agx_ioto_state_core.h"
 #include "util/macros.h"
 
@@ -162,6 +163,249 @@ agx3_g17p_graphics_program_generate(
 
    if (written > UINT16_MAX)
       return false;
+   staged.length = (uint16_t)written;
+   *program = staged;
+   return true;
+}
+
+bool
+agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
+                               enum agx3_g17p_rt0_bg_op op,
+                               uint64_t *resource_spec)
+{
+   if (chip != AGX_CHIP_G17P || !resource_spec)
+      return false;
+
+   uint64_t pass_mask;
+   switch (op) {
+   case AGX3_G17P_RT0_BG_CLEAR:
+   case AGX3_G17P_RT0_BG_RELOAD:
+      pass_mask = (UINT64_C(1) << 17) - 1;
+      break;
+   case AGX3_G17P_RT0_BG_NONE:
+      pass_mask = 0;
+      break;
+   default:
+      return false;
+   }
+
+   const uint64_t resources =
+      AGX_IOTO_G17P_BG_RESOURCE_SPEC & ((UINT64_C(1) << 47) - 1);
+   *resource_spec = resources | (pass_mask << 47);
+   return true;
+}
+
+bool
+agx3_g17p_rt0_bg_shader_resources_match(enum agx3_g17p_rt0_bg_op op,
+                                        unsigned push_count, bool uses_txf)
+{
+   switch (op) {
+   case AGX3_G17P_RT0_BG_CLEAR:
+      return (push_count == AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
+              push_count == AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS) &&
+             !uses_txf;
+   case AGX3_G17P_RT0_BG_RELOAD:
+      return push_count == 0 && uses_txf;
+   default:
+      return false;
+   }
+}
+
+bool
+agx3_g17p_rt0_bg_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_rt0_bg_program_desc *desc,
+   struct agx3_g17p_rt0_bg_program *program)
+{
+   if (!program || chip != AGX_CHIP_G17P || !desc)
+      return false;
+
+   struct agx3_ioto_uniform_range ranges[2];
+   size_t range_count;
+   switch (desc->op) {
+   case AGX3_G17P_RT0_BG_CLEAR: {
+      const uint16_t clear_push_halfs =
+         desc->clear_push_halfs ? desc->clear_push_halfs
+                                : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+      if (!desc->clear_value_va || desc->texture_pointer_va ||
+          desc->sampler_pointer_va ||
+          (clear_push_halfs != AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS))
+         return false;
+      ranges[0] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 4,
+         .size_halfs = clear_push_halfs - 4,
+         .address = desc->clear_value_va,
+      };
+      range_count = 1;
+      break;
+   }
+   case AGX3_G17P_RT0_BG_RELOAD:
+      if (desc->clear_value_va || !desc->texture_pointer_va ||
+          !desc->sampler_pointer_va)
+         return false;
+      ranges[0] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0,
+         .size_halfs = 4,
+         .address = desc->texture_pointer_va,
+      };
+      ranges[1] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 4,
+         .size_halfs = 4,
+         .address = desc->sampler_pointer_va,
+      };
+      range_count = 2;
+      break;
+   default:
+      return false;
+   }
+
+   const struct agx3_g17p_graphics_program_desc shader = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .shader_binary_size = desc->shader_binary_size,
+      .scratch_size = desc->scratch_size,
+      .nr_gprs = desc->nr_gprs,
+      .compiler_d_valid = desc->staging_known,
+      .compiler_d = (uint32_t)desc->staging_halfs * 2,
+      .fragment = true,
+   };
+   struct agx_ioto_state_tail_output tail;
+   if (!graphics_state_tail(&shader, &tail))
+      return false;
+
+   uint8_t body[512];
+   struct agx_ioto_inflight_load loads[64];
+   struct agx_ioto_inflight_load sort[64];
+   struct agx_ioto_load_cache_entry cache[64];
+   const struct agx3_ioto_uniform_program_desc load_desc = {
+      .program_va = desc->program_va,
+      .ranges = ranges,
+      .range_count = range_count,
+   };
+   const struct agx3_ioto_uniform_program_workspace workspace = {
+      .body = body,
+      .body_capacity = sizeof(body),
+      .loads = loads,
+      .load_capacity = ARRAY_SIZE(loads),
+      .sort = sort,
+      .sort_capacity = ARRAY_SIZE(sort),
+      .cache = cache,
+      .cache_capacity = ARRAY_SIZE(cache),
+   };
+
+   size_t body_size, copy_offset;
+   if (!agx3_ioto_uniform_program_body_generate(chip, &load_desc, workspace,
+                                                &body_size, &copy_offset) ||
+       copy_offset > body_size)
+      return false;
+
+   struct agx3_g17p_rt0_bg_program staged = {0};
+   size_t written = 0;
+   if (!agx_ioto_g17p_background_resource_program_compose(
+          desc->program_va, body, copy_offset, body + copy_offset,
+          body_size - copy_offset, &tail, staged.bytes, sizeof(staged.bytes),
+          &written) ||
+       written > UINT16_MAX ||
+       (desc->op == AGX3_G17P_RT0_BG_CLEAR &&
+        written > (desc->clear_push_halfs ==
+                         AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
+                      ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
+                      : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE)))
+      return false;
+
+   staged.length = (uint16_t)written;
+   *program = staged;
+   return true;
+}
+
+bool
+agx3_g17p_rt0_eot_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_rt0_eot_program_desc *desc,
+   struct agx3_g17p_rt0_eot_program *program)
+{
+   const bool rt0 = desc &&
+                    (desc->shader_binary_size == 68 ||
+                     desc->shader_binary_size == 84) &&
+                    desc->nr_gprs == 8 && desc->staging_halfs == 8 &&
+                    (desc->attachment_count == 0 ||
+                     desc->attachment_count == 1);
+   const bool wboit_mrt = desc && desc->shader_binary_size == 120 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 8;
+   if (!program || chip != AGX_CHIP_G17P || !desc || (!rt0 && !wboit_mrt) ||
+       !desc->pbe_argument_va ||
+       desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
+          (wboit_mrt ? 63 : 31) ||
+       (desc->pbe_argument_va & 31))
+      return false;
+
+   const struct agx3_g17p_graphics_program_desc shader = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .shader_binary_size = desc->shader_binary_size,
+      .scratch_size = desc->scratch_size,
+      .nr_gprs = desc->nr_gprs,
+      .compiler_d_valid = true,
+      .compiler_d = desc->staging_halfs * 2,
+      .fragment = true,
+   };
+   struct agx_ioto_state_tail_output tail;
+   if (!graphics_state_tail(&shader, &tail))
+      return false;
+
+   uint8_t body[4 * AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   size_t body_size = 0;
+   for (unsigned i = 0; i < 2; ++i) {
+      uint8_t bytes[AGX_IOTO_LOAD_LDIMM_MAX_SIZE], length;
+      if (!agx_ioto_load_pack_ldimm(
+             chip, 4 + 2 * i,
+             (uint32_t)(desc->pbe_argument_va >> (32 * i)), bytes, &length))
+         return false;
+      memcpy(body + body_size, bytes, length);
+      body_size += length;
+   }
+
+   uint8_t offset_length;
+   if (!agx_ioto_load_pack_ldimm(chip, 8, desc->imageblock_offset_B,
+                                 body + body_size, &offset_length))
+      return false;
+   body_size += offset_length;
+   if (wboit_mrt) {
+      if (!agx_ioto_load_pack_ldimm(chip, 10, desc->imageblock_offset1_B,
+                                    body + body_size, &offset_length))
+         return false;
+      body_size += offset_length;
+   }
+
+   uint8_t copies[20];
+   const struct agx3_field_kv baseline[] = {{9, 3}, {10, 2}, {23, 2}, {24, 2}};
+   const unsigned copy_count = wboit_mrt ? 5 : 3;
+   const unsigned copy_sources[] = {4, 6, 8, 8, 10};
+   for (unsigned i = 0; i < copy_count; ++i) {
+      const struct agx3_field_kv operands[] = {
+         {3, 2u * i},
+         {16, copy_sources[i]},
+      };
+      uint8_t bytes[AGX3_MAX_WORDS * 2], length = 0;
+      if (!agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "copy", 0, baseline,
+                             ARRAY_SIZE(baseline), operands,
+                             ARRAY_SIZE(operands), bytes, &length) ||
+          length != 4)
+         return false;
+      memcpy(copies + 4 * i, bytes, length);
+   }
+
+   struct agx3_g17p_rt0_eot_program staged = {0};
+   size_t written = 0;
+   if (!agx_ioto_g17p_resource_program_compose(
+          desc->program_va, body, body_size, copies, 4 * copy_count, &tail,
+          staged.bytes, sizeof(staged.bytes), &written) ||
+       written > sizeof(staged.bytes))
+      return false;
+
    staged.length = (uint16_t)written;
    *program = staged;
    return true;

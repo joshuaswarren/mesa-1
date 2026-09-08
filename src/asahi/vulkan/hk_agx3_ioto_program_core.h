@@ -8,6 +8,7 @@
 #pragma once
 
 #include "asahi/compiler/agx3_ioto_uniform_program.h"
+#include "asahi/compiler/agx3_graphics_program.h"
 #include "asahi/lib/agx3_compute_program_core.h"
 #include "asahi/lib/agx_ioto_program_core.h"
 

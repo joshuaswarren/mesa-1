@@ -1381,17 +1381,18 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    if ((dev->debug & AGX_DBG_NOCLUSTER) && dev->chip != AGX_CHIP_G17P)
       c->flags |= DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING;
 
-   memcpy(&c->bg.rsrc_spec, &pipeline_clear.counts,
-          sizeof(struct agx_counts_packed));
-
-   memcpy(&c->eot.rsrc_spec, &pipeline_store.counts,
-          sizeof(struct agx_counts_packed));
-
-   memcpy(&c->partial_bg.rsrc_spec, &pipeline_load.counts,
-          sizeof(struct agx_counts_packed));
-
-   memcpy(&c->partial_eot.rsrc_spec, &pipeline_store.counts,
-          sizeof(struct agx_counts_packed));
+   c->bg.rsrc_spec = (uint32_t)pipeline_clear.rsrc_spec;
+   c->eot.rsrc_spec = (uint32_t)pipeline_store.rsrc_spec;
+   c->partial_bg.rsrc_spec = (uint32_t)pipeline_load.rsrc_spec;
+   c->partial_eot.rsrc_spec = (uint32_t)pipeline_store.rsrc_spec;
+   c->bg_rsrc_spec_hi = (uint32_t)(pipeline_clear.rsrc_spec >> 32);
+   c->bg_eot_rsrc_spec_hi = (uint32_t)(pipeline_store.rsrc_spec >> 32);
+   c->bg_partial_rsrc_spec_hi = (uint32_t)(pipeline_load.rsrc_spec >> 32);
+   c->bg_eot_partial_rsrc_spec_hi =
+      (uint32_t)(pipeline_store.rsrc_spec >> 32);
+   if (c->bg_rsrc_spec_hi || c->bg_eot_rsrc_spec_hi ||
+       c->bg_partial_rsrc_spec_hi || c->bg_eot_partial_rsrc_spec_hi)
+      c->flags |= DRM_ASAHI_RENDER_RSRC_SPEC_HI;
 
    /* XXX is this correct? */
    c->bg.usc = pipeline_clear.usc | (framebuffer->nr_cbufs >= 4 ? 8 : 4);

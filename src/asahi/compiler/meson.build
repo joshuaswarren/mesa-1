@@ -772,6 +772,34 @@ if with_tests
   )
 
   test(
+    'agx3_graphics_program',
+    executable(
+      'agx3_graphics_program_test',
+      files(
+        'agx3_graphics_program.c',
+        'agx3_ioto_uniform_program.c',
+        'agx3_ioto_load_packer.c',
+        'agx3_mem_core.c',
+        'agx3_binder.c',
+        'agx3_compose/agx3_compose.c',
+        'agx3_compose/agx3b_tables.c',
+        'agx3_compose/agx3c_tables.c',
+        '../lib/agx_ioto_core.c',
+        '../lib/agx_ioto_load_core.c',
+        '../lib/agx_ioto_profile_core.c',
+        '../lib/agx_ioto_state_core.c',
+        '../lib/agx_ioto_preshader_core.c',
+        '../lib/agx_ioto_program_core.c',
+        'test/test-agx3-graphics-program.c',
+      ),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx_register_bank',
     executable(
       'agx_register_bank_test',
