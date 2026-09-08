@@ -767,6 +767,20 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
 }
 
 bool
+agx_nir_lower_g17p_texture_early(nir_shader *s, bool support_lod_bias)
+{
+   bool progress = false;
+
+   /* HAL200's texture_load has no witnessed integer-offset form.  A txf
+    * offset is defined as integer coordinate addition, so lower it before
+    * descriptor binding instead of admitting an unencodable backend source. */
+   NIR_PASS(progress, s, nir_lower_tex,
+            &(nir_lower_tex_options){.lower_txf_offset = true});
+   progress |= agx_nir_lower_texture_early(s, support_lod_bias);
+   return progress;
+}
+
+bool
 agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
                                                bool support_lod_bias,
                                                bool lower_2d_robustness)

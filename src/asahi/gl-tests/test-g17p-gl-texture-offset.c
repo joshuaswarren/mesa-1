@@ -58,7 +58,10 @@ make_program(void)
       "uniform sampler2D source;\n"
       "layout(location=0) out vec4 colour;\n"
       "void main() {\n"
-      "  colour = textureOffset(source, vec2(0.5), ivec2(1, -1));\n"
+      "  vec4 filtered = textureOffset(source, vec2(0.5), ivec2(1, -1));\n"
+      "  vec4 fetched = texelFetchOffset(source, ivec2(1), 0, "
+      "ivec2(1, -1));\n"
+      "  colour = vec4(filtered.rgb, fetched.r);\n"
       "}\n";
 
    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
@@ -164,9 +167,9 @@ main(void)
    if (!gl_ok("textureOffset draw/readback"))
       return 1;
    if (!noop && (pixel[0] != 17 || pixel[1] != 93 || pixel[2] != 201 ||
-                 pixel[3] != 255)) {
-      fprintf(stderr, "textureOffset pixel {%u,%u,%u,%u}\n", pixel[0], pixel[1],
-              pixel[2], pixel[3]);
+                 pixel[3] != 17)) {
+      fprintf(stderr, "texture offset pixel {%u,%u,%u,%u}\n", pixel[0],
+              pixel[1], pixel[2], pixel[3]);
       return 1;
    }
 
@@ -177,7 +180,7 @@ main(void)
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
-   puts(noop ? "G17P WebGL2 textureOffset submitted"
-             : "G17P WebGL2 textureOffset pixel exact");
+   puts(noop ? "G17P WebGL2 textureOffset/texelFetchOffset submitted"
+             : "G17P WebGL2 textureOffset/texelFetchOffset pixel exact");
    return 0;
 }

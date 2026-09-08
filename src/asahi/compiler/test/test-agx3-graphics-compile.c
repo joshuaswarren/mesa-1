@@ -1878,6 +1878,45 @@ test_txf_lowering(void)
    return ok;
 }
 
+/* texelFetchOffset is core WebGL2/GLES3.  AGX texture_load has no witnessed
+ * integer-offset form, while adding the compile-time offset to the integer
+ * coordinate is exactly equivalent and is already provided by nir_lower_tex.
+ * Keep that lowering before descriptor binding so source 5 never reaches the
+ * AGX3 packer as an unencodable texture offset. */
+static bool
+test_txf_offset_lowering(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 texelFetchOffset FS");
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                      nir_imm_ivec2(&b, 1, 1));
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_offset,
+                                      nir_imm_ivec2(&b, 1, -1));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+
+   bool progress = agx_nir_lower_g17p_texture_early(b.shader, false);
+   NIR_PASS(_, b.shader, nir_opt_constant_folding);
+
+   const int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   const bool ok = progress && coord >= 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0 &&
+                   nir_src_is_const(tex->src[coord].src) &&
+                   nir_src_comp_as_int(tex->src[coord].src, 0) == 2 &&
+                   nir_src_comp_as_int(tex->src[coord].src, 1) == 0;
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_shader *
 build_cs_storage_image(unsigned mode)
 {
@@ -3412,6 +3451,12 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--txf-offset-only")) {
+      const bool ok = test_txf_offset_lowering();
+      fprintf(stderr, "WebGL2 texelFetchOffset coordinate lowering: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    const enum agx_isa_encoding encodings[] = {
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
@@ -3445,6 +3490,11 @@ main(int argc, char **argv)
 
    if (!test_txf_lowering()) {
       fputs("static TXF descriptor lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_txf_offset_lowering()) {
+      fputs("texelFetchOffset coordinate lowering mismatch\n", stderr);
       all_ok = false;
    }
 

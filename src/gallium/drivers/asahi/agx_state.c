@@ -1983,8 +1983,11 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
     */
    NIR_PASS(_, nir, nir_lower_robust_access, should_lower_robustness, &robust);
 
-   /* Similarly, we need to do early texture lowering before bindings */
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
+   /* Similarly, we need to do early texture lowering before bindings. */
+   if (dev->chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, agx_nir_lower_g17p_texture_early, support_lod_bias);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
 
    /* We need to lower binding tables before calling agx_preprocess_nir, since
     * that does texture lowering that needs to know the binding model.

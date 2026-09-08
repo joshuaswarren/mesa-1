@@ -31,6 +31,8 @@ bool agx_nir_lower_subgroups_g17p(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
+bool agx_nir_lower_g17p_texture_early(struct nir_shader *s,
+                                     bool support_lod_bias);
 bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
                                                     bool support_lod_bias,
                                                     bool lower_2d_robustness);
