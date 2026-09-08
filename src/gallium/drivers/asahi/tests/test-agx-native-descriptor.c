@@ -157,6 +157,37 @@ test_g17p_txf_sampler(void)
    CHECK(!agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17P, NULL));
 }
 
+static void
+test_standard_border_colours(void)
+{
+   enum agx_border_colour result = AGX_BORDER_COLOUR_CUSTOM;
+   uint32_t color[4] = {0, 0x80000000, 0, 0};
+   CHECK(agx_gallium_classify_standard_border(color, false, &result));
+   CHECK(result == AGX_BORDER_COLOUR_TRANSPARENT_BLACK);
+
+   memcpy(color, (uint32_t[4]){0, 0, 0, 0x3f800000}, sizeof(color));
+   CHECK(agx_gallium_classify_standard_border(color, false, &result));
+   CHECK(result == AGX_BORDER_COLOUR_OPAQUE_BLACK);
+
+   memcpy(color,
+          (uint32_t[4]){0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000},
+          sizeof(color));
+   CHECK(agx_gallium_classify_standard_border(color, false, &result));
+   CHECK(result == AGX_BORDER_COLOUR_OPAQUE_WHITE);
+
+   memcpy(color, (uint32_t[4]){1, 1, 1, 1}, sizeof(color));
+   CHECK(agx_gallium_classify_standard_border(color, true, &result));
+   CHECK(result == AGX_BORDER_COLOUR_OPAQUE_WHITE);
+
+   memcpy(color, (uint32_t[4]){0x3e800000, 0, 0, 0x3f800000},
+          sizeof(color));
+   result = AGX_BORDER_COLOUR_CUSTOM;
+   CHECK(!agx_gallium_classify_standard_border(color, false, &result));
+   CHECK(result == AGX_BORDER_COLOUR_CUSTOM);
+   CHECK(!agx_gallium_classify_standard_border(NULL, false, &result));
+   CHECK(!agx_gallium_classify_standard_border(color, false, NULL));
+}
+
 /* A plain 2D render target: exactly what the end-of-tile store binds. */
 static struct AGX_PBE
 render_target_pbe(void)
@@ -629,6 +660,7 @@ main(void)
    test_chip_routing();
    test_feature_gates();
    test_g17p_txf_sampler();
+   test_standard_border_colours();
    test_native_packers();
    test_agx3_pbe();
    printf("Gallium AGX native descriptors: %u checks passed\n", checks);

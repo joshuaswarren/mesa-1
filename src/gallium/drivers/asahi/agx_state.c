@@ -567,6 +567,29 @@ agx_create_sampler_state(struct pipe_context *pctx,
    struct agx_sampler_state *so = CALLOC_STRUCT(agx_sampler_state);
    so->base = *state;
 
+   so->border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+   const bool uses_border =
+      state->wrap_s == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+      state->wrap_t == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+      state->wrap_r == PIPE_TEX_WRAP_CLAMP_TO_BORDER ||
+      state->wrap_s == PIPE_TEX_WRAP_CLAMP ||
+      state->wrap_t == PIPE_TEX_WRAP_CLAMP ||
+      state->wrap_r == PIPE_TEX_WRAP_CLAMP;
+
+   if (uses_border && state->border_color_format != PIPE_FORMAT_NONE) {
+      union pipe_color_union border = state->border_color;
+      enum pipe_format format =
+         fixup_border_zs(state->border_color_format, &border);
+      const bool integer = util_format_is_pure_integer(format);
+
+      if (!agx_gallium_classify_standard_border(
+             border.ui, integer, &so->border_colour)) {
+         so->uses_custom_border = true;
+         so->border_colour = AGX_BORDER_COLOUR_CUSTOM;
+         agx_pack_border(&so->border, border.ui, format);
+      }
+   }
+
    /* We report a max texture LOD bias of 16, so clamp appropriately */
    float lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
    so->lod_bias_as_fp16 = _mesa_float_to_half(lod_bias);
@@ -586,23 +609,12 @@ agx_create_sampler_state(struct pipe_context *pctx,
       cfg.compare_func = agx_compare_funcs[state->compare_func];
       cfg.compare_enable = state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
       cfg.seamful_cube_maps = !state->seamless_cube_map;
-
-      if (state->border_color_format != PIPE_FORMAT_NONE) {
-         /* TODO: Optimize to use compact descriptors for black/white borders */
-         so->uses_custom_border = true;
-         cfg.border_colour = AGX_BORDER_COLOUR_CUSTOM;
-      }
+      cfg.border_colour = so->border_colour;
    }
 
    memcpy(&so->desc_without_custom_border, &so->desc, sizeof(so->desc));
 
    if (so->uses_custom_border) {
-      union pipe_color_union border = state->border_color;
-      enum pipe_format format =
-         fixup_border_zs(state->border_color_format, &border);
-
-      agx_pack_border(&so->border, border.ui, format);
-
       /* Neutralize the bindless-safe descriptor. XXX: This is a hack. */
       so->desc_without_custom_border.opaque[1] &= ~(1u << 23);
    }
@@ -3243,9 +3255,7 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
                   state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
                cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
                cfg.seamful_cube_maps = !state->seamless_cube_map;
-               cfg.border_colour = sampler->uses_custom_border
-                                      ? AGX_BORDER_COLOUR_CUSTOM
-                                      : AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+               cfg.border_colour = sampler->border_colour;
             }
          } else {
             agx_pack(out, SAMPLER_HAL200, cfg) {

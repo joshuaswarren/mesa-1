@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_chip.h"
 
 #include <stdbool.h>
@@ -195,6 +196,13 @@ agx_gallium_native_compressed_pbe_supported(
 
 struct AGX_TEXTURE;
 struct AGX_PBE;
+
+/* Classify the three border colours represented directly by every native AGX
+ * sampler generation. Returns false for colours that require shader-backed
+ * custom-border emulation. */
+bool agx_gallium_classify_standard_border(
+   const uint32_t color[4], bool integer,
+   enum agx_border_colour *out);
 
 bool agx_gallium_pack_native_texture(
    enum agx_descriptor_generation generation,

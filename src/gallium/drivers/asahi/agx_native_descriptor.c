@@ -12,6 +12,45 @@
 #include <string.h>
 
 bool
+agx_gallium_classify_standard_border(const uint32_t color[4], bool integer,
+                                     enum agx_border_colour *out)
+{
+   if (!color || !out)
+      return false;
+
+   bool rgb_zero = true, rgba_one = true;
+   for (unsigned i = 0; i < 4; ++i) {
+      union {
+         uint32_t u;
+         float f;
+      } value = {.u = color[i]};
+      const bool zero = integer ? color[i] == 0 : value.f == 0.0f;
+      const bool one = integer ? color[i] == 1 : value.f == 1.0f;
+      rgb_zero &= i == 3 || zero;
+      rgba_one &= one;
+   }
+
+   union {
+      uint32_t u;
+      float f;
+   } alpha = {.u = color[3]};
+   const bool alpha_zero = integer ? color[3] == 0 : alpha.f == 0.0f;
+   const bool alpha_one = integer ? color[3] == 1 : alpha.f == 1.0f;
+
+   if (rgb_zero && alpha_zero) {
+      *out = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+   } else if (rgb_zero && alpha_one) {
+      *out = AGX_BORDER_COLOUR_OPAQUE_BLACK;
+   } else if (rgba_one) {
+      *out = AGX_BORDER_COLOUR_OPAQUE_WHITE;
+   } else {
+      return false;
+   }
+
+   return true;
+}
+
+bool
 agx_gallium_pack_g17p_txf_sampler(
    enum agx_chip chip, struct agx_gallium_sampler_descriptor *out)
 {

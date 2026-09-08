@@ -870,6 +870,10 @@ struct agx_sampler_state {
    /* Whether a custom border colour is required */
    bool uses_custom_border;
 
+   /* Native compact border selector. CUSTOM is used only with the packed
+    * custom-border payload below. */
+   enum agx_border_colour border_colour;
+
    /* Packed custom border colour, or zero if none is required */
    struct agx_border_packed border;
 
