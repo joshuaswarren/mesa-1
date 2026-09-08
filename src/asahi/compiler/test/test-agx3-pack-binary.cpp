@@ -5982,6 +5982,33 @@ TEST_F(AGX3PackBinary, WideVertexOutputsPreserveValuesAndRecycleSlotsAfterWrites
    }
 }
 
+TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+
+   /* Apple's applegpu_g17p vs68 witness emits UVSW indices 0..67 and staging
+    * half-indices 0..134. A shared source keeps this codec test independent
+    * of the register allocator's synthetic no-spill pressure. */
+   for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   EXPECT_FALSE(bytes.empty());
+   EXPECT_EQ(b->shader->agx3_staging_halfs,
+             2u * AGX3_MAX_VERTEX_OUTPUTS);
+
+   agx_builder *too_wide = builder(enc);
+   too_wide->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c <= AGX3_MAX_VERTEX_OUTPUTS; ++c)
+      agx_st_vary(too_wide, agx_immediate(c),
+                  agx_register(4, AGX_SIZE_32));
+   agx_stop(too_wide);
+   EXPECT_TRUE(pack(too_wide, false).empty());
+}
+
 TEST_F(AGX3PackBinary, SideEffectBeforeWideTerminalVertexOutputs)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

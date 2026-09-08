@@ -3546,7 +3546,7 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
           uvs_mask == 0xf;
 }
 
-/* Native 11/16/32/36/52-output VSs use a dense set of scalar UVSW indices and
+/* Native 11/16/32/36/52/68-output VSs use a dense set of scalar UVSW indices and
  * distinct staging addresses. The stores may be grouped by varying rather
  * than sorted by scalar index. Recycle the six scoreboard slots after waiting
  * for earlier writes; keep the four-position golden independent. Instructions
@@ -3566,7 +3566,8 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
    agx_block *output_block = NULL;
    agx_foreach_block(ctx, block)
       output_block = block;
-   uint64_t outputs = 0;
+   bool outputs[AGX3_MAX_VERTEX_OUTPUTS] = {false};
+   unsigned output_count = 0, maximum_output = 0;
    bool stopped = false;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
@@ -3588,11 +3589,13 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             if (I->nr_dests != 0 || I->nr_srcs != 2 ||
                 I->src[0].type != AGX_INDEX_IMMEDIATE ||
                 I->src[0].value >= AGX3_MAX_VERTEX_OUTPUTS ||
-                (outputs & (UINT64_C(1) << I->src[0].value)) ||
+                outputs[I->src[0].value] ||
                 !agx3_vary_reg32(I->src[1]) ||
                 agx_channels(I->src[1]) != 1)
                return 0;
-            outputs |= UINT64_C(1) << I->src[0].value;
+            outputs[I->src[0].value] = true;
+            output_count++;
+            maximum_output = MAX2(maximum_output, I->src[0].value);
             break;
          case AGX_OPCODE_GET_SR:
             /* Native vertex programs use both IDs as ordinary scalar
@@ -3605,14 +3608,14 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             /* Once writeout begins only ST_VARY followed by STOP is safe.
              * Before it begins, side-effecting instructions are fine: they
              * stay in place and normal packing validates their encoding. */
-            if (outputs && !agx_opcodes_info[I->op].can_eliminate)
+            if (output_count && !agx_opcodes_info[I->op].can_eliminate)
                return 0;
             break;
          }
       }
    }
-   return stopped && outputs >= 0x1f && !(outputs & (outputs + 1))
-             ? util_bitcount64(outputs) : 0;
+   return stopped && output_count >= 5 && maximum_output + 1 == output_count
+             ? output_count : 0;
 }
 
 /* The sources of a dense terminal store bundle cannot be overwritten before

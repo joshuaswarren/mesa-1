@@ -1049,9 +1049,10 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* Native G17P VS witnesses cover contiguous output/staging indices 0..35;
- * the 64-entry bound matches the UVSW field and the software bitset. */
-#define AGX3_MAX_VERTEX_OUTPUTS 64u
+/* Apple's G17P VS witness exports position plus sixteen float4 user
+ * locations: 68 contiguous output/staging scalars. Keep the software bound
+ * at that independently compiled hardware limit. */
+#define AGX3_MAX_VERTEX_OUTPUTS 68u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);

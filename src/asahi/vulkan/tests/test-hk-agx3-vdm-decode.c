@@ -308,6 +308,20 @@ test_g17p_vertex_program_info(void)
    CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &firefox51, &program));
    CHECK(program.template_info.raw_vs_output_count_0 == 51);
 
+   /* The Vulkan minimum is 64 user components. Apple's vs68/fs68 pipeline
+    * (native archive SHA256 6e71a71797784d58266ffbb0cd89181a8054a9e2b0d6db34770e36689be1bcf2;
+    * VS text SHA256 70980b666b28386a9288b9ac31ff6b4a4f6257e16af0911912e653e538519620)
+    * exports position plus sixteen float4 user locations as a 1506-byte
+    * native vertex program. Retain exactly that witnessed public boundary. */
+   struct hk_agx3_g17p_vertex_compile_info native68 = vkcube_info;
+   native68.user_size = 64;
+   native68.psiz_off = native68.layer_viewport_off = native68.clip_off = 68;
+   native68.uvs_size = 68;
+   native68.uvs_written = BITFIELD64_MASK(16) << VARYING_SLOT_VAR0;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &native68, &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 68);
+   CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
    struct hk_agx3_g17p_vertex_compile_info invalid_info = vkcube_info;
    invalid_info.has_preamble = true;
    CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &invalid_info,

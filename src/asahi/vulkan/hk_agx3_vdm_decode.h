@@ -23,10 +23,10 @@ extern "C" {
 /* Bump whenever the Honeykrisp shader payload below changes.  Vulkan shader
  * binaries carry this version outside the driver-private blob, so stale
  * layouts are rejected before any fields are consumed. */
-#define HK_AGX3_SHADER_BINARY_VERSION 11u
+#define HK_AGX3_SHADER_BINARY_VERSION 12u
 
-/* Native VS witnesses export position plus twelve float4 user locations. */
-#define HK_AGX3_G17P_MAX_USER_WORDS 48u
+/* Native VS witnesses export position plus sixteen float4 user locations. */
+#define HK_AGX3_G17P_MAX_USER_WORDS 64u
 
 bool hk_agx3_shader_binary_version_supported(uint32_t version);
 
@@ -58,7 +58,7 @@ struct hk_agx3_g17p_vertex_compile_info {
 };
 
 /* Build the exact G17P VertexProgramVariant fields for a hardware vertex
- * shader with position and up to the witnessed twelve ordinary float4 user
+ * shader with position and up to the witnessed sixteen ordinary float4 user
  * locations. System outputs and preambles are separate state shapes. */
 bool hk_agx3_g17p_vertex_program_info(
    enum agx_chip chip,
