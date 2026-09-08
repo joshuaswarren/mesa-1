@@ -295,6 +295,10 @@
 #define G17P_ADVANCED_BLEND 0
 #endif
 
+#ifndef G17P_RASTER_DISCARD
+#define G17P_RASTER_DISCARD 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -313,7 +317,7 @@
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
-     G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND) > 1
+     G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -1242,6 +1246,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_RASTER_DISCARD
+#define PROBE_NAME "g17p-vulkan-rasterizer-discard"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1711,6 +1720,8 @@ verify_readback(const uint8_t *map)
    static const uint8_t expected[8] = {
       0xff, 0xff, 0xae, 0x47, 0xcd, 0x0c, 0xff, 0xff,
    };
+#elif G17P_RASTER_DISCARD
+   static const uint8_t expected[4] = {0, 0, 0, 255};
 #else
    static const uint8_t expected[4] = {255, 71, 13, 255};
 #endif
@@ -1871,6 +1882,8 @@ main(void)
        getenv("G17P_DYNAMIC_BLEND_RECORD_ONLY") != NULL) ||
       (G17P_ADVANCED_BLEND &&
        getenv("G17P_ADVANCED_BLEND_RECORD_ONLY") != NULL) ||
+      (G17P_RASTER_DISCARD &&
+       getenv("G17P_RASTER_DISCARD_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -3382,6 +3395,7 @@ main(void)
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_NONE,
       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .rasterizerDiscardEnable = G17P_RASTER_DISCARD,
 #if G17P_BRESENHAM_LINES
       .lineWidth = 3.0f,
 #else
@@ -3944,6 +3958,7 @@ main(void)
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
    G17P_RGBA8_MRT || G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND ||      \
+   G17P_RASTER_DISCARD ||                                               \
    G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -4053,7 +4068,7 @@ main(void)
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
    G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT || G17P_RGBA8_MRT ||        \
-   G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND ||                         \
+   G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND || G17P_RASTER_DISCARD || \
    G17P_RG16_UNORM ||                                                     \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -4300,6 +4315,10 @@ main(void)
 #elif G17P_ADVANCED_BLEND
    printf(PROBE_NAME ": PASS — coherent conjoint MULTIPLY produced exact "
                      "nonpremultiplied RGBA8 output immediately/3s, guards "
+                     "unchanged, checksum %016" PRIx64 "\n", checksum);
+#elif G17P_RASTER_DISCARD
+   printf(PROBE_NAME ": PASS — rasterizer discard suppressed the draw while "
+                     "the exact clear survived immediately/3s, guards "
                      "unchanged, checksum %016" PRIx64 "\n", checksum);
 #elif G17P_RGBA16_UINT
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UINT exact immediately/3s, "
