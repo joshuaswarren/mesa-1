@@ -46,8 +46,143 @@
 #include "util/driconf.h"
 #include "util/xmlconfig.h"
 
+#include "asahi/compiler/agx_compile.h"
+#include "compiler/nir/nir_builder.h"
+
 #include "agx_public.h"
 #include "agx_state.h"
+
+static nir_shader *
+build_es3_bitops_txf(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P ES3 bit operations plus texelFetch fragment shader");
+
+   nir_def *frag = nir_load_frag_coord(&b);
+   nir_def *word = nir_f2u32(&b, nir_channel(&b, frag, 0));
+   nir_def *reversed = nir_bitfield_reverse(&b, word);
+   nir_def *count = nir_bit_count(&b, reversed);
+   nir_def *top = nir_ufind_msb(&b, nir_ior_imm(&b, reversed, 1));
+   nir_def *lod = nir_iand_imm(&b, nir_iadd(&b, count, top), 3);
+   nir_def *coord = nir_f2i32(&b, nir_channels(&b, frag, 0x3));
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+
+   /* Keep each integer operation live in the colour. This is the GLSL ES
+    * 3.x/WebGL2 family behind bitfieldReverse(), bitCount(), findMSB() and a
+    * dynamic texelFetch() level, rather than four independent dead probes. */
+   nir_def *bit_value = nir_iand_imm(
+      &b, nir_ixor(&b, reversed, nir_ishl_imm(&b, count, 3)), 0xff);
+   nir_def *scale = nir_fmul_imm(&b, nir_u2f32(&b, bit_value), 1.0f / 255.0f);
+   /* This exact f16 -> f32 -> multiply chain is the remaining ext.frag
+    * failure from Hyprland's built-in corpus. The widening must stay explicit
+    * through the backend optimizer when the post-RA mixed multiply cannot
+    * carry the combined producer wait and lifetime hints. */
+   nir_def *rounded_half = nir_f2f16(&b, nir_channel(&b, &tex->def, 3));
+   nir_def *mixed_product = nir_fmul(
+      &b, nir_f2f32(&b, rounded_half), nir_fadd_imm(&b, scale, 1.0f));
+   nir_def *colour = nir_fadd(
+      &b, &tex->def,
+      nir_vec4(&b, scale, scale, scale, mixed_product));
+   nir_store_output(&b, colour, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0);
+
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   BITSET_SET(b.shader->info.textures_used, 0);
+   BITSET_SET(b.shader->info.samplers_used, 0);
+   return b.shader;
+}
+
+static nir_shader *
+build_webgl_refused_fs(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P WebGL compile-refusal fragment shader");
+   nir_def *frag = nir_load_frag_coord(&b);
+
+   /* sampler2DShadow is valid WebGL2. G17P's plain implicit compare mode is
+    * byte-grounded, but Mesa's API path supplies the sampler's register bias
+    * and that biased shadow form is not yet witnessed. This is a stable,
+    * API-realistic refusal rather than a malformed backend instruction. */
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->is_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord, nir_fmul_imm(&b, nir_channels(&b, frag, 0x3),
+                                     1.0f / 64.0f));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                     nir_channel(&b, frag, 2));
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+
+   nir_def *colour = nir_replicate(&b, nir_channel(&b, &tex->def, 0), 4);
+   nir_store_output(&b, colour, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   BITSET_SET(b.shader->info.textures_used, 0);
+   BITSET_SET(b.shader->info.samplers_used, 0);
+   return b.shader;
+}
+
+static bool
+check_es3_compile_contract(struct pipe_context *pctx)
+{
+   struct pipe_shader_state accepted = {
+      .type = PIPE_SHADER_IR_NIR,
+      .report_compile_error = true,
+      .ir.nir = build_es3_bitops_txf(),
+   };
+   void *ok = pctx->create_fs_state(pctx, &accepted);
+   if (!ok || accepted.error_message) {
+      fprintf(stderr, "ES3 bitops/texelFetch shader did not compile: %s\n",
+              accepted.error_message ? accepted.error_message : "no shader");
+      free(accepted.error_message);
+      if (ok)
+         pctx->delete_fs_state(pctx, ok);
+      return false;
+   }
+   pctx->delete_fs_state(pctx, ok);
+
+   struct pipe_shader_state refused = {
+      .type = PIPE_SHADER_IR_NIR,
+      .report_compile_error = true,
+      .ir.nir = build_webgl_refused_fs(),
+   };
+   void *bad = pctx->create_fs_state(pctx, &refused);
+   const bool propagated =
+      bad == NULL && refused.error_message != NULL &&
+      strstr(refused.error_message, "fragment") != NULL &&
+      strstr(refused.error_message, "G17P") != NULL;
+   if (!propagated) {
+      fprintf(stderr,
+              "WebGL-visible shader refusal was not propagated (shader=%p, "
+              "message=%s)\n",
+              bad, refused.error_message ? refused.error_message : "none");
+   }
+   if (bad)
+      pctx->delete_fs_state(pctx, bad);
+   free(refused.error_message);
+   return propagated;
+}
 
 static struct pipe_resource *
 make_2d(struct pipe_screen *screen, enum pipe_format format, unsigned w,
@@ -124,6 +259,10 @@ main(void)
       fprintf(stderr, "context_create failed\n");
       return 1;
    }
+
+   if (!check_es3_compile_contract(pctx))
+      return 1;
+   printf("ES3 bitops/texelFetch compile and WebGL refusal propagation passed\n");
 
    /* Exactly the blit core 983 died on: 4x8, BGRA8_UNORM source, RGBA8_UNORM
     * destination, one level, one layer, nearest. u_blitter turns this into a

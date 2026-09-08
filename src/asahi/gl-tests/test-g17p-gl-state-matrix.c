@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WIDTH 64
 #define HEIGHT 64
@@ -94,6 +95,79 @@ make_program(bool varying)
    return program;
 }
 
+static char *
+read_shader(const char *path)
+{
+   FILE *f = fopen(path, "rb");
+   if (!f)
+      return NULL;
+   if (fseek(f, 0, SEEK_END) || ftell(f) < 0) {
+      fclose(f);
+      return NULL;
+   }
+   const long length = ftell(f);
+   rewind(f);
+   char *source = malloc((size_t)length + 1);
+   if (!source || fread(source, 1, (size_t)length, f) != (size_t)length) {
+      free(source);
+      fclose(f);
+      return NULL;
+   }
+   source[length] = '\0';
+   fclose(f);
+   return source;
+}
+
+/* Compile and link already-preprocessed GLSL ES sources. Passing the real
+ * Hyprland vertex shader followed by all thirteen fragment shaders makes the
+ * GL link result an API-level compiler oracle: a fail-closed AGX refusal must
+ * now make glLinkProgram() fail instead of being discovered at first draw. */
+static bool
+compile_shader_corpus(int argc, char **argv)
+{
+   char *vs_source = read_shader(argv[1]);
+   if (!vs_source) {
+      fprintf(stderr, "could not read corpus vertex shader %s\n", argv[1]);
+      return false;
+   }
+   GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
+   free(vs_source);
+   if (!vs)
+      return false;
+
+   bool ok = true;
+   for (int i = 2; i < argc; ++i) {
+      char *fs_source = read_shader(argv[i]);
+      GLuint fs = fs_source ? compile_shader(GL_FRAGMENT_SHADER, fs_source) : 0;
+      free(fs_source);
+      if (!fs) {
+         fprintf(stderr, "corpus fragment compile failed: %s\n", argv[i]);
+         ok = false;
+         continue;
+      }
+
+      GLuint program = glCreateProgram();
+      glAttachShader(program, vs);
+      glAttachShader(program, fs);
+      glLinkProgram(program);
+      glDeleteShader(fs);
+      GLint linked = GL_FALSE;
+      glGetProgramiv(program, GL_LINK_STATUS, &linked);
+      if (!linked) {
+         char log[4096] = {0};
+         glGetProgramInfoLog(program, sizeof(log), NULL, log);
+         fprintf(stderr, "corpus fragment link failed: %s: %s\n", argv[i],
+                 log);
+         ok = false;
+      } else {
+         printf("shader-corpus: %s\n", argv[i]);
+      }
+      glDeleteProgram(program);
+   }
+   glDeleteShader(vs);
+   return ok && gl_ok("shader corpus");
+}
+
 static bool
 finish_case(const char *name)
 {
@@ -107,7 +181,7 @@ finish_case(const char *name)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major, minor;
@@ -140,6 +214,20 @@ main(void)
    if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
        !eglMakeCurrent(display, surface, surface, context))
       return 1;
+
+   if (argc > 1) {
+      if (argc < 3) {
+         fprintf(stderr, "usage: %s <vertex.glsl> <fragment.glsl>...\n",
+                 argv[0]);
+         return 2;
+      }
+      const bool ok = compile_shader_corpus(argc, argv);
+      eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      eglDestroyContext(display, context);
+      eglDestroySurface(display, surface);
+      eglTerminate(display);
+      return ok ? 0 : 1;
+   }
 
    GLuint varying_program = make_program(true);
    GLuint solid_program = make_program(false);

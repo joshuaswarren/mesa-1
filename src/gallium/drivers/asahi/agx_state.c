@@ -1892,6 +1892,45 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
    return compiled;
 }
 
+/* Forward declared for the precompile-error path below. */
+static void agx_delete_uncompiled_shader(struct agx_device *dev,
+                                         struct agx_uncompiled_shader *so);
+
+/*
+ * st/mesa asks drivers to report failures from the default variant while it
+ * is linking a GLSL program. The AGX compiler is deliberately fail-closed,
+ * but merely retaining a failed variant here makes glLinkProgram() succeed
+ * and postpones the error until the first draw is dropped. WebGL treats a
+ * successful link as an executable program, so surface the refusal through
+ * pipe_shader_state::error_message and return no CSO when requested.
+ *
+ * Non-link-time users keep the failed CSO. The draw/dispatch guards still
+ * consume it safely and this preserves the existing behaviour for internal
+ * shaders and late key-specific variants.
+ */
+static bool
+agx_precompile_variant(struct agx_device *dev, struct pipe_context *pctx,
+                       struct agx_uncompiled_shader *so,
+                       const struct pipe_shader_state *cso,
+                       union asahi_shader_key *key)
+{
+   struct agx_compiled_shader *compiled =
+      agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, key);
+
+   if (!cso->report_compile_error || (compiled && !compiled->failed))
+      return true;
+
+   char message[192];
+   snprintf(message, sizeof(message),
+            "asahi: the AGX backend cannot encode the default %s shader "
+            "variant for %s",
+            _mesa_shader_stage_to_string(so->type), agx_chip_name(dev->chip));
+   ((struct pipe_shader_state *)cso)->error_message = strdup(message);
+
+   agx_delete_uncompiled_shader(dev, so);
+   return false;
+}
+
 static int
 glsl_type_size(const struct glsl_type *type, bool bindless)
 {
@@ -2125,16 +2164,19 @@ agx_create_shader_state(struct pipe_context *pctx,
        (so->type == MESA_SHADER_GEOMETRY) ||
        (so->type == MESA_SHADER_FRAGMENT && !so->info.uses_fbfetch)) {
       union asahi_shader_key key = {0};
-      agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, &key);
+      if (!agx_precompile_variant(dev, pctx, so, cso, &key))
+         return NULL;
    } else if (so->type == MESA_SHADER_VERTEX) {
       union asahi_shader_key key = {
          .vs.hw = next_stage == MESA_SHADER_FRAGMENT,
       };
-      agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, &key);
+      if (!agx_precompile_variant(dev, pctx, so, cso, &key))
+         return NULL;
 
       if (next_stage == MESA_SHADER_NONE) {
          key.vs.hw = true;
-         agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, &key);
+         if (!agx_precompile_variant(dev, pctx, so, cso, &key))
+            return NULL;
       }
    } else if (dev->debug & AGX_DBG_PRECOMPILE) {
       union asahi_shader_key key = {0};
@@ -2696,10 +2738,6 @@ agx_bind_cs_state(struct pipe_context *pctx, void *cso)
 {
    agx_bind_shader_state(pctx, cso, MESA_SHADER_COMPUTE);
 }
-
-/* Forward declare because of the recursion hit with geometry shaders */
-static void agx_delete_uncompiled_shader(struct agx_device *dev,
-                                         struct agx_uncompiled_shader *so);
 
 static void
 agx_delete_compiled_shader(struct agx_device *dev,

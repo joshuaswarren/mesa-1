@@ -2644,6 +2644,24 @@ agx_coerce_f16_src(agx_builder *b, agx_index src)
    return tmp;
 }
 
+/* Ordinary G17P f32 arithmetic has no generally witnessed scalar-half
+ * register source.  Widen such operands explicitly with the native
+ * half-to-float add form before register allocation.  Immediate and null
+ * sources have no size bit and remain directly encodable. */
+static agx_index
+agx_g17p_coerce_f32_src(agx_builder *b, agx_index src)
+{
+   if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       src.size == AGX_SIZE_32 || src.type == AGX_INDEX_IMMEDIATE ||
+       src.type == AGX_INDEX_NULL)
+      return src;
+
+   assert(src.size == AGX_SIZE_16);
+   agx_index tmp = agx_temp(b->shader, AGX_SIZE_32);
+   agx_fmov_to(b, tmp, src);
+   return tmp;
+}
+
 static agx_index
 agx_g17p_shift_boundary(agx_builder *b, unsigned shift)
 {
@@ -2664,6 +2682,46 @@ static agx_index
 agx_g17p_and_imm(agx_builder *b, agx_index value, uint32_t mask)
 {
    return agx_and(b, value, agx_mov_imm(b, 32, mask));
+}
+
+static agx_index
+agx_g17p_ishl_imm(agx_builder *b, agx_index value, unsigned shift)
+{
+   agx_index shifted = agx_temp(b->shader, AGX_SIZE_32);
+   agx_bfi_to(b, shifted, agx_immediate(0), value,
+              agx_immediate(shift), 0);
+   return shifted;
+}
+
+static agx_instr *
+agx_emit_g17p_bitrev(agx_builder *b, agx_index dst, agx_index value)
+{
+   /* AGX3's BITREV opcode is not grounded. Express GLSL
+    * bitfieldReverse() with the ordinary G17P shifts and bitwise operations
+    * instead. Every shift below is a compile-time constant and every mask is
+    * exact, so this is the conventional five-stage 32-bit permutation rather
+    * than an approximation of an unknown native instruction. */
+   static const struct {
+      uint8_t shift;
+      uint32_t mask;
+   } stages[] = {
+      {1, UINT32_C(0x55555555)},
+      {2, UINT32_C(0x33333333)},
+      {4, UINT32_C(0x0f0f0f0f)},
+      {8, UINT32_C(0x00ff00ff)},
+   };
+
+   agx_index x = value;
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      agx_index lo = agx_g17p_and_imm(b, x, stages[i].mask);
+      lo = agx_g17p_ishl_imm(b, lo, stages[i].shift);
+      agx_index hi = agx_g17p_and_imm(
+         b, agx_g17p_ushr_imm(b, x, stages[i].shift), stages[i].mask);
+      x = agx_or(b, lo, hi);
+   }
+
+   return agx_or_to(b, dst, agx_g17p_ushr_imm(b, x, 16),
+                    agx_g17p_ishl_imm(b, x, 16));
 }
 
 static agx_instr *
@@ -2746,7 +2804,11 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 
       UNOP(mov, mov);
       UNOP(u2u32, mov);
-      UNOP(bitfield_reverse, bitrev);
+   case nir_op_bitfield_reverse:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          src_sz == 32)
+         return agx_emit_g17p_bitrev(b, dst, s0);
+      return agx_bitrev_to(b, dst, s0);
    case nir_op_bit_count:
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           src_sz == 16 && sz == 32) {
@@ -2772,14 +2834,16 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
          return agx_hadd_to(b, dst, agx_coerce_f16_src(b, s0),
                             agx_coerce_f16_src(b, s1));
       else
-         return agx_fadd_to(b, dst, s0, s1);
+         return agx_fadd_to(b, dst, agx_g17p_coerce_f32_src(b, s0),
+                            agx_g17p_coerce_f32_src(b, s1));
 
    case nir_op_fmul:
       if (instr->def.bit_size == 16)
          return agx_hmul_to(b, dst, agx_coerce_f16_src(b, s0),
                             agx_coerce_f16_src(b, s1));
       else
-         return agx_fmul_to(b, dst, s0, s1);
+         return agx_fmul_to(b, dst, agx_g17p_coerce_f32_src(b, s0),
+                            agx_g17p_coerce_f32_src(b, s1));
 
    case nir_op_ffma:
       if (instr->def.bit_size == 16)
@@ -2787,7 +2851,9 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
                             agx_coerce_f16_src(b, s1),
                             agx_coerce_f16_src(b, s2));
       else
-         return agx_ffma_to(b, dst, s0, s1, s2);
+         return agx_ffma_to(b, dst, agx_g17p_coerce_f32_src(b, s0),
+                            agx_g17p_coerce_f32_src(b, s1),
+                            agx_g17p_coerce_f32_src(b, s2));
 
    case nir_op_fsat: {
       agx_instr *I = agx_fadd_to(b, dst, s0, agx_negzero());

@@ -157,11 +157,16 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
       if (src.size == AGX_SIZE_16 && def->src[0].size == AGX_SIZE_32)
          continue;
 
-      /* G17P does not have a corpus-grounded direct f32+f16 ADD. Preserve
-       * the explicit exact widening before a full-width add, matching the
-       * native compiler sequence used for half-backed blend attachments. */
+      /* G17P does not have generally grounded f32 arithmetic over an f16
+       * register.  FMUL has a few native mixed endpoints, but their combined
+       * producer-wait/lifetime domain is intentionally narrow.  Preserve the
+       * explicit exact widening for ordinary full-width arithmetic; native
+       * patterns such as the scalar-half sqrt are emitted without an fmov and
+       * therefore remain available. */
       if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          ins->op == AGX_OPCODE_FADD && src.size == AGX_SIZE_32 &&
+          (ins->op == AGX_OPCODE_FADD || ins->op == AGX_OPCODE_FMUL ||
+           ins->op == AGX_OPCODE_FFMA) &&
+          src.size == AGX_SIZE_32 &&
           def->src[0].size == AGX_SIZE_16)
          continue;
 
