@@ -7429,6 +7429,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       } while (progress);
    }
 
+   /* int64 lowering and the perspective divide emit fdiv after preprocessing;
+    * the backend has no fdiv, so lower what is left before it is scheduled.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_fdiv_late);
+
    /* Reassociate before forming preambles because it makes preambles more
     * effective. Clean up after.
     */
