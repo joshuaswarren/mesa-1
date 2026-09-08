@@ -218,11 +218,12 @@ bool hk_agx3_g17p_rt0_eot_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_rt0_eot_program_desc *desc,
    struct hk_agx3_g17p_rt0_eot_program *program);
 
-/* The bounded G17P render path handles one ordinary framebuffer layer. */
+/* Classify the ordinary non-multiview, one-layer fast path. */
 bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
                                         uint32_t layer_count);
 
-/* Admit the bounded one-attachment tilebuffer used by that path. */
+/* Admit the bounded one-attachment physical tilebuffer. Layer selection is
+ * carried independently by the array BG/EOT programs. */
 bool hk_agx3_g17p_rt0_tile_layout_supported(
    struct agx_tilebuffer_layout *tib);
 

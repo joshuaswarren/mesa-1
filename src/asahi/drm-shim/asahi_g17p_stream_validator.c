@@ -545,7 +545,10 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           !agx_ppp_hal200_graphics_core_unpack(
              AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_OUTPUT, bytes, size,
              &graphics) ||
-          (graphics.words[0] & ~UINT32_C(0x00210000)) || graphics.words[1] ||
+          (graphics.words[0] & ~UINT32_C(0x003d0000)) ||
+          !!(graphics.words[0] & UINT32_C(0x00080000)) !=
+             !!(graphics.words[0] & UINT32_C(0x00100000)) ||
+          graphics.words[1] ||
           graphics.words[2] > 15 ||
           (graphics.words[3] & UINT32_C(0xff00ff00)) ||
           graphics.words[4] != AGX_PPP_HAL200_PRIMARY_FACE_HEADER ||
@@ -658,6 +661,13 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
                    output_record, sizeof(output_record)) ||
        load_le32(output_record + 12) != viewport_count - 1)
       return fail_at(address, "output/viewport counts disagree");
+
+   /* OUTPUT bits 19 and 20 are the paired viewport/layer UVS selector.  A
+    * multiview stream is not complete merely because it exposes two image
+    * layers: the vertex ViewIndex must also reach this native output path. */
+   stats->layer_output |=
+      (load_le32(output_record + 4) & UINT32_C(0x00180000)) ==
+      UINT32_C(0x00180000);
 
    for (unsigned i = 0; i < 8; ++i) {
       /* Fixed controls and lengths are intentionally independent of the

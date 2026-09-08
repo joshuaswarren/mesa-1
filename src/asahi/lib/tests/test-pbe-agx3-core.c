@@ -125,6 +125,46 @@ check_exact_generation_vectors(void)
 }
 
 static int
+check_exact_gen9_array_vector(void)
+{
+   /* PBEStateEncoderGen9<HAL200> keeps the ordinary 2D words, changes the
+    * dimension nibble to3, and writes layers-1/page alignment at word1
+    * bits44..60. This exact two-layer vector exercises every changed field. */
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 2,
+      .channels = 0x28,
+      .type = 0,
+      .swizzle_r = 0,
+      .swizzle_g = 1,
+      .swizzle_b = 2,
+      .swizzle_a = 3,
+      .width = 256,
+      .height = 128,
+      .buffer = UINT64_C(0x0000123456789ab0),
+      .page_aligned_layers = true,
+   };
+   static const uint8_t expected[32] = {
+      0x23, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0xab, 0x89, 0x67, 0x45, 0x23, 0x11, 0x00, 0x10,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct agx_pbe_agx3_descriptor packed;
+   CHECK(agx_pbe_agx3_2d_array_pack(9, &fields, 2, &packed));
+   CHECK(packed.length == sizeof(expected));
+   CHECK(memcmp(packed.bytes, expected, sizeof(expected)) == 0);
+
+   struct agx_pbe_agx3_2d_fields bad = fields;
+   bad.layout = 0;
+   bad.stride_B = 1024;
+   CHECK(!agx_pbe_agx3_2d_array_pack(9, &bad, 2, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_pack(10, &fields, 2, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 1, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 65537, &packed));
+   return 0;
+}
+
+static int
 check_exhaustive_format_axes(void)
 {
    const uint32_t generations[] = {
@@ -380,7 +420,8 @@ check_gen9_native_mips(void)
 int
 main(void)
 {
-   if (check_exact_generation_vectors() || check_exact_gen9_linear_vector() ||
+   if (check_exact_generation_vectors() || check_exact_gen9_array_vector() ||
+       check_exact_gen9_linear_vector() ||
        check_exhaustive_format_axes() ||
        check_dimension_and_address_bits() || check_fail_closed_axes() ||
        check_gen9_single_layer_packet() || check_gen9_native_mips())

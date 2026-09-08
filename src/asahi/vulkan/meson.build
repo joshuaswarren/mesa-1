@@ -554,6 +554,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Two-view/layer exact image oracle.  The same binary records and submits
+    # against drm-shim when G17P_MULTIVIEW_RECORD_ONLY is set.
+    executable(
+      'g17p-vulkan-multiview',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MULTIVIEW=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-implicit-lod',
       files('tests/g17p_offscreen_triangle.c'),

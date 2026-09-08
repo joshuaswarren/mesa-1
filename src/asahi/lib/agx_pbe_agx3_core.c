@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define AGX_PBE_DIMENSION_2D 2u
+#define AGX_PBE_DIMENSION_2D_ARRAY 3u
 #define AGX_PBE_LAYOUT_LINEAR 0u
 #define AGX_PBE_LAYOUT_TWIDDLED 1u
 #define AGX_PBE_LAYOUT_GPU 2u
@@ -144,6 +145,33 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
    out->length = AGX_PBE_AGX3_DESCRIPTOR_LENGTH;
+   return true;
+}
+
+bool
+agx_pbe_agx3_2d_array_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   /* The exact HAL200 producer keeps arrays tiled and non-mipmapped in this
+    * packet. Linear array stride and Gen10's shifted mode fields remain
+    * independently gated. */
+   if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
+       fields->layout == AGX_PBE_LAYOUT_LINEAR || layers < 2 ||
+       layers > UINT16_MAX + 1u ||
+       !agx_pbe_agx3_2d_pack(generation, fields, out))
+      return false;
+
+   uint64_t word0 = load_le64(&out->bytes[0]);
+   uint64_t word1 = load_le64(&out->bytes[8]);
+   word0 = (word0 & ~UINT64_C(0xf)) | AGX_PBE_DIMENSION_2D_ARRAY;
+   word1 |= (uint64_t)(layers - 1) << 44;
+   word1 |= (uint64_t)fields->page_aligned_layers << 60;
+   store_le64(&out->bytes[0], word0);
+   store_le64(&out->bytes[8], word1);
    return true;
 }
 

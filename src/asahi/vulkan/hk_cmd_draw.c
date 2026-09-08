@@ -454,14 +454,22 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          ? cmd->state.gfx.render.color_att[0].resolve_iview : iview;
       struct hk_image_view *iview1 = wboit_mrt_active
          ? cmd->state.gfx.render.color_att[1].iview : NULL;
+      const bool target_pbe_valid =
+         target && (key->tib.layered
+                       ? target->planes[0].layered_eot_pbe_valid
+                       : target->planes[0].eot_pbe_valid);
+      const bool target1_pbe_valid =
+         iview1 && (key->tib.layered
+                       ? iview1->planes[0].layered_eot_pbe_valid
+                       : iview1->planes[0].eot_pbe_valid);
       if (!iview || !target ||
           (direct_resolve &&
            (target->vk.image->samples != 1 ||
             target->vk.format != iview->vk.format)) ||
-          !target->planes[0].eot_pbe_valid ||
+          !target_pbe_valid ||
           info->pColorAttachments[0].imageView == VK_NULL_HANDLE ||
           (wboit_mrt_active &&
-           (!iview1 || !iview1->planes[0].eot_pbe_valid ||
+           (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
@@ -478,12 +486,19 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                        AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE,
                     "native PBE table stride");
 
+      const struct hk_native_pbe_descriptor target_pbe =
+         key->tib.layered ? target->planes[0].layered_eot
+                          : target->planes[0].eot;
+      struct hk_native_pbe_descriptor target1_pbe = {0};
+      if (wboit_mrt_active) {
+         target1_pbe = key->tib.layered ? iview1->planes[0].layered_eot
+                                        : iview1->planes[0].eot;
+      }
       struct hk_native_pbe_descriptor pbe_arguments[2] = {
-         diagnostic_rt1_slot0 ? iview1->planes[0].eot
-                              : target->planes[0].eot,
+         diagnostic_rt1_slot0 ? target1_pbe : target_pbe,
       };
       if (wboit_mrt_active && !diagnostic_rt1_slot0)
-         pbe_arguments[1] = iview1->planes[0].eot;
+         pbe_arguments[1] = target1_pbe;
       const size_t pbe_argument_size =
          wboit_mrt_active && !diagnostic_rt1_slot0
          ? AGX_IOTO_G17P_WBOIT_MRT_PBE_ARGUMENT_SIZE
@@ -613,10 +628,13 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                           AGX_TEXTURE_GEN9_LENGTH,
                        "native texture table stride");
          struct hk_native_texture_descriptor textures[3] = {
-            iview->planes[0].background,
+            key->tib.layered ? iview->planes[0].layered_background
+                             : iview->planes[0].background,
          };
          if (wboit_mrt_active)
-            textures[2] = iview1->planes[0].background;
+            textures[2] = key->tib.layered
+                             ? iview1->planes[0].layered_background
+                             : iview1->planes[0].background;
          const size_t texture_size = wboit_mrt_active
             ? 3 * AGX_TEXTURE_GEN9_LENGTH : AGX_TEXTURE_GEN9_LENGTH;
          const uint64_t texture_va =
@@ -3057,6 +3075,13 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                  vs->info.uvs.size, 0, &output_size))
       return hk_g17p_bind_tail_refused(__LINE__);
 
+   uint32_t output_select;
+   if (!agx_ppp_hal200_output_select_pack(
+          dev->dev.chip, vs->info.uvs.osel.opaque[0],
+          linked_fs->b.cf.nr_bindings != 0, linked_fs->b.cf.reads_z,
+          &output_select))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
    struct agx_ppp_hal200_graphics_core output_record;
    struct agx_ppp_hal200_graphics_fields output_fields = {
       /* Native vertex update 0x481be8..0x481c2c writes zero at
@@ -3064,8 +3089,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        * for this single-viewport layout. VIT supplies interpolation.
        * FragmentProgramVariant 0x373eb4..0x373ee0 sets output-select bit16
        * for nonempty iteration metadata, merged by 0x4824fc..0x482518. */
-      .words = {(linked_fs->b.cf.nr_bindings ? UINT32_C(0x10000) : 0) |
-                   (linked_fs->b.cf.reads_z ? UINT32_C(0x200000) : 0),
+      .words = {output_select,
                 0, 0, output_size,
                 AGX_PPP_HAL200_PRIMARY_FACE_HEADER, 0},
    };

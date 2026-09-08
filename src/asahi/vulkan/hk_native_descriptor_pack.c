@@ -210,10 +210,13 @@ hk_pack_native_pbe(unsigned generation,
       return false;
 
    /* The recovered subset deliberately excludes every field whose Gen9/10
-    * semantic placement is incomplete: arrays, compression, sparse mode,
-    * gamma and the software-addressing sideband.
-    */
-   if (legacy->dimension != AGX_TEXTURE_DIMENSION_2D ||
+    * semantic placement is incomplete: compression, sparse mode, gamma and
+    * the software-addressing sideband. HAL200's exact tiled 2D-array packet
+    * is the one bounded layered exception. */
+   const bool array = generation == 9 &&
+                      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
+                      legacy->layers > 1;
+   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (generation != 9 || legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
@@ -223,7 +226,7 @@ hk_pack_native_pbe(unsigned generation,
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
        legacy->samples != AGX_SAMPLE_COUNT_2 ||
        legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
-       legacy->layers != 1 ||
+       (!array && legacy->layers != 1) ||
        (generation != 9 && (legacy->level != 0 || legacy->levels != 1 ||
                             legacy->unk_mipmapped)) ||
        legacy->srgb || legacy->extended ||
@@ -255,10 +258,15 @@ hk_pack_native_pbe(unsigned generation,
       .page_aligned_layers = legacy->page_aligned_layers,
    };
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = generation == 9
-      ? agx_pbe_agx3_2d_mip_pack(generation, &fields, legacy->level,
-                                legacy->levels, &packed)
-      : agx_pbe_agx3_2d_pack(generation, &fields, &packed);
+   const bool valid = array
+      ? (legacy->level == 0 && legacy->levels == 1 &&
+         !legacy->unk_mipmapped &&
+         agx_pbe_agx3_2d_array_pack(generation, &fields, legacy->layers,
+                                    &packed))
+      : generation == 9
+         ? agx_pbe_agx3_2d_mip_pack(generation, &fields, legacy->level,
+                                    legacy->levels, &packed)
+         : agx_pbe_agx3_2d_pack(generation, &fields, &packed);
    if (!valid)
       return false;
 

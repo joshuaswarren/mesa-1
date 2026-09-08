@@ -1134,6 +1134,20 @@ test_g17p_rt0_eot_program(void)
    CHECK(signed_program.length == program.length);
    CHECK(memcmp(signed_program.bytes, program.bytes, program.length) == 0);
 
+   /* Layered U8NORM uses the exact 110-byte array-wire text with r0..r6
+    * coordinates. Its Ioto ABI remains one PBE and one imageblock offset. */
+   struct hk_agx3_g17p_rt0_eot_program layered_program;
+   struct hk_agx3_g17p_rt0_eot_program_desc layered_desc = desc;
+   layered_desc.attachment_count = 1;
+   layered_desc.shader_binary_size = 110;
+   layered_desc.nr_gprs = 16;
+   CHECK(hk_agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &layered_desc, &layered_program));
+   CHECK(layered_program.length == program.length);
+   layered_desc.nr_gprs = 15;
+   CHECK(!hk_agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &layered_desc, &layered_program));
+
    /* Profile scratch occupies0..3; the table pointer survives in4..7.
     * Its only publications are COPY GPR4->uniform0 and GPR6->uniform2.
     * These COPY source-file/no-kill bits and the terminal are unchanged.
@@ -2037,7 +2051,8 @@ test_g17p_single_layer_rt0_layout(void)
    tib = agx_build_tilebuffer_layout(rg16, 1, 1, false);
 
    tib.layered = true;
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.layered);
 
    enum pipe_format mrt[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R8G8B8A8_UNORM,

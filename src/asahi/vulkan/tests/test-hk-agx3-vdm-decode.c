@@ -211,6 +211,17 @@ test_g17p_vertex_program_info(void)
    point_info.layer_viewport_off = point_info.clip_off = point_info.uvs_size = 6;
    CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &point_info, &program));
 
+   /* The packed layer/viewport sysval occupies one word after ordinary
+    * varyings (and optional point size).  Multiview's ViewIndex-to-Layer
+    * lowering produces this exact position + packed-layer shape. */
+   struct hk_agx3_g17p_vertex_compile_info layer_info = compiler_info;
+   layer_info.position_only = false;
+   layer_info.clip_off = layer_info.uvs_size = 5;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &layer_info,
+                                          &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 5);
+   CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
    const struct hk_agx3_g17p_vertex_compile_info vkcube_info = {
       .hardware_vertex = true,
       .uvs_written = BITFIELD64_BIT(VARYING_SLOT_VAR0) |

@@ -1118,7 +1118,20 @@ main(void)
    assert(memcmp(&native_pbe, linear_pbe, sizeof(linear_pbe)) == 0);
    pbe.stride = 0;
    pbe.layout = AGX_LAYOUT_GPU;
-   CHECK_PBE_REJECT(pbe.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY);
+   pbe.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   pbe.layers = 2;
+   static const uint8_t gen9_array_pbe[32] = {
+      0x23, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0x00, 0x80, 0x00, 0x00, 0x10, 0x10, 0x00, 0x10,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, gen9_array_pbe,
+                 sizeof(gen9_array_pbe)) == 0);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   pbe.layers = 1;
+   CHECK_PBE_REJECT((void)0);
    pbe.dimension = AGX_TEXTURE_DIMENSION_2D;
    CHECK_PBE_REJECT(pbe.compressed = true);
    pbe.compressed = false;

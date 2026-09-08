@@ -329,13 +329,18 @@ agx3_g17p_rt0_eot_program_generate(
                     desc->nr_gprs == 8 && desc->staging_halfs == 8 &&
                     (desc->attachment_count == 0 ||
                      desc->attachment_count == 1);
+   const bool layered_rt0 = desc && desc->shader_binary_size == 110 &&
+                            desc->nr_gprs == 16 &&
+                            desc->staging_halfs == 8 &&
+                            desc->attachment_count == 1;
    const bool wboit_mrt = desc && desc->shader_binary_size == 120 &&
                           desc->nr_gprs == 8 &&
                           desc->staging_halfs == 16 &&
                           desc->attachment_count == 2 &&
                           desc->imageblock_offset_B == 0 &&
                           desc->imageblock_offset1_B == 8;
-   if (!program || chip != AGX_CHIP_G17P || !desc || (!rt0 && !wboit_mrt) ||
+   if (!program || chip != AGX_CHIP_G17P || !desc ||
+       (!rt0 && !layered_rt0 && !wboit_mrt) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
           (wboit_mrt ? 63 : 31) ||

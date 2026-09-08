@@ -20,13 +20,13 @@ extern "C" {
 #define AGX_PBE_AGX3_GENERATION_10     10u
 
 /* This is intentionally the subset whose complete byte geometry is recovered:
- * uncompressed, non-sparse, single-level, single-layer 2D images in ordinary
- * Gen9 linear or Gen9/10 twiddled/GPU memory. Gen9's ordinary single-layer
- * packet has no layer-mode bit regardless of allocation padding; the
- * inherited page-aligned-layer input is ignored on pack and canonicalized to
- * false on unpack. Gen10 keeps its existing flag semantics. Fields with
- * unresolved Gen9/10 semantics are not represented and are required to be
- * zero by the decoder.
+ * uncompressed, non-sparse, single-level 2D images in ordinary Gen9 linear or
+ * Gen9/10 twiddled/GPU memory, plus Gen9's exact tiled 2D-array extension.
+ * Gen9's ordinary single-layer packet has no layer-mode bit regardless of
+ * allocation padding; the inherited page-aligned-layer input is ignored on
+ * scalar pack and canonicalized to false on unpack. Gen10 keeps its existing
+ * flag semantics. Fields with unresolved Gen9/10 semantics are not
+ * represented and are required to be zero by the decoder.
  */
 struct agx_pbe_agx3_2d_fields {
    uint8_t layout;
@@ -54,6 +54,13 @@ bool agx_pbe_agx3_2d_pack(
    uint32_t generation,
    const struct agx_pbe_agx3_2d_fields *fields,
    struct agx_pbe_agx3_descriptor *out);
+
+/* Gen9 HAL200 2D-array extension. PBEStateEncoderGen9 keeps the 2D field
+ * geometry, selects dimension3, and places layers-1 at word1[59:44] with
+ * page-aligned-layers at bit60. */
+bool agx_pbe_agx3_2d_array_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, struct agx_pbe_agx3_descriptor *out);
 
 /* Gen9 native mip extension: the existing descriptor is unchanged for
  * level=0, levels=1. Width/height and buffer describe the complete mip chain. */

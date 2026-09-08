@@ -178,6 +178,29 @@ agx_ppp_hal200_graphics_core_supported(enum agx_chip chip)
 }
 
 bool
+agx_ppp_hal200_output_select_pack(enum agx_chip chip,
+                                  uint32_t vertex_output_select,
+                                  bool fragment_varyings,
+                                  bool fragment_reads_z, uint32_t *out)
+{
+   const uint32_t point_size = UINT32_C(1) << 18;
+   const uint32_t viewport_target = UINT32_C(1) << 19;
+   const uint32_t render_target = UINT32_C(1) << 20;
+   const uint32_t vertex_mask = point_size | viewport_target | render_target;
+
+   if (chip != AGX_CHIP_G17P || !out ||
+       (vertex_output_select & ~vertex_mask) ||
+       !!(vertex_output_select & viewport_target) !=
+          !!(vertex_output_select & render_target))
+      return false;
+
+   *out = vertex_output_select |
+          (fragment_varyings ? UINT32_C(1) << 16 : 0) |
+          (fragment_reads_z ? UINT32_C(1) << 21 : 0);
+   return true;
+}
+
+bool
 agx_ppp_hal200_graphics_core_pack(
    enum agx_chip chip, enum agx_ppp_hal200_graphics_bundle bundle,
    const struct agx_ppp_hal200_graphics_fields *fields,

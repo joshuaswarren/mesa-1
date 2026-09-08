@@ -152,6 +152,14 @@ uint32_t agx_ppp_hal200_stencil_pack(bool enabled, unsigned compare,
 bool agx_ppp_hal200_output_size_pack(uint32_t count_0,
                                       uint32_t count_2, uint32_t *out);
 
+/* Merge the compiler's vertex OUTPUT_SELECT word with the fragment-owned
+ * varying/depth inputs consumed by the HAL200 OUTPUT record. */
+bool agx_ppp_hal200_output_select_pack(enum agx_chip chip,
+                                      uint32_t vertex_output_select,
+                                      bool fragment_varyings,
+                                      bool fragment_reads_z,
+                                      uint32_t *out);
+
 /* Native vertex-state update writes viewport_count - 1 to context+0x1f94;
  * the HAL200 output bundle consumes that word unchanged. */
 bool agx_ppp_hal200_viewport_count_pack(enum agx_chip chip,

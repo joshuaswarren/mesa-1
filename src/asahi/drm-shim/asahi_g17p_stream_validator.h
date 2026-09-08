@@ -44,6 +44,7 @@ struct asahi_g17p_stream_stats {
    bool stencil_enabled;
    bool blend_enabled;
    bool rasterizer_discard;
+   bool layer_output;
    uint64_t fragment_code;
 };
 

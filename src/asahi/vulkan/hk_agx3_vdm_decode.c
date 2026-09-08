@@ -115,6 +115,16 @@ hk_agx3_g17p_vertex_program_info(
    if (program)
       memset(program, 0, sizeof(*program));
 
+   const bool writes_psiz =
+      compiler_info &&
+      compiler_info->layer_viewport_off == compiler_info->psiz_off + 1;
+   const bool writes_layer_viewport =
+      compiler_info &&
+      compiler_info->clip_off == compiler_info->layer_viewport_off + 1;
+   const bool position_only =
+      compiler_info && compiler_info->user_size == 0 && !writes_psiz &&
+      !writes_layer_viewport;
+
    if (chip != AGX_CHIP_G17P || !compiler_info || !program ||
        !compiler_info->hardware_vertex ||
        compiler_info->has_preamble || compiler_info->nr_preamble_gprs != 0 ||
@@ -123,14 +133,11 @@ hk_agx3_g17p_vertex_program_info(
        compiler_info->psiz_off != 4 + compiler_info->user_size ||
        (compiler_info->layer_viewport_off != compiler_info->psiz_off &&
         compiler_info->layer_viewport_off != compiler_info->psiz_off + 1) ||
-       compiler_info->clip_off != compiler_info->layer_viewport_off ||
+       (compiler_info->clip_off != compiler_info->layer_viewport_off &&
+        compiler_info->clip_off != compiler_info->layer_viewport_off + 1) ||
        compiler_info->uvs_size != compiler_info->clip_off ||
-       compiler_info->position_only !=
-          (compiler_info->user_size == 0 &&
-           compiler_info->layer_viewport_off == compiler_info->psiz_off) ||
-       compiler_info->position_only !=
-          (compiler_info->uvs_written == 0 &&
-           compiler_info->layer_viewport_off == compiler_info->psiz_off) ||
+       compiler_info->position_only != position_only ||
+       (compiler_info->position_only && compiler_info->uvs_written != 0) ||
        compiler_info->user_size > HK_AGX3_G17P_MAX_USER_WORDS ||
        util_bitcount64(compiler_info->uvs_written) > compiler_info->user_size)
       return false;

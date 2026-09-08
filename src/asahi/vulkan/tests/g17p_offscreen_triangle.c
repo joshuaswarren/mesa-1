@@ -242,6 +242,10 @@
 #define G17P_TEXTURE_3D 0
 #endif
 
+#ifndef G17P_MULTIVIEW
+#define G17P_MULTIVIEW 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
@@ -558,6 +562,7 @@
 #define T8140_DEVICE_ID 0x8140
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
+#define IMAGE_LAYERS (G17P_MULTIVIEW ? 2 : 1)
 
 #if G17P_INDIRECT_DRAW
 #define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
@@ -692,6 +697,7 @@
 #endif
 
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * IMAGE_PIXEL_BYTES)
+#define READBACK_PAYLOAD_BYTES (IMAGE_BYTES * IMAGE_LAYERS)
 
 #ifndef G17P_HOST_IMAGE_COPY
 #define G17P_HOST_IMAGE_COPY 0
@@ -1172,6 +1178,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MULTIVIEW
+#define PROBE_NAME "g17p-vulkan-multiview"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (READBACK_PAYLOAD_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MSAA_SAMPLES > 1
 #define PROBE_NAME "g17p-msaa-triangle"
 #define READBACK_IMAGE_USAGE 0
@@ -1215,7 +1226,8 @@ VK_FN(vkGetInstanceProcAddr);
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
-#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES
+#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
+   G17P_MULTIVIEW
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1441,7 +1453,7 @@ verify_readback(const uint8_t *map)
 {
    for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
       if (map[i] != 0xa5 ||
-          map[READBACK_GUARD_BYTES + IMAGE_BYTES + i] != 0xa5) {
+          map[READBACK_GUARD_BYTES + READBACK_PAYLOAD_BYTES + i] != 0xa5) {
          fprintf(stderr, PROBE_NAME ": readback guard %zu was modified\n", i);
          return false;
       }
@@ -1620,7 +1632,8 @@ verify_readback(const uint8_t *map)
       }
    }
 #else
-   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+   for (size_t pixel = 0;
+        pixel < IMAGE_WIDTH * IMAGE_HEIGHT * IMAGE_LAYERS; ++pixel) {
       const uint8_t *actual = &pixels[pixel * IMAGE_PIXEL_BYTES];
 #if G17P_SHADOW_COMPARE
       const uint8_t *expected_pixel =
@@ -1695,6 +1708,7 @@ main(void)
       (G17P_MSAA_SAMPLES > 1 &&
        getenv("G17P_MSAA_RECORD_ONLY") != NULL) ||
       (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
+      (G17P_MULTIVIEW && getenv("G17P_MULTIVIEW_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
@@ -1784,7 +1798,8 @@ main(void)
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
-#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES
+#if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
+   G17P_MULTIVIEW
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1843,7 +1858,7 @@ main(void)
    if (!physical)
       die("no T8140 device has a graphics-and-transfer queue");
 
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_MULTIVIEW
    VkPhysicalDeviceVulkan11Features available11 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
    };
@@ -1852,9 +1867,17 @@ main(void)
       .pNext = &available11,
    };
    vkGetPhysicalDeviceFeatures2(physical, &available);
+#if G17P_F16_IO
    if (!available11.storageInputOutput16)
       die("T8140/G17P does not advertise storageInputOutput16");
-#elif G17P_BRESENHAM_LINES
+#endif
+#if G17P_MULTIVIEW
+   if (!available11.multiview || properties.limits.maxFramebufferLayers < 2)
+      die("T8140/G17P does not advertise two-layer multiview");
+#endif
+#endif
+
+#if G17P_BRESENHAM_LINES
    VkPhysicalDeviceLineRasterizationFeaturesKHR available_lines = {
       .sType =
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR,
@@ -1961,10 +1984,15 @@ main(void)
    };
 #endif
 #endif
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_MULTIVIEW
    const VkPhysicalDeviceVulkan11Features enabled11 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+#if G17P_F16_IO
       .storageInputOutput16 = VK_TRUE,
+#endif
+#if G17P_MULTIVIEW
+      .multiview = VK_TRUE,
+#endif
    };
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1984,7 +2012,7 @@ main(void)
 #endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-#if G17P_F16_IO
+#if G17P_F16_IO || G17P_MULTIVIEW
       .pNext = &enabled11,
 #elif G17P_BRESENHAM_LINES
       .pNext = &enabled_lines,
@@ -2637,7 +2665,7 @@ main(void)
       .format = IMAGE_FORMAT,
       .extent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
       .mipLevels = 1,
-      .arrayLayers = 1,
+      .arrayLayers = IMAGE_LAYERS,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -2729,12 +2757,13 @@ main(void)
    const VkImageViewCreateInfo view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .viewType = G17P_MULTIVIEW ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                : VK_IMAGE_VIEW_TYPE_2D,
       .format = IMAGE_FORMAT,
       .subresourceRange = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .levelCount = 1,
-         .layerCount = 1,
+         .layerCount = IMAGE_LAYERS,
       },
    };
    VkImageView view;
@@ -2905,8 +2934,21 @@ main(void)
          .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
       },
    };
+#if G17P_MULTIVIEW
+   const uint32_t multiview_mask = 0x3;
+   const VkRenderPassMultiviewCreateInfo multiview_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO,
+      .subpassCount = 1,
+      .pViewMasks = &multiview_mask,
+      .correlationMaskCount = 1,
+      .pCorrelationMasks = &multiview_mask,
+   };
+#endif
    const VkRenderPassCreateInfo render_pass_info = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+#if G17P_MULTIVIEW
+      .pNext = &multiview_info,
+#endif
       .attachmentCount = sizeof(attachments) / sizeof(attachments[0]),
       .pAttachments = attachments,
       .subpassCount = 1,
@@ -3422,7 +3464,7 @@ main(void)
       .bufferOffset = READBACK_GUARD_BYTES,
       .imageSubresource = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-         .layerCount = 1,
+         .layerCount = IMAGE_LAYERS,
       },
       .imageExtent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
    };
@@ -3434,7 +3476,7 @@ main(void)
 #endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
-   if (record_only) {
+   if (record_only && !G17P_MULTIVIEW) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -3452,6 +3494,7 @@ main(void)
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
+   G17P_MULTIVIEW ||                                                     \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
@@ -3484,6 +3527,14 @@ main(void)
 #else
    check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
          "vkWaitForFences");
+#endif
+
+#if G17P_MULTIVIEW
+   if (record_only) {
+      printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
+                        "and two-view command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
 #endif
 
 #if G17P_HOST_IMAGE_COPY
@@ -3551,6 +3602,7 @@ main(void)
 #endif
 
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
+   G17P_MULTIVIEW ||                                                       \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
@@ -3612,8 +3664,14 @@ main(void)
 #endif
 #endif
    const uint64_t checksum =
-      fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
-#if G17P_IMPLICIT_LOD
+      fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
+#if G17P_MULTIVIEW
+   printf(PROBE_NAME ": PASS — both view 0/layer 0 and view 1/layer 1 "
+                     "contain the exact full-frame image immediately/3s; "
+                     "all readback guards unchanged, checksum %016" PRIx64
+                     "\n",
+          checksum);
+#elif G17P_IMPLICIT_LOD
    printf(PROBE_NAME ": PASS — implicit derivative LOD selected exact mip 1 "
                      "immediately/3s, distinct red/green/blue mips and all "
                      "source/readback guards unchanged, checksum %016" PRIx64

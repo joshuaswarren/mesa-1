@@ -105,6 +105,7 @@ static unsigned invalid_vm_binds;
 
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
+static bool multiview_layers_two;
 
 static void __attribute__((destructor))
 check_vm_bind_lifetime(void)
@@ -198,6 +199,7 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    MERGE_FLAG(stencil_enabled);
    MERGE_FLAG(blend_enabled);
    MERGE_FLAG(rasterizer_discard);
+   MERGE_FLAG(layer_output);
 #undef MERGE_FLAG
 }
 
@@ -261,6 +263,31 @@ check_multi_viewport_coverage(void)
 
    fprintf(stderr,
            "shim: complete G17P 16-viewport index-1 stream coverage\n");
+}
+
+static void __attribute__((destructor))
+check_multiview_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW"))
+      return;
+
+   /* Honeykrisp implements multiview by emitting one native draw for each
+    * view while changing the root-table ViewIndex.  The shader lowering
+    * routes that value through the layer/viewport UVS output, and the render
+    * command must expose both array layers to BG/EOT. */
+   if (!multiview_layers_two || matrix_stats.draws != 2 ||
+       matrix_stats.state_updates != 2 || !matrix_stats.layer_output) {
+      fprintf(stderr,
+              "shim: incomplete G17P multiview coverage: layers=%u draws=%u "
+              "state=%u varying=%u layer-output=%u\n",
+              multiview_layers_two, matrix_stats.draws,
+              matrix_stats.state_updates, matrix_stats.varying_fs,
+              matrix_stats.layer_output);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P two-view/layer render stream coverage\n");
 }
 
 static void __attribute__((destructor))
@@ -680,6 +707,8 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+         if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW"))
+            multiview_layers_two |= render.layers == 2;
          const struct asahi_g17p_stream_memory memory = {
             .data = (void *)(intptr_t)fd,
             .read = shim_gpu_read,

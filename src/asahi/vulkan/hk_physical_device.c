@@ -766,7 +766,11 @@ hk_get_device_features(
       features->sparseResidencyAliased = false;
       features->sparseResidencyImage2D = false;
       features->sparseResidencyBuffer = false;
-      features->multiview = false;
+      /* The common Honeykrisp lowering duplicates a draw per view, writes
+       * ViewIndex through the draw root and routes it through the packed
+       * layer/viewport UVS output.  G17P now also has exact array BG/EOT
+       * coordinates, completing the two-view render path. */
+      features->multiview = true;
       /* The direct triangle path uses the native geometry pipeline plus the
        * G17P-compiled libagx XFB counter-copy kernel. */
       features->transformFeedback = true;
@@ -777,12 +781,8 @@ hk_get_device_features(
        * count/clamp/stride oracle batch is qualified. */
       features->drawIndirectCount =
          hk_g17p_unverified_feature("draw_indirect_count");
-      /* hk_agx3_g17p_rt0_tile_layout_supported() refuses any tilebuffer
-       * layout with `layered` set, so a render pass with more than one layer
-       * has no BG/EOT program and is refused at vkCmdBeginRendering.  Writing
-       * gl_Layer is meaningless without one.  maxFramebufferLayers drops to 1
-       * alongside it in hk_get_device_properties(); this is unimplemented,
-       * not hardware-impossible -- it needs layered BG/EOT programs. */
+      /* Application-authored gl_Layer remains a separate qualification item;
+       * multiview uses the driver's ViewIndex-to-Layer lowering instead. */
       features->shaderOutputLayer = false;
       /* The HAL300 bind tail now emits the complete viewport/region-clip and
        * consecutive scissor/depth arrays, and the vertex compiler writes the
@@ -1217,12 +1217,6 @@ hk_get_device_properties(const struct agx_device *dev,
       /* Pair the limit with the qualification gate above. */
       if (!hk_g17p_unverified_feature("multi_viewport"))
          properties->maxViewports = 1;
-
-      /* Pairs with features->shaderOutputLayer == false: the G17P tile layout
-       * has no layered form, so one layer is all a render pass can bind.
-       * Reporting 2048 here let an application build a layered framebuffer
-       * that vkCmdBeginRendering then refused. */
-      properties->maxFramebufferLayers = 1;
 
       /* Measured per operation under the G17P drm-shim with
        * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):

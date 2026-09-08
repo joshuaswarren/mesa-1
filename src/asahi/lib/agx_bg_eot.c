@@ -26,19 +26,24 @@ static bool
 agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
 {
    /* Admit only complete native builtin texts: the common 68-byte RT0
-    * program, the signed RGBA16 84-byte RT0 program, or the exact 120-byte
-    * RGBA16F+R8 WBOIT MRT program. None has a synthetic compute preamble;
-    * the CODE container supplies the stop constant. */
+    * program, its exact 110-byte layered array-wire form, the signed RGBA16
+    * 84-byte RT0 program, or the exact 120-byte RGBA16F+R8 WBOIT MRT program.
+    * None has a synthetic compute preamble; the CODE container supplies the
+    * stop constant. */
    const bool rt0 = bin && bin->info.binary_size == 68 &&
                     bin->info.nr_gprs == 8 &&
                     bin->info.agx3_staging_halfs == 8;
+   const bool layered_rt0 = bin && bin->info.binary_size == 110 &&
+                            bin->info.nr_gprs == 16 &&
+                            bin->info.agx3_staging_halfs == 8;
    const bool wboit_mrt = bin && bin->info.binary_size == 120 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
    const bool rgba16_sint = bin && bin->info.binary_size == 84 &&
                             bin->info.nr_gprs == 8 &&
                             bin->info.agx3_staging_halfs == 8;
-   return bin && bin->binary && (rt0 || rgba16_sint || wboit_mrt) &&
+   return bin && bin->binary &&
+          (rt0 || layered_rt0 || rgba16_sint || wboit_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;
@@ -353,9 +358,17 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       nir_def *coords = layer;
       if (cache->dev->chip == AGX_CHIP_G17P) {
          /* AGX3's EOT imgwblk has no implicit pixel-coordinate form.  Apple's
-          * G17P compiler reads the hardware grid X/Y SRs explicitly. */
-         coords = nir_trim_vector(
+          * G17P compiler reads the hardware grid X/Y SRs explicitly.  Array
+          * stores append the hardware layer ID; dropping it here made every
+          * layered EOT store address layer zero even though the image
+          * descriptor and tilebuffer were correctly marked as arrays. */
+         nir_def *xy = nir_trim_vector(
             &b, nir_load_global_invocation_id(&b, 32), 2);
+         coords = key->tib.layered
+                     ? nir_vec3(&b, nir_channel(&b, xy, 0),
+                                nir_channel(&b, xy, 1),
+                                nir_u2u32(&b, nir_load_layer_id(&b)))
+                     : xy;
          explicit = true;
       }
 

@@ -157,6 +157,26 @@ main(void)
    assert(!agx_ppp_hal200_output_size_pack(256, 0, &output_size));
    assert(!agx_ppp_hal200_output_size_pack(4, 256, &output_size));
    assert(!agx_ppp_hal200_output_size_pack(4, 2, NULL));
+
+   uint32_t output_select;
+   assert(agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00180000), true, false,
+      &output_select));
+   assert(output_select == UINT32_C(0x00190000));
+   assert(agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00040000), false, true,
+      &output_select));
+   assert(output_select == UINT32_C(0x00240000));
+   assert(!agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00080000), false, false,
+      &output_select));
+   assert(!agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00000001), false, false,
+      &output_select));
+   assert(!agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17S, 0, false, false, &output_select));
+   assert(!agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, 0, false, false, NULL));
    uint32_t viewport_count;
    for (unsigned count = 1; count <= 16; ++count) {
       assert(agx_ppp_hal200_viewport_count_pack(
