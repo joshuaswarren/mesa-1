@@ -352,11 +352,12 @@ test_sample_witnesses(void)
         .coord_kill = true, .final = true},
        "05800cb8b0000000010010000100",
        "0f061600418060290118010000000000008000000000"},
-      {"ts_array register layer implicit LOD",
+      {"ts_array direct register layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
-        .coord_kill = true, .final = true, .array = true},
-       "05800cb8b0000004010010000100", NULL},
+        .coord_kill = true, .final = true, .array = true,
+        .array_layer = 22},
+       "05800cb8b0000db4010010001200", NULL},
       /*
        * Implicit LOD plus a constant bias.  Apple's own fragment samples of
        * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in
@@ -421,8 +422,11 @@ test_sample_witnesses(void)
                                  &length));
    bad.lod_x64 = 32;
    bad.array = true;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
-                                 &length));
+   bad.array_layer = 22;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b00005b7010010001202"));
    return 0;
 }
 
@@ -671,9 +675,7 @@ test_gradient_and_register_bias(void)
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &shadow, bytes,
                                  &length));
 
-   /* Fail closed on everything unwitnessed: both forms are AGX3b-only,
-    * neither carries the immediate LOD operand, and a gradient array sample
-    * would need the immediate layer selector Apple pairs with it. */
+   /* Both forms are AGX3b-only and neither carries an immediate LOD. */
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &grad, bytes,
                                  &length));
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bias_reg, bytes,
@@ -684,14 +686,47 @@ test_gradient_and_register_bias(void)
                                  &length));
    bad = grad;
    bad.array = true;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
-                                 &length));
+   bad.array_layer = 22;
+   bad.wait_mask = 1;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0000fb5000010001200"));
    bad = bias_reg;
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
    bad = bias_reg;
    bad.array = true;
+   bad.array_layer = 22;
+   bad.wait_mask = 1;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0000db5010010001200"));
+
+   struct agx3_tex_sample_desc array_level = grad_apple;
+   array_level.array = true;
+   array_level.array_layer = 22;
+   array_level.lod = AGX3_TEX_LOD_LEVEL;
+   array_level.lod_x64 = 128;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0008db6010010001208"));
+   array_level.lod = AGX3_TEX_LOD_REGISTER;
+   array_level.lod_x64 = 0;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0008fb4010010001200"));
+
+   bad = grad_apple;
+   bad.array = true;
+   bad.array_layer = 3;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                 &length));
+   bad.array_layer = 256;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
    return 0;
@@ -950,11 +985,8 @@ test_indexed_sample_witnesses(void)
       0x05,0x80,0x0c,0xb8,0x34,0x00,0x00,0x00,0x01,0x02,
       0x90,0x01,0x01,0x00,0xa0,0x28,0x00,0x00,0x40,0x00};
    const uint8_t uniform_array_bytes[] = {
-      0x05,0xe0,0x0c,0xb8,0xb0,0x00,0x00,0x04,0x83,0x03,
-      0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
-   const uint8_t register_array_bytes[] = {
-      0x05,0x80,0x0c,0xb8,0x34,0x00,0x00,0x04,0x01,0x02,
-      0x90,0x01,0x01,0x00,0xa0,0x28,0x00,0x00,0x40,0x00};
+      0x05,0xc0,0x0c,0xb8,0xbc,0x00,0x0d,0x14,0x93,0x03,
+      0x90,0x03,0x12,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
    struct agx3_tex_sample_desc d = {
       .width=AGX3_TEX_W32, .mask=15, .slot=1, .wait_mask=1,
       .coord_kill=true, .final=true, .lod=AGX3_TEX_LOD_AUTO,
@@ -967,10 +999,14 @@ test_indexed_sample_witnesses(void)
    CHECK(len==sizeof(uniform_bytes));
    CHECK(memcmp(out,uniform_bytes,len)==0);
    d.array=true;
+   d.array_layer=34;
+   d.texture_value=24;
+   d.sampler_value=28;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    CHECK(len==sizeof(uniform_array_bytes));
    CHECK(memcmp(out,uniform_array_bytes,len)==0);
    d.array=false;
+   d.array_layer=0;
    d.texture_kind=d.sampler_kind=AGX3_TEX_OPERAND_REGISTER;
    d.texture_value=0; d.sampler_value=4; d.wait_mask=32;
    d.texture_kill=d.sampler_kill=true;
@@ -978,10 +1014,12 @@ test_indexed_sample_witnesses(void)
    CHECK(len==sizeof(register_bytes));
    CHECK(memcmp(out,register_bytes,len)==0);
    d.array=true;
+   d.array_layer=24;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
-   CHECK(len==sizeof(register_array_bytes));
-   CHECK(memcmp(out,register_array_bytes,len)==0);
+   CHECK(hex_eq(out,len,
+                "05800cb834000dc4010290011200a02800004000"));
    d.array=false;
+   d.array_layer=0;
    d.texture_value=1;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    d.texture_value=0; d.texture_kind=AGX3_TEX_OPERAND_UNIFORM;

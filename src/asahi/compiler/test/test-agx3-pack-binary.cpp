@@ -7347,7 +7347,7 @@ TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
    }
 }
 
-TEST_F(AGX3PackBinary, ArraySampleStagingAndLifetime)
+TEST_F(AGX3PackBinary, ArraySampleDirectLayerAndLifetime)
 {
    for (unsigned hint = 0; hint < 3; ++hint) {
       auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -7379,18 +7379,6 @@ TEST_F(AGX3PackBinary, ArraySampleStagingAndLifetime)
                                            hint == 1, hint == 2,
                                            bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 4, 1, 0,
-                                            hint == 1, hint == 2,
-                                            bytes, &len));
-      if (hint == 2) {
-         const uint8_t native[] = {
-            0x17, 0x05, 0x54, 0x06, 0x00, 0x08,
-            0x00, 0x00, 0xf0, 0xc0, 0x04, 0x00,
-         };
-         EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
-                   std::vector<uint8_t>(native, native + sizeof(native)));
-      }
-      append(want, bytes, len);
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
       d.width = AGX3_TEX_W32;
@@ -7401,6 +7389,7 @@ TEST_F(AGX3PackBinary, ArraySampleStagingAndLifetime)
       d.coord_kill = hint == 2;
       d.final = true;
       d.array = true;
+      d.array_layer = 4;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -7477,18 +7466,69 @@ TEST_F(AGX3PackBinary, GradientSampleStagesFourScalarsIntoTheirOwnBanks)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
 }
 
-/* A gradient whose four scalars are not one aligned 32-bit run, and a
- * gradient on an array texture, have no witness and must fail closed. */
+TEST_F(AGX3PackBinary, ArrayGradientNamesLayerDirectly)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   agx_index grad = agx_register(32, AGX_SIZE_32);
+   grad.channels_m1 = 3;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, grad, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D_ARRAY,
+      AGX_LOD_MODE_LOD_GRAD, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 20, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   const uint16_t bank[4] = {8, 10, 12, 14};
+   for (unsigned i = 0; i < 4; ++i) {
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, bank[i], 32 + 2 * i, 1, 0,
+                                            false, false, bytes, &len));
+      append(want, bytes, len);
+   }
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_GRADIENT;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   d.array = true;
+   d.array_layer = 24;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1, bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
+}
+
+/* A gradient whose four scalars are not one aligned 32-bit run must fail. */
 TEST_F(AGX3PackBinary, GradientSampleRefusesUnwitnessedShapes)
 {
-   for (unsigned shape = 0; shape < 3; ++shape) {
+   for (unsigned shape = 0; shape < 2; ++shape) {
       auto enc = AGX_ISA_ENCODING_AGX3B;
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_index dest = agx_register(8, AGX_SIZE_32);
       dest.channels_m1 = 3;
       agx_index coord = agx_register(20, AGX_SIZE_32);
-      coord.channels_m1 = shape == 2 ? 2 : 1;
+      coord.channels_m1 = 1;
       agx_index grad = agx_register(24, AGX_SIZE_32);
       grad.channels_m1 = shape == 0 ? 1 : 3;
       if (shape == 1)
@@ -7496,7 +7536,7 @@ TEST_F(AGX3PackBinary, GradientSampleRefusesUnwitnessedShapes)
       auto *I = agx_texture_sample_to(
          b, dest, coord, grad, agx_immediate(0), agx_immediate(0),
          agx_immediate(0), agx_null(),
-         shape == 2 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D, AGX_LOD_MODE_LOD_GRAD, 0,
+         AGX_DIM_2D, AGX_LOD_MODE_LOD_GRAD, 0,
          false, false, false, AGX_GATHER_NONE, false);
       I->mask = 15;
       agx_stop(b);
@@ -7683,7 +7723,7 @@ TEST_F(AGX3PackBinary, GatherRefusesUnwitnessedShapes)
    }
 }
 
-TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
+TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -7709,12 +7749,6 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 6, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 24, 6, 0, false, false,
-                                          bytes, &len));
-   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
-             (std::vector<uint8_t>{0x17,0x05,0x54,0x06,0,0x30,
-                                   0,0,0x70,0xe4,0x04,0}));
-   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
    d.width = AGX3_TEX_W32;
@@ -7724,6 +7758,7 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseNativeStaging)
    d.wait_mask = 1u << 5;
    d.final = true;
    d.array = true;
+   d.array_layer = 24;
    d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
    d.texture_value = 12;
@@ -7762,9 +7797,6 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 122, 6, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 124, 6, 0, false, false,
-                                          bytes, &len));
-   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
    d.width = AGX3_TEX_W32;
@@ -7774,6 +7806,7 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    d.wait_mask = 1u << 5;
    d.final = true;
    d.array = true;
+   d.array_layer = 124;
    d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
    d.texture_value = 12;

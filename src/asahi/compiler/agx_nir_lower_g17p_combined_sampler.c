@@ -56,12 +56,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
       return false;
 
    /* An explicit gradient is four 32-bit scalars staged into their own
-    * operand banks. The array layer would additionally need the immediate
-    * layer selector Apple pairs with gradients, which is not encoded, so a
-    * gradient array sample is refused rather than silently mis-staged. */
+    * operand banks. G17P array gradients name the independent dynamic layer
+    * register directly in the sample instruction. */
    if (has_grad &&
-       (tex->is_array ||
-        nir_src_num_components(tex->src[ddx].src) != 2 ||
+       (nir_src_num_components(tex->src[ddx].src) != 2 ||
         nir_src_num_components(tex->src[ddy].src) != 2 ||
         nir_src_bit_size(tex->src[ddx].src) != 32 ||
         nir_src_bit_size(tex->src[ddy].src) != 32))

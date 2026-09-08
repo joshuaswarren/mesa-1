@@ -1242,19 +1242,19 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (valid_immediate_lod || scalar_lod_reg)) :
       biased_lod
          ? (enc == AGX_ISA_ENCODING_AGX3B && valid_immediate_bias &&
-            immediate_level_x64 != 0.0f && !array)
+            immediate_level_x64 != 0.0f)
          : register_bias
-         ? (enc == AGX_ISA_ENCODING_AGX3B && scalar_lod_reg && !array)
+         ? (enc == AGX_ISA_ENCODING_AGX3B && scalar_lod_reg)
          : gradient_lod
-         ? (enc == AGX_ISA_ENCODING_AGX3B && gradient_operand && !array)
+         ? (enc == AGX_ISA_ENCODING_AGX3B && gradient_operand)
          : (implicit_lod &&
             (zero_bias || agx3_tex_imm(I->src[1], 0)));
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE &&
       I->src[4].type == AGX_INDEX_IMMEDIATE;
-   /* Array coordinates are copied to the fixed staging bank before SMP, so
-    * their source only needs to fit the COPY/PACK_SMPIR 7-bit half-register
-    * fields. The third scalar must not wrap that field. Plain 2D samples name
+   /* Array x/y coordinates are copied to the fixed staging bank before SMP,
+    * while the layer is named directly by the sample's 8-bit register field.
+    * The third scalar must not wrap that field. Plain 2D samples name
     * the coordinate directly in SMP and retain its narrower bound. */
    const unsigned max_coord = array ? 120 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
@@ -1283,7 +1283,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               agx_channels(I->src[5]) != 1 || I->src[5].value > 254)
            : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY) ||
-       (array && (enc != AGX_ISA_ENCODING_AGX3B || explicit_lod)) ||
+       (array && enc != AGX_ISA_ENCODING_AGX3B) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->offset || I->query_lod || I->sparse ||
        (shadow && (array || !implicit_lod || gather || I->mask != 1 ||
@@ -1307,8 +1307,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * ep4 register-descriptor form. */
    const uint8_t stage_slot = array && register_operands ? 6 : slot;
    /* Every native array witness names coordinate bank 0 in SMP, including
-    * register-indexed shaders whose physical coordinates live elsewhere.
-    * PACK_SMPIR publishes only the layer, so explicitly copy x/y to bank 0. */
+    * register-indexed shaders whose physical coordinates live elsewhere. */
    const uint16_t coord = (explicit_lod || register_bias || array ||
                            gradient_lod || shadow)
                              ? 0
@@ -1340,13 +1339,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (!agx3_tex_stage_copy_hints(
            enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            I->src[5].discard, bytes, &len) ||
-        !agx3_append(emission, bytes, len)))
-      return false;
-
-   if (array &&
-       (!agx3_tex_stage_array_layer(enc, I->src[0].value + 4, stage_slot, 0,
-                                   I->src[0].cache, I->src[0].discard,
-                                   bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;
 
@@ -1395,6 +1387,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                               : AGX3_TEX_LOD_AUTO,
       .lod_x64 = immediate_lod ? immediate_x64_field : 0,
       .array = array,
+      .array_layer = array ? I->src[0].value + 4 : 0,
       .slot = slot,
       .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
       .coord_kill = I->src[0].kill,

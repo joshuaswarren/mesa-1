@@ -235,10 +235,13 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        d->mask != 8 && d->mask != 12 && d->mask != 15)
       return false;
 
-   /* The array selector and register-layer operand are grounded only for the
-    * G17P implicit-LOD form. */
-   if (d->array &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO))
+   /* G17P names a dynamic array layer directly with f31/f37 in every
+    * witnessed LOD mode. Do not accept a value the 32-bit register operand
+    * cannot name, or silently ignore a layer on a non-array sample. */
+   if ((d->array &&
+        (enc != AGX_ISA_ENCODING_AGX3B || (d->array_layer & 1) ||
+         d->array_layer > 254)) ||
+       (!d->array && d->array_layer != 0))
       return false;
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
@@ -299,7 +302,9 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] = (struct agx3_field_kv)KV(104, immediate ? 1 : 2);
-   base[nb++] = (struct agx3_field_kv)KV(112, 4);
+   if (d->array)
+      base[nb++] = (struct agx3_field_kv)KV(83, 4);
+   base[nb++] = (struct agx3_field_kv)KV(112, d->array ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -322,8 +327,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
    ov[n++] = (struct agx3_field_kv)KV(76, 1);  /* 2D */
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
-   if (d->array)
-      ov[n++] = (struct agx3_field_kv)KV(77, 2); /* register array layer */
+   if (d->array) {
+      ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
+      ov[n++] = (struct agx3_field_kv)KV(37, 3);
+      ov[n++] = (struct agx3_field_kv)KV(77, 1);
+   }
    ov[n++] = (struct agx3_field_kv)KV(94 + tk, tk == 1 ? d->texture : d->texture_value);
    ov[n++] = (struct agx3_field_kv)KV(123 + sk, sk == 1 ? d->sampler : d->sampler_value);
    if (d->texture_kill)
@@ -334,9 +342,14 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(156, 1); /* implicit-LOD marker */
    } else if (d->lod == AGX3_TEX_LOD_BIAS) {
       ov[n++] = (struct agx3_field_kv)KV(156, 1); /* still implicit LOD */
-      ov[n++] = (struct agx3_field_kv)KV(37, 1);  /* immediate LOD operand */
+      if (d->array) {
+         ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
+         ov[n++] = (struct agx3_field_kv)KV(51, 1);
+      } else {
+         ov[n++] = (struct agx3_field_kv)KV(37, 1);
+         ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
+      }
       ov[n++] = (struct agx3_field_kv)KV(139, 1); /* bias mode */
-      ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
    } else if (d->lod == AGX3_TEX_LOD_REGISTER) {
       ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed level bank */
       ov[n++] = (struct agx3_field_kv)KV(139, 4);
@@ -350,9 +363,16 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * staged scalars are the derivative. */
       ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
-      ov[n++] = (struct agx3_field_kv)KV(37, 1);  /* immediate LOD operand */
+      if (d->array)
+         ov[n++] = (struct agx3_field_kv)KV(156, 1);
+      if (d->array) {
+         ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
+         ov[n++] = (struct agx3_field_kv)KV(51, 1);
+      } else {
+         ov[n++] = (struct agx3_field_kv)KV(37, 1);
+         ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
+      }
       ov[n++] = (struct agx3_field_kv)KV(139, 2); /* explicit-level mode */
-      ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
    }
    if (d->gather != AGX3_TEX_GATHER_NONE) {
       ov[n++] = (struct agx3_field_kv)KV(144, 1);
