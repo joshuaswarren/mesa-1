@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "g17p_vulkan_transform_feedback_vert.h"
+#include "g17p_wsi_triangle_frag.h"
 
 #define T8140_DEVICE_ID 0x8140
 #define GUARD 64
@@ -246,6 +247,7 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
 int
 main(int argc, char **argv)
 {
+   const bool rasterized = getenv("G17P_XFB_RASTERIZED_DIAGNOSTIC") != NULL;
    const bool optin = argc >= 2 && !strcmp(argv[1], "--optin");
    const bool execute = (argc == 2 && !strcmp(argv[1], "--execute")) ||
                         (argc == 3 && optin && !strcmp(argv[2], "--execute"));
@@ -509,18 +511,38 @@ main(int argc, char **argv)
    VkPipelineLayout layout;
    check(vkCreatePipelineLayout(device, &layout_info, NULL, &layout),
          "vkCreatePipelineLayout");
-   const VkShaderModuleCreateInfo module_info = {
+   const VkShaderModuleCreateInfo vertex_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = sizeof(g17p_vulkan_transform_feedback_vert_spv),
       .pCode = g17p_vulkan_transform_feedback_vert_spv,
    };
-   VkShaderModule module;
-   check(vkCreateShaderModule(device, &module_info, NULL, &module),
-         "vkCreateShaderModule");
+   VkShaderModule vertex_module;
+   check(vkCreateShaderModule(device, &vertex_module_info, NULL,
+                              &vertex_module),
+         "vkCreateShaderModule(vertex)");
+   const VkShaderModuleCreateInfo fragment_module_info = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(g17p_wsi_triangle_frag_spv),
+      .pCode = g17p_wsi_triangle_frag_spv,
+   };
+   VkShaderModule fragment_module;
+   check(vkCreateShaderModule(device, &fragment_module_info, NULL,
+                              &fragment_module),
+         "vkCreateShaderModule(fragment)");
 
-   const VkPipelineShaderStageCreateInfo stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = module, .pName = "main",
+   const VkPipelineShaderStageCreateInfo stages[2] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vertex_module,
+         .pName = "main",
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = fragment_module,
+         .pName = "main",
+      },
    };
    const VkVertexInputBindingDescription binding = {
       .binding = 0, .stride = VERTEX_STRIDE,
@@ -540,13 +562,20 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
       .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
    };
+   const VkViewport static_viewport = {
+      .x = 0.0f, .y = 0.0f, .width = 1.0f, .height = 1.0f,
+      .minDepth = 0.0f, .maxDepth = 1.0f,
+   };
+   const VkRect2D static_scissor = {.extent = {1, 1}};
    const VkPipelineViewportStateCreateInfo viewport = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-      .viewportCount = 1, .scissorCount = 1,
+      .viewportCount = 1, .pViewports = &static_viewport,
+      .scissorCount = 1, .pScissors = &static_scissor,
    };
    const VkPipelineRasterizationStateCreateInfo raster = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-      .rasterizerDiscardEnable = VK_TRUE, .polygonMode = VK_POLYGON_MODE_FILL,
+      .rasterizerDiscardEnable = !rasterized,
+      .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f,
    };
    const VkPipelineMultisampleStateCreateInfo multisample = {
@@ -555,7 +584,7 @@ main(int argc, char **argv)
    };
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-      .stageCount = 1, .pStages = &stage,
+      .stageCount = rasterized ? 2 : 1, .pStages = stages,
       .pVertexInputState = &vertex_input,
       .pInputAssemblyState = &input_assembly,
       .pViewportState = &viewport, .pRasterizationState = &raster,
@@ -646,7 +675,8 @@ main(int argc, char **argv)
 
    vkDestroyCommandPool(device, pool, NULL);
    vkDestroyPipeline(device, pipeline, NULL);
-   vkDestroyShaderModule(device, module, NULL);
+   vkDestroyShaderModule(device, fragment_module, NULL);
+   vkDestroyShaderModule(device, vertex_module, NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
    vkDestroyFramebuffer(device, framebuffer, NULL);
    vkDestroyRenderPass(device, render_pass, NULL);
@@ -661,7 +691,9 @@ main(int argc, char **argv)
    dlclose(loader);
 
    if (execute)
-      puts("G17P TRANSFORM FEEDBACK PASS: two exact guarded captures and resumed counter stayed exact immediately and after 3 seconds");
+      printf("G17P TRANSFORM FEEDBACK %s PASS: two exact guarded captures "
+             "and resumed counter stayed exact immediately and after 3 seconds\n",
+             rasterized ? "RASTERIZED DIAGNOSTIC" : "");
    else
       puts("G17P TRANSFORM FEEDBACK RECORD PASS: feature is fail-closed by default and complete native XFB path reached vkEndCommandBuffer");
    return EXIT_SUCCESS;
