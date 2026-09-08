@@ -1476,7 +1476,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    shader->info.cull_distance_array_size = nir->info.cull_distance_array_size;
    shader->b.info.outputs = outputs;
 
-   if (dev->dev.chip == AGX_CHIP_G17P && sw_stage == MESA_SHADER_VERTEX && hw) {
+   /* A geometry raster variant is a hardware vertex program too: software
+    * geometry only changes how its input vertices were produced.  Build the
+    * same byte-grounded VertexProgramVariant payload from the final UVS
+    * layout, while leaving compute-only GS variants untouched. */
+   if (dev->dev.chip == AGX_CHIP_G17P && hw &&
+       shader->b.info.stage == MESA_SHADER_VERTEX) {
       const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
          .position_only = shader->b.info.outputs == VARYING_BIT_POS,
@@ -1492,8 +1497,19 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          .uvs_size = shader->info.uvs.size,
          .user_size = shader->info.uvs.user_size,
       };
-      hk_agx3_g17p_vertex_program_info(dev->dev.chip, &compiler_info,
-                                       &shader->agx3_vdm_state_update);
+      const bool state_ok = hk_agx3_g17p_vertex_program_info(
+         dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
+      if (!state_ok && hk_g17p_launch_trace_enabled())
+         fprintf(stderr,
+                 "G17P vertex state refused: sw=%u pos_only=%u pre=%u/%u/%u "
+                 "written=%" PRIx64 " off=%u/%u/%u/%u/%u size=%u user=%u\n",
+                 (unsigned)sw_stage, compiler_info.position_only,
+                 compiler_info.has_preamble, compiler_info.nr_preamble_gprs,
+                 compiler_info.preamble_scratch_size,
+                 compiler_info.uvs_written, compiler_info.position_off,
+                 compiler_info.varyings_off, compiler_info.psiz_off,
+                 compiler_info.layer_viewport_off, compiler_info.clip_off,
+                 compiler_info.uvs_size, compiler_info.user_size);
    }
 
    if (xfb_info) {

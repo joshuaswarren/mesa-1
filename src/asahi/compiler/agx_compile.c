@@ -2510,6 +2510,18 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      /* Multiplication is commutative.  Keep a sole immediate in the second
+       * multiply slot, matching Apple's native IMAD form and the existing
+       * grounded G17P encoder.  Geometry/XFB arithmetic naturally arrives
+       * from NIR with the constant first. */
+      if (I->op == AGX_OPCODE_IMAD && I->nr_srcs == 3 &&
+          I->src[0].type == AGX_INDEX_IMMEDIATE &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE) {
+         agx_index tmp = I->src[0];
+         I->src[0] = I->src[1];
+         I->src[1] = tmp;
+      }
+
       /* The grounded immediate-multiplier IMAD has either no addend or a
        * nonnegative byte addend. Split `a * byte - byte` into the witnessed
        * pure multiply followed by the witnessed subtract-immediate form. */
@@ -2673,7 +2685,16 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(mov, mov);
       UNOP(u2u32, mov);
       UNOP(bitfield_reverse, bitrev);
-      UNOP(bit_count, popcount);
+   case nir_op_bit_count:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          src_sz == 16 && sz == 32) {
+         /* Apple's native ushort popcount writes a ushort.  Count(16 bits)
+          * is at most 16, so widen its exact result after the operation. */
+         agx_index count16 = agx_temp(b->shader, AGX_SIZE_16);
+         agx_popcount_to(b, count16, s0);
+         return agx_mov_to(b, dst, count16);
+      }
+      return agx_popcount_to(b, dst, s0);
    case nir_op_ufind_msb:
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           src_sz == 32)
@@ -4953,6 +4974,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p) {
       agx3_options = *original_options;
       agx3_options.lower_iabs = false;
+      /* The G17P integer encoder has no witnessed saturating-subtract form.
+       * Lower it to the canonical unsigned compare, subtract, and select;
+       * each resulting operation already has an Apple-exact encoding.  XFB
+       * uses this for bounds-safe counter arithmetic. */
+      agx3_options.lower_usub_sat = true;
       if (source_iadd64)
          agx3_options.lower_int64_options |= nir_lower_iadd64;
       if (source_imul64)

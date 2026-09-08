@@ -35,6 +35,14 @@ enum agx3_alu_hint {
    AGX3_ALU_HINT_CACHE = 2,
 };
 
+/* Native G17P population count.  Apple's exact scalar ushort and uint forms
+ * are both eight bytes; the source is consumed and no dependency wait is
+ * encoded in this form. */
+bool agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       bool half, enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P 32-bit AND/OR/XOR with actual post-RA operand hints. */
 bool agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       uint16_t dest, const uint16_t src[2],

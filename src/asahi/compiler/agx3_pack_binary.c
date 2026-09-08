@@ -7093,6 +7093,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_POPCOUNT && I->nr_dests == 1 &&
+             I->nr_srcs == 1) {
+            const agx_index dest = I->dest[0], src = I->src[0];
+            const bool half = dest.size == AGX_SIZE_16 &&
+                              src.size == AGX_SIZE_16;
+            const bool word = dest.size == AGX_SIZE_32 &&
+                              src.size == AGX_SIZE_32;
+            if ((!half && !word) || !agx3_src_is_register(dest) ||
+                dest.memory || agx_channels(dest) != 1 ||
+                !agx3_src_is_register(src) || src.memory ||
+                agx_channels(src) != 1 || src.abs || src.neg)
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+            if (wait && !agx3_retire_slots_noop(emission, enc, wait))
+               AGX3_REFUSE(I);
+            if (!agx3_alu_popcount(enc, dest.value, src.value, half,
+                                   agx3_post_ra_hint(src), dest.cache, 0,
+                                   bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
              (I->truth_table & 0xfu) == 0x2u && I->nr_dests == 1 &&
              I->nr_srcs == 2) {

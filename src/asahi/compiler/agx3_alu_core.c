@@ -8,6 +8,33 @@
 #include <string.h>
 
 bool
+agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  bool half, enum agx3_alu_hint hint, bool dest_cache,
+                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                  uint8_t *len)
+{
+   /* Exact Apple G17P witnesses:
+    *   ushort: 27 05 56 02 02 04 50 04
+    *   uint:   27 05 56 00 02 00 5c 04
+    * byte3 is the destination half, byte5 is twice the source half, and the
+    * source descriptor distinguishes 16 from 32 bits.  Both witnesses consume
+    * their source.  Refuse unwitnessed cache/wait/lifetime combinations. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 128 || (!half && ((dest | src) & 1)) ||
+       hint != AGX3_ALU_HINT_DISCARD || wait_mask)
+      return false;
+
+   const uint8_t bytes[8] = {
+      0x27, 0x05, 0x56, (uint8_t)dest, dest_cache ? 0x03 : 0x02,
+      (uint8_t)(src << 1),
+      half ? 0x50 : 0x5c, 0x04,
+   };
+   memcpy(out, bytes, sizeof(bytes));
+   *len = sizeof(bytes);
+   return true;
+}
+
+bool
 agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  enum agx3_alu_hint hint, bool dest_cache,
                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],

@@ -24,6 +24,7 @@
 #include "hk_wsi.h"
 
 #include "util/simple_mtx.h"
+#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
 #include "vk_drm_syncobj.h"
@@ -251,6 +252,34 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .GOOGLE_user_type = true,
       .VALVE_mutable_descriptor_type = true,
    };
+}
+
+/*
+ * G17P features whose implementation records correctly under the drm-shim
+ * but has not yet executed on hardware.  They stay unadvertised by default: a
+ * feature bit is a promise, and the only way to keep it is to flip the
+ * default after the one-boot probe named next to each entry has passed.
+ * Until then HK_G17P_UNVERIFIED_FEATURES=<name>[,<name>...] advertises one,
+ * for exactly that probe.
+ */
+static bool
+hk_g17p_unverified_feature(const char *name)
+{
+   const char *list = debug_get_option("HK_G17P_UNVERIFIED_FEATURES", NULL);
+   if (!list)
+      return false;
+
+   const size_t len = strlen(name);
+   for (const char *p = list; *p;) {
+      const char *end = strchr(p, ',');
+      const size_t n = end ? (size_t)(end - p) : strlen(p);
+      if (n == len && !strncmp(p, name, len))
+         return true;
+      if (!end)
+         break;
+      p = end + 1;
+   }
+   return false;
 }
 
 static void
@@ -719,7 +748,12 @@ hk_get_device_features(
       features->sparseResidencyImage2D = false;
       features->sparseResidencyBuffer = false;
       features->multiview = false;
-      features->transformFeedback = false;
+      /* The direct triangle path uses the native geometry pipeline plus the
+       * G17P-compiled libagx XFB counter-copy kernel.  The strict public
+       * transform-feedback probe records the complete path under the shim;
+       * keep the bit opt-in until that probe has executed on hardware. */
+      features->transformFeedback =
+         hk_g17p_unverified_feature("transform_feedback");
       features->geometryStreams = false;
       /* vkCmdDrawIndirectCount/vkCmdDrawIndexedIndirectCount reach
        * libagx_predicate_indirect, and every libagx precompiled kernel is

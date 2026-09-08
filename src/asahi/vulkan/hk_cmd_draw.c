@@ -1962,12 +1962,17 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Launch the vertex shader first */
    hk_reserve_scratch(cmd, cs, vs);
-   hk_dispatch_with_usc(dev, cs, &vs->b.info,
-                        hk_upload_usc_words(cmd, vs,
-                                            vs->info.stage == MESA_SHADER_VERTEX
-                                               ? gfx->linked[MESA_SHADER_VERTEX]
-                                               : vs->only_linked),
-                        grid_vs, wg);
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, wg);
+   } else {
+      hk_dispatch_with_usc(
+         dev, cs, &vs->b.info,
+         hk_upload_usc_words(cmd, vs,
+                             vs->info.stage == MESA_SHADER_VERTEX
+                                ? gfx->linked[MESA_SHADER_VERTEX]
+                                : vs->only_linked),
+         grid_vs, wg);
+   }
 
    /* Transform feedback and various queries require extra dispatching,
     * determine if we need that here.
@@ -3798,10 +3803,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    bool g17p_native_bind_tail_emitted = false;
    *g17p_native_bind_tail_emitted_out = false;
 
-   /* The grounded VertexProgramVariant producer covers only the four ordinary
-    * Index List entry points.  Reject software-transformed draw paths even if
-    * no dynamic state happens to be dirty, otherwise they could inherit a
-    * preceding ordinary draw's admitted AGX3 state. */
+   /* The caller admits ordinary draws plus the bounded passthrough-GS XFB
+    * route.  Reject every other software-transformed draw even if no state is
+    * dirty, otherwise it could inherit a preceding draw's AGX3 state. */
    if (agx_chip_command_stream_generation(dev->dev.chip) !=
           AGX_CS_GENERATION_AGX2 &&
        !ordinary_draw_path) {
@@ -4301,6 +4305,23 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
+   /* With rasterization disabled, XFB is completed entirely by the software
+    * vertex/geometry dispatches.  Stop only after publishing the vertex and
+    * geometry parameter buffers and their root table: those are the compute
+    * ABI consumed by the dispatches.  No hardware vertex or PPP state belongs
+    * in the VDM stream. */
+   const struct hk_api_shader *bound_gs =
+      gfx->shaders[MESA_SHADER_GEOMETRY];
+   if (dev->dev.chip == AGX_CHIP_G17P && gfx->xfb_enabled &&
+       hk_rast_discard(cmd) && bound_gs && bound_gs->is_passthrough) {
+      vk_dynamic_graphics_state_clear_dirty(dyn);
+      gfx->shaders_dirty = 0;
+      gfx->linked_dirty = 0;
+      gfx->dirty = 0;
+      gfx->descriptors.root_dirty = false;
+      return;
+   }
+
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
     */
@@ -4727,14 +4748,18 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    *needs_idx_robust = hk_needs_index_robustness(cmd, draw);
    const bool ordinary_draw_path =
       !geom && !tess && !adj && !*needs_idx_robust;
-
+   const bool xfb_passthrough_path =
+      dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
+      !*needs_idx_robust && gfx->xfb_enabled &&
+      gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
    if (draw->restart || geom)
       hk_flush_index(cmd, cs);
 
-   hk_flush_dynamic_state(cmd, cs, draw_id, *draw, ordinary_draw_path,
+   hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
+                          ordinary_draw_path || xfb_passthrough_path,
                           g17p_native_bind_tail_emitted);
    return cs;
 }
@@ -4979,6 +5004,12 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if (geom) {
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
       }
+
+      /* The dispatches above are the complete draw when rasterization is
+       * disabled: they run the original vertex shader, write XFB, and update
+       * its counter.  No Index List belongs in the VDM stream. */
+      if (dev->dev.chip == AGX_CHIP_G17P && geom && hk_rast_discard(cmd))
+         continue;
 
       if (adj) {
          assert(!geom && "geometry shaders handle adj directly");

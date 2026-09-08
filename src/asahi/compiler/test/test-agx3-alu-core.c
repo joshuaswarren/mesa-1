@@ -13,6 +13,34 @@
 #include <assert.h>
 
 static void
+test_native_popcount(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   static const uint8_t u16[] = {0x27, 0x05, 0x56, 0x02,
+                                 0x02, 0x04, 0x50, 0x04};
+   static const uint8_t u32[] = {0x27, 0x05, 0x56, 0x00,
+                                 0x02, 0x00, 0x5c, 0x04};
+   static const uint8_t u16_cached[] = {0x27, 0x05, 0x56, 0x02,
+                                        0x03, 0x04, 0x50, 0x04};
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
+                            AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(len == sizeof(u16) && !memcmp(bytes, u16, len));
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
+                            AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(len == sizeof(u32) && !memcmp(bytes, u32, len));
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
+                            AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
+   assert(len == sizeof(u16_cached) && !memcmp(bytes, u16_cached, len));
+
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
+                             AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
+                             AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
+                             AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+}
+
+static void
 test_native_ft1(void)
 {
    static const struct {
@@ -2335,6 +2363,7 @@ static void test_native_high_float_registers(void)
 }
 
 int main(void){
+   test_native_popcount();
    test_native_minifloat_half_select();
    test_native_bit_andc();
    test_native_ft1();
