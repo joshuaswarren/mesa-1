@@ -35,8 +35,8 @@
 extern "C" {
 #endif
 
-/* Apple's `copy` ep0 is 4 bytes in both encodings. */
-#define AGX3_COPY_MAX_LENGTH 8u
+/* Apple's ordinary `copy` is four bytes; its extended ep1 record is ten. */
+#define AGX3_COPY_MAX_LENGTH 10u
 
 /*
  * Encode `copy dest32, uniform32`.  Both indices are 16-bit half-register
@@ -69,7 +69,9 @@ bool agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
  * shader Mach-O) writes its uniforms with an ordinary `copy` whose f9 is 3
  * rather than 2, moving the destination from f2 into f3 and making it a
  * UNIFORM half. Four consecutive writes to uniform halves 20, 22, 24 and 26
- * witness it byte-exactly.
+ * witness it byte-exactly. Destinations through half 126 use that four-byte
+ * ep0; higher aligned pairs use the corpus's ten-byte ep1 form, whose f39
+ * suffix and upper destination deposits come from Apple's composer tables.
  *
  * `kill` is f27, the source register's last-use hint. It is liveness, not a
  * baseline bit -- forcing it on cost two compute probes on hardware once

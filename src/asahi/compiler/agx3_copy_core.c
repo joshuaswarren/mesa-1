@@ -79,7 +79,8 @@ agx3_copy_encode_reg_to_uniform(enum agx_isa_encoding encoding,
    if (encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
-   if (uniform_half >= 512 || src_half >= 256)
+   if ((uniform_half & 1) || uniform_half + 2 > 512 || (src_half & 1) ||
+       src_half + 2 > 256)
       return false;
 
    const struct agx3_field_kv baseline[] = {
@@ -91,8 +92,18 @@ agx3_copy_encode_reg_to_uniform(enum agx_isa_encoding encoding,
       KV(27, kill ? 1 : 0),
    };
 
-   return agx3_bind_compose(encoding, "copy", 0, baseline,
-                            AGX3_COPY_ARRAY_SIZE(baseline), overrides,
+   if (uniform_half < 128)
+      return agx3_bind_compose(encoding, "copy", 0, baseline,
+                               AGX3_COPY_ARRAY_SIZE(baseline), overrides,
+                               AGX3_COPY_ARRAY_SIZE(overrides), out, len);
+
+   /* f39=1 is present in Apple's extended constant-program COPY record. The
+    * ep1 table deposits f3's upper bits instead of truncating at half 127. */
+   const struct agx3_field_kv extended[] = {
+      KV(9, 3), KV(10, 2), KV(23, 2), KV(24, 2), KV(39, 1),
+   };
+   return agx3_bind_compose(encoding, "copy", 1, extended,
+                            AGX3_COPY_ARRAY_SIZE(extended), overrides,
                             AGX3_COPY_ARRAY_SIZE(overrides), out, len);
 }
 

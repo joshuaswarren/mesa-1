@@ -1052,6 +1052,7 @@ void agx_pressure_schedule(agx_context *ctx);
 /* Native G17P VS witnesses cover contiguous output/staging indices0..31. */
 #define AGX3_MAX_VERTEX_OUTPUTS 32u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
+bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);

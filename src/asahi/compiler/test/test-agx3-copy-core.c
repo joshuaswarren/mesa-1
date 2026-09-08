@@ -185,6 +185,37 @@ main(void)
                                                true, o, &l));
    }
 
+   /* Fresh G17P metal-nt containers for half mul, compare/select, and FMA/min
+    * fragment pipelines all terminate their constant-program prefix with the
+    * same 32-bit copy into an aligned uniform pair. None emits a 16-bit
+    * uniform-destination copy; retain Apple's observed width contract. */
+   {
+      static const uint8_t apple[4] = {0x2b, 0x00, 0x09, 0x04};
+      uint8_t o[AGX3_COPY_MAX_LENGTH];
+      uint8_t l = 0;
+      CHECK(agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3B, 4, 0, true, o, &l));
+      CHECK(l == 4 && memcmp(o, apple, 4) == 0);
+
+      /* First pair beyond ep0's seven-bit destination uses Apple's extended
+       * constant-program COPY and preserves the upper destination bits. */
+      static const uint8_t extended[10] = {
+         0x0b, 0x03, 0x0f, 0x00, 0x42, 0x10, 0x00, 0x00, 0x60, 0x00,
+      };
+      CHECK(agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3B, 128, 2, true, o, &l));
+      CHECK(l == 10 && memcmp(o, extended, 10) == 0);
+
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3B, 511, 0, true, o, &l));
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3B, 4, 256, true, o, &l));
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3C, 4, 0, true, o, &l));
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX2, 4, 0, true, o, &l));
+   }
+
    /* Fail closed outside the witnessed domain. */
    uint8_t out[AGX3_COPY_MAX_LENGTH];
    uint8_t len = 0;

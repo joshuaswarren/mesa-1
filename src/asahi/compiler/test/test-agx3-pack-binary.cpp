@@ -5114,6 +5114,87 @@ TEST_F(AGX3PackBinary, G17PUniformHalfMoveUsesNativeCopy)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index value = agx_register(4, AGX_SIZE_16);
+   value.discard = true;
+   agx_uniform_store(b, value, agx_immediate(24), 1);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_COPY_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(
+      AGX_ISA_ENCODING_AGX3B, 24, 4, false, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, G17PUniformHalfStoreRequiresUnusedAlignedPadding)
+{
+   /* Adjacent half stores are real data, not a dword with free padding. */
+   agx_builder *adjacent = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_uniform_store(adjacent, agx_register(4, AGX_SIZE_16),
+                     agx_immediate(24), 1);
+   agx_uniform_store(adjacent, agx_register(6, AGX_SIZE_16),
+                     agx_immediate(25), 1);
+   agx_stop(adjacent);
+   pack(adjacent, false);
+
+   agx_builder *odd_source = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_uniform_store(odd_source, agx_register(5, AGX_SIZE_16),
+                     agx_immediate(24), 1);
+   agx_stop(odd_source);
+   pack(odd_source, false);
+}
+
+TEST_F(AGX3PackBinary, G17PCoalescesAdjacentPreambleUniformHalvesBeforeRA)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->is_preamble = true;
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_uniform_store(b, agx_register(4, AGX_SIZE_16), agx_immediate(32), 1);
+   agx_uniform_store(b, agx_register(6, AGX_SIZE_16), agx_immediate(33), 1);
+   agx_uniform_store(b, agx_register(8, AGX_SIZE_16), agx_immediate(34), 1);
+   agx_stop(b);
+
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned collects = 0, stores32 = 0, stores16 = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op == AGX_OPCODE_COLLECT) {
+         ++collects;
+         ASSERT_EQ(I->nr_srcs, 2);
+         EXPECT_EQ(I->src[0].value, 4u);
+         EXPECT_EQ(I->src[1].value, 6u);
+      } else if (I->op == AGX_OPCODE_UNIFORM_STORE) {
+         ASSERT_EQ(I->src[1].type, AGX_INDEX_IMMEDIATE);
+         if (I->src[0].size == AGX_SIZE_32) {
+            ++stores32;
+            EXPECT_EQ(I->src[1].value, 32u);
+         } else {
+            ++stores16;
+            EXPECT_EQ(I->src[1].value, 34u);
+         }
+      }
+   }
+   EXPECT_EQ(collects, 1u);
+   EXPECT_EQ(stores32, 1u);
+   EXPECT_EQ(stores16, 1u);
+}
+
+TEST_F(AGX3PackBinary, G17PDoesNotCoalesceOddUniformPair)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->is_preamble = true;
+   agx_uniform_store(b, agx_register(4, AGX_SIZE_16), agx_immediate(33), 1);
+   agx_uniform_store(b, agx_register(6, AGX_SIZE_16), agx_immediate(34), 1);
+   agx_stop(b);
+   EXPECT_FALSE(agx3_coalesce_uniform_half_stores(b->shader));
+}
+
 TEST_F(AGX3PackBinary, ByteAddressLoweringKeepsFullU32Offset)
 {
    for (bool enabled : {false, true}) {

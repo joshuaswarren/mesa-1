@@ -4290,6 +4290,64 @@ agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
       agx_validate(ctx, #pass);                                                \
    } while (0)
 
+/* G17P constant programs write the uniform file with 32-bit COPY records,
+ * including half-valued expressions. Coalesce adjacent scalar halves before
+ * RA so both values occupy one real GPR pair and one aligned uniform pair.
+ * An isolated half is handled by the packer's separately guarded padding
+ * path; odd starts and non-adjacent live halves remain fail-closed. */
+bool
+agx3_coalesce_uniform_half_stores(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       !ctx->is_preamble)
+      return false;
+
+   bool progress = false;
+   agx_foreach_block(ctx, block) {
+      agx_instr *pending = NULL;
+      unsigned pending_base = 0;
+
+      agx_foreach_instr_in_block_safe(block, I) {
+         const bool scalar_half =
+            I->op == AGX_OPCODE_UNIFORM_STORE && I->nr_srcs == 2 &&
+            I->mask == 1 && I->src[0].size == AGX_SIZE_16 &&
+            agx_channels(I->src[0]) == 1 &&
+            I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
+            !I->src[1].neg;
+         if (!scalar_half) {
+            if (I->op == AGX_OPCODE_UNIFORM_STORE)
+               pending = NULL;
+            if (pending != NULL) {
+               agx_foreach_src(I, s) {
+                  if (I->src[s].type == AGX_INDEX_UNIFORM)
+                     pending = NULL;
+               }
+            }
+            continue;
+         }
+
+         const unsigned base = I->src[1].value;
+         if (pending != NULL && !(pending_base & 1) &&
+             base == pending_base + 1) {
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+            agx_index halves[2] = {pending->src[0], I->src[0]};
+            agx_index pair = agx_vec_temp(ctx, AGX_SIZE_32, 1);
+            agx_emit_collect_to(&b, pair, 2, halves);
+            agx_uniform_store(&b, pair, agx_immediate(pending_base), 1);
+            agx_remove_instruction(pending);
+            agx_remove_instruction(I);
+            pending = NULL;
+            progress = true;
+         } else {
+            pending = I;
+            pending_base = base;
+         }
+      }
+   }
+
+   return progress;
+}
+
 /* Keep scalar UVS values live until a native-shaped terminal writeout.
  * Run after pressure scheduling but before RA: moving physical-register stores
  * would lose values when later instructions reuse their sources. */
@@ -4484,6 +4542,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * check, lower after CSE, since moves are cheaper than registers.
     */
    AGX_PASS(ctx, agx_lower_uniform_sources);
+
+   AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
 
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);

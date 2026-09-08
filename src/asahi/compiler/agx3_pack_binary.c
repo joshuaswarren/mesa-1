@@ -4072,6 +4072,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned texture_samples_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
+   bool uniform_half_used[512] = {false};
    unsigned count = 0;
 
    assert(enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
@@ -4101,6 +4102,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             image_writes_left++;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE)
             texture_samples_left++;
+         if (scan_I->op == AGX_OPCODE_UNIFORM_STORE &&
+             scan_I->nr_srcs == 2 &&
+             scan_I->src[1].type == AGX_INDEX_IMMEDIATE) {
+            const unsigned base = scan_I->src[1].value;
+            const unsigned stride = agx_size_align_16(scan_I->src[0].size);
+            for (unsigned c = 0; c < 4; ++c) {
+               if (!(scan_I->mask & BITFIELD_BIT(c)))
+                  continue;
+               for (unsigned h = 0; h < stride; ++h) {
+                  if (base + c * stride + h < ARRAY_SIZE(uniform_half_used))
+                     uniform_half_used[base + c * stride + h] = true;
+               }
+            }
+         }
       }
    }
 
@@ -4693,17 +4708,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->mask == 15)) {
             const agx_index value = I->src[0], index = I->src[1];
             const unsigned components = util_bitcount(I->mask);
+            const bool scalar16 = value.size == AGX_SIZE_16 && I->mask == 1 &&
+                                  agx_channels(value) == 1;
             const bool scalar64 = value.size == AGX_SIZE_64 && I->mask == 1 &&
                                   agx_channels(value) == 1 &&
                                   (value.value & 3) == 0;
             const bool vector32 = value.size == AGX_SIZE_32 &&
                                   agx_channels(value) == components;
-            const unsigned dwords = scalar64 ? 2 : components;
+            const unsigned copies = scalar64 ? 2 : components;
+            /* Apple widens a scalar half preamble result to one aligned
+             * 32-bit copy. Permit that exact substitution only when both
+             * files are pair-aligned and the extra uniform half is padding;
+             * otherwise a neighbouring scalar result could be overwritten. */
+            const bool padded16 = scalar16 && !(value.value & 1) &&
+                                  !(index.value & 1) && index.value + 2 <= 512 &&
+                                  !uniform_half_used[index.value + 1];
 
             if (agx3_src_is_register(value) && !value.memory && !value.abs &&
-                !value.neg && (scalar64 || vector32) &&
+                !value.neg && (padded16 || scalar64 || vector32) &&
                 index.type == AGX_INDEX_IMMEDIATE && !index.abs &&
-                !index.neg && index.value + 2 * dwords <= 512) {
+                !index.neg && index.value + 2 * copies <= 512) {
                /*
                 * Apple's witnessed uniform write carries no wait bits, and
                 * the wait bank for this form is not witnessed, so retire any
@@ -4717,13 +4741,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 */
                bool ok = wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
 
-               for (unsigned i = 0; ok && i < dwords; ++i) {
+               for (unsigned i = 0; ok && i < copies; ++i) {
                   uint8_t bytes[AGX3_COPY_MAX_LENGTH];
                   uint8_t len = 0;
-                  const bool last = i + 1 == dwords;
+                  const bool last = i + 1 == copies;
                   ok = agx3_copy_encode_reg_to_uniform(
                           enc, index.value + 2 * i, value.value + 2 * i,
-                          last && value.kill, bytes, &len) &&
+                          /* A half-register discard does not prove that its
+                           * paired upper half is dead. */
+                          !padded16 && last && value.kill, bytes, &len) &&
                        agx3_append(emission, bytes, len);
                }
 
