@@ -10969,10 +10969,9 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
    }
 
    /* Lower VK_KHR_cooperative_matrix to the G13 HW matrix instruction before
-    * vars_to_scratch can spill the 8x8 cmat temps. Gated so default Honeykrisp
-    * does not compile experimental coopmat shaders.
+    * vars_to_scratch can spill the 8x8 cmat temps. AGX_SIMDMAT=0 skips it.
     */
-   if (getenv("AGX_SIMDMAT"))
+   if (agx_simdmat_enabled())
       NIR_PASS(_, nir, agx_nir_lower_simdmat, 32);
 
 
