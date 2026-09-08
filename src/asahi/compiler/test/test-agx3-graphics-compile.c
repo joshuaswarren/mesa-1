@@ -2899,6 +2899,50 @@ build_fs_texture_imm(void)
    return build_fs_texture_index_abi(false);
 }
 
+/* A18 Pro's v_texture vertex pipeline samples texture0/sampler0 at explicit
+ * level zero and emits the same 14-byte SMP as the shared t_base witness:
+ *
+ *    05800cb8b0000900000010000100
+ *
+ * Keep a real vertex-stage compile in the corpus so txl(0) cannot regress to
+ * the fragment-only implicit-derivative selector. */
+static nir_shader *
+build_vs_texture_level_zero(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "AGX3 vertex texture level-zero VS");
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord, nir_imm_vec2(&b, 0.5f, 0.5f));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod,
+                                     nir_imm_float(&b, 0.0f));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_store_uvs_agx(&b, c == 3 ? nir_imm_float(&b, 1.0f)
+                                   : nir_imm_float(&b, 0.0f),
+                        nir_imm_intN_t(&b, c, 16));
+      nir_store_uvs_agx(&b, nir_channel(&b, &tex->def, c),
+                        nir_imm_intN_t(&b, 4 + c, 16));
+   }
+
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_fs_texture_compact_native(void)
 {
@@ -3216,6 +3260,8 @@ static const struct agx3_graphics_case cases[] = {
     .g17p_only = true},
    {"vs-vkcube-vbo-ubo", build_vs_vkcube_vbo_ubo, true, false,
     AGX_ABI_VUNI_COUNT_VK(2) + 8, 257},
+   {"vs-texture-level-zero", build_vs_texture_level_zero, true,
+    .g17p_only = true},
    {"fs-flat-colour", build_fs_flat, true,
     .expected_g17p_binary = g17p_flat_colour,
     .expected_g17p_binary_size = sizeof(g17p_flat_colour)},

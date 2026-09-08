@@ -5234,9 +5234,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool final = --texture_ops_left == 0;
             /* The implicit-LOD form needs the 2x2 quad's derivatives; every
              * witness is a fragment shader and the hardware has no quad
-             * outside one. Apple's explicit immediate-level form is a
-             * compute kernel witness and does not consume derivatives. */
-            const bool compute_level = ctx->stage == MESA_SHADER_COMPUTE &&
+             * outside one. Apple's compute and vertex explicit-level forms
+             * are byte-identical and do not consume derivatives. */
+            const bool explicit_level = ctx->stage != MESA_SHADER_FRAGMENT &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_IMMEDIATE;
             /* An explicit gradient carries its own derivative, so it needs no
@@ -5254,7 +5254,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                sample_wait = 0;
             }
-            if ((ctx->stage != MESA_SHADER_FRAGMENT && !compute_level &&
+            if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
                  !compute_gradient) ||
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final))

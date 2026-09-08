@@ -91,6 +91,11 @@ struct agx_vs_prolog_key {
    /* Whether running as a hardware vertex shader (versus compute) */
    bool hw;
 
+   /* First uniform half of the ordinary vertex ABI. G17P reserves the
+    * preceding halves for texture/sampler table pointers when the VS samples
+    * textures. */
+   uint8_t uniform_base;
+
    /* Whether the shader uses static vertex input and the prolog just fixes up
     * the vertex ID.
     */

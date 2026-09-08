@@ -260,7 +260,10 @@ hex_eq(const uint8_t *bytes, uint8_t len, const char *hex)
  * implicit-LOD fragment witnesses (ts_auto / fs_bufcoord) were compiled from
  * fragment render pipelines with Apple's offline translator
  * (MetalToolchain v27.1.5194.15) and decode with the same tables. AGX3b
- * bytes are g16g (byte-identical on g15g); AGX3c bytes are g17s.
+ * bytes are g16g (byte-identical on g15g); AGX3c bytes are g17s. The G17P
+ * `t_base` bytes are also the exact sample in an A18 Pro vertex pipeline with
+ * a VBO plus texture0/sampler0, proving that the explicit-level instruction
+ * itself is shared across vertex and compute/fragment stages.
  */
 static int
 test_sample_witnesses(void)

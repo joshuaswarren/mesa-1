@@ -242,6 +242,10 @@ struct agx_compiled_shader {
     */
    bool refusal_reported;
 
+   /* G17P vertex programs reserve uniform halves 0..7 for the native texture
+    * and sampler table pointers. */
+   bool g17p_vertex_texture_resources;
+
    /* Uniforms the driver must push */
    unsigned push_range_count;
    struct agx_push_range push[AGX_MAX_PUSH_RANGES];
@@ -1042,7 +1046,7 @@ bool agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 
 bool agx_nir_layout_uniforms(nir_shader *shader,
                              struct agx_compiled_shader *compiled,
-                             unsigned *push_size);
+                             unsigned *push_size, unsigned uniform_base);
 
 struct agx_lower_bindings_options {
    bool *uses_bindless_samplers;

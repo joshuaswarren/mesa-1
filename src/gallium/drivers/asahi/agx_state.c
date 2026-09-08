@@ -1681,8 +1681,16 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
+      compiled->g17p_vertex_texture_resources =
+         dev->chip == AGX_CHIP_G17P && stage == MESA_SHADER_VERTEX &&
+         nir->info.stage == MESA_SHADER_VERTEX &&
+         BITSET_LAST_BIT(nir->info.textures_used) != 0;
+      const unsigned uniform_base =
+         compiled->g17p_vertex_texture_resources
+            ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
+            : 0;
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
-               &key.reserved_preamble);
+               &key.reserved_preamble, uniform_base);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -2525,6 +2533,10 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_fast_link_key link_key = {
       .prolog.vs.hw = key.hw,
+      .prolog.vs.uniform_base =
+         ctx->vs->g17p_vertex_texture_resources
+            ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
+            : 0,
       .prolog.vs.sw_index_size_B = key.hw ? 0 : index_size_B,
 
       .prolog.vs.robustness.level =
@@ -3357,10 +3369,13 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
    size_t count = 0;
    const mesa_shader_stage stage = cs->stage;
-   const bool resource_pair = stage == MESA_SHADER_FRAGMENT &&
-                              batch->texture_count[stage] != 0;
+   const bool resource_pair =
+      batch->texture_count[stage] != 0 &&
+      (stage == MESA_SHADER_FRAGMENT ||
+       (stage == MESA_SHADER_VERTEX &&
+        cs->g17p_vertex_texture_resources));
 
-   if (batch->texture_count[stage] && stage != MESA_SHADER_FRAGMENT)
+   if (batch->texture_count[stage] && !resource_pair)
       return 0;
    if (resource_pair) {
       if (!batch->stage_uniforms[stage].texture_base ||
@@ -3384,6 +3399,13 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
    for (unsigned i = 0; i < cs->push_range_count; ++i) {
       const struct agx_push_range *push = &cs->push[i];
       const uint64_t table = batch->uniforms.tables[push->table];
+
+      /* Fragment uniform zero is deliberately replaced by the resource pair.
+       * A textured VS instead shifts its complete fixed ABI; trimming a VBO
+       * or draw-parameter range here would corrupt vertex fetches. */
+      if (resource_pair && stage == MESA_SHADER_VERTEX &&
+          push->uniform < AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
+         return 0;
 
       /* Draw parameters are intentionally absent for draws whose shader does
        * not consume them. This is the same omission as the legacy builder. */

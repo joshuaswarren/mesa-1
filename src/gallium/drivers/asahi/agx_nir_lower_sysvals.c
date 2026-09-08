@@ -42,6 +42,7 @@ struct table_state {
 
 struct state {
    mesa_shader_stage stage, hw_stage;
+   unsigned uniform_base;
 
    /* Array of nir_intrinsic_instr's to fix up at the end */
    struct util_dynarray loads;
@@ -384,7 +385,7 @@ lay_out_table(struct agx_compiled_shader *shader, struct table_state *state,
 static unsigned
 lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
 {
-   unsigned uniform = 0;
+   unsigned uniform = state->uniform_base;
 
    if (state->stage == MESA_SHADER_VERTEX ||
        state->stage == MESA_SHADER_TESS_EVAL) {
@@ -395,14 +396,15 @@ lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
 
       if (count) {
          shader->push[shader->push_range_count++] = (struct agx_push_range){
-            .uniform = AGX_ABI_VUNI_VBO_BASE(0),
+            .uniform = state->uniform_base + AGX_ABI_VUNI_VBO_BASE(0),
             .table = AGX_SYSVAL_TABLE_ROOT,
             .offset = (uintptr_t)&u->attrib_base,
             .length = 4 * count,
          };
 
          shader->push[shader->push_range_count++] = (struct agx_push_range){
-            .uniform = AGX_ABI_VUNI_VBO_CLAMP(count, 0),
+            .uniform = state->uniform_base +
+                       AGX_ABI_VUNI_VBO_CLAMP(count, 0),
             .table = AGX_SYSVAL_TABLE_ROOT,
             .offset = (uintptr_t)&u->attrib_clamp,
             .length = 2 * count,
@@ -410,7 +412,7 @@ lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
       }
 
       shader->push[shader->push_range_count++] = (struct agx_push_range){
-         .uniform = AGX_ABI_VUNI_FIRST_VERTEX(count),
+         .uniform = state->uniform_base + AGX_ABI_VUNI_FIRST_VERTEX(count),
          .table = AGX_SYSVAL_TABLE_PARAMS,
          .offset = 0,
          .length = 4,
@@ -419,14 +421,15 @@ lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
       bool sw = state->hw_stage == MESA_SHADER_COMPUTE;
       if (sw) {
          shader->push[shader->push_range_count++] = (struct agx_push_range){
-            .uniform = AGX_ABI_VUNI_VERTEX_PARAMS(count),
+            .uniform = state->uniform_base +
+                       AGX_ABI_VUNI_VERTEX_PARAMS(count),
             .table = AGX_SYSVAL_TABLE_ROOT,
             .offset = (uintptr_t)&u->vertex_params,
             .length = 4,
          };
       }
 
-      uniform = AGX_ABI_VUNI_COUNT_GL(count, sw);
+      uniform = state->uniform_base + AGX_ABI_VUNI_COUNT_GL(count, sw);
    } else if (state->stage == MESA_SHADER_FRAGMENT) {
       struct agx_draw_uniforms *u = NULL;
       struct agx_stage_uniforms *s = NULL;
@@ -520,11 +523,12 @@ agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 bool
 agx_nir_layout_uniforms(nir_shader *shader,
                         struct agx_compiled_shader *compiled,
-                        unsigned *push_size)
+                        unsigned *push_size, unsigned uniform_base)
 {
    struct state state = {
       .stage = compiled->stage,
       .hw_stage = shader->info.stage,
+      .uniform_base = uniform_base,
    };
 
    nir_shader_intrinsics_pass(shader, record_loads, nir_metadata_control_flow,

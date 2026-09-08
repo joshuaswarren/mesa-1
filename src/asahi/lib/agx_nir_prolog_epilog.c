@@ -58,27 +58,37 @@ agx_nir_lower_poly_stipple(nir_shader *s)
 }
 
 static int
-map_vs_part_uniform(nir_intrinsic_instr *intr, unsigned nr_attribs)
+map_vs_part_uniform(nir_intrinsic_instr *intr, unsigned nr_attribs,
+                    unsigned uniform_base)
 {
+   int uniform;
    switch (intr->intrinsic) {
    case nir_intrinsic_load_vbo_base_agx:
-      return AGX_ABI_VUNI_VBO_BASE(nir_src_as_uint(intr->src[0]));
+      uniform = AGX_ABI_VUNI_VBO_BASE(nir_src_as_uint(intr->src[0]));
+      break;
 
    case nir_intrinsic_load_attrib_clamp_agx:
-      return AGX_ABI_VUNI_VBO_CLAMP(nr_attribs, nir_src_as_uint(intr->src[0]));
+      uniform =
+         AGX_ABI_VUNI_VBO_CLAMP(nr_attribs, nir_src_as_uint(intr->src[0]));
+      break;
 
    case nir_intrinsic_load_first_vertex:
-      return AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs);
+      uniform = AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs);
+      break;
 
    case nir_intrinsic_load_base_instance:
-      return AGX_ABI_VUNI_BASE_INSTANCE(nr_attribs);
+      uniform = AGX_ABI_VUNI_BASE_INSTANCE(nr_attribs);
+      break;
 
    case nir_intrinsic_load_vertex_param_buffer_poly:
-      return AGX_ABI_VUNI_VERTEX_PARAMS(nr_attribs);
+      uniform = AGX_ABI_VUNI_VERTEX_PARAMS(nr_attribs);
+      break;
 
    default:
       return -1;
    }
+
+   return uniform_base + uniform;
 }
 
 static int
@@ -108,8 +118,12 @@ lower_non_monolithic_uniforms(nir_builder *b, nir_intrinsic_instr *intr,
 {
    int unif;
    if (b->shader->info.stage == MESA_SHADER_VERTEX) {
-      unsigned *nr_attribs = data;
-      unif = map_vs_part_uniform(intr, *nr_attribs);
+      const struct agx_vs_prolog_key *layout = data;
+      unif = map_vs_part_uniform(intr,
+                                 DIV_ROUND_UP(BITSET_LAST_BIT(
+                                                 layout->component_mask),
+                                              4),
+                                 layout->uniform_base);
    } else {
       unif = map_fs_part_uniform(intr);
    }
@@ -134,8 +148,12 @@ lower_non_monolithic_uniforms(nir_builder *b, nir_intrinsic_instr *intr,
 bool
 agx_nir_lower_non_monolithic_uniforms(nir_shader *nir, unsigned nr)
 {
+   struct agx_vs_prolog_key layout = {0};
+   if (nr)
+      BITSET_SET_COUNT(layout.component_mask, 0, nr * 4);
+
    return nir_shader_intrinsics_pass(nir, lower_non_monolithic_uniforms,
-                                     nir_metadata_control_flow, &nr);
+                                     nir_metadata_control_flow, &layout);
 }
 
 static bool
@@ -229,8 +247,8 @@ agx_nir_vs_prolog_impl(nir_builder *b, const void *key_, bool native_raw)
                      key->sw_index_size_B);
 
    /* Finally, lower uniforms according to our ABI */
-   unsigned nr = DIV_ROUND_UP(BITSET_LAST_BIT(key->component_mask), 4);
-   agx_nir_lower_non_monolithic_uniforms(b->shader, nr);
+   nir_shader_intrinsics_pass(b->shader, lower_non_monolithic_uniforms,
+                              nir_metadata_control_flow, (void *)key);
    b->shader->info.io_lowered = true;
 }
 

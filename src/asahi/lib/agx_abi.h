@@ -43,6 +43,11 @@
 #define AGX_ABI_VUNI_COUNT_VK(nr_vbos)                                         \
    ALIGN_POT(AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos) + 4, 4)
 
+/* HAL200 graphics texture instructions take a pair of 64-bit texture and
+ * sampler table pointers from the first four uniform dwords. Vertex shaders
+ * using texture state place the ordinary vertex ABI after this prefix. */
+#define AGX_ABI_G17P_TEXTURE_POINTER_HALFS 8
+
 #define AGX_ABI_FUNI_EMRT_HEAP (0)
 #define AGX_ABI_FUNI_BLEND_R   (AGX_ABI_FUNI_EMRT_HEAP + 4)
 #define AGX_ABI_FUNI_BLEND_G   (AGX_ABI_FUNI_BLEND_R + 2)
