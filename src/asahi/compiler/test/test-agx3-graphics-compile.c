@@ -1282,7 +1282,7 @@ test_indexed_fetch_sets(void)
            : nir_imm_vec2(&b,.25,.75));
       tex->src[1]=nir_tex_src_for_ssa(nir_tex_src_texture_handle,image);
       tex->src[2]=nir_tex_src_for_ssa(i?nir_tex_src_lod:nir_tex_src_sampler_handle,
-                                    i?nir_imm_intN_t(&b,0,16):sampler);
+                                    i?nir_imm_intN_t(&b,i==1?2:63,16):sampler);
       nir_def_init(&tex->instr,&tex->def,4,32);
       nir_builder_instr_insert(&b,&tex->instr);
       result=nir_fadd(&b,result,&tex->def);
@@ -1307,7 +1307,8 @@ test_indexed_fetch_sets(void)
                ok &= si<0 && tex->op==nir_texop_txf;
                int li=nir_tex_instr_src_index(tex,nir_tex_src_lod);
                ok &= li>=0 && nir_src_is_const(tex->src[li].src) &&
-                     nir_src_as_uint(tex->src[li].src)==0;
+                     nir_src_as_uint(tex->src[li].src)==
+                        (tex->is_array ? 63 : 2);
                fetches++;
                arrays+=tex->is_array;
             }

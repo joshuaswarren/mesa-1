@@ -32,9 +32,13 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
              size == AGX_SIZE_32 && value < 512 && !(value & 1);
    case AGX_OPCODE_IMAGE_LOAD:
    case AGX_OPCODE_TEXTURE_LOAD:
-      /* Unknown if this works, but the driver will never hit this. */
+      /* G17P publishes a dynamic integer LOD through PACK_SMPIR from a GPR;
+       * there is no witnessed uniform-file source for that operand.  Keep
+       * the heap in uniforms, but materialize the LOD into a register. */
       assert(!(src_index == 2 && high) && "texture heap always low");
-      return !high && (src_index == 1 || src_index == 2);
+      return !high &&
+             (src_index == 2 ||
+              (encoding == AGX_ISA_ENCODING_AGX2 && src_index == 1));
    case AGX_OPCODE_TEXTURE_SAMPLE:
       /* G17P's LOD operand is an immediate level or a packed GPR value, not a
        * uniform-file operand. Source 2 is still the bindless texture heap. */

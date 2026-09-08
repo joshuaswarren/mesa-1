@@ -4456,6 +4456,16 @@ TEST_F(AGX3PackBinary, G17PColourPackingKeepsNativeUniformSources)
       AGX_OPCODE_IADD, 0, 16, AGX_SIZE_32));
 }
 
+TEST_F(AGX3PackBinary, G17PTexelFetchLODMaterializesUniform)
+{
+   EXPECT_FALSE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX3B,
+      AGX_OPCODE_TEXTURE_LOAD, 1, 16, AGX_SIZE_16));
+   EXPECT_TRUE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX3B,
+      AGX_OPCODE_TEXTURE_LOAD, 2, 16, AGX_SIZE_64));
+   EXPECT_TRUE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX2,
+      AGX_OPCODE_TEXTURE_LOAD, 1, 16, AGX_SIZE_16));
+}
+
 TEST_F(AGX3PackBinary, G17PFltnormStartMatchesNativeF32Uniforms)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

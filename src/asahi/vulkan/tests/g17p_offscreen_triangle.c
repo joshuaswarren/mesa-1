@@ -218,10 +218,14 @@
 #define G17P_SHADOW_COMPARE 0
 #endif
 
+#ifndef G17P_TEXEL_FETCH_LOD
+#define G17P_TEXEL_FETCH_LOD 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
-    G17P_SHADOW_COMPARE)
+    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD)
 
 #if G17P_SHADOW_COMPARE
 #define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
@@ -304,6 +308,11 @@
 #include "g17p_vulkan_shadow_compare_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_shadow_compare_frag_spv
+#elif G17P_TEXEL_FETCH_LOD
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_texel_fetch_lod_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texel_fetch_lod_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -852,6 +861,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TEXEL_FETCH_LOD
+#define PROBE_NAME "g17p-vulkan-texel-fetch-lod"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1332,6 +1346,10 @@ verify_readback(const uint8_t *map)
       {255, 255, 255, 255},
       {0, 0, 0, 0},
    };
+#elif G17P_TEXEL_FETCH_LOD
+   /* Mip 2 is blue. Mip 0 red and mip 1 green are exact negative controls
+    * for a dropped or mis-typed integer level. */
+   static const uint8_t expected[4] = {0, 0, 255, 255};
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1483,6 +1501,8 @@ main(void)
        getenv("G17P_SATURATE_TEXTURE_RECORD_ONLY") != NULL) ||
       (G17P_SHADOW_COMPARE &&
        getenv("G17P_SHADOW_COMPARE_RECORD_ONLY") != NULL) ||
+      (G17P_TEXEL_FETCH_LOD &&
+       getenv("G17P_TEXEL_FETCH_LOD_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -3066,7 +3086,12 @@ main(void)
    printf(PROBE_NAME ": PASS — two depth references split the exact "
                      "white/black halves immediately/3s; all source/readback guards "
                      "unchanged, checksum %016" PRIx64 "\n",
-          checksum);
+                     checksum);
+#elif G17P_TEXEL_FETCH_LOD
+   printf(PROBE_NAME ": PASS — texelFetch selected exact mip 2 through "
+                     "the integer level staging path immediately/3s; "
+                     "all source/readback guards unchanged, checksum %016" PRIx64
+                     "\n", checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
                      "immediately/3s, binding 3, offset 64, stride 13, "

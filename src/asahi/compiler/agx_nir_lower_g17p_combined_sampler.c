@@ -318,7 +318,10 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
    const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
    return handle >= 0 && lod >= 0 && coord >= 0 && tex->num_srcs == 3 &&
       nir_src_is_const(tex->src[lod].src) &&
-      nir_src_as_uint(tex->src[lod].src) == 0 &&
+      /* PACK_SMPIR stages this integer into the native level bank.  Its
+       * captured field is 12-bit x64, so whole Vulkan mip levels 0..63 fit
+       * exactly and larger constants remain refused. */
+      nir_src_as_uint(tex->src[lod].src) <= 63 &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
       nir_src_num_components(tex->src[coord].src) ==
          (lowered_buffer ? 2 : tex->coord_components);
