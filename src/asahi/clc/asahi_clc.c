@@ -239,6 +239,7 @@ target_supports_program(const char *target, const nir_function *func)
     * execute oracle; every other slot remains NULL and fails closed. */
    return strcmp(target, "g17p") ||
           !strcmp(func->name, "libagx_fill_uint4") ||
+          !strcmp(func->name, "libagx_predicate_indirect") ||
           !strcmp(func->name, "libagx_copy_xfb_counters");
 }
 
@@ -411,6 +412,10 @@ main(int argc, char **argv)
          fprintf(fp_c,
                  "const uint32_t *libagx_g17p[LIBAGX_NUM_PROGRAMS] = {\n"
                  "    [LIBAGX_FILL_UINT4] = libagx_fill_uint4_0_g17p,\n"
+                 "    [LIBAGX_PREDICATE_INDIRECT_0] = "
+                 "libagx_predicate_indirect_0_g17p,\n"
+                 "    [LIBAGX_PREDICATE_INDIRECT_1] = "
+                 "libagx_predicate_indirect_1_g17p,\n"
                  "    [LIBAGX_COPY_XFB_COUNTERS] = "
                  "libagx_copy_xfb_counters_0_g17p,\n"
                  "};\n\n");

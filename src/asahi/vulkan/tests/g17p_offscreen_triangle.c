@@ -177,14 +177,18 @@
 #define G17P_RGBA32_SFLOAT 0
 #endif
 
-/* 1 = vkCmdDrawIndirect, 2 = vkCmdDrawIndexedIndirect. */
+/* 1/2 = direct-count indirect nonindexed/indexed, 3/4 = count variants. */
 #ifndef G17P_INDIRECT_DRAW
 #define G17P_INDIRECT_DRAW 0
 #endif
 
-#if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 2
+#if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 4
 #error "select a valid G17P indirect draw oracle"
 #endif
+
+#define G17P_INDIRECT_INDEXED                                                \
+   (G17P_INDIRECT_DRAW == 2 || G17P_INDIRECT_DRAW == 4)
+#define G17P_INDIRECT_COUNT (G17P_INDIRECT_DRAW >= 3)
 
 #ifndef G17P_INDEX_RESTART
 #define G17P_INDEX_RESTART 0
@@ -915,6 +919,16 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INDIRECT_DRAW == 3
+#define PROBE_NAME "g17p-vulkan-draw-indirect-count"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_INDIRECT_DRAW == 4
+#define PROBE_NAME "g17p-vulkan-draw-indexed-indirect-count"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_A2R10G10B10_UNORM
 #define PROBE_NAME "g17p-vulkan-a2r10g10b10-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1177,6 +1191,10 @@ VK_FN(vkCmdDraw);
 #if G17P_INDIRECT_DRAW
 VK_FN(vkCmdDrawIndirect);
 VK_FN(vkCmdDrawIndexedIndirect);
+#if G17P_INDIRECT_COUNT
+VK_FN(vkCmdDrawIndirectCount);
+VK_FN(vkCmdDrawIndexedIndirectCount);
+#endif
 #endif
 #if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
 VK_FN(vkCmdBindIndexBuffer);
@@ -1720,10 +1738,17 @@ main(void)
    if (!indirect_available.features.drawIndirectFirstInstance ||
        !indirect_available.features.multiDrawIndirect)
       die("required core indirect-draw features are not advertised");
+#if G17P_INDIRECT_COUNT
+   if (!indirect_available12.drawIndirectCount ||
+       !has_device_extension(physical,
+                             VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME))
+      die("indirect-count variants are not advertised");
+#else
    if (indirect_available12.drawIndirectCount ||
        has_device_extension(physical,
                             VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME))
       die("unqualified indirect-count variants are advertised");
+#endif
 #endif
 
    if (!(properties.limits.framebufferColorSampleCounts &
@@ -1787,6 +1812,10 @@ main(void)
    };
 #endif
 #if G17P_INDIRECT_DRAW
+   const VkPhysicalDeviceVulkan12Features indirect_enabled12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .drawIndirectCount = G17P_INDIRECT_COUNT,
+   };
    const VkPhysicalDeviceFeatures indirect_enabled = {
       .multiDrawIndirect = VK_TRUE,
       .drawIndirectFirstInstance = VK_TRUE,
@@ -1798,6 +1827,8 @@ main(void)
       .pNext = &enabled11,
 #elif G17P_HOST_IMAGE_COPY
       .pNext = &host_copy_features,
+#elif G17P_INDIRECT_DRAW
+      .pNext = &indirect_enabled12,
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
@@ -1854,6 +1885,10 @@ main(void)
 #if G17P_INDIRECT_DRAW
    LOAD_DEVICE(device, vkCmdDrawIndirect);
    LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
+#if G17P_INDIRECT_COUNT
+   LOAD_DEVICE(device, vkCmdDrawIndirectCount);
+   LOAD_DEVICE(device, vkCmdDrawIndexedIndirectCount);
+#endif
 #endif
 #if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
@@ -2104,7 +2139,7 @@ main(void)
       INDIRECT_COMMAND_STRIDE = 32,
       INDIRECT_SUFFIX_BYTES = 64,
    };
-#if G17P_INDIRECT_DRAW == 1
+#if !G17P_INDIRECT_INDEXED
    const VkDrawIndirectCommand indirect_command = {
       .vertexCount = 3,
       .instanceCount = 1,
@@ -2121,7 +2156,7 @@ main(void)
    };
 #endif
    uint8_t indirect_expected[INDIRECT_COMMAND_OFFSET +
-                             INDIRECT_COMMAND_STRIDE +
+                             2 * INDIRECT_COMMAND_STRIDE +
                              sizeof(indirect_command) +
                              INDIRECT_SUFFIX_BYTES];
    memset(indirect_expected, 0xa5, sizeof(indirect_expected));
@@ -2133,6 +2168,9 @@ main(void)
           sizeof(indirect_command));
    memset(indirect_expected + INDIRECT_COMMAND_OFFSET, 0,
           sizeof(indirect_command));
+   memset(indirect_expected + INDIRECT_COMMAND_OFFSET +
+             2 * INDIRECT_COMMAND_STRIDE,
+          0, sizeof(indirect_command));
    memcpy(indirect_expected + INDIRECT_COMMAND_OFFSET +
              INDIRECT_COMMAND_STRIDE,
           &indirect_command, sizeof(indirect_command));
@@ -2141,7 +2179,26 @@ main(void)
       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, "indirect buffer");
    memcpy(indirect.map, indirect_expected, sizeof(indirect_expected));
 
-#if G17P_INDIRECT_DRAW == 2
+#if G17P_INDIRECT_COUNT
+   enum {
+      INDIRECT_COUNT_OFFSET = 64,
+      INDIRECT_COUNT_SUFFIX_BYTES = 64,
+   };
+   uint8_t indirect_count_expected[INDIRECT_COUNT_OFFSET + sizeof(uint32_t) +
+                                   INDIRECT_COUNT_SUFFIX_BYTES];
+   memset(indirect_count_expected, 0xa5, sizeof(indirect_count_expected));
+   memset(indirect_count_expected, 0, sizeof(uint32_t));
+   const uint32_t indirect_count_value = 2;
+   memcpy(indirect_count_expected + INDIRECT_COUNT_OFFSET,
+          &indirect_count_value, sizeof(indirect_count_value));
+   struct mapped_buffer indirect_count = create_mapped_buffer(
+      device, &memory_properties, sizeof(indirect_count_expected),
+      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, "indirect count buffer");
+   memcpy(indirect_count.map, indirect_count_expected,
+          sizeof(indirect_count_expected));
+#endif
+
+#if G17P_INDIRECT_INDEXED
    enum {
       INDEX_BUFFER_OFFSET = 64,
       INDEX_SUFFIX_BYTES = 64,
@@ -3022,6 +3079,24 @@ main(void)
    vkCmdDrawIndexedIndirect(command_buffer, indirect.buffer,
                             INDIRECT_COMMAND_OFFSET, 2,
                             INDIRECT_COMMAND_STRIDE);
+#elif G17P_INDIRECT_DRAW == 3
+   vkCmdDrawIndirectCount(command_buffer, indirect.buffer,
+                          INDIRECT_COMMAND_OFFSET, indirect_count.buffer,
+                          INDIRECT_COUNT_OFFSET, 0, INDIRECT_COMMAND_STRIDE);
+   vkCmdDrawIndirectCount(command_buffer, indirect.buffer,
+                          INDIRECT_COMMAND_OFFSET, indirect_count.buffer,
+                          INDIRECT_COUNT_OFFSET, 3, INDIRECT_COMMAND_STRIDE);
+#elif G17P_INDIRECT_DRAW == 4
+   vkCmdBindIndexBuffer(command_buffer, index.buffer, INDEX_BUFFER_OFFSET,
+                        VK_INDEX_TYPE_UINT16);
+   vkCmdDrawIndexedIndirectCount(
+      command_buffer, indirect.buffer, INDIRECT_COMMAND_OFFSET,
+      indirect_count.buffer, INDIRECT_COUNT_OFFSET, 0,
+      INDIRECT_COMMAND_STRIDE);
+   vkCmdDrawIndexedIndirectCount(
+      command_buffer, indirect.buffer, INDIRECT_COMMAND_OFFSET,
+      indirect_count.buffer, INDIRECT_COUNT_OFFSET, 3,
+      INDIRECT_COMMAND_STRIDE);
 #elif G17P_CUBE_SAMPLE
    for (uint32_t face = 0; face < 6; ++face) {
       if (cube_face_diagnostic >= 0 && cube_face_diagnostic != (int)face)
@@ -3139,7 +3214,12 @@ main(void)
 #if G17P_INDIRECT_DRAW
    if (!verify_upload(&indirect, indirect_expected, "indirect input"))
       return EXIT_FAILURE;
-#if G17P_INDIRECT_DRAW == 2
+#if G17P_INDIRECT_COUNT
+   if (!verify_upload(&indirect_count, indirect_count_expected,
+                      "indirect count input"))
+      return EXIT_FAILURE;
+#endif
+#if G17P_INDIRECT_INDEXED
    if (!verify_upload(&index, index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
@@ -3193,7 +3273,12 @@ main(void)
 #if G17P_INDIRECT_DRAW
    if (!verify_upload(&indirect, indirect_expected, "indirect input"))
       return EXIT_FAILURE;
-#if G17P_INDIRECT_DRAW == 2
+#if G17P_INDIRECT_COUNT
+   if (!verify_upload(&indirect_count, indirect_count_expected,
+                      "indirect count input"))
+      return EXIT_FAILURE;
+#endif
+#if G17P_INDIRECT_INDEXED
    if (!verify_upload(&index, index_expected, "index input"))
       return EXIT_FAILURE;
 #endif
@@ -3304,6 +3389,19 @@ main(void)
                      "firstIndex/baseVertex/firstInstance, 384 guard bytes "
                      "unchanged, checksum "
                      "%016" PRIx64 "\n",
+          checksum);
+#elif G17P_INDIRECT_DRAW == 3
+   printf(PROBE_NAME ": PASS — vkCmdDrawIndirectCount exact immediately/3s, "
+                     "count-buffer and command offsets, max-count "
+                     "predication, stride/firstVertex/firstInstance, all "
+                     "guards unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_INDIRECT_DRAW == 4
+   printf(PROBE_NAME ": PASS — vkCmdDrawIndexedIndirectCount exact "
+                     "immediately/3s, count-buffer/command/index offsets, "
+                     "max-count predication, firstIndex/baseVertex/"
+                     "firstInstance, all guards unchanged, checksum %016"
+                     PRIx64 "\n",
           checksum);
 #elif G17P_A2R10G10B10_UNORM
    printf(PROBE_NAME ": PASS — %ux%u A2R10G10B10 UNORM exact immediately/3s, "

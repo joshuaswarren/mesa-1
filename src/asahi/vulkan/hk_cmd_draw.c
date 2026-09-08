@@ -5485,6 +5485,11 @@ hk_draw_indirect_count(VkCommandBuffer commandBuffer, VkBuffer _buffer,
 
    assert((stride % 4) == 0 && "aligned");
 
+   /* The Vulkan commands are defined as no-ops for a zero maximum. Avoid a
+    * zero-sized pool allocation and a zero-grid internal dispatch. */
+   if (maxDrawCount == 0)
+      return;
+
    size_t out_stride = sizeof(uint32_t) * (indexed ? 5 : 4);
    uint64_t patched = hk_pool_alloc(cmd, out_stride * maxDrawCount, 4).gpu;
    uint64_t in = hk_buffer_address_ro(buffer, offset);

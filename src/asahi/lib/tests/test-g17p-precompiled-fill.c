@@ -17,6 +17,17 @@ static unsigned failures;
       }                                                                        \
    } while (0)
 
+static uint64_t
+fnv1a64(const uint8_t *bytes, size_t size)
+{
+   uint64_t hash = UINT64_C(14695981039346656037);
+   for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= UINT64_C(1099511628211);
+   }
+   return hash;
+}
+
 int
 main(void)
 {
@@ -40,7 +51,9 @@ main(void)
    };
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
-      if (i == LIBAGX_FILL_UINT4 || i == LIBAGX_COPY_XFB_COUNTERS)
+      if (i == LIBAGX_FILL_UINT4 || i == LIBAGX_COPY_XFB_COUNTERS ||
+          i == LIBAGX_PREDICATE_INDIRECT_0 ||
+          i == LIBAGX_PREDICATE_INDIRECT_1)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -95,6 +108,52 @@ main(void)
    CHECK(xfb_info->agx3_staging_halfs == 0);
    CHECK(memcmp(xfb_binary + xfb_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
+
+   /* Apple G17P compiles the equivalent four- and five-word predicate/copy
+    * kernels to the same control, address and device-store instruction
+    * families used here. Fresh AIR/native SHA-256 pairs:
+    *   ab91101e4182bd1656ac7602ad258174d1576451f2de55f770c64ad851ecc606
+    *   b30f7801c83790963138415bf16dc9770faa22a00bb5bf08add355fd7a127fa3
+    * Keep both generated variants byte-exact: the count path must never
+    * silently fall back to an AGX2 precompiled binary on HAL200. */
+   const struct {
+      unsigned index;
+      uint32_t size;
+      uint64_t hash;
+   } predicate[] = {
+      {LIBAGX_PREDICATE_INDIRECT_0, 668, UINT64_C(0x3b6d443be271fbfb)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 814, UINT64_C(0x33746e6fd2961f9f)},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
+      const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
+      CHECK(predicate_blob != NULL);
+      if (!predicate_blob)
+         continue;
+      const struct agx_precompiled_kernel_info *predicate_info =
+         (const void *)predicate_blob;
+      const uint8_t *predicate_binary =
+         (const uint8_t *)predicate_blob + sizeof(*predicate_info);
+      CHECK(predicate_info->preamble_offset == 0);
+      CHECK(predicate_info->main_offset == 0);
+      CHECK(predicate_info->main_size == predicate[i].size);
+      CHECK(predicate_info->binary_size == predicate[i].size);
+      CHECK(predicate_info->nr_gprs == 24);
+      CHECK(predicate_info->nr_preamble_gprs == 0);
+      CHECK(predicate_info->push_count == 14);
+      CHECK(predicate_info->workgroup_size[0] == 32);
+      CHECK(predicate_info->workgroup_size[1] == 1);
+      CHECK(predicate_info->workgroup_size[2] == 1);
+      CHECK(predicate_info->local_size == 0);
+      CHECK(predicate_info->imageblock_stride == 0);
+      CHECK(!predicate_info->uses_txf);
+      CHECK(predicate_info->agx3_staging_known);
+      CHECK(predicate_info->agx3_staging_halfs == 0);
+      CHECK(fnv1a64(predicate_binary, predicate_info->binary_size) ==
+            predicate[i].hash);
+      CHECK(memcmp(predicate_binary + predicate_info->binary_size -
+                      sizeof(end),
+                   end, sizeof(end)) == 0);
+   }
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

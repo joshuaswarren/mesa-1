@@ -619,6 +619,24 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-draw-indirect-count',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_INDIRECT_DRAW=3'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-draw-indexed-indirect-count',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_INDIRECT_DRAW=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-index-restart',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],
