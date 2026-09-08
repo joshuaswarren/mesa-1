@@ -326,6 +326,10 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          return 1;
       }
 
+   case AGX_OPCODE_ZS_EMIT_AGX3:
+      assert(s == 0 && I->zs == 1);
+      return 2;
+
    case AGX_OPCODE_IMAGE_WRITE:
       if (s == 0)
          return 4 * size /* data */;

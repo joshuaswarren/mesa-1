@@ -940,6 +940,37 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
    assert(!write_z || z.size == AGX_SIZE_32);
    assert(!write_s || s.size == AGX_SIZE_16);
 
+   /* G17P depthf reads a single staged 32-bit word. Apple's depth-only
+    * fragments build its low half as 15 | (SR2 << 4) | (SR2 << 8), clamp the
+    * depth to [0, 1] while narrowing it to f16 in the high half, publish the
+    * pair, then issue depthf. Build the register tuple here, before RA, so the
+    * allocator owns every scratch value and the packer only publishes it.
+    *
+    * Stencil remains on the legacy path and is refused by the AGX3 packer:
+    * Metal has no fragment stencil-output expression from which to ground its
+    * staged operand contract.
+    */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && write_z &&
+       !write_s) {
+      agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
+      agx_get_coverage_1x_agx3_to(b, sr2);
+      agx_index mid = agx_iadd(b, sr2, sr2, 4);
+      agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
+
+      agx_index depth = agx_temp(b->shader, AGX_SIZE_16);
+      agx_instr *narrow = agx_fmov_to(b, depth, z);
+      narrow->saturate = true;
+
+      agx_index word = agx_temp(b->shader, AGX_SIZE_32);
+      agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, depth});
+
+      b->shader->out->writes_sample_mask = true;
+      agx_wait_pixel_mask(b, 0x1);
+      agx_instr *I = agx_zs_emit_agx3(b, word, base);
+      agx_signal_pix(b, 0x1);
+      return I;
+   }
+
    if (write_z && write_s) {
       agx_index u2u32 = agx_temp(b->shader, AGX_SIZE_32);
       agx_mov_to(b, u2u32, s);

@@ -170,7 +170,8 @@ choose_instr(struct sched_ctx *s)
        * sample_mask when all other instructions have been exhausted.
        */
       if (n->instr->op == AGX_OPCODE_SAMPLE_MASK ||
-          n->instr->op == AGX_OPCODE_ZS_EMIT) {
+          n->instr->op == AGX_OPCODE_ZS_EMIT ||
+          n->instr->op == AGX_OPCODE_ZS_EMIT_AGX3) {
 
          if (!best) {
             best = n;

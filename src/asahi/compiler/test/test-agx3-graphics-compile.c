@@ -899,6 +899,50 @@ build_fs_depth(void)
    return b.shader;
 }
 
+static nir_shader *
+build_fs_depth_only(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 depth-only FS");
+   nir_store_output(&b, nir_imm_float(&b, 0.5f), nir_imm_int(&b, 0),
+                    .base = 0, .write_mask = 0x1,
+                    .src_type = nir_type_float32,
+                    .io_semantics.location = FRAG_RESULT_DEPTH,
+                    .io_semantics.num_slots = 1);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+/* Same depth path with a genuine run-time f32 source. This keeps the
+ * saturating f32-to-f16 narrowing and its register lifetime in the oracle. */
+static nir_shader *
+build_fs_depth_dynamic(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 dynamic depth-write FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *depth = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   fs_store_colour(&b, nir_vec4(&b, nir_imm_float(&b, 0.25f),
+                                nir_imm_float(&b, 0.5f),
+                                nir_imm_float(&b, 0.75f),
+                                nir_imm_float(&b, 1.0f)));
+   nir_store_output(&b, depth, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0x1, .src_type = nir_type_float32,
+                    .io_semantics.location = FRAG_RESULT_DEPTH,
+                    .io_semantics.num_slots = 1);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0) |
+                                    BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
 /*
  * Fragment shader that reads the tilebuffer before writing it -- the shape a
  * blend or a framebuffer fetch takes, and the shape Apple's own `w_pass8`
@@ -2959,7 +3003,42 @@ struct agx3_graphics_case {
    bool compare_apple_g17p_vs;
    uint8_t expected_g17p_loads;
    bool g17p_only;
+   uint8_t expected_g17p_depth;
 };
+
+static bool
+g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
+{
+   /* Independently fixed records from the production depth=0.5 shader:
+    * half LDIMM 0x3800, class-1 acquire, stage[0] copy, Apple's depthf,
+    * class-1 release, terminator. This pins both halves of depthf's input:
+    * the copy is 32-bit, so the half literal is physically word.high.
+    */
+   static const uint8_t constant_tail[] = {
+      0x04,0x80,0x06,0x00,0x00,0x0c,0x01,0x00,
+      0x87,0x02,0x54,0x01,0x00,0x00,
+      0x0b,0x00,0x29,0x04,
+      0xd7,0x14,0x54,0x00,0x00,0x03,
+      0x07,0x02,0x54,0x01,0x00,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t dynamic_tail[] = {
+      0x11,0x01,0x1c,0x81,0x05,0x02,0x00,0x02,
+      0x87,0x02,0x54,0x01,0x00,0x00,
+      0x0b,0x02,0x29,0x04,
+      0xd7,0x14,0x54,0x00,0x00,0x03,
+      0x07,0x02,0x54,0x01,0x00,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   const uint8_t *tail = variant == 1 ? constant_tail : dynamic_tail;
+   const size_t tail_size = sizeof(constant_tail);
+   return part->info.agx3_staging_known &&
+          part->info.agx3_staging_halfs == 2 &&
+          part->info.binary_size >= tail_size &&
+          !memcmp((const uint8_t *)part->binary + part->info.binary_size -
+                     tail_size,
+                  tail, tail_size);
+}
 
 static const struct agx3_graphics_case cases[] = {
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
@@ -2999,20 +3078,13 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
     .g17p_only = true},
 
-   /*
-    * Deliberate refusals. Each one names a specific missing witness, not a
-    * missing line of routing:
-    *
-    * - a depth write lowers to zs_emit, whose counterpart is depthf. depthf's
-    *   enable bits are grounded, but it carries no value register: every
-    *   witness stages the value through a copy whose destination field is 0,
-    *   behind an un-decomposed iadd/fsel cluster that may be a required
-    *   format transform, so the staging ABI is a correlation rather than a
-    *   traced contract (see agx3_pack_binary.c).
-    *
-    */
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
-   {"fs-depth-write", build_fs_depth, false},
+   {"fs-depth-write", build_fs_depth, true, .g17p_only = true,
+    .expected_g17p_depth = true},
+   {"fs-depth-only", build_fs_depth_only, true, .g17p_only = true,
+    .expected_g17p_depth = true},
+   {"fs-depth-write-dynamic", build_fs_depth_dynamic, true,
+    .g17p_only = true, .expected_g17p_depth = 2},
 };
 
 static bool
@@ -3127,6 +3199,14 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             fprintf(stderr, "%s %s: vertex LDDEV policy mismatch\n",
                     enc_name(enc), c->name);
          }
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_depth) {
+         result = g17p_depth_protocol(&part, c->expected_g17p_depth);
+         if (!result)
+            fprintf(stderr, "%s %s: depth staging protocol mismatch\n",
+                    enc_name(enc), c->name);
       }
 
       if (result && c->lower_combined_sampler) {

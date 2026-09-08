@@ -51,10 +51,13 @@
 #include "agx3_tex_core.h"
 #include "agx3_tile_core.h"
 #include "agx3_vary_core.h"
+#include "agx3_writeout_core.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
+#include "util/half_float.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -566,6 +569,12 @@ agx3_is_async(const agx_instr *I)
 {
    if ((I->op == AGX_OPCODE_ATOMIC || I->op == AGX_OPCODE_LOCAL_ATOMIC) &&
        I->nr_dests == 1 && !agx_is_null(I->dest[0]))
+      return true;
+
+   /* The compound depth write publishes its staging word and consumes that
+    * scoreboard generation with depthf. It needs an assigned slot even
+    * though it has no general-register destination. */
+   if (I->op == AGX_OPCODE_ZS_EMIT_AGX3)
       return true;
 
    return I->op == AGX_OPCODE_DEVICE_LOAD || I->op == AGX_OPCODE_LOCAL_LOAD ||
@@ -4194,7 +4203,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             tile_loads_left++;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
-         if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3)
+         if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
+             scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             has_coverage_write = true;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
@@ -4290,7 +4300,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                   g17p_deferred_write != NULL);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
-      if (agx3_is_cf_op(entry_I) || entry_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3)
+      if (agx3_is_cf_op(entry_I) ||
+          entry_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
+          entry_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
          ctx->agx3_colour_link.straight_line = false;
    }
    unsigned g17p_link_packs_seen = 0;
@@ -4381,6 +4393,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->op == AGX_OPCODE_IMAGE_LOAD) ||
              (g17p_storage_image_protocol &&
               I->op == AGX_OPCODE_TEXTURE_SAMPLE))
+            e->preferred_slot = 1;
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             e->preferred_slot = 1;
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
              vertex_loads_scheduled++ == 0)
@@ -4898,6 +4913,38 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             interpolation_started = true;
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_ZS_EMIT_AGX3) {
+            if (enc != AGX_ISA_ENCODING_AGX3B ||
+                ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests ||
+                I->nr_srcs != 1 || I->zs != 1 ||
+                !agx3_vary_reg32(I->src[0]) ||
+                agx_channels(I->src[0]) != 1 || !g17p_colour_open)
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_STAGE_MAX_LENGTH];
+            uint8_t len = 0;
+            if (!agx3_stage_copy_source(enc, 0, I->src[0].value,
+                                        I->src[0].discard, slot,
+                                        wait | outstanding_here, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+
+            const struct agx3_zs_desc zs = {
+               .value = 0,
+               .value_kill = true,
+               .slot = slot,
+               .wait_mask = (uint16_t)(1u << (slot - 1)),
+            };
+            if (!agx3_zs_encode_depth_stencil(enc, &zs, true, false, bytes,
+                                              &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+
+            outstanding = 0;
+            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 2);
             continue;
          }
 
@@ -6088,6 +6135,36 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->shift == 4 && I->dest[0].size == AGX_SIZE_16 &&
+             I->src[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
+             agx3_src_is_register(I->dest[0]) &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[0].value <= 15 && !I->src[0].memory &&
+             !I->src[0].abs && !I->src[0].neg &&
+             agx3_src_is_register(I->src[1]) && !I->src[1].memory &&
+             !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
+             !(I->src[1].cache && I->src[1].discard)) {
+            const struct agx3_shift_add_desc d = {
+               .dest = I->dest[0].value,
+               .dest_hint = I->dest[0].cache,
+               .src0_immediate = true,
+               .src0 = I->src[0].value,
+               .src1 = I->src[1].value,
+               .shift = 4,
+               .wait_mask = wait,
+            };
+            uint8_t bytes[AGX3_WRITEOUT_MAX_LENGTH], len;
+            if (!agx3_shift_add16_encode(enc, &d, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->dest[0].size == AGX_SIZE_16 && I->src[0].size == AGX_SIZE_16 &&
              I->src[1].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
              agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
@@ -6646,6 +6723,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_encoded_ldimm encoded;
             if (!agx3_pack_ldimm_u32(enc, I->dest[0].value, bits, &encoded) ||
                 !agx3_append(emission, encoded.bytes, encoded.length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* A constant f32-to-f16 conversion is represented by the same ADD
+          * with -0 used for the register form. Fold its finite minifloat
+          * inputs to the exact half literal; the saturate bit used by depth
+          * output clamps before the single conversion, just like Apple's
+          * dynamic narrowing instruction. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !wait &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE &&
+             !I->src[0].memory && !I->src[1].memory &&
+             !I->src[0].abs && !I->src[1].abs &&
+             !I->src[0].neg && !I->src[1].neg) {
+            float value = agx_minifloat_decode(I->src[0].value) +
+                          agx_minifloat_decode(I->src[1].value);
+            if (!isfinite(value))
+               AGX3_REFUSE(I);
+            if (I->saturate)
+               value = CLAMP(value, 0.0f, 1.0f);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_mov16(enc, I->dest[0].value,
+                                _mesa_float_to_half(value), 0, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }
