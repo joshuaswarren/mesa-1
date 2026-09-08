@@ -3600,7 +3600,7 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       d.width = AGX3_TEX_W32;
       d.mask = 15;
       d.slot = 1;
-      d.wait_mask = 1;
+      d.wait_mask = enc == AGX_ISA_ENCODING_AGX3B ? 0 : 1;
       d.final = true;
       d.sample_abi = enc == AGX_ISA_ENCODING_AGX3B
                         ? AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT
@@ -3648,7 +3648,7 @@ TEST_F(AGX3PackBinary, FragmentImplicit2DUsesNativeDirectCoordinateABI)
       .mask = 15,
       .lod = AGX3_TEX_LOD_AUTO,
       .slot = 1,
-      .wait_mask = 1,
+      .wait_mask = 0,
       .coord_kill = true,
       .final = true,
       .texture_kind = AGX3_TEX_OPERAND_REGISTER,

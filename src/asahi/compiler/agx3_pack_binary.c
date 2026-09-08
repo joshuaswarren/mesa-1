@@ -1503,7 +1503,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .three_d = three_d,
       .cube = cube,
       .slot = slot,
-      .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
+      .wait_mask = apple_fragment_abi
+         ? wait_mask
+         : (uint16_t)(1u << (stage_slot - 1)),
       /* CEM consumes and discards the source XYZ before SMP. Apple's cube
        * and cube-array samples consequently set SMP f27 even though the
        * sampler reads CEM's private coordinate bank rather than the original
