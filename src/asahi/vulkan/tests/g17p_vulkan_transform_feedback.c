@@ -224,6 +224,26 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
       if (xfb->map[i] != expected) {
          fprintf(stderr, "%s: XFB byte %zu: %02x != %02x\n", NAME, i,
                  xfb->map[i], expected);
+
+         size_t changed = 0;
+         size_t first = SIZE_MAX;
+         size_t last = 0;
+         for (size_t j = 0; j < xfb->size; ++j) {
+            if (xfb->map[j] == SENTINEL)
+               continue;
+            if (first == SIZE_MAX)
+               first = j;
+            last = j;
+            changed++;
+         }
+         if (first == SIZE_MAX) {
+            fprintf(stderr, "%s: XFB buffer remained entirely sentinel\n",
+                    NAME);
+         } else {
+            fprintf(stderr,
+                    "%s: XFB has %zu non-sentinel bytes spanning %zu..%zu\n",
+                    NAME, changed, first, last);
+         }
          failures++;
          break;
       }
@@ -240,6 +260,12 @@ verify_bytes(const struct buffer *vertices, const struct buffer *xfb,
          failures++;
          break;
       }
+   }
+   if (failures) {
+      uint32_t observed_offset;
+      memcpy(&observed_offset, counter->map + GUARD, sizeof(observed_offset));
+      fprintf(stderr, "%s: observed XFB counter %#x\n", NAME,
+              observed_offset);
    }
    return failures;
 }
