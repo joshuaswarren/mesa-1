@@ -1644,7 +1644,9 @@ verify_readback(const uint8_t *map)
 #elif G17P_DYNAMIC_BLEND
    static const uint8_t expected[2][4] = {
       /* Left: dynamic reverse-subtract blend with only R/G enabled. */
-      {0, 56, 191, 255},
+      /* The destination is first quantized to 128/255, so
+       * round((128/255 - 0.28) * 255) = 57. */
+      {0, 57, 191, 255},
       /* Right: dynamic blend disable with only B/A enabled. */
       {64, 128, 13, 255},
    };
