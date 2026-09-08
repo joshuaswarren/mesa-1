@@ -4617,6 +4617,78 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    return true;
 }
 
+/* Apple's G17P two-RGBA8 fragment writes both packed colours before entering
+ * the pixel transaction, then commits RT1 followed by RT0.  In particular,
+ * the native tail is:
+ *
+ *   entry; wait 0x30; store +4; release 0x30;
+ *   wait 0x0c; store +0; release-last 0x0c
+ *
+ * Preserve that ordering without extending physical-register lifetimes after
+ * RA: sink and reverse only the exact opaque two-target graph while it is
+ * still in SSA.  The packer independently revalidates the resulting graph.
+ */
+static bool
+agx3_sink_g17p_rgba8_mrt_stores(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       !ctx->key->secondary || ctx->key->fs.ignore_tib_dependencies ||
+       list_length(&ctx->blocks) != 1)
+      return false;
+
+   agx_instr *stores[2] = {0}, *stop = NULL;
+   unsigned waits = 0, packs = 0, store_count = 0;
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block(block, I) {
+         switch (I->op) {
+         case AGX_OPCODE_PRELOAD:
+         case AGX_OPCODE_COLLECT:
+            break;
+         case AGX_OPCODE_WAIT_PIX:
+            if (I->writeout != 12 || ++waits != 1)
+               return false;
+            break;
+         case AGX_OPCODE_FLTNORM_AGX3:
+            packs++;
+            break;
+         case AGX_OPCODE_ST_TILE:
+            if (store_count >= ARRAY_SIZE(stores) || I->nr_dests != 0 ||
+                I->nr_srcs != 3 || I->format != AGX_FORMAT_U8NORM ||
+                I->mask != 15 || I->explicit_coords ||
+                I->pixel_offset != store_count * 4 ||
+                I->src[0].type != AGX_INDEX_NORMAL || I->src[0].memory ||
+                I->src[0].size != AGX_SIZE_16 ||
+                agx_channels(I->src[0]) != 2 ||
+                I->src[1].type != AGX_INDEX_IMMEDIATE ||
+                I->src[1].value != 0xff ||
+                !agx_is_null(I->src[2]))
+               return false;
+            stores[store_count++] = I;
+            break;
+         case AGX_OPCODE_STOP:
+            if (stop)
+               return false;
+            stop = I;
+            break;
+         default:
+            return false;
+         }
+      }
+   }
+
+   if (!stop || waits != 1 || packs != 4 || store_count != 2)
+      return false;
+
+   /* RT1 first, then RT0, immediately before STOP.  Moving the SSA stores
+    * keeps both packed values live so RA cannot reuse RT0's register early. */
+   for (int i = 1; i >= 0; --i) {
+      list_del(&stores[i]->link);
+      list_addtail(&stores[i]->link, &stop->link);
+   }
+   return true;
+}
+
 static bool
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
@@ -4724,6 +4796,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_print_shader(ctx, stdout);
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
+   AGX_PASS(ctx, agx3_sink_g17p_rgba8_mrt_stores);
 
    AGX_PASS(ctx, agx_ra);
    agx_lower_64bit_postra(ctx);

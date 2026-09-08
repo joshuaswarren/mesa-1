@@ -4034,6 +4034,63 @@ agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
    return blocks == 1 && r8_loads == 1 && f16 == 1 && r8 == 1;
 }
 
+/* Fresh MetalToolchain v27.1.5194.15 G17P evidence for two opaque RGBA8
+ * attachments (mrt.nat SHA256
+ * b6484363c120f218f20aaea9d69d0f114479fbc098333c7280e7b232f663f620)
+ * ends in four FLTNORMs followed by this exact transaction:
+ *
+ *   870254000600 870254300800 e70654020002014e00000000
+ *   070254300000 8702540c0800 e70654000000014e00000000
+ *   0702540c0200
+ *
+ * The pre-RA pass sinks and reverses the two stores to keep both packed
+ * values live.  Revalidate the complete post-RA graph here before selecting
+ * the native per-target writeout classes.
+ */
+static const agx_instr *
+agx3_g17p_rgba8_mrt_wait(agx_context *ctx)
+{
+   unsigned blocks = 0, packs = 0, stores = 0, waits = 0;
+   const agx_instr *wait = NULL;
+
+   agx_foreach_block(ctx, block) {
+      if (++blocks != 1)
+         return NULL;
+
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op == AGX_OPCODE_STOP)
+            continue;
+         if (I->op == AGX_OPCODE_WAIT_PIX) {
+            if (I->writeout != 12 || ++waits != 1 || stores || packs)
+               return NULL;
+            wait = I;
+         } else if (I->op == AGX_OPCODE_FLTNORM_AGX3) {
+            if (waits != 1 || stores || ++packs > 4)
+               return NULL;
+         } else if (I->op == AGX_OPCODE_ST_TILE) {
+            const unsigned expected_offset = stores == 0 ? 4 : 0;
+            if (waits != 1 || packs != 4 || stores >= 2 ||
+                I->nr_dests != 0 || I->nr_srcs != 3 ||
+                I->format != AGX_FORMAT_U8NORM || I->mask != 15 ||
+                I->explicit_coords || I->pixel_offset != expected_offset ||
+                !agx3_src_is_register(I->src[0]) || I->src[0].memory ||
+                I->src[0].size != AGX_SIZE_16 ||
+                agx_channels(I->src[0]) != 2 ||
+                I->src[1].type != AGX_INDEX_IMMEDIATE ||
+                I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
+                !agx_is_null(I->src[2]))
+               return NULL;
+            stores++;
+         } else {
+            return NULL;
+         }
+      }
+   }
+
+   return blocks == 1 && waits == 1 && packs == 4 && stores == 2 ? wait
+                                                                 : NULL;
+}
+
 /* Prove complete shader-part shapes from post-RA IR. EXPORT is an ABI
  * declaration with no machine instruction; every declared source must be
  * supplied by one of the bounded uniform copies. Never infer this from bytes.
@@ -4352,20 +4409,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
       !ctx->key->fs.ignore_tib_dependencies &&
       agx3_is_g17p_wboit_mrt_colour(ctx);
+   const agx_instr *g17p_rgba8_mrt_wait =
+      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
+            !ctx->key->fs.ignore_tib_dependencies
+         ? agx3_g17p_rgba8_mrt_wait(ctx)
+         : NULL;
+   const bool g17p_rgba8_mrt_colour = g17p_rgba8_mrt_wait != NULL;
    const bool g17p_colour_protocol =
       (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 1 &&
-       tile_loads_left == 0) || g17p_wboit_mrt_colour;
+       tile_loads_left == 0) || g17p_wboit_mrt_colour ||
+      g17p_rgba8_mrt_colour;
 
-   /* Multiple colour stores share one pixel transaction. The only captured
-    * G17P transaction is the WBOIT pair above; emitting the individual tile
-    * operations without its entry/release bracket produces a syntactically
-    * valid but unusable shader. */
+   /* Multiple colour stores need an attachment-specific pixel transaction.
+    * The captured G17P forms are the WBOIT pair and the opaque two-RGBA8 pair
+    * above; emitting individual tile operations without either exact bracket
+    * produces a syntactically valid but unusable shader. */
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies && tile_stores_left > 1 &&
-       !g17p_wboit_mrt_colour)
+       !g17p_wboit_mrt_colour && !g17p_rgba8_mrt_colour)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.
@@ -4406,8 +4470,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
    const bool g17p_pixel_protocol =
       g17p_colour_protocol || g17p_blend_protocol || has_coverage_write;
-   const agx_instr *g17p_deferred_write = g17p_pixel_protocol ?
-      agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol) : NULL;
+   const agx_instr *g17p_deferred_write = g17p_rgba8_mrt_colour
+      ? g17p_rgba8_mrt_wait
+      : (g17p_pixel_protocol
+            ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
+            : NULL);
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
@@ -4972,6 +5039,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             } else {
                assert(tile_stores_left > 0);
                last = --tile_stores_left == 0;
+            }
+            if (I->op == AGX_OPCODE_ST_TILE && g17p_rgba8_mrt_colour) {
+               if (wait != 0 || I->pixel_offset != (last ? 0 : 4))
+                  AGX3_REFUSE(I);
+
+               uint8_t bytes[AGX3_TILE_MAX_LENGTH];
+               uint8_t len = 0;
+               const uint32_t writeout = last ? 12 : 48;
+               if (!g17p_colour_open) {
+                  if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
+                      !agx3_append(emission, bytes, len))
+                     AGX3_REFUSE(I);
+                  ctx->agx3_colour_link.entry_emitted = true;
+                  ctx->agx3_colour_link.entry_offset =
+                     emission->size - len - initial_size;
+                  g17p_colour_open = true;
+               }
+               if (!agx3_pixel_wait(enc, writeout, 0, bytes, &len) ||
+                   !agx3_append(emission, bytes, len) ||
+                   !agx3_emit_tile(emission, enc, I, slot, 0, false, false) ||
+                   !agx3_pixel_release(enc, writeout, last, 0, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
             }
             if (I->op == AGX_OPCODE_ST_TILE && g17p_deferred_write) {
                if (!g17p_colour_open) {

@@ -55,6 +55,40 @@ compile_epilog(const struct agx_fs_epilog_link_info *link,
    return ok;
 }
 
+static bool
+compile_rgba8_mrt_epilog(const struct agx_fs_epilog_link_info *link,
+                         enum pipe_format rt1_format, bool rt1_additive,
+                         struct agx_shader_part *part)
+{
+   struct agx_fs_epilog_key key = {
+      .link = *link,
+      .nr_samples = 1,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.remap[1] = 1;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.rt_formats[1] = rt1_format;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode = blend_mode(false);
+   key.blend.rt[1].colormask = 0xf;
+   key.blend.rt[1].mode = blend_mode(rt1_additive);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P two-RGBA8 MRT epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_1x_tile_samples(b.shader);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+   };
+   const bool ok = agx_compile_shader_nir(b.shader, &backend_key, part);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -151,6 +185,69 @@ main(void)
       return 1;
    }
    free(part.binary);
+
+   memset(&part, 0, sizeof(part));
+   if (!compile_rgba8_mrt_epilog(&actual_link,
+                                 PIPE_FORMAT_R8G8B8A8_UNORM, false, &part)) {
+      fprintf(stderr, "G17P two-RGBA8 MRT did not compile\n");
+      return 1;
+   }
+   static const uint8_t expected_rgba8_mrt[] = {
+      0x97,0x0c,0x54,0x00,0x02,0x10,0x2a,0x54,0x44,0xc2,
+      0x97,0x04,0x54,0x01,0x02,0x18,0x3a,0x54,0x44,0xc2,
+      0x97,0x04,0x54,0x02,0x02,0x20,0x4a,0x54,0x44,0xc2,
+      0x97,0x04,0x54,0x03,0x02,0x28,0x5a,0x54,0x44,0xc2,
+      0x87,0x02,0x54,0x00,0x06,0x00,
+      0x87,0x02,0x54,0x30,0x08,0x00,
+      0xe7,0x06,0x54,0x02,0x00,0x02,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x30,0x00,0x00,
+      0x87,0x02,0x54,0x0c,0x08,0x00,
+      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x0c,0x02,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t apple_transaction[] = {
+      0x87,0x02,0x54,0x00,0x06,0x00,
+      0x87,0x02,0x54,0x30,0x08,0x00,
+      0xe7,0x06,0x54,0x02,0x00,0x02,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x30,0x00,0x00,
+      0x87,0x02,0x54,0x0c,0x08,0x00,
+      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x0c,0x02,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   const uint8_t *rgba8_code =
+      (uint8_t *)part.binary + part.info.main_offset;
+   if (part.info.main_size != sizeof(expected_rgba8_mrt) ||
+       memcmp(rgba8_code, expected_rgba8_mrt,
+              sizeof(expected_rgba8_mrt)) ||
+       !part.info.agx3_colour_link.entry_emitted ||
+       !part.info.agx3_colour_link.straight_line ||
+       part.info.agx3_colour_link.entry_offset != 40 ||
+       memcmp(rgba8_code + 40, apple_transaction,
+              sizeof(apple_transaction))) {
+      fprintf(stderr, "G17P two-RGBA8 MRT transaction changed\n");
+      return 1;
+   }
+   free(part.binary);
+
+   const struct {
+      enum pipe_format rt1_format;
+      bool rt1_additive;
+   } rgba8_rejected[] = {
+      {PIPE_FORMAT_R16G16B16A16_FLOAT, false},
+      {PIPE_FORMAT_R8G8B8A8_UNORM, true},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(rgba8_rejected); ++i) {
+      memset(&part, 0xa5, sizeof(part));
+      if (compile_rgba8_mrt_epilog(&actual_link,
+                                   rgba8_rejected[i].rt1_format,
+                                   rgba8_rejected[i].rt1_additive, &part) ||
+          part.binary || part.info.binary_size != 0) {
+         fprintf(stderr, "unsupported G17P RGBA8 MRT shape encoded\n");
+         return 1;
+      }
+   }
 
    const struct {
       enum pipe_format rt1_format;
