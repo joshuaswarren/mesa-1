@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_ETC2_RGBA8_DECODE)
+#if defined(G17P_BC3_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC3_UNORM_BLOCK
+#define NAME "g17p-vulkan-bc3-decode"
+#elif defined(G17P_ETC2_RGBA8_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
@@ -184,10 +189,8 @@ decode_bc1(const uint8_t *block, uint8_t pixels[16][4])
 }
 
 static void
-put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
-          uint32_t indices)
+put_bc1_payload(uint8_t *out, uint16_t c0, uint16_t c1, uint32_t indices)
 {
-   uint8_t *out = data + block * BLOCK_BYTES;
    out[0] = c0;
    out[1] = c0 >> 8;
    out[2] = c1;
@@ -199,11 +202,34 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 }
 
 static void
+put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
+          uint32_t indices)
+{
+   uint8_t *out = data + block * BLOCK_BYTES;
+#if defined(G17P_BC3_DECODE)
+   static const uint8_t alpha[4] = {0x20, 0x60, 0xa0, 0xff};
+   out[0] = alpha[block];
+   out[1] = 0;
+   memset(out + 2, 0, 6);
+   out += 8;
+#endif
+   put_bc1_payload(out, c0, c1, indices);
+}
+
+static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
    uint8_t decoded[4][16][4];
-   for (unsigned block = 0; block < 4; ++block)
-      decode_bc1(blocks + block * BLOCK_BYTES, decoded[block]);
+   for (unsigned block = 0; block < 4; ++block) {
+      const uint8_t *encoded = blocks + block * BLOCK_BYTES;
+#if defined(G17P_BC3_DECODE)
+      decode_bc1(encoded + 8, decoded[block]);
+      for (unsigned texel = 0; texel < 16; ++texel)
+         decoded[block][texel][3] = encoded[0];
+#else
+      decode_bc1(encoded, decoded[block]);
+#endif
+   }
 
    for (unsigned y = 0; y < HEIGHT; ++y) {
       for (unsigned x = 0; x < WIDTH; ++x) {
@@ -619,10 +645,14 @@ main(void)
    put_block(blocks, 0, 0xf800, 0x0000, 0);
    put_block(blocks, 1, 0x07e0, 0x0000, 0);
    put_block(blocks, 2, 0x001f, 0x0000, 0);
+#if defined(G17P_BC3_DECODE)
+   put_block(blocks, 3, 0xffff, 0x0000, 0);
+#else
    /* Keep the exact oracle independent of the implementation's permitted
     * interpolation rounding: c0 <= c1 selects BC1 alpha mode and 0/1/3 use
     * only black, white and transparent black. */
    put_block(blocks, 3, 0x0000, 0xffff, UINT32_C(0x74747474));
+#endif
    uint8_t reference[PIXEL_BYTES];
    build_reference(blocks, reference);
 #endif
