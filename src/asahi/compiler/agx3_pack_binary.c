@@ -5494,15 +5494,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                fsel_wait = 0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (invalid ||
-                !agx3_alu_fcmp_minifloat_select_mixed(
+            if (!invalid &&
+                agx3_alu_fcmp_minifloat_select_mixed(
                    enc, I->dest[0].value, I->src[0].value,
                    I->src[1].value, selected, selected_immediate, hints,
                    I->fcond, dest_16, I->dest[0].cache, fsel_wait, bytes,
-                   &len) ||
-                !agx3_append(emission, bytes, len))
-               AGX3_REFUSE(I);
-            continue;
+                   &len)) {
+               if (!agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
          }
 
          /* Native scalar half comparison/select.  This is the general

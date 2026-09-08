@@ -853,6 +853,23 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, MinifloatSpecializationDeclinesOtherGroundedForms)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index compare = agx_register(8, AGX_SIZE_32);
+   agx_index selected = agx_register(14, AGX_SIZE_32);
+   compare.discard = selected.discard = true;
+
+   /* Cube lowering produces this zero-threshold GE form.  It is not the
+    * specialized Hyprland GE encoding, but the later general zero-select
+    * path has its own grounded representation and must get a chance at it. */
+   agx_fcmpsel_to(b, agx_register(8, AGX_SIZE_32), compare,
+                  agx_immediate(0), agx_immediate(0), selected,
+                  AGX_FCOND_GE);
+   agx_stop(b);
+   EXPECT_GT(pack(b).size(), 4u);
+}
+
 TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

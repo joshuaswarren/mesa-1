@@ -37,13 +37,13 @@
 
 static const uint8_t agx3_end[] = {0x0e, 0x00, 0x00, 0x00};
 
-/* Apple G17P's byte-exact colour-only tile protocol around the existing
- * normalized RGBA8 store. */
+/* Apple G17P's byte-exact immediate colour packing followed by the deferred
+ * colour-write fence and normalized RGBA8 store. */
 static const uint8_t g17p_flat_colour[] = {
+   0x97, 0x0c, 0x54, 0x00, 0x02, 0x20, 0x80, 0x50, 0x04, 0xc8,
+   0x97, 0x04, 0x54, 0x01, 0x02, 0x50, 0xc0, 0x50, 0x04, 0xc8,
    0x87, 0x02, 0x54, 0x00, 0x06, 0x00, /* entry gate */
    0x87, 0x02, 0x54, 0x0c, 0x08, 0x00, /* colour wait */
-   0x97, 0x04, 0x54, 0x00, 0x02, 0x20, 0x80, 0x50, 0x04, 0xc8,
-   0x97, 0x04, 0x54, 0x01, 0x02, 0x50, 0xc0, 0x50, 0x04, 0xc8,
    0xe7, 0x06, 0x54, 0x00, 0x00, 0x00, 0x01, 0x4e, 0x00, 0x00, 0x00, 0x00,
    0x07, 0x02, 0x54, 0x0c, 0x02, 0x00, /* final colour release */
    0x0e, 0x00, 0x00, 0x00,
@@ -2669,19 +2669,12 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-vkcube-combined-sampler", build_fs_texture, true, true},
    {"fs-descriptor-resource", build_fs_descriptor_resource, true},
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,
-    AGX_ABI_FUNI_ROOT + 4},
+    AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
    {"fs-transcendentals", build_fs_funops, true},
 
    /*
     * Deliberate refusals. Each one names a specific missing witness, not a
     * missing line of routing:
-    *
-    * - discard lowers to sample_mask. Apple's discard and [[sample_mask]]
-    *   shaders both go through movmsk under the class-1 pixwait/pixrel
-    *   bracket with a value staged by a copy (never cmsk, which only
-    *   alpha-to-coverage emits), and movmsk's operand roles plus the staging
-    *   ABI are not isolated. Mesa's mask+value operand split has no
-    *   witnessed encoding either way.
     *
     * - a depth write lowers to zs_emit, whose counterpart is depthf. depthf's
     *   enable bits are grounded, but it carries no value register: every
@@ -2691,7 +2684,7 @@ static const struct agx3_graphics_case cases[] = {
     *   traced contract (see agx3_pack_binary.c).
     *
     */
-   {"fs-discard", build_fs_discard, false},
+   {"fs-discard", build_fs_discard, true, .g17p_only = true},
    {"fs-depth-write", build_fs_depth, false},
 };
 
