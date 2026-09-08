@@ -163,8 +163,12 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (encoding != AGX_ISA_ENCODING_AGX3B)
       return false;
 
-   /* A 64-bit product is a register pair: four halves, 32-bit aligned. */
-   if ((d->dest & 1) || d->dest + (d->dest_64 ? 4u : 2u) > 256)
+   if (d->dest_16 && d->dest_64)
+      return false;
+   /* A half result occupies one half; wider products remain 32-bit aligned. */
+   if (d->dest_16 ? d->dest >= 256
+                  : ((d->dest & 1) ||
+                     d->dest + (d->dest_64 ? 4u : 2u) > 256))
       return false;
    if ((d->src_a_kill && d->src_a_cache) ||
        (d->multiplier_kill && d->multiplier_cache) ||
@@ -201,6 +205,13 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       return false;
    if (!d->multiplier_is_register && d->multiplier_16)
       return false;
+   /* Fresh G17P ushort witnesses ground the narrow immediate MAD only. */
+   if (d->dest_16 &&
+       (!d->src_a_16 || d->multiplier_is_register ||
+        !d->addend_is_immediate || d->no_addend ||
+        d->src_a_sign_extend || d->multiplier_sign_extend ||
+        d->src_c_sign_extend))
+      return false;
    if (d->wait_mask >= (1u << 6))
       return false;
 
@@ -216,7 +227,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     * exactly as Apple emits it and as every register-slot-B `imadd` in the
     * command-stream corpus does.
     */
-   const uint64_t dest_width = d->dest_64 ? 3 : 2;
+   const uint64_t dest_width = d->dest_16 ? 1 : (d->dest_64 ? 3 : 2);
    const uint64_t src_a_width = d->src_a_16 ? 1 : 2;
    const uint64_t mult_width = d->multiplier_16 ? 1 : 2;
    const struct agx3_field_kv baseline_imm[] = {

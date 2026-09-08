@@ -1069,6 +1069,32 @@ TEST_F(AGX3PackBinary, FaddOneMinusAbsMatchesNativeLiveForm)
  * the destination means zero-extend, its absence means sign-extend, which is
  * what the per-slot f28/f43 bits encode.
  */
+TEST_F(AGX3PackBinary, G17PNarrowImmediateMADMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index source = agx_register(3, AGX_SIZE_16);
+   source.discard = true;
+   agx_imad_to(b, agx_register(3, AGX_SIZE_16), source,
+               agx_immediate(11), agx_immediate(9), 0);
+   agx_stop(b);
+
+   static const uint8_t native[] = {
+      0x9f,0x00,0x54,0x03,0x02,0x06,0x2c,0x48,0x00,0x22,0x02,0x00,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_imad_to(bad, agx_register(0, AGX_SIZE_16),
+               agx_register(2, AGX_SIZE_16),
+               agx_register(4, AGX_SIZE_16), agx_immediate(3), 0);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, WideSignedMultiplyMatchesNativeWitness)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

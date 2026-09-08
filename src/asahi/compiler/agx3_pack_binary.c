@@ -5247,7 +5247,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs >= 3 &&
              I->shift == 0 && agx3_src_is_register(I->dest[0]) &&
              !I->dest[0].memory &&
-             (I->dest[0].size == AGX_SIZE_32 ||
+             (I->dest[0].size == AGX_SIZE_16 ||
+              I->dest[0].size == AGX_SIZE_32 ||
               I->dest[0].size == AGX_SIZE_64) &&
              agx_channels(I->dest[0]) == 1) {
             const agx_index a = I->src[0], m = I->src[1], c = I->src[2];
@@ -5261,6 +5262,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * carries `abs` and sign-extended otherwise, which maps onto the
              * per-slot sign-extend bits f28/f43/f58.
              */
+            const bool narrow = I->dest[0].size == AGX_SIZE_16;
             const bool wide = I->dest[0].size == AGX_SIZE_64;
 
             /* The multiplier is either an 8-bit immediate or a 32-bit
@@ -5288,14 +5290,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  (c.size == AGX_SIZE_16 && (c.abs || c.neg))));
             const bool addend_reg = !no_addend && !addend_imm;
 
-            if (agx3_src_is_register(a) && !a.memory && (wide || !a.abs) &&
-                !a.neg && a.size == AGX_SIZE_32 && agx_channels(a) == 1 &&
+            const bool a_ok = agx3_src_is_register(a) && !a.memory &&
+               agx_channels(a) == 1 &&
+               (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
+                       : ((wide || !a.abs) && !a.neg &&
+                          a.size == AGX_SIZE_32));
+
+            if (a_ok &&
                 (mult_imm || mult_reg) && addend_ok) {
                const struct agx3_imad_desc d = {
                   .dest = I->dest[0].value,
+                  .dest_16 = narrow,
                   .dest_64 = wide,
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
+                  .src_a_16 = narrow,
                   .src_a_sign_extend = wide && !a.abs,
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,

@@ -135,6 +135,8 @@ bool agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
  */
 struct agx3_imad_desc {
    uint16_t dest;      /* 32-bit register half, or the low half of a pair */
+   /* Native shaderInt16 arithmetic uses destination-width selector f10=1. */
+   bool dest_16;
    /*
     * 32x32 -> 64. The destination width selector f10 moves from 2 to 3 and the
     * destination becomes a register pair; each narrower operand is then widened

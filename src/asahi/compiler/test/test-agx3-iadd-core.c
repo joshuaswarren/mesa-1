@@ -334,6 +334,36 @@ test_native_imad_immediate_addend(void)
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    d.addend_immediate=5; d.src_c_kill=true;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+
+   /* applegpu-nt 32023.917, apple-g17p ushort MAD. The vector form pins
+    * odd-half operands plus both no-wait and slot-6 wait encodings. */
+   static const struct {
+      struct agx3_imad_desc d;
+      uint8_t bytes[12];
+   } narrow[] = {
+      {{.dest=2, .dest_16=true, .src_a=0, .src_a_16=true,
+        .multiplier=7, .addend_is_immediate=true, .addend_immediate=3,
+        .wait_mask=1},
+       {0x9f,0x10,0x54,0x02,0x02,0x00,0x1c,0x18,0x00,0x20,0x02,0x00}},
+      {{.dest=2, .dest_16=true, .src_a=2, .src_a_16=true,
+        .src_a_kill=true, .multiplier=7, .addend_is_immediate=true,
+        .addend_immediate=3, .wait_mask=32},
+       {0x9f,0x00,0x56,0x02,0x02,0x04,0x1c,0x18,0x00,0x22,0x02,0x00}},
+      {{.dest=3, .dest_16=true, .src_a=3, .src_a_16=true,
+        .src_a_kill=true, .multiplier=11, .addend_is_immediate=true,
+        .addend_immediate=9},
+       {0x9f,0x00,0x54,0x03,0x02,0x06,0x2c,0x48,0x00,0x22,0x02,0x00}},
+   };
+   for (unsigned i=0; i<sizeof(narrow)/sizeof(narrow[0]); ++i) {
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow[i].d,out,&len));
+      CHECK(len==12 && !memcmp(out,narrow[i].bytes,12));
+   }
+   struct agx3_imad_desc narrow_bad = narrow[0].d;
+   narrow_bad.multiplier_is_register = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[0].d;
+   narrow_bad.dest_64 = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
 }
 
 int
