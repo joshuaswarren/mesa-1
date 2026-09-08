@@ -194,10 +194,12 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       return false;
 
    if (d->compare_immediate) {
-      /* Fresh applegpu-nt G17P witnesses use this exact form for
-       * simd_ballot(tid < 5/16). Keep every unwitnessed axis closed. */
+      /* Fresh applegpu-nt G17P witnesses use this exact form for unsigned
+       * equality/less-than/greater-than against immediates.  The latter is
+       * how Apple canonicalizes >= N (as > N - 1). */
       if (enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
-          d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->condition != 1 ||
+          d->type != AGX3_SUBGROUP_BALLOT_INTEGER ||
+          (d->condition != 1 && d->condition != 2 && d->condition != 4) ||
           d->invert)
          return false;
    } else if (d->type == AGX3_SUBGROUP_BALLOT_INTEGER) {

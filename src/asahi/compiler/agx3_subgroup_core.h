@@ -115,8 +115,8 @@ bool agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
                                   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
                                   uint8_t *length);
 
-/* The recovered ballot subset compares a register against zero or, for the
- * native G17P SIMD unsigned-less-than form, a 16-bit immediate. */
+/* The recovered ballot subset compares a register against zero or, on G17P,
+ * performs an unsigned ==, <, or > comparison against a 16-bit immediate. */
 bool agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                                  const struct agx3_subgroup_ballot_desc *desc,
                                  uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],

@@ -2245,6 +2245,8 @@ TEST_F(AGX3PackBinary, BallotWaitsForDeviceLoad)
       .type = AGX3_SUBGROUP_BALLOT_INTEGER,
       .dest = 6,
       .src = 4,
+      .compare_immediate = true,
+      .src_live = true,
       .condition = 4,
    };
    ASSERT_TRUE(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &ballot,
@@ -2262,26 +2264,56 @@ TEST_F(AGX3PackBinary, BallotWaitsForDeviceLoad)
 
 TEST_F(AGX3PackBinary, G17PBallotUnsignedImmediate)
 {
-   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
-   agx_index source = agx_register(2, AGX_SIZE_32);
-   source.cache = true;
-   agx_icmp_ballot_to(b, agx_register(0, AGX_SIZE_32), source,
-                      agx_immediate(16), AGX_ICOND_ULT, false);
-   agx_stop(b);
-
-   static const uint8_t native[] = {
+   static const uint8_t native_lt16[] = {
       0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x40, 0x18, 0x22, 0x0c,
    };
-   std::vector<uint8_t> want(std::begin(native), std::end(native));
-   struct agx3_encoded_end end;
-   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
-   append(want, end.bytes, end.length);
-   EXPECT_EQ(pack(b), want);
+   static const uint8_t native_gt15[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x3c, 0x18, 0x22, 0x0a,
+   };
+   static const uint8_t native_eq0[] = {
+      0x17, 0x17, 0x54, 0x00, 0x02, 0x04, 0x00, 0x18, 0x22, 0x02,
+   };
+
+   auto check = [this](enum agx_icond cond, unsigned imm, bool invert,
+                       const uint8_t *native, size_t native_size) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index source = agx_register(2, AGX_SIZE_32);
+      source.cache = true;
+      agx_icmp_ballot_to(b, agx_register(0, AGX_SIZE_32), source,
+                         agx_immediate(imm), cond, invert);
+      agx_stop(b);
+
+      std::vector<uint8_t> want(native, native + native_size);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   };
+
+   check(AGX_ICOND_ULT, 16, false, native_lt16, sizeof(native_lt16));
+   check(AGX_ICOND_UGT, 15, false, native_gt15, sizeof(native_gt15));
+   /* !(x < 16) is canonicalized to Apple's byte-exact x > 15 form. */
+   check(AGX_ICOND_ULT, 16, true, native_gt15, sizeof(native_gt15));
+   check(AGX_ICOND_UEQ, 0, false, native_eq0, sizeof(native_eq0));
 
    agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
    agx_icmp_quad_ballot_to(bad, agx_register(0, AGX_SIZE_32),
                            agx_register(2, AGX_SIZE_32), agx_immediate(16),
                            AGX_ICOND_ULT, false);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+
+   bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_icmp_ballot_to(bad, agx_register(0, AGX_SIZE_32),
+                      agx_register(2, AGX_SIZE_32), agx_immediate(7),
+                      AGX_ICOND_SLT, false);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+
+   bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_icmp_ballot_to(bad, agx_register(0, AGX_SIZE_32),
+                      agx_register(2, AGX_SIZE_32), agx_immediate(0),
+                      AGX_ICOND_ULT, true);
    agx_stop(bad);
    pack(bad, /*expect_ok=*/false);
 }

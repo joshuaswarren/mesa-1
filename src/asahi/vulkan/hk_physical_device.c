@@ -1210,8 +1210,8 @@ hk_get_device_properties(const struct agx_device *dev,
        * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
        *
        *   BASIC             g22_subgroup_basic          encodes
-       *   VOTE              g21_subgroup_vote           REFUSED, icmp_ballot
-       *   BALLOT            g05_subgroup_ballot         REFUSED, icmp_ballot
+       *   VOTE              g21_subgroup_vote           encodes
+       *   BALLOT            g05_subgroup_ballot         encodes
        *   ARITHMETIC        g06_subgroup_arith          encodes
        *   SHUFFLE           g07_subgroup_shuffle        encodes
        *   SHUFFLE_RELATIVE  g25_subgroup_shuffle_rel    encodes
@@ -1219,18 +1219,11 @@ hk_get_device_properties(const struct agx_device *dev,
        *   QUAD              g08_subgroup_quad           REFUSED, quad_shuffle_xor
        *   ROTATE/CLUSTERED  g24_subgroup_rotate         encodes
        *
-       * subgroupAll/subgroupAny lower onto the same icmp_ballot as
-       * subgroupBallot, so VOTE falls with BALLOT.  Neither icmp_ballot nor
-       * quad_shuffle_xor has a grounded AGX3 encoding, so a shader using one
-       * is refused whole at vkCreateComputePipelines.
-       *
-       * Translation layers read this mask and emit a scalar fallback for a
-       * missing bit, so removing the three we cannot encode turns a
-       * mid-run pipeline failure into working, slower code. */
+       * The remaining missing quad_shuffle_xor encoding means only QUAD must
+       * stay hidden. Translation layers read this mask and emit a scalar
+       * fallback for the missing operation. */
       properties->subgroupSupportedOperations &=
-         ~(VkSubgroupFeatureFlags)(VK_SUBGROUP_FEATURE_VOTE_BIT |
-                                   VK_SUBGROUP_FEATURE_BALLOT_BIT |
-                                   VK_SUBGROUP_FEATURE_QUAD_BIT);
+         ~(VkSubgroupFeatureFlags)VK_SUBGROUP_FEATURE_QUAD_BIT;
       properties->subgroupQuadOperationsInAllStages = false;
       properties->advancedBlendMaxColorAttachments = 0;
       properties->advancedBlendIndependentBlend = false;
@@ -1486,16 +1479,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * predicate kernel that is not yet available on this path. */
       supported_extensions.KHR_draw_indirect_count = false;
 
-      /* These three exist only to expose subgroup operations that the AGX3
-       * packer has no grounded encoding for -- icmp_ballot for ballot and vote,
-       * quad_shuffle_xor for the quad group.  A shader using any of them is
-       * refused whole at pipeline creation, so advertising the extension turns a
-       * capability query the application would have handled into a failure it
-       * cannot.  Kept together with the subgroupSupportedOperations mask in
-       * hk_get_device_properties(), which carries the per-operation
-       * measurements. */
-      supported_extensions.EXT_shader_subgroup_ballot = false;
-      supported_extensions.EXT_shader_subgroup_vote = false;
+      /* quad_shuffle_xor is the last subgroup operation without a grounded
+       * AGX3 encoding.  Keep this paired with the QUAD mask in the device
+       * properties above. */
       supported_extensions.KHR_shader_quad_control = false;
    }
 

@@ -2662,26 +2662,66 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
        I->src[1].cache || I->src[1].discard || I->src[1].kill)
       return false;
 
-   const bool compare_immediate = I->src[1].value != 0;
+   bool compare_immediate = false;
+   uint32_t compare_value = I->src[1].value;
    uint8_t condition;
    if (is_float) {
-      if (compare_immediate)
+      if (compare_value != 0)
          return false;
       condition = I->fcond;
    } else {
       switch (I->icond) {
       case AGX_ICOND_UEQ:
-      case AGX_ICOND_SEQ: condition = 4; break;
-      case AGX_ICOND_SLT: condition = 5; break;
-      case AGX_ICOND_SGT: condition = 6; break;
-      case AGX_ICOND_ULT:
-         if (!compare_immediate)
+         /* Apple's immediate equality form is grounded for the direct
+          * predicate.  Keep != 0 on the older register-zero form, whose
+          * inverted encoding is independently witnessed. */
+         compare_immediate = !I->invert_cond;
+         condition = 4;
+         break;
+      case AGX_ICOND_SEQ:
+         if (compare_value != 0)
             return false;
-         condition = 1;
+         condition = 4;
+         break;
+      case AGX_ICOND_SLT:
+         if (compare_value != 0)
+            return false;
+         condition = 5;
+         break;
+      case AGX_ICOND_SGT:
+         if (compare_value != 0)
+            return false;
+         condition = 6;
+         break;
+      case AGX_ICOND_ULT:
+         compare_immediate = true;
+         if (I->invert_cond) {
+            /* !(x < N) is x > N - 1.  Apple emits this canonical native
+             * form for subgroup votes, and the native instruction has no
+             * need for an invert bit. */
+            if (compare_value == 0)
+               return false;
+            compare_value--;
+            condition = AGX_ICOND_UGT;
+         } else {
+            condition = AGX_ICOND_ULT;
+         }
+         break;
+      case AGX_ICOND_UGT:
+         compare_immediate = true;
+         if (I->invert_cond) {
+            /* !(x > N) is x < N + 1. */
+            if (compare_value == UINT16_MAX)
+               return false;
+            compare_value++;
+            condition = AGX_ICOND_ULT;
+         } else {
+            condition = AGX_ICOND_UGT;
+         }
          break;
       default: return false;
       }
-      if (compare_immediate && I->icond != AGX_ICOND_ULT)
+      if (compare_immediate && compare_value > UINT16_MAX)
          return false;
    }
 
@@ -2700,11 +2740,11 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       .dest = I->dest[0].value,
       .src = I->src[0].value,
       .compare_immediate = compare_immediate,
-      .compare_value = I->src[1].value,
+      .compare_value = compare_value,
       .dest_cache = I->dest[0].cache,
       .src_live = !I->src[0].discard,
       .condition = condition,
-      .invert = I->invert_cond,
+      .invert = compare_immediate ? false : I->invert_cond,
       .wait_mask = 0,
    };
    uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;

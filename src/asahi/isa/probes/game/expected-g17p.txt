@@ -10,7 +10,7 @@
 # advertised: maxFramebufferLayers=1 maxColorAttachments=8
 # advertised: multiDrawIndirect=1 drawIndirectFirstInstance=1 drawIndirectCount=0 timelineSemaphore=1 synchronization2=1
 # advertised: robustBufferAccess=1 robustImageAccess=0 bufferDeviceAddressCaptureReplay=1 graphicsPipelineLibrary(ext)
-# advertised: subgroupSize=32 subgroupOps = BASIC ARITHMETIC SHUFFLE SHUFFLE_RELATIVE CLUSTERED ROTATE ROTATE_CLUSTERED
+# advertised: subgroupSize=32 subgroupOps = BASIC VOTE ARITHMETIC BALLOT SHUFFLE SHUFFLE_RELATIVE CLUSTERED ROTATE ROTATE_CLUSTERED
 g00_control                  COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g01_int64                    COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g02_bda                      COMPILE=ok       RECORD=ok       (compile 0, record 0)
@@ -32,7 +32,7 @@ g17_int64_add                COMPILE=ok       RECORD=ok       (compile 0, record
 g18_int64_mul                COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g19_int16_add                COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g20_float16_arith            COMPILE=ok       RECORD=ok       (compile 0, record 0)
-g21_subgroup_vote            COMPILE=REFUSED  RECORD=-        (compile -8, record 0)
+g21_subgroup_vote            COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g22_subgroup_basic           COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g23_subgroup_clustered       COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g24_subgroup_rotate          COMPILE=ok       RECORD=ok       (compile 0, record 0)
@@ -53,7 +53,7 @@ g29_int64_sub_const          COMPILE=ok       RECORD=ok       (compile 0, record
 # advertised: maxFramebufferLayers=1 maxColorAttachments=8
 # advertised: multiDrawIndirect=1 drawIndirectFirstInstance=1 drawIndirectCount=0 timelineSemaphore=1 synchronization2=1
 # advertised: robustBufferAccess=1 robustImageAccess=0 bufferDeviceAddressCaptureReplay=1 graphicsPipelineLibrary(ext)
-# advertised: subgroupSize=32 subgroupOps = BASIC ARITHMETIC SHUFFLE SHUFFLE_RELATIVE CLUSTERED ROTATE ROTATE_CLUSTERED
+# advertised: subgroupSize=32 subgroupOps = BASIC VOTE ARITHMETIC BALLOT SHUFFLE SHUFFLE_RELATIVE CLUSTERED ROTATE ROTATE_CLUSTERED
 g00_control                  COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g01_int64                    COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g02_bda                      COMPILE=ok       RECORD=ok       (compile 0, record 0)
@@ -75,7 +75,7 @@ g17_int64_add                COMPILE=ok       RECORD=ok       (compile 0, record
 g18_int64_mul                COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g19_int16_add                COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g20_float16_arith            COMPILE=ok       RECORD=ok       (compile 0, record 0)
-g21_subgroup_vote            COMPILE=REFUSED  RECORD=-        (compile -8, record 0)
+g21_subgroup_vote            COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g22_subgroup_basic           COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g23_subgroup_clustered       COMPILE=ok       RECORD=ok       (compile 0, record 0)
 g24_subgroup_rotate          COMPILE=ok       RECORD=ok       (compile 0, record 0)

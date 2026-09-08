@@ -382,6 +382,81 @@ check_device_ballot_compute(enum agx_isa_encoding encoding)
 }
 
 static bool
+check_g17p_subgroup_vote_compute(void)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P subgroup vote");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *lane = nir_load_subgroup_invocation(&b);
+   nir_def *ge32 = nir_uge(&b, lane, nir_imm_int(&b, 32));
+   nir_def *eq0 = nir_ieq_imm(&b, lane, 0);
+   nir_def *all_mask = nir_ballot(&b, 1, 32, ge32);
+   nir_def *any_mask = nir_ballot(&b, 1, 32, eq0);
+   nir_store_global(&b, all_mask, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   nir_store_global(&b, any_mask, nir_imm_int64(&b, 0x2004),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+      fprintf(stderr, "G17P subgroup-vote shader was rejected\n");
+      ralloc_free(b.shader);
+      return false;
+   }
+
+   const bool valid =
+      part.binary != NULL && part.info.binary_size > sizeof(end) &&
+      part.info.main_offset == 0 &&
+      part.info.main_size == part.info.binary_size &&
+      part.info.stats.instrs >= 5 &&
+      memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
+             end, sizeof(end)) == 0;
+   if (!valid)
+      fprintf(stderr, "G17P subgroup-vote metadata/binary mismatch\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
+check_g17p_signed_immediate_ballot_rejected(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "unwitnessed G17P signed-immediate ballot");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *lane = nir_load_subgroup_invocation(&b);
+   nir_def *mask = nir_ballot(&b, 1, 32,
+                              nir_ilt(&b, lane, nir_imm_int(&b, 7)));
+   nir_store_global(&b, mask, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+
+   if (compiled)
+      fprintf(stderr, "unwitnessed signed-immediate ballot was accepted\n");
+   return !compiled;
+}
+
+static bool
 check_device_shuffle_compute(enum agx_isa_encoding encoding)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
@@ -1684,6 +1759,12 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--subgroup-vote-only")) {
+      const bool valid = check_g17p_subgroup_vote_compute() &&
+                         check_g17p_signed_immediate_ballot_rejected();
+      fprintf(stderr, "G17P subgroup vote: %s\n", valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--device-shuffle-only")) {
       const bool valid =
          check_device_shuffle_compute(AGX_ISA_ENCODING_AGX3B) &&
@@ -1802,6 +1883,9 @@ main(int argc, char **argv)
    if (!check_half_ceil_compute())
       return 1;
    if (!check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2))
+      return 1;
+   if (!check_g17p_subgroup_vote_compute() ||
+       !check_g17p_signed_immediate_ballot_rejected())
       return 1;
 
    for (unsigned i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {
