@@ -547,10 +547,12 @@ check_program_records(void)
    };
    static const uint8_t g17p_pixrel[][6] = {
       {0x07, 0x02, 0x54, 0xf3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xf2, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0x00, 0x02, 0x00},
    };
 
-   for (unsigned i = 0; i < 2; ++i) {
+   for (unsigned i = 0; i < sizeof(g17p_pixrel) / sizeof(g17p_pixrel[0]);
+        ++i) {
       struct agx_ioto_program_record record;
       size_t consumed = 99;
       CHECK(agx_ioto_decode_program_record(

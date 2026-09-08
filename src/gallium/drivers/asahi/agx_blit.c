@@ -527,6 +527,48 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
 {
    struct agx_context *ctx = agx_context(pipe);
 
+   /* G17P does not have a grounded fragment ABI for exporting depth and
+    * stencil from one shader.  That is not a hardware-resource limitation:
+    * u_transfer_helper represents every packed API Z/S image as a native
+    * depth image plus a separate native S8 image.
+    *
+    * Lower a packed Z/S blit at that representation boundary.  Depth keeps
+    * using the depth blitter, whose G17P depthf sequence is Apple-witnessed.
+    * Reinterpret the physical S8 images as R8_UINT and use the ordinary
+    * integer-colour blitter, avoiding an unwitnessed stencilf staging
+    * contract.  R8_UINT and S8_UINT have the same one-byte AIL layout and the
+    * same integer conversion, so this is a lossless plane copy, including
+    * scaling and array-layer selection performed by u_blitter.
+    */
+   if (agx_chip_command_stream_generation(agx_device(pipe->screen)->chip) !=
+          AGX_CS_GENERATION_AGX2 &&
+       (info->mask & PIPE_MASK_S) &&
+       !(info->mask & ~PIPE_MASK_ZS) &&
+       util_format_is_depth_and_stencil(info->src.format) &&
+       util_format_is_depth_and_stencil(info->dst.format)) {
+      struct agx_resource *src = agx_resource(info->src.resource);
+      struct agx_resource *dst = agx_resource(info->dst.resource);
+
+      if (src->separate_stencil && dst->separate_stencil) {
+         if (info->mask & PIPE_MASK_Z) {
+            struct pipe_blit_info depth = *info;
+            depth.src.format = src->layout.format;
+            depth.dst.format = dst->layout.format;
+            depth.mask = PIPE_MASK_Z;
+            agx_blit(pipe, &depth);
+         }
+
+         struct pipe_blit_info stencil = *info;
+         stencil.src.resource = &src->separate_stencil->base;
+         stencil.src.format = PIPE_FORMAT_R8_UINT;
+         stencil.dst.resource = &dst->separate_stencil->base;
+         stencil.dst.format = PIPE_FORMAT_R8_UINT;
+         stencil.mask = PIPE_MASK_R;
+         agx_blit(pipe, &stencil);
+         return;
+      }
+   }
+
    if (info->render_condition_enable && !agx_render_condition_check(ctx))
       return;
 

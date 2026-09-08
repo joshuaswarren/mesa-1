@@ -12,6 +12,53 @@ gl_resources = executable(
   build_by_default : false,
 )
 
+gl_depth_texture = executable(
+  'asahi-g17p-gl-depth-texture',
+  files('test-g17p-gl-depth-texture.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-depth-texture-software-control',
+  gl_depth_texture,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+run_target(
+  'asahi-g17p-gl-depth-texture-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_depth_texture,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1'],
+)
+
+test(
+  'asahi-g17p-gl-depth-texture-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_depth_texture,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1'],
+  suite : ['asahi'],
+)
+
 gl_state_matrix = executable(
   'asahi-g17p-gl-state-matrix',
   files('test-g17p-gl-state-matrix.c'),

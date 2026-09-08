@@ -247,6 +247,32 @@ check_multi_viewport_coverage(void)
 }
 
 static void __attribute__((destructor))
+check_depth_texture_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE"))
+      return;
+
+   /* One API depth draw, the lowered depth and physical S8 plane blits, and
+    * one colour draw which consumes raw depth, shadow depth, and the copied
+    * stencil value.  A refused combined Z/S epilog produced only two draws;
+    * silently dropping either lowered plane produces three. */
+   if (matrix_stats.draws != 4 || matrix_stats.state_updates != 4 ||
+       !matrix_stats.depth_enabled || !matrix_stats.stencil_enabled ||
+       !matrix_stats.varying_fs) {
+      fprintf(stderr,
+              "shim: incomplete G17P depth-texture coverage: draws=%u "
+              "state=%u depth=%u stencil=%u varying=%u\n",
+              matrix_stats.draws, matrix_stats.state_updates,
+              matrix_stats.depth_enabled, matrix_stats.stencil_enabled,
+              matrix_stats.varying_fs);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P depth/stencil render/blit/sample coverage\n");
+}
+
+static void __attribute__((destructor))
 check_compute_coverage(void)
 {
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE"))
