@@ -343,7 +343,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          /* LOD */
          if (I->op == AGX_OPCODE_TEXTURE_LOAD &&
              ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-             I->lod_mode == AGX_LOD_MODE_LOD_MIN)
+             I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+             I->src[s].type != AGX_INDEX_IMMEDIATE)
              return 2;
 
          if (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
