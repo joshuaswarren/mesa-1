@@ -1989,7 +1989,11 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    /* We need to lower binding tables before calling agx_preprocess_nir, since
     * that does texture lowering that needs to know the binding model.
     */
-   NIR_PASS(_, nir, agx_nir_lower_bindings, &so->uses_bindless_samplers);
+   struct agx_lower_bindings_options binding_options = {
+      .uses_bindless_samplers = &so->uses_bindless_samplers,
+      .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
+   };
+   NIR_PASS(_, nir, agx_nir_lower_bindings, &binding_options);
 
    /* We need to do some I/O lowering before lowering textures */
    so->info.nr_bindful_textures = BITSET_LAST_BIT(nir->info.textures_used);

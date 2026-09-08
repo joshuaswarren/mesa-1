@@ -39,9 +39,17 @@ lower_sampler(nir_builder *b, nir_tex_instr *tex)
 static bool
 lower(nir_builder *b, nir_instr *instr, void *data)
 {
-   bool *uses_bindless_samplers = data;
+   struct agx_lower_bindings_options *options = data;
+   bool *uses_bindless_samplers = options->uses_bindless_samplers;
    bool progress = false;
    bool force_bindless = agx_nir_needs_texture_crawl(instr);
+   if (options->g17p_plain_txf_crawl && instr->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(instr);
+      force_bindless |= tex->op == nir_texop_txf &&
+                        tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+                        !tex->is_array &&
+                        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP);
+   }
    b->cursor = nir_before_instr(instr);
 
    if (instr->type == nir_instr_type_intrinsic) {
@@ -143,7 +151,8 @@ lower(nir_builder *b, nir_instr *instr, void *data)
 }
 
 bool
-agx_nir_lower_bindings(nir_shader *shader, bool *uses_bindless_samplers)
+agx_nir_lower_bindings(nir_shader *shader,
+                       struct agx_lower_bindings_options *options)
 {
    /* First lower index to offset so we can lower more naturally */
    bool progress = nir_lower_tex(
@@ -155,7 +164,7 @@ agx_nir_lower_bindings(nir_shader *shader, bool *uses_bindless_samplers)
    progress |= nir_opt_constant_folding(shader);
 
    progress |= nir_shader_instructions_pass(
-      shader, lower, nir_metadata_control_flow, uses_bindless_samplers);
+      shader, lower, nir_metadata_control_flow, options);
    return progress;
 }
 

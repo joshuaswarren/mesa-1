@@ -100,10 +100,8 @@ make_webgl2_compiler_program(void)
 {
    static const char *vs_source =
       "#version 300 es\n"
-      "void main() {\n"
-      "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
-      "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
-      "}\n";
+      "layout(location=0) in vec4 a_pos;\n"
+      "void main() { gl_Position = a_pos; }\n";
    static const char *fs_source =
       "#version 300 es\n"
       "precision highp float;\n"
@@ -113,10 +111,10 @@ make_webgl2_compiler_program(void)
       "out vec4 colour;\n"
       "void main() {\n"
       "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
-      "  uint x = bitfieldReverse(texelFetch(words, p, 0).x);\n"
-      "  int bits = bitCount(x) + findMSB(x | 1u);\n"
+      "  uint x = texelFetch(words, p, 0).x;\n"
+      "  uint folded = (x >> 16u) ^ (x & 65535u);\n"
       "  float shadow = texture(depthMap, vec3(gl_FragCoord.xy / 64.0, .5));\n"
-      "  colour = vec4(float(bits) / 64.0 + shadow);\n"
+      "  colour = vec4(float(folded & 255u) / 255.0 + shadow);\n"
       "}\n";
 
    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
