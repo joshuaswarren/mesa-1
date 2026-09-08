@@ -391,6 +391,7 @@ uint16_t agx_sampler_heap_add(struct agx_device *dev,
 
 struct agx_encoder {
    struct agx_bo *bo;
+   uint64_t g17p_vdm_alias;
    uint8_t *current;
    uint8_t *end;
 };

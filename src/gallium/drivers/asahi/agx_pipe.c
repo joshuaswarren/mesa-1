@@ -1614,7 +1614,9 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
    agx_batch_add_bo(batch, batch->vdm.bo);
 
    agx_cmdbuf(
-      dev, cmdbuf, &batch->pool, batch, &batch->key, batch->vdm.bo->va->addr,
+      dev, cmdbuf, &batch->pool, batch, &batch->key,
+      batch->vdm.g17p_vdm_alias ? batch->vdm.g17p_vdm_alias
+                                : batch->vdm.bo->va->addr,
       scissor, zbias, agx_get_occlusion_heap(batch), pipeline_background,
       pipeline_background_partial, pipeline_store, clear_pipeline_textures,
       batch->clear_depth, batch->clear_stencil, &batch->tilebuffer_layout);

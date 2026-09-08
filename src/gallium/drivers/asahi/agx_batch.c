@@ -6,6 +6,7 @@
 
 #include <xf86drm.h>
 #include "asahi/lib/agx_device_virtio.h"
+#include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/decode.h"
 #include "util/bitset.h"
 #include "util/u_dynarray.h"
@@ -85,6 +86,65 @@ agx_encoder_allocate(struct agx_batch *batch, struct agx_device *dev)
    return (struct agx_encoder){.bo = bo, .current = map, .end = map + bo->size};
 }
 
+static void agx_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias,
+                                    uint64_t size);
+
+static uint64_t
+agx_g17p_vdm_alias_alloc(struct agx_device *dev, uint64_t size)
+{
+   simple_mtx_lock(&dev->vma_lock);
+   const uint64_t alias = util_vma_heap_alloc(
+      &dev->g17p_vdm_alias_heap, size, AIL_PAGESIZE);
+   simple_mtx_unlock(&dev->vma_lock);
+
+   if (agx_g17p_vdm_alias_range_valid(alias, size))
+      return alias;
+
+   if (alias)
+      agx_g17p_vdm_alias_free(dev, alias, size);
+   return 0;
+}
+
+static void
+agx_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias, uint64_t size)
+{
+   simple_mtx_lock(&dev->vma_lock);
+   util_vma_heap_free(&dev->g17p_vdm_alias_heap, alias, size);
+   simple_mtx_unlock(&dev->vma_lock);
+}
+
+static void
+agx_encoder_bind_vdm_alias(struct agx_device *dev, struct agx_encoder *encoder)
+{
+   if (dev->chip != AGX_CHIP_G17P)
+      return;
+
+   const uint64_t alias =
+      agx_g17p_vdm_alias_alloc(dev, encoder->bo->size);
+   const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
+   const int ret = alias ? agx_bo_bind(dev, encoder->bo, alias,
+                                      encoder->bo->size, 0, flags)
+                         : -1;
+   assert(alias && ret == 0);
+   if (!alias || ret)
+      return;
+
+   encoder->g17p_vdm_alias = alias;
+}
+
+static void
+agx_encoder_cleanup(struct agx_device *dev, struct agx_encoder *encoder)
+{
+   if (encoder->g17p_vdm_alias) {
+      agx_bo_bind(dev, NULL, encoder->g17p_vdm_alias, encoder->bo->size, 0,
+                  DRM_ASAHI_BIND_UNBIND);
+      agx_g17p_vdm_alias_free(dev, encoder->g17p_vdm_alias,
+                              encoder->bo->size);
+   }
+
+   agx_bo_unreference(dev, encoder->bo);
+}
+
 static void
 agx_batch_init(struct agx_context *ctx,
                const struct pipe_framebuffer_state *key,
@@ -117,6 +177,7 @@ agx_batch_init(struct agx_context *ctx,
       memset(&batch->vdm, 0, sizeof(batch->vdm));
    } else {
       batch->vdm = agx_encoder_allocate(batch, dev);
+      agx_encoder_bind_vdm_alias(dev, &batch->vdm);
       memset(&batch->cdm, 0, sizeof(batch->cdm));
    }
 
@@ -257,8 +318,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    }
 
    agx_bo_unreference(dev, screen->rodata);
-   agx_bo_unreference(dev, batch->vdm.bo);
-   agx_bo_unreference(dev, batch->cdm.bo);
+   agx_encoder_cleanup(dev, &batch->vdm);
+   agx_encoder_cleanup(dev, &batch->cdm);
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
 
