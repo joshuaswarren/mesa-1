@@ -1606,6 +1606,16 @@ test_cube_coordinate_stage(void)
    }
    CHECK(agx3_tex_cube_cem_rcp(AGX_ISA_ENCODING_AGX3B, bytes, &len));
    CHECK(len == sizeof(rcp) && !memcmp(bytes, rcp, len));
+   static const uint8_t finalize[2][12] = {
+      {0x09,0x0f,0x2e,0x81,0x23,0xa0,0x42,0x00,0x00,0x02,0x02,0x00},
+      {0x19,0x05,0x3e,0x01,0x23,0xa0,0x42,0x00,0x00,0x02,0x62,0x00},
+   };
+   for (unsigned component = 0; component < 2; ++component) {
+      CHECK(agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3B, component,
+                                       component == 1, bytes, &len));
+      CHECK(len == sizeof(finalize[component]) &&
+            !memcmp(bytes, finalize[component], len));
+   }
    CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
@@ -1621,6 +1631,12 @@ test_cube_coordinate_stage(void)
                                  true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 128, 6, 20, 0,
                                  false, bytes, &len));
+   CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3C, 0, false,
+                                     bytes, &len));
+   CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3B, 0, true,
+                                     bytes, &len));
+   CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3B, 2, false,
+                                     bytes, &len));
    return 0;
 }
 

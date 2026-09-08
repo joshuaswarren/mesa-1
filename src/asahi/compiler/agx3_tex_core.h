@@ -305,6 +305,12 @@ bool agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x,
 bool agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* Finish CEM's two normalized coordinates. `component` is 0 then 1. */
+bool agx3_tex_cube_cem_finalize(enum agx_isa_encoding enc, uint8_t component,
+                                bool discard,
+                                uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                uint8_t *len);
+
 /* Publish the face calculated by CEM for a native cube sample. */
 bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            uint8_t slot, uint16_t wait_mask,

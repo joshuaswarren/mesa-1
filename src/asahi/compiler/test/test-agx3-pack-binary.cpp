@@ -7608,6 +7608,11 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
          append(want, bytes, len);
       }
    }
+   for (unsigned component = 0; component < 2; ++component) {
+      ASSERT_TRUE(agx3_tex_cube_cem_finalize(enc, component,
+                                             component == 1, bytes, &len));
+      append(want, bytes, len);
+   }
    ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                     bytes, &len));
    append(want, bytes, len);
@@ -7671,6 +7676,12 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
             ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
             append(want, bytes, len);
          }
+      }
+      for (unsigned component = 0; component < 2; ++component) {
+         ASSERT_TRUE(agx3_tex_cube_cem_finalize(enc, component,
+                                                component == 1, bytes,
+                                                &len));
+         append(want, bytes, len);
       }
       ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                         bytes, &len));

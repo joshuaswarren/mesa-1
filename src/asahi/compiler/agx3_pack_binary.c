@@ -1363,6 +1363,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               !agx3_append(emission, bytes, len)))
             return false;
       }
+
+      for (unsigned component = 0; component < 2; ++component) {
+         if (!agx3_tex_cube_cem_finalize(enc, component,
+                                         component == 1, bytes, &len) ||
+             !agx3_append(emission, bytes, len))
+            return false;
+      }
    } else {
       if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
                                     wait_mask,

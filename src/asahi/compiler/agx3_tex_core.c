@@ -887,6 +887,42 @@ agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
    return true;
 }
 
+/* CEM and its reciprocal leave the signed face coordinates in private
+ * operands. Apple's native cube shaders finish those coordinates with these
+ * two fixed f32fma records, writing sampler coordinate bank 0. The second
+ * record's f107 is the last-use bit; the common interpolated-coordinate path
+ * sets it because SMP is the sole remaining consumer.
+ *
+ *   component 0  090f2e8123a0420000020200
+ *   component 1  19053e0123a0420000026200  (discard)
+ */
+bool
+agx3_tex_cube_cem_finalize(enum agx_isa_encoding enc, uint8_t component,
+                           bool discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   static const uint8_t native[2][12] = {
+      {0x09, 0x0f, 0x2e, 0x81, 0x23, 0xa0,
+       0x42, 0x00, 0x00, 0x02, 0x02, 0x00},
+      {0x19, 0x05, 0x3e, 0x01, 0x23, 0xa0,
+       0x42, 0x00, 0x00, 0x02, 0x02, 0x00},
+   };
+
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || component > 1 ||
+       (component == 0 && discard))
+      return false;
+
+   memcpy(out, native[component], sizeof(native[component]));
+   if (discard)
+      out[10] |= 0x60;
+   *len = sizeof(native[component]);
+   return true;
+}
+
 /* CEM publishes the selected face through the FLOAT cube form of PACK_SMPIR.
  * For discarded special r1 on slot 1 Apple emits exactly
  * 1705540600040004f0c00000; only f74 differs from the array-layer form. */
