@@ -283,6 +283,10 @@
 #define G17P_BLEND_CONSTANT 0
 #endif
 
+#ifndef G17P_RGBA8_MRT
+#define G17P_RGBA8_MRT 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -300,7 +304,7 @@
      G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
-     G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT) > 1
+     G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -322,6 +326,11 @@
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
 #define VERTEX_INPUT_FORMAT VK_FORMAT_R16G16_SFLOAT
+#elif G17P_RGBA8_MRT
+#include "g17p_wsi_triangle_vert.h"
+#include "g17p_vulkan_rgba8_mrt_frag.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_rgba8_mrt_frag_spv
 #elif G17P_IMPLICIT_LOD
 #include "g17p_vulkan_implicit_lod_frag.h"
 #include "g17p_vulkan_implicit_lod_vert.h"
@@ -1208,6 +1217,12 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_RGBA8_MRT
+#define PROBE_NAME "g17p-vulkan-rgba8-mrt"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_IMAGE1_OFFSET (2 * READBACK_GUARD_BYTES + IMAGE_BYTES)
+#define READBACK_BYTES (2 * IMAGE_BYTES + 3 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1264,8 +1279,10 @@ VK_FN(vkCreateCommandPool);
 VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
-#if G17P_TEXTURE_ORACLE
+#if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
 VK_FN(vkCmdPipelineBarrier);
+#endif
+#if G17P_TEXTURE_ORACLE
 #if G17P_SHADOW_COMPARE
 VK_FN(vkCmdClearDepthStencilImage);
 #else
@@ -1451,6 +1468,48 @@ verify_upload(const struct mapped_buffer *buffer, const uint8_t *expected,
 static bool
 verify_readback(const uint8_t *map)
 {
+#if G17P_RGBA8_MRT
+   for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
+      if (map[i] != 0xa5 ||
+          map[READBACK_GUARD_BYTES + IMAGE_BYTES + i] != 0xa5 ||
+          map[READBACK_IMAGE1_OFFSET + IMAGE_BYTES + i] != 0xa5) {
+         fprintf(stderr, PROBE_NAME ": readback guard %zu was modified\n", i);
+         return false;
+      }
+   }
+
+   static const uint8_t clear[2][4] = {
+      {16, 32, 48, 64},
+      {80, 96, 112, 128},
+   };
+   static const uint8_t additive[2][4] = {
+      {128, 64, 255, 128},
+      {32, 64, 16, 128},
+   };
+   const uint8_t *images[2] = {
+      map + READBACK_GUARD_BYTES,
+      map + READBACK_IMAGE1_OFFSET,
+   };
+
+   for (unsigned rt = 0; rt < 2; ++rt) {
+      for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+         const uint8_t *wanted =
+            (pixel % IMAGE_WIDTH) < (IMAGE_WIDTH / 2) ? additive[rt]
+                                                       : clear[rt];
+         const uint8_t *actual = images[rt] + pixel * 4;
+         if (memcmp(actual, wanted, 4) != 0) {
+            fprintf(stderr, PROBE_NAME
+                            ": attachment %u pixel %zu differs: got "
+                            "%02x%02x%02x%02x, expected %02x%02x%02x%02x\n",
+                    rt, pixel, actual[0], actual[1], actual[2], actual[3],
+                    wanted[0], wanted[1], wanted[2], wanted[3]);
+            return false;
+         }
+      }
+   }
+
+   return true;
+#else
    for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
       if (map[i] != 0xa5 ||
           map[READBACK_GUARD_BYTES + READBACK_PAYLOAD_BYTES + i] != 0xa5) {
@@ -1664,6 +1723,7 @@ verify_readback(const uint8_t *map)
 #endif
 
    return true;
+#endif
 }
 
 int
@@ -1765,6 +1825,7 @@ main(void)
        getenv("G17P_LOGIC_OP_XOR_RECORD_ONLY") != NULL) ||
       (G17P_BLEND_CONSTANT &&
        getenv("G17P_BLEND_CONSTANT_RECORD_ONLY") != NULL) ||
+      (G17P_RGBA8_MRT && getenv("G17P_RGBA8_MRT_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -2066,8 +2127,10 @@ main(void)
    LOAD_DEVICE(device, vkAllocateCommandBuffers);
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
-#if G17P_TEXTURE_ORACLE
+#if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
+#endif
+#if G17P_TEXTURE_ORACLE
 #if G17P_SHADOW_COMPARE
    LOAD_DEVICE(device, vkCmdClearDepthStencilImage);
 #else
@@ -2691,6 +2754,27 @@ main(void)
    check(vkBindImageMemory(device, image, image_memory, 0),
          "vkBindImageMemory");
 
+#if G17P_RGBA8_MRT
+   VkImage image1;
+   check(vkCreateImage(device, &image_info, NULL, &image1),
+         "vkCreateImage(attachment1)");
+   VkMemoryRequirements image1_requirements;
+   vkGetImageMemoryRequirements(device, image1, &image1_requirements);
+   const uint32_t image1_memory_type =
+      find_memory_type(&memory_properties, image1_requirements.memoryTypeBits,
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+   const VkMemoryAllocateInfo image1_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = image1_requirements.size,
+      .memoryTypeIndex = image1_memory_type,
+   };
+   VkDeviceMemory image1_memory;
+   check(vkAllocateMemory(device, &image1_memory_info, NULL, &image1_memory),
+         "vkAllocateMemory(attachment1)");
+   check(vkBindImageMemory(device, image1, image1_memory, 0),
+         "vkBindImageMemory(attachment1)");
+#endif
+
 #if G17P_MSAA_SAMPLES > 1
    VkImageCreateInfo msaa_image_info = image_info;
    msaa_image_info.samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES;
@@ -2769,6 +2853,14 @@ main(void)
    VkImageView view;
    check(vkCreateImageView(device, &view_info, NULL, &view),
          "vkCreateImageView");
+
+#if G17P_RGBA8_MRT
+   VkImageViewCreateInfo view1_info = view_info;
+   view1_info.image = image1;
+   VkImageView view1;
+   check(vkCreateImageView(device, &view1_info, NULL, &view1),
+         "vkCreateImageView(attachment1)");
+#endif
 
 #if G17P_TEXTURE_ORACLE
    const VkImageViewCreateInfo texture_view_info = {
@@ -2868,6 +2960,30 @@ main(void)
          "vkCreateImageView(msaa2)");
 #endif
 
+#if G17P_RGBA8_MRT
+   const VkAttachmentDescription attachments[] = {
+      {
+         .format = IMAGE_FORMAT,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      },
+      {
+         .format = IMAGE_FORMAT,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      },
+   };
+#else
    const VkAttachmentDescription attachments[] = {{
       .format = IMAGE_FORMAT,
       .samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
@@ -2899,10 +3015,18 @@ main(void)
    },
 #endif
    };
+#endif
+#if G17P_RGBA8_MRT
+   const VkAttachmentReference color_refs[] = {
+      {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+      {.attachment = 1, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+   };
+#else
    const VkAttachmentReference color_ref = {
       .attachment = 0,
       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
    };
+#endif
 #if G17P_MSAA_SAMPLES > 1
    const VkAttachmentReference resolve_ref = {
       .attachment = 1,
@@ -2911,8 +3035,13 @@ main(void)
 #endif
    const VkSubpassDescription subpass = {
       .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+#if G17P_RGBA8_MRT
+      .colorAttachmentCount = 2,
+      .pColorAttachments = color_refs,
+#else
       .colorAttachmentCount = 1,
       .pColorAttachments = &color_ref,
+#endif
 #if G17P_MSAA_SAMPLES > 1
       .pResolveAttachments = &resolve_ref,
 #endif
@@ -2959,6 +3088,28 @@ main(void)
    VkRenderPass render_pass;
    check(vkCreateRenderPass(device, &render_pass_info, NULL, &render_pass),
          "vkCreateRenderPass");
+
+#if G17P_RGBA8_MRT
+   VkAttachmentDescription load_attachment = attachments[0];
+   load_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+   load_attachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+   load_attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   const VkAttachmentReference load_color_ref = {
+      .attachment = 0,
+      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+   };
+   VkSubpassDescription load_subpass = subpass;
+   load_subpass.colorAttachmentCount = 1;
+   load_subpass.pColorAttachments = &load_color_ref;
+   VkRenderPassCreateInfo load_render_pass_info = render_pass_info;
+   load_render_pass_info.attachmentCount = 1;
+   load_render_pass_info.pAttachments = &load_attachment;
+   load_render_pass_info.pSubpasses = &load_subpass;
+   VkRenderPass load_render_pass;
+   check(vkCreateRenderPass(device, &load_render_pass_info, NULL,
+                            &load_render_pass),
+         "vkCreateRenderPass(load-additive)");
+#endif
 
    const VkShaderModuleCreateInfo vert_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -3090,7 +3241,12 @@ main(void)
       .minDepth = 0.0f,
       .maxDepth = 1.0f,
    };
-   const VkRect2D scissor = {.extent = {IMAGE_WIDTH, IMAGE_HEIGHT}};
+   const VkRect2D scissor = {
+      .extent = {
+         G17P_RGBA8_MRT ? IMAGE_WIDTH / 2 : IMAGE_WIDTH,
+         IMAGE_HEIGHT,
+      },
+   };
    const VkPipelineViewportStateCreateInfo viewport_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
       .viewportCount = 1,
@@ -3139,12 +3295,21 @@ main(void)
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
    };
+#if G17P_RGBA8_MRT
+   const VkPipelineColorBlendAttachmentState blend_attachments[2] = {
+      blend_attachment, blend_attachment,
+   };
+#endif
    const VkPipelineColorBlendStateCreateInfo blend = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
       .logicOpEnable = G17P_LOGIC_OP_XOR,
       .logicOp = VK_LOGIC_OP_XOR,
-      .attachmentCount = 1,
+      .attachmentCount = G17P_RGBA8_MRT ? 2 : 1,
+#if G17P_RGBA8_MRT
+      .pAttachments = blend_attachments,
+#else
       .pAttachments = &blend_attachment,
+#endif
       .blendConstants = {0.25f, 0.5f, 0.75f, 0.125f},
    };
    const VkGraphicsPipelineCreateInfo pipeline_info = {
@@ -3224,9 +3389,36 @@ main(void)
    check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
                                    NULL, &pipeline),
          "vkCreateGraphicsPipelines");
+#if G17P_RGBA8_MRT
+   VkPipelineColorBlendAttachmentState additive_attachments[2] = {
+      blend_attachment, blend_attachment,
+   };
+   for (unsigned i = 0; i < 2; ++i) {
+      additive_attachments[i].blendEnable = i == 0;
+      additive_attachments[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+      additive_attachments[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+      additive_attachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      additive_attachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      if (i == 1)
+         additive_attachments[i].colorWriteMask = 0;
+   }
+   VkPipelineColorBlendStateCreateInfo additive_blend = blend;
+   additive_blend.attachmentCount = 1;
+   additive_blend.pAttachments = additive_attachments;
+   VkGraphicsPipelineCreateInfo additive_pipeline_info = pipeline_info;
+   additive_pipeline_info.pColorBlendState = &additive_blend;
+   additive_pipeline_info.renderPass = load_render_pass;
+   VkPipeline additive_pipeline;
+   check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                   &additive_pipeline_info, NULL,
+                                   &additive_pipeline),
+         "vkCreateGraphicsPipelines(load-additive)");
+#endif
 #endif
 
-#if G17P_MSAA_SAMPLES > 1
+#if G17P_RGBA8_MRT
+   const VkImageView framebuffer_views[] = {view, view1};
+#elif G17P_MSAA_SAMPLES > 1
    const VkImageView framebuffer_views[] = {msaa_view, view};
 #else
    const VkImageView framebuffer_views[] = {view};
@@ -3244,6 +3436,17 @@ main(void)
    VkFramebuffer framebuffer;
    check(vkCreateFramebuffer(device, &framebuffer_info, NULL, &framebuffer),
          "vkCreateFramebuffer");
+
+#if G17P_RGBA8_MRT
+   VkFramebufferCreateInfo load_framebuffer_info = framebuffer_info;
+   load_framebuffer_info.renderPass = load_render_pass;
+   load_framebuffer_info.attachmentCount = 1;
+   load_framebuffer_info.pAttachments = &view;
+   VkFramebuffer load_framebuffer;
+   check(vkCreateFramebuffer(device, &load_framebuffer_info, NULL,
+                             &load_framebuffer),
+         "vkCreateFramebuffer(load-additive)");
+#endif
 
    const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -3350,7 +3553,12 @@ main(void)
                         NULL, 1, &texture_barrier);
 #endif
 #endif
-#if G17P_R32_SINT || G17P_RG16_SINT || G17P_RG32_SINT ||              \
+#if G17P_RGBA8_MRT
+   const VkClearValue clears[2] = {
+      {.color = {.float32 = {0.0625f, 0.125f, 0.1875f, 0.25f}}},
+      {.color = {.float32 = {0.3125f, 0.375f, 0.4375f, 0.5f}}},
+   };
+#elif G17P_R32_SINT || G17P_RG16_SINT || G17P_RG32_SINT ||              \
    G17P_RG8_SINT || G17P_RGBA8_SINT || G17P_R8_SINT ||                \
    G17P_RGBA16_SINT || G17P_RGBA32_SINT || G17P_R16_SINT
    const VkClearValue clear = {.color = {.int32 = {0, 0, 0, 0}}};
@@ -3374,8 +3582,12 @@ main(void)
       .renderPass = render_pass,
       .framebuffer = framebuffer,
       .renderArea = {.extent = {IMAGE_WIDTH, IMAGE_HEIGHT}},
-      .clearValueCount = 1,
+      .clearValueCount = G17P_RGBA8_MRT ? 2 : 1,
+#if G17P_RGBA8_MRT
+      .pClearValues = clears,
+#else
       .pClearValues = &clear,
+#endif
    };
    vkCmdBeginRenderPass(command_buffer, &render_begin,
                         VK_SUBPASS_CONTENTS_INLINE);
@@ -3459,6 +3671,42 @@ main(void)
 #endif
    vkCmdEndRenderPass(command_buffer);
 
+#if G17P_RGBA8_MRT
+   const VkImageMemoryBarrier mrt_barrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = image,
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .levelCount = 1,
+         .layerCount = 1,
+      },
+   };
+   vkCmdPipelineBarrier(command_buffer,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                        0, NULL, 0, NULL, 1, &mrt_barrier);
+
+   const VkRenderPassBeginInfo load_render_begin = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+      .renderPass = load_render_pass,
+      .framebuffer = load_framebuffer,
+      .renderArea = {.extent = {IMAGE_WIDTH, IMAGE_HEIGHT}},
+   };
+   vkCmdBeginRenderPass(command_buffer, &load_render_begin,
+                        VK_SUBPASS_CONTENTS_INLINE);
+   vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     additive_pipeline);
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   vkCmdEndRenderPass(command_buffer);
+#endif
+
 #if !G17P_HOST_IMAGE_COPY
    const VkBufferImageCopy copy = {
       .bufferOffset = READBACK_GUARD_BYTES,
@@ -3472,6 +3720,13 @@ main(void)
       vkCmdCopyImageToBuffer(command_buffer, image,
                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1,
                              &copy);
+#if G17P_RGBA8_MRT
+      VkBufferImageCopy copy1 = copy;
+      copy1.bufferOffset = READBACK_IMAGE1_OFFSET;
+      vkCmdCopyImageToBuffer(command_buffer, image1,
+                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1,
+                             &copy1);
+#endif
    }
 #endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
@@ -3498,6 +3753,7 @@ main(void)
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
+   G17P_RGBA8_MRT ||                                                     \
    G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -3606,7 +3862,7 @@ main(void)
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
-   G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||                           \
+   G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT || G17P_RGBA8_MRT ||        \
    G17P_RG16_UNORM ||                                                     \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -3663,6 +3919,18 @@ main(void)
       return EXIT_FAILURE;
 #endif
 #endif
+#if G17P_RGBA8_MRT
+   const uint64_t checksum =
+      fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
+   const uint64_t checksum1 =
+      fnv1a64(readback_map + READBACK_IMAGE1_OFFSET, IMAGE_BYTES);
+   printf(PROBE_NAME ": PASS — two distinct RGBA8 attachments preserved "
+                     "exact clears outside the scissor; RT0 STORE/LOAD/add "
+                     "and RT1 independent store remained exact inside it "
+                     "immediately/3s; "
+                     "three guards unchanged, checksums %016" PRIx64
+                     "/%016" PRIx64 "\n", checksum, checksum1);
+#else
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
 #if G17P_MULTIVIEW
@@ -3941,6 +4209,7 @@ main(void)
    printf(PROBE_NAME ": PASS — %ux%u RGBA8, checksum "
           "%016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#endif
 #endif
    return EXIT_SUCCESS;
 }

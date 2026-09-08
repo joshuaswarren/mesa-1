@@ -1132,6 +1132,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # R06c public Vulkan oracle for two independent RGBA8 attachments across
+    # clear, store, load, and additive blend transactions.
+    executable(
+      'g17p-vulkan-rgba8-mrt',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_RGBA8_MRT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # F01b public Vulkan oracle for exact G17P A2R10G10B10 UNORM storage.
     executable(
       'g17p-vulkan-a2r10g10b10-unorm',
