@@ -3878,7 +3878,7 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
        ctx->is_preamble || ctx->key->no_stop ||
-       ctx->key->g17p_rt0_eot_words != 1 || ctx->key->g17p_rt0_eot_i32)
+       ctx->key->g17p_rt0_eot_words != 0 || ctx->key->g17p_rt0_eot_i32)
       return false;
 
    unsigned instruction = 0;

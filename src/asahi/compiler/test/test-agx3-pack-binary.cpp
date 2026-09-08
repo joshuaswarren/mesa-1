@@ -180,7 +180,7 @@ TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 
 TEST_F(AGX3PackBinary, G17PLayeredU8NormEOTUsesExactNativeArrayWire)
 {
-   key.g17p_rt0_eot_words = 1;
+   key.g17p_rt0_eot_words = 0;
    static const uint8_t native[] = {
       0x0c,0xa0,0x10,0x06,0x1c,0xa1,0x10,0x26,
       0x2c,0x9e,0x10,0x46,0x3b,0x00,0x00,0x00,
