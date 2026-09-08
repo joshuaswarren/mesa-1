@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC3_DECODE)
+#if defined(G17P_BC5_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC5_UNORM_BLOCK
+#define NAME "g17p-vulkan-bc5-decode"
+#elif defined(G17P_BC3_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC3_UNORM_BLOCK
@@ -146,6 +151,7 @@ fnv1a64(const uint8_t *data, size_t size)
 
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
+#if !defined(G17P_BC5_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -200,12 +206,24 @@ put_bc1_payload(uint8_t *out, uint16_t c0, uint16_t c1, uint32_t indices)
    out[6] = indices >> 16;
    out[7] = indices >> 24;
 }
+#endif
 
 static void
 put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
+#if defined(G17P_BC5_DECODE)
+   static const uint8_t rg[4][2] = {
+      {0x20, 0xe0}, {0x60, 0xa0}, {0xa0, 0x60}, {0xe0, 0x20},
+   };
+   (void)c0;
+   (void)c1;
+   (void)indices;
+   memset(out, 0, BLOCK_BYTES);
+   out[0] = rg[block][0];
+   out[8] = rg[block][1];
+#else
 #if defined(G17P_BC3_DECODE)
    static const uint8_t alpha[4] = {0x20, 0x60, 0xa0, 0xff};
    out[0] = alpha[block];
@@ -214,11 +232,25 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
    out += 8;
 #endif
    put_bc1_payload(out, c0, c1, indices);
+#endif
 }
 
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
+#if defined(G17P_BC5_DECODE)
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         const uint8_t *encoded = blocks + block * BLOCK_BYTES;
+         uint8_t *pixel = reference + (y * WIDTH + x) * 4;
+         pixel[0] = encoded[0];
+         pixel[1] = encoded[8];
+         pixel[2] = 0;
+         pixel[3] = 255;
+      }
+   }
+#else
    uint8_t decoded[4][16][4];
    for (unsigned block = 0; block < 4; ++block) {
       const uint8_t *encoded = blocks + block * BLOCK_BYTES;
@@ -238,6 +270,7 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
          memcpy(reference + (y * WIDTH + x) * 4, decoded[block][texel], 4);
       }
    }
+#endif
 }
 #elif defined(G17P_ETC2_RGBA8_DECODE)
 static void
