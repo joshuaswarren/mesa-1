@@ -234,6 +234,10 @@
 #define G17P_COMPOSITE_EXPLICIT_LOD 0
 #endif
 
+#ifndef G17P_COMPOSITE_SINGLE_DRAW
+#define G17P_COMPOSITE_SINGLE_DRAW 0
+#endif
+
 #if G17P_COMPOSITE_NO_FLAT && G17P_COMPOSITE_EXPLICIT_LOD
 #error "select one alpha-composite diagnostic shader"
 #endif
@@ -1875,8 +1879,9 @@ verify_readback(const uint8_t *map)
          else
             coverage_eighths = ((x ^ y) & 1) ? 5 : 3;
       }
-      const unsigned opacity_sixteenths =
-         (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
+      const unsigned opacity_sixteenths = G17P_COMPOSITE_SINGLE_DRAW
+         ? 16
+         : (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
       const unsigned product = coverage_eighths * opacity_sixteenths;
       expected_pixel[0] -= product;
       expected_pixel[1] += product;
@@ -4322,6 +4327,17 @@ main(void)
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
    vkCmdBindIndexBuffer(command_buffer, composite_index.buffer,
                         COMPOSITE_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
+#if G17P_COMPOSITE_SINGLE_DRAW
+   const VkRect2D alpha_scissor = {
+      .extent = {IMAGE_WIDTH, IMAGE_HEIGHT},
+   };
+   const uint32_t dynamic_offset = 16 * COMPOSITE_UNIFORM_STRIDE;
+   vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
+   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline_layout, 0, 1, &descriptor_set, 1,
+                           &dynamic_offset);
+   vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+#else
    for (uint32_t step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
       const uint32_t min_x = step * IMAGE_WIDTH / COMPOSITE_OPACITY_COUNT;
       const uint32_t max_x =
@@ -4337,6 +4353,7 @@ main(void)
                               &dynamic_offset);
       vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
    }
+#endif
 #elif G17P_INDEX_RESTART
    vkCmdBindIndexBuffer(command_buffer, restart_index.buffer,
                         RESTART_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);

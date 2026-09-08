@@ -3353,7 +3353,9 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        * storage writes, framebuffer fetch, sample-rate execution, and shadows.
        * Multisampled depth/depth-stencil variants set it. */
       .shader_tri_merge_disable =
-         render->tilebuffer.nr_samples > 1 && fs->info.fs.epilog_key.write_z,
+         (render->tilebuffer.nr_samples > 1 &&
+          fs->info.fs.epilog_key.write_z) ||
+         debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false),
 
       /* Native forces bit26 for type2 and conditionally for type3 from the
        * draw-buffer state. Keep the already-qualified conservative type3
