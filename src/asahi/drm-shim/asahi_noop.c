@@ -273,6 +273,29 @@ check_depth_texture_coverage(void)
 }
 
 static void __attribute__((destructor))
+check_swap_lifecycle_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE"))
+      return;
+
+   /* Eight swaps at each of two window geometries. Each swap must retire one
+    * real draw; a lost back buffer, stale context binding, or resize failure
+    * makes the count short even when EGL itself reports success. */
+   if (matrix_stats.draws != 16 || matrix_stats.state_updates != 16 ||
+       !matrix_stats.no_varying_fs) {
+      fprintf(stderr,
+              "shim: incomplete G17P swap lifecycle: draws=%u state=%u "
+              "no-varying=%u\n",
+              matrix_stats.draws, matrix_stats.state_updates,
+              matrix_stats.no_varying_fs);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P 16-frame swap/resize lifecycle coverage\n");
+}
+
+static void __attribute__((destructor))
 check_compute_coverage(void)
 {
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE"))

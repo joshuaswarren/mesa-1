@@ -201,15 +201,6 @@ agx_resource_from_handle(struct pipe_screen *pscreen,
     */
    prsc->bind |= PIPE_BIND_SHARED | PIPE_BIND_SCANOUT;
 
-   rsc->bo = agx_bo_import(dev, whandle->handle);
-   /* Sometimes an import can fail e.g. on an invalid buffer fd, out of
-    * memory space to mmap it etc.
-    */
-   if (!rsc->bo) {
-      FREE(rsc);
-      return NULL;
-   }
-
    agx_resource_setup(dev, rsc);
 
    if (rsc->layout.tiling == AIL_TILING_LINEAR) {
@@ -222,6 +213,28 @@ agx_resource_from_handle(struct pipe_screen *pscreen,
    }
 
    ail_make_miptree(&rsc->layout);
+
+   /* Validate all modifier geometry before acquiring a BO reference.  A
+    * rejected Wayland/X11 dma-buf import is routine during resize and format
+    * renegotiation; importing first leaked one reference for every malformed
+    * tiled stride or offset.
+    */
+   rsc->bo = agx_bo_import(dev, whandle->handle);
+   /* Sometimes an import can fail e.g. on an invalid buffer fd, out of
+    * memory space to mmap it etc.
+    */
+   if (!rsc->bo) {
+      FREE(rsc);
+      return NULL;
+   }
+
+   /* The modifier layout includes metadata and any external base offset. Do
+    * not let a short dma-buf become a GPU out-of-bounds access. */
+   if (rsc->layout.size_B > rsc->bo->size) {
+      agx_bo_unreference(dev, rsc->bo);
+      FREE(rsc);
+      return NULL;
+   }
 
    if (prsc->target == PIPE_BUFFER) {
       assert(rsc->layout.tiling == AIL_TILING_LINEAR);

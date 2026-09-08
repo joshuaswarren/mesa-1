@@ -299,6 +299,46 @@ egl_dmabuf_image = executable(
   build_by_default : false,
 )
 
+egl_gbm_swap = executable(
+  'asahi-g17p-egl-gbm-swap',
+  files('test-g17p-egl-gbm-swap.c'),
+  include_directories : inc_include,
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+    dep_gbm,
+    dep_libdrm,
+  ],
+  build_by_default : false,
+)
+
+run_target(
+  'asahi-g17p-egl-gbm-swap-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_gbm_swap,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1'],
+)
+
+test(
+  'asahi-g17p-egl-gbm-swap-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_gbm_swap,
+  ],
+  env : ['ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1'],
+  suite : ['asahi'],
+)
+
 run_target(
   'asahi-g17p-egl-dmabuf-image-shim',
   command : [
