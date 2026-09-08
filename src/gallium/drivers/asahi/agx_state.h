@@ -453,6 +453,7 @@ struct agx_batch {
    bool incoherent_writes;
 
    struct agx_pool pool, pipeline_pool;
+   struct util_dynarray g17p_vdm_aliases;
 
    /* We may enqueue both CDM and VDM work, possibly to the same batch for
     * geometry/tessellation.
@@ -1188,6 +1189,9 @@ void agx_resource_copy_region(struct pipe_context *pctx,
 
 struct agx_encoder agx_encoder_allocate(struct agx_batch *batch,
                                         struct agx_device *dev);
+
+uint64_t agx_batch_get_g17p_vdm_alias(struct agx_batch *batch,
+                                      struct agx_bo *bo, uint64_t address);
 
 void agx_batch_init_state(struct agx_batch *batch);
 

@@ -78,17 +78,29 @@
  * pointer. Gallium's batch pool already returns the full context VA, so make
  * only that nested pointer relative. The root VDM stream remains absolute. */
 static bool
-agx_gallium_ppp_fini(struct agx_device *dev, uint8_t **out,
+agx_gallium_ppp_fini(struct agx_batch *batch, uint8_t **out,
                      struct agx_ppp_update *ppp)
 {
-   if (!dev || !ppp)
+   if (!batch || !ppp)
       return false;
 
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
    if (dev->chip != AGX_CHIP_G17P)
       return agx_ppp_fini(dev->chip, out, ppp);
 
+   struct agx_bo *payload_bo = NULL;
+   util_dynarray_foreach(&batch->pool.bos, struct agx_bo *, bo) {
+      if (ppp->gpu_base >= (*bo)->va->addr &&
+          ppp->gpu_base - (*bo)->va->addr < (*bo)->size) {
+         payload_bo = *bo;
+         break;
+      }
+   }
+
    struct agx_ppp_update compact_ppp = *ppp;
-   if (!agx_g17p_vdm_payload_compact(ppp->gpu_base,
+   const uint64_t alias =
+      agx_batch_get_g17p_vdm_alias(batch, payload_bo, ppp->gpu_base);
+   if (!agx_g17p_vdm_payload_compact(alias,
                                      &compact_ppp.gpu_base))
       return false;
 
@@ -1069,8 +1081,7 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
       }
    }
 
-   bool emitted = agx_gallium_ppp_fini(
-      agx_device(batch->ctx->base.screen), out, &ppp);
+   bool emitted = agx_gallium_ppp_fini(batch, out, &ppp);
    assert(emitted);
    (void)emitted;
 }
@@ -3630,7 +3641,7 @@ agx_batch_init_state(struct agx_batch *batch)
          .total_size = initial.length,
          .cpu_base = T.cpu,
       };
-      const bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
+      const bool emitted = agx_gallium_ppp_fini(batch, &out, &ppp);
       assert(emitted);
       if (!emitted)
          return;
@@ -3655,7 +3666,7 @@ agx_batch_init_state(struct agx_batch *batch)
       agx_ppp_push(&ppp, VARYING_2, cfg);
       /* clang-format on */
 
-      const bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
+      const bool emitted = agx_gallium_ppp_fini(batch, &out, &ppp);
       assert(emitted);
       if (!emitted)
          return;
@@ -4029,7 +4040,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
          cfg.count = vs->uvs.size;
    }
 
-   bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
+   bool emitted = agx_gallium_ppp_fini(batch, &out, &ppp);
    assert(emitted);
    (void)emitted;
    ppp_updates++;

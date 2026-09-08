@@ -113,6 +113,47 @@ agx_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias, uint64_t size)
    simple_mtx_unlock(&dev->vma_lock);
 }
 
+struct agx_g17p_vdm_alias {
+   struct agx_bo *bo;
+   uint64_t address;
+};
+
+uint64_t
+agx_batch_get_g17p_vdm_alias(struct agx_batch *batch, struct agx_bo *bo,
+                             uint64_t address)
+{
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   if (dev->chip != AGX_CHIP_G17P)
+      return address;
+
+   if (!bo || address < bo->va->addr || address - bo->va->addr >= bo->size)
+      return 0;
+
+   uint64_t alias = 0;
+   util_dynarray_foreach(&batch->g17p_vdm_aliases,
+                         struct agx_g17p_vdm_alias, entry) {
+      if (entry->bo == bo) {
+         alias = entry->address;
+         break;
+      }
+   }
+
+   if (!alias) {
+      alias = agx_g17p_vdm_alias_alloc(dev, bo->size);
+      const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
+      const int ret = alias ? agx_bo_bind(dev, bo, alias, bo->size, 0, flags)
+                            : -1;
+      assert(alias && ret == 0);
+      if (!alias || ret)
+         return 0;
+
+      const struct agx_g17p_vdm_alias entry = {bo, alias};
+      util_dynarray_append(&batch->g17p_vdm_aliases, entry);
+   }
+
+   return alias + (address - bo->va->addr);
+}
+
 static void
 agx_encoder_bind_vdm_alias(struct agx_device *dev, struct agx_encoder *encoder)
 {
@@ -184,6 +225,7 @@ agx_batch_init(struct agx_context *ctx,
    util_dynarray_init(&batch->scissor, ctx);
    util_dynarray_init(&batch->depth_bias, ctx);
    util_dynarray_init(&batch->timestamps, ctx);
+   util_dynarray_init(&batch->g17p_vdm_aliases, ctx);
 
    batch->clear = 0;
    batch->draw = 0;
@@ -318,6 +360,12 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    }
 
    agx_bo_unreference(dev, screen->rodata);
+   util_dynarray_foreach(&batch->g17p_vdm_aliases,
+                         struct agx_g17p_vdm_alias, entry) {
+      agx_bo_bind(dev, NULL, entry->address, entry->bo->size, 0,
+                  DRM_ASAHI_BIND_UNBIND);
+      agx_g17p_vdm_alias_free(dev, entry->address, entry->bo->size);
+   }
    agx_encoder_cleanup(dev, &batch->vdm);
    agx_encoder_cleanup(dev, &batch->cdm);
    agx_pool_cleanup(&batch->pool);
@@ -326,6 +374,7 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    util_dynarray_fini(&batch->scissor);
    util_dynarray_fini(&batch->depth_bias);
    util_dynarray_fini(&batch->timestamps);
+   util_dynarray_fini(&batch->g17p_vdm_aliases);
 
    if (!(dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC))) {
       agx_batch_print_stats(dev, batch);
