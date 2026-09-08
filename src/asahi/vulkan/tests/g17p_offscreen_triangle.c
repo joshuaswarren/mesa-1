@@ -222,10 +222,14 @@
 #define G17P_TEXEL_FETCH_LOD 0
 #endif
 
+#ifndef G17P_CUBE_SAMPLE
+#define G17P_CUBE_SAMPLE 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
-    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD)
+    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE)
 
 #if G17P_SHADOW_COMPARE
 #define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
@@ -313,6 +317,11 @@
 #include "g17p_vulkan_texel_fetch_lod_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texel_fetch_lod_frag_spv
+#elif G17P_CUBE_SAMPLE
+#include "g17p_vulkan_implicit_lod_vert.h"
+#include "g17p_vulkan_cube_sample_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_cube_sample_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -866,6 +875,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_CUBE_SAMPLE
+#define PROBE_NAME "g17p-vulkan-cube-sample"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1350,6 +1364,11 @@ verify_readback(const uint8_t *map)
    /* Mip 2 is blue. Mip 0 red and mip 1 green are exact negative controls
     * for a dropped or mis-typed integer level. */
    static const uint8_t expected[4] = {0, 0, 255, 255};
+#elif G17P_CUBE_SAMPLE
+   static const uint8_t expected[6][4] = {
+      {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
+      {255, 255, 0, 255}, {255, 0, 255, 255}, {0, 255, 255, 255},
+   };
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1468,6 +1487,11 @@ verify_readback(const uint8_t *map)
 #if G17P_SHADOW_COMPARE
       const uint8_t *expected_pixel =
          expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
+#elif G17P_CUBE_SAMPLE
+      const unsigned x = pixel % IMAGE_WIDTH;
+      const uint8_t *expected_pixel =
+         expected[x < 5 ? 0 : x < 10 ? 1 : x < 15 ? 2 :
+                  x < 20 ? 3 : x < 25 ? 4 : 5];
 #else
       const uint8_t *expected_pixel = expected;
 #endif
@@ -1503,6 +1527,8 @@ main(void)
        getenv("G17P_SHADOW_COMPARE_RECORD_ONLY") != NULL) ||
       (G17P_TEXEL_FETCH_LOD &&
        getenv("G17P_TEXEL_FETCH_LOD_RECORD_ONLY") != NULL) ||
+      (G17P_CUBE_SAMPLE &&
+       getenv("G17P_CUBE_SAMPLE_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -2146,11 +2172,20 @@ main(void)
    enum {
       TEXTURE_WIDTH = 64,
       TEXTURE_HEIGHT = 64,
+#if G17P_CUBE_SAMPLE
+      TEXTURE_LEVELS = 1,
+      TEXTURE_LAYERS = 6,
+#else
       TEXTURE_LEVELS = 3,
+      TEXTURE_LAYERS = 1,
+#endif
       TEXTURE_GUARD_BYTES = 64,
-      TEXTURE_LEVEL0_BYTES = 64 * 64 * TEXTURE_PIXEL_BYTES,
-      TEXTURE_LEVEL1_BYTES = 32 * 32 * TEXTURE_PIXEL_BYTES,
-      TEXTURE_LEVEL2_BYTES = 16 * 16 * TEXTURE_PIXEL_BYTES,
+      TEXTURE_LEVEL0_BYTES =
+         64 * 64 * TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS,
+      TEXTURE_LEVEL1_BYTES =
+         G17P_CUBE_SAMPLE ? 0 : 32 * 32 * TEXTURE_PIXEL_BYTES,
+      TEXTURE_LEVEL2_BYTES =
+         G17P_CUBE_SAMPLE ? 0 : 16 * 16 * TEXTURE_PIXEL_BYTES,
       TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
                            TEXTURE_LEVEL2_BYTES,
       TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
@@ -2158,6 +2193,22 @@ main(void)
 #if !G17P_SHADOW_COMPARE
    uint8_t texture_upload_expected[TEXTURE_UPLOAD_BYTES];
    memset(texture_upload_expected, 0xa5, sizeof(texture_upload_expected));
+#if G17P_CUBE_SAMPLE
+   static const uint8_t face_colours[TEXTURE_LAYERS][4] = {
+      {0xff, 0x00, 0x00, 0xff}, {0x00, 0xff, 0x00, 0xff},
+      {0x00, 0x00, 0xff, 0xff}, {0xff, 0xff, 0x00, 0xff},
+      {0xff, 0x00, 0xff, 0xff}, {0x00, 0xff, 0xff, 0xff},
+   };
+   for (unsigned layer = 0; layer < TEXTURE_LAYERS; ++layer) {
+      uint8_t *dst = texture_upload_expected + TEXTURE_GUARD_BYTES +
+                     layer * TEXTURE_WIDTH * TEXTURE_HEIGHT *
+                        TEXTURE_PIXEL_BYTES;
+      for (size_t pixel = 0; pixel < TEXTURE_WIDTH * TEXTURE_HEIGHT;
+           ++pixel)
+         memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, face_colours[layer],
+                TEXTURE_PIXEL_BYTES);
+   }
+#else
    static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
 #if G17P_SATURATE_TEXTURE
       {0xff, 0xff, 0xff, 0xff},
@@ -2182,6 +2233,7 @@ main(void)
                 TEXTURE_PIXEL_BYTES);
       }
    }
+#endif
 #if G17P_TEXTURE_GATHER
    struct gather_texel {
       unsigned x, y;
@@ -2210,11 +2262,14 @@ main(void)
 
    const VkImageCreateInfo texture_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+#if G17P_CUBE_SAMPLE
+      .flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+#endif
       .imageType = VK_IMAGE_TYPE_2D,
       .format = TEXTURE_FORMAT,
       .extent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
       .mipLevels = TEXTURE_LEVELS,
-      .arrayLayers = 1,
+      .arrayLayers = TEXTURE_LAYERS,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -2354,12 +2409,13 @@ main(void)
    const VkImageViewCreateInfo texture_view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = texture,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .viewType = G17P_CUBE_SAMPLE ? VK_IMAGE_VIEW_TYPE_CUBE
+                                   : VK_IMAGE_VIEW_TYPE_2D,
       .format = TEXTURE_FORMAT,
       .subresourceRange = {
          .aspectMask = TEXTURE_ASPECT,
          .levelCount = TEXTURE_LEVELS,
-         .layerCount = 1,
+         .layerCount = TEXTURE_LAYERS,
       },
    };
    VkImageView texture_view;
@@ -2378,7 +2434,7 @@ main(void)
       .compareOp = VK_COMPARE_OP_LESS,
 #endif
       .minLod = 0.0f,
-      .maxLod = 2.0f,
+      .maxLod = (float)(TEXTURE_LEVELS - 1),
    };
    VkSampler sampler;
    check(vkCreateSampler(device, &sampler_info, NULL, &sampler),
@@ -2758,7 +2814,7 @@ main(void)
       .subresourceRange = {
          .aspectMask = TEXTURE_ASPECT,
          .levelCount = TEXTURE_LEVELS,
-         .layerCount = 1,
+         .layerCount = TEXTURE_LAYERS,
       },
    };
    vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -2774,6 +2830,17 @@ main(void)
    vkCmdClearDepthStencilImage(command_buffer, texture,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                &depth_clear, 1, &depth_range);
+#elif G17P_CUBE_SAMPLE
+   const VkBufferImageCopy texture_copies[1] = {
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES,
+         .imageSubresource = {TEXTURE_ASPECT, 0, 0, TEXTURE_LAYERS},
+         .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
+      },
+   };
+   vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                          texture_copies);
 #else
    const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
       {
@@ -3091,6 +3158,11 @@ main(void)
    printf(PROBE_NAME ": PASS — texelFetch selected exact mip 2 through "
                      "the integer level staging path immediately/3s; "
                      "all source/readback guards unchanged, checksum %016" PRIx64
+                     "\n", checksum);
+#elif G17P_CUBE_SAMPLE
+   printf(PROBE_NAME ": PASS — all six cube faces sampled their exact "
+                     "distinct RGBA colors immediately/3s; six-layer upload "
+                     "and all source/readback guards unchanged, checksum %016" PRIx64
                      "\n", checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
