@@ -115,6 +115,10 @@ int
 main(void)
 {
    const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
+   const bool expect_export_retry =
+      getenv("ASAHI_GL_EXPECT_PRIME_EXPORT_RETRY") != NULL;
+   if (expect_export_retry)
+      unsetenv("ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE");
    const int drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
    if (drm_fd < 0) {
       perror("open render node");
@@ -128,6 +132,31 @@ main(void)
    }
 
    const uint32_t use = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
+   if (expect_export_retry) {
+      setenv("ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE", "1", 1);
+      struct gbm_bo *retry =
+         gbm_bo_create(device, WIDTH, HEIGHT, GBM_FORMAT_ARGB8888, use);
+      unsetenv("ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE");
+
+      /* GBM may either propagate a creation-time handle export failure or
+       * keep the otherwise valid BO. Both are legal, but either path must be
+       * able to export normally as soon as fd pressure is gone. */
+      if (!retry)
+         retry = gbm_bo_create(device, WIDTH, HEIGHT, GBM_FORMAT_ARGB8888,
+                               use);
+      if (!retry)
+         return 1;
+
+      const int recovered_fd = gbm_bo_get_fd(retry);
+      if (recovered_fd < 0 ||
+          !(fcntl(recovered_fd, F_GETFD, 0) & FD_CLOEXEC)) {
+         fprintf(stderr, "PRIME export did not recover on retry\n");
+         return 1;
+      }
+      close(recovered_fd);
+      gbm_bo_destroy(retry);
+   }
+
    struct gbm_bo *original =
       gbm_bo_create(device, WIDTH, HEIGHT, GBM_FORMAT_ARGB8888, use);
    if (!original || gbm_bo_get_width(original) != WIDTH ||
@@ -261,6 +290,9 @@ main(void)
    gbm_device_destroy(device);
    close(drm_fd);
 
-   puts("GL05 GBM linear dma-buf export/import, aliasing, retention and guards exact");
+   puts(expect_export_retry
+           ? "GL05 GBM PRIME export failure was transactional and retryable"
+           : "GL05 GBM linear dma-buf export/import, aliasing, retention and "
+             "guards exact");
    return 0;
 }

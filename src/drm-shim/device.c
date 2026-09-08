@@ -61,6 +61,21 @@ memfd_create(const char *name, unsigned int flags)
 struct shim_device shim_device;
 
 long shim_page_size;
+static bool failed_prime_export_once;
+
+static void __attribute__((destructor))
+check_prime_export_failure(void)
+{
+   if (!getenv("ASAHI_SHIM_EXPECT_PRIME_EXPORT_FAILURE"))
+      return;
+
+   if (!failed_prime_export_once) {
+      fprintf(stderr, "shim: expected PRIME export failure was not injected\n");
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr, "shim: injected PRIME export failure exactly once\n");
+}
 
 static uint32_t
 uint_key_hash(const void *key)
@@ -393,6 +408,13 @@ drm_shim_ioctl_prime_handle_to_fd(int fd, unsigned long request, void *arg)
    if (!shim_fd || !prime->handle ||
        (prime->flags & ~(DRM_CLOEXEC | DRM_RDWR)))
       return -EINVAL;
+
+   if (getenv("ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE") &&
+       !failed_prime_export_once) {
+      failed_prime_export_once = true;
+      errno = EMFILE;
+      return -1;
+   }
 
    struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, prime->handle);
    if (!bo)

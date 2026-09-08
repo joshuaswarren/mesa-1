@@ -303,7 +303,8 @@ agx_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *ctx,
       rsrc_debug(rsrc, "Get handle: %p (KMS)\n", rsrc);
 
       /* BO must be considered shared at this point. */
-      agx_bo_make_shared(dev, rsrc->bo);
+      if (!agx_bo_make_shared(dev, rsrc->bo))
+         return false;
 
       handle->handle = rsrc->bo->handle;
    } else if (handle->type == WINSYS_HANDLE_TYPE_FD) {

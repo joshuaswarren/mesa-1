@@ -683,6 +683,24 @@ run_target(
   ],
 )
 
+test(
+  'asahi-g17p-gbm-prime-export-retry',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gbm_share,
+  ],
+  env : [
+    'ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE=1',
+    'ASAHI_SHIM_EXPECT_PRIME_EXPORT_FAILURE=1',
+    'ASAHI_GL_EXPECT_PRIME_EXPORT_RETRY=1',
+  ],
+  suite : ['asahi'],
+)
+
 egl_dmabuf_image = executable(
   'asahi-g17p-egl-dmabuf-image',
   files('test-g17p-egl-dmabuf-image.c'),

@@ -519,22 +519,38 @@ error:
    return NULL;
 }
 
-void
+bool
 agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
 {
-   assert(bo->flags & AGX_BO_SHAREABLE);
-   if (bo->flags & AGX_BO_SHARED) {
-      assert(bo->prime_fd >= 0);
-      return;
+   if (!(bo->flags & AGX_BO_SHAREABLE)) {
+      errno = EINVAL;
+      return false;
    }
 
-   bo->flags |= AGX_BO_SHARED;
+   if (bo->flags & AGX_BO_SHARED) {
+      if (bo->prime_fd >= 0)
+         return true;
+
+      errno = EIO;
+      return false;
+   }
+
    assert(bo->prime_fd == -1);
 
+   int prime_fd = -1;
+   int saved_errno;
    int ret = drmPrimeHandleToFD(dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
-                                &bo->prime_fd);
-   assert(ret == 0);
-   assert(bo->prime_fd >= 0);
+                                &prime_fd);
+   if (ret || prime_fd < 0) {
+      if (!errno)
+         errno = EIO;
+      return false;
+   }
+
+   /* Keep the transition transactional. In particular, a recoverable fd
+    * exhaustion must not leave AGX_BO_SHARED set with no dma-buf fd, because
+    * every later export and implicit-sync operation is allowed to retry. */
+   bo->prime_fd = prime_fd;
 
    /* If there is a pending writer to this BO, import it into the buffer
     * for implicit sync.
@@ -542,23 +558,37 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
    uint64_t writer = p_atomic_read_relaxed(&bo->writer);
    if (writer) {
       int out_sync_fd = -1;
-      int ret = drmSyncobjExportSyncFile(dev->fd, agx_bo_writer_syncobj(writer),
-                                         &out_sync_fd);
-      assert(ret >= 0);
-      assert(out_sync_fd >= 0);
+      ret = drmSyncobjExportSyncFile(dev->fd, agx_bo_writer_syncobj(writer),
+                                     &out_sync_fd);
+      if (ret || out_sync_fd < 0) {
+         if (out_sync_fd >= 0)
+            close(out_sync_fd);
+         goto error;
+      }
 
       ret = agx_import_sync_file(dev, bo, out_sync_fd);
-      assert(ret >= 0);
       close(out_sync_fd);
+      if (ret)
+         goto error;
    }
+
+   bo->flags |= AGX_BO_SHARED;
+   return true;
+
+error:
+   saved_errno = errno ? errno : EIO;
+   close(bo->prime_fd);
+   bo->prime_fd = -1;
+   errno = saved_errno;
+   return false;
 }
 
 int
 agx_bo_export(struct agx_device *dev, struct agx_bo *bo)
 {
-   agx_bo_make_shared(dev, bo);
+   if (!agx_bo_make_shared(dev, bo))
+      return -1;
 
-   assert(bo->prime_fd >= 0);
    return os_dupfd_cloexec(bo->prime_fd);
 }
 
@@ -1452,12 +1482,13 @@ agx_import_sync_file(struct agx_device *dev, struct agx_bo *bo, int fd)
       .fd = fd,
    };
 
-   assert(fd >= 0);
-   assert(bo->prime_fd != -1);
+   if (fd < 0 || bo->prime_fd < 0) {
+      errno = EINVAL;
+      return -1;
+   }
 
    int ret = drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE,
                       &import_sync_file_ioctl);
-   assert(ret >= 0);
 
    return ret;
 }
@@ -1470,14 +1501,21 @@ agx_export_sync_file(struct agx_device *dev, struct agx_bo *bo)
       .fd = -1,
    };
 
-   assert(bo->prime_fd != -1);
+   if (bo->prime_fd < 0) {
+      errno = EINVAL;
+      return -1;
+   }
 
    int ret = drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE,
                       &export_sync_file_ioctl);
-   assert(ret >= 0);
-   assert(export_sync_file_ioctl.fd >= 0);
 
-   return ret >= 0 ? export_sync_file_ioctl.fd : ret;
+   if (ret || export_sync_file_ioctl.fd < 0) {
+      if (export_sync_file_ioctl.fd >= 0)
+         close(export_sync_file_ioctl.fd);
+      return -1;
+   }
+
+   return export_sync_file_ioctl.fd;
 }
 #endif /* HAVE_LIBDRM */
 
