@@ -1099,6 +1099,9 @@ test_indexed_sample_witnesses(void)
    const uint8_t vertex_level_bytes[] = {
       0x05,0xa0,0x0c,0xb8,0xb8,0x00,0x09,0x00,0x92,0x03,
       0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
+   const uint8_t vertex_mixed_bytes[] = {
+      0x05,0x80,0x0c,0xb8,0xb0,0x00,0x09,0x00,0x90,0x02,
+      0x90,0x00,0x01,0x00,0x00,0x20,0x00,0x00,0x00,0x00};
    const uint8_t uniform_bytes[] = {
       0x05,0xe0,0x0c,0xb8,0xb0,0x00,0x00,0x00,0x83,0x03,
       0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
@@ -1126,7 +1129,17 @@ test_indexed_sample_witnesses(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    CHECK(len == sizeof(vertex_level_bytes));
    CHECK(memcmp(out, vertex_level_bytes, len) == 0);
+   /* The independently compiled mixed sibling (SHA256 6fa7259810a5...)
+    * keeps texture uniform16 indirect while selecting sampler0 immediate.
+    * Operand class and size selectors are independent in SMP.EP4. */
+   d.texture_value = 16;
+   d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.sampler_value = 0;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+   CHECK(len == sizeof(vertex_mixed_bytes));
+   CHECK(memcmp(out, vertex_mixed_bytes, len) == 0);
    d.lod = AGX3_TEX_LOD_AUTO;
+   d.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
    d.texture_value = 12;
    d.sampler_value = 16;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));

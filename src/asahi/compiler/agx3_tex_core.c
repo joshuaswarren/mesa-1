@@ -269,7 +269,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
    const unsigned sk = d->sampler_kind ? d->sampler_kind : 1;
-   if (tk > 3 || sk > 3 || (tk == 1) != (sk == 1) ||
+   if (tk > 3 || sk > 3 ||
        ((tk != 1 || sk != 1) && enc != AGX_ISA_ENCODING_AGX3B) ||
        (tk != 1 && ((d->texture_value & 1) || d->texture_value > 252)) ||
        (sk != 1 && ((d->sampler_value & 1) || d->sampler_value > 252)) ||
@@ -341,7 +341,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(89, 3);
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
-   base[nb++] = (struct agx3_field_kv)KV(104, immediate ? 1 : 2);
+   base[nb++] =
+      (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
    if (d->array || d->cube)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] =
@@ -349,7 +350,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
-   base[nb++] = (struct agx3_field_kv)KV(133, immediate ? 1 : 2);
+   base[nb++] =
+      (struct agx3_field_kv)KV(133, sk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
    base[nb++] = (struct agx3_field_kv)KV(138, 1);
    if (enc == AGX_ISA_ENCODING_AGX3C) {
       base[nb++] = (struct agx3_field_kv)KV(24, 2);

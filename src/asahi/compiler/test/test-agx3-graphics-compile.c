@@ -2996,10 +2996,8 @@ build_vs_indexed_texture_sample(void)
       "AGX3 indexed vertex texture sample");
    nir_def *offset = nir_imm_int(&b, 72);
    nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 3);
-   nir_def *sampler_index = nir_iadd_imm(
-      &b, nir_load_preamble(&b, 1, 16, .base = 20), 28);
    nir_def *sampler = nir_bindless_sampler_agx(
-      &b, nir_imm_int(&b, 104), sampler_index, .desc_set = 3);
+      &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 28, 16), .desc_set = 3);
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 4);
    tex->op = nir_texop_txl;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;

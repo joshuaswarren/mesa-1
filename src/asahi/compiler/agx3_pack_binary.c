@@ -1252,9 +1252,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          ? (enc == AGX_ISA_ENCODING_AGX3B && gradient_operand)
          : (implicit_lod &&
             (zero_bias || agx3_tex_imm(I->src[1], 0)));
-   const bool immediate = I->nr_srcs == 6 &&
-      I->src[3].type == AGX_INDEX_IMMEDIATE &&
-      I->src[4].type == AGX_INDEX_IMMEDIATE;
+   const bool texture_immediate =
+      I->nr_srcs == 6 && I->src[3].type == AGX_INDEX_IMMEDIATE;
+   const bool sampler_immediate =
+      I->nr_srcs == 6 && I->src[4].type == AGX_INDEX_IMMEDIATE;
+   const bool immediate = texture_immediate && sampler_immediate;
    const bool immediate_offset = offset &&
       I->src[5].type == AGX_INDEX_IMMEDIATE &&
       I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
@@ -1278,15 +1280,20 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
        (cube && !I->src[0].discard) ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
-       (immediate && (I->src[3].value > 15 || I->src[4].value > 15)) ||
+       (texture_immediate
+           ? I->src[3].value > 15
+           : ((I->src[3].type != AGX_INDEX_REGISTER &&
+               I->src[3].type != AGX_INDEX_UNIFORM) ||
+              I->src[3].size != AGX_SIZE_64 ||
+              agx_channels(I->src[3]) != 1 || (I->src[3].value & 1))) ||
+       (sampler_immediate
+           ? I->src[4].value > 15
+           : ((I->src[4].type != AGX_INDEX_REGISTER &&
+               I->src[4].type != AGX_INDEX_UNIFORM) ||
+              I->src[4].size != AGX_SIZE_64 ||
+              agx_channels(I->src[4]) != 1 || (I->src[4].value & 1))) ||
        I->src[3].memory || I->src[3].abs || I->src[3].neg ||
        I->src[4].memory || I->src[4].abs || I->src[4].neg ||
-       (!immediate &&
-        ((I->src[3].type != AGX_INDEX_REGISTER && I->src[3].type != AGX_INDEX_UNIFORM) ||
-         (I->src[4].type != AGX_INDEX_REGISTER && I->src[4].type != AGX_INDEX_UNIFORM) ||
-         I->src[3].size != AGX_SIZE_64 || I->src[4].size != AGX_SIZE_64 ||
-         agx_channels(I->src[3]) != 1 || agx_channels(I->src[4]) != 1 ||
-         (I->src[3].value & 1) || (I->src[4].value & 1))) ||
        (shadow
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
@@ -1437,16 +1444,16 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .coord = coord,
       .width = I->dest[0].size == AGX_SIZE_32 ? AGX3_TEX_W32 : AGX3_TEX_W16,
       .mask = I->mask,
-      .texture = immediate ? I->src[3].value : 0,
-      .sampler = immediate ? I->src[4].value : 0,
-      .texture_kind = immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
+      .texture = texture_immediate ? I->src[3].value : 0,
+      .sampler = sampler_immediate ? I->src[4].value : 0,
+      .texture_kind = texture_immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
          I->src[3].type == AGX_INDEX_UNIFORM ? AGX3_TEX_OPERAND_UNIFORM : AGX3_TEX_OPERAND_REGISTER,
-      .sampler_kind = immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
+      .sampler_kind = sampler_immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
          I->src[4].type == AGX_INDEX_UNIFORM ? AGX3_TEX_OPERAND_UNIFORM : AGX3_TEX_OPERAND_REGISTER,
-      .texture_value = immediate ? 0 : I->src[3].value,
-      .sampler_value = immediate ? 0 : I->src[4].value,
-      .texture_kill = !immediate && I->src[3].kill,
-      .sampler_kill = !immediate && I->src[4].kill,
+      .texture_value = texture_immediate ? 0 : I->src[3].value,
+      .sampler_value = sampler_immediate ? 0 : I->src[4].value,
+      .texture_kill = !texture_immediate && I->src[3].kill,
+      .sampler_kill = !sampler_immediate && I->src[4].kill,
       .gather = gather_component,
       .shadow = shadow,
       .offset = offset,
