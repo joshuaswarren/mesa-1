@@ -2749,6 +2749,29 @@ build_fs_funops(void)
    return fs_finish(&b);
 }
 
+/* Quickshell's rounded-rectangle fragment path computes abs(delta) * 2.0
+ * before clamping against a live radius. Keep that application-derived
+ * modifier/immediate shape in the full graphics compiler, not just the
+ * low-level encoder test. */
+static nir_shader *
+build_fs_quickshell_abs_scale(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 Quickshell abs-scale FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *scaled = nir_fmul_imm(&b, nir_fabs(&b, v), 2.0f);
+   nir_def *clamped = nir_fmin(&b, scaled, nir_imm_float(&b, 0.67f));
+   fs_store_colour(&b, nir_vec4(&b, clamped, scaled, v,
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -2799,6 +2822,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,
     AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
    {"fs-transcendentals", build_fs_funops, true},
+   {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
+    .g17p_only = true},
 
    /*
     * Deliberate refusals. Each one names a specific missing witness, not a

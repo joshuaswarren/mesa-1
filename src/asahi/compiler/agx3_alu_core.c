@@ -125,9 +125,11 @@ agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       uint16_t immediate, enum agx3_alu_hint hint, uint16_t wait_mask,
-                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+agx3_alu_fmul_minifloat_mod(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
        src >= 256 || ((dest | src) & 1) || immediate > 0xff ||
@@ -144,16 +146,50 @@ agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
       {9, 2}, {10, 2}, {25, 1}, {26, 2},
       {42, 2}, {43, 2}, {60, 2}, {74, 2},
    };
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[12] = {
       {2, dest}, {35, src}, {17, immediate}, {46, hint == AGX3_ALU_HINT_DISCARD},
-      {44, hint == AGX3_ALU_HINT_CACHE},
+      {44, hint == AGX3_ALU_HINT_CACHE}, {11, dest_cache},
    };
-   unsigned n = 5;
+   unsigned n = 6;
    for (unsigned slot = 0; slot < 6; ++slot)
       if (wait_mask & (1u << slot))
          fields[n++] = (struct agx3_field_kv){80 + slot, 1};
 
-   return agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, out, len);
+   uint8_t encoded[AGX3_ALU_MAX_LENGTH], encoded_len = 0;
+   if (!agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, encoded,
+                          &encoded_len))
+      return false;
+
+   /* Fresh Apple G17P kernels encode abs(x) * {0.5, 1.5, 2.0} by setting
+    * bit33 of this same six-byte endpoint. A texture-dependent abs(x) * 2.0
+    * independently keeps that bit with destination retention and wait slot1:
+    *
+    *   plain/discard abs*2     09 c1 15 01 82 00
+    *   live-source abs*2       09 c1 05 83 82 00
+    *   cached/wait1 abs*2      09 c1 35 01 82 20
+    *
+    * Apple's recovered composer still fixes bit33 to zero, so deposit this
+    * one newly witnessed modifier after composing the otherwise byte-exact
+    * form. Keep AGX3c closed: these are applegpu_g17p witnesses only. */
+   if (src_abs) {
+      if (encoded_len != 6 || (encoded[4] & 0x02))
+         return false;
+      encoded[4] |= 0x02;
+   }
+
+   memcpy(out, encoded, encoded_len);
+   *len = encoded_len;
+   return true;
+}
+
+bool
+agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, uint16_t immediate,
+                        enum agx3_alu_hint hint, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_fmul_minifloat_mod(
+      enc, dest, src, immediate, false, false, hint, wait_mask, out, len);
 }
 
 bool

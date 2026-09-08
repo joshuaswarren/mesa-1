@@ -1311,11 +1311,29 @@ TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
    }
 }
 
+TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_abs(agx_register(2, AGX_SIZE_32));
+   src.cache = true;
+   agx_fmul_to(b, agx_register(0, AGX_SIZE_32), src,
+               agx_immediate(0x40));
+   agx_stop(b);
+
+   std::vector<uint8_t> want = {
+      0x09, 0xc1, 0x05, 0x83, 0x82, 0x00,
+   };
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
-      /* A scalar-half source is now covered by the exact widening witness. */
-      if (variant == 8)
+      /* Absolute and scalar-half sources now have exact native witnesses. */
+      if (variant == 5 || variant == 8)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);

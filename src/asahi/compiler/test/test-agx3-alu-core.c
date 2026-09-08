@@ -691,6 +691,87 @@ test_fmul_minifloat(void)
         " all256 immediates, all65536 scaled pixel centres PASS");
 }
 
+static void
+test_fmul_minifloat_modifiers(void)
+{
+   static const struct {
+      uint16_t src, imm;
+      bool dest_cache;
+      enum agx3_alu_hint hint;
+      uint16_t wait;
+      uint8_t bytes[6];
+   } native[] = {
+      {0, 0x40, false, AGX3_ALU_HINT_DISCARD, 0,
+       {0x09, 0xc1, 0x15, 0x01, 0x82, 0x00}},
+      {0, 0x20, false, AGX3_ALU_HINT_DISCARD, 0,
+       {0x09, 0xa1, 0x15, 0x01, 0x82, 0x00}},
+      {0, 0x38, false, AGX3_ALU_HINT_DISCARD, 0,
+       {0x09, 0xb9, 0x15, 0x01, 0x82, 0x00}},
+      {0, 0xc0, false, AGX3_ALU_HINT_DISCARD, 0,
+       {0x09, 0xc1, 0x1d, 0x01, 0x82, 0x00}},
+      {0, 0x40, true, AGX3_ALU_HINT_DISCARD, 1,
+       {0x09, 0xc1, 0x35, 0x01, 0x82, 0x20}},
+      {2, 0x40, false, AGX3_ALU_HINT_CACHE, 0,
+       {0x09, 0xc1, 0x05, 0x83, 0x82, 0x00}},
+   };
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
+      assert(agx3_alu_fmul_minifloat_mod(
+         AGX_ISA_ENCODING_AGX3B, 0, native[i].src, native[i].imm,
+         native[i].dest_cache, true, native[i].hint,
+         native[i].wait, out, &len));
+      assert(len == sizeof(native[i].bytes));
+      assert(!memcmp(out, native[i].bytes, len));
+   }
+
+   unsigned matrix = 0;
+   for (unsigned imm = 0; imm <= UINT8_MAX; ++imm) {
+      for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
+         for (unsigned hint = AGX3_ALU_HINT_NONE;
+              hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+            for (unsigned wait = 0; wait < 64; ++wait) {
+               uint8_t plain[AGX3_ALU_MAX_LENGTH], absolute[AGX3_ALU_MAX_LENGTH];
+               uint8_t plain_len = 0xa5, absolute_len = 0xa5;
+               bool plain_ok = agx3_alu_fmul_minifloat_mod(
+                  AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
+                  false, hint, wait, plain, &plain_len);
+               bool absolute_ok = agx3_alu_fmul_minifloat_mod(
+                  AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
+                  true, hint, wait, absolute, &absolute_len);
+               assert(plain_ok == absolute_ok);
+               if (!plain_ok)
+                  continue;
+               assert(plain_len == 6 && absolute_len == plain_len);
+               assert(!(plain[4] & 0x02) && (absolute[4] & 0x02));
+               absolute[4] &= ~0x02;
+               assert(!memcmp(plain, absolute, plain_len));
+               matrix++;
+            }
+         }
+      }
+   }
+
+   memset(out, 0xa5, sizeof(out));
+   len = 99;
+   assert(!agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 0x40, false, true,
+      AGX3_ALU_HINT_DISCARD, 0, out, &len));
+   assert(len == 99 && out[0] == 0xa5);
+   assert(!agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, 0x40, false, true,
+      AGX3_ALU_HINT_DISCARD, 0, out, &len));
+   assert(!agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, 0x40, false, true,
+      AGX3_ALU_HINT_DISCARD, 0, out, &len));
+   assert(!agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x100, false, true,
+      AGX3_ALU_HINT_DISCARD, 0, out, &len));
+
+   printf("G17P absolute minifloat FMUL: five direct and one texture-wait "
+          "Apple witnesses, %u orthogonal immediate/lifetime/wait forms and "
+          "strict negatives PASS\n", matrix);
+}
+
 static void test_fmul_half_minifloat_to_f32(void)
 {
    static const uint8_t native[] = {0x09, 0xf1, 0x35, 0x00, 0x80, 0x00};
@@ -2559,6 +2640,7 @@ int main(void){
    test_modified_minifloat_add();
    test_half_uv();
    test_fmul_minifloat();
+   test_fmul_minifloat_modifiers();
    test_fmul_half_minifloat_to_f32();
    test_fadd_minifloat();
    test_u16_to_f32();

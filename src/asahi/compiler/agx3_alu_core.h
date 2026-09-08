@@ -256,6 +256,14 @@ bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Full G17P minifloat multiply form, including the independently witnessed
+ * destination retention and absolute source modifiers. */
+bool agx3_alu_fmul_minifloat_mod(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native scalar-half times minifloat with a float32 result. */
 bool agx3_alu_fmul_half_minifloat_to_f32(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
