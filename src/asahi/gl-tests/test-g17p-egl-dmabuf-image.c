@@ -297,6 +297,10 @@ main(void)
    if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
        !eglMakeCurrent(display, surface, surface, context))
       return 1;
+   EGLContext retained_context =
+      eglCreateContext(display, config, context, context_attributes);
+   if (retained_context == EGL_NO_CONTEXT)
+      return 1;
 
    const char *gl_extensions = (const char *)glGetString(GL_EXTENSIONS);
    if (!gl_extensions ||
@@ -403,12 +407,25 @@ main(void)
    gl_pixels_ok &= gl_read("first GPU clear", clear_rgba, clear_bgra,
                             first_rgba, noop);
 
+   /* Wayland compositors routinely hand an imported texture to a shared
+    * render context and retire the producer context. Texture/storage objects
+    * belong to the share group; framebuffer wrappers do not, so recreate the
+    * latter in the surviving context after destroying the original context. */
+   glDeleteFramebuffers(1, &fbo);
    if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                        EGL_NO_CONTEXT) ||
-       !eglMakeCurrent(display, surface, surface, context) ||
-       !glIsTexture(texture) || !glIsFramebuffer(fbo))
+       !eglDestroyContext(display, context) ||
+       !eglMakeCurrent(display, surface, surface, retained_context) ||
+       !glIsTexture(texture))
       return 1;
+   context = EGL_NO_CONTEXT;
+   glGenFramebuffers(1, &fbo);
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          texture, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+       !gl_ok("retained-context EGLImage bind"))
+      return 1;
    if (!map_write(retained, &second))
       return 1;
    gl_pixels_ok &= gl_read("second CPU upload", second_rgba, second_bgra,
@@ -434,11 +451,13 @@ main(void)
    gbm_device_destroy(gbm);
    close(drm_fd);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-   eglDestroyContext(display, context);
+   eglDestroyContext(display, retained_context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
 
-   puts(noop ? "GL06 EGLImage dma-buf lifecycle exact; no-op pixels skipped"
-             : "GL06 EGLImage dma-buf bidirectional pixels and lifetime exact");
+   puts(noop ? "GL06 EGLImage dma-buf shared-context lifetime exact; "
+               "no-op pixels skipped"
+             : "GL06 EGLImage dma-buf bidirectional pixels and shared-context "
+               "lifetime exact");
    return 0;
 }
