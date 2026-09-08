@@ -221,11 +221,16 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
             /* The bounded absolute-load builder always materializes a 64-bit
              * source as consecutive low/high dwords. Validate it as soon as
              * the high half arrives, independently of the producer's range
-             * list. */
+             * list. A non-fragment EOT program is the one no-nested-table
+             * form: dwords 2/3 hold its PBE argument address, while 4/5 are
+             * the two MRT imageblock offsets and must not be mistaken for an
+             * address. */
             if (dest && immediate_valid[dest - 1]) {
                const uint64_t source =
                   immediates[dest - 1] | ((uint64_t)value << 32);
-               if (source > UINT32_MAX) {
+               const bool absolute_source = fragment || nested_tables ||
+                                            dest == 3;
+               if (absolute_source && source > UINT32_MAX) {
                   if (!memory->owned(memory->data, source, 4))
                      return fail_at(cursor, "Ioto load source is unowned");
 

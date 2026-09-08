@@ -233,6 +233,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->resolve = 0;
    batch->feedback = 0;
    memset(batch->uploaded_clear_color, 0, sizeof(batch->uploaded_clear_color));
+   memset(batch->clear_color, 0, sizeof(batch->clear_color));
    batch->clear_depth = 0;
    batch->clear_stencil = 0;
    batch->varyings = 0;

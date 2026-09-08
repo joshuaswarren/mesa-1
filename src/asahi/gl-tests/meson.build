@@ -32,6 +32,40 @@ gl_texture_offset = executable(
   build_by_default : false,
 )
 
+gl_mrt = executable(
+  'asahi-g17p-gl-mrt',
+  files('test-g17p-gl-mrt.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-mrt-software-control',
+  gl_mrt,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-mrt-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_mrt,
+  ],
+  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  suite : ['asahi'],
+)
+
 test(
   'asahi-g17p-gl-texture-offset-software-control',
   gl_texture_offset,

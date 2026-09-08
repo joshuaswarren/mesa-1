@@ -3919,25 +3919,43 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
    }
 
    if (dev->chip == AGX_CHIP_G17P) {
-      /* The exact HAL200 background/EOT programs currently cover the ordinary
-       * single-colour-buffer tile layout used by desktop compositors and GL
-       * FBOs.  Never feed its Ioto grammar a spilled, layered, or MRT key. */
+      /* The exact HAL200 background/EOT programs cover ordinary RT0 and the
+       * hardware-witnessed pair of single-sample RGBA8 attachments. */
       if (!agx_g17p_rt0_tile_layout_supported(&batch->tilebuffer_layout))
          agx_native_descriptor_rejected(dev, "background tile layout");
 
+      const bool rgba8_mrt =
+         key.tib.nr_samples == 1 && !key.tib.layered &&
+         key.tib.logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+         key.tib.logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+         !key.tib.spilled[0] && !key.tib.spilled[1] &&
+         agx_tilebuffer_offset_B(&key.tib, 0) == 0 &&
+         agx_tilebuffer_offset_B(&key.tib, 1) == 4;
+
       for (unsigned rt = 1; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
-         if (key.op[rt] != AGX_BG_EOT_NONE)
+         const enum agx_bg_eot_op rt_op = key.op[rt];
+         const bool rt1_supported =
+            rt == 1 && rgba8_mrt &&
+            (store ? rt_op == AGX_EOT_STORE
+                   : (rt_op == AGX_BG_CLEAR || rt_op == AGX_BG_LOAD));
+         if (rt_op != AGX_BG_EOT_NONE && !rt1_supported)
             agx_native_descriptor_rejected(dev, "background MRT program");
       }
 
       const enum agx_bg_eot_op op = key.op[0];
+      const bool dual_mrt_active = rgba8_mrt &&
+                                   key.op[1] != AGX_BG_EOT_NONE;
+      if (dual_mrt_active && key.op[1] != op)
+         agx_native_descriptor_rejected(dev, "mixed background MRT operation");
       if (store ? (op != AGX_EOT_STORE && op != AGX_BG_EOT_NONE)
                 : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD &&
                    op != AGX_BG_EOT_NONE))
          agx_native_descriptor_rejected(dev, "background operation");
 
       if (!store && op == AGX_BG_CLEAR)
-         key.reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+         key.reserved_preamble =
+            dual_mrt_active ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+                            : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
       struct agx_bg_eot_shader *shader =
          agx_get_bg_eot_shader(&ctx->bg_eot, &key);
@@ -3962,12 +3980,17 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          agx_native_descriptor_rejected(dev, "background shader");
       agx_batch_add_bo(batch, shader->bo);
 
-      const size_t capacity =
-         op == AGX_BG_EOT_NONE
-            ? AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
-         : store ? AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE
-         : op == AGX_BG_CLEAR ? AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE
-                              : AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
+      size_t capacity;
+      if (op == AGX_BG_EOT_NONE)
+         capacity = AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE;
+      else if (store)
+         capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
+      else if (op == AGX_BG_CLEAR)
+         capacity = dual_mrt_active
+                       ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+                       : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE;
+      else
+         capacity = AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
       struct agx_bo *program_bo = NULL;
       struct agx_ptr program_ptr = agx_pool_alloc_aligned_with_bo(
          &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT,
@@ -3982,18 +4005,29 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       uint64_t resource_spec = 0;
       if (store && op == AGX_EOT_STORE) {
          const struct pipe_surface *surf = &batch->key.cbufs[0];
-         if (!surf->texture || descriptor_size !=
-                                  AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE)
+         const struct pipe_surface *surf1 =
+            dual_mrt_active ? &batch->key.cbufs[1] : NULL;
+         if (!surf->texture || (dual_mrt_active && !surf1->texture) ||
+             descriptor_size != AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE)
             agx_native_descriptor_rejected(dev, "end-of-tile attachment");
 
-         struct pipe_image_view view = image_view_for_surface(surf);
+         const size_t pbe_size =
+            dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
+                            : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
          struct agx_ptr pbe =
-            agx_pool_alloc_aligned(&batch->pool, descriptor_size, 256);
-         view.format = util_format_linear(view.format);
-         const bool no_compress = batch->feedback & PIPE_CLEAR_COLOR0;
-         if (!agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false,
-                                   no_compress))
-            agx_native_descriptor_rejected(dev, "end-of-tile PBE");
+            agx_pool_alloc_aligned(&batch->pool, pbe_size, 32);
+         for (unsigned rt = 0; rt < (dual_mrt_active ? 2 : 1); ++rt) {
+            const struct pipe_surface *attachment = &batch->key.cbufs[rt];
+            struct pipe_image_view view = image_view_for_surface(attachment);
+            view.format = util_format_linear(view.format);
+            const bool no_compress =
+               batch->feedback & (PIPE_CLEAR_COLOR0 << rt);
+            struct agx_gallium_pbe_descriptor *argument =
+               agx_pbe_descriptor_at(pbe.cpu, descriptor_size, rt);
+            if (!agx_batch_upload_pbe(batch, argument, &view, true, true,
+                                      false, no_compress))
+               agx_native_descriptor_rejected(dev, "end-of-tile PBE");
+         }
 
          const struct agx3_g17p_rt0_eot_program_desc desc = {
             .program_va = program_ptr.gpu,
@@ -4001,7 +4035,9 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .pbe_argument_va = pbe.gpu,
             .imageblock_offset_B =
                agx_tilebuffer_offset_B(&key.tib, 0),
-            .attachment_count = 1,
+            .attachment_count = dual_mrt_active ? 2 : 1,
+            .imageblock_offset1_B =
+               dual_mrt_active ? agx_tilebuffer_offset_B(&key.tib, 1) : 0,
             .shader_binary_size = shader->info.binary_size,
             .scratch_size = shader->info.scratch_size,
             .nr_gprs = shader->info.nr_gprs,
@@ -4056,15 +4092,40 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          if (op == AGX_BG_CLEAR) {
             if (!batch->uploaded_clear_color[0])
                agx_native_descriptor_rejected(dev, "background clear value");
-            desc.clear_value_va = batch->uploaded_clear_color[0];
+            if (dual_mrt_active) {
+               if (!batch->uploaded_clear_color[1])
+                  agx_native_descriptor_rejected(dev,
+                                                 "background MRT clear value");
+               union pipe_color_union clear_values[2] = {
+                  batch->clear_color[0], batch->clear_color[1],
+               };
+               desc.clear_value_va = agx_pool_upload_aligned(
+                  &batch->pool, clear_values, sizeof(clear_values), 16);
+               if (!desc.clear_value_va)
+                  agx_native_descriptor_rejected(dev,
+                                                 "background MRT clear upload");
+            } else {
+               desc.clear_value_va = batch->uploaded_clear_color[0];
+            }
          } else {
-            struct agx_ptr texture =
-               agx_pool_alloc_aligned(&batch->pool, descriptor_size, 64);
-            struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
-            if (!agx_pack_texture(descriptor_generation, texture.cpu,
-                                  agx_resource(surf->texture), surf->format,
-                                  &sampler_view))
-               agx_native_descriptor_rejected(dev, "background texture");
+            /* RT1 is texture index 2 in the exact MRT reload shader, so keep
+             * the index-1 descriptor gap in the native table. */
+            const unsigned texture_count = dual_mrt_active ? 3 : 1;
+            struct agx_ptr textures = agx_pool_alloc_aligned(
+               &batch->pool, descriptor_size * texture_count, 64);
+            memset(textures.cpu, 0, descriptor_size * texture_count);
+            for (unsigned rt = 0; rt < (dual_mrt_active ? 2 : 1); ++rt) {
+               const struct pipe_surface *attachment = &batch->key.cbufs[rt];
+               struct pipe_sampler_view sampler_view =
+                  sampler_view_for_surface(attachment);
+               struct agx_gallium_texture_descriptor *texture =
+                  agx_texture_descriptor_at(textures.cpu, descriptor_size,
+                                            rt * 2);
+               if (!agx_pack_texture(descriptor_generation, texture,
+                                     agx_resource(attachment->texture),
+                                     attachment->format, &sampler_view))
+                  agx_native_descriptor_rejected(dev, "background texture");
+            }
 
             const unsigned sampler_size =
                agx_chip_sampler_heap_element_size(dev->chip);
@@ -4075,7 +4136,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             if (!agx_gallium_pack_g17p_txf_sampler(dev->chip, sampler.cpu))
                agx_native_descriptor_rejected(dev, "background texel-fetch sampler");
 
-            const uint64_t pointers[2] = {texture.gpu, sampler.gpu};
+            const uint64_t pointers[2] = {textures.gpu, sampler.gpu};
             const uint64_t table = agx_pool_upload_aligned(
                &batch->pool, pointers, sizeof(pointers), 8);
             desc.texture_pointer_va = table;
