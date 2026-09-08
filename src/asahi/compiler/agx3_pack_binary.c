@@ -1166,7 +1166,8 @@ fail:
 static bool
 agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
-                         uint8_t slot, uint16_t wait_mask, bool final)
+                         uint8_t slot, uint16_t wait_mask, bool final,
+                         bool pixel_entry, uint32_t *pixel_entry_offset)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
@@ -1457,6 +1458,17 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              !agx3_append(emission, bytes, len))
             return false;
       }
+   }
+
+   if (pixel_entry) {
+      uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len = 0;
+      if (pixel_entry_offset == NULL ||
+          !agx3_pixel_colour_entry(enc, entry, &entry_len))
+         return false;
+
+      *pixel_entry_offset = emission->size;
+      if (!agx3_append(emission, entry, entry_len))
+         return false;
    }
 
    const struct agx3_tex_sample_desc d = {
@@ -5287,6 +5299,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
+            /* Apple's implicit-derivative fragment programs enter the pixel
+             * transaction immediately before their first SMP, after their
+             * coefficient interpolation.  Opening it only in the colour
+             * epilog is too late: a scissor edge may then retire uncovered
+             * lanes before SMP forms its derivative quad, selecting the next
+             * mip on odd-aligned rectangles.  Keep explicit-LOD/gradient
+             * samples outside this rule; they do not consume a helper quad.
+             *
+             * A split fragment epilog carries the same entry gate for its
+             * tile write.  Publishing this main-part entry through the
+             * existing link metadata lets agx_fast_link remove that later
+             * duplicate, leaving the one native gate at the first derivative
+             * consumer.  The native corpus is straight-line; do not place an
+             * opener inside one control-flow arm and then deduplicate the
+             * unconditional epilog opener. */
+            const bool implicit_derivatives =
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS;
+            const bool open_pixel =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               !ctx->key->fs.ignore_tib_dependencies &&
+               ctx->agx3_colour_link.straight_line &&
+               implicit_derivatives && !g17p_colour_open;
             /* The implicit-LOD form needs the 2x2 quad's derivatives; every
              * witness is a fragment shader and the hardware has no quad
              * outside one. Apple's compute and vertex explicit-level forms
@@ -5313,9 +5349,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
                  !compute_gradient) ||
+                /* Keep the pixel-entry gate after all native coordinate
+                 * staging and immediately before SMP, matching Apple. */
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
-                                          final))
+                                          final, open_pixel,
+                                          &ctx->agx3_colour_link.entry_offset))
                AGX3_REFUSE(I);
+            if (open_pixel) {
+               ctx->agx3_colour_link.entry_emitted = true;
+               ctx->agx3_colour_link.entry_offset -= initial_size;
+               g17p_colour_open = true;
+            }
             /* The sample emitter stages two 32-bit coordinates, a third for
              * 3D, the auxiliary scalar bank for a per-lane level or bias, or
              * the four gradient banks that reach half 14. */

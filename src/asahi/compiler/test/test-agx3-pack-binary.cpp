@@ -3323,6 +3323,8 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 6, 1, 0, false, true,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
 
    const struct agx3_tex_sample_desc sample = {
       .dest = 8, .coord = 4, .width = AGX3_TEX_W16, .mask = 15,
@@ -3335,6 +3337,8 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
+   EXPECT_EQ(b->shader->agx3_colour_link.entry_offset, 8);
 }
 
 TEST_F(AGX3PackBinary, TextureSampleOffsetRefusesRegisterAndAGX3C)
@@ -3501,6 +3505,10 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
                                                  false, bytes, &len)
                      : agx3_tex_stage_copy(enc, 2, 2, 1, 0, bytes, &len));
       append(want, bytes, len);
+      if (enc == AGX_ISA_ENCODING_AGX3B) {
+         ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+         append(want, bytes, len);
+      }
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
       d.coord = 0;
@@ -7732,6 +7740,8 @@ TEST_F(AGX3PackBinary, Texture3DImplicitLodStagesCoordinates)
          bytes, &len));
       append(want, bytes, len);
    }
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
    d.width = AGX3_TEX_W32;
@@ -7824,6 +7834,8 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                     bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
 
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
@@ -7909,6 +7921,8 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
    }
    ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                     bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
 
    const struct agx3_tex_sample_desc sample = {
@@ -8163,6 +8177,8 @@ TEST_F(AGX3PackBinary, ArraySampleDirectLayerAndLifetime)
                                            hint == 1, hint == 2,
                                            bytes, &len));
       append(want, bytes, len);
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+      append(want, bytes, len);
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
       d.width = AGX3_TEX_W32;
@@ -8390,6 +8406,8 @@ TEST_F(AGX3PackBinary, RegisterLodBiasStagesLikeRegisterLevel)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
    d.width = AGX3_TEX_W32;
@@ -8462,6 +8480,8 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
       ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 22, 22, 1, 0, false, false,
                                             bytes, &len));
       append(want, bytes, len);
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+      append(want, bytes, len);
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
       d.coord = 20;
@@ -8533,6 +8553,8 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 6, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
    d.width = AGX3_TEX_W32;
@@ -8580,6 +8602,8 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    append(want, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 122, 6, 0, false, false,
                                          bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 8;
