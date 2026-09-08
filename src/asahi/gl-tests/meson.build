@@ -825,6 +825,23 @@ test(
   suite : ['asahi'],
 )
 
+test(
+  'asahi-g17p-egl-gbm-server-wait-accumulate',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    egl_gbm_swap,
+  ],
+  env : [
+    'ASAHI_GL_EXPECT_SERVER_WAIT_ACCUMULATE=1',
+    'ASAHI_SHIM_EXPECT_SYNC_WAIT_TIMEOUT=1',
+  ],
+  suite : ['asahi'],
+)
+
 run_target(
   'asahi-g17p-egl-dmabuf-image-shim',
   command : [

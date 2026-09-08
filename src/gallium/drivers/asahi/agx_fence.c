@@ -153,12 +153,23 @@ agx_fence_create(struct agx_context *ctx)
                            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
 
       if (ret == 0) {
-         close(fd);
-         fd = os_dupfd_cloexec(ctx->in_sync_fd);
+         int pending = os_dupfd_cloexec(ctx->in_sync_fd);
+         if (pending >= 0) {
+            close(fd);
+            fd = pending;
+         } else if (sync_wait(ctx->in_sync_fd, -1)) {
+            close(fd);
+            fd = -1;
+         }
       } else if (ret == -ETIME) {
          int merged = sync_merge("asahi-fence", fd, ctx->in_sync_fd);
-         close(fd);
-         fd = merged;
+         if (merged >= 0) {
+            close(fd);
+            fd = merged;
+         } else if (sync_wait(fd, -1) || sync_wait(ctx->in_sync_fd, -1)) {
+            close(fd);
+            fd = -1;
+         }
       } else {
          close(fd);
          fd = -1;
@@ -203,9 +214,17 @@ agx_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f,
    }
 
    ret = sync_accumulate("asahi", &ctx->in_sync_fd, fd);
-   close(fd);
    if (ret || ctx->in_sync_fd < 0) {
-      agx_msg("server-wait fence accumulation failed\n");
-      ctx->any_faults = true;
+      /* Keep the previous accumulated fence and consume this dependency on
+       * the CPU if the kernel cannot allocate a merged sync file. Dropping it
+       * would let the next GPU submission run before the acquire fence. */
+      if (sync_wait(fd, -1)) {
+         agx_msg("server-wait fence accumulation and fallback wait failed\n");
+         const bool first_fault = !ctx->any_faults;
+         ctx->any_faults = true;
+         if (first_fault && ctx->reset.reset)
+            ctx->reset.reset(ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
+      }
    }
+   close(fd);
 }

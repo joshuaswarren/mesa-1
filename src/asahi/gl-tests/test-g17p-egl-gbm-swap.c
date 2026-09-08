@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 #define FIRST_WIDTH  240
@@ -177,6 +178,58 @@ out:
       eglMakeCurrent(display, consumer_surface, consumer_surface,
                      consumer_context);
    return ok;
+}
+
+static bool
+accumulate_native_server_waits(EGLDisplay display,
+                               const struct native_fence_api *api)
+{
+   for (unsigned i = 0; i < 2; ++i) {
+      int fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+      if (fd < 0)
+         return false;
+
+      const EGLint import_attrs[] = {
+         EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+         fd,
+         EGL_NONE,
+      };
+      EGLSyncKHR acquire =
+         api->create(display, EGL_SYNC_NATIVE_FENCE_ANDROID, import_attrs);
+      if (acquire == EGL_NO_SYNC_KHR) {
+         close(fd);
+         return false;
+      }
+
+      /* EGL owns fd after the successful import. */
+      if (!api->wait(display, acquire, 0) ||
+          !api->destroy(display, acquire))
+         return false;
+   }
+
+   /* Force the release snapshot down its unsignalled-current-fence path.
+    * The shim's eventfds deliberately cannot SYNC_IOC_MERGE, so success proves
+    * the driver waited both dependencies rather than dropping either one. */
+   setenv("ASAHI_SHIM_TIMEOUT_SYNC_WAIT_ONCE", "1", 1);
+   const EGLint release_attrs[] = {
+      EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+      EGL_NO_NATIVE_FENCE_FD_ANDROID,
+      EGL_NONE,
+   };
+   EGLSyncKHR release =
+      api->create(display, EGL_SYNC_NATIVE_FENCE_ANDROID, release_attrs);
+   unsetenv("ASAHI_SHIM_TIMEOUT_SYNC_WAIT_ONCE");
+   if (release == EGL_NO_SYNC_KHR || !api->destroy(display, release))
+      return false;
+
+   const GLenum status = glGetGraphicsResetStatus();
+   if (status != GL_NO_ERROR) {
+      fprintf(stderr, "native server-wait accumulation reset context: %#x\n",
+              status);
+      return false;
+   }
+
+   return true;
 }
 
 static bool
@@ -421,6 +474,8 @@ main(void)
       getenv("ASAHI_GL_EXPECT_SUBMIT_FAILURE") != NULL;
    const bool expect_implicit_sync_fallback =
       getenv("ASAHI_GL_EXPECT_IMPLICIT_SYNC_FALLBACK") != NULL;
+   const bool expect_server_wait_accumulate =
+      getenv("ASAHI_GL_EXPECT_SERVER_WAIT_ACCUMULATE") != NULL;
    if (expect_implicit_sync_fallback) {
       unsetenv("ASAHI_SHIM_FAIL_DMABUF_EXPORT_ONCE");
       unsetenv("ASAHI_SHIM_FAIL_DMABUF_IMPORT_ONCE");
@@ -476,7 +531,9 @@ main(void)
       EGL_NONE,
    };
    const EGLint *selected_context_attrs =
-      expect_submit_failure ? robust_context_attrs : context_attrs;
+      (expect_submit_failure || expect_server_wait_accumulate)
+         ? robust_context_attrs
+         : context_attrs;
    EGLContext context = config ? eglCreateContext(display, config,
                                                    EGL_NO_CONTEXT,
                                                    selected_context_attrs)
@@ -527,6 +584,13 @@ main(void)
       }
       if (!program)
          return 1;
+
+      if (expect_server_wait_accumulate && generation == 0 &&
+          !accumulate_native_server_waits(display, &fence_api)) {
+         fprintf(stderr, "multiple native server waits failed: %#x\n",
+                 eglGetError());
+         return 1;
+      }
 
       if (expect_submit_failure) {
          glUseProgram(program);
@@ -582,10 +646,14 @@ main(void)
    eglTerminate(display);
    gbm_device_destroy(device);
    close(drm_fd);
-   puts(expect_implicit_sync_fallback
-           ? "GL05 dma-buf acquire/release sync failures fell back without "
-             "losing 16-frame swap progress"
-           : "GL05 EGL/GBM swap, partial update, native-fence handoff, "
-             "dma-buf retention, resize and 16 frames exact");
+   if (expect_implicit_sync_fallback) {
+      puts("GL05 dma-buf acquire/release sync failures fell back without "
+           "losing 16-frame swap progress");
+   } else if (expect_server_wait_accumulate) {
+      puts("GL05 multiple native server waits preserved before 16 swaps");
+   } else {
+      puts("GL05 EGL/GBM swap, partial update, native-fence handoff, dma-buf "
+           "retention, resize and 16 frames exact");
+   }
    return 0;
 }

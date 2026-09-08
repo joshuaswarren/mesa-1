@@ -67,6 +67,7 @@ static bool failed_dmabuf_import_once;
 static unsigned dmabuf_fallback_sync_calls;
 static bool waited_after_dmabuf_import_failure;
 static unsigned prime_export_calls;
+static bool timed_out_sync_wait_once;
 
 static void __attribute__((destructor))
 check_injected_sync_failures(void)
@@ -96,6 +97,12 @@ check_injected_sync_failures(void)
       _Exit(EXIT_FAILURE);
    }
 
+   if (getenv("ASAHI_SHIM_EXPECT_SYNC_WAIT_TIMEOUT") &&
+       !timed_out_sync_wait_once) {
+      fprintf(stderr, "shim: expected syncobj wait timeout was not injected\n");
+      _Exit(EXIT_FAILURE);
+   }
+
    if (failed_prime_export_once)
       fprintf(stderr, "shim: injected PRIME export failure exactly once\n");
    if (failed_dmabuf_export_once && failed_dmabuf_import_once)
@@ -103,6 +110,8 @@ check_injected_sync_failures(void)
    if (getenv("ASAHI_SHIM_EXPECT_SINGLE_PRIME_EXPORT"))
       fprintf(stderr,
               "shim: one concurrent BO transition made one PRIME export\n");
+   if (timed_out_sync_wait_once)
+      fprintf(stderr, "shim: injected syncobj wait timeout exactly once\n");
 }
 
 static uint32_t
@@ -509,6 +518,13 @@ drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
 static int
 drm_shim_ioctl_syncobj_wait(int fd, unsigned long request, void *arg)
 {
+   if (getenv("ASAHI_SHIM_TIMEOUT_SYNC_WAIT_ONCE") &&
+       !timed_out_sync_wait_once) {
+      timed_out_sync_wait_once = true;
+      errno = ETIME;
+      return -ETIME;
+   }
+
    if (failed_dmabuf_import_once)
       waited_after_dmabuf_import_failure = true;
    return 0;
