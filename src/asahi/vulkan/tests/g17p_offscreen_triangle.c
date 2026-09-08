@@ -271,6 +271,14 @@
 #define G17P_BRESENHAM_LINES 0
 #endif
 
+#ifndef G17P_LOGIC_OP_XOR
+#define G17P_LOGIC_OP_XOR 0
+#endif
+
+#ifndef G17P_BLEND_CONSTANT
+#define G17P_BLEND_CONSTANT 0
+#endif
+
 #if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
@@ -287,7 +295,8 @@
      G17P_R16_SINT + G17P_R16_SFLOAT + G17P_RG16_SFLOAT +             \
      G17P_RGBA16_SFLOAT + G17P_A2B10G10R10_UINT +                    \
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
-     (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES) > 1
+     (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
+     G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -1178,6 +1187,16 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_LOGIC_OP_XOR
+#define PROBE_NAME "g17p-vulkan-logic-op-xor"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_BLEND_CONSTANT
+#define PROBE_NAME "g17p-vulkan-blend-constant"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1526,6 +1545,15 @@ verify_readback(const uint8_t *map)
    /* IEC 61966-2-1 transfer of the linear fragment colour, rounded to UNORM:
     * R=255, G=144, B=63, then stored in BGRA byte order. */
    static const uint8_t expected[4] = {63, 144, 255, 255};
+#elif G17P_LOGIC_OP_XOR
+   /* The clear is exact RGBA8 55 aa 0f ff. XOR with the fragment's
+    * ff 47 0d ff distinguishes the destination load from a source store. */
+   static const uint8_t expected[4] = {0xaa, 0xed, 0x02, 0x00};
+#elif G17P_BLEND_CONSTANT
+   /* CONSTANT_COLOR/CONSTANT_ALPHA times the source, with no destination
+    * contribution. These are independently rounded RGBA8 results for
+    * constants (0.25, 0.5, 0.75, 0.125). */
+   static const uint8_t expected[4] = {64, 36, 10, 32};
 #elif G17P_BGRA8_SNORM
    static const uint8_t expected[4] = {0x60, 0x11, 0xc0, 0xdf};
 #elif G17P_RGBA8_SNORM
@@ -1719,6 +1747,10 @@ main(void)
       (G17P_RGBA8_SNORM && getenv("G17P_RGBA8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_BRESENHAM_LINES &&
        getenv("G17P_BRESENHAM_LINES_RECORD_ONLY") != NULL) ||
+      (G17P_LOGIC_OP_XOR &&
+       getenv("G17P_LOGIC_OP_XOR_RECORD_ONLY") != NULL) ||
+      (G17P_BLEND_CONSTANT &&
+       getenv("G17P_BLEND_CONSTANT_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -1945,6 +1977,11 @@ main(void)
       .drawIndirectFirstInstance = VK_TRUE,
    };
 #endif
+#if G17P_LOGIC_OP_XOR
+   const VkPhysicalDeviceFeatures blend_features = {
+      .logicOp = G17P_LOGIC_OP_XOR,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_F16_IO
@@ -1963,6 +2000,8 @@ main(void)
 #endif
 #if G17P_BRESENHAM_LINES
       .pEnabledFeatures = &enabled_features,
+#elif G17P_LOGIC_OP_XOR
+      .pEnabledFeatures = &blend_features,
 #endif
 #if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
       .enabledExtensionCount = 1,
@@ -3042,20 +3081,29 @@ main(void)
       .rasterizationSamples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
    };
    const VkPipelineColorBlendAttachmentState blend_attachment = {
-      .blendEnable = G17P_INDEX_RESTART,
-      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .blendEnable = G17P_INDEX_RESTART || G17P_BLEND_CONSTANT,
+      .srcColorBlendFactor = G17P_BLEND_CONSTANT
+                                ? VK_BLEND_FACTOR_CONSTANT_COLOR
+                                : VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = G17P_BLEND_CONSTANT ? VK_BLEND_FACTOR_ZERO
+                                                 : VK_BLEND_FACTOR_ONE,
       .colorBlendOp = VK_BLEND_OP_ADD,
-      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .srcAlphaBlendFactor = G17P_BLEND_CONSTANT
+                                ? VK_BLEND_FACTOR_CONSTANT_ALPHA
+                                : VK_BLEND_FACTOR_ONE,
+      .dstAlphaBlendFactor = G17P_BLEND_CONSTANT ? VK_BLEND_FACTOR_ZERO
+                                                 : VK_BLEND_FACTOR_ONE,
       .alphaBlendOp = VK_BLEND_OP_ADD,
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
    };
    const VkPipelineColorBlendStateCreateInfo blend = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .logicOpEnable = G17P_LOGIC_OP_XOR,
+      .logicOp = VK_LOGIC_OP_XOR,
       .attachmentCount = 1,
       .pAttachments = &blend_attachment,
+      .blendConstants = {0.25f, 0.5f, 0.75f, 0.125f},
    };
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -3269,7 +3317,15 @@ main(void)
    G17P_RGBA32_UINT || G17P_R16_UINT || G17P_A2B10G10R10_UINT
    const VkClearValue clear = {.color = {.uint32 = {0, 0, 0, 0}}};
 #else
+#if G17P_LOGIC_OP_XOR
+   const VkClearValue clear = {
+      .color = {.float32 = {1.0f / 255.0f * 0x55,
+                            1.0f / 255.0f * 0xaa,
+                            1.0f / 255.0f * 0x0f, 1.0f}},
+   };
+#else
    const VkClearValue clear = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
+#endif
 #endif
    const VkRenderPassBeginInfo render_begin = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -3398,7 +3454,8 @@ main(void)
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
-   G17P_BRESENHAM_LINES || G17P_RG16_UNORM ||                           \
+   G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
+   G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
    G17P_R32_SINT || G17P_RG16_UINT || G17P_RG16_SINT ||               \
@@ -3497,6 +3554,7 @@ main(void)
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
+   G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||                           \
    G17P_RG16_UNORM ||                                                     \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
@@ -3709,6 +3767,14 @@ main(void)
    printf(PROBE_NAME ": PASS — 32x32 exact 3px Bresenham line immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           checksum);
+#elif G17P_LOGIC_OP_XOR
+   printf(PROBE_NAME ": PASS — exact RGBA8 XOR with retained clear "
+                     "immediately/3s, guards unchanged, checksum %016" PRIx64
+                     "\n", checksum);
+#elif G17P_BLEND_CONSTANT
+   printf(PROBE_NAME ": PASS — exact independent constant-color/alpha "
+                     "blend immediately/3s, guards unchanged, checksum %016"
+                     PRIx64 "\n", checksum);
 #elif G17P_RGBA16_UINT
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UINT exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
