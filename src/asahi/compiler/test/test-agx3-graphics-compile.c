@@ -927,6 +927,15 @@ build_fs_tilebuffer_load(void)
 static bool
 test_g17p_fragment_io_matrix(void)
 {
+   static const uint8_t pair_loads[][12] = {
+      /* The Apple witnesses use scoreboard slot 6 (d2/92/b2, byte8=02).
+       * Production allocation selects slot 1 here; f12's independently
+       * pinned LUT is the only difference in these exact records.
+       */
+      {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x52,0x00,0x00,0x00,0x00},
+      {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x12,0x00,0x00,0x00,0x00},
+      {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x32,0x00,0x00,0x00,0x00},
+   };
    static const struct {
       enum pipe_format format;
       uint8_t components;
@@ -939,28 +948,22 @@ test_g17p_fragment_io_matrix(void)
       {PIPE_FORMAT_R8_SNORM, 2, true},
       {PIPE_FORMAT_R8_SNORM, 4, true},
       {PIPE_FORMAT_R16_FLOAT, 1, true},
-      {PIPE_FORMAT_R16_FLOAT, 2, false},
+      {PIPE_FORMAT_R16_FLOAT, 2, true},
       {PIPE_FORMAT_R16_FLOAT, 4, true},
       {PIPE_FORMAT_R16_UNORM, 1, true},
-      {PIPE_FORMAT_R16_UNORM, 2, false},
+      {PIPE_FORMAT_R16_UNORM, 2, true},
       {PIPE_FORMAT_R16_UNORM, 4, true},
       {PIPE_FORMAT_R16_SNORM, 1, true},
-      {PIPE_FORMAT_R16_SNORM, 2, false},
+      {PIPE_FORMAT_R16_SNORM, 2, true},
       {PIPE_FORMAT_R16_SNORM, 4, true},
       {PIPE_FORMAT_R16_UINT, 1, true},
-      {PIPE_FORMAT_R16_UINT, 2, false},
+      {PIPE_FORMAT_R16_UINT, 2, true},
       {PIPE_FORMAT_R16_UINT, 4, true},
       {PIPE_FORMAT_R32_UINT, 1, true},
-      {PIPE_FORMAT_R32_UINT, 2, false},
+      {PIPE_FORMAT_R32_UINT, 2, true},
       {PIPE_FORMAT_R32_UINT, 4, true},
       {PIPE_FORMAT_R10G10B10A2_UNORM, 4, true},
    };
-
-   /* The false rows are an owned negative matrix, not formats silently
-    * omitted from the audit.  W16/W32 mask3 LDCOL has no Apple witness yet;
-    * scalar and full-vector encodings must keep working without accidentally
-    * admitting those shapes through a neighbouring mask.
-    */
 
    bool ok = true;
    for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
@@ -988,12 +991,39 @@ test_g17p_fragment_io_matrix(void)
          !memcmp((const uint8_t *)part.binary + part.info.binary_size -
                     sizeof(agx3_end),
                  agx3_end, sizeof(agx3_end));
+      bool exact_pair_load = true;
+      if (compiled && cases[i].components == 2) {
+         const unsigned width =
+            cases[i].format == PIPE_FORMAT_R8_UNORM ||
+                  cases[i].format == PIPE_FORMAT_R8_SNORM
+               ? 0
+            : cases[i].format == PIPE_FORMAT_R32_UINT
+               ? 2
+               : 1;
+         exact_pair_load = false;
+         for (unsigned offset = 0;
+              offset + sizeof(pair_loads[width]) <= part.info.binary_size;
+              ++offset) {
+            if (!memcmp((const uint8_t *)part.binary + offset,
+                        pair_loads[width], sizeof(pair_loads[width]))) {
+               exact_pair_load = true;
+               break;
+            }
+         }
+      }
       if (compiled != cases[i].expect_ok ||
           (cases[i].expect_ok && !terminated) ||
+          (cases[i].expect_ok && !exact_pair_load) ||
           (!cases[i].expect_ok && memcmp(&part, &cleared, sizeof(part)))) {
          fprintf(stderr, "G17P fragment I/O %s%u %s unexpectedly\n",
                  util_format_name(cases[i].format), cases[i].components,
                  compiled ? "compiled" : "rejected");
+         if (compiled && !exact_pair_load) {
+            fputs("  binary:", stderr);
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[j]);
+            fputc('\n', stderr);
+         }
          ok = false;
       }
       free(part.binary);

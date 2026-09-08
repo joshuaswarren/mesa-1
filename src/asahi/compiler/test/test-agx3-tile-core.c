@@ -35,15 +35,27 @@ int main(void){
    }
    {
       uint8_t out[AGX3_TILE_MAX_LENGTH], len = 0;
-      static const uint8_t rg8[] = {
-         0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xd2,0x02,0x00,0x00,0x00,
+      static const struct {
+         enum agx3_tile_width width;
+         uint8_t bytes[12];
+      } pairs[] = {
+         {AGX3_TILE_W8,
+          {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xd2,0x02,0x00,0x00,0x00}},
+         {AGX3_TILE_W16,
+          {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x92,0x02,0x00,0x00,0x00}},
+         {AGX3_TILE_W32,
+          {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xb2,0x02,0x00,0x00,0x00}},
       };
-      if (!agx3_tile_load(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8, 6,
-                          3, 0, AGX3_TILE_COV_1X, 0, true, true, out, &len) ||
-          len != sizeof(rg8) || memcmp(out, rg8, sizeof(rg8)))
-         fail++;
-      else
-         pass++;
+      for (unsigned i = 0; i < sizeof(pairs) / sizeof(pairs[0]); ++i) {
+         if (!agx3_tile_load(AGX_ISA_ENCODING_AGX3B, 0, pairs[i].width, 6,
+                             3, 0, AGX3_TILE_COV_1X, 0, true, true, out,
+                             &len) ||
+             len != sizeof(pairs[i].bytes) ||
+             memcmp(out, pairs[i].bytes, sizeof(pairs[i].bytes)))
+            fail++;
+         else
+            pass++;
+      }
    }
    {
       uint8_t out[AGX3_TILE_MAX_LENGTH]; uint8_t len=0;
@@ -54,6 +66,10 @@ int main(void){
       if(agx3_tile_store(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W32,15,0,
                          AGX3_TILE_COV_1X,3,out,&len)) fail++; else pass++;
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,7,0,
+                        AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
+      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,3,0,
+                        AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
+      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W16,1,7,0,
                         AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,15,0,
                         AGX3_TILE_COV_PER_SAMPLE,0,true,true,out,&len)) fail++; else pass++;
