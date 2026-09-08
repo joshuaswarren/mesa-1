@@ -49,11 +49,17 @@ test_shuffle_vectors(void)
    static const uint8_t uniform_c[] = {
       0x27, 0x00, 0x21, 0x1a, 0x20, 0x00, 0xa8, 0x02, 0x18, 0x02,
    };
-   static const uint8_t quad_broadcast_lane2_wait6[] = {
-      0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x04, 0x2c, 0x02, 0x00,
+   static const uint8_t quad_broadcast_wait6[4][10] = {
+      {0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x00, 0x2c, 0x02, 0x00},
+      {0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x02, 0x2c, 0x02, 0x00},
+      {0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x04, 0x2c, 0x02, 0x00},
+      {0x47, 0x00, 0x56, 0x00, 0x02, 0x0c, 0x06, 0x2c, 0x02, 0x00},
    };
    static const uint8_t quad_xor_lane1_live[] = {
       0xc7, 0x00, 0x54, 0x02, 0x02, 0x0c, 0x02, 0x2c, 0x02, 0x00,
+   };
+   static const uint8_t quad_xor_lane1_cached[] = {
+      0xc7, 0x00, 0x54, 0x02, 0x03, 0x0c, 0x02, 0x2c, 0x02, 0x00,
    };
    static const uint8_t quad_xor_lane3_final[] = {
       0xc7, 0x00, 0x54, 0x06, 0x02, 0x0c, 0x06, 0x2c, 0x04, 0x00,
@@ -97,10 +103,13 @@ test_shuffle_vectors(void)
       .wait_mask = 1u << 5,
       .src_live = true,
    };
-   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
-                                       &length));
-   CHECK(bytes_equal(out, length, quad_broadcast_lane2_wait6,
-                     sizeof(quad_broadcast_lane2_wait6)));
+   for (unsigned lane = 0; lane < 4; ++lane) {
+      d.lane = lane;
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, quad_broadcast_wait6[lane],
+                        sizeof(quad_broadcast_wait6[lane])));
+   }
 
    d.op = AGX3_SUBGROUP_SHUFFLE_XOR;
    d.dest = 2;
@@ -110,6 +119,14 @@ test_shuffle_vectors(void)
                                        &length));
    CHECK(bytes_equal(out, length, quad_xor_lane1_live,
                      sizeof(quad_xor_lane1_live)));
+
+   /* Fresh Apple G17P quad output retains f11 when its result remains live. */
+   d.dest_hint = true;
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, quad_xor_lane1_cached,
+                     sizeof(quad_xor_lane1_cached)));
+   d.dest_hint = false;
 
    d.dest = 6;
    d.lane = 3;
@@ -570,7 +587,7 @@ test_rejection(void)
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.quad = true;
    s.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
-   s.lane = 1;
+   s.lane = 4;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.op = AGX3_SUBGROUP_SHUFFLE_XOR;

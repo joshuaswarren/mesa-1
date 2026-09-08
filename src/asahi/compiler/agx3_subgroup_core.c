@@ -77,14 +77,13 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
          !d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST &&
          (d->lane == 0 || d->lane == 3 || d->lane == 5);
       const bool quad_witness =
-         d->quad && ((d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST && d->lane == 2) ||
+         d->quad && ((d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST && d->lane <= 3) ||
                      (d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
                       d->lane >= 1 && d->lane <= 3));
       if (enc != AGX_ISA_ENCODING_AGX3B || (!simd_witness && !quad_witness))
          return false;
-      if (d->quad && (d->dest_hint ||
-                      (d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
-                       d->wait_mask != 0)))
+      if (d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
+          d->wait_mask != 0)
          return false;
       if (d->lane > 0x7f || (d->wait_mask >> slots) != 0)
          return false;

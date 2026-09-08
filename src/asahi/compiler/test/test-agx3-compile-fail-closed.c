@@ -457,6 +457,52 @@ check_g17p_signed_immediate_ballot_rejected(void)
 }
 
 static bool
+check_g17p_subgroup_quad_compute(bool valid_lane)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P subgroup quad");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *lane = nir_load_subgroup_invocation(&b);
+   nir_def *horizontal = nir_quad_swap_horizontal(&b, lane);
+   nir_def *vertical = nir_quad_swap_vertical(&b, lane);
+   nir_def *broadcast =
+      nir_quad_broadcast(&b, lane, nir_imm_int(&b, valid_lane ? 3 : 4));
+   nir_def *sum = nir_iadd(&b, nir_iadd(&b, horizontal, vertical), broadcast);
+   nir_store_global(&b, sum, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+
+   const bool valid = valid_lane
+                         ? compiled && part.binary != NULL &&
+                              part.info.binary_size > sizeof(end) &&
+                              part.info.main_offset == 0 &&
+                              part.info.main_size == part.info.binary_size &&
+                              part.info.stats.instrs >= 6 &&
+                              memcmp((const uint8_t *)part.binary +
+                                        part.info.binary_size - sizeof(end),
+                                     end, sizeof(end)) == 0
+                         : !compiled;
+   if (!valid)
+      fprintf(stderr, "G17P subgroup-quad %s lane %s\n",
+              valid_lane ? "valid" : "out-of-range",
+              compiled ? "was accepted" : "was rejected");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_device_shuffle_compute(enum agx_isa_encoding encoding)
 {
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
@@ -1765,6 +1811,12 @@ main(int argc, char **argv)
       fprintf(stderr, "G17P subgroup vote: %s\n", valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--subgroup-quad-only")) {
+      const bool valid = check_g17p_subgroup_quad_compute(true) &&
+                         check_g17p_subgroup_quad_compute(false);
+      fprintf(stderr, "G17P subgroup quad: %s\n", valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--device-shuffle-only")) {
       const bool valid =
          check_device_shuffle_compute(AGX_ISA_ENCODING_AGX3B) &&
@@ -1886,6 +1938,9 @@ main(int argc, char **argv)
       return 1;
    if (!check_g17p_subgroup_vote_compute() ||
        !check_g17p_signed_immediate_ballot_rejected())
+      return 1;
+   if (!check_g17p_subgroup_quad_compute(true) ||
+       !check_g17p_subgroup_quad_compute(false))
       return 1;
 
    for (unsigned i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {

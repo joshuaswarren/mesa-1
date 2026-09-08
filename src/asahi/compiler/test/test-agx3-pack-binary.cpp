@@ -1910,8 +1910,9 @@ TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
                        agx_immediate(2));
    agx_quad_shuffle_xor_to(b, agx_register(2, AGX_SIZE_32), value,
                            agx_immediate(1));
-   agx_quad_shuffle_xor_to(b, agx_register(4, AGX_SIZE_32), value,
-                           agx_immediate(2));
+   agx_index cached = agx_register(4, AGX_SIZE_32);
+   cached.cache = true;
+   agx_quad_shuffle_xor_to(b, cached, value, agx_immediate(2));
    agx_index final_value = value;
    final_value.discard = true;
    agx_quad_shuffle_xor_to(b, agx_register(6, AGX_SIZE_32), final_value,
@@ -1921,7 +1922,7 @@ TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
    const uint8_t native[] = {
       0x47, 0x00, 0x54, 0x00, 0x02, 0x0c, 0x04, 0x2c, 0x02, 0x00,
       0xc7, 0x00, 0x54, 0x02, 0x02, 0x0c, 0x02, 0x2c, 0x02, 0x00,
-      0xc7, 0x00, 0x54, 0x04, 0x02, 0x0c, 0x04, 0x2c, 0x02, 0x00,
+      0xc7, 0x00, 0x54, 0x04, 0x03, 0x0c, 0x04, 0x2c, 0x02, 0x00,
       0xc7, 0x00, 0x54, 0x06, 0x02, 0x0c, 0x06, 0x2c, 0x04, 0x00,
    };
    std::vector<uint8_t> want(native, native + sizeof(native));

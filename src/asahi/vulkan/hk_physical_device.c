@@ -781,9 +781,9 @@ hk_get_device_features(
        * viewport 0 with nothing reported.  maxViewports drops to 1 with it,
        * as the spec requires when this feature is false. */
       features->multiViewport = false;
-      /* VK_KHR_shader_quad_control's whole subject is the quad operations,
-       * and quad_shuffle_xor has no grounded AGX3 encoding.  See the
-       * subgroupSupportedOperations block in hk_get_device_properties(). */
+      /* VK_KHR_shader_quad_control permits quad operations and derivatives
+       * inside divergent control flow.  The ordinary subgroup quad shuffles
+       * exposed below do not establish that stronger execution guarantee. */
       features->shaderQuadControl = false;
       /* HAL200's native storage-image fetch is memory-safe, but its TEX
        * descriptor does not bounds-check against the Vulkan image view.
@@ -1216,14 +1216,12 @@ hk_get_device_properties(const struct agx_device *dev,
        *   SHUFFLE           g07_subgroup_shuffle        encodes
        *   SHUFFLE_RELATIVE  g25_subgroup_shuffle_rel    encodes
        *   CLUSTERED         g23_subgroup_clustered      encodes
-       *   QUAD              g08_subgroup_quad           REFUSED, quad_shuffle_xor
+       *   QUAD              g08_subgroup_quad           encodes
        *   ROTATE/CLUSTERED  g24_subgroup_rotate         encodes
        *
-       * The remaining missing quad_shuffle_xor encoding means only QUAD must
-       * stay hidden. Translation layers read this mask and emit a scalar
-       * fallback for the missing operation. */
-      properties->subgroupSupportedOperations &=
-         ~(VkSubgroupFeatureFlags)VK_SUBGROUP_FEATURE_QUAD_BIT;
+       * Quad broadcasts and swaps are now grounded for the compute and
+       * fragment stages.  Keep subgroupQuadOperationsInAllStages false until
+       * every other advertised graphics stage is independently witnessed. */
       properties->subgroupQuadOperationsInAllStages = false;
       properties->advancedBlendMaxColorAttachments = 0;
       properties->advancedBlendIndependentBlend = false;
@@ -1479,9 +1477,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * predicate kernel that is not yet available on this path. */
       supported_extensions.KHR_draw_indirect_count = false;
 
-      /* quad_shuffle_xor is the last subgroup operation without a grounded
-       * AGX3 encoding.  Keep this paired with the QUAD mask in the device
-       * properties above. */
+      /* This extension controls divergent quad derivatives, not the standard
+       * subgroup quad shuffle operations exposed above. */
       supported_extensions.KHR_shader_quad_control = false;
    }
 
