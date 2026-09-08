@@ -85,9 +85,31 @@ main(void)
    struct agx_shader_part part = {0};
    const bool compiled =
       agx_compile_shader_nir(b.shader, &backend_key, &part);
-   const bool ok = compiled && part.binary && part.info.binary_size > 0;
+   static const uint8_t entry[] = {0x87,0x02,0x54,0x00,0x06,0x00};
+   static const uint8_t read_wait[] = {0x87,0x02,0x54,0x08,0x08,0x00};
+   static const uint8_t tile_load[] = {
+      0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xce,0x02,0x00,0x00,0x00,
+   };
+   static const uint8_t tail[] = {
+      0x87,0x02,0x54,0x04,0x08,0x00,
+      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x0c,0x02,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   const uint8_t *program = part.binary ?
+      (const uint8_t *)part.binary + part.info.main_offset : NULL;
+   const bool protocol = compiled && program && part.info.main_size >=
+      sizeof(entry) + sizeof(read_wait) + sizeof(tile_load) + sizeof(tail) &&
+      !memcmp(program, entry, sizeof(entry)) &&
+      !memcmp(program + sizeof(entry), read_wait,
+              sizeof(read_wait)) &&
+      !memcmp(program + sizeof(entry) + sizeof(read_wait),
+              tile_load, sizeof(tile_load)) &&
+      !memcmp(program + part.info.main_size - sizeof(tail),
+              tail, sizeof(tail));
+   const bool ok = compiled && part.binary && protocol;
    if (!ok)
-      fprintf(stderr, "G17P advanced blend epilog failed to compile\n");
+      fprintf(stderr, "G17P advanced blend epilog/protocol failed\n");
 
    free(part.binary);
    ralloc_free(b.shader);

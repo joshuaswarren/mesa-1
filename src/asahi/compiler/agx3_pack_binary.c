@@ -4397,6 +4397,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             e->preferred_slot = 1;
+         /* Apple's G17P programmable-blend and framebuffer-fetch corpus
+          * assigns LLDCol to slot 6, including scalar, pair, and RGBA loads.
+          * Keep tile reads in that native hardware domain instead of applying
+          * the generic round-robin starting point. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_LD_TILE)
+            e->preferred_slot = 6;
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
              vertex_loads_scheduled++ == 0)
             e->preferred_slot = 6;

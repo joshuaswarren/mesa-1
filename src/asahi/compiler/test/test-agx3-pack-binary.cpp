@@ -3428,12 +3428,14 @@ TEST_F(AGX3PackBinary, TileLoadStoreWaitSurvivesFallthroughBlock)
       uint8_t tile[AGX3_TILE_MAX_LENGTH];
       uint8_t tile_len = 0;
       std::vector<uint8_t> want;
-      ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, 1, 15, 16,
+      const unsigned load_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 1;
+      ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, load_slot, 15, 16,
                                  AGX3_TILE_COV_1X, 0, true, true, tile,
                                  &tile_len));
       append(want, tile, tile_len);
       ASSERT_TRUE(agx3_tile_store(enc, 0, AGX3_TILE_W32, 15, 16,
-                                  AGX3_TILE_COV_1X, 1, tile, &tile_len));
+                                  AGX3_TILE_COV_1X,
+                                  1u << (load_slot - 1), tile, &tile_len));
       append(want, tile, tile_len);
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(enc, &end));
@@ -3460,11 +3462,13 @@ TEST_F(AGX3PackBinary, TileLoadSequenceBoundaryMarkers)
       uint8_t tile[AGX3_TILE_MAX_LENGTH];
       uint8_t tile_len = 0;
       std::vector<uint8_t> want;
-      ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, 1, 15, 0,
+      const unsigned first_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 1;
+      const unsigned second_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 2;
+      ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, first_slot, 15, 0,
                                  AGX3_TILE_COV_1X, 0, true, false, tile,
                                  &tile_len));
       append(want, tile, tile_len);
-      ASSERT_TRUE(agx3_tile_load(enc, 8, AGX3_TILE_W32, 2, 15, 16,
+      ASSERT_TRUE(agx3_tile_load(enc, 8, AGX3_TILE_W32, second_slot, 15, 16,
                                  AGX3_TILE_COV_1X, 0, false, true, tile,
                                  &tile_len));
       append(want, tile, tile_len);
@@ -4311,7 +4315,7 @@ TEST_F(AGX3PackBinary, G17PAlphaProtocolAcquiresBeforeLoadReleasesAfterStore)
    const uint8_t prefix[] = {
       0x87,0x02,0x54,0x00,0x06,0x00, /* class12 entry */
       0x87,0x02,0x54,0x08,0x08,0x00, /* read wait */
-      0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xce,0x02,0x00,0x00,0x00,
       0x87,0x02,0x54,0x04,0x08,0x00, /* write wait */
    };
    const uint8_t suffix[] = {
@@ -4324,7 +4328,7 @@ TEST_F(AGX3PackBinary, G17PAlphaProtocolAcquiresBeforeLoadReleasesAfterStore)
    /* The intervening store consumes the actual outstanding tile-load slot. */
    uint8_t store[AGX3_TILE_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
-                               15, 0, AGX3_TILE_COV_1X, 1, store, &len));
+                               15, 0, AGX3_TILE_COV_1X, 1u << 5, store, &len));
    ASSERT_EQ(len, 12u);
    EXPECT_TRUE(std::equal(store, store+len, bin.begin()+sizeof(prefix)));
 }
@@ -4800,7 +4804,7 @@ TEST_F(AGX3PackBinary, G17PWriteWaitFollowsPackingAndPreservesScoreboard)
             loaded.channels_m1 = 1;
             agx_ld_tile_to(b, loaded, agx_immediate(AGX_ALL_SAMPLES),
                           agx_null(), AGX_FORMAT_U8NORM, 15, 0, false);
-            ASSERT_TRUE(agx3_tile_load(enc, 12, AGX3_TILE_W8, async ? 2 : 1, 15, 0,
+            ASSERT_TRUE(agx3_tile_load(enc, 12, AGX3_TILE_W8, 6, 15, 0,
                AGX3_TILE_COV_1X, 0, true, true, bytes, &len));
             append(want, bytes, len);
             agx_index unpacked = agx_register(8, AGX_SIZE_32);
@@ -4809,7 +4813,7 @@ TEST_F(AGX3PackBinary, G17PWriteWaitFollowsPackingAndPreservesScoreboard)
                                AGX_FORMAT_U8NORM);
             struct agx3_normflt_desc d = {};
             d.dest = 8; d.dest_hint = true; d.src = 12;
-            d.two_lanes = true; d.wait_mask = async ? 2 : 1;
+            d.two_lanes = true; d.wait_mask = 1u << 5;
             ASSERT_TRUE(agx3_normflt_encode(enc, &d, bytes, &len));
             append(want, bytes, len);
          }
