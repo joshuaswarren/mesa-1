@@ -7,6 +7,8 @@
 
 #include "agx3_binder.h"
 
+#include "util/u_debug.h"
+
 #include <string.h>
 
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
@@ -337,6 +339,19 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool immediate = tk == 1 && sk == 1;
    const bool apple_fragment_abi =
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   unsigned operand_profile = apple_fragment_abi ? 3 : 0;
+
+   /* Diagnostic-only four-way matrix for the indirect implicit fragment
+    * path.  This is deliberately narrower than sample_abi: it cannot perturb
+    * immediate background loads or explicit-level samples in the same draw.
+    * Values map bit0 to f83=4 and bit1 to f112=8. */
+   if (enc == AGX_ISA_ENCODING_AGX3B && !immediate &&
+       d->lod == AGX3_TEX_LOD_AUTO) {
+      const int probe = debug_get_num_option(
+         "AGX3_G17P_INDIRECT_IMPLICIT_PROFILE", -1);
+      if (probe >= 0 && probe <= 3)
+         operand_profile = probe;
+   }
    struct agx3_field_kv base[20];
    unsigned nb = 0;
    base[nb++] = (struct agx3_field_kv)KV(9, 2);
@@ -350,10 +365,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   if (apple_fragment_abi || d->array || d->cube)
+   if ((operand_profile & 1) || d->array || d->cube)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
-      112, (apple_fragment_abi || d->array || d->cube) ? 8 : 4);
+      112, ((operand_profile & 2) || d->array || d->cube) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
