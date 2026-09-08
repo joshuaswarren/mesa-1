@@ -1091,6 +1091,21 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       return;
    }
 
+   /* Apple's scalar-byte LDDEV writes the low half of an aligned 32-bit GPR.
+    * Model that physical result explicitly, then expose only its low 16 bits
+    * to the size-lowered NIR value. The split coalesces away during RA. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       fmt == AGX_FORMAT_I8 && instr->def.num_components == 1 &&
+       dest.size == AGX_SIZE_16 && packed_count == 0) {
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *load = agx_device_load_to(b, packed, addr, offset, fmt, 1,
+                                           shift, nir_is_coherent(instr));
+      load->memory_index_is_bytes = index_bytes;
+      agx_subdivide_to(b, dest, packed, 0);
+      agx_emit_cached_split(b, dest, 1);
+      return;
+   }
+
    agx_instr *load = agx_device_load_to(b, dest, addr, offset, fmt,
                       BITFIELD_MASK(packed_count ? packed_count : instr->def.num_components), shift,
                       nir_is_coherent(instr));
@@ -2873,6 +2888,18 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 
    case nir_op_i2i32: {
       if (src_sz == 8) {
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+            /* G17P's grounded shifts operate on complete 32-bit registers.
+             * Widen first and sign-extend from bit 7 as Apple does, rather
+             * than inventing a half-register BFI/ASR encoding. */
+            agx_index wide = agx_pad_to_32(b, s0);
+            agx_index zero32 = agx_mov_imm(b, 32, 0);
+            agx_index shift = agx_mov_imm(b, 32, 24);
+            agx_index shifted =
+               agx_bfi(b, zero32, wide, shift, 0);
+            return agx_asr_to(b, dst, shifted, shift);
+         }
+
          /* Sign extend in software, NIR likes 8-bit conversions */
          agx_index ishl16 = agx_bfi(b, i0, s0, agx_immediate(8), 0);
          return agx_asr_to(b, dst, ishl16, agx_immediate(8));
@@ -2884,6 +2911,18 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 
    case nir_op_i2i16: {
       if (src_sz == 8) {
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+            /* Perform the same exact 32-bit sign extension and expose its
+             * low half only after the shift pair has completed. */
+            agx_index wide = agx_pad_to_32(b, s0);
+            agx_index zero32 = agx_mov_imm(b, 32, 0);
+            agx_index shift = agx_mov_imm(b, 32, 24);
+            agx_index shifted =
+               agx_bfi(b, zero32, wide, shift, 0);
+            agx_index extended = agx_asr(b, shifted, shift);
+            return agx_subdivide_to(b, dst, extended, 0);
+         }
+
          /* Sign extend in software, NIR likes 8-bit conversions */
          agx_index ishl16 = agx_bfi(b, i0, s0, agx_immediate(8), 0);
          return agx_asr_to(b, dst, ishl16, agx_immediate(8));

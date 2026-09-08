@@ -1745,6 +1745,28 @@ TEST_F(AGX3PackBinary, SimdBroadcastWaitsForDeviceLoad)
    EXPECT_EQ(tail, want);
 }
 
+TEST_F(AGX3PackBinary, G17PScalarByteLoadRequiresAlignedHalf)
+{
+   agx_builder *good = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_device_load_to(good, agx_register(2, AGX_SIZE_32),
+                      agx_uniform(4, AGX_SIZE_64),
+                      agx_register(0, AGX_SIZE_32), AGX_FORMAT_I8, 1, 0,
+                      false);
+   agx_stop(good);
+   EXPECT_FALSE(pack(good).empty());
+
+   /* No Apple scalar-byte witness writes an odd half. The frontend models the
+    * physical result as a 32-bit temporary so production RA cannot create
+    * this shape; retain the packer refusal as the negative control. */
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_device_load_to(bad, agx_register(1, AGX_SIZE_16),
+                      agx_uniform(4, AGX_SIZE_64),
+                      agx_register(0, AGX_SIZE_32), AGX_FORMAT_I8, 1, 0,
+                      false);
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

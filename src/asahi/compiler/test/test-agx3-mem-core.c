@@ -114,6 +114,37 @@ main(void)
       }else pass++;
    }
 
+   /* Apple Metal 32023.917, applegpu_g17p, exact `device uchar *` scalar
+    * load from buffer(1). The byte result occupies the low half of an
+    * aligned GPR; the sole/final load carries f79=2. */
+   {
+      static const uint8_t expected[] = {
+         0x67, 0x10, 0x44, 0x02, 0x01, 0x00, 0x20,
+         0x00, 0x61, 0x01, 0x00, 0x40, 0x42, 0x00,
+      };
+      struct agx3_mem_desc d = {
+         .data = 2,
+         .width = AGX3_MEM_W8,
+         .mask = 1,
+         .shift = 0,
+         .base_is_uniform = true,
+         .base = 4,
+         .idx_kind = AGX3_MEM_IDX_REG,
+         .idx_reg = 0,
+         .slot = 6,
+         .wait_mask = 1,
+         .agx3b_last_load = true,
+      };
+      uint8_t out[AGX3_MEM_MAX_LENGTH], len = 0;
+      if (!agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3B, &d, out, &len) ||
+          len != sizeof(expected) || memcmp(out, expected, len)) {
+         fprintf(stderr, "FAIL G17P scalar-byte LDDEV\n");
+         fail++;
+      } else {
+         pass++;
+      }
+   }
+
    if (fail) {
       fprintf(stderr, "agx3_mem_core: %u of %zu failed\n", fail, mem_vec_count);
       return 1;
