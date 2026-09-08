@@ -1130,10 +1130,10 @@ contains_integer_lod_stage(const struct agx_shader_part *part)
    return false;
 }
 
-/* Keep the cross-generation width conversion tied to the full compiler path.
- * NIR legalizes texture LODs to 16 bits for AGX2, but native G17P read() has a
- * uint level. This is the exact nonzero fragment fetch shape used by the
- * hardware oracle, with constant promotion enabled as Honeykrisp enables it. */
+/* Keep the exact constant-level route tied to the full compiler path. NIR
+ * legalizes texture LODs to 16 bits for AGX2, while native G17P read() takes a
+ * uint. A literal must use Apple's direct f29 level field even when constant
+ * promotion is enabled, rather than manufacturing a per-lane dependency. */
 static bool
 test_g17p_nonzero_fetch_lod_compile(void)
 {
@@ -1179,7 +1179,7 @@ test_g17p_nonzero_fetch_lod_compile(void)
    };
    struct agx_shader_part part = {0};
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary &&
-         contains_integer_lod_stage(&part);
+         !contains_integer_lod_stage(&part);
    free(part.binary);
    ralloc_free(b.shader);
    return ok;

@@ -2745,6 +2745,44 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
    }
 }
 
+TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(2), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+
+   struct agx3_tex_fetch_desc d = {};
+   d.dest = 0;
+   d.coord = 12;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod_x64 = 2 * 64;
+   d.texture = 0;
+   d.slot = 1;
+   d.final = true;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length = 0;
+   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &length));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+
+   std::vector<uint8_t> want;
+   append(want, bytes, length);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, TextureFetchRefusesUngroundedAxes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

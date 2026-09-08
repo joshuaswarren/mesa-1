@@ -868,6 +868,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
+   const bool immediate_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+      I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].memory &&
+      !I->src[1].abs && !I->src[1].neg && I->src[1].value <= 31;
    const bool register_lod =
       I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
       agx3_tex_plain_reg(I->src[1]) && I->src[1].size == AGX_SIZE_32 &&
@@ -885,7 +888,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
          I->src[0].value + 2 * agx_channels(I->src[0]) > 256) :
          ((I->src[0].value & 3) || I->src[0].value > 60)) ||
        (!(I->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
-          agx3_tex_imm(I->src[1], 0)) && !register_lod) ||
+          agx3_tex_imm(I->src[1], 0)) && !immediate_lod && !register_lod) ||
        (register_lod && !stage_coordinates) ||
        !agx3_tex_imm(I->src[2], 0) ||
        (immediate ? I->src[3].value > 15 :
@@ -951,6 +954,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       .coord_kill = stage_coordinates || I->src[0].kill,
       .final = final,
       .array = I->dim == AGX_DIM_2D_ARRAY,
+      .lod_x64 = immediate_lod ? I->src[1].value * 64 : 0,
       .register_lod = register_lod,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];

@@ -3116,7 +3116,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
 
       case nir_tex_src_lod:
       case nir_tex_src_bias:
-         lod = index;
+         /* G17P has an exact immediate texel-fetch level encoding. Keep
+          * compile-time levels in that form instead of promoting them into
+          * the per-lane PACK_SMPIR path. Besides being smaller, this matches
+          * Apple's constant read(..., level) programs and avoids introducing
+          * an asynchronous staging dependency for a literal. */
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             instr->op == nir_texop_txf &&
+             nir_src_is_const(instr->src[i].src) &&
+             nir_src_as_uint(instr->src[i].src) <= 31)
+            lod = agx_immediate(nir_src_as_uint(instr->src[i].src));
+         else
+            lod = index;
          lod_is_zero = nir_src_is_const(instr->src[i].src) &&
                        nir_src_as_uint(instr->src[i].src) == 0;
          break;

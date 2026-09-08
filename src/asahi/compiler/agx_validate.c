@@ -343,8 +343,10 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          /* LOD */
          if (I->op == AGX_OPCODE_TEXTURE_LOAD &&
              ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-             I->lod_mode == AGX_LOD_MODE_LOD_MIN) {
-            /* Native G17P texture read takes a full uint level. */
+             I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+             I->src[s].type != AGX_INDEX_IMMEDIATE) {
+            /* Native G17P's staged texture-read level takes a full uint. The
+             * direct constant form is an ordinary immediate operand. */
             return 2;
          }
 
