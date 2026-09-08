@@ -6048,6 +6048,30 @@ TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, LinearInterpRetiresReusedCoefficientDestination)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(13), 1);
+   agx_interp_agx3_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(4),
+                      agx_immediate(0), AGX_INTERPOLATION_CENTER, true);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 13, 1, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_vary_interp_at_start(
+      enc, 8, 4, true, AGX3_VARY_CENTER, true, bytes, &len));
+   append(want, bytes, len);
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FragmentHelperCoverageMatchesNativeAtomicPipeline)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

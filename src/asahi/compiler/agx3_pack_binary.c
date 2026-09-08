@@ -5026,12 +5026,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  !agx3_private_rhw_use(ctx, block, I)))
                AGX3_REFUSE(I);
             uint16_t interp_wait = wait;
-            /* The native projective-RHW opcode has no witnessed scoreboard
-             * fields. Real GTK shaders reuse an LDCF destination for RHW,
-             * which creates a required WAW wait. Retire that dependency with
-             * the grounded band no-op before emitting the unchanged native
-             * RHW instruction instead of inventing wait bits. */
-            if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 && interp_wait) {
+            /* Neither native f32interp form has witnessed scoreboard fields.
+             * Real GTK and Firefox shaders reuse LDCF destinations for both
+             * RHW and ordinary user interpolation, creating required WAW
+             * waits. Retire those dependencies with the grounded band no-op
+             * before emitting the unchanged native interpolation instead of
+             * inventing wait bits. */
+            if (interp_wait) {
                if (!agx3_retire_slots_noop(emission, enc, interp_wait))
                   AGX3_REFUSE(I);
                outstanding &= (uint16_t)~interp_wait;
