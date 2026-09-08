@@ -1120,6 +1120,22 @@ hk_nir_uses_root(const nir_shader *nir)
    return false;
 }
 
+static bool
+hk_g17p_shift_vertex_preamble(UNUSED nir_builder *b,
+                              nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_preamble)
+      return false;
+
+   const unsigned base = *(const unsigned *)data;
+   const unsigned old = nir_intrinsic_base(intr);
+   if (old > UINT16_MAX - base)
+      return false;
+
+   nir_intrinsic_set_base(intr, old + base);
+   return true;
+}
+
 static void
 hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
                enum agx_chip chip)
@@ -1154,7 +1170,26 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    bool kill_psiz = false;
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
-       nir->info.stage == MESA_SHADER_FRAGMENT) {
+       nir->info.stage == MESA_SHADER_VERTEX && hw) {
+      nir_shader *candidate = nir_shader_clone(NULL, nir);
+      if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
+         ralloc_free(nir);
+         nir = candidate;
+         shader->info.agx3_indexed_sampler_valid = true;
+
+         /* Native G17P publishes texture/sampler heap pointers in halves
+          * 0..7. The monolithic VBO lowering may already have materialized
+          * vertex ABI preamble loads, so move those as one unit before root
+          * and descriptor-set lowering allocates the following ranges. */
+         const unsigned base = AGX_ABI_G17P_TEXTURE_POINTER_HALFS;
+         NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+                  hk_g17p_shift_vertex_preamble,
+                  nir_metadata_control_flow, (void *)&base);
+      } else {
+         ralloc_free(candidate);
+      }
+   } else if (dev->dev.chip == AGX_CHIP_G17P &&
+              nir->info.stage == MESA_SHADER_FRAGMENT) {
       nir_shader *candidate = nir_shader_clone(NULL, nir);
       struct agx_g17p_combined_sampler_binding binding;
       if (candidate &&
@@ -1344,15 +1379,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                       shader->info.agx3_indexed_sampler_valid)
                       ? AGX_G17P_TXF_ROOT_HALFS
                       : 0;
+   const unsigned vertex_uniform_base =
+      sw_stage == MESA_SHADER_VERTEX &&
+      shader->info.agx3_indexed_sampler_valid
+         ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
+         : 0;
    if (sw_stage == MESA_SHADER_FRAGMENT)
       root = AGX_ABI_FUNI_ROOT;
    else if (sw_stage == MESA_SHADER_VERTEX)
-      root = AGX_ABI_VUNI_COUNT_VK(nr_vbos);
+      root = vertex_uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_vbos);
 
    shader->info.set_count = set_count;
 
    /* XXX: rename */
-   NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
+   NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos,
+            vertex_uniform_base);
    /* Stage lowering can introduce driver sysvals (for example discard's
     * no_epilog_discard mask). hk_lower_uvs_index turns those into root
     * accesses, so gather the resource requirement after that pass and before

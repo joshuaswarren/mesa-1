@@ -403,6 +403,7 @@ translate_pipeline_stat_bit(enum pipe_statistics_query_index pipe)
 struct lower_uvs_args {
    mesa_shader_stage sw_stage;
    unsigned nr_vbos;
+   unsigned uniform_base;
 };
 
 static bool
@@ -446,7 +447,8 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
       if (args->sw_stage == MESA_SHADER_VERTEX) {
          b->cursor = nir_instr_remove(&intrin->instr);
 
-         unsigned base = AGX_ABI_VUNI_VERTEX_PARAMS(args->nr_vbos);
+         unsigned base = args->uniform_base +
+                         AGX_ABI_VUNI_VERTEX_PARAMS(args->nr_vbos);
          nir_def *val = nir_load_preamble(b, 1, 64, .base = base);
          nir_def_rewrite_uses(&intrin->def, val);
 
@@ -484,13 +486,15 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_draw_id: {
       b->cursor = nir_instr_remove(&intrin->instr);
 
-      unsigned base = AGX_ABI_VUNI_FIRST_VERTEX(args->nr_vbos);
+      unsigned base = args->uniform_base +
+                      AGX_ABI_VUNI_FIRST_VERTEX(args->nr_vbos);
       unsigned size = 32;
 
       if (intrin->intrinsic == nir_intrinsic_load_base_instance) {
-         base = AGX_ABI_VUNI_BASE_INSTANCE(args->nr_vbos);
+         base = args->uniform_base +
+                AGX_ABI_VUNI_BASE_INSTANCE(args->nr_vbos);
       } else if (intrin->intrinsic == nir_intrinsic_load_draw_id) {
-         base = AGX_ABI_VUNI_DRAW_ID(args->nr_vbos);
+         base = args->uniform_base + AGX_ABI_VUNI_DRAW_ID(args->nr_vbos);
          size = 16;
       }
 
@@ -551,11 +555,13 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 }
 
 bool
-hk_lower_uvs_index(nir_shader *s, mesa_shader_stage sw_stage, unsigned nr_vbos)
+hk_lower_uvs_index(nir_shader *s, mesa_shader_stage sw_stage, unsigned nr_vbos,
+                   unsigned uniform_base)
 {
    struct lower_uvs_args args = {
       .sw_stage = sw_stage,
       .nr_vbos = nr_vbos,
+      .uniform_base = uniform_base,
    };
    return nir_shader_intrinsics_pass(s, lower_uvs_index,
                                      nir_metadata_control_flow, &args);

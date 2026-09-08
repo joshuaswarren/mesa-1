@@ -1185,6 +1185,9 @@ hk_g17p_graphics_uniform_ranges(
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
          BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
+      const unsigned uniform_base = s->info.agx3_indexed_sampler_valid
+         ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
+         : 0;
       if (nr_attribs > AGX_MAX_VBUFS)
          return false;
 
@@ -1193,13 +1196,14 @@ hk_g17p_graphics_uniform_ranges(
             return false;
 
          ranges[count++] = (struct agx3_ioto_uniform_range){
-            .start_halfs = AGX_ABI_VUNI_VBO_BASE(0),
+            .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_BASE(0),
             .size_halfs = 4 * nr_attribs,
             .address =
                root_ptr + hk_root_descriptor_offset(draw.attrib_base),
          };
          ranges[count++] = (struct agx3_ioto_uniform_range){
-            .start_halfs = AGX_ABI_VUNI_VBO_CLAMP(nr_attribs, 0),
+            .start_halfs = uniform_base +
+                           AGX_ABI_VUNI_VBO_CLAMP(nr_attribs, 0),
             .size_halfs = 2 * nr_attribs,
             .address =
                root_ptr + hk_root_descriptor_offset(draw.attrib_clamps),
@@ -1212,20 +1216,22 @@ hk_g17p_graphics_uniform_ranges(
        * specialization, shader patch or pre-render compute dispatch. */
       if (cmd->state.gfx.draw_params) {
          ranges[count++] = (struct agx3_ioto_uniform_range){
-            .start_halfs = AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs),
+            .start_halfs = uniform_base +
+                           AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs),
             .size_halfs = 4,
             .address = cmd->state.gfx.draw_params,
          };
       }
       if (cmd->state.gfx.draw_id_ptr) {
          ranges[count++] = (struct agx3_ioto_uniform_range){
-            .start_halfs = AGX_ABI_VUNI_DRAW_ID(nr_attribs),
+            .start_halfs = uniform_base +
+                           AGX_ABI_VUNI_DRAW_ID(nr_attribs),
             .size_halfs = 1,
             .address = cmd->state.gfx.draw_id_ptr,
          };
       }
 
-      root_uniform = AGX_ABI_VUNI_COUNT_VK(nr_attribs);
+      root_uniform = uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_attribs);
    } else if (s->info.stage == MESA_SHADER_GEOMETRY &&
               s->b.info.stage == MESA_SHADER_VERTEX) {
       /* poly's raster variant lowers its geometry parameter loads against the
@@ -1311,7 +1317,8 @@ hk_g17p_graphics_uniform_ranges(
    }
 
    if (s->info.agx3_indexed_sampler_valid) {
-      if (s->info.stage != MESA_SHADER_FRAGMENT ||
+      if ((s->info.stage != MESA_SHADER_FRAGMENT &&
+           s->info.stage != MESA_SHADER_VERTEX) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)
          return false;
       const uint64_t pointers[2] = {

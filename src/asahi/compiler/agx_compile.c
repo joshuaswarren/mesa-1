@@ -3394,7 +3394,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     * native form. */
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        b->shader->stage != MESA_SHADER_FRAGMENT &&
-       instr->op == nir_texop_txl &&
+       (instr->op == nir_texop_txl || instr->op == nir_texop_txf) &&
        lod_is_zero)
       lod_mode = AGX_LOD_MODE_LOD_MIN;
 

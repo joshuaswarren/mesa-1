@@ -393,7 +393,8 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
 bool
 agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   if (!shader || (shader->info.stage != MESA_SHADER_FRAGMENT &&
+   if (!shader || (shader->info.stage != MESA_SHADER_VERTEX &&
+                   shader->info.stage != MESA_SHADER_FRAGMENT &&
                    shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
 
@@ -417,7 +418,12 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* txb and txd reach the packer as the same sample instruction
              * with a different LOD mode; the heap-indexed descriptor operand
              * is orthogonal to it. */
-            if (!fetch && !g17p_sample_shape(tex))
+            /* Apple's G17P vertex witness uses explicit texture.read with a
+             * dynamic argument-buffer texture. Implicit sampling requires
+             * fragment quads, and no vertex filtered-sample form is used by
+             * Honeykrisp's Vulkan lowering, so retain that boundary here. */
+            if ((!fetch && shader->info.stage == MESA_SHADER_VERTEX) ||
+                (!fetch && !g17p_sample_shape(tex)))
                return false;
             nir_intrinsic_instr *image = nir_src_as_intrinsic(
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);

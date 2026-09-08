@@ -3598,7 +3598,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             /* Once writeout begins only ST_VARY followed by STOP is safe.
              * Before it begins, side-effecting instructions are fine: they
              * stay in place and normal packing validates their encoding. */
-            if (outputs)
+            if (outputs && !agx_opcodes_info[I->op].can_eliminate)
                return 0;
             break;
          }
@@ -5198,8 +5198,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_IMAGE_LOAD) {
             /* Native TEX reads staging coordinates, independently of GPRs.
              * This also applies to the background reload's pixel coordinates. */
-            const bool staged = ctx->stage == MESA_SHADER_FRAGMENT ||
-                                ctx->stage == MESA_SHADER_COMPUTE;
+            /* Apple's dynamic argument-buffer vertex read stages its uint2
+             * coordinates before the same SMP.EP4 used by other stages.
+             * Image operations retain their stage-specific paths. */
+            const bool staged =
+               (I->op == AGX_OPCODE_TEXTURE_LOAD &&
+                ctx->stage == MESA_SHADER_VERTEX &&
+                I->src[3].type != AGX_INDEX_IMMEDIATE) ||
+               ctx->stage == MESA_SHADER_FRAGMENT ||
+               ctx->stage == MESA_SHADER_COMPUTE;
             if (staged) {
                const unsigned coord_base =
                   (I->op == AGX_OPCODE_IMAGE_LOAD &&

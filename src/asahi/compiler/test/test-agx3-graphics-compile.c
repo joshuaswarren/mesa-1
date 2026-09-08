@@ -2943,6 +2943,51 @@ build_vs_texture_level_zero(void)
    return b.shader;
 }
 
+/* Firefox WebRender uses texelFetch from a dynamically indexed descriptor in
+ * vertex shaders. Lower the Vulkan descriptor to the native G17P heap index,
+ * then compile the exact explicit-level read plus terminal UVS outputs. */
+static nir_shader *
+build_vs_indexed_texture_fetch(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options,
+      "AGX3 indexed vertex texel fetch");
+   nir_def *handle =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 72), .desc_set = 3);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_backend1, nir_imm_ivec2(&b, 0, 0));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+   tex->src[2] = nir_tex_src_for_ssa(
+      nir_tex_src_lod, nir_imm_intN_t(&b, 0, 16));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_store_uvs_agx(&b, c == 3 ? nir_imm_float(&b, 1.0f)
+                                   : nir_imm_float(&b, 0.0f),
+                        nir_imm_intN_t(&b, c, 16));
+      nir_store_uvs_agx(&b, nir_channel(&b, &tex->def, c),
+                        nir_imm_intN_t(&b, 4 + c, 16));
+   }
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+
+   if (!agx_nir_lower_g17p_indexed_samplers(b.shader)) {
+      ralloc_free(b.shader);
+      return NULL;
+   }
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_fs_texture_compact_native(void)
 {
@@ -3262,6 +3307,8 @@ static const struct agx3_graphics_case cases[] = {
     AGX_ABI_VUNI_COUNT_VK(2) + 8, 257},
    {"vs-texture-level-zero", build_vs_texture_level_zero, true,
     .g17p_only = true},
+   {"vs-indexed-texture-fetch", build_vs_indexed_texture_fetch, true,
+    .g17p_only = true, .reserved_preamble = 64},
    {"fs-flat-colour", build_fs_flat, true,
     .expected_g17p_binary = g17p_flat_colour,
     .expected_g17p_binary_size = sizeof(g17p_flat_colour)},

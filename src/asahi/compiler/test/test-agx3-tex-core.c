@@ -1057,6 +1057,28 @@ test_bindless_operand_kinds(void)
    d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
    CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
 
+   /* Fresh MetalToolchain v27.1.5194.15 vertex argument-buffer read. The
+    * dynamic VS object (SHA256 2838ec963f7e...) uses SMP.EP4 with its
+    * zero-extended texture heap index in uniform half16 and the native read
+    * sampler at immediate zero. Its direct texture0 sibling is the ordinary
+    * 14-byte EP3 form; this 20-byte instruction is their only SMP delta. */
+   memset(&d, 0, sizeof(d));
+   d.dest = 0;
+   d.coord = 0;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.coord_kill = true;
+   d.final = true;
+   d.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   d.texture_value = 16;
+   d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   CHECK(len == 20 &&
+         hex_eq(out, len,
+                "05800cb8b0001701900280000100002000000000"));
+
    /* Only AGX3b is witnessed for the non-immediate kinds. */
    FETCH_BASE();
    d.texture_kind = AGX3_TEX_OPERAND_REGISTER;

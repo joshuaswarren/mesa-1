@@ -3244,6 +3244,40 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, VertexIndexedTextureFetchUsesNativeHeapIndex)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   auto build = [&](bool native_index) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      agx_index dest = agx_register(40, AGX_SIZE_32);
+      agx_index coord = agx_register(36, AGX_SIZE_32);
+      agx_index texture = agx_register(2, native_index ? AGX_SIZE_64
+                                                       : AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      texture.discard = true;
+      agx_index descriptor_base = native_index
+         ? agx_immediate(0)
+         : agx_uniform(44, AGX_SIZE_64);
+      agx_instr *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), descriptor_base, texture,
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN,
+         0, false, false, false, AGX_GATHER_NONE, false);
+      I->op = AGX_OPCODE_TEXTURE_LOAD;
+      I->mask = 15;
+      agx_stop(b);
+      return b;
+   };
+
+   /* Native uses one zero-extended 64-bit heap index. The original AGX2
+    * descriptor-base plus 32-bit byte-offset pair is not that operand and
+    * must remain fail-closed instead of being reinterpreted. */
+   EXPECT_FALSE(pack(build(true)).empty());
+   pack(build(false), /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, TextureFetchRefusesUngroundedAxes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
