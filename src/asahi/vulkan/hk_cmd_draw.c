@@ -2989,9 +2989,12 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .flags = 0,
    };
 
-   const struct hk_api_shader *api_vs = gfx->shaders[MESA_SHADER_VERTEX];
-   const struct hk_shader *vs =
-      api_vs ? &api_vs->variants[HK_VS_VARIANT_HW] : NULL;
+   /* This record describes the program actually launched by the Index List.
+    * Ordinary draws use the API vertex shader, while GS/XFB draws use the
+    * geometry raster-copy variant. Taking the API VS unconditionally makes
+    * the HAL200 output contract disagree with the live VertexProgramVariant
+    * as soon as interstage optimization changes their UVS footprints. */
+   const struct hk_shader *vs = hk_bound_hw_vs(gfx);
    uint32_t output_size;
    if (!vs || !agx_ppp_hal200_output_size_pack(
                  vs->info.uvs.size, 0, &output_size))
