@@ -1660,6 +1660,37 @@ static void test_native_half_fma(void)
         "and refusals PASS");
 }
 
+static void test_native_half_fma_minifloat_addend(void)
+{
+   /* applegpu-nt 32023.917, apple-g17p, fma(a, b, half(1.5/2.5)). */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const uint16_t src[] = {2, 3};
+   const enum agx3_alu_hint dead_hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+
+   assert(agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, src, 56, dead_hints, false, 32, bytes,
+      &len));
+   exact(bytes, len, "10021e0321b800c0");
+   assert(agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, src, 68, dead_hints, false, 32, bytes,
+      &len));
+   exact(bytes, len, "10021e0321c400c0");
+
+   assert(!agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3C, 2, src, 56, dead_hints, false, 32, bytes,
+      &len));
+   assert(!agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, src, 256, dead_hints, false, 32, bytes,
+      &len));
+   assert(!agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, src, 56, dead_hints, false, 64, bytes,
+      &len));
+   puts("Native half FMA minifloat addend: two exact Apple vectors and "
+        "bounds PASS");
+}
+
 static void test_native_widen_half(void)
 {
    const char *golden[]={"09021c8100c2","19021c810802","0984148100c2","198414810802"};
@@ -2447,6 +2478,7 @@ int main(void){
    test_native_minifloat_mixed_select();
    test_native_fadd_abs_mixed_half();
    test_native_half_fma();
+   test_native_half_fma_minifloat_addend();
    test_native_narrow_multiply();
    test_native_sqrt_step();
    test_native_half_sqrt();

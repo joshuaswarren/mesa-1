@@ -6659,6 +6659,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HFMA &&
              I->nr_dests == 1 && I->nr_srcs == 3 && !I->saturate) {
+            const bool immediate_addend =
+               I->src[2].type == AGX_INDEX_IMMEDIATE;
+            if (immediate_addend) {
+               const agx_index dst = I->dest[0];
+               const agx_index addend = I->src[2];
+               uint16_t src[2];
+               enum agx3_alu_hint hints[2];
+
+               if (!agx3_src_is_register(dst) || dst.memory ||
+                   dst.size != AGX_SIZE_16 || agx_channels(dst) != 1 ||
+                   addend.memory || addend.abs || addend.neg || addend.kill ||
+                   addend.cache || addend.discard ||
+                   addend.size != AGX_SIZE_16 || agx_channels(addend) != 1 ||
+                   addend.value > UINT8_MAX)
+                  AGX3_REFUSE(I);
+
+               for (unsigned i = 0; i < 2; ++i) {
+                  const agx_index x = I->src[i];
+                  if (!agx3_src_is_register(x) || x.memory ||
+                      x.size != AGX_SIZE_16 || agx_channels(x) != 1 || x.abs ||
+                      x.neg || x.kill || (x.cache && x.discard))
+                     AGX3_REFUSE(I);
+                  src[i] = x.value;
+                  hints[i] = agx3_post_ra_hint(x);
+               }
+
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               if (!agx3_alu_hfma_addend_minifloat(
+                      enc, dst.value, src, addend.value, hints, dst.cache,
+                      wait, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+
             uint16_t src[3];
             enum agx3_alu_hint hints[3];
             agx_index dst = I->dest[0];

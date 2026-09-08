@@ -1767,6 +1767,40 @@ TEST_F(AGX3PackBinary, G17PScalarByteLoadRequiresAlignedHalf)
    pack(bad, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src0 = agx_register(2, AGX_SIZE_16);
+   agx_index src1 = agx_register(3, AGX_SIZE_16);
+   src0.discard = true;
+   src1.discard = true;
+   agx_hfma_to(b, agx_register(2, AGX_SIZE_16), src0, src1,
+               agx_immediate(56));
+   agx_stop(b);
+
+   uint8_t fma[AGX3_ALU_MAX_LENGTH], fma_len;
+   const uint16_t src[] = {2, 3};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   ASSERT_TRUE(agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 2, src, 56, hints, false, 0, fma, &fma_len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   std::vector<uint8_t> want;
+   append(want, fma, fma_len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index absolute = agx_register(2, AGX_SIZE_16);
+   absolute.abs = true;
+   agx_hfma_to(bad, agx_register(0, AGX_SIZE_16), absolute,
+               agx_register(3, AGX_SIZE_16), agx_immediate(56));
+   agx_stop(bad);
+   pack(bad, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
