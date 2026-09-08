@@ -671,6 +671,44 @@ gbm_share = executable(
   build_by_default : false,
 )
 
+bo_export_race = executable(
+  'asahi-g17p-bo-export-race',
+  files('test-g17p-bo-export-race.c'),
+  include_directories : [
+    inc_include,
+    inc_src,
+    inc_asahi,
+    inc_virtio_gpu,
+    inc_virtio_vdrm,
+  ],
+  dependencies : [
+    dep_libdrm,
+    dep_thread,
+    idep_libagx,
+    idep_nir,
+    idep_mesautil,
+  ],
+  link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-bo-export-race',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    bo_export_race,
+  ],
+  env : [
+    'ASAHI_SHIM_DELAY_PRIME_EXPORT=1',
+    'ASAHI_SHIM_EXPECT_SINGLE_PRIME_EXPORT=1',
+  ],
+  suite : ['asahi'],
+)
+
 run_target(
   'asahi-g17p-gbm-share-shim',
   command : [

@@ -66,6 +66,7 @@ static bool failed_dmabuf_export_once;
 static bool failed_dmabuf_import_once;
 static unsigned dmabuf_fallback_sync_calls;
 static bool waited_after_dmabuf_import_failure;
+static unsigned prime_export_calls;
 
 static void __attribute__((destructor))
 check_injected_sync_failures(void)
@@ -88,10 +89,20 @@ check_injected_sync_failures(void)
       _Exit(EXIT_FAILURE);
    }
 
+   if (getenv("ASAHI_SHIM_EXPECT_SINGLE_PRIME_EXPORT") &&
+       prime_export_calls != 1) {
+      fprintf(stderr, "shim: observed %u PRIME exports for one BO\n",
+              prime_export_calls);
+      _Exit(EXIT_FAILURE);
+   }
+
    if (failed_prime_export_once)
       fprintf(stderr, "shim: injected PRIME export failure exactly once\n");
    if (failed_dmabuf_export_once && failed_dmabuf_import_once)
       fprintf(stderr, "shim: injected dma-buf sync failures exactly once\n");
+   if (getenv("ASAHI_SHIM_EXPECT_SINGLE_PRIME_EXPORT"))
+      fprintf(stderr,
+              "shim: one concurrent BO transition made one PRIME export\n");
 }
 
 static uint32_t
@@ -440,6 +451,10 @@ drm_shim_ioctl_prime_handle_to_fd(int fd, unsigned long request, void *arg)
    if (!shim_fd || !prime->handle ||
        (prime->flags & ~(DRM_CLOEXEC | DRM_RDWR)))
       return -EINVAL;
+
+   p_atomic_inc(&prime_export_calls);
+   if (getenv("ASAHI_SHIM_DELAY_PRIME_EXPORT"))
+      usleep(25000);
 
    if (getenv("ASAHI_SHIM_FAIL_PRIME_EXPORT_ONCE") &&
        !failed_prime_export_once) {

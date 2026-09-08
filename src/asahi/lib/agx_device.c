@@ -522,29 +522,35 @@ error:
 bool
 agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
 {
+   bool success = false;
+   int error = 0;
+
+   /* Export is a one-way state transition shared by every pipe context on the
+    * screen. Serialize both the PRIME fd creation and implicit-writer handoff:
+    * two compositor threads must not overwrite/close each other's prime_fd or
+    * publish AGX_BO_SHARED before the handoff is complete. */
+   simple_mtx_lock(&dev->bo_map_lock);
+
    if (!(bo->flags & AGX_BO_SHAREABLE)) {
-      errno = EINVAL;
-      return false;
+      error = EINVAL;
+      goto out;
    }
 
    if (bo->flags & AGX_BO_SHARED) {
-      if (bo->prime_fd >= 0)
-         return true;
-
-      errno = EIO;
-      return false;
+      success = bo->prime_fd >= 0;
+      if (!success)
+         error = EIO;
+      goto out;
    }
 
    assert(bo->prime_fd == -1);
 
    int prime_fd = -1;
-   int saved_errno;
    int ret = drmPrimeHandleToFD(dev->fd, bo->handle, DRM_CLOEXEC | DRM_RDWR,
                                 &prime_fd);
    if (ret || prime_fd < 0) {
-      if (!errno)
-         errno = EIO;
-      return false;
+      error = ret < -1 ? -ret : (errno ? errno : EIO);
+      goto out;
    }
 
    /* Keep the transition transactional. In particular, a recoverable fd
@@ -561,6 +567,7 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
       ret = drmSyncobjExportSyncFile(dev->fd, agx_bo_writer_syncobj(writer),
                                      &out_sync_fd);
       if (ret || out_sync_fd < 0) {
+         error = ret < -1 ? -ret : (errno ? errno : EIO);
          if (out_sync_fd >= 0)
             close(out_sync_fd);
          goto error;
@@ -568,19 +575,25 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
 
       ret = agx_import_sync_file(dev, bo, out_sync_fd);
       close(out_sync_fd);
-      if (ret)
+      if (ret) {
+         error = ret < -1 ? -ret : (errno ? errno : EIO);
          goto error;
+      }
    }
 
    bo->flags |= AGX_BO_SHARED;
-   return true;
+   success = true;
+   goto out;
 
 error:
-   saved_errno = errno ? errno : EIO;
    close(bo->prime_fd);
    bo->prime_fd = -1;
-   errno = saved_errno;
-   return false;
+
+out:
+   simple_mtx_unlock(&dev->bo_map_lock);
+   if (error)
+      errno = error;
+   return success;
 }
 
 int
