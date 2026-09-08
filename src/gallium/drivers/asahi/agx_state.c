@@ -1690,7 +1690,15 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
    struct agx_shader_key key = {
       .dev = agx_gather_device_key(dev),
       .has_scratch = !secondary,
-      .promote_constants = true,
+      /* Apple's G17P constant-colour fragment keeps literals in the main
+       * program (the byte-exact fs-flat-colour compiler ratchet covers that
+       * sequence). A promoted literal instead requires an Ioto direct-uniform
+       * range before a fragment with no asynchronous staging; that unwitnessed
+       * combination retires without shading on hardware. Keep ordinary UBO
+       * uniforms and proven compute/vertex promotion, but materialize fragment
+       * literals through the native immediate path. */
+      .promote_constants =
+         !(dev->chip == AGX_CHIP_G17P && stage == MESA_SHADER_FRAGMENT),
       .no_stop = !terminal,
       .secondary = secondary,
       /* G17P graphics binds the linked executable through a native Ioto

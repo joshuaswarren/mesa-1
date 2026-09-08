@@ -310,6 +310,16 @@ gl_layered_fbo = executable(
   build_by_default : false,
 )
 
+gl_frag_constants = executable(
+  'asahi-g17p-gl-frag-constants',
+  files('test-g17p-gl-frag-constants.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
 gl_texture_3d = executable(
   'asahi-g17p-gl-texture-3d',
   files('test-g17p-gl-texture-3d.c'),
@@ -393,6 +403,33 @@ test(
   env : [
     'EGL_PLATFORM=surfaceless',
     'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-frag-constants-software-control',
+  gl_frag_constants,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-frag-constants-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_frag_constants,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
   ],
   suite : ['asahi'],
 )
