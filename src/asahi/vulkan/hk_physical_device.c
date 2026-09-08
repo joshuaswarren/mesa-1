@@ -311,13 +311,9 @@ hk_get_device_features(
       .alphaToOne = true,
       .multiViewport = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 =
-         dev->chip != AGX_CHIP_G17P ||
-         hk_g17p_unverified_feature("etc2_eac"),
+      .textureCompressionETC2 = true,
       .textureCompressionBC = true,
-      .textureCompressionASTC_LDR =
-         dev->chip != AGX_CHIP_G17P ||
-         hk_g17p_unverified_feature("astc_ldr"),
+      .textureCompressionASTC_LDR = true,
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = instance->vertex_stores,

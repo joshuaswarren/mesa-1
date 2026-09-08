@@ -840,16 +840,8 @@ main(void)
 
    VkPhysicalDeviceFeatures features;
    vkGetPhysicalDeviceFeatures(physical, &features);
-#if defined(G17P_ETC2_RGBA8_DECODE)
    if (!features.textureCompressionBC || !features.textureCompressionETC2 ||
-       features.textureCompressionASTC_LDR)
-#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
-   if (!features.textureCompressionBC || features.textureCompressionETC2 ||
        !features.textureCompressionASTC_LDR)
-#else
-   if (!features.textureCompressionBC || features.textureCompressionETC2 ||
-       features.textureCompressionASTC_LDR)
-#endif
       die("compressed-family feature gating is incorrect");
 
    static const VkFormat bc_formats[] = {
@@ -870,22 +862,6 @@ main(void)
       if ((props.optimalTilingFeatures & required) != required)
          die("a BC family format lacks sampled/upload support");
    }
-   static const VkFormat closed[] = {
-#if !defined(G17P_ETC2_RGBA8_DECODE)
-      VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
-#endif
-#if !defined(G17P_ASTC_DECODE) && !defined(G17P_ASTC4X4_DECODE)
-      VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
-#endif
-      VK_FORMAT_UNDEFINED,
-   };
-   for (unsigned i = 0; i < sizeof(closed) / sizeof(closed[0]); ++i) {
-      VkFormatProperties props;
-      vkGetPhysicalDeviceFormatProperties(physical, closed[i], &props);
-      if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
-         die("an unqualified compressed family is advertised");
-   }
-#if defined(G17P_ETC2_RGBA8_DECODE)
    static const VkFormat etc2_formats[] = {
       VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK,
       VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK,
@@ -905,7 +881,6 @@ main(void)
       if ((props.optimalTilingFeatures & required) != required)
          die("an ETC2/EAC family format lacks sampled/upload support");
    }
-#elif defined(G17P_ASTC_DECODE) || defined(G17P_ASTC4X4_DECODE)
    static const VkFormat astc_formats[] = {
 #define ASTC_FORMATS(w, h)                                                     \
       VK_FORMAT_ASTC_##w##x##h##_UNORM_BLOCK,                                 \
@@ -926,7 +901,6 @@ main(void)
       if ((props.optimalTilingFeatures & required) != required)
          die("an ASTC LDR family format lacks sampled/upload support");
    }
-#endif
 
    VkFormatProperties target_props;
    vkGetPhysicalDeviceFormatProperties(physical, test_format, &target_props);

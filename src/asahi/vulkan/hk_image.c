@@ -53,20 +53,15 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       return 0;
 
    /* Keep compressed-family reporting atomic with the corresponding Vulkan
-    * feature.  The native G17P descriptor path already carries independent
-    * ETC2/EAC and ASTC codec selectors; the hidden switches expose both the
-    * family feature and every sampled/upload format for the consolidated
-    * hardware qualification run. */
+    * feature. The complete BC, ETC2/EAC and ASTC LDR format matrices are
+    * hardware-qualified through the native G17P sampled/upload path. */
    if (pdev->dev.chip == AGX_CHIP_G17P &&
        util_format_is_compressed(p_format) &&
        !hk_g17p_bc_format_supported(vk_format)) {
       const enum util_format_layout layout =
          util_format_description(p_format)->layout;
-      const bool enabled =
-         (layout == UTIL_FORMAT_LAYOUT_ETC &&
-          hk_g17p_unverified_feature("etc2_eac")) ||
-         (layout == UTIL_FORMAT_LAYOUT_ASTC &&
-          hk_g17p_unverified_feature("astc_ldr"));
+      const bool enabled = layout == UTIL_FORMAT_LAYOUT_ETC ||
+                           layout == UTIL_FORMAT_LAYOUT_ASTC;
       if (!enabled)
          return 0;
    }

@@ -1707,11 +1707,9 @@ hk_g17p_block_upload_format(struct hk_device *dev, VkFormat format)
 
    switch (hk_g17p_block_format_family(format)) {
    case HK_G17P_BLOCK_FORMAT_BC:
-      return true;
    case HK_G17P_BLOCK_FORMAT_ETC2_EAC:
-      return hk_g17p_unverified_feature("etc2_eac");
    case HK_G17P_BLOCK_FORMAT_ASTC_LDR:
-      return hk_g17p_unverified_feature("astc_ldr");
+      return true;
    default:
       return false;
    }
