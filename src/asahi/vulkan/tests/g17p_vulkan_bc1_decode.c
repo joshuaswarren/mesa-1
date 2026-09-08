@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC6H_SFLOAT_DECODE)
+#if defined(G17P_BC7_SRGB_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC7_SRGB_BLOCK
+#define NAME "g17p-vulkan-bc7-srgb-decode"
+#elif defined(G17P_BC6H_SFLOAT_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC6H_SFLOAT_BLOCK
@@ -178,7 +183,8 @@ fnv1a64(const uint8_t *data, size_t size)
    !defined(G17P_ASTC4X4_DECODE)
 #if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE) &&               \
    !defined(G17P_BC6H_SFLOAT_DECODE) &&                                \
-   !defined(G17P_BC6H_UFLOAT_DECODE) && !defined(G17P_BC7_DECODE)
+   !defined(G17P_BC6H_UFLOAT_DECODE) && !defined(G17P_BC7_DECODE) &&       \
+   !defined(G17P_BC7_SRGB_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -262,7 +268,7 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
    (void)c1;
    (void)indices;
    memcpy(out, encoded[block], BLOCK_BYTES);
-#elif defined(G17P_BC7_DECODE)
+#elif defined(G17P_BC7_DECODE) || defined(G17P_BC7_SRGB_DECODE)
    static const uint8_t encoded[4][16] = {
       {0x10,0x84,0x20,0x04,0x21,0x86,0x01,0,0,0,0,0,0,0,0,0},
       {0x10,0xce,0x09,0xc1,0x39,0x8a,0x02,0,0,0,0,0,0,0,0,0},
@@ -342,14 +348,23 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
                 decoded[block][x % 4], 4);
       }
    }
-#elif defined(G17P_BC7_DECODE)
+#elif defined(G17P_BC7_DECODE) || defined(G17P_BC7_SRGB_DECODE)
    (void)blocks;
+#if defined(G17P_BC7_SRGB_DECODE)
+   static const uint8_t decoded[4][4] = {
+      {0x04, 0x0e, 0x3b, 0x61},
+      {0x2c, 0x01, 0xcc, 0xa2},
+      {0xab, 0x4c, 0x08, 0x20},
+      {0xed, 0x90, 0x16, 0xff},
+   };
+#else
    static const uint8_t decoded[4][4] = {
       {0x21, 0x42, 0x84, 0x61},
       {0x73, 0x10, 0xe7, 0xa2},
       {0xd6, 0x94, 0x31, 0x20},
       {0xf7, 0xc6, 0x52, 0xff},
    };
+#endif
    for (unsigned y = 0; y < HEIGHT; ++y) {
       for (unsigned x = 0; x < WIDTH; ++x) {
          const unsigned block = (y / 4) * 2 + x / 4;
