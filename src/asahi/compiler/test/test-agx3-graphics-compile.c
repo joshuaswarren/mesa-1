@@ -2989,6 +2989,52 @@ build_vs_indexed_texture_fetch(void)
 }
 
 static nir_shader *
+build_vs_indexed_texture_sample(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options,
+      "AGX3 indexed vertex texture sample");
+   nir_def *offset = nir_imm_int(&b, 72);
+   nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 3);
+   nir_def *sampler_index = nir_iadd_imm(
+      &b, nir_load_preamble(&b, 1, 16, .base = 20), 28);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 104), sampler_index, .desc_set = 3);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 4);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_backend1, nir_imm_vec2(&b, 0.5f, 0.5f));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_lod,
+                                     nir_imm_float(&b, 0.0f));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_store_uvs_agx(&b, c == 3 ? nir_imm_float(&b, 1.0f)
+                                   : nir_imm_float(&b, 0.0f),
+                        nir_imm_intN_t(&b, c, 16));
+      nir_store_uvs_agx(&b, nir_channel(&b, &tex->def, c),
+                        nir_imm_intN_t(&b, 4 + c, 16));
+   }
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+
+   if (!agx_nir_lower_g17p_indexed_samplers(b.shader)) {
+      ralloc_free(b.shader);
+      return NULL;
+   }
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
+static nir_shader *
 build_fs_texture_compact_native(void)
 {
    return build_fs_texture_index_abi(true);
@@ -3308,6 +3354,8 @@ static const struct agx3_graphics_case cases[] = {
    {"vs-texture-level-zero", build_vs_texture_level_zero, true,
     .g17p_only = true},
    {"vs-indexed-texture-fetch", build_vs_indexed_texture_fetch, true,
+    .g17p_only = true, .reserved_preamble = 64},
+   {"vs-indexed-texture-sample", build_vs_indexed_texture_sample, true,
     .g17p_only = true, .reserved_preamble = 64},
    {"fs-flat-colour", build_fs_flat, true,
     .expected_g17p_binary = g17p_flat_colour,

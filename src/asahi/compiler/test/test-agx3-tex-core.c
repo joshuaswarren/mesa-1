@@ -1096,6 +1096,9 @@ test_bindless_operand_kinds(void)
 static int
 test_indexed_sample_witnesses(void)
 {
+   const uint8_t vertex_level_bytes[] = {
+      0x05,0xa0,0x0c,0xb8,0xb8,0x00,0x09,0x00,0x92,0x03,
+      0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
    const uint8_t uniform_bytes[] = {
       0x05,0xe0,0x0c,0xb8,0xb0,0x00,0x00,0x00,0x83,0x03,
       0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
@@ -1113,6 +1116,19 @@ test_indexed_sample_witnesses(void)
       .texture_value=12, .sampler_value=16,
    };
    uint8_t out[AGX3_TEX_MAX_LENGTH], len;
+   /* Fresh v27.1 G17P vertex dynamic argument-buffer sample, object SHA256
+    * 49cab707568f.... Texture/sampler heap indices are uniform20/uniform24;
+    * the explicit vertex level-zero selector is otherwise the direct sample
+    * sibling's exact SMP shape. */
+   d.lod = AGX3_TEX_LOD_LEVEL;
+   d.texture_value = 20;
+   d.sampler_value = 24;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+   CHECK(len == sizeof(vertex_level_bytes));
+   CHECK(memcmp(out, vertex_level_bytes, len) == 0);
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.texture_value = 12;
+   d.sampler_value = 16;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    CHECK(len==sizeof(uniform_bytes));
    CHECK(memcmp(out,uniform_bytes,len)==0);
