@@ -1167,7 +1167,8 @@ static bool
 agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint8_t slot, uint16_t wait_mask, bool final,
-                         bool pixel_entry, uint32_t *pixel_entry_offset)
+                         bool pixel_entry, uint32_t *pixel_entry_offset,
+                         bool apple_fragment_abi)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
@@ -1398,7 +1399,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              !agx3_append(emission, bytes, len))
             return false;
       }
-   } else {
+   } else if (!apple_fragment_abi) {
       if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
                                     wait_mask,
                                     enc == AGX_ISA_ENCODING_AGX3B &&
@@ -1508,8 +1509,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        * sampler reads CEM's private coordinate bank rather than the original
        * AGX IR source. Ordinary dimensions retain their existing last-use
        * mapping. */
-      .coord_kill = cube ? I->src[0].discard : I->src[0].kill,
+      .coord_kill = cube ? I->src[0].discard
+                         : apple_fragment_abi
+                              ? (I->src[0].discard || I->src[0].kill)
+                              : I->src[0].kill,
       .final = final,
+      .sample_abi = apple_fragment_abi
+         ? AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT
+         : AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
           agx3_append(emission, bytes, len);
@@ -5317,6 +5324,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool implicit_derivatives =
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS;
+            const bool zero_bias =
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+               I->src[1].type == AGX_INDEX_IMMEDIATE &&
+               agx_minifloat_decode(I->src[1].value) == 0.0f;
+            const bool plain_implicit =
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD || zero_bias;
+            /* This is the complete native ABI witnessed for ordinary 2D
+             * implicit fragment sampling: coordinates stay in their GPRs,
+             * the pixel gate immediately precedes SMP, and SMP selects the
+             * Apple f83/f112 profile.  More elaborate sampling modes retain
+             * their independently qualified staging contracts. */
+            const bool apple_fragment_abi =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               !ctx->key->fs.ignore_tib_dependencies &&
+               ctx->agx3_colour_link.straight_line &&
+               plain_implicit &&
+               I->dim == AGX_DIM_2D && !I->shadow && !I->offset &&
+               I->gather == AGX_GATHER_NONE;
             const bool open_pixel =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -5353,7 +5379,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  * staging and immediately before SMP, matching Apple. */
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final, open_pixel,
-                                          &ctx->agx3_colour_link.entry_offset))
+                                          &ctx->agx3_colour_link.entry_offset,
+                                          apple_fragment_abi))
                AGX3_REFUSE(I);
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -5367,12 +5394,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
-            ctx->agx3_staging_halfs =
-               MAX2(ctx->agx3_staging_halfs,
-                    I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
-                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
-                       I->dim == AGX_DIM_3D)
-                       ? 8 : I->src[0].value + 4);
+            if (!apple_fragment_abi) {
+               ctx->agx3_staging_halfs =
+                  MAX2(ctx->agx3_staging_halfs,
+                       I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
+                       : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
+                          I->dim == AGX_DIM_3D)
+                          ? 8 : I->src[0].value + 4);
+            }
             continue;
          }
 
