@@ -254,6 +254,14 @@
 #define G17P_COMPOSITE_NARROW_TWO_CHANGED 0
 #endif
 
+#ifndef G17P_COMPOSITE_NARROW_X
+#define G17P_COMPOSITE_NARROW_X 0
+#endif
+
+#ifndef G17P_COMPOSITE_NARROW_WIDTH
+#define G17P_COMPOSITE_NARROW_WIDTH 2
+#endif
+
 #if (G17P_COMPOSITE_SINGLE_DRAW + G17P_COMPOSITE_NARROW_SINGLE +            \
      G17P_COMPOSITE_REPEATED_FULL + G17P_COMPOSITE_NARROW_TWO +             \
      G17P_COMPOSITE_NARROW_TWO_CHANGED) > 1
@@ -1889,7 +1897,9 @@ verify_readback(const uint8_t *map)
       const unsigned y = pixel / IMAGE_WIDTH;
       const bool covered =
          (G17P_COMPOSITE_NARROW_SINGLE || G17P_COMPOSITE_NARROW_TWO ||
-          G17P_COMPOSITE_NARROW_TWO_CHANGED) ? x < 2 :
+          G17P_COMPOSITE_NARROW_TWO_CHANGED) ?
+            (x >= G17P_COMPOSITE_NARROW_X &&
+             x < G17P_COMPOSITE_NARROW_X + G17P_COMPOSITE_NARROW_WIDTH) :
          (!G17P_COMPOSITE_FRACTIONAL_INSET ||
           (x >= 4 && x < 14 && y >= 3 && y < 12));
       uint8_t expected_pixel[4] = {128, 64, 128, 255};
@@ -4368,7 +4378,8 @@ main(void)
    /* Hold draw count at one while reproducing the physical 2-pixel scissor
     * width from the failing 32-wide opacity sweep. */
    const VkRect2D alpha_scissor = {
-      .extent = {2, IMAGE_HEIGHT},
+      .offset = {G17P_COMPOSITE_NARROW_X, 0},
+      .extent = {G17P_COMPOSITE_NARROW_WIDTH, IMAGE_HEIGHT},
    };
    const uint32_t dynamic_offset = COMPOSITE_UNIFORM_STRIDE;
    vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
