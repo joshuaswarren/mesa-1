@@ -101,3 +101,11 @@ bool agx3_g17p_graphics_program_bound(
 bool agx3_g17p_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program);
+
+/* HAL200 native texture/sampler pointers occupy uniform halves 0..7.  Select
+ * the first even eight-half range after every main-shader uniform and rodata
+ * range for a fragment blend epilog which also uses that resource prefix.
+ * The output is transactional on failure. */
+bool agx3_g17p_fragment_blend_constant_base(enum agx_chip chip,
+                                             unsigned occupied_halfs,
+                                             uint16_t *base);

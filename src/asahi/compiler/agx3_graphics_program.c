@@ -169,6 +169,22 @@ agx3_g17p_graphics_program_generate(
 }
 
 bool
+agx3_g17p_fragment_blend_constant_base(enum agx_chip chip,
+                                        unsigned occupied_halfs,
+                                        uint16_t *base)
+{
+   if (chip != AGX_CHIP_G17P || !base)
+      return false;
+
+   const unsigned start = ALIGN_POT(MAX2(occupied_halfs, 8), 2);
+   if (start > 512 - 8)
+      return false;
+
+   *base = (uint16_t)start;
+   return true;
+}
+
+bool
 agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
                                enum agx3_g17p_rt0_bg_op op,
                                uint64_t *resource_spec)

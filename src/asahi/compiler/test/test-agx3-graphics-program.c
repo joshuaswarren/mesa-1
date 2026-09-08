@@ -20,6 +20,67 @@
 int
 main(void)
 {
+   uint16_t blend_base = UINT16_C(0xa5a5);
+   CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 0,
+                                                 &blend_base));
+   CHECK(blend_base == 8);
+   CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 16,
+                                                 &blend_base));
+   CHECK(blend_base == 16);
+   CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 17,
+                                                 &blend_base));
+   CHECK(blend_base == 18);
+   CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 504,
+                                                 &blend_base));
+   CHECK(blend_base == 504);
+   const uint16_t valid_blend_base = blend_base;
+   CHECK(!agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 505,
+                                                  &blend_base));
+   CHECK(blend_base == valid_blend_base);
+   CHECK(!agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17S, 16,
+                                                  &blend_base));
+   CHECK(blend_base == valid_blend_base);
+   CHECK(!agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 16, NULL));
+
+   /* Exact compositor uniform geometry: the texture/sampler pointer pair,
+    * root pointer, and relocated four-float blend constant each occupy a
+    * disjoint native range.  Every source must independently change the
+    * generated CProg bytes. */
+   CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 16,
+                                                 &blend_base));
+   struct agx3_ioto_uniform_range compositor_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 12, .size_halfs = 4, .address = 0x2000},
+      {.start_halfs = blend_base, .size_halfs = 8, .address = 0x3000},
+   };
+   const size_t compositor_range_count =
+      sizeof(compositor_ranges) / sizeof(compositor_ranges[0]);
+   struct agx3_g17p_graphics_program_desc compositor_desc = {
+      .program_va = UINT64_C(0x10000100000),
+      .shader_va = UINT64_C(0x100002003c0),
+      .uniform_ranges = compositor_ranges,
+      .uniform_range_count = compositor_range_count,
+      .shader_binary_size = 128,
+      .nr_gprs = 16,
+      .fragment = true,
+   };
+   struct agx3_g17p_graphics_program compositor_program;
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &compositor_desc, &compositor_program));
+   CHECK(compositor_program.length >
+         AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE);
+   const struct agx3_g17p_graphics_program compositor_baseline =
+      compositor_program;
+   for (unsigned i = 0; i < compositor_range_count; ++i) {
+      compositor_ranges[i].address += 0x40;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &compositor_desc, &compositor_program));
+      CHECK(compositor_program.length == compositor_baseline.length);
+      CHECK(memcmp(compositor_program.bytes, compositor_baseline.bytes,
+                   compositor_program.length) != 0);
+      compositor_ranges[i].address -= 0x40;
+   }
+
    uint64_t clear_spec = 0, reload_spec = 0, none_spec = 0;
    CHECK(agx3_g17p_rt0_bg_resource_spec(
       AGX_CHIP_G17P, AGX3_G17P_RT0_BG_CLEAR, &clear_spec));

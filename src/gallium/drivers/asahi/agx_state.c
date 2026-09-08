@@ -2675,6 +2675,31 @@ optimize_blend_factor_w_1(enum pipe_blendfactor f)
       return f;
 }
 
+static uint32_t
+agx_nr_tex_descriptors(struct agx_batch *batch,
+                       struct agx_compiled_shader *cs);
+
+/* Select a uniform range which cannot overlap either the native texture /
+ * sampler pointer prefix or any main-shader uniform/constant range.  The
+ * fragment epilog is linked against this same absolute half index. */
+static bool
+agx_g17p_fragment_blend_constant_base(const struct agx_compiled_shader *cs,
+                                       uint16_t *base)
+{
+   if (!cs || !base)
+      return false;
+
+   unsigned occupied_halfs = cs->b.info.push_count;
+   if (cs->b.info.rodata.size_16) {
+      const unsigned rodata_end = (unsigned)cs->b.info.rodata.base_uniform +
+                                  cs->b.info.rodata.size_16;
+      occupied_halfs = MAX2(occupied_halfs, rodata_end);
+   }
+
+   return agx3_g17p_fragment_blend_constant_base(
+      AGX_CHIP_G17P, occupied_halfs, base);
+}
+
 /* Tessellation ignored here due to the hard rebinding we do atm */
 static struct agx_uncompiled_shader *
 agx_last_uncompiled_vgt(struct agx_context *ctx)
@@ -2758,6 +2783,21 @@ agx_update_fs(struct agx_batch *batch)
 
    memcpy(&link_key.epilog.fs.blend, &ctx->blend->key,
           sizeof(link_key.epilog.fs.blend));
+
+   /* HAL200 texture/sampler table pointers consume fragment uniform halves
+    * 0..7, overlapping the legacy dynamic blend constants at halves4..11.
+    * Link the epilog against a range after the main shader's complete uniform
+    * footprint. agx_build_g17p_graphics_program() publishes that exact range.
+    */
+   if (dev->chip == AGX_CHIP_G17P &&
+       agx_nr_tex_descriptors(batch, ctx->fs) != 0 &&
+       !agx_g17p_fragment_blend_constant_base(
+          ctx->fs, &link_key.epilog.fs.blend_constant_base)) {
+      mesa_loge("asahi: G17P fragment blend constants exceed the native "
+                "uniform file");
+      ctx->linked.fs = NULL;
+      return true;
+   }
 
    /* Normalize */
    if (!agx_tilebuffer_spills(&batch->tilebuffer_layout))
@@ -3479,7 +3519,18 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       unsigned start = push->uniform;
       unsigned length = push->length;
       uint64_t source = table + push->offset;
-      if (resource_pair && start < 8) {
+      const bool blend_constants =
+         resource_pair && stage == MESA_SHADER_FRAGMENT &&
+         push->table == AGX_SYSVAL_TABLE_ROOT &&
+         push->offset == offsetof(struct agx_draw_uniforms, blend_constant) &&
+         push->uniform == AGX_ABI_FUNI_BLEND_R && push->length == 8;
+
+      if (blend_constants) {
+         uint16_t blend_base;
+         if (!agx_g17p_fragment_blend_constant_base(cs, &blend_base))
+            return 0;
+         start = blend_base;
+      } else if (resource_pair && start < 8) {
          const unsigned end = start + length;
          if (end <= 8)
             continue;
