@@ -39,6 +39,7 @@ struct asahi_g17p_stream_stats {
    bool no_varying_fs;
    bool viewport_changed;
    bool multi_viewport;
+   bool two_viewport;
    bool scissor_changed;
    bool cull_enabled;
    bool depth_enabled;

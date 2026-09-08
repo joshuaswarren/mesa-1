@@ -250,6 +250,10 @@
 #define G17P_LAYER_OUTPUT 0
 #endif
 
+#ifndef G17P_MULTI_VIEWPORT
+#define G17P_MULTI_VIEWPORT 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
@@ -563,6 +567,11 @@
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rg16_sint_frag_spv
+#elif G17P_MULTI_VIEWPORT
+#include "g17p_vulkan_viewport_index_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_viewport_index_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
 #elif G17P_LAYER_OUTPUT
 #include "g17p_vulkan_layer_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -1209,6 +1218,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MULTI_VIEWPORT
+#define PROBE_NAME "g17p-vulkan-multi-viewport"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_LAYER_OUTPUT
 #define PROBE_NAME "g17p-vulkan-layer-output"
 #define READBACK_IMAGE_USAGE 0
@@ -1285,7 +1299,7 @@ VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
-   G17P_ADVANCED_BLEND
+   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1838,6 +1852,8 @@ main(void)
       (G17P_MULTIVIEW && getenv("G17P_MULTIVIEW_RECORD_ONLY") != NULL) ||
       (G17P_LAYER_OUTPUT &&
        getenv("G17P_LAYER_OUTPUT_RECORD_ONLY") != NULL) ||
+      (G17P_MULTI_VIEWPORT &&
+       getenv("G17P_MULTI_VIEWPORT_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
@@ -1921,7 +1937,8 @@ main(void)
       .applicationVersion = 1,
       .pEngineName = "none",
       .engineVersion = 1,
-      .apiVersion = (G17P_INDIRECT_DRAW || G17P_LAYER_OUTPUT)
+      .apiVersion =
+         (G17P_INDIRECT_DRAW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT)
                        ? VK_API_VERSION_1_2
                        : VK_API_VERSION_1_1,
    };
@@ -1937,7 +1954,7 @@ main(void)
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
-   G17P_ADVANCED_BLEND
+   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2074,6 +2091,21 @@ main(void)
       die("T8140/G17P does not advertise vertex shader layer output");
 #endif
 
+#if G17P_MULTI_VIEWPORT
+   VkPhysicalDeviceVulkan12Features viewport_available12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+   };
+   VkPhysicalDeviceFeatures2 viewport_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &viewport_available12,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &viewport_available);
+   if (!viewport_available.features.multiViewport ||
+       !viewport_available12.shaderOutputViewportIndex ||
+       properties.limits.maxViewports < 2)
+      die("T8140/G17P does not advertise shader-selected multi-viewport");
+#endif
+
 #if G17P_INDIRECT_DRAW
    VkPhysicalDeviceVulkan12Features indirect_available12 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -2184,6 +2216,15 @@ main(void)
       .shaderOutputLayer = VK_TRUE,
    };
 #endif
+#if G17P_MULTI_VIEWPORT
+   const VkPhysicalDeviceVulkan12Features viewport_enabled12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .shaderOutputViewportIndex = VK_TRUE,
+   };
+   const VkPhysicalDeviceFeatures viewport_enabled = {
+      .multiViewport = VK_TRUE,
+   };
+#endif
 #if G17P_INDIRECT_DRAW
    const VkPhysicalDeviceVulkan12Features indirect_enabled12 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -2229,6 +2270,8 @@ main(void)
       .pNext = &enabled_lines,
 #elif G17P_LAYER_OUTPUT
       .pNext = &layer_enabled12,
+#elif G17P_MULTI_VIEWPORT
+      .pNext = &viewport_enabled12,
 #elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
       .pNext = &host_copy_features,
 #elif G17P_INDIRECT_DRAW
@@ -2242,6 +2285,8 @@ main(void)
       .pQueueCreateInfos = &queue_info,
 #if G17P_INDIRECT_DRAW
       .pEnabledFeatures = &indirect_enabled,
+#elif G17P_MULTI_VIEWPORT
+      .pEnabledFeatures = &viewport_enabled,
 #endif
 #if G17P_BRESENHAM_LINES
       .pEnabledFeatures = &enabled_features,
@@ -3404,6 +3449,30 @@ main(void)
                           : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
       .primitiveRestartEnable = G17P_INDEX_RESTART,
    };
+#if G17P_MULTI_VIEWPORT
+   const VkViewport viewports[2] = {
+      {
+         .width = IMAGE_WIDTH / 2,
+         .height = IMAGE_HEIGHT,
+         .minDepth = 0.0f,
+         .maxDepth = 1.0f,
+      },
+      {
+         .x = IMAGE_WIDTH / 2,
+         .width = IMAGE_WIDTH / 2,
+         .height = IMAGE_HEIGHT,
+         .minDepth = 0.0f,
+         .maxDepth = 1.0f,
+      },
+   };
+   const VkRect2D scissors[2] = {
+      {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT}},
+      {
+         .offset = {IMAGE_WIDTH / 2, 0},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT},
+      },
+   };
+#else
    const VkViewport viewport = {
       .width = IMAGE_WIDTH,
       .height = IMAGE_HEIGHT,
@@ -3416,12 +3485,20 @@ main(void)
          IMAGE_HEIGHT,
       },
    };
+#endif
    const VkPipelineViewportStateCreateInfo viewport_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+#if G17P_MULTI_VIEWPORT
+      .viewportCount = 2,
+      .pViewports = viewports,
+      .scissorCount = 2,
+      .pScissors = scissors,
+#else
       .viewportCount = 1,
       .pViewports = &viewport,
       .scissorCount = 1,
       .pScissors = &scissor,
+#endif
    };
 #if G17P_BRESENHAM_LINES
    const VkPipelineRasterizationLineStateCreateInfoKHR line_raster = {
@@ -3828,7 +3905,9 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
 #endif
-#if G17P_LAYER_OUTPUT
+#if G17P_MULTI_VIEWPORT
+   vkCmdDraw(command_buffer, 3, 2, 0, 0);
+#elif G17P_LAYER_OUTPUT
    vkCmdDraw(command_buffer, 3, IMAGE_LAYERS, 0, 0);
 #elif G17P_VERTEX_FORMAT
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
@@ -3979,7 +4058,8 @@ main(void)
 #endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
-   if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT) {
+   if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT &&
+       !G17P_MULTI_VIEWPORT) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -3997,7 +4077,7 @@ main(void)
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
-   G17P_MULTIVIEW || G17P_LAYER_OUTPUT ||                               \
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT ||        \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
@@ -4034,7 +4114,13 @@ main(void)
          "vkWaitForFences");
 #endif
 
-#if G17P_LAYER_OUTPUT
+#if G17P_MULTI_VIEWPORT
+   if (record_only) {
+      printf(PROBE_NAME ": PASS — feature advertised, shader compiled, "
+                        "and two-viewport command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_LAYER_OUTPUT
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, shader compiled, "
                         "and two-instance/layer command stream submitted\n");
@@ -4113,7 +4199,7 @@ main(void)
 #endif
 
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
-   G17P_MULTIVIEW || G17P_LAYER_OUTPUT ||                                  \
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT ||           \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
@@ -4189,7 +4275,12 @@ main(void)
 #else
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
-#if G17P_LAYER_OUTPUT
+#if G17P_MULTI_VIEWPORT
+   printf(PROBE_NAME ": PASS — instances selected viewports 0 and 1; both "
+                     "half-frame images exact immediately/3s, all guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_LAYER_OUTPUT
    printf(PROBE_NAME ": PASS — two instances selected exact layers 0 and 1 "
                      "immediately/3s; all readback guards unchanged, "
                      "checksum %016" PRIx64 "\n",
