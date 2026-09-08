@@ -48,7 +48,6 @@ struct hk_cmd_pool {
    /** List of hk_cmd_bo */
    struct list_head free_bos;
    struct list_head free_usc_bos;
-   struct list_head vdm_slabs;
    uint32_t num_free_bos;
    uint32_t num_free_usc_bos;
 };
@@ -76,3 +75,4 @@ VkResult hk_cmd_pool_alloc_vdm(struct hk_cmd_pool *pool, uint64_t size,
                                struct hk_vdm_allocation **allocation);
 void hk_cmd_pool_free_vdm(struct hk_cmd_pool *pool,
                           struct hk_vdm_allocation *allocation);
+void hk_device_finish_vdm_slabs(struct hk_device *dev);

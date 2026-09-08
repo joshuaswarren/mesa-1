@@ -379,11 +379,14 @@ hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
    }
 
    const uint32_t chunk_size =
-      align(MAX2(size, HK_G17P_VDM_ROOT_SIZE), HK_G17P_VDM_ROOT_SIZE);
+      align(MAX2(size, HK_G17P_VDM_UPLOAD_CHUNK_SIZE),
+            HK_G17P_VDM_UPLOAD_CHUNK_SIZE);
+   const uint32_t chunk_alignment =
+      MAX2(alignment, HK_G17P_VDM_UPLOAD_CHUNK_SIZE);
    struct agx_ptr chunk = {0};
    struct hk_vdm_allocation *allocation = NULL;
    const VkResult result = hk_cmd_pool_alloc_vdm(
-      hk_cmd_buffer_pool(cmd), chunk_size, HK_G17P_VDM_ROOT_SIZE, &chunk,
+      hk_cmd_buffer_pool(cmd), chunk_size, chunk_alignment, &chunk,
       &allocation);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);

@@ -88,6 +88,13 @@ struct hk_device {
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
 
+   /* Device-wide compact VDM backing. Command buffers from different pools
+    * suballocate immutable spans from the same finite G17P aperture. */
+   struct {
+      simple_mtx_t lock;
+      struct list_head slabs;
+   } vdm;
+
    /* Native G17P indirect compute grid helper.  A compact indirect helper
     * record carries no dimensions and no resource table, so the only way a
     * runtime grid can reach the main record is for this program to publish

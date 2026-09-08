@@ -620,18 +620,28 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .queueFamilyIndex = queue_family,
    };
-   VkCommandPool command_pool;
-   check(vkCreateCommandPool(device, &pool_info, NULL, &command_pool),
+   VkCommandPool command_pools[COMMAND_BUFFER_COUNT];
+#ifdef G17P_VDM_CAPACITY
+   for (unsigned command = 0; command < COMMAND_BUFFER_COUNT; ++command)
+      check(vkCreateCommandPool(device, &pool_info, NULL,
+                                &command_pools[command]),
+            "vkCreateCommandPool");
+#else
+   check(vkCreateCommandPool(device, &pool_info, NULL, &command_pools[0]),
          "vkCreateCommandPool");
-   const VkCommandBufferAllocateInfo command_allocate = {
+#endif
+   VkCommandBufferAllocateInfo command_allocate = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = command_pool,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = COMMAND_BUFFER_COUNT,
+      .commandBufferCount = 1,
    };
    VkCommandBuffer command_buffers[COMMAND_BUFFER_COUNT];
-   check(vkAllocateCommandBuffers(device, &command_allocate, command_buffers),
-         "vkAllocateCommandBuffers");
+   for (unsigned command = 0; command < COMMAND_BUFFER_COUNT; ++command) {
+      command_allocate.commandPool = command_pools[command];
+      check(vkAllocateCommandBuffers(device, &command_allocate,
+                                     &command_buffers[command]),
+            "vkAllocateCommandBuffers");
+   }
    VkCommandBuffer command_buffer = command_buffers[0];
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -705,7 +715,7 @@ main(void)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 #ifdef G17P_VDM_CAPACITY
    }
-   puts("g17p-vdm-capacity: 193 live command buffers recorded");
+   puts("g17p-vdm-capacity: 193 live command buffers across 193 pools recorded");
    return EXIT_SUCCESS;
 #else
    fprintf(stderr, "g17p-render-only: command buffer recorded\n");

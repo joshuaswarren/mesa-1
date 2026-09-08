@@ -51,9 +51,9 @@ main(void)
    assert(HK_G17P_VDM_ROOT_SIZE > command_bo_size - offset);
 
    /* vkQuake exposed the previous one-general-BO-per-alias failure only after
-    * filling all 192 slots in the native 24 MiB aperture. A dedicated VDM
-    * uploader must pack more than that many simultaneously live roots without
-    * exhausting the aperture. */
+    * filling all 192 slots in the native 24 MiB aperture. The device-wide VDM
+    * slab allocator must pack more than that many simultaneously live roots
+    * without depending on command-buffer or command-pool boundaries. */
    const unsigned live_roots = 193;
    const unsigned alias_slots = (24 * 1024 * 1024) / command_bo_size;
    unsigned packed_bos = 1;
