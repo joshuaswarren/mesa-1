@@ -4565,6 +4565,29 @@ TEST_F(AGX3PackBinary, FloatRegisterLivenessNativeWitnesses)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PAbsoluteMultiplierImmediateAddend)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index src0 = agx_register(0, AGX_SIZE_32);
+   agx_index src1 = agx_register(2, AGX_SIZE_32);
+   src0.discard = true;
+   src1.abs = true;
+   src1.discard = true;
+   agx_ffma_to(b, agx_register(0, AGX_SIZE_32), src0, src1,
+               agx_immediate(48));
+   agx_stop(b);
+
+   /* applegpu-nt v32023.255, -arch applegpu_g17p, for
+    * fma(a, fabs(b), 1.0f), followed by the canonical end. */
+   static const uint8_t native[] = {
+      0x09,0x01,0x1e,0x03,0x23,0xb0,0x02,0x00,0x00,0x80,0x02,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), std::vector<uint8_t>(std::begin(native),
+                                            std::end(native)));
+}
+
 TEST_F(AGX3PackBinary, FloatRegisterLivenessPreservedThroughBackend)
 {
    /* Alpha blending repeatedly reads both factors. Exercise all three float

@@ -7984,25 +7984,34 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
              !I->saturate && I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
-             agx3_mod_src_ok(I->src[0]) && !I->src[0].abs &&
+             agx3_mod_src_ok(I->src[0]) &&
              agx_channels(I->src[0]) == 1 &&
-             agx3_mod_src_ok(I->src[1]) && !I->src[1].abs &&
+             agx3_mod_src_ok(I->src[1]) &&
              agx_channels(I->src[1]) == 1 &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              !I->src[2].abs && !I->src[2].neg && !I->src[2].memory) {
+            /* Multiplication is commutative. Apple's G17P form puts a lone
+             * absolute multiplier in the f35 source slot; match that
+             * canonical order while moving the post-RA lifetime hints with
+             * their operands. */
+            const bool swap = !I->src[0].abs && I->src[1].abs;
+            const agx_index src0 = I->src[swap ? 1 : 0];
+            const agx_index src1 = I->src[swap ? 0 : 1];
             struct agx3_falu_runtime runtime = {
                .dest_cache = I->dest[0].cache, .wait_mask = wait,
             };
             for (unsigned i = 0; i < 2; ++i) {
-               if (I->src[i].kill)
+               const agx_index src = I->src[swap ? 1 - i : i];
+               if (src.kill)
                   AGX3_REFUSE(I);
-               runtime.cache[i] = I->src[i].cache;
-               runtime.discard[i] = I->src[i].discard;
+               runtime.cache[i] = src.cache;
+               runtime.discard[i] = src.discard;
             }
             uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], length;
             if (!agx3_falu_fma_addend_imm_mod(enc, I->dest[0].value,
-                    I->src[0].value, I->src[1].value, I->src[2].value,
-                    I->src[0].neg, I->src[1].neg, &runtime, bytes, &length) ||
+                    src0.value, src1.value, I->src[2].value,
+                    src0.abs, src0.neg, src1.abs, src1.neg,
+                    &runtime, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;

@@ -331,7 +331,8 @@ fma_addend_vectors(void)
          if (!agx3_falu_fma_addend_imm_mod(
                 AGX_ISA_ENCODING_AGX3B, negative_multiplier[i].dst,
                 negative_multiplier[i].src0, negative_multiplier[i].src1,
-                24, true, false, &negative_multiplier[i].rt, out, &size) ||
+                24, false, true, false, false,
+                &negative_multiplier[i].rt, out, &size) ||
              size != sizeof(negative_multiplier[i].bytes) ||
              memcmp(out, negative_multiplier[i].bytes, size)) {
             fprintf(stderr,
@@ -344,7 +345,28 @@ fma_addend_vectors(void)
          }
       }
    }
-   printf("native FMA minifloat addend: eight Apple live/dead/modifier vectors: %u failures\n",fail);
+   {
+      /* applegpu-nt v32023.255, -arch applegpu_g17p:
+       * fma(a, fabs(b), 1.0f).  This is the exact modifier-bearing
+       * minifloat-addend form emitted by production GTK shaders. */
+      static const uint8_t native[] = {
+         0x09,0x01,0x1e,0x03,0x23,0xb0,0x02,0x00,0x00,0x80,0x02,0x00,
+      };
+      const struct agx3_falu_runtime rt = {.discard={true,true}};
+      uint8_t out[16], size = 0;
+      if (!agx3_falu_fma_addend_imm_mod(
+             AGX_ISA_ENCODING_AGX3B, 0, 2, 0, 48,
+             true, false, false, false, &rt, out, &size) ||
+          size != sizeof(native) || memcmp(out, native, size)) {
+         fprintf(stderr, "FMA absolute multiplier/immediate addend failed\n");
+         for (unsigned i = 0; i < size; ++i)
+            fprintf(stderr, "%02x", out[i]);
+         fprintf(stderr, " size=%u\n", size);
+         fail++;
+      }
+   }
+   printf("native FMA minifloat addend: nine Apple live/dead/modifier vectors: "
+          "%u failures\n", fail);
    return fail;
 }
 
