@@ -19,7 +19,17 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC7_SRGB_DECODE)
+#if defined(G17P_BC4_SNORM_DECODE)
+#define BLOCK_BYTES 8
+#define BLOCK_DATA_BYTES 32
+#define TEST_FORMAT VK_FORMAT_BC4_SNORM_BLOCK
+#define NAME "g17p-vulkan-bc4-snorm-decode"
+#elif defined(G17P_BC5_SNORM_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC5_SNORM_BLOCK
+#define NAME "g17p-vulkan-bc5-snorm-decode"
+#elif defined(G17P_BC7_SRGB_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC7_SRGB_BLOCK
@@ -182,6 +192,7 @@ fnv1a64(const uint8_t *data, size_t size)
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
 #if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE) &&               \
+   !defined(G17P_BC4_SNORM_DECODE) && !defined(G17P_BC5_SNORM_DECODE) &&    \
    !defined(G17P_BC6H_SFLOAT_DECODE) &&                                \
    !defined(G17P_BC6H_UFLOAT_DECODE) && !defined(G17P_BC7_DECODE) &&       \
    !defined(G17P_BC7_SRGB_DECODE)
@@ -246,7 +257,19 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
-#if defined(G17P_BC6H_SFLOAT_DECODE)
+#if defined(G17P_BC4_SNORM_DECODE) || defined(G17P_BC5_SNORM_DECODE)
+   static const int8_t rg[4][2] = {
+      {-127, 127}, {127, -127}, {-128, 0}, {0, 127},
+   };
+   (void)c0;
+   (void)c1;
+   (void)indices;
+   memset(out, 0, BLOCK_BYTES);
+   out[0] = (uint8_t)rg[block][0];
+#if defined(G17P_BC5_SNORM_DECODE)
+   out[8] = (uint8_t)rg[block][1];
+#endif
+#elif defined(G17P_BC6H_SFLOAT_DECODE)
    static const uint8_t encoded[4][16] = {
       {0xc3,0x1a,0x9d,0xbd,0xf1,0xe6,0x1d,0x6b,0x40,0xf8,0x40,0xf8,0x40,0xf8,0x40,0xf8},
       {0xa3,0x9d,0x5a,0xb4,0xd1,0xa6,0x9e,0x76,0x10,0x9f,0x10,0x9f,0x10,0x9f,0x10,0x9f},
@@ -310,7 +333,23 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
-#if defined(G17P_BC6H_SFLOAT_DECODE)
+#if defined(G17P_BC4_SNORM_DECODE) || defined(G17P_BC5_SNORM_DECODE)
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         const uint8_t *encoded = blocks + block * BLOCK_BYTES;
+         uint8_t *pixel = reference + (y * WIDTH + x) * 4;
+         pixel[0] = encoded[0] == 127 ? 255 : 0;
+#if defined(G17P_BC5_SNORM_DECODE)
+         pixel[1] = encoded[8] == 127 ? 255 : 0;
+#else
+         pixel[1] = 0;
+#endif
+         pixel[2] = 0;
+         pixel[3] = 255;
+      }
+   }
+#elif defined(G17P_BC6H_SFLOAT_DECODE)
    (void)blocks;
    static const uint8_t decoded[4][4][4] = {
       {{0x3f,0x00,0x5e,0xff}, {0x47,0x00,0x56,0xff},
