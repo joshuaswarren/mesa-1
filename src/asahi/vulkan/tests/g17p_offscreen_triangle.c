@@ -262,6 +262,19 @@
 #define G17P_COMPOSITE_NARROW_WIDTH 2
 #endif
 
+#ifndef G17P_COMPOSITE_NARROW_Y
+#define G17P_COMPOSITE_NARROW_Y 0
+#endif
+
+/* Zero retains the full render-target height. */
+#ifndef G17P_COMPOSITE_NARROW_HEIGHT
+#define G17P_COMPOSITE_NARROW_HEIGHT 0
+#endif
+
+#ifndef G17P_COMPOSITE_FULLSCREEN_TRIANGLE
+#define G17P_COMPOSITE_FULLSCREEN_TRIANGLE 0
+#endif
+
 #if (G17P_COMPOSITE_SINGLE_DRAW + G17P_COMPOSITE_NARROW_SINGLE +            \
      G17P_COMPOSITE_REPEATED_FULL + G17P_COMPOSITE_NARROW_TWO +             \
      G17P_COMPOSITE_NARROW_TWO_CHANGED) > 1
@@ -270,6 +283,10 @@
 
 #if G17P_COMPOSITE_NO_FLAT && G17P_COMPOSITE_EXPLICIT_LOD
 #error "select one alpha-composite diagnostic shader"
+#endif
+
+#if G17P_COMPOSITE_FULLSCREEN_TRIANGLE && G17P_COMPOSITE_FRACTIONAL_INSET
+#error "the oversized triangle and fractional quad are mutually exclusive"
 #endif
 
 #define G17P_COMPOSITE_OPACITY_COUNT 17
@@ -1899,7 +1916,12 @@ verify_readback(const uint8_t *map)
          (G17P_COMPOSITE_NARROW_SINGLE || G17P_COMPOSITE_NARROW_TWO ||
           G17P_COMPOSITE_NARROW_TWO_CHANGED) ?
             (x >= G17P_COMPOSITE_NARROW_X &&
-             x < G17P_COMPOSITE_NARROW_X + G17P_COMPOSITE_NARROW_WIDTH) :
+             x < G17P_COMPOSITE_NARROW_X + G17P_COMPOSITE_NARROW_WIDTH &&
+             y >= G17P_COMPOSITE_NARROW_Y &&
+             y < G17P_COMPOSITE_NARROW_Y +
+                    (G17P_COMPOSITE_NARROW_HEIGHT
+                        ? G17P_COMPOSITE_NARROW_HEIGHT
+                        : IMAGE_HEIGHT)) :
          (!G17P_COMPOSITE_FRACTIONAL_INSET ||
           (x >= 4 && x < 14 && y >= 3 && y < 12));
       uint8_t expected_pixel[4] = {128, 64, 128, 255};
@@ -2711,7 +2733,15 @@ main(void)
    /* Two triangles sharing a full-surface diagonal. Every pixel, including
     * the shared edge, must be covered exactly once. The integer attribute
     * forces a flat input ahead of the smooth UV in the fragment program. */
-#if G17P_COMPOSITE_FRACTIONAL_INSET
+#if G17P_COMPOSITE_FULLSCREEN_TRIANGLE
+   /* One oversized triangle removes the internal quad seam while retaining
+    * exactly the same UV gradient and fragment program. */
+   static const struct composite_vertex vertices[] = {
+      {{-1.0f, -1.0f}, 1},
+      {{3.0f, -1.0f}, 1},
+      {{-1.0f, 3.0f}, 1},
+   };
+#elif G17P_COMPOSITE_FRACTIONAL_INSET
    /* A 10x9 quad translated by quarter pixels. Its clip coordinates are
     * fractional for this odd target, while sample centres 4..13 by 3..11
     * remain safely inside its outer edges. */
@@ -4378,15 +4408,23 @@ main(void)
    /* Hold draw count at one while reproducing the physical 2-pixel scissor
     * width from the failing 32-wide opacity sweep. */
    const VkRect2D alpha_scissor = {
-      .offset = {G17P_COMPOSITE_NARROW_X, 0},
-      .extent = {G17P_COMPOSITE_NARROW_WIDTH, IMAGE_HEIGHT},
+      .offset = {G17P_COMPOSITE_NARROW_X, G17P_COMPOSITE_NARROW_Y},
+      .extent = {
+         G17P_COMPOSITE_NARROW_WIDTH,
+         G17P_COMPOSITE_NARROW_HEIGHT ? G17P_COMPOSITE_NARROW_HEIGHT
+                                      : IMAGE_HEIGHT,
+      },
    };
    const uint32_t dynamic_offset = COMPOSITE_UNIFORM_STRIDE;
    vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &descriptor_set, 1,
                            &dynamic_offset);
+#if G17P_COMPOSITE_FULLSCREEN_TRIANGLE
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#else
    vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+#endif
 #elif G17P_COMPOSITE_REPEATED_FULL
    /* Hold the physical scissor at the full target while retaining all 17
     * dynamic-state/bind/draw transitions. The first 16 draws have zero

@@ -726,6 +726,33 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Keep the failing odd-X helper edge but move it away from either quad
+    # diagonal, then remove the quad seam entirely with an oversized triangle.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-narrow-single-x1-y8',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_NARROW_SINGLE=1',
+                '-DG17P_COMPOSITE_NARROW_X=1',
+                '-DG17P_COMPOSITE_NARROW_Y=8',
+                '-DG17P_COMPOSITE_NARROW_HEIGHT=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-narrow-single-x1-triangle',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_NARROW_SINGLE=1',
+                '-DG17P_COMPOSITE_NARROW_X=1',
+                '-DG17P_COMPOSITE_FULLSCREEN_TRIANGLE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-texture-alpha-composite-repeated-full',
       files('tests/g17p_offscreen_triangle.c'),
