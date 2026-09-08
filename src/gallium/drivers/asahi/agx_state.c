@@ -4660,7 +4660,7 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
        !agx_gallium_vdm_compact(batch, indices.gpu, &compact_indices) ||
        !agx_g17p_upload_draw_indices(
           indices.cpu, 8, compact_indices, batch->scissor.size,
-          batch->depth_bias.size, draw_state_offset))
+          batch->depth_bias.size, 1, draw_state_offset))
       return NULL;
 
    memcpy(out, uploaded.tail.bytes, uploaded.tail.length);
