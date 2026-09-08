@@ -15,7 +15,9 @@
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
+#include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
+#include "asahi/lib/agx_vdm_barrier_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "asahi/libagx/compression.h"
@@ -3582,6 +3584,8 @@ agx_batch_init_state(struct agx_batch *batch)
       return;
    }
 
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+
    /* Emit state on the batch that we don't change and so don't dirty track */
    uint8_t *out = batch->vdm.current;
 
@@ -3589,34 +3593,73 @@ agx_batch_init_state(struct agx_batch *batch)
     * with another that caused stale data to be cached and the CPU wrote to it
     * in the meantime.
     */
-   agx_push(out, VDM_BARRIER, cfg) {
-      cfg.usc_cache_inval = true;
+   if (dev->chip == AGX_CHIP_G17P) {
+      struct agx_vdm_barrier_core barrier;
+      const bool packed = agx_vdm_barrier_core_pack(dev->chip, &barrier);
+      assert(packed);
+      if (!packed)
+         return;
+
+      memcpy(out, barrier.bytes, barrier.length);
+      out += barrier.length;
+   } else {
+      agx_push(out, VDM_BARRIER, cfg) {
+         cfg.usc_cache_inval = true;
+      }
    }
 
-   struct AGX_PPP_HEADER present = {
-      .w_clamp = true,
-      .occlusion_query_2 = true,
-      .output_unknown = true,
-      .varying_word_2 = true,
-      .viewport_count = 1, /* irrelevant */
-   };
+   if (dev->chip == AGX_CHIP_G17P) {
+      const struct agx_ppp_w_clamp_cull2_fields fields = {
+         .w_clamp_raw = 0,
+         .cull2_raw = UINT32_C(0x80),
+      };
+      struct agx_ppp_w_clamp_cull2_core initial;
+      const bool packed =
+         agx_ppp_w_clamp_cull2_core_pack(dev->chip, &fields, &initial);
+      assert(packed);
+      if (!packed)
+         return;
 
-   size_t size = agx_ppp_update_size(&present);
-   struct agx_ptr T =
-      agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
-   struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
+      struct agx_ptr T = agx_pool_alloc_aligned(
+         &batch->pool, initial.length, AGX_PPP_HEADER_ALIGN);
+      memcpy(T.cpu, initial.bytes, initial.length);
 
-   /* clang-format off */
-   agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
-   agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
-   agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
-   agx_ppp_push(&ppp, VARYING_2, cfg);
-   /* clang-format on */
+      struct agx_ppp_update ppp = {
+         .head = (uint8_t *)T.cpu + initial.length,
+         .gpu_base = T.gpu,
+         .total_size = initial.length,
+         .cpu_base = T.cpu,
+      };
+      const bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
+      assert(emitted);
+      if (!emitted)
+         return;
+   } else {
+      struct AGX_PPP_HEADER present = {
+         .w_clamp = true,
+         .occlusion_query_2 = true,
+         .output_unknown = true,
+         .varying_word_2 = true,
+         .viewport_count = 1, /* irrelevant */
+      };
 
-   bool emitted = agx_gallium_ppp_fini(
-      agx_device(batch->ctx->base.screen), &out, &ppp);
-   assert(emitted);
-   (void)emitted;
+      size_t size = agx_ppp_update_size(&present);
+      struct agx_ptr T =
+         agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
+      struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
+
+      /* clang-format off */
+      agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
+      agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
+      agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
+      agx_ppp_push(&ppp, VARYING_2, cfg);
+      /* clang-format on */
+
+      const bool emitted = agx_gallium_ppp_fini(dev, &out, &ppp);
+      assert(emitted);
+      if (!emitted)
+         return;
+   }
    batch->vdm.current = out;
 
    /* Mark it as initialized now, since agx_batch_writes() will check this. */
