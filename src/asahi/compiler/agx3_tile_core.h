@@ -4,10 +4,9 @@
  *
  * AGX3 tile / framebuffer encoders: st_tile -> lstcol (fragment color output)
  * and ld_tile -> lldcol (framebuffer fetch).  This core intentionally exposes
- * only the directly witnessed single-sample forms.  The per-sample selector is
- * not understood well enough to bind Mesa IR yet and therefore fails closed.
- * Composer-driven; reproduces Apple's witnessed bytes. Blend and depth-compare
- * are render state, not ISA. Evidence:
+ * the directly witnessed single-sample and 2x/4x color forms. Composer-driven;
+ * reproduces Apple's witnessed bytes. Blend and depth-compare are render
+ * state, not ISA. Evidence:
  * research/gpu/GPU_AGX3_TILE_OPS_2026-08-24.md.
  */
 
@@ -30,11 +29,16 @@ enum agx3_tile_width {
    AGX3_TILE_W32 = 2,
 };
 
-/* PER_SAMPLE is reserved for the grounded field value but is not accepted by
- * this bounded codec until its sample/mask source semantics are known. */
 enum agx3_tile_coverage {
    AGX3_TILE_COV_1X = 1,
-   AGX3_TILE_COV_PER_SAMPLE = 2,
+   AGX3_TILE_COV_2X_BROADCAST,
+   AGX3_TILE_COV_2X_SAMPLE_0,
+   AGX3_TILE_COV_2X_SAMPLE_1,
+   AGX3_TILE_COV_4X_BROADCAST,
+   AGX3_TILE_COV_4X_SAMPLE_0,
+   AGX3_TILE_COV_4X_SAMPLE_1,
+   AGX3_TILE_COV_4X_SAMPLE_2,
+   AGX3_TILE_COV_4X_SAMPLE_3,
 };
 
 /* Store `data` to the tile buffer. `chan_mask` is the component write mask

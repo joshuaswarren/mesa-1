@@ -1424,26 +1424,48 @@ agx3_tile_value_ok(agx_index value, uint8_t mask, int width)
 }
 
 
-/*
- * AGX3's single-sample coverage group (f51=1) encodes no sample selector at
- * all: it stores or loads the whole pixel. The only sample source it can
- * faithfully represent is therefore one that names every sample, which
- * agx_nir_lower_tilebuffer spells as the ALL_SAMPLES immediate 0xFF.
- *
- * A narrower immediate, and any register source, mean per-sample traffic. That
- * is the f51=2 group, whose f44 selector is not grounded (its register-versus-
- * selector meaning is an open question in the corpus), so both fail closed
- * rather than silently becoming a whole-pixel access.
- */
+/* agx_nir_lower_g17p_tile_samples tags each statically known sample-count
+ * domain before backend compilation. Keeping the count in the immediate is
+ * essential: native lstcol uses different selectors for 2x and 4x sample 0,
+ * while lldcol uses a one-hot selector for both. */
 #define AGX3_TILE_ALL_SAMPLES 0xFFu
+#define AGX3_TILE_2X_TAG       0x20u
+#define AGX3_TILE_4X_TAG       0x40u
 
 static bool
-agx3_tile_pixel_rate_sample(agx_index sample)
+agx3_tile_coverage(agx_index sample, enum agx3_tile_coverage *coverage)
 {
-   return sample.type == AGX_INDEX_IMMEDIATE &&
-          sample.value == AGX3_TILE_ALL_SAMPLES && sample.size == AGX_SIZE_16 &&
-          !sample.memory && !sample.abs && !sample.neg && !sample.cache &&
-          !sample.discard && !sample.kill;
+   if (sample.type != AGX_INDEX_IMMEDIATE || sample.size != AGX_SIZE_16 ||
+       sample.memory || sample.abs || sample.neg || sample.cache ||
+       sample.discard || sample.kill)
+      return false;
+
+   if (sample.value == AGX3_TILE_ALL_SAMPLES) {
+      *coverage = AGX3_TILE_COV_1X;
+      return true;
+   }
+
+   const unsigned tag = sample.value & ~0xfu;
+   const unsigned mask = sample.value & 0xfu;
+   if (tag == AGX3_TILE_2X_TAG) {
+      if (mask == 0)
+         *coverage = AGX3_TILE_COV_2X_BROADCAST;
+      else if (mask == 1 || mask == 2)
+         *coverage = AGX3_TILE_COV_2X_SAMPLE_0 + util_logbase2(mask);
+      else
+         return false;
+   } else if (tag == AGX3_TILE_4X_TAG) {
+      if (mask == 0)
+         *coverage = AGX3_TILE_COV_4X_BROADCAST;
+      else if (util_is_power_of_two_nonzero(mask) && mask <= 8)
+         *coverage = AGX3_TILE_COV_4X_SAMPLE_0 + util_logbase2(mask);
+      else
+         return false;
+   } else {
+      return false;
+   }
+
+   return true;
 }
 
 /* Bind the directly witnessed single-sample tile subset.  Explicit pixel
@@ -1465,10 +1487,11 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const agx_index sample = load ? I->src[0] : I->src[1];
    const agx_index coords = load ? I->src[1] : I->src[2];
    const int width = agx3_tile_format_width(I->format);
+   enum agx3_tile_coverage coverage;
    if ((I->format == AGX_FORMAT_RGB10A2 &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
        width < 0 || !agx3_tile_value_ok(value, I->mask, width) ||
-       !agx3_tile_pixel_rate_sample(sample) || !agx_is_null(coords))
+       !agx3_tile_coverage(sample, &coverage) || !agx_is_null(coords))
       return false;
 
    /* AGX3b f13 varies independently in high-register store witnesses.  The
@@ -1481,11 +1504,11 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    uint8_t length = 0;
    const bool ok =
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
-                            slot, I->mask, I->pixel_offset, AGX3_TILE_COV_1X,
+                            slot, I->mask, I->pixel_offset, coverage,
                             wait_mask, first_load, last_load, bytes, &length)
            : agx3_tile_store(enc, value.value,
                              (enum agx3_tile_width)width, I->mask,
-                             I->pixel_offset, AGX3_TILE_COV_1X, wait_mask,
+                             I->pixel_offset, coverage, wait_mask,
                              bytes, &length);
    return ok && agx3_append(emission, bytes, length);
 }

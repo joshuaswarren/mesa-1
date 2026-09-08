@@ -661,8 +661,9 @@
 #define G17P_MSAA_SAMPLES 1
 #endif
 
-#if G17P_MSAA_SAMPLES != 1 && G17P_MSAA_SAMPLES != 2
-#error "the G17P qualification fixture covers only 1x and native-default 2x"
+#if G17P_MSAA_SAMPLES != 1 && G17P_MSAA_SAMPLES != 2 && \
+    G17P_MSAA_SAMPLES != 4
+#error "the G17P qualification fixture covers only 1x, 2x and 4x"
 #endif
 
 #if G17P_HOST_IMAGE_COPY && G17P_MSAA_SAMPLES != 1
@@ -1116,8 +1117,8 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
-#elif G17P_MSAA_SAMPLES == 2
-#define PROBE_NAME "g17p-msaa2-triangle"
+#elif G17P_MSAA_SAMPLES > 1
+#define PROBE_NAME "g17p-msaa-triangle"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
@@ -1574,6 +1575,8 @@ main(void)
        getenv("G17P_INSTANCE_RATE_RECORD_ONLY") != NULL) ||
       (G17P_INDEX_RESTART &&
        getenv("G17P_INDEX_RESTART_RECORD_ONLY") != NULL) ||
+      (G17P_MSAA_SAMPLES > 1 &&
+       getenv("G17P_MSAA_RECORD_ONLY") != NULL) ||
       (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
@@ -2405,9 +2408,9 @@ main(void)
    check(vkBindImageMemory(device, image, image_memory, 0),
          "vkBindImageMemory");
 
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
    VkImageCreateInfo msaa_image_info = image_info;
-   msaa_image_info.samples = VK_SAMPLE_COUNT_2_BIT;
+   msaa_image_info.samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES;
    msaa_image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
    VkImage msaa_image;
    check(vkCreateImage(device, &msaa_image_info, NULL, &msaa_image),
@@ -2572,7 +2575,7 @@ main(void)
    vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, NULL);
 #endif
 
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
    VkImageViewCreateInfo msaa_view_info = view_info;
    msaa_view_info.image = msaa_image;
    VkImageView msaa_view;
@@ -2584,7 +2587,7 @@ main(void)
       .format = IMAGE_FORMAT,
       .samples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
       .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
       .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
 #else
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -2592,13 +2595,13 @@ main(void)
       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
       .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
       .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 #endif
    },
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
    {
       .format = IMAGE_FORMAT,
       .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -2615,7 +2618,7 @@ main(void)
       .attachment = 0,
       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
    };
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
    const VkAttachmentReference resolve_ref = {
       .attachment = 1,
       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2625,7 +2628,7 @@ main(void)
       .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
       .colorAttachmentCount = 1,
       .pColorAttachments = &color_ref,
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
       .pResolveAttachments = &resolve_ref,
 #endif
    };
@@ -2900,7 +2903,7 @@ main(void)
          "vkCreateGraphicsPipelines");
 #endif
 
-#if G17P_MSAA_SAMPLES == 2
+#if G17P_MSAA_SAMPLES > 1
    const VkImageView framebuffer_views[] = {msaa_view, view};
 #else
    const VkImageView framebuffer_views[] = {view};
@@ -3166,7 +3169,7 @@ main(void)
    if (waited == VK_TIMEOUT)
       die("vkWaitForFences timed out after three seconds");
    check(waited, "vkWaitForFences");
-#elif G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES == 2
+#elif G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES > 1
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000));
    if (waited == VK_TIMEOUT)
@@ -3244,7 +3247,7 @@ main(void)
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
-   G17P_MSAA_SAMPLES == 2 || G17P_F16_IO || G17P_RG16_UNORM ||         \
+   G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_RG16_UNORM ||         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \

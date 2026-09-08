@@ -58,6 +58,52 @@ int main(void){
       }
    }
    {
+      static const struct {
+         enum agx3_tile_coverage cov;
+         uint8_t bytes[12];
+      } stores[] = {
+         {AGX3_TILE_COV_2X_SAMPLE_0,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x04,0x4e,0x08,0x00,0x00,0x08}},
+         {AGX3_TILE_COV_2X_SAMPLE_1,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x05,0x4e,0x08,0x00,0x00,0x08}},
+         {AGX3_TILE_COV_4X_SAMPLE_0,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x08,0x4e,0x08,0x00,0x00,0x08}},
+         {AGX3_TILE_COV_4X_SAMPLE_1,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x09,0x4e,0x08,0x00,0x00,0x08}},
+         {AGX3_TILE_COV_4X_SAMPLE_2,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x0a,0x4e,0x08,0x00,0x00,0x08}},
+         {AGX3_TILE_COV_4X_SAMPLE_3,
+          {0xe7,0x06,0x54,0x00,0x00,0x00,0x0b,0x4e,0x08,0x00,0x00,0x08}},
+      };
+      for (unsigned i = 0; i < sizeof(stores) / sizeof(stores[0]); ++i) {
+         uint8_t out[AGX3_TILE_MAX_LENGTH], len = 0;
+         if (!agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
+                              15, 0, stores[i].cov, 0, out, &len) ||
+             len != sizeof(stores[i].bytes) ||
+             memcmp(out, stores[i].bytes, len)) {
+            fprintf(stderr, "FAIL native MS store %u len=%u bytes=", i, len);
+            for (unsigned j = 0; j < len; ++j) fprintf(stderr, "%02x", out[j]);
+            fprintf(stderr, "\n");
+            fail++;
+         } else
+            pass++;
+      }
+
+      static const uint8_t broadcast[] = {
+         0xe7,0x16,0x54,0x00,0x00,0x00,0x0a,0x4e,0x08,0x00,0x00,0x08,
+      };
+      uint8_t out[AGX3_TILE_MAX_LENGTH], len = 0;
+      if (!agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
+                           15, 0, AGX3_TILE_COV_4X_BROADCAST, 1, out, &len) ||
+          len != sizeof(broadcast) || memcmp(out, broadcast, len)) {
+         fprintf(stderr, "FAIL native MS broadcast len=%u bytes=", len);
+         for (unsigned j = 0; j < len; ++j) fprintf(stderr, "%02x", out[j]);
+         fprintf(stderr, "\n");
+         fail++;
+      } else
+         pass++;
+   }
+   {
       uint8_t out[AGX3_TILE_MAX_LENGTH]; uint8_t len=0;
       if(agx3_tile_store(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W32,15,0,
                          AGX3_TILE_COV_1X,0x40,out,&len)) fail++; else pass++;
@@ -72,7 +118,9 @@ int main(void){
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W16,1,7,0,
                         AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,15,0,
-                        AGX3_TILE_COV_PER_SAMPLE,0,true,true,out,&len)) fail++; else pass++;
+                        AGX3_TILE_COV_2X_SAMPLE_0,0,true,true,out,&len)) fail++; else pass++;
+      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W8,1,15,0,
+                        AGX3_TILE_COV_2X_BROADCAST,0,true,true,out,&len)) fail++; else pass++;
    }
    if(fail){ fprintf(stderr,"agx3_tile_core: %u of %zu failed\n",fail,tile_vec_count); return 1; }
    printf("agx3_tile_core: all %u tile ops reproduced\n",pass); return 0;

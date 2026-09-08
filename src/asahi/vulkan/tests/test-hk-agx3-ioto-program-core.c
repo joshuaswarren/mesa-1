@@ -2061,8 +2061,28 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    CHECK(tib.nr_samples == 2 && tib.sample_size_B == 8 &&
          tib.tile_size == 32 * 32 && !tib.spilled[0]);
+   CHECK(hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, false));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 2, true, true, false));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, false, true, false));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, false, false));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, true));
    tib = agx_build_tilebuffer_layout(rgba, 1, 4, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.nr_samples == 4 && tib.sample_size_B == 8 &&
+         tib.tile_size == 32 * 32 && !tib.spilled[0]);
+   CHECK(hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, false));
+   tib = agx_build_tilebuffer_layout(rgba, 1, 8, false);
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, false));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      NULL, 1, true, true, false));
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
    return 0;
 }

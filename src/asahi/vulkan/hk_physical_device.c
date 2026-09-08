@@ -823,8 +823,12 @@ hk_get_device_properties(const struct agx_device *dev,
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+   const bool g17p_msaa = dev->chip == AGX_CHIP_G17P &&
+                          debug_get_bool_option("HK_G17P_MSAA", false);
    const VkSampleCountFlagBits color_sample_counts =
-      dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
+      dev->chip == AGX_CHIP_G17P
+         ? (g17p_msaa ? sample_counts : VK_SAMPLE_COUNT_1_BIT)
+         : sample_counts;
    const VkSampleCountFlagBits other_sample_counts =
       dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
 

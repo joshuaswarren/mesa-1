@@ -764,8 +764,7 @@ agx_nir_lower_fs_output_to_epilog_g17p(
 }
 
 static bool
-lower_g17p_1x_tile_sample(nir_builder *b, nir_intrinsic_instr *intr,
-                          UNUSED void *data)
+lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    unsigned src;
    switch (intr->intrinsic) {
@@ -779,13 +778,38 @@ lower_g17p_1x_tile_sample(nir_builder *b, nir_intrinsic_instr *intr,
       return false;
    }
 
-   if (nir_src_is_const(intr->src[src]) &&
-       nir_src_as_uint(intr->src[src]) == 0xff)
+   if (!nir_src_is_const(intr->src[src]))
+      return false;
+
+   const unsigned samples = *(const unsigned *)data;
+   const unsigned mask = nir_src_as_uint(intr->src[src]);
+   unsigned encoded;
+   if (samples == 1) {
+      encoded = 0xff;
+   } else {
+      if (mask != 0xff &&
+          (!util_is_power_of_two_nonzero(mask) || mask >= (1u << samples)))
+         return false;
+
+      encoded = (samples << 4) | (mask == 0xff ? 0 : mask);
+   }
+
+   if (mask == encoded)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_src_rewrite(&intr->src[src], nir_imm_intN_t(b, 0xff, 16));
+   nir_src_rewrite(&intr->src[src], nir_imm_intN_t(b, encoded, 16));
    return true;
+}
+
+bool
+agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
+{
+   if (nr_samples != 1 && nr_samples != 2 && nr_samples != 4)
+      return false;
+
+   return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
+                                     nir_metadata_control_flow, &nr_samples);
 }
 
 bool
@@ -795,8 +819,7 @@ agx_nir_lower_g17p_1x_tile_samples(nir_shader *s)
     * lowering still materializes `1 << sample_id`, but sample_id can only be
     * zero.  Native 1x fragments encode the ordinary whole-pixel LSTCOL/LLDCOL
     * forms, which carry no sample operand. */
-   return nir_shader_intrinsics_pass(s, lower_g17p_1x_tile_sample,
-                                     nir_metadata_control_flow, NULL);
+   return agx_nir_lower_g17p_tile_samples(s, 1);
 }
 
 bool

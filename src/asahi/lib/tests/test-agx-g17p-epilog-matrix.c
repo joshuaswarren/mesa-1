@@ -94,8 +94,7 @@ main(void)
                   nir_builder b = nir_builder_init_simple_shader(
                      0, &agx_nir_options, "G17P epilog sweep");
                   agx_nir_fs_epilog(&b, &key);
-                  if (key.nr_samples == 1)
-                     agx_nir_lower_g17p_1x_tile_samples(b.shader);
+                  agx_nir_lower_g17p_tile_samples(b.shader, key.nr_samples);
                   agx_preprocess_nir(b.shader);
 
                   struct agx_shader_key bk = {
@@ -133,9 +132,10 @@ main(void)
 
    /* Keeping G17P fsat as its native standalone f32add.ep2 closes 416
     * producer shapes without inventing saturated forms for those producers. */
-   /* Depth-only late tests now use Apple's staged depthf protocol; stencil,
-    * multisample and unrelated format/ALU gaps remain in the refusal set. */
-   const unsigned ceiling = 30480;
+   /* Multisample selectors are now sample-count tagged before the backend.
+    * This deliberately rejects 1904 matrix combinations which previously
+    * fell through the single-sample tile form and encoded the wrong access. */
+   const unsigned ceiling = 32384;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",

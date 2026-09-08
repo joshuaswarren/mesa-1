@@ -222,9 +222,13 @@ bool hk_agx3_g17p_rt0_eot_program_generate(
 bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
                                         uint32_t layer_count);
 
-/* Admit the one-sample, one-attachment tilebuffer used by that path. */
+/* Admit the bounded one-attachment tilebuffer used by that path. */
 bool hk_agx3_g17p_rt0_tile_layout_supported(
    struct agx_tilebuffer_layout *tib);
+
+bool hk_agx3_g17p_direct_color_resolve_supported(
+   struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
+   bool has_resolve_target, bool average_resolve, bool store_source);
 
 /* Bounded Honeykrisp bridge for the exact G17P direct-add3 Ioto/CDM pair.
  * These functions expose a tested bring-up primitive only; Vulkan compute

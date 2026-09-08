@@ -179,6 +179,9 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
                NULL, NULL, false, cache->dev->chip == AGX_CHIP_G17P);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
+      if (cache->dev->chip == AGX_CHIP_G17P)
+         NIR_PASS(_, shader, agx_nir_lower_g17p_tile_samples,
+                  tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_texture);
       NIR_PASS(_, shader, nir_shader_intrinsics_pass, lower_tex_handle_to_u0,
                nir_metadata_control_flow, &descriptor_size);
@@ -305,8 +308,12 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
                                                   &agx_nir_options, "agx_eot");
 
+   /* Native G17P resolves the multisample tile directly through an ordinary
+    * single-sample PBE target. IMGWBLK itself remains the dimensionless 2D
+    * builtin; encoding an MS image here stores an unresolved surface. */
    enum glsl_sampler_dim dim =
-      (key->tib.nr_samples > 1) ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
+      (key->tib.nr_samples > 1 && cache->dev->chip != AGX_CHIP_G17P)
+         ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)

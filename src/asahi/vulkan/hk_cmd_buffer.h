@@ -212,6 +212,9 @@ struct hk_rendering_state {
    uint32_t layer_count;
    uint32_t view_mask;
 
+   /* The main G17P EOT writes the single-sample resolve target directly. */
+   bool g17p_direct_color_resolve;
+
    uint32_t color_att_count;
    struct hk_attachment color_att[HK_MAX_RTS];
    struct hk_attachment depth_att;

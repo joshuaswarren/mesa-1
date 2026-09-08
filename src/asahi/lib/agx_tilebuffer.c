@@ -180,8 +180,24 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 bool
 agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 {
-   if (!tib || (tib->nr_samples != 1 && tib->nr_samples != 2) ||
-       tib->layered || tib->tile_size != 32 * 32 || tib->spilled[0])
+   if (!tib ||
+       (tib->nr_samples != 1 && tib->nr_samples != 2 &&
+        tib->nr_samples != 4) ||
+       tib->layered || tib->spilled[0])
+      return false;
+
+   if (tib->nr_samples == 4 && tib->sample_size_B == 8 &&
+       tib->tile_size == 32 * 16) {
+      tib->tile_size = 32 * 32;
+      agx_tilebuffer_pack_usc(tib);
+   }
+
+   if (tib->tile_size != 32 * 32)
+      return false;
+
+   if (tib->nr_samples > 1 &&
+       tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM)
       return false;
 
    const bool mixed_mrt =

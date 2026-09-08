@@ -325,7 +325,8 @@ hk_g17p_bg_eot_shader_supported(const struct agx_bg_eot_shader *shader)
 static struct hk_bg_eot
 hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      struct agx_bg_eot_key *key,
-                     const VkRenderingInfo *info, bool store)
+                     const VkRenderingInfo *info, bool store,
+                     bool partial_render)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (!hk_agx3_g17p_rt0_tile_layout_supported(&key->tib)) {
@@ -442,9 +443,22 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    uint64_t resource_spec;
    if (store && op == AGX_EOT_STORE) {
       struct hk_image_view *iview = cmd->state.gfx.render.color_att[0].iview;
+      const VkRenderingAttachmentInfo *att = &info->pColorAttachments[0];
+      const bool direct_resolve =
+         hk_agx3_g17p_direct_color_resolve_supported(
+            &key->tib, info->colorAttachmentCount,
+            att->resolveImageView != VK_NULL_HANDLE,
+            att->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT,
+            att->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
+      struct hk_image_view *target = direct_resolve
+         ? cmd->state.gfx.render.color_att[0].resolve_iview : iview;
       struct hk_image_view *iview1 = wboit_mrt_active
          ? cmd->state.gfx.render.color_att[1].iview : NULL;
-      if (!iview || !iview->planes[0].eot_pbe_valid ||
+      if (!iview || !target ||
+          (direct_resolve &&
+           (target->vk.image->samples != 1 ||
+            target->vk.format != iview->vk.format)) ||
+          !target->planes[0].eot_pbe_valid ||
           info->pColorAttachments[0].imageView == VK_NULL_HANDLE ||
           (wboit_mrt_active &&
            (!iview1 || !iview1->planes[0].eot_pbe_valid ||
@@ -466,7 +480,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 
       struct hk_native_pbe_descriptor pbe_arguments[2] = {
          diagnostic_rt1_slot0 ? iview1->planes[0].eot
-                              : iview->planes[0].eot,
+                              : target->planes[0].eot,
       };
       if (wboit_mrt_active && !diagnostic_rt1_slot0)
          pbe_arguments[1] = iview1->planes[0].eot;
@@ -516,6 +530,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                  desc.attachment_count, desc.imageblock_offset_B,
                  desc.imageblock_offset1_B, desc.nr_gprs,
                  desc.staging_halfs);
+
+      if (direct_resolve && !partial_render)
+         cmd->state.gfx.render.g17p_direct_color_resolve = true;
    } else if (op == AGX_BG_EOT_NONE) {
       const struct hk_agx3_g17p_graphics_program_desc desc = {
          .program_va = program_bo->va->addr,
@@ -750,7 +767,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    }
 
    if (dev->dev.chip == AGX_CHIP_G17P)
-      return hk_build_g17p_bg_eot(cmd, &key, info, store);
+      return hk_build_g17p_bg_eot(cmd, &key, info, store, partial_render);
 
    const unsigned descriptor_generation =
       agx_chip_descriptor_generation(dev->dev.chip);
@@ -1028,6 +1045,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count);
    render->tilebuffer = agx_build_tilebuffer_layout(
       formats, render->color_att_count, render->tilebuffer.nr_samples, layered);
+
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
 
    const VkRenderingAttachmentLocationInfoKHR ral_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
@@ -1382,14 +1405,17 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    /* Translate render state back to VK for meta */
    VkRenderingAttachmentInfo vk_color_att[HK_MAX_RTS];
    for (uint32_t i = 0; i < render->color_att_count; i++) {
-      if (render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE)
+      if (render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE &&
+          !render->g17p_direct_color_resolve)
          need_resolve = true;
 
       vk_color_att[i] = (VkRenderingAttachmentInfo){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          .imageView = hk_image_view_to_handle(render->color_att[i].iview),
          .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-         .resolveMode = render->color_att[i].resolve_mode,
+         .resolveMode = render->g17p_direct_color_resolve
+                           ? VK_RESOLVE_MODE_NONE
+                           : render->color_att[i].resolve_mode,
          .resolveImageView =
             hk_image_view_to_handle(render->color_att[i].resolve_iview),
          .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -2350,8 +2376,7 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
    const struct agx_fs_epilog_key *key = key_;
    agx_nir_fs_epilog(b, key);
 
-   if (key->nr_samples == 1)
-      NIR_PASS(_, b->shader, agx_nir_lower_g17p_1x_tile_samples);
+   NIR_PASS(_, b->shader, agx_nir_lower_g17p_tile_samples, key->nr_samples);
 }
 
 static struct hk_linked_shader *

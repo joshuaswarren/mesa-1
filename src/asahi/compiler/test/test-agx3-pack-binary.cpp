@@ -3446,6 +3446,62 @@ TEST_F(AGX3PackBinary, TileLoadStoreWaitSurvivesFallthroughBlock)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PMultisampleTileSelectorsMatchNative)
+{
+   const struct {
+      unsigned tagged_mask;
+      enum agx3_tile_coverage coverage;
+   } stores[] = {
+      {0x20, AGX3_TILE_COV_2X_BROADCAST},
+      {0x21, AGX3_TILE_COV_2X_SAMPLE_0},
+      {0x22, AGX3_TILE_COV_2X_SAMPLE_1},
+      {0x40, AGX3_TILE_COV_4X_BROADCAST},
+      {0x41, AGX3_TILE_COV_4X_SAMPLE_0},
+      {0x42, AGX3_TILE_COV_4X_SAMPLE_1},
+      {0x44, AGX3_TILE_COV_4X_SAMPLE_2},
+      {0x48, AGX3_TILE_COV_4X_SAMPLE_3},
+   };
+
+   for (const auto &v : stores) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_st_tile(b, value, agx_immediate(v.tagged_mask), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_stop(b);
+
+      uint8_t tile[AGX3_TILE_MAX_LENGTH], tile_len = 0;
+      ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
+                                  15, 0, v.coverage, 0, tile, &tile_len));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      std::vector<uint8_t> want;
+      append(want, tile, tile_len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* Untagged raw masks and an all-sample lldcol reduction remain closed. */
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_st_tile(b, value, agx_immediate(1), agx_null(), AGX_FORMAT_U8NORM,
+                  15, 0, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_ld_tile_to(b, value, agx_immediate(0x20), agx_null(),
+                     AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, TileLoadSequenceBoundaryMarkers)
 {
    for (int e = 0; e < 2; ++e) {

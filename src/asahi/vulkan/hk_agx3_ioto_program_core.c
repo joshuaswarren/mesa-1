@@ -77,6 +77,17 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    return agx_g17p_rt0_tile_layout_supported(tib);
 }
 
+bool
+hk_agx3_g17p_direct_color_resolve_supported(
+   struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
+   bool has_resolve_target, bool average_resolve, bool store_source)
+{
+   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+          color_attachment_count == 1 && has_resolve_target &&
+          average_resolve && !store_source &&
+          hk_agx3_g17p_rt0_tile_layout_supported(tib);
+}
+
 static bool
 hk_agx3_g17p_graphics_state_tail(
    const struct hk_agx3_g17p_graphics_program_desc *desc,
