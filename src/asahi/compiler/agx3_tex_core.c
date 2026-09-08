@@ -815,8 +815,80 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
    return true;
 }
 
-/* Own-MSL cube sampling publishes the third coordinate through the FLOAT
- * cube form of PACK_SMPIR.  For discarded r1 on slot 1 Apple emits exactly
+/* Apple's G17P cube path first runs one CEM calculation for each axis.  The
+ * three source fields are the input XYZ half-register indices; axis 2 is the
+ * last consumer in the witnessed sequence and carries their discard bits.
+ *
+ * f_plain from the native cube corpus, with x/y/z in 4/6/20, is exactly:
+ *
+ *   axis 0  1701540003040d5254219200
+ *   axis 1  1701540703040d5254219204
+ *   axis 2  1701540203040c50502f9208
+ */
+bool
+agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
+                       uint16_t z, uint8_t axis, bool discard,
+                       uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || x >= 128 || y >= 128 || z >= 128 ||
+       axis > 2 || discard != (axis == 2))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(9, 2),  KV(10, 2), KV(11, 1), KV(23, 2), KV(24, 2),
+      KV(40, 2), KV(41, 2), KV(57, 2), KV(58, 2),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, x);
+   ov[n++] = (struct agx3_field_kv)KV(33, y);
+   ov[n++] = (struct agx3_field_kv)KV(50, z);
+   ov[n++] = (struct agx3_field_kv)KV(75, axis);
+   if (axis)
+      ov[n++] = (struct agx3_field_kv)KV(2, axis == 1 ? 14 : 4);
+   if (discard) {
+      ov[n++] = (struct agx3_field_kv)KV(27, 1);
+      ov[n++] = (struct agx3_field_kv)KV(44, 1);
+      ov[n++] = (struct agx3_field_kv)KV(61, 1);
+   } else {
+      ov[n++] = (struct agx3_field_kv)KV(25, 1);
+      ov[n++] = (struct agx3_field_kv)KV(42, 1);
+      ov[n++] = (struct agx3_field_kv)KV(59, 1);
+   }
+
+   return agx3_bind_compose(enc, "cem_calc", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
+
+/* CEM axis 0 leaves the major-axis magnitude in its private operand state.
+ * Apple's cube shaders apply this exact reciprocal before calculating the two
+ * normalized face coordinates.  It has no GPR operands to allocate. */
+bool
+agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
+                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   static const uint8_t native[] = {
+      0xaf, 0x00, 0x54, 0x00, 0x03, 0x00, 0x10, 0x48, 0x20, 0x00,
+   };
+
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   memcpy(out, native, sizeof(native));
+   *len = sizeof(native);
+   return true;
+}
+
+/* CEM publishes the selected face through the FLOAT cube form of PACK_SMPIR.
+ * For discarded special r1 on slot 1 Apple emits exactly
  * 1705540600040004f0c00000; only f74 differs from the array-layer form. */
 bool
 agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,

@@ -1585,12 +1585,27 @@ test_register_array_layer(void)
 static int
 test_cube_coordinate_stage(void)
 {
-   /* Exact own-MSL texturecube third-coordinate publication. */
+   /* Exact own-MSL texturecube CEM sequence and face publication. */
+   static const uint8_t cem[3][12] = {
+      {0x17,0x01,0x54,0x00,0x03,0x04,0x0d,0x52,0x54,0x21,0x92,0x00},
+      {0x17,0x01,0x54,0x07,0x03,0x04,0x0d,0x52,0x54,0x21,0x92,0x04},
+      {0x17,0x01,0x54,0x02,0x03,0x04,0x0c,0x50,0x50,0x2f,0x92,0x08},
+   };
+   static const uint8_t rcp[10] = {
+      0xaf,0x00,0x54,0x00,0x03,0x00,0x10,0x48,0x20,0x00,
+   };
    static const uint8_t native[] = {
       0x17,0x05,0x54,0x06,0x00,0x04,
       0x00,0x04,0xf0,0xc0,0x00,0x00,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      CHECK(agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20,
+                                   axis, axis == 2, bytes, &len));
+      CHECK(len == sizeof(cem[axis]) && !memcmp(bytes, cem[axis], len));
+   }
+   CHECK(agx3_tex_cube_cem_rcp(AGX_ISA_ENCODING_AGX3B, bytes, &len));
+   CHECK(len == sizeof(rcp) && !memcmp(bytes, rcp, len));
    CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
@@ -1600,6 +1615,12 @@ test_cube_coordinate_stage(void)
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                 true, true, bytes, &len));
+   CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 4, 6, 20, 0,
+                                 false, bytes, &len));
+   CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20, 0,
+                                 true, bytes, &len));
+   CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 128, 6, 20, 0,
+                                 false, bytes, &len));
    return 0;
 }
 

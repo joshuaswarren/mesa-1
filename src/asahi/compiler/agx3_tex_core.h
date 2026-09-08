@@ -295,7 +295,17 @@ bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 bool src_cache, bool src_discard,
                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* Publish the third f32 coordinate of a native cube sample. */
+/* Run one axis of the native cube-coordinate calculation.  Three axes with
+ * the fixed reciprocal between axis 0 and 1 are required before sampling. */
+bool agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x,
+                            uint16_t y, uint16_t z, uint8_t axis,
+                            bool discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish the face calculated by CEM for a native cube sample. */
 bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            uint8_t slot, uint16_t wait_mask,
                            bool src_cache, bool src_discard,

@@ -1264,7 +1264,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * while the layer is named directly by the sample's 8-bit register field.
     * The third scalar must not wrap that field. Plain 2D samples name
     * the coordinate directly in SMP and retain its narrower bound. */
-   const unsigned max_coord = array ? 120 : (three_d || cube) ? 248 : 60;
+   /* CEM's three recovered GPR source fields are seven bits. */
+   const unsigned max_coord = (array || cube) ? 120 : three_d ? 248 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -1275,6 +1276,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != ((array || three_d || cube) ? 3 : 2) ||
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
+       (cube && !I->src[0].discard) ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
        (immediate && (I->src[3].value > 15 || I->src[4].value > 15)) ||
        I->src[3].memory || I->src[3].abs || I->src[3].neg ||
@@ -1342,16 +1344,45 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       wait_mask = 0;
    }
 
-   if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot, wait_mask,
-          enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
-          enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard, bytes, &len) ||
-       !agx3_append(emission, bytes, len))
-      return false;
-   if (!agx3_tex_stage_copy_hints(enc, coord + 2, I->src[0].value + 2, stage_slot, 0,
-          enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
-          enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard, bytes, &len) ||
-       !agx3_append(emission, bytes, len))
-      return false;
+   if (cube) {
+      /* Native cube sampling consumes CEM's normalized coordinates and face,
+       * not the raw XYZ vector.  CEM has no witnessed scoreboard-wait form;
+       * register LOD staging above already drained its producer. */
+      if (wait_mask)
+         return false;
+
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         if (!agx3_tex_cube_cem_calc(
+                enc, I->src[0].value, I->src[0].value + 2,
+                I->src[0].value + 4, axis, axis == 2, bytes, &len) ||
+             !agx3_append(emission, bytes, len))
+            return false;
+
+         if (axis == 0 &&
+             (!agx3_tex_cube_cem_rcp(enc, bytes, &len) ||
+              !agx3_append(emission, bytes, len)))
+            return false;
+      }
+   } else {
+      if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
+                                    wait_mask,
+                                    enc == AGX_ISA_ENCODING_AGX3B &&
+                                       I->src[0].cache,
+                                    enc != AGX_ISA_ENCODING_AGX3B ||
+                                       I->src[0].discard,
+                                    bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      if (!agx3_tex_stage_copy_hints(enc, coord + 2, I->src[0].value + 2,
+                                    stage_slot, 0,
+                                    enc == AGX_ISA_ENCODING_AGX3B &&
+                                       I->src[0].cache,
+                                    enc != AGX_ISA_ENCODING_AGX3B ||
+                                       I->src[0].discard,
+                                    bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+   }
 
    if (three_d &&
        (!agx3_tex_stage_copy_hints(
@@ -1361,8 +1392,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       return false;
 
    if (cube &&
-       (!agx3_tex_stage_cube_z(enc, I->src[0].value + 4, stage_slot, 0,
-                              I->src[0].cache, I->src[0].discard,
+       (!agx3_tex_stage_cube_z(enc, 2, stage_slot, 0,
+                              false, true,
                               bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;

@@ -7599,13 +7599,16 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
 
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 1, 0, false, true,
-                                        bytes, &len));
-   append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 1, 0, false, true,
-                                        bytes, &len));
-   append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 8, 1, 0, false, true,
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      ASSERT_TRUE(agx3_tex_cube_cem_calc(enc, 4, 6, 8, axis, axis == 2,
+                                         bytes, &len));
+      append(want, bytes, len);
+      if (axis == 0) {
+         ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
+         append(want, bytes, len);
+      }
+   }
+   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                     bytes, &len));
    append(want, bytes, len);
 
@@ -7660,13 +7663,16 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
                                         bytes, &len));
          append(want, bytes, len);
       }
-      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 1, 0, false, true,
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         ASSERT_TRUE(agx3_tex_cube_cem_calc(enc, 4, 6, 8, axis, axis == 2,
                                             bytes, &len));
-      append(want, bytes, len);
-      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 1, 0, false, true,
-                                            bytes, &len));
-      append(want, bytes, len);
-      ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 8, 1, 0, false, true,
+         append(want, bytes, len);
+         if (axis == 0) {
+            ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
+            append(want, bytes, len);
+         }
+      }
+      ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
                                         bytes, &len));
       append(want, bytes, len);
 
@@ -7702,7 +7708,7 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
 
 TEST_F(AGX3PackBinary, TextureCubeRefusesUnwitnessedModes)
 {
-   for (unsigned shape = 0; shape < 2; ++shape) {
+   for (unsigned shape = 0; shape < 3; ++shape) {
       const auto enc = shape == 1 ? AGX_ISA_ENCODING_AGX3C
                                   : AGX_ISA_ENCODING_AGX3B;
       agx_builder *b = builder(enc);
@@ -7711,6 +7717,7 @@ TEST_F(AGX3PackBinary, TextureCubeRefusesUnwitnessedModes)
       dest.channels_m1 = 3;
       agx_index coord = agx_register(4, AGX_SIZE_32);
       coord.channels_m1 = 2;
+      coord.discard = shape != 2;
       const enum agx_lod_mode mode = shape == 0 ? AGX_LOD_MODE_LOD_GRAD
                                                 : AGX_LOD_MODE_AUTO_LOD;
       agx_index lod = shape == 0 ? agx_register(20, AGX_SIZE_32)
