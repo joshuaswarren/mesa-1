@@ -2901,6 +2901,29 @@ build_fs_texture_3d_level(void)
    return b.shader;
 }
 
+static nir_shader *
+build_fs_texture_3d_implicit(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Hyprland ICC texture3d implicit FS");
+   nir_def *coord = nir_imm_vec3(&b, 0.5f, 0.5f, 0.625f);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_3D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, coord);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   return b.shader;
+}
+
 static bool
 has_compact_native_sample(const nir_shader *shader)
 {
@@ -3171,6 +3194,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-textured-triangle", build_fs_texture_imm, true},
    {"fs-vkcube-combined-sampler", build_fs_texture, true, true},
    {"fs-texture3d-level", build_fs_texture_3d_level, true,
+    .g17p_only = true},
+   {"fs-texture3d-implicit", build_fs_texture_3d_implicit, true,
     .g17p_only = true},
    {"fs-descriptor-resource", build_fs_descriptor_resource, true},
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,

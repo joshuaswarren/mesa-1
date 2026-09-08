@@ -244,12 +244,14 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (!d->array && d->array_layer != 0))
       return false;
 
-   /* Fresh G17P texture3d witnesses cover an immediate level. Implicit
-    * fragment derivatives, array, per-lane/bias/gradient, gather and
+   /* Fresh G17P texture3d witnesses cover both an immediate level and the
+    * implicit fragment-derivative form used by compositor ICC LUTs.  The
+    * dimension remains f76=3 and the implicit form differs only by selecting
+    * the ordinary AUTO LOD marker. Array, per-lane/bias/gradient, gather and
     * comparison combinations remain closed until independently witnessed. */
    if (d->three_d &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
-        d->lod != AGX3_TEX_LOD_LEVEL ||
+        (d->lod != AGX3_TEX_LOD_LEVEL && d->lod != AGX3_TEX_LOD_AUTO) ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 

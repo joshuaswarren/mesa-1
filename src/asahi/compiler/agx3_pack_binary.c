@@ -1297,7 +1297,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
        (three_d &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
-         !valid_immediate_lod)) ||
+         (!valid_immediate_lod && !implicit_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod) || !immediate)) ||
@@ -5259,8 +5259,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final))
                AGX3_REFUSE(I);
-            /* The sample emitter stages exactly two 32-bit coordinates, plus
-             * the auxiliary scalar bank for a per-lane level or bias, plus
+            /* The sample emitter stages two 32-bit coordinates, a third for
+             * 3D, the auxiliary scalar bank for a per-lane level or bias, or
              * the four gradient banks that reach half 14. */
             const bool staged_scalar =
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
@@ -5269,7 +5269,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
                     I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
-                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY)
+                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
+                       I->dim == AGX_DIM_3D)
                        ? 8 : I->src[0].value + 4);
             continue;
          }
