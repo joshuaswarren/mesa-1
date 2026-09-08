@@ -5900,7 +5900,7 @@ TEST_F(AGX3PackBinary, NativeHighVertexOutputIndices)
 
 TEST_F(AGX3PackBinary, WideVertexOutputsPreserveValuesAndRecycleSlotsAfterWrites)
 {
-   for (unsigned count : {5u, 7u, 8u, 9u, 11u, 16u, 32u}) {
+   for (unsigned count : {5u, 7u, 8u, 9u, 11u, 16u, 32u, 52u}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_VERTEX;
       b->shader->nir = rzalloc(mem_ctx, nir_shader);

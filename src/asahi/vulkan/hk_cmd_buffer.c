@@ -1039,7 +1039,7 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
 }
 
 /* Keep native interpolation bounded to the f32 UVS layout already supported
- * by hk_agx3_g17p_vertex_program_info: position plus up to 28 user words.
+ * by hk_agx3_g17p_vertex_program_info: position plus up to 48 user words.
  * HAL200 updateVaryingTable (0x3efa58) uses the same CF entry encoding for
  * smooth, linear and flat inputs, including their mixture in one shader.
  * Flat inputs are restricted to non-fan triangle primitives; the compiler

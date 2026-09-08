@@ -286,6 +286,28 @@ test_g17p_vertex_program_info(void)
    CHECK(program.template_info.raw_vs_output_count_0 == 36);
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
 
+   /* Fresh MetalToolchain v27.1.5194.15 G17P vs52/fs52 pipeline, AIR SHA256
+    * d9967d614233... / native SHA256 ebadfd1cefb6.... The VS exports position
+    * plus twelve float4 user locations and its 1304-byte program contains the
+    * complete dense 52-scalar UVSW protocol. Firefox WebRender uses the same
+    * state shape with 47 user words (51 total outputs). */
+   struct hk_agx3_g17p_vertex_compile_info native52 = vkcube_info;
+   native52.user_size = 48;
+   native52.psiz_off = native52.layer_viewport_off = native52.clip_off = 52;
+   native52.uvs_size = 52;
+   native52.uvs_written = BITFIELD64_MASK(12) << VARYING_SLOT_VAR0;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &native52, &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 52);
+   CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
+   struct hk_agx3_g17p_vertex_compile_info firefox51 = vkcube_info;
+   firefox51.user_size = 47;
+   firefox51.psiz_off = firefox51.layer_viewport_off = firefox51.clip_off = 51;
+   firefox51.uvs_size = 51;
+   firefox51.uvs_written = BITFIELD64_MASK(12) << VARYING_SLOT_VAR0;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &firefox51, &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 51);
+
    struct hk_agx3_g17p_vertex_compile_info invalid_info = vkcube_info;
    invalid_info.has_preamble = true;
    CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &invalid_info,
