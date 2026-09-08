@@ -51,7 +51,7 @@ hk_image_view_type_is_array(VkImageViewType view_type)
 
 static enum agx_texture_dimension
 translate_image_view_type(VkImageViewType view_type, bool msaa, bool layered,
-                          enum hk_desc_usage usage)
+                          enum hk_desc_usage usage, bool cubes_to_2d)
 {
    if (usage == HK_DESC_USAGE_EMRT || usage == HK_DESC_USAGE_INPUT ||
        (usage == HK_DESC_USAGE_LAYERED_BG_EOT && layered)) {
@@ -64,8 +64,6 @@ translate_image_view_type(VkImageViewType view_type, bool msaa, bool layered,
       return msaa ? AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED
                   : AGX_TEXTURE_DIMENSION_2D;
    }
-
-   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
 
    switch (view_type) {
    case VK_IMAGE_VIEW_TYPE_1D:
@@ -207,7 +205,11 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    struct ail_layout *layout = &plane->layout;
    uint64_t base_addr = hk_image_base_address(image, image_plane);
 
-   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
+   /* G17P cube samples are lowered in the shader to 2D-array samples. The
+    * sampled descriptor has to expose the same six-layer address domain;
+    * leaving it cube-shaped makes the staged face layer ineffective. */
+   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED ||
+                      dev->dev.chip == AGX_CHIP_G17P;
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
@@ -261,7 +263,8 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    struct AGX_TEXTURE cfg = {AGX_TEXTURE_header};
    {
       cfg.dimension = translate_image_view_type(
-         view->vk.view_type, view->vk.image->samples > 1, layers > 1, usage);
+         view->vk.view_type, view->vk.image->samples > 1, layers > 1, usage,
+         cubes_to_2d);
       cfg.layout = agx_translate_layout(layout->tiling);
       cfg.channels = ail_pixel_format[p_format].channels;
       cfg.type = ail_pixel_format[p_format].type;
@@ -407,7 +410,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    struct AGX_PBE cfg = {AGX_PBE_header};
    {
       cfg.dimension =
-         translate_image_view_type(view->vk.view_type, msaa, layers > 1, usage);
+         translate_image_view_type(view->vk.view_type, msaa, layers > 1,
+                                   usage, usage != HK_DESC_USAGE_SAMPLED);
       cfg.layout = agx_translate_layout(layout->tiling);
       cfg.channels = ail_pixel_format[p_format].channels;
       cfg.type = ail_pixel_format[p_format].type;
