@@ -2756,10 +2756,71 @@ main(void)
       .layout = pipeline_layout,
       .renderPass = render_pass,
    };
+#if G17P_CUBE_SAMPLE
+   static const float cube_directions[6][3] = {
+      {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+      {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+      {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+   };
+   static const uint32_t cube_stripe_edges[7] = {
+      0, 5, 10, 15, 20, 25, IMAGE_WIDTH,
+   };
+   static const VkSpecializationMapEntry cube_direction_entries[3] = {
+      {.constantID = 0, .offset = 0 * sizeof(float), .size = sizeof(float)},
+      {.constantID = 1, .offset = 1 * sizeof(float), .size = sizeof(float)},
+      {.constantID = 2, .offset = 2 * sizeof(float), .size = sizeof(float)},
+   };
+   VkSpecializationInfo cube_specializations[6];
+   VkPipelineShaderStageCreateInfo cube_stages[6][2];
+   VkViewport cube_viewports[6];
+   VkRect2D cube_scissors[6];
+   VkPipelineViewportStateCreateInfo cube_viewport_states[6];
+   VkGraphicsPipelineCreateInfo cube_pipeline_infos[6];
+   VkPipeline cube_pipelines[6];
+
+   /* Specialization folds each direction before G17P cube lowering. Six
+    * clipped draws therefore test face routing without fragment comparisons,
+    * selects, or divergent control flow obscuring the result. */
+   for (uint32_t face = 0; face < 6; ++face) {
+      cube_specializations[face] = (VkSpecializationInfo) {
+         .mapEntryCount = 3,
+         .pMapEntries = cube_direction_entries,
+         .dataSize = sizeof(cube_directions[face]),
+         .pData = cube_directions[face],
+      };
+      memcpy(cube_stages[face], stages, sizeof(stages));
+      cube_stages[face][1].pSpecializationInfo = &cube_specializations[face];
+
+      const uint32_t x = cube_stripe_edges[face];
+      const uint32_t width = cube_stripe_edges[face + 1] - x;
+      cube_viewports[face] = (VkViewport) {
+         .x = x,
+         .width = width,
+         .height = IMAGE_HEIGHT,
+         .minDepth = 0.0f,
+         .maxDepth = 1.0f,
+      };
+      cube_scissors[face] = (VkRect2D) {
+         .offset = {(int32_t)x, 0},
+         .extent = {width, IMAGE_HEIGHT},
+      };
+      cube_viewport_states[face] = viewport_state;
+      cube_viewport_states[face].pViewports = &cube_viewports[face];
+      cube_viewport_states[face].pScissors = &cube_scissors[face];
+
+      cube_pipeline_infos[face] = pipeline_info;
+      cube_pipeline_infos[face].pStages = cube_stages[face];
+      cube_pipeline_infos[face].pViewportState = &cube_viewport_states[face];
+   }
+   check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 6,
+                                   cube_pipeline_infos, NULL, cube_pipelines),
+         "vkCreateGraphicsPipelines(cube faces)");
+#else
    VkPipeline pipeline;
    check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
                                    NULL, &pipeline),
          "vkCreateGraphicsPipelines");
+#endif
 
 #if G17P_MSAA_SAMPLES == 2
    const VkImageView framebuffer_views[] = {msaa_view, view};
@@ -2893,8 +2954,9 @@ main(void)
    };
    vkCmdBeginRenderPass(command_buffer, &render_begin,
                         VK_SUBPASS_CONTENTS_INLINE);
-   vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                     pipeline);
+#if !G17P_CUBE_SAMPLE
+   vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+#endif
 #if G17P_TEXTURE_ORACLE
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
@@ -2939,6 +3001,12 @@ main(void)
    vkCmdDrawIndexedIndirect(command_buffer, indirect.buffer,
                             INDIRECT_COMMAND_OFFSET, 2,
                             INDIRECT_COMMAND_STRIDE);
+#elif G17P_CUBE_SAMPLE
+   for (uint32_t face = 0; face < 6; ++face) {
+      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        cube_pipelines[face]);
+      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   }
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #endif
