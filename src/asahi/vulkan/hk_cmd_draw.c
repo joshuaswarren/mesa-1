@@ -3174,17 +3174,21 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * payload word, masked by 0xe6600000 and ORed with 0x200. It is not the
     * older-generation FRAGMENT_CONTROL location in our PRIMARY record.
     */
-   const uint32_t pass_type = linked_fs->b.fragment_control.opaque[0] >> 29;
+   const uint32_t linked_fragment_control =
+      linked_fs->b.fragment_control.opaque[0];
+   const uint32_t pass_type = linked_fragment_control >> 29;
    if (pass_type != AGX_PASS_TYPE_OPAQUE &&
        pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
-       pass_type != AGX_PASS_TYPE_PUNCH_THROUGH)
+       pass_type != AGX_PASS_TYPE_PUNCH_THROUGH &&
+       pass_type != AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)
       return hk_g17p_bind_tail_refused(__LINE__);
-   secondary_fields.words[0] |= pass_type << 29;
-   /* Native46c674..46c694 forces bit26 for pass type2, before merging it
-    * into the same SECONDARY payload. This prevents triangle merging from
-    * treating per-fragment coverage rejection as an opaque pass. Type3's
-    * additional draw-buffer-state predicate is a separate native path. */
-   if (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH)
+   secondary_fields.words[0] |= linked_fragment_control & UINT32_C(0xe6600000);
+   /* Native forces bit26 for type2 and conditionally for type3 from the
+    * draw-buffer state. Conservatively disabling merging for every coverage
+    * shader is equivalent and avoids depending on the legacy draw-buffer
+    * predicate while its HAL200 layout remains opaque. */
+   if (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
+       pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH)
       secondary_fields.words[0] |= UINT32_C(1) << 26;
    /* Native458934..45896c retains both stencil-control bits in the
     * same per-draw record as depth. No extra state allocation or launch. */
