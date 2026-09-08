@@ -2378,7 +2378,6 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
    VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
                           pPropertyCount);
-<<<<<<< HEAD
    if (pdev->vk.supported_features.cooperativeMatrix &&
        agx_chip_g17_m5(pdev->dev.chip)) {
       /* The order of this list is implementation-defined. List the 8x8x8
