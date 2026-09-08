@@ -1240,6 +1240,44 @@ test_g17p_cube_sample_lowering(void)
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
    free(part.binary);
    ralloc_free(b.shader);
+
+   /* Texture lowering has already moved the cube coordinate to backend1 when
+    * the G17P-specific pass runs.  The staged 2D-array layer must therefore
+    * be the integer coordinate bits expected by SMP, not IEEE float bits.
+    * Float 1.0 has a zero low half and aliases the -X face to layer 0. */
+   nir_builder c = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P cube -X layer");
+   nir_def *c_image =
+      nir_bindless_image_agx(&c, nir_imm_int(&c, 0), .desc_set = 0);
+   nir_def *c_sampler = nir_bindless_sampler_agx(
+      &c, nir_imm_int(&c, 32), nir_imm_int(&c, 0), .desc_set = 0);
+   nir_tex_instr *c_tex = nir_tex_instr_create(c.shader, 3);
+   c_tex->op = nir_texop_tex;
+   c_tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   c_tex->dest_type = nir_type_float32;
+   c_tex->coord_components = 3;
+   c_tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_vec3(&c, nir_imm_float(&c, -1.0f), nir_imm_float(&c, 0.0f),
+               nir_imm_float(&c, 0.0f)));
+   c_tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_handle, c_image);
+   c_tex->src[2] =
+      nir_tex_src_for_ssa(nir_tex_src_sampler_handle, c_sampler);
+   nir_def_init(&c_tex->instr, &c_tex->def, 4, 32);
+   nir_builder_instr_insert(&c, &c_tex->instr);
+   fs_store_colour(&c, &c_tex->def);
+   c.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, c.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   ok &= agx_nir_lower_g17p_cube_samples(c.shader);
+   NIR_PASS(_, c.shader, nir_opt_constant_folding);
+   const int c_coord =
+      nir_tex_instr_src_index(c_tex, nir_tex_src_backend1);
+   ok &= c_coord >= 0 && nir_src_is_const(c_tex->src[c_coord].src) &&
+         nir_src_comp_as_uint(c_tex->src[c_coord].src, 2) == 1;
+   ralloc_free(c.shader);
    return ok;
 }
 

@@ -544,21 +544,21 @@ agx_nir_lower_g17p_cube_samples(nir_shader *shader)
                nir_bcsel(&b, x_positive, nir_ffma(&b, nx, z, half),
                           nir_ffma(&b, px, z, half)),
                nir_ffma(&b, nx, y, half),
-               nir_bcsel(&b, x_positive, nir_imm_float(&b, 0.0f),
-                          nir_imm_float(&b, 1.0f)));
+               nir_bcsel(&b, x_positive, nir_imm_int(&b, 0),
+                          nir_imm_int(&b, 1)));
             nir_def *face_y = nir_vec3(
                &b, nir_ffma(&b, py, x, half),
                nir_bcsel(&b, y_positive, nir_ffma(&b, py, z, half),
                           nir_ffma(&b, ny, z, half)),
-               nir_bcsel(&b, y_positive, nir_imm_float(&b, 2.0f),
-                          nir_imm_float(&b, 3.0f)));
+               nir_bcsel(&b, y_positive, nir_imm_int(&b, 2),
+                          nir_imm_int(&b, 3)));
             nir_def *face_z = nir_vec3(
                &b,
                nir_bcsel(&b, z_positive, nir_ffma(&b, pz, x, half),
                           nir_ffma(&b, nz, x, half)),
                nir_ffma(&b, nz, y, half),
-               nir_bcsel(&b, z_positive, nir_imm_float(&b, 4.0f),
-                          nir_imm_float(&b, 5.0f)));
+               nir_bcsel(&b, z_positive, nir_imm_int(&b, 4),
+                          nir_imm_int(&b, 5)));
 
             nir_def *use_x = nir_iand(&b, nir_fge(&b, x2, y2),
                                       nir_fge(&b, x2, z2));
