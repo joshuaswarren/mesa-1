@@ -99,13 +99,108 @@ count_native_uvsw(const struct agx_shader_part *part)
    return count;
 }
 
+static nir_shader *
+build_layer_viewport_output(bool write_layer, uint32_t layer,
+                            bool write_viewport, uint32_t viewport)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "layer/viewport UVS packing");
+
+   if (write_layer) {
+      nir_store_output(&b, nir_imm_int(&b, layer), nir_imm_int(&b, 0),
+                       .write_mask = 0x1, .src_type = nir_type_uint32,
+                       .io_semantics.location = VARYING_SLOT_LAYER,
+                       .io_semantics.num_slots = 1);
+      b.shader->info.outputs_written |= VARYING_BIT_LAYER;
+   }
+
+   if (write_viewport) {
+      nir_store_output(&b, nir_imm_int(&b, viewport), nir_imm_int(&b, 0),
+                       .write_mask = 0x1, .src_type = nir_type_uint32,
+                       .io_semantics.location = VARYING_SLOT_VIEWPORT,
+                       .io_semantics.num_slots = 1);
+      b.shader->info.outputs_written |= VARYING_BIT_VIEWPORT;
+   }
+
+   return b.shader;
+}
+
+static bool
+lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
+                             uint32_t layer, bool write_viewport,
+                             uint32_t viewport, uint32_t expected,
+                             unsigned expected_size)
+{
+   nir_shader *nir = build_layer_viewport_output(
+      write_layer, layer, write_viewport, viewport);
+   struct agx_unlinked_uvs_layout layout = {0};
+   bool valid = agx_nir_lower_uvs(nir, &layout, chip);
+
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
+   } while (progress);
+
+   unsigned matching_stores = 0;
+   uint32_t actual = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_uvs_agx ||
+                !nir_src_is_const(intr->src[1]) ||
+                nir_src_as_uint(intr->src[1]) !=
+                   layout.group_offs[UVS_LAYER_VIEWPORT])
+               continue;
+
+            matching_stores++;
+            if (nir_src_is_const(intr->src[0]))
+               actual = nir_src_as_uint(intr->src[0]);
+            else
+               valid = false;
+         }
+      }
+   }
+
+   valid &= layout.size == expected_size && matching_stores == 1 &&
+            actual == expected;
+   if (!valid) {
+      fprintf(stderr,
+              "layer/viewport packing mismatch: chip=%u layer=%#x/%u "
+              "viewport=%#x/%u actual=%#x expected=%#x stores=%u size=%u\n",
+              chip, layer, write_layer, viewport, write_viewport, actual,
+              expected, matching_stores, layout.size);
+   }
+
+   ralloc_free(nir);
+   return valid;
+}
+
 int
 main(void)
 {
+   /* Fresh applegpu-nt G17P witnesses materialize layer=1 as 1 << 16 and
+    * layer=2 as 2 << 16 before the fifth UVSW. Keep the established AGX2
+    * order as an explicit negative-side regression. */
+   if (!lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, false, 0,
+                                     UINT32_C(0x00010000), 5) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
+                                     UINT32_C(0x00000002), 6) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
+                                     UINT32_C(0x00010002), 6) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
+                                     UINT32_C(0x00020001), 6))
+      return 1;
+
    nir_shader *nir = build_f16_output();
    struct agx_unlinked_uvs_layout layout = {0};
 
-   if (!agx_nir_lower_uvs(nir, &layout) || layout.size != 5 ||
+   if (!agx_nir_lower_uvs(nir, &layout, AGX_CHIP_G17P) || layout.size != 5 ||
        layout.user_size != 1 || !has_type_correct_varying_store(nir)) {
       fprintf(stderr, "f16 output was not widened to f32 before ST_VARY\n");
       ralloc_free(nir);
