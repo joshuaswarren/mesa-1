@@ -15,6 +15,7 @@
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
+#include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
 #include "asahi/lib/agx_vdm_barrier_core.h"
@@ -1030,6 +1031,63 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
          cfg.max_y = maxy[i];
          cfg.max_z = maxz;
       }
+   }
+
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   if (dev->chip == AGX_CHIP_G17P) {
+      struct agx_ppp_viewport_payload_fields fields = {
+         .viewport_count = count,
+      };
+
+      for (unsigned i = 0; i < count; ++i) {
+         uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+         agx_pack(region_clip, REGION_CLIP, cfg) {
+            cfg.enable = true;
+            cfg.min_x = minx[i] / 32;
+            cfg.min_y = miny[i] / 32;
+            cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
+            cfg.max_y = DIV_ROUND_UP(MAX2(maxy[i], 1), 32);
+         }
+         memcpy(&fields.region_clip_raw[i], region_clip,
+                sizeof(region_clip));
+
+         fields.viewports[i] = (struct agx_ppp_viewport_transform_raw){
+            .translate_x = fui(vp[i].translate[0]),
+            .scale_x = fui(vp[i].scale[0]),
+            .translate_y = fui(vp[i].translate[1]),
+            .scale_y = fui(vp[i].scale[1]),
+            .translate_z = fui(clip_halfz ? vp[i].translate[2]
+                                         : vp[i].translate[2] - vp[i].scale[2]),
+            .scale_z = fui(clip_halfz ? vp[i].scale[2]
+                                     : vp[i].scale[2] * 2.0f),
+         };
+      }
+
+      uint8_t viewport_control[AGX_VIEWPORT_CONTROL_LENGTH];
+      agx_pack(viewport_control, VIEWPORT_CONTROL, cfg)
+         ;
+      memcpy(&fields.viewport_control_raw, viewport_control,
+             sizeof(viewport_control));
+
+      struct agx_ppp_viewport_payload_core encoded;
+      const bool packed =
+         agx_ppp_viewport_payload_core_pack(dev->chip, &fields, &encoded);
+      assert(packed);
+      if (!packed)
+         return;
+
+      struct agx_ptr T = agx_pool_alloc_aligned(
+         &batch->pool, encoded.length, AGX_PPP_HEADER_ALIGN);
+      memcpy(T.cpu, encoded.bytes, encoded.length);
+      struct agx_ppp_update ppp = {
+         .head = (uint8_t *)T.cpu + encoded.length,
+         .gpu_base = T.gpu,
+         .total_size = encoded.length,
+         .cpu_base = T.cpu,
+      };
+      const bool emitted = agx_gallium_ppp_fini(batch, out, &ppp);
+      assert(emitted);
+      return;
    }
 
    /* Upload state */

@@ -846,6 +846,8 @@ if with_tests
       'asahi-g17p-gallium-command-stream',
       files(
         'agx_va_runtime_hole.c',
+        'agx_ppp_viewport_payload_core.c',
+        'agx_ppp_w_clamp_cull2_core.c',
         'agx_vdm_barrier_core.c',
         'agx_vdm_index_list_core.c',
         'agx_vdm_ppp_state_core.c',
