@@ -359,9 +359,22 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          explicit = true;
       }
 
+      enum pipe_format physical =
+         agx_tilebuffer_physical_format(&key->tib, rt);
+      if (cache->dev->chip == AGX_CHIP_G17P &&
+          util_format_is_srgb(key->tib.logical_format[rt])) {
+         /* G17P lowers the sRGB transfer explicitly before ST_TILE and stores
+          * the resulting bytes in a U8NORM imageblock.  EOT is a raw transfer
+          * from that imageblock to the format-aware PBE descriptor; asking
+          * IMGWBLK to consume SRGBA8 would perform a second conversion and has
+          * no native builtin.  Match the physical format selected by the
+          * fragment lowering, just as background clear/reload already do. */
+         physical = (enum pipe_format)AIL_ISA_FORMAT_U8NORM;
+      }
+
       nir_image_store_block_agx(
          &b, nir_imm_intN_t(&b, rt, 16), nir_imm_int(&b, offset_B), coords,
-         .format = agx_tilebuffer_physical_format(&key->tib, rt),
+         .format = physical,
          .image_dim = dim, .image_array = key->tib.layered,
          .explicit_coord = explicit);
    }

@@ -113,6 +113,14 @@
 #define G17P_BGRA8_SNORM 0
 #endif
 
+#ifndef G17P_BGRA8_UNORM
+#define G17P_BGRA8_UNORM 0
+#endif
+
+#ifndef G17P_BGRA8_SRGB
+#define G17P_BGRA8_SRGB 0
+#endif
+
 #ifndef G17P_RG8_SNORM
 #define G17P_RG8_SNORM 0
 #endif
@@ -271,6 +279,7 @@
      G17P_RG32_SINT + G17P_RG32_SFLOAT + G17P_RG8_UINT +              \
      G17P_RG8_SINT + G17P_RG32_UINT + G17P_RGBA8_UINT +               \
      G17P_RGBA8_SINT + G17P_RGBA8_SNORM + G17P_BGRA8_SNORM +          \
+     G17P_BGRA8_UNORM + G17P_BGRA8_SRGB +                              \
      G17P_RG8_SNORM +                                                   \
      G17P_R8_UINT + G17P_R8_UNORM + G17P_R8_SNORM + G17P_R8_SINT +    \
      G17P_RGBA16_SNORM +                                               \
@@ -608,6 +617,14 @@
 #define IMAGE_FORMAT VK_FORMAT_R8G8_SNORM
 #define IMAGE_PIXEL_BYTES 2
 #define READBACK_GUARD_BYTES 64
+#elif G17P_BGRA8_UNORM
+#define IMAGE_FORMAT VK_FORMAT_B8G8R8A8_UNORM
+#define IMAGE_PIXEL_BYTES 4
+#define READBACK_GUARD_BYTES 64
+#elif G17P_BGRA8_SRGB
+#define IMAGE_FORMAT VK_FORMAT_B8G8R8A8_SRGB
+#define IMAGE_PIXEL_BYTES 4
+#define READBACK_GUARD_BYTES 64
 #elif G17P_BGRA8_SNORM
 #define IMAGE_FORMAT VK_FORMAT_B8G8R8A8_SNORM
 #define IMAGE_PIXEL_BYTES 4
@@ -782,6 +799,11 @@
 
 #if G17P_BGRA8_SNORM && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
 #error "the BGRA8 SNORM fixture is a guarded single-sample GPU-copy oracle"
+#endif
+
+#if (G17P_BGRA8_UNORM || G17P_BGRA8_SRGB) &&                         \
+   (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
+#error "the BGRA8 fixtures are guarded single-sample GPU-copy oracles"
 #endif
 
 #if G17P_RG8_SNORM && (G17P_HOST_IMAGE_COPY || G17P_MSAA_SAMPLES != 1)
@@ -1040,6 +1062,16 @@
 #elif G17P_RG8_SNORM
 #define PROBE_NAME "g17p-vulkan-rg8-snorm"
 #define READBACK_IMAGE_USAGE 0
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_BGRA8_UNORM
+#define PROBE_NAME "g17p-vulkan-bgra8-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_BGRA8_SRGB
+#define PROBE_NAME "g17p-vulkan-bgra8-srgb"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_BGRA8_SNORM
 #define PROBE_NAME "g17p-vulkan-bgra8-snorm"
@@ -1487,6 +1519,13 @@ verify_readback(const uint8_t *map)
    static const uint8_t expected[1] = {0xa7};
 #elif G17P_RG8_SNORM
    static const uint8_t expected[2] = {0xc0, 0x11};
+#elif G17P_BGRA8_UNORM
+   /* The fragment writes RGBA=(1,.28,.05,1); BGRA memory order is B,G,R,A. */
+   static const uint8_t expected[4] = {13, 71, 255, 255};
+#elif G17P_BGRA8_SRGB
+   /* IEC 61966-2-1 transfer of the linear fragment colour, rounded to UNORM:
+    * R=255, G=144, B=63, then stored in BGRA byte order. */
+   static const uint8_t expected[4] = {63, 144, 255, 255};
 #elif G17P_BGRA8_SNORM
    static const uint8_t expected[4] = {0x60, 0x11, 0xc0, 0xdf};
 #elif G17P_RGBA8_SNORM
@@ -1672,6 +1711,10 @@ main(void)
       (G17P_RG8_SINT && getenv("G17P_RG8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RGBA8_UINT && getenv("G17P_RGBA8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_RGBA8_SINT && getenv("G17P_RGBA8_SINT_RECORD_ONLY") != NULL) ||
+      (G17P_BGRA8_UNORM &&
+       getenv("G17P_BGRA8_UNORM_RECORD_ONLY") != NULL) ||
+      (G17P_BGRA8_SRGB &&
+       getenv("G17P_BGRA8_SRGB_RECORD_ONLY") != NULL) ||
       (G17P_BGRA8_SNORM && getenv("G17P_BGRA8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA8_SNORM && getenv("G17P_RGBA8_SNORM_RECORD_ONLY") != NULL) ||
       (G17P_BRESENHAM_LINES &&
@@ -3362,6 +3405,7 @@ main(void)
    G17P_RG32_SINT || G17P_RG32_SFLOAT || G17P_RG8_UINT ||             \
    G17P_RG8_SINT || G17P_RG32_UINT || G17P_RGBA8_UINT ||              \
    G17P_RGBA8_SINT || G17P_RGBA8_SNORM || G17P_BGRA8_SNORM ||        \
+   G17P_BGRA8_UNORM || G17P_BGRA8_SRGB ||                             \
    G17P_RG8_SNORM ||                                                   \
    G17P_R8_UINT || G17P_R8_UNORM || G17P_R8_SNORM || G17P_R8_SINT || \
    G17P_RGBA16_SNORM || G17P_R16_SNORM || G17P_R16_UNORM ||          \

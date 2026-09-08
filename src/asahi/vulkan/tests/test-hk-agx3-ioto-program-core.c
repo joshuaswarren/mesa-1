@@ -2064,6 +2064,15 @@ test_g17p_single_layer_rt0_layout(void)
          tib.tile_size == 32 * 32 && !tib.spilled[0]);
    CHECK(hk_agx3_g17p_direct_color_resolve_supported(
       &tib, 1, true, true, false));
+
+   enum pipe_format bgra_srgb[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B8G8R8A8_SRGB,
+   };
+   tib = agx_build_tilebuffer_layout(bgra_srgb, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(tib.logical_format[0] == PIPE_FORMAT_B8G8R8A8_SRGB &&
+         tib.sample_size_B == 8 && tib.tile_size == 32 * 32 &&
+         !tib.spilled[0]);
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
       &tib, 2, true, true, false));
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
