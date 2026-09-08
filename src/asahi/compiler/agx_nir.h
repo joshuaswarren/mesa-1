@@ -49,6 +49,7 @@ bool agx_nir_lower_shared_element_index(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s, bool ftz_only);
 bool agx_nir_lower_atomics(struct nir_shader *s, bool native_fadd);
 bool agx_nir_lower_fdiv(struct nir_shader *s);
+bool agx_nir_lower_fdiv_late(struct nir_shader *s);
 bool agx_nir_lower_log(struct nir_shader *s);
 bool agx_nir_lower_sincos(struct nir_shader *s);
 
