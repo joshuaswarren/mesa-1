@@ -7717,6 +7717,75 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
    }
 }
 
+TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+
+   for (unsigned i = 0; i < 2; ++i) {
+      agx_index dest = agx_register(8 * i, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(16 + 8 * i, AGX_SIZE_32);
+      coord.channels_m1 = 2;
+      coord.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate_f(1.0f), agx_immediate(0),
+         agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_CUBE,
+         AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE,
+         false);
+      I->mask = 15;
+   }
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   for (unsigned i = 0; i < 2; ++i) {
+      const uint8_t slot = i + 1;
+      if (i != 0) {
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                      1, bytes, &len));
+         append(want, bytes, len);
+      }
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         ASSERT_TRUE(agx3_tex_cube_cem_calc(
+            enc, 16 + 8 * i, 18 + 8 * i, 20 + 8 * i, axis, axis == 2,
+            bytes, &len));
+         append(want, bytes, len);
+         if (axis == 0) {
+            ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
+            append(want, bytes, len);
+         }
+      }
+      for (unsigned component = 0; component < 2; ++component) {
+         ASSERT_TRUE(agx3_tex_cube_cem_finalize(enc, component,
+                                                component == 1, bytes,
+                                                &len));
+         append(want, bytes, len);
+      }
+      ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, slot, 0, false, true,
+                                        bytes, &len));
+      append(want, bytes, len);
+
+      struct agx3_tex_sample_desc d = {};
+      d.dest = 8 * i;
+      d.width = AGX3_TEX_W32;
+      d.mask = 15;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      d.lod_x64 = 64;
+      d.slot = slot;
+      d.wait_mask = 1u << i;
+      d.final = i == 1;
+      d.cube = true;
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      append(want, bytes, len);
+   }
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, TextureCubeRefusesUnwitnessedModes)
 {
    for (unsigned shape = 0; shape < 3; ++shape) {

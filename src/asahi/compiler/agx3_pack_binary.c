@@ -4893,6 +4893,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             nd = agx3_expand_regs(I->dest[d], e->dst, nd);
          for (unsigned s = 0; s < I->nr_srcs; ++s)
             ns = agx3_expand_regs(I->src[s], e->src, ns);
+
+         /* CEM is a compound cube-coordinate pipeline, not a single opaque
+          * sampler operation.  Its three witnessed calculations write fixed
+          * GPR halves 0, 14, and 4 before SMP consumes the staged result.
+          * Keep those writes owned by the sample's scoreboard generation so
+          * a following cube pipeline cannot clobber them while the first SMP
+          * is still in flight.  Apple's two-cube G17P fragment does the
+          * equivalent by completing both CEM pipelines before issuing either
+          * SMP, with separate staging banks for the two results.
+          *
+          * A four-channel f32 texture result expands to eight tokens, leaving
+          * room for these three exact scratch destinations. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             I->dim == AGX_DIM_CUBE) {
+            assert(nd + 3 <= AGX3_SLOT_MAX_REGS);
+            e->dst[nd++] = 0;
+            e->dst[nd++] = 14;
+            e->dst[nd++] = 4;
+         }
          e->nr_dsts = (uint8_t)nd;
          e->nr_srcs = (uint8_t)ns;
          if ((I->op == AGX_OPCODE_STACK_LOAD ||
@@ -5224,9 +5244,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * kernel. */
             const bool compute_gradient = ctx->stage == MESA_SHADER_COMPUTE &&
                I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
+            uint16_t sample_wait = wait;
+            /* CEM has no scoreboard-wait fields.  The slot planner includes
+             * its fixed scratch writes above, so materialize that dependency
+             * immediately before the compound pipeline and let its own
+             * PACK_SMPIR/SMP pair use the newly assigned result slot. */
+            if (I->dim == AGX_DIM_CUBE && sample_wait != 0) {
+               if (!agx3_retire_slots_noop(emission, enc, sample_wait))
+                  AGX3_REFUSE(I);
+               sample_wait = 0;
+            }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !compute_level &&
                  !compute_gradient) ||
-                !agx3_emit_texture_sample(emission, enc, I, slot, wait,
+                !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final))
                AGX3_REFUSE(I);
             /* The sample emitter stages exactly two 32-bit coordinates, plus
