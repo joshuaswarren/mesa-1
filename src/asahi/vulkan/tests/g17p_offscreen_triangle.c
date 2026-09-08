@@ -1195,6 +1195,10 @@ VK_FN(vkCreateFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
 
+#if G17P_CUBE_SAMPLE
+static int cube_face_diagnostic = -1;
+#endif
+
 static void
 die(const char *what)
 {
@@ -1369,6 +1373,7 @@ verify_readback(const uint8_t *map)
       {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
       {255, 255, 0, 255}, {255, 0, 255, 255}, {0, 255, 255, 255},
    };
+   static const uint8_t clear[4] = {0, 0, 0, 255};
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1489,9 +1494,12 @@ verify_readback(const uint8_t *map)
          expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
 #elif G17P_CUBE_SAMPLE
       const unsigned x = pixel % IMAGE_WIDTH;
+      const unsigned face = x < 5 ? 0 : x < 10 ? 1 : x < 15 ? 2 :
+                            x < 20 ? 3 : x < 25 ? 4 : 5;
       const uint8_t *expected_pixel =
-         expected[x < 5 ? 0 : x < 10 ? 1 : x < 15 ? 2 :
-                  x < 20 ? 3 : x < 25 ? 4 : 5];
+         cube_face_diagnostic < 0 || cube_face_diagnostic == (int)face
+            ? expected[face]
+            : clear;
 #else
       const uint8_t *expected_pixel = expected;
 #endif
@@ -1514,6 +1522,19 @@ verify_readback(const uint8_t *map)
 int
 main(void)
 {
+#if G17P_CUBE_SAMPLE
+   const char *cube_face = getenv("G17P_CUBE_SAMPLE_FACE");
+   if (cube_face) {
+      char *end = NULL;
+      long parsed = strtol(cube_face, &end, 10);
+      if (!end || *end != '\0' || parsed < 0 || parsed >= 6) {
+         fprintf(stderr,
+                 PROBE_NAME ": G17P_CUBE_SAMPLE_FACE must be 0 through 5\n");
+         return EXIT_FAILURE;
+      }
+      cube_face_diagnostic = parsed;
+   }
+#endif
    const bool record_only =
       (G17P_IMPLICIT_LOD &&
        getenv("G17P_IMPLICIT_LOD_RECORD_ONLY") != NULL) ||
@@ -3003,6 +3024,8 @@ main(void)
                             INDIRECT_COMMAND_STRIDE);
 #elif G17P_CUBE_SAMPLE
    for (uint32_t face = 0; face < 6; ++face) {
+      if (cube_face_diagnostic >= 0 && cube_face_diagnostic != (int)face)
+         continue;
       vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         cube_pipelines[face]);
       vkCmdDraw(command_buffer, 3, 1, 0, 0);
@@ -3228,10 +3251,17 @@ main(void)
                      "all source/readback guards unchanged, checksum %016" PRIx64
                      "\n", checksum);
 #elif G17P_CUBE_SAMPLE
-   printf(PROBE_NAME ": PASS — all six cube faces sampled their exact "
-                     "distinct RGBA colors immediately/3s; six-layer upload "
-                     "and all source/readback guards unchanged, checksum %016" PRIx64
-                     "\n", checksum);
+   if (cube_face_diagnostic >= 0) {
+      printf(PROBE_NAME ": PASS — cube face %d sampled its exact RGBA color "
+                        "in one draw immediately/3s; all other stripes stayed "
+                        "clear and all guards unchanged, checksum %016" PRIx64
+                        "\n", cube_face_diagnostic, checksum);
+   } else {
+      printf(PROBE_NAME ": PASS — all six cube faces sampled their exact "
+                        "distinct RGBA colors immediately/3s; six-layer upload "
+                        "and all source/readback guards unchanged, checksum %016" PRIx64
+                        "\n", checksum);
+   }
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
                      "immediately/3s, binding 3, offset 64, stride 13, "
