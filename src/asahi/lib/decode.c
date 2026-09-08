@@ -22,6 +22,7 @@
 #include "agx3_cdm_direct_launch_semantic_core.h"
 #include "agx_ioto_core.h"
 #include "agx_ppp_decode_core.h"
+#include "agx_va_runtime_hole.h"
 #include "agx_vdm_decode_core.h"
 #include "util/u_hexdump.h"
 #include "decode.h"
@@ -959,6 +960,19 @@ agxdecode_ppp_agx3(struct agxdecode_ctx *ctx, enum agx_chip chip, uint64_t va,
    }
 }
 
+/* G17P carries PPP payload pointers as offsets from the render-context base.
+ * Resolve that address only for decoder memory fetches; keep the raw packet
+ * value visible so diagnostics cannot accidentally hide an encoder bug. */
+static uint64_t
+agxdecode_g17p_ppp_fetch_address(enum agx_chip chip, uint64_t wire_pointer)
+{
+   if (chip == AGX_CHIP_G17P &&
+       wire_pointer < AGX_G17P_VDM_USER_SIZE)
+      return AGX_G17P_VDM_USER_BASE + wire_pointer;
+
+   return wire_pointer;
+}
+
 static unsigned
 agxdecode_vdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
                    size_t available, uint64_t *link, bool verbose,
@@ -974,17 +988,23 @@ agxdecode_vdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
    }
 
    switch (record.kind) {
-   case AGX_VDM_RECORD_PPP_STATE_UPDATE:
+   case AGX_VDM_RECORD_PPP_STATE_UPDATE: {
+      const uint64_t fetch_pointer = agxdecode_g17p_ppp_fetch_address(
+         chip, record.data.ppp_state_update.pointer);
+
       fprintf(agxdecode_dump_stream,
               "AGX3 PPP State Update\n"
-              "  Pointer = 0x%012" PRIx64 "\n"
+              "  Wire pointer = 0x%012" PRIx64 "\n"
+              "  Fetch pointer = 0x%012" PRIx64 "\n"
               "  Size = %" PRIu32 " words\n",
               record.data.ppp_state_update.pointer,
+              fetch_pointer,
               record.data.ppp_state_update.size_words);
-      agxdecode_ppp_agx3(ctx, chip, record.data.ppp_state_update.pointer,
+      agxdecode_ppp_agx3(ctx, chip, fetch_pointer,
                          (size_t)record.data.ppp_state_update.size_words * 4,
                          verbose);
       return record.length;
+   }
 
    case AGX_VDM_RECORD_BARRIER:
       agxdecode_log("AGX3 VDM Barrier\n");
@@ -1308,6 +1328,10 @@ agxdecode_drm_cmd_render(struct agxdecode_ctx *ctx,
                          struct drm_asahi_params_global *params,
                          struct drm_asahi_cmd_render *c, bool verbose)
 {
+   const enum agx_chip chip = agxdecode_chip_from_params(params);
+   decode_cmd graphics_program_decoder =
+      chip == AGX_CHIP_G17P ? agxdecode_ioto : agxdecode_usc;
+
    DUMP_FIELD(c, "%x", flags);
    DUMP_FIELD(c, "0x%llx", vdm_ctrl_stream_base);
    agxdecode_stateful(ctx, c->vdm_ctrl_stream_base, "Encoder", agxdecode_vdm,
@@ -1335,21 +1359,21 @@ agxdecode_drm_cmd_render(struct agxdecode_ctx *ctx,
    DUMP_FIELD(c, "0x%x", bg.usc);
    DUMP_FIELD(c, "0x%x", bg.rsrc_spec);
    agxdecode_stateful(ctx, decode_usc(ctx, c->bg.usc & ~0x7), "Load pipeline",
-                      agxdecode_usc, verbose, params, NULL);
+                      graphics_program_decoder, verbose, params, NULL);
    DUMP_FIELD(c, "0x%x", eot.usc);
    DUMP_FIELD(c, "0x%x", eot.rsrc_spec);
    agxdecode_stateful(ctx, decode_usc(ctx, c->eot.usc & ~0x7), "Store pipeline",
-                      agxdecode_usc, verbose, params, NULL);
+                      graphics_program_decoder, verbose, params, NULL);
    DUMP_FIELD(c, "0x%x", partial_bg.usc);
    DUMP_FIELD(c, "0x%x", partial_bg.rsrc_spec);
    agxdecode_stateful(ctx, decode_usc(ctx, c->partial_bg.usc & ~0x7),
-                      "Partial reload pipeline", agxdecode_usc, verbose, params,
-                      NULL);
+                      "Partial reload pipeline", graphics_program_decoder,
+                      verbose, params, NULL);
    DUMP_FIELD(c, "0x%x", partial_eot.usc);
    DUMP_FIELD(c, "0x%x", partial_eot.rsrc_spec);
    agxdecode_stateful(ctx, decode_usc(ctx, c->partial_eot.usc & ~0x7),
-                      "Partial store pipeline", agxdecode_usc, verbose, params,
-                      NULL);
+                      "Partial store pipeline", graphics_program_decoder,
+                      verbose, params, NULL);
 
    DUMP_FIELD(c, "0x%x", isp_zls_pixels);
    DUMP_FIELD(c, "0x%x", isp_bgobjdepth);
