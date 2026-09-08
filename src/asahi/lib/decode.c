@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "util/os_misc.h"
 #include "util/u_dynarray.h"
 #include "util/u_math.h"
@@ -100,7 +101,8 @@ _agxdecode_grab_mapped(struct agxdecode_ctx *ctx, uint64_t gpu_va, void **buf,
       fprintf(stderr, "Access to unknown memory %" PRIx64 " in %s:%d\n", gpu_va,
               filename, line);
       fflush(agxdecode_dump_stream);
-      assert(0);
+      *buf = NULL;
+      return 0;
    }
 
    uint32_t offset = gpu_va - mem->va->addr;
@@ -303,7 +305,12 @@ agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
    size_t size = sizeof(buf);
    if (!lib_config.read_gpu_mem) {
       struct agx_bo *alloc = agxdecode_find_mapped_gpu_mem_containing(ctx, va);
-      assert(alloc != NULL && "nonexistent object");
+      if (!alloc) {
+         fprintf(agxdecode_dump_stream,
+                 "%s (%" PRIx64 ") is not mapped; skipping decode\n", label,
+                 va);
+         return;
+      }
       fprintf(agxdecode_dump_stream, "%s (%" PRIx64 ", handle %u)\n", label, va,
               alloc->handle);
       size = MIN2(size, alloc->size - (va - alloc->va->addr));
@@ -439,7 +446,8 @@ agxdecode_usc(struct agxdecode_ctx *ctx, const uint8_t *map,
       size_t size =
          agxdecode_grab_mapped(ctx, decode_usc(ctx, ctrl.code), &buf);
 
-      agx_disassemble(buf, size, agxdecode_dump_stream);
+      if (size)
+         agx_disassemble(buf, size, agxdecode_dump_stream);
       return STATE_DONE;
    }
 
@@ -452,7 +460,8 @@ agxdecode_usc(struct agxdecode_ctx *ctx, const uint8_t *map,
       size_t size =
          agxdecode_grab_mapped(ctx, decode_usc(ctx, ctrl.code), &buf);
 
-      agx_disassemble(buf, size, agxdecode_dump_stream);
+      if (size)
+         agx_disassemble(buf, size, agxdecode_dump_stream);
       agxdecode_log("\n");
 
       return AGX_USC_SHADER_LENGTH;
@@ -1511,8 +1520,13 @@ void
 agxdecode_track_alloc(struct agxdecode_ctx *ctx, struct agx_bo *alloc)
 {
    util_dynarray_foreach(&ctx->mmap_array, struct agx_bo, it) {
-      bool match = (it->handle == alloc->handle);
-      assert(!match && "tried to alloc already allocated BO");
+      if (it->handle == alloc->handle) {
+         /* PRIME can hand the same shared BO back to a client repeatedly.
+          * Keep one current decoder view instead of aborting the application
+          * for an otherwise valid, idempotent import. */
+         *it = *alloc;
+         return;
+      }
    }
 
    util_dynarray_append(&ctx->mmap_array, *alloc);
@@ -1521,18 +1535,12 @@ agxdecode_track_alloc(struct agxdecode_ctx *ctx, struct agx_bo *alloc)
 void
 agxdecode_track_free(struct agxdecode_ctx *ctx, struct agx_bo *bo)
 {
-   bool found = false;
-
    util_dynarray_foreach(&ctx->mmap_array, struct agx_bo, it) {
       if (it->handle == bo->handle) {
-         assert(!found && "mapped multiple times!");
-         found = true;
-
          memset(it, 0, sizeof(*it));
+         return;
       }
    }
-
-   assert(found && "freed unmapped memory");
 }
 
 static int agxdecode_dump_frame_count = 0;
@@ -1552,8 +1560,8 @@ agxdecode_dump_file_open(void)
       agxdecode_dump_stream = stderr;
    else {
       char buffer[1024];
-      snprintf(buffer, sizeof(buffer), "%s.%04d", dump_file_base,
-               agxdecode_dump_frame_count);
+      snprintf(buffer, sizeof(buffer), "%s.%ld.%04d", dump_file_base,
+               (long)getpid(), agxdecode_dump_frame_count);
       printf("agxdecode: dump command stream to file %s\n", buffer);
       agxdecode_dump_stream = fopen(buffer, "w");
       if (!agxdecode_dump_stream) {

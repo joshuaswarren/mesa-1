@@ -30,6 +30,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <xf86drm.h>
 #include "util/list.h"
 #include "util/macros.h"
@@ -41,6 +42,15 @@
 #include "layout.h"
 #include "vk_drm_syncobj.h"
 #include "vk_sync.h"
+
+static bool
+hk_agxdecode_trace_armed(void)
+{
+   const char *arm_file = getenv("HK_G17P_TRACE_ARM_FILE");
+
+   return arm_file == NULL || arm_file[0] == '\0' ||
+          access(arm_file, F_OK) == 0;
+}
 
 /*
  * We need to specially handle submits with no control streams. The kernel
@@ -1229,7 +1239,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       }
    }
 
-   if (dev->dev.debug & AGX_DBG_TRACE) {
+   if ((dev->dev.debug & AGX_DBG_TRACE) && hk_agxdecode_trace_armed()) {
       agxdecode_drm_cmdbuf(dev->dev.agxdecode, &dev->dev.params, &payload,
                            true);
 
