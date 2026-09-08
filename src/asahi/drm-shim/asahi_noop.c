@@ -260,6 +260,25 @@ check_matrix_coverage(void)
 }
 
 static void __attribute__((destructor))
+check_fragment_constant_draws(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS");
+   if (!value)
+      return;
+
+   const unsigned expected = strtoul(value, NULL, 10);
+   if (matrix_stats.draws != expected) {
+      fprintf(stderr,
+              "shim: G17P fragment-constant test submitted %u/%u draws\n",
+              matrix_stats.draws, expected);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr, "shim: G17P fragment-constant test submitted %u draws\n",
+           expected);
+}
+
+static void __attribute__((destructor))
 check_multi_viewport_coverage(void)
 {
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT"))

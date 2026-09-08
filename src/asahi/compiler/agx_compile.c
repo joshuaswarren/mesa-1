@@ -1021,7 +1021,8 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
    if (!norm8 &&
        !(norm16 && b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B))
       return false;
-   if (nr_comps < 1 || nr_comps > 4 || dest.size != AGX_SIZE_32)
+   if (nr_comps < 1 || nr_comps > 4 ||
+       (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32))
       return false;
 
    const unsigned loaded_channels =
@@ -1053,8 +1054,14 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
 
       agx_index unpacked[2] = {agx_null()};
       agx_emit_split(b, unpacked, pair, lanes);
-      for (unsigned c = 0; c < lanes; ++c)
-         channels[i * 2 + c] = unpacked[c];
+      for (unsigned c = 0; c < lanes; ++c) {
+         if (dest.size == AGX_SIZE_16) {
+            channels[i * 2 + c] = agx_temp(b->shader, AGX_SIZE_16);
+            agx_fmov_to(b, channels[i * 2 + c], unpacked[c]);
+         } else {
+            channels[i * 2 + c] = unpacked[c];
+         }
+      }
    }
 
    agx_emit_collect_to(b, dest, nr_comps, channels);

@@ -85,6 +85,36 @@ draw_and_read(GLuint program, GLint uniform, uint8_t pixel[4])
    return true;
 }
 
+static bool
+draw_texture_blend(GLuint program, GLint sampler, GLuint texture,
+                   GLenum src_rgb, GLenum dst_rgb, GLenum src_alpha,
+                   GLenum dst_alpha, const float blend[4], uint8_t pixel[4])
+{
+   glDisable(GL_BLEND);
+   glClearColor(16.0f / 255.0f, 32.0f / 255.0f, 48.0f / 255.0f,
+                64.0f / 255.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+   glUseProgram(program);
+   glActiveTexture(GL_TEXTURE0);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glUniform1i(sampler, 0);
+   glBlendColor(blend[0], blend[1], blend[2], blend[3]);
+   glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
+   glEnable(GL_BLEND);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glFinish();
+   glDisable(GL_BLEND);
+
+   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                pixel);
+   GLenum error = glGetError();
+   if (error != GL_NO_ERROR) {
+      fprintf(stderr, "textured fragment-constant GL error %#x\n", error);
+      return false;
+   }
+   return true;
+}
+
 int
 main(void)
 {
@@ -131,22 +161,64 @@ main(void)
       "uniform vec4 source_colour;\n"
       "layout(location=0) out vec4 colour;\n"
       "void main() { colour = source_colour; }\n";
+   static const char texture_fs[] =
+      "#version 300 es\n"
+      "precision highp float;\n"
+      "uniform sampler2D source_texture;\n"
+      "layout(location=0) out vec4 colour;\n"
+      "void main() { colour = texture(source_texture, vec2(0.5)); }\n";
    GLuint literal = make_program(literal_fs);
    GLuint uniform = make_program(uniform_fs);
+   GLuint textured = make_program(texture_fs);
    GLuint vao;
    glGenVertexArrays(1, &vao);
    glBindVertexArray(vao);
    glViewport(0, 0, WIDTH, HEIGHT);
    const GLint location = glGetUniformLocation(uniform, "source_colour");
+   const GLint sampler = glGetUniformLocation(textured, "source_texture");
+   GLuint texture;
+   static const uint8_t source_pixel[4] = {64, 128, 192, 128};
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA,
+                   GL_UNSIGNED_BYTE, source_pixel);
    uint8_t literal_pixel[4] = {0};
    uint8_t uniform_pixel[4] = {0};
+   uint8_t constant_pixel[4] = {0};
+   uint8_t inverse_pixel[4] = {0};
+   uint8_t alpha_pixel[4] = {0};
    /* Avoid exact x.5 UNORM boundaries: native and software conversions may
     * legally choose opposite tie directions, while literal and uniform
     * shader sources must still produce byte-identical pixels. */
    static const uint8_t expected[4] = {32, 96, 159, 255};
-   bool ok = literal && uniform && location >= 0 &&
+   static const float half[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+   static const float quarter_half[4] = {0.25f, 0.25f, 0.25f, 0.5f};
+   static const float three_quarters[4] = {0.75f, 0.75f, 0.75f, 0.75f};
+   static const uint8_t expected_constant[4] = {32, 64, 96, 64};
+   static const uint8_t expected_inverse[4] = {28, 56, 84, 96};
+   static const uint8_t expected_alpha[4] = {52, 104, 156, 112};
+   bool ok = literal && uniform && textured && location >= 0 && sampler >= 0 &&
              draw_and_read(literal, -1, literal_pixel) &&
-             draw_and_read(uniform, location, uniform_pixel);
+             draw_and_read(uniform, location, uniform_pixel) &&
+             draw_texture_blend(textured, sampler, texture,
+                                GL_CONSTANT_COLOR, GL_ZERO,
+                                GL_CONSTANT_ALPHA, GL_ZERO, half,
+                                constant_pixel) &&
+             draw_texture_blend(textured, sampler, texture,
+                                GL_CONSTANT_COLOR,
+                                GL_ONE_MINUS_CONSTANT_COLOR,
+                                GL_CONSTANT_ALPHA,
+                                GL_ONE_MINUS_CONSTANT_ALPHA, quarter_half,
+                                inverse_pixel) &&
+             draw_texture_blend(textured, sampler, texture,
+                                GL_CONSTANT_ALPHA,
+                                GL_ONE_MINUS_CONSTANT_ALPHA,
+                                GL_CONSTANT_ALPHA,
+                                GL_ONE_MINUS_CONSTANT_ALPHA, three_quarters,
+                                alpha_pixel);
    if (!noop &&
        (memcmp(literal_pixel, uniform_pixel, sizeof(literal_pixel)) ||
         memcmp(literal_pixel, expected, sizeof(literal_pixel)))) {
@@ -159,17 +231,32 @@ main(void)
               expected[2], expected[3]);
       ok = false;
    }
+   if (!noop &&
+       (memcmp(constant_pixel, expected_constant, sizeof(constant_pixel)) ||
+        memcmp(inverse_pixel, expected_inverse, sizeof(inverse_pixel)) ||
+        memcmp(alpha_pixel, expected_alpha, sizeof(alpha_pixel)))) {
+      fprintf(stderr,
+              "textured blend pixels {%u,%u,%u,%u} {%u,%u,%u,%u} "
+              "{%u,%u,%u,%u}\n",
+              constant_pixel[0], constant_pixel[1], constant_pixel[2],
+              constant_pixel[3], inverse_pixel[0], inverse_pixel[1],
+              inverse_pixel[2], inverse_pixel[3], alpha_pixel[0],
+              alpha_pixel[1], alpha_pixel[2], alpha_pixel[3]);
+      ok = false;
+   }
 
+   glDeleteTextures(1, &texture);
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(literal);
    glDeleteProgram(uniform);
+   glDeleteProgram(textured);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
    if (!ok)
       return EXIT_FAILURE;
-   puts(noop ? "G17P literal/uniform fragment draws submitted"
-             : "G17P literal/uniform fragment pixels exact");
+   puts(noop ? "G17P literal/uniform and textured blend draws submitted"
+             : "G17P literal/uniform and textured blend pixels exact");
    return EXIT_SUCCESS;
 }

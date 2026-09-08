@@ -1801,6 +1801,73 @@ static void test_native_half_add(void)
    puts("Native half add: two exact Apple vectors and bounds PASS");
 }
 
+static void test_native_half_saturate(void)
+{
+   static const struct {
+      uint16_t dest, src, wait;
+      const char *bytes;
+   } witnesses[] = {
+      {0, 0, 1, "00001c8001220002"},
+      {1, 1, 0, "08011c8001020002"},
+      {2, 2, 0, "10021c8001020002"},
+      {3, 3, 0, "18031c8001020002"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_hadd_saturate_negzero(
+         AGX_ISA_ENCODING_AGX3B, witnesses[i].dest, witnesses[i].src,
+         AGX3_ALU_HINT_DISCARD, false, witnesses[i].wait, bytes, &len));
+      exact(bytes, len, witnesses[i].bytes);
+   }
+
+   assert(!agx3_alu_hadd_saturate_negzero(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE, false, 0, bytes,
+      &len));
+   assert(!agx3_alu_hadd_saturate_negzero(
+      AGX_ISA_ENCODING_AGX3B, 256, 0, AGX3_ALU_HINT_NONE, false, 0, bytes,
+      &len));
+   assert(!agx3_alu_hadd_saturate_negzero(
+      AGX_ISA_ENCODING_AGX3B, 0, 256, AGX3_ALU_HINT_NONE, false, 0, bytes,
+      &len));
+   assert(!agx3_alu_hadd_saturate_negzero(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE, false, 0x40, bytes,
+      &len));
+   puts("Native half saturate: four exact Apple vectors and bounds PASS");
+}
+
+static void test_native_half_inverse(void)
+{
+   static const struct {
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } witnesses[] = {
+      {0, 0, 1, AGX3_ALU_HINT_DISCARD, "00b034008028"},
+      {1, 1, 0, AGX3_ALU_HINT_DISCARD, "08b034018008"},
+      {2, 2, 0, AGX3_ALU_HINT_DISCARD, "10b034028008"},
+      {3, 3, 0, AGX3_ALU_HINT_DISCARD, "18b034038008"},
+      {0, 1, 1, AGX3_ALU_HINT_CACHE, "00b024818028"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_hadd_one_neg(
+         AGX_ISA_ENCODING_AGX3B, witnesses[i].dest, witnesses[i].src,
+         witnesses[i].hint, true, witnesses[i].wait, bytes, &len));
+      exact(bytes, len, witnesses[i].bytes);
+   }
+
+   assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                  AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 256, 0,
+                                  AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 0, 256,
+                                  AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                  AGX3_ALU_HINT_NONE, false, 0x40, bytes,
+                                  &len));
+   puts("Native half inverse: five exact Apple vectors and bounds PASS");
+}
+
 static void test_native_half_fma(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -2656,6 +2723,8 @@ int main(void){
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_add();
+   test_native_half_saturate();
+   test_native_half_inverse();
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
    test_native_minifloat_mixed_select();

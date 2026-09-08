@@ -588,6 +588,18 @@ bool agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
                    bool dest_cache, uint16_t wait_mask,
                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native scalar-half saturate: sat(src + -0.0h). */
+bool agx3_alu_hadd_saturate_negzero(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native scalar-half inverse: 1.0h + -src. */
+bool agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, enum agx3_alu_hint hint,
+                           bool dest_cache, uint16_t wait_mask,
+                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 bool agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,
                    const uint16_t src[3], const enum agx3_alu_hint hints[3],
                    bool product_neg, bool src2_neg, bool dest_cache,

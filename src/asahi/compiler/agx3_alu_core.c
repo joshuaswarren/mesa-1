@@ -2296,6 +2296,77 @@ agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
+bool
+agx3_alu_hadd_saturate_negzero(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* applegpu_g17p lowers saturate(half) to f16add.ep2 with an exact
+    * negative-zero minifloat in field33. The ordinary half-add witnesses
+    * establish the shared register, lifetime, destination-retention and
+    * six-slot wait axes; four texture-dependent saturation witnesses pin
+    * this endpoint, the saturation bit and slot-0 dependency exactly. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {24, 2}, {25, 1}, {41, 1}, {42, 1},
+   };
+   struct agx3_field_kv fields[13] = {
+      {2, dest},
+      {17, src},
+      {33, UINT8_C(0x80)},
+      {11, dest_cache},
+      {14, 1},
+      {26, hint == AGX3_ALU_HINT_CACHE},
+      {28, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 7;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){51 + slot,
+                                           !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "f16add", 2, base, 6, fields, n, out, len);
+}
+
+bool
+agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
+                      uint16_t src, enum agx3_alu_hint hint,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* applegpu_g17p commutes 1.0h - src so the minifloat occupies operand 0
+    * and the negated register occupies operand 1. Four component witnesses
+    * pin destination/source registers, discard and slot-0 wait; a fifth
+    * live-source witness pins the cache axis on this same ep1 form. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {24, 1}, {25, 1}, {41, 2}, {42, 1},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest},
+      {16, UINT8_C(0x30)},
+      {34, src},
+      {47, 1},
+      {11, dest_cache},
+      {43, hint == AGX3_ALU_HINT_CACHE},
+      {45, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 7;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){51 + slot,
+                                           !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "f16add", 1, base, 6, fields, n, out, len);
+}
+
 /* Native scalar half FMA preserves the single-rounding f16 semantics. */
 bool
 agx3_alu_hfma(enum agx_isa_encoding enc, uint16_t dest,

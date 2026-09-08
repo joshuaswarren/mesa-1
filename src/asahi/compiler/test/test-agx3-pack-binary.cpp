@@ -2021,6 +2021,96 @@ TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
    pack(bad, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, G17PHalfSaturateMatchesNative)
+{
+   static const uint8_t native[] = {
+      0x00, 0x00, 0x1c, 0x80, 0x01, 0x02, 0x00, 0x02,
+   };
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_16);
+   src.discard = true;
+   agx_instr *I = agx_hadd_to(b, agx_register(0, AGX_SIZE_16), src,
+                              agx_immediate(0x80));
+   I->saturate = true;
+   agx_stop(b);
+
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, G17PHalfSaturateRefusesUnwitnessedOperands)
+{
+   for (unsigned mode = 0; mode < 8; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dst = agx_register(0, AGX_SIZE_16);
+      agx_index src = agx_register(0, AGX_SIZE_16);
+      agx_index imm = agx_immediate(mode == 1 ? 0x30 : 0x80);
+      if (mode == 2)
+         src.size = AGX_SIZE_32;
+      if (mode == 3)
+         src.channels_m1 = 1;
+      if (mode == 4)
+         src.abs = true;
+      if (mode == 5)
+         src.neg = true;
+      if (mode == 6)
+         src.kill = true;
+      if (mode == 7)
+         dst.channels_m1 = 1;
+      agx_instr *I = agx_hadd_to(b, dst, src, imm);
+      I->saturate = mode != 1;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+   }
+}
+
+TEST_F(AGX3PackBinary, G17PHalfInverseMatchesNativeForm)
+{
+   static const uint8_t native[] = {
+      0x08, 0xb0, 0x04, 0x80, 0x80, 0x08,
+   };
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_16);
+   src.neg = true;
+   src.cache = true;
+   agx_hadd_to(b, agx_register(1, AGX_SIZE_16), src, agx_immediate(0x30));
+   agx_stop(b);
+
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, G17PHalfInverseRefusesUnwitnessedOperands)
+{
+   for (unsigned mode = 0; mode < 9; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dst = agx_register(1, AGX_SIZE_16);
+      agx_index src = agx_register(0, AGX_SIZE_16);
+      agx_index imm = agx_immediate(mode == 1 ? 0x80 : 0x30);
+      src.neg = mode != 2;
+      src.abs = mode == 4;
+      src.kill = mode == 5;
+      if (mode == 6)
+         src.size = AGX_SIZE_32;
+      if (mode == 7)
+         src.channels_m1 = 1;
+      if (mode == 8)
+         dst.channels_m1 = 1;
+      agx_instr *I = agx_hadd_to(b, dst, src, imm);
+      I->saturate = mode == 3;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PU32ToHalfMatchesNative)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
