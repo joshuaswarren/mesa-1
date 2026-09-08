@@ -3328,7 +3328,6 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
       .dest = 8, .coord = 4, .width = AGX3_TEX_W16, .mask = 15,
       .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
       .final = true, .offset = true, .offset_xy = 0xf1,
-      .g17p_fragment_profile = true,
    };
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
    append(want, bytes, len);
@@ -3510,7 +3509,6 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       d.slot = 1;
       d.wait_mask = 1;
       d.final = true;
-      d.g17p_fragment_profile = enc == AGX_ISA_ENCODING_AGX3B;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
 
@@ -7585,7 +7583,6 @@ TEST_F(AGX3PackBinary, ExplicitLodStagingAndLifetime)
          struct agx3_tex_sample_desc d = {};
          d.dest=8; d.width=AGX3_TEX_W32; d.mask=15;
          d.lod=AGX3_TEX_LOD_REGISTER; d.slot=1; d.wait_mask=1; d.final=true;
-         d.g17p_fragment_profile = true;
          ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
          append(want, bytes, len);
          ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -7675,11 +7672,10 @@ TEST_F(AGX3PackBinary, Texture3DImmediateLodStagesThirdCoordinate)
    d.coord_kill = false;
    d.final = true;
    d.three_d = true;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0x98,0xb0,0x00,0x39,
-      0x00,0x00,0x00,0x10,0x08,0x12,0x00,
+      0x00,0x00,0x00,0x10,0x08,0x01,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,
@@ -7726,7 +7722,6 @@ TEST_F(AGX3PackBinary, Texture3DImplicitLodStagesCoordinates)
    d.wait_mask = 1;
    d.final = true;
    d.three_d = true;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    /* Rebased onto this test's destination/scoreboard fields from the Apple
     * A18 Pro fragment `texture3d::sample(s, uvw)`. The adjacent native
@@ -7734,7 +7729,7 @@ TEST_F(AGX3PackBinary, Texture3DImplicitLodStagesCoordinates)
     * implicit uses f156=1 while explicit level zero uses f37=1/f139=2. */
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0x98,0xb0,0x00,0x80,
-      0x01,0x01,0x00,0x10,0x00,0x12,0x00,
+      0x01,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,
@@ -7821,7 +7816,6 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    d.coord_kill = true;
    d.final = true;
    d.cube = true;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0xb8,0xb0,0x00,0x10,
@@ -7976,7 +7970,6 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       d.coord_kill = true;
       d.final = true;
       d.cube = true;
-      d.g17p_fragment_profile = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       static const uint8_t native_immediate[] = {
          0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x13,
@@ -8058,7 +8051,6 @@ TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
       d.coord_kill = true;
       d.final = i == 1;
       d.cube = true;
-      d.g17p_fragment_profile = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
    }
@@ -8163,7 +8155,6 @@ TEST_F(AGX3PackBinary, ArraySampleDirectLayerAndLifetime)
       d.final = true;
       d.array = true;
       d.array_layer = 4;
-      d.g17p_fragment_profile = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -8225,13 +8216,13 @@ TEST_F(AGX3PackBinary, GradientSampleStagesFourScalarsIntoTheirOwnBanks)
    d.slot = 1;
    d.wait_mask = 1;
    d.final = true;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
-   /* Apple's fragment gradient profile differs from the compute witness in
-    * f83/f112; this one also changes the destination register to half8. */
+   /* Apple's own compute gradient sample is 05800cb8b0000401000010000100;
+    * this one differs only in the destination register (8, not 0) and the
+    * coordinate-kill hint. */
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              (std::vector<uint8_t>{0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x04,
-                                   0x01, 0x00, 0x00, 0x10, 0x00, 0x12, 0x00}));
+                                   0x01, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00}));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
                                 1, bytes, &len));
@@ -8283,7 +8274,6 @@ TEST_F(AGX3PackBinary, ArrayGradientNamesLayerDirectly)
    d.final = true;
    d.array = true;
    d.array_layer = 24;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -8389,7 +8379,6 @@ TEST_F(AGX3PackBinary, RegisterLodBiasStagesLikeRegisterLevel)
    d.slot = 1;
    d.wait_mask = 1;
    d.final = true;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    std::vector<uint8_t> bias(bytes, bytes + len);
    append(want, bytes, len);
@@ -8464,7 +8453,6 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
       d.wait_mask = 1;
       d.final = true;
       d.gather = native[c];
-      d.g17p_fragment_profile = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -8540,7 +8528,6 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
    d.texture_value = 12;
    d.sampler_value = 16;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
@@ -8589,7 +8576,6 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
    d.texture_value = 12;
    d.sampler_value = 16;
-   d.g17p_fragment_profile = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,

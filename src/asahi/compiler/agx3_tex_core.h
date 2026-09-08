@@ -63,6 +63,22 @@ enum agx3_tex_operand_kind {
 };
 
 /*
+ * SMP's f83/f112 pair is part of a larger sample ABI, not a shader-stage
+ * selector.  The driver's descriptor heaps, coordinate staging, and
+ * derivative protocol are hardware-qualified with f83=0/f112=4.  Apple's
+ * fragment binaries use f83=4/f112=8 together with a different, not yet
+ * modeled surrounding ABI.
+ *
+ * Keep the Apple pair available to byte-exact witness tests, but require an
+ * explicit full-ABI choice.  Production compiler callers leave this zero and
+ * therefore cannot infer the Apple form merely from MESA_SHADER_FRAGMENT.
+ */
+enum agx3_tex_sample_abi {
+   AGX3_TEX_SAMPLE_ABI_DRIVER = 0,
+   AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT = 1,
+};
+
+/*
  * How the level operand staged into texture operand bank 6 is typed.
  *
  * PACK_SMPIR's f74 selects it, and it is the only field that moves between
@@ -269,9 +285,7 @@ struct agx3_tex_sample_desc {
    bool shadow;                 /* compare against the scalar in bank 4 */
    bool offset;                 /* signed nibble-packed 2D texel offset */
    uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
-   /* Apple's G17P fragment samples select the fragment operand profile
-    * (f83=4/f112=8). Compute and vertex samples use f83=0/f112=4. */
-   bool g17p_fragment_profile;
+   enum agx3_tex_sample_abi sample_abi;
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate

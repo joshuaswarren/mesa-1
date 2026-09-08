@@ -1166,8 +1166,7 @@ fail:
 static bool
 agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
-                         uint8_t slot, uint16_t wait_mask, bool final,
-                         bool fragment_profile)
+                         uint8_t slot, uint16_t wait_mask, bool final)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
@@ -1499,8 +1498,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        * mapping. */
       .coord_kill = cube ? I->src[0].discard : I->src[0].kill,
       .final = final,
-      .g17p_fragment_profile =
-         fragment_profile && enc == AGX_ISA_ENCODING_AGX3B,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
           agx3_append(emission, bytes, len);
@@ -5313,9 +5310,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
                  !compute_gradient) ||
-                !agx3_emit_texture_sample(
-                   emission, enc, I, slot, sample_wait, final,
-                   ctx->stage == MESA_SHADER_FRAGMENT))
+                !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
+                                          final))
                AGX3_REFUSE(I);
             /* The sample emitter stages two 32-bit coordinates, a third for
              * 3D, the auxiliary scalar bank for a per-lane level or bias, or
