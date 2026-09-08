@@ -19,7 +19,12 @@
 
 #define WIDTH 8
 #define HEIGHT 8
-#if defined(G17P_BC7_DECODE)
+#if defined(G17P_BC6H_UFLOAT_DECODE)
+#define BLOCK_BYTES 16
+#define BLOCK_DATA_BYTES 64
+#define TEST_FORMAT VK_FORMAT_BC6H_UFLOAT_BLOCK
+#define NAME "g17p-vulkan-bc6h-ufloat-decode"
+#elif defined(G17P_BC7_DECODE)
 #define BLOCK_BYTES 16
 #define BLOCK_DATA_BYTES 64
 #define TEST_FORMAT VK_FORMAT_BC7_UNORM_BLOCK
@@ -167,7 +172,7 @@ fnv1a64(const uint8_t *data, size_t size)
 #if !defined(G17P_ETC2_RGBA8_DECODE) && !defined(G17P_ASTC_DECODE) &&         \
    !defined(G17P_ASTC4X4_DECODE)
 #if !defined(G17P_BC4_DECODE) && !defined(G17P_BC5_DECODE) &&               \
-   !defined(G17P_BC7_DECODE)
+   !defined(G17P_BC6H_UFLOAT_DECODE) && !defined(G17P_BC7_DECODE)
 static uint8_t
 expand5(unsigned value)
 {
@@ -229,7 +234,18 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
    uint8_t *out = data + block * BLOCK_BYTES;
-#if defined(G17P_BC7_DECODE)
+#if defined(G17P_BC6H_UFLOAT_DECODE)
+   static const uint8_t encoded[4][16] = {
+      {0x43,0x3a,0xce,0x7a,0xeb,0xcd,0x3b,0xe9,0x60,0xfd,0x60,0xfd,0x60,0xfd,0x60,0xfd},
+      {0x43,0xbb,0xd2,0x94,0x53,0x6e,0x3d,0xed,0x10,0xbf,0x10,0xbf,0x10,0xbf,0x10,0xbf},
+      {0x43,0x3b,0xe1,0xa8,0xa3,0xee,0x3c,0xed,0xf0,0x48,0xf0,0x48,0xf0,0x48,0xf0,0x48},
+      {0x83,0x3b,0xee,0xc0,0x7b,0xef,0xbd,0xf1,0xf0,0x03,0xf0,0x03,0xf0,0x03,0xf0,0x03},
+   };
+   (void)c0;
+   (void)c1;
+   (void)indices;
+   memcpy(out, encoded[block], BLOCK_BYTES);
+#elif defined(G17P_BC7_DECODE)
    static const uint8_t encoded[4][16] = {
       {0x10,0x84,0x20,0x04,0x21,0x86,0x01,0,0,0,0,0,0,0,0,0},
       {0x10,0xce,0x09,0xc1,0x39,0x8a,0x02,0,0,0,0,0,0,0,0,0},
@@ -271,7 +287,21 @@ put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
 static void
 build_reference(const uint8_t *blocks, uint8_t *reference)
 {
-#if defined(G17P_BC7_DECODE)
+#if defined(G17P_BC6H_UFLOAT_DECODE)
+   (void)blocks;
+   static const uint8_t decoded[4][4] = {
+      {0x8f, 0x2f, 0x5f, 0xff},
+      {0xae, 0x38, 0x78, 0xff},
+      {0xae, 0x68, 0x97, 0xff},
+      {0xb6, 0xb6, 0xc5, 0xff},
+   };
+   for (unsigned y = 0; y < HEIGHT; ++y) {
+      for (unsigned x = 0; x < WIDTH; ++x) {
+         const unsigned block = (y / 4) * 2 + x / 4;
+         memcpy(reference + (y * WIDTH + x) * 4, decoded[block], 4);
+      }
+   }
+#elif defined(G17P_BC7_DECODE)
    (void)blocks;
    static const uint8_t decoded[4][4] = {
       {0x21, 0x42, 0x84, 0x61},
