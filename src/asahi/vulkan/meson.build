@@ -596,6 +596,50 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Desktop-compositor path: indexed combined-image descriptors, a UBO at
+    # a nonzero offset, normalized implicit derivatives, linear filtering,
+    # premultiplied alpha blend, and indexed drawing in one guarded oracle.
+    executable(
+      'g17p-vulkan-texture-alpha-composite',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-64',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SPLIT=1',
+                '-DIMAGE_WIDTH=64', '-DIMAGE_HEIGHT=64'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-cw',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SPLIT=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-64-cw',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SPLIT=3',
+                '-DIMAGE_WIDTH=64', '-DIMAGE_HEIGHT=64'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-texture-grad',
       files('tests/g17p_offscreen_triangle.c'),

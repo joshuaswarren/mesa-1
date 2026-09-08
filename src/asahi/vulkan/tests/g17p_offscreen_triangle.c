@@ -214,6 +214,18 @@
 #define G17P_IMPLICIT_LOD 0
 #endif
 
+#ifndef G17P_TEXTURE_ALPHA_COMPOSITE
+#define G17P_TEXTURE_ALPHA_COMPOSITE 0
+#endif
+
+#ifndef G17P_COMPOSITE_SPLIT
+#define G17P_COMPOSITE_SPLIT 0
+#endif
+
+#if G17P_COMPOSITE_SPLIT < 0 || G17P_COMPOSITE_SPLIT > 3
+#error "G17P_COMPOSITE_SPLIT must select one of two diagonals and windings"
+#endif
+
 #ifndef G17P_EXPLICIT_GRADIENT
 #define G17P_EXPLICIT_GRADIENT 0
 #endif
@@ -256,9 +268,9 @@
 
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
-   (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
-    G17P_SHADOW_COMPARE || G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE ||     \
-    G17P_TEXTURE_3D)
+   (G17P_LOD_ORACLE || G17P_TEXTURE_ALPHA_COMPOSITE ||                     \
+    G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE || G17P_SHADOW_COMPARE || \
+    G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE || G17P_TEXTURE_3D)
 
 #if G17P_SHADOW_COMPARE
 #define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
@@ -325,7 +337,8 @@
      G17P_A2R10G10B10_UNORM + G17P_RGBA32_SFLOAT +                    \
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
-     G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD) > 1
+     G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
+     G17P_TEXTURE_ALPHA_COMPOSITE) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -352,6 +365,11 @@
 #include "g17p_vulkan_rgba8_mrt_frag.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rgba8_mrt_frag_spv
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+#include "g17p_vulkan_texture_alpha_composite_vert.h"
+#include "g17p_vulkan_texture_alpha_composite_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_texture_alpha_composite_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_texture_alpha_composite_frag_spv
 #elif G17P_IMPLICIT_LOD
 #include "g17p_vulkan_implicit_lod_frag.h"
 #include "g17p_vulkan_implicit_lod_vert.h"
@@ -600,8 +618,16 @@
 #endif
 
 #define T8140_DEVICE_ID 0x8140
+#ifndef IMAGE_WIDTH
 #define IMAGE_WIDTH 32
+#endif
+#ifndef IMAGE_HEIGHT
 #define IMAGE_HEIGHT 32
+#endif
+#if G17P_TEXTURE_ALPHA_COMPOSITE &&                                  \
+   ((IMAGE_WIDTH % 32) != 0 || (IMAGE_HEIGHT % 32) != 0)
+#error "the alpha-composite extents must be positive multiples of 32"
+#endif
 #define IMAGE_LAYERS ((G17P_MULTIVIEW || G17P_LAYER_OUTPUT) ? 2 : 1)
 
 #if G17P_INDIRECT_DRAW
@@ -941,7 +967,12 @@
 #error "the RGBA32 SFLOAT fixture is a guarded single-sample GPU-copy oracle"
 #endif
 
-#if G17P_IMPLICIT_LOD
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+#define PROBE_NAME "g17p-vulkan-texture-alpha-composite"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_IMPLICIT_LOD
 #define PROBE_NAME "g17p-vulkan-implicit-lod"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
@@ -1299,7 +1330,8 @@ VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
-   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT
+   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
+   G17P_TEXTURE_ALPHA_COMPOSITE
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1350,8 +1382,10 @@ VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
-#if G17P_DYNAMIC_BLEND
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
 VK_FN(vkCmdSetScissor);
+#endif
+#if G17P_DYNAMIC_BLEND
 VK_FN(vkCmdSetColorBlendEnableEXT);
 VK_FN(vkCmdSetColorBlendEquationEXT);
 VK_FN(vkCmdSetColorWriteMaskEXT);
@@ -1364,10 +1398,11 @@ VK_FN(vkCmdDrawIndirectCount);
 VK_FN(vkCmdDrawIndexedIndirectCount);
 #endif
 #endif
-#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || \
+   G17P_TEXTURE_ALPHA_COMPOSITE
 VK_FN(vkCmdBindIndexBuffer);
 #endif
-#if G17P_INDEX_RESTART
+#if G17P_INDEX_RESTART || G17P_TEXTURE_ALPHA_COMPOSITE
 VK_FN(vkCmdDrawIndexed);
 #endif
 VK_FN(vkCmdEndRenderPass);
@@ -1610,6 +1645,13 @@ verify_readback(const uint8_t *map)
    /* LOD1 is 32x32x2; z=0.75 addresses its blue slice 1.  Its red slice 0
     * catches dropped or 2D-reinterpreted Z. */
    static const uint8_t expected[4] = {0, 0, 255, 255};
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   /* Descriptor 1 mip 1 is a transparent/green checker. A quarter-texel
+    * offset makes linear filtering produce 0, 2/8, 3/8, 5/8 or 6/8
+    * coverage. Seventeen scissored draws sweep opacity 0/16..16/16. With
+    * source (0,192,0) and clear (128,64,128), every expected UNORM8 channel
+    * is an exact integer: product = coverage_eighths * opacity_sixteenths,
+    * colour = (128-product, 64+product, 128-product, 255). */
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -1786,6 +1828,29 @@ verify_readback(const uint8_t *map)
 #elif G17P_DYNAMIC_BLEND
       const uint8_t *expected_pixel =
          expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+      const unsigned x = pixel % IMAGE_WIDTH;
+      const unsigned y = pixel / IMAGE_WIDTH;
+      unsigned coverage_eighths;
+      if (x == IMAGE_WIDTH - 1 && y == IMAGE_HEIGHT - 1)
+         coverage_eighths = 0;
+      else if (x == IMAGE_WIDTH - 1)
+         coverage_eighths = (y & 1) ? 2 : 6;
+      else if (y == IMAGE_HEIGHT - 1)
+         coverage_eighths = (x & 1) ? 2 : 6;
+      else
+         coverage_eighths = ((x ^ y) & 1) ? 5 : 3;
+      const unsigned edge_width = IMAGE_WIDTH / 32;
+      const unsigned opacity_sixteenths =
+         x < edge_width
+            ? 0
+            : x >= IMAGE_WIDTH - edge_width
+                 ? 16
+                 : 1 + (x - edge_width) / (2 * edge_width);
+      const unsigned product = coverage_eighths * opacity_sixteenths;
+      const uint8_t expected_pixel[4] = {
+         128 - product, 64 + product, 128 - product, 255,
+      };
 #else
       const uint8_t *expected_pixel = expected;
 #endif
@@ -1823,6 +1888,8 @@ main(void)
    }
 #endif
    const bool record_only =
+      (G17P_TEXTURE_ALPHA_COMPOSITE &&
+       getenv("G17P_TEXTURE_ALPHA_COMPOSITE_RECORD_ONLY") != NULL) ||
       (G17P_IMPLICIT_LOD &&
        getenv("G17P_IMPLICIT_LOD_RECORD_ONLY") != NULL) ||
       (G17P_EXPLICIT_GRADIENT &&
@@ -1953,7 +2020,8 @@ main(void)
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
-   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT
+   G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
+   G17P_TEXTURE_ALPHA_COMPOSITE
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2041,6 +2109,15 @@ main(void)
    vkGetPhysicalDeviceFeatures2(physical, &available_advanced_features);
    if (!available_advanced.advancedBlendCoherentOperations)
       die("coherent advanced blend operations are not advertised");
+#endif
+
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   VkPhysicalDeviceFeatures2 composite_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &composite_available);
+   if (!composite_available.features.shaderSampledImageArrayDynamicIndexing)
+      die("dynamic sampled-image array indexing is not advertised");
 #endif
 
 #if G17P_F16_IO || G17P_MULTIVIEW
@@ -2239,6 +2316,11 @@ main(void)
       .logicOp = G17P_LOGIC_OP_XOR,
    };
 #endif
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkPhysicalDeviceFeatures composite_features = {
+      .shaderSampledImageArrayDynamicIndexing = VK_TRUE,
+   };
+#endif
 #if G17P_DYNAMIC_BLEND
    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT enabled_dynamic3 = {
       .sType =
@@ -2286,6 +2368,8 @@ main(void)
       .pEnabledFeatures = &indirect_enabled,
 #elif G17P_MULTI_VIEWPORT
       .pEnabledFeatures = &viewport_enabled,
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+      .pEnabledFeatures = &composite_features,
 #endif
 #if G17P_BRESENHAM_LINES
       .pEnabledFeatures = &enabled_features,
@@ -2347,8 +2431,10 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
-#if G17P_DYNAMIC_BLEND
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
    LOAD_DEVICE(device, vkCmdSetScissor);
+#endif
+#if G17P_DYNAMIC_BLEND
    LOAD_DEVICE(device, vkCmdSetColorBlendEnableEXT);
    LOAD_DEVICE(device, vkCmdSetColorBlendEquationEXT);
    LOAD_DEVICE(device, vkCmdSetColorWriteMaskEXT);
@@ -2361,10 +2447,11 @@ main(void)
    LOAD_DEVICE(device, vkCmdDrawIndexedIndirectCount);
 #endif
 #endif
-#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART
+#if G17P_INDIRECT_DRAW || G17P_INDEX_RESTART || \
+   G17P_TEXTURE_ALPHA_COMPOSITE
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
 #endif
-#if G17P_INDEX_RESTART
+#if G17P_INDEX_RESTART || G17P_TEXTURE_ALPHA_COMPOSITE
    LOAD_DEVICE(device, vkCmdDrawIndexed);
 #endif
    LOAD_DEVICE(device, vkCmdEndRenderPass);
@@ -2535,18 +2622,36 @@ main(void)
    memcpy(vertex.map, vertex_expected, RESTART_VERTEX_BUFFER_BYTES);
    VkBuffer vertex_buffer = vertex.buffer;
 #elif G17P_TEXTURE_ORACLE
+   struct composite_vertex {
+      float position[2];
+      uint32_t source_bias;
+   };
    enum {
       TEXTURE_VERTEX_OFFSET = 64,
       TEXTURE_VERTEX_SUFFIX_BYTES = 64,
       TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_OFFSET +
-                             3 * 2 * sizeof(float) +
+                             (G17P_TEXTURE_ALPHA_COMPOSITE
+                                 ? 4 * sizeof(struct composite_vertex)
+                                 : 3 * 2 * sizeof(float)) +
                              TEXTURE_VERTEX_SUFFIX_BYTES,
    };
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   /* Two triangles sharing a full-surface diagonal. Every pixel, including
+    * the shared edge, must be covered exactly once. The integer attribute
+    * forces a flat input ahead of the smooth UV in the fragment program. */
+   static const struct composite_vertex vertices[] = {
+      {{-1.0f, -1.0f}, 1},
+      {{1.0f, -1.0f}, 1},
+      {{-1.0f, 1.0f}, 1},
+      {{1.0f, 1.0f}, 1},
+   };
+#else
    static const float vertices[][2] = {
       {-1.0f, -1.0f},
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+#endif
    uint8_t texture_vertex_expected[TEXTURE_VERTEX_BYTES];
    memset(texture_vertex_expected, 0xa5, sizeof(texture_vertex_expected));
    memcpy(texture_vertex_expected + TEXTURE_VERTEX_OFFSET, vertices,
@@ -2728,16 +2833,93 @@ main(void)
           sizeof(restart_index_expected));
 #endif
 
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   enum {
+      COMPOSITE_INDEX_BUFFER_OFFSET = 64,
+      COMPOSITE_FIRST_INDEX = 5,
+      COMPOSITE_INDEX_SEQUENCE_OFFSET = COMPOSITE_INDEX_BUFFER_OFFSET +
+                                        COMPOSITE_FIRST_INDEX *
+                                           sizeof(uint16_t),
+      COMPOSITE_INDEX_SUFFIX_BYTES = 64,
+      COMPOSITE_UNIFORM_OFFSET = 64,
+      COMPOSITE_UNIFORM_STRIDE = 64,
+      COMPOSITE_OPACITY_COUNT = 17,
+      COMPOSITE_UNIFORM_SUFFIX_BYTES = 64,
+   };
+#if G17P_COMPOSITE_SPLIT == 0
+   /* First diagonal, counter-clockwise winding. */
+   static const uint16_t composite_indices[] = {0, 1, 2, 2, 1, 3};
+#elif G17P_COMPOSITE_SPLIT == 1
+   /* Opposite diagonal, counter-clockwise winding. */
+   static const uint16_t composite_indices[] = {0, 1, 3, 0, 3, 2};
+#elif G17P_COMPOSITE_SPLIT == 2
+   /* First diagonal, clockwise winding. */
+   static const uint16_t composite_indices[] = {2, 1, 0, 3, 1, 2};
+#else
+   /* Opposite diagonal, clockwise winding. */
+   static const uint16_t composite_indices[] = {3, 1, 0, 2, 3, 0};
+#endif
+   uint8_t composite_index_expected[COMPOSITE_INDEX_SEQUENCE_OFFSET +
+                                    sizeof(composite_indices) +
+                                    COMPOSITE_INDEX_SUFFIX_BYTES];
+   memset(composite_index_expected, 0xa5, sizeof(composite_index_expected));
+   /* Ignoring either the binding offset or firstIndex selects only zeroes,
+    * producing a degenerate draw without making an out-of-range access. */
+   memset(composite_index_expected, 0, COMPOSITE_INDEX_SEQUENCE_OFFSET);
+   memcpy(composite_index_expected + COMPOSITE_INDEX_SEQUENCE_OFFSET,
+          composite_indices, sizeof(composite_indices));
+   struct mapped_buffer composite_index = create_mapped_buffer(
+      device, &memory_properties, sizeof(composite_index_expected),
+      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "composite index buffer");
+   memcpy(composite_index.map, composite_index_expected,
+          sizeof(composite_index_expected));
+
+   struct composite_params {
+      uint32_t source_index;
+      float opacity;
+      float texel_offset;
+      uint32_t pad;
+   };
+   uint8_t composite_uniform_expected[COMPOSITE_UNIFORM_OFFSET +
+                                      COMPOSITE_OPACITY_COUNT *
+                                         COMPOSITE_UNIFORM_STRIDE +
+                                      COMPOSITE_UNIFORM_SUFFIX_BYTES];
+   memset(composite_uniform_expected, 0xa5,
+          sizeof(composite_uniform_expected));
+   /* A lost descriptor offset safely selects source 0 with zero opacity. Each
+    * aligned dynamic record selects source 1 and advances opacity by 1/16,
+    * including the transparent and opaque endpoints. */
+   memset(composite_uniform_expected, 0, COMPOSITE_UNIFORM_OFFSET);
+   for (unsigned step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
+      const struct composite_params params = {
+         .source_index = 1,
+         .opacity = step / 16.0f,
+         .texel_offset = 1.0f / (4.0f * IMAGE_WIDTH),
+      };
+      memcpy(composite_uniform_expected + COMPOSITE_UNIFORM_OFFSET +
+                step * COMPOSITE_UNIFORM_STRIDE,
+             &params, sizeof(params));
+   }
+   struct mapped_buffer composite_uniform = create_mapped_buffer(
+      device, &memory_properties, sizeof(composite_uniform_expected),
+      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, "composite uniform buffer");
+   memcpy(composite_uniform.map, composite_uniform_expected,
+          sizeof(composite_uniform_expected));
+#endif
+
 #if G17P_TEXTURE_ORACLE
    enum {
-      TEXTURE_WIDTH = 64,
-      TEXTURE_HEIGHT = 64,
+      TEXTURE_WIDTH = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_WIDTH * 2 : 64,
+      TEXTURE_HEIGHT = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_HEIGHT * 2 : 64,
 #if G17P_CUBE_SAMPLE
       TEXTURE_LEVELS = 1,
       TEXTURE_LAYERS = 6,
 #elif G17P_TEXTURE_3D
       TEXTURE_LEVELS = 2,
       TEXTURE_LAYERS = 1,
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+      TEXTURE_LEVELS = 3,
+      TEXTURE_LAYERS = 2,
 #else
       TEXTURE_LEVELS = 3,
       TEXTURE_LAYERS = 1,
@@ -2745,13 +2927,17 @@ main(void)
       TEXTURE_DEPTH = G17P_TEXTURE_3D ? 4 : 1,
       TEXTURE_GUARD_BYTES = 64,
       TEXTURE_LEVEL0_BYTES =
-         64 * 64 * TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS * TEXTURE_DEPTH,
+         TEXTURE_WIDTH * TEXTURE_HEIGHT * TEXTURE_PIXEL_BYTES *
+            TEXTURE_LAYERS * TEXTURE_DEPTH,
       TEXTURE_LEVEL1_BYTES = G17P_CUBE_SAMPLE
          ? 0
-         : 32 * 32 * TEXTURE_PIXEL_BYTES * (G17P_TEXTURE_3D ? 2 : 1),
+         : (TEXTURE_WIDTH / 2) * (TEXTURE_HEIGHT / 2) * TEXTURE_PIXEL_BYTES *
+              (G17P_TEXTURE_3D ? 2 : TEXTURE_LAYERS),
       TEXTURE_LEVEL2_BYTES =
          (G17P_CUBE_SAMPLE || G17P_TEXTURE_3D)
-            ? 0 : 16 * 16 * TEXTURE_PIXEL_BYTES,
+            ? 0
+            : (TEXTURE_WIDTH / 4) * (TEXTURE_HEIGHT / 4) *
+                 TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS,
       TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
                            TEXTURE_LEVEL2_BYTES,
       TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
@@ -2797,6 +2983,51 @@ main(void)
       for (size_t pixel = 0; pixel < 32 * 32; ++pixel)
          memcpy(mip1 + (slice * 32 * 32 + pixel) * TEXTURE_PIXEL_BYTES,
                 mip1_colours[slice], TEXTURE_PIXEL_BYTES);
+   }
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   /* Descriptor 0 is a yellow negative control at every level. Descriptor 1
+    * is the red/checker/blue LOD ladder: a texture twice the framebuffer size
+    * makes implicit derivatives select mip 1. Its transparent/green checker
+    * is premultiplied already, so linear interpolation remains premultiplied. */
+   static const uint8_t mip_colours[TEXTURE_LAYERS][TEXTURE_LEVELS][4] = {
+      {
+         {0xff, 0xff, 0x00, 0xff},
+         {0xff, 0xff, 0x00, 0xff},
+         {0xff, 0xff, 0x00, 0xff},
+      },
+      {
+         {0xff, 0x00, 0x00, 0xff},
+         {0x00, 0x00, 0x00, 0x00},
+         {0x00, 0x00, 0xff, 0xff},
+      },
+   };
+   const size_t mip_offsets[TEXTURE_LEVELS] = {
+      TEXTURE_GUARD_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES,
+   };
+   const size_t mip_pixels[TEXTURE_LEVELS] = {
+      TEXTURE_WIDTH * TEXTURE_HEIGHT,
+      (TEXTURE_WIDTH / 2) * (TEXTURE_HEIGHT / 2),
+      (TEXTURE_WIDTH / 4) * (TEXTURE_HEIGHT / 4),
+   };
+   for (unsigned level = 0; level < TEXTURE_LEVELS; ++level) {
+      for (unsigned layer = 0; layer < TEXTURE_LAYERS; ++layer) {
+         uint8_t *dst = texture_upload_expected + mip_offsets[level] +
+                        layer * mip_pixels[level] * TEXTURE_PIXEL_BYTES;
+         for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel) {
+            const uint8_t *colour = mip_colours[layer][level];
+            static const uint8_t green[4] = {0, 192, 0, 255};
+            if (layer == 1 && level == 1) {
+               const unsigned x = pixel % (TEXTURE_WIDTH / 2);
+               const unsigned y = pixel / (TEXTURE_WIDTH / 2);
+               if ((x ^ y) & 1)
+                  colour = green;
+            }
+            memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, colour,
+                   TEXTURE_PIXEL_BYTES);
+         }
+      }
    }
 #else
    static const uint8_t mip_colours[TEXTURE_LEVELS][4] = {
@@ -3089,13 +3320,27 @@ main(void)
          .layerCount = TEXTURE_LAYERS,
       },
    };
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   VkImageView texture_views[2];
+   for (uint32_t source = 0; source < 2; ++source) {
+      VkImageViewCreateInfo source_view_info = texture_view_info;
+      source_view_info.subresourceRange.baseArrayLayer = source;
+      source_view_info.subresourceRange.layerCount = 1;
+      check(vkCreateImageView(device, &source_view_info, NULL,
+                              &texture_views[source]),
+            "vkCreateImageView(composite source)");
+   }
+#else
    VkImageView texture_view;
    check(vkCreateImageView(device, &texture_view_info, NULL, &texture_view),
          "vkCreateImageView(texture)");
+#endif
    const VkSamplerCreateInfo sampler_info = {
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter = VK_FILTER_NEAREST,
-      .minFilter = VK_FILTER_NEAREST,
+      .magFilter = G17P_TEXTURE_ALPHA_COMPOSITE ? VK_FILTER_LINEAR
+                                                : VK_FILTER_NEAREST,
+      .minFilter = G17P_TEXTURE_ALPHA_COMPOSITE ? VK_FILTER_LINEAR
+                                                : VK_FILTER_NEAREST,
       .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
       .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -3110,30 +3355,61 @@ main(void)
    VkSampler sampler;
    check(vkCreateSampler(device, &sampler_info, NULL, &sampler),
          "vkCreateSampler");
-   const VkDescriptorSetLayoutBinding sampler_binding = {
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkDescriptorSetLayoutBinding descriptor_bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 2,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+   };
+#else
+   const VkDescriptorSetLayoutBinding descriptor_bindings[] = {{
       .binding = 0,
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-   };
+   }};
+#endif
    const VkDescriptorSetLayoutCreateInfo set_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 1,
-      .pBindings = &sampler_binding,
+      .bindingCount = sizeof(descriptor_bindings) /
+                      sizeof(descriptor_bindings[0]),
+      .pBindings = descriptor_bindings,
    };
    VkDescriptorSetLayout set_layout;
    check(vkCreateDescriptorSetLayout(device, &set_layout_info, NULL,
                                      &set_layout),
          "vkCreateDescriptorSetLayout");
-   const VkDescriptorPoolSize pool_size = {
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkDescriptorPoolSize pool_sizes[] = {
+      {
+         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 2,
+      },
+      {
+         .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+         .descriptorCount = 1,
+      },
+   };
+#else
+   const VkDescriptorPoolSize pool_sizes[] = {{
       .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .descriptorCount = 1,
-   };
+   }};
+#endif
    const VkDescriptorPoolCreateInfo descriptor_pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = 1,
-      .poolSizeCount = 1,
-      .pPoolSizes = &pool_size,
+      .poolSizeCount = sizeof(pool_sizes) / sizeof(pool_sizes[0]),
+      .pPoolSizes = pool_sizes,
    };
    VkDescriptorPool descriptor_pool;
    check(vkCreateDescriptorPool(device, &descriptor_pool_info, NULL,
@@ -3149,20 +3425,61 @@ main(void)
    check(vkAllocateDescriptorSets(device, &set_allocate_info,
                                   &descriptor_set),
          "vkAllocateDescriptorSets");
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkDescriptorImageInfo descriptor_images[2] = {
+      {
+         .sampler = sampler,
+         .imageView = texture_views[0],
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+      {
+         .sampler = sampler,
+         .imageView = texture_views[1],
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+   };
+   const VkDescriptorBufferInfo descriptor_uniform = {
+      .buffer = composite_uniform.buffer,
+      .offset = COMPOSITE_UNIFORM_OFFSET,
+      .range = sizeof(struct composite_params),
+   };
+   const VkWriteDescriptorSet descriptor_writes[] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = descriptor_set,
+         .dstBinding = 0,
+         .descriptorCount = 2,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = descriptor_images,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = descriptor_set,
+         .dstBinding = 1,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+         .pBufferInfo = &descriptor_uniform,
+      },
+   };
+#else
    const VkDescriptorImageInfo descriptor_image = {
       .sampler = sampler,
       .imageView = texture_view,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
    };
-   const VkWriteDescriptorSet descriptor_write = {
+   const VkWriteDescriptorSet descriptor_writes[] = {{
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet = descriptor_set,
       .dstBinding = 0,
       .descriptorCount = 1,
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .pImageInfo = &descriptor_image,
-   };
-   vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, NULL);
+   }};
+#endif
+   vkUpdateDescriptorSets(device,
+                          sizeof(descriptor_writes) /
+                             sizeof(descriptor_writes[0]),
+                          descriptor_writes, 0, NULL);
 #endif
 
 #if G17P_MSAA_SAMPLES > 1
@@ -3420,6 +3737,34 @@ main(void)
          sizeof(vertex_attributes) / sizeof(vertex_attributes[0]),
       .pVertexAttributeDescriptions = vertex_attributes,
    };
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkVertexInputBindingDescription vertex_binding = {
+      .binding = 0,
+      .stride = sizeof(struct composite_vertex),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   };
+   const VkVertexInputAttributeDescription vertex_attributes[] = {
+      {
+         .location = 0,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32_SFLOAT,
+         .offset = 0,
+      },
+      {
+         .location = 1,
+         .binding = 0,
+         .format = VK_FORMAT_R32_UINT,
+         .offset = 2 * sizeof(float),
+      },
+   };
+   const VkPipelineVertexInputStateCreateInfo vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &vertex_binding,
+      .vertexAttributeDescriptionCount =
+         sizeof(vertex_attributes) / sizeof(vertex_attributes[0]),
+      .pVertexAttributeDescriptions = vertex_attributes,
+   };
 #else
    const VkVertexInputBindingDescription vertex_binding = {
       .binding = 0,
@@ -3535,21 +3880,28 @@ main(void)
 #endif
    const VkPipelineColorBlendAttachmentState blend_attachment = {
       .blendEnable =
-         G17P_INDEX_RESTART || G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND,
+         G17P_INDEX_RESTART || G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND ||
+         G17P_TEXTURE_ALPHA_COMPOSITE,
       .srcColorBlendFactor = G17P_BLEND_CONSTANT
                                 ? VK_BLEND_FACTOR_CONSTANT_COLOR
                                 : VK_BLEND_FACTOR_ONE,
       .dstColorBlendFactor =
-         (G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND) ? VK_BLEND_FACTOR_ZERO
-                                                      : VK_BLEND_FACTOR_ONE,
+         G17P_TEXTURE_ALPHA_COMPOSITE
+            ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+            : (G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND)
+                 ? VK_BLEND_FACTOR_ZERO
+                 : VK_BLEND_FACTOR_ONE,
       .colorBlendOp =
          G17P_ADVANCED_BLEND ? VK_BLEND_OP_MULTIPLY_EXT : VK_BLEND_OP_ADD,
       .srcAlphaBlendFactor = G17P_BLEND_CONSTANT
                                 ? VK_BLEND_FACTOR_CONSTANT_ALPHA
                                 : VK_BLEND_FACTOR_ONE,
       .dstAlphaBlendFactor =
-         (G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND) ? VK_BLEND_FACTOR_ZERO
-                                                      : VK_BLEND_FACTOR_ONE,
+         G17P_TEXTURE_ALPHA_COMPOSITE
+            ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+            : (G17P_BLEND_CONSTANT || G17P_ADVANCED_BLEND)
+                 ? VK_BLEND_FACTOR_ZERO
+                 : VK_BLEND_FACTOR_ONE,
       .alphaBlendOp =
          G17P_ADVANCED_BLEND ? VK_BLEND_OP_MULTIPLY_EXT : VK_BLEND_OP_ADD,
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -3575,12 +3927,14 @@ main(void)
 #endif
       .blendConstants = {0.25f, 0.5f, 0.75f, 0.125f},
    };
-#if G17P_DYNAMIC_BLEND
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
    const VkDynamicState dynamic_states[] = {
       VK_DYNAMIC_STATE_SCISSOR,
+#if G17P_DYNAMIC_BLEND
       VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT,
       VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
       VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT,
+#endif
    };
    const VkPipelineDynamicStateCreateInfo dynamic_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -3598,7 +3952,7 @@ main(void)
       .pRasterizationState = &raster,
       .pMultisampleState = &multisample,
       .pColorBlendState = &blend,
-#if G17P_DYNAMIC_BLEND
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
       .pDynamicState = &dynamic_state,
 #endif
       .layout = pipeline_layout,
@@ -3803,19 +4157,19 @@ main(void)
    const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
       {
          .bufferOffset = TEXTURE_GUARD_BYTES,
-         .imageSubresource = {TEXTURE_ASPECT, 0, 0, 1},
-         .imageExtent = {64, 64, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 0, 0, TEXTURE_LAYERS},
+         .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
       },
       {
          .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
-         .imageSubresource = {TEXTURE_ASPECT, 1, 0, 1},
-         .imageExtent = {32, 32, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 1, 0, TEXTURE_LAYERS},
+         .imageExtent = {TEXTURE_WIDTH / 2, TEXTURE_HEIGHT / 2, 1},
       },
       {
          .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES +
                          TEXTURE_LEVEL1_BYTES,
-         .imageSubresource = {TEXTURE_ASPECT, 2, 0, 1},
-         .imageExtent = {16, 16, 1},
+         .imageSubresource = {TEXTURE_ASPECT, 2, 0, TEXTURE_LAYERS},
+         .imageExtent = {TEXTURE_WIDTH / 4, TEXTURE_HEIGHT / 4, 1},
       },
    };
    vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
@@ -3836,6 +4190,11 @@ main(void)
    const VkClearValue clears[2] = {
       {.color = {.float32 = {0.0625f, 0.125f, 0.1875f, 0.25f}}},
       {.color = {.float32 = {0.3125f, 0.375f, 0.4375f, 0.5f}}},
+   };
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   const VkClearValue clear = {
+      .color = {.float32 = {128.0f / 255.0f, 64.0f / 255.0f,
+                            128.0f / 255.0f, 1.0f}},
    };
 #elif G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND
    const VkClearValue clear = {
@@ -3877,7 +4236,7 @@ main(void)
 #if !G17P_CUBE_SAMPLE
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 #endif
-#if G17P_TEXTURE_ORACLE
+#if G17P_TEXTURE_ORACLE && !G17P_TEXTURE_ALPHA_COMPOSITE
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
 #endif
@@ -3912,6 +4271,32 @@ main(void)
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #elif G17P_INSTANCE_RATE
    vkCmdDraw(command_buffer, 6, 2, 0, 3);
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   vkCmdBindIndexBuffer(command_buffer, composite_index.buffer,
+                        COMPOSITE_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
+   for (uint32_t step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
+      const uint32_t edge_width = IMAGE_WIDTH / 32;
+      const VkRect2D alpha_scissor = {
+         .offset = {
+            step == 0
+               ? 0
+               : step == 16
+                    ? IMAGE_WIDTH - edge_width
+                    : edge_width + (step - 1) * 2 * edge_width,
+            0,
+         },
+         .extent = {
+            (step == 0 || step == 16) ? edge_width : 2 * edge_width,
+            IMAGE_HEIGHT,
+         },
+      };
+      const uint32_t dynamic_offset = step * COMPOSITE_UNIFORM_STRIDE;
+      vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
+      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline_layout, 0, 1, &descriptor_set, 1,
+                              &dynamic_offset);
+      vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+   }
 #elif G17P_INDEX_RESTART
    vkCmdBindIndexBuffer(command_buffer, restart_index.buffer,
                         RESTART_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
@@ -4196,6 +4581,13 @@ main(void)
    )
       return EXIT_FAILURE;
 #endif
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   if (!verify_upload(&composite_index, composite_index_expected,
+                      "composite index input") ||
+       !verify_upload(&composite_uniform, composite_uniform_expected,
+                      "composite uniform input"))
+      return EXIT_FAILURE;
+#endif
 
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT ||           \
@@ -4259,6 +4651,13 @@ main(void)
    )
       return EXIT_FAILURE;
 #endif
+#if G17P_TEXTURE_ALPHA_COMPOSITE
+   if (!verify_upload(&composite_index, composite_index_expected,
+                      "composite index input") ||
+       !verify_upload(&composite_uniform, composite_uniform_expected,
+                      "composite uniform input"))
+      return EXIT_FAILURE;
+#endif
 #endif
 #if G17P_RGBA8_MRT
    const uint64_t checksum =
@@ -4296,6 +4695,14 @@ main(void)
                      "source/readback guards unchanged, checksum %016" PRIx64
                      "\n",
           checksum);
+#elif G17P_TEXTURE_ALPHA_COMPOSITE
+   printf(PROBE_NAME ": PASS — dynamically indexed descriptor 1 and UBO "
+                     "offsets selected the checker mip 1 and all 17 opacity "
+                     "steps; quarter-texel linear RGBA sampling, clamp edges, "
+                     "two-triangle diagonal coverage and premultiplied blend "
+                     "were exact "
+                     "immediately/3s; all source/readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #elif G17P_EXPLICIT_GRADIENT
    printf(PROBE_NAME ": PASS — explicit gradients selected exact mip 1 "
                      "immediately/3s, distinct red/green/blue mips and all "
