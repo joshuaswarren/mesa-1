@@ -325,13 +325,18 @@ agx_gallium_pack_native_pbe(
 
    /* Exactly the subset agx_pbe_agx3_core.h documents as recovered, and the
     * same gate hk_pack_native_pbe() applies field for field -- the one that
-    * already runs on this hardware through Honeykrisp. Every other axis
-    * (arrays, multisample, compression, sRGB-on-store, image mode, the
+    * already runs on this hardware through Honeykrisp. Gen9's exact tiled
+    * 2D-array packet is the one bounded layered exception. Every other axis
+    * (multisample, compression, sRGB-on-store, image mode, the
     * extended word, and the software addressing sideband Gallium uses for
     * image atomics, EMRT and spilled render targets) has no proven Gen9/Gen10
     * placement, so refuse rather than drop the bits.
     */
-   if (legacy->dimension != AGX_TEXTURE_DIMENSION_2D ||
+   const bool array =
+      agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
+      legacy->layers > 1;
+   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (agx3_generation != AGX_PBE_AGX3_GENERATION_9 || legacy->level != 0 ||
          legacy->levels != 1 || legacy->unk_mipmapped)) ||
@@ -340,7 +345,8 @@ agx_gallium_pack_native_pbe(
         legacy->layout != AGX_LAYOUT_GPU) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
        legacy->samples != AGX_SAMPLE_COUNT_2 || legacy->compressed ||
-       legacy->mode != AGX_IMAGE_MODE_NORMAL || legacy->layers != 1 ||
+       legacy->mode != AGX_IMAGE_MODE_NORMAL ||
+       (!array && legacy->layers != 1) ||
        (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
         (legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
@@ -372,8 +378,12 @@ agx_gallium_pack_native_pbe(
    };
 
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid =
-      agx3_generation == AGX_PBE_AGX3_GENERATION_9
+   const bool valid = array
+      ? (legacy->level == 0 && legacy->levels == 1 &&
+         !legacy->unk_mipmapped &&
+         agx_pbe_agx3_2d_array_pack(agx3_generation, &fields,
+                                    legacy->layers, &packed))
+      : agx3_generation == AGX_PBE_AGX3_GENERATION_9
          ? agx_pbe_agx3_2d_mip_pack(agx3_generation, &fields, legacy->level,
                                     legacy->levels, &packed)
          : agx_pbe_agx3_2d_pack(agx3_generation, &fields, &packed);

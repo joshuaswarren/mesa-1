@@ -315,8 +315,7 @@ test_agx3_pbe(void)
     */
    static const char *const names[] = {
       "software sideband (image atomics)", "MSAA sideband", "layer stride",
-      "compressed",  "sRGB on store",      "extended word",
-      "array",       "multisampled",       "1D",
+      "compressed", "sRGB on store", "extended word", "multisampled", "1D",
       "sparse image mode",
    };
    struct AGX_PBE bad[ARRAY_SIZE(names)];
@@ -329,10 +328,9 @@ test_agx3_pbe(void)
    bad[3].compressed = true;
    bad[4].srgb = true;
    bad[5].extended = true;
-   bad[6].layers = 2;
-   bad[7].samples = AGX_SAMPLE_COUNT_4;
-   bad[8].dimension = AGX_TEXTURE_DIMENSION_1D;
-   bad[9].mode = AGX_IMAGE_MODE_SPARSE;
+   bad[6].samples = AGX_SAMPLE_COUNT_4;
+   bad[7].dimension = AGX_TEXTURE_DIMENSION_1D;
+   bad[8].mode = AGX_IMAGE_MODE_SPARSE;
 
    for (unsigned i = 0; i < ARRAY_SIZE(bad); ++i) {
       memset(&native, 0xff, sizeof(native));
@@ -352,6 +350,37 @@ test_agx3_pbe(void)
                                            &still_ok, &bad[i]));
       }
    }
+
+   /* Match the exact shared/Honeykrisp Gen9 layered EOT descriptor. Array
+    * storage is tiled, base-level-only and Gen9-only; every adjacent shape
+    * stays closed. */
+   struct AGX_PBE array = rt;
+   array.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   array.layers = 2;
+   array.page_aligned_layers = true;
+   struct agx_pbe_agx3_descriptor expected_array;
+   CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                     &array));
+   struct agx_pbe_agx3_2d_fields array_fields = fields;
+   array_fields.page_aligned_layers = true;
+   CHECK(agx_pbe_agx3_2d_array_pack(AGX_PBE_AGX3_GENERATION_9,
+                                    &array_fields, 2, &expected_array));
+   CHECK(memcmp(native.opaque, expected_array.bytes,
+                sizeof(expected_array.bytes)) == 0);
+
+   array.layout = AGX_LAYOUT_LINEAR;
+   array.stride = (array.width * 4) - 4;
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                      &array));
+   array = rt;
+   array.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   array.layers = 2;
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10, &native,
+                                      &array));
+   array.level = 1;
+   array.levels = 2;
+   CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9, &native,
+                                      &array));
 }
 
 static void

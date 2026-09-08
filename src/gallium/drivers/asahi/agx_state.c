@@ -3090,6 +3090,20 @@ agx_texture_descriptor_at(void *base, unsigned stride, unsigned index)
                                                      (stride * index));
 }
 
+static bool
+agx_gallium_g17p_tile_layout_supported(struct agx_tilebuffer_layout *tib)
+{
+   if (!tib)
+      return false;
+
+   /* Layer selection lives in the proven array BG/EOT programs and PBE
+    * descriptor. It does not change the physical tile allocation, so validate
+    * that allocation through the same bounded RT0 contract Honeykrisp uses. */
+   struct agx_tilebuffer_layout physical = *tib;
+   physical.layered = false;
+   return agx_g17p_rt0_tile_layout_supported(&physical);
+}
+
 static struct agx_gallium_pbe_descriptor *
 agx_pbe_descriptor_at(void *base, unsigned stride, unsigned index)
 {
@@ -3969,7 +3983,8 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
    if (dev->chip == AGX_CHIP_G17P) {
       /* The exact HAL200 background/EOT programs cover ordinary RT0 and the
        * hardware-witnessed pair of single-sample RGBA8 attachments. */
-      if (!agx_g17p_rt0_tile_layout_supported(&batch->tilebuffer_layout))
+      if (!agx_gallium_g17p_tile_layout_supported(
+             &batch->tilebuffer_layout))
          agx_native_descriptor_rejected(dev, "background tile layout");
 
       const bool rgba8_mrt =

@@ -300,6 +300,16 @@ gl_texture_array = executable(
   build_by_default : false,
 )
 
+gl_layered_fbo = executable(
+  'asahi-g17p-gl-layered-fbo',
+  files('test-g17p-gl-layered-fbo.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
 gl_texture_3d = executable(
   'asahi-g17p-gl-texture-3d',
   files('test-g17p-gl-texture-3d.c'),
@@ -374,6 +384,30 @@ test(
     'EGL_PLATFORM=surfaceless',
     'LIBGL_ALWAYS_SOFTWARE=true',
   ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-layered-fbo-software-control',
+  gl_layered_fbo,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-layered-fbo-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_layered_fbo,
+  ],
+  env : ['MESA_SHADER_CACHE_DISABLE=true'],
   suite : ['asahi'],
 )
 
