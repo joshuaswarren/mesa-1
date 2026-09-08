@@ -422,7 +422,7 @@ struct agx_batch {
    bool generate_primitive_id;
 
    /* Current varyings linkage structures */
-   uint32_t varyings;
+   uint64_t varyings;
    struct agx_varyings_vs linked_varyings;
 
    struct agx_draw_uniforms uniforms;

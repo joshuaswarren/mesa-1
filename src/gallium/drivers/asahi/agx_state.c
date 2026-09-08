@@ -13,8 +13,11 @@
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
+#include "asahi/lib/agx_ppp_hal200_graphics_core.h"
+#include "asahi/lib/agx_ppp_hal200_raster_core.h"
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
@@ -81,6 +84,31 @@
  * pointer. Gallium's batch pool already returns the full context VA, so make
  * only that nested pointer relative. The root VDM stream remains absolute. */
 static bool
+agx_gallium_vdm_compact(struct agx_batch *batch, uint64_t gpu,
+                        uint64_t *compact)
+{
+   if (!batch || !compact)
+      return false;
+
+   struct agx_bo *payload_bo = NULL;
+   util_dynarray_foreach(&batch->pool.bos, struct agx_bo *, bo) {
+      if (gpu >= (*bo)->va->addr && gpu - (*bo)->va->addr < (*bo)->size) {
+         payload_bo = *bo;
+         break;
+      }
+   }
+   if (!payload_bo)
+      return false;
+
+   const uint64_t alias =
+      agx_batch_get_g17p_vdm_alias(batch, payload_bo, gpu);
+   if (!agx_g17p_vdm_payload_compact(alias, compact))
+      return false;
+
+   return true;
+}
+
+static bool
 agx_gallium_ppp_fini(struct agx_batch *batch, uint8_t **out,
                      struct agx_ppp_update *ppp)
 {
@@ -91,20 +119,9 @@ agx_gallium_ppp_fini(struct agx_batch *batch, uint8_t **out,
    if (dev->chip != AGX_CHIP_G17P)
       return agx_ppp_fini(dev->chip, out, ppp);
 
-   struct agx_bo *payload_bo = NULL;
-   util_dynarray_foreach(&batch->pool.bos, struct agx_bo *, bo) {
-      if (ppp->gpu_base >= (*bo)->va->addr &&
-          ppp->gpu_base - (*bo)->va->addr < (*bo)->size) {
-         payload_bo = *bo;
-         break;
-      }
-   }
-
    struct agx_ppp_update compact_ppp = *ppp;
-   const uint64_t alias =
-      agx_batch_get_g17p_vdm_alias(batch, payload_bo, ppp->gpu_base);
-   if (!agx_g17p_vdm_payload_compact(alias,
-                                     &compact_ppp.gpu_base))
+   if (!agx_gallium_vdm_compact(batch, ppp->gpu_base,
+                                &compact_ppp.gpu_base))
       return false;
 
    return agx_ppp_fini(dev->chip, out, &compact_ppp);
@@ -1031,63 +1048,6 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
          cfg.max_y = maxy[i];
          cfg.max_z = maxz;
       }
-   }
-
-   struct agx_device *dev = agx_device(batch->ctx->base.screen);
-   if (dev->chip == AGX_CHIP_G17P) {
-      struct agx_ppp_viewport_payload_fields fields = {
-         .viewport_count = count,
-      };
-
-      for (unsigned i = 0; i < count; ++i) {
-         uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
-         agx_pack(region_clip, REGION_CLIP, cfg) {
-            cfg.enable = true;
-            cfg.min_x = minx[i] / 32;
-            cfg.min_y = miny[i] / 32;
-            cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
-            cfg.max_y = DIV_ROUND_UP(MAX2(maxy[i], 1), 32);
-         }
-         memcpy(&fields.region_clip_raw[i], region_clip,
-                sizeof(region_clip));
-
-         fields.viewports[i] = (struct agx_ppp_viewport_transform_raw){
-            .translate_x = fui(vp[i].translate[0]),
-            .scale_x = fui(vp[i].scale[0]),
-            .translate_y = fui(vp[i].translate[1]),
-            .scale_y = fui(vp[i].scale[1]),
-            .translate_z = fui(clip_halfz ? vp[i].translate[2]
-                                         : vp[i].translate[2] - vp[i].scale[2]),
-            .scale_z = fui(clip_halfz ? vp[i].scale[2]
-                                     : vp[i].scale[2] * 2.0f),
-         };
-      }
-
-      uint8_t viewport_control[AGX_VIEWPORT_CONTROL_LENGTH];
-      agx_pack(viewport_control, VIEWPORT_CONTROL, cfg)
-         ;
-      memcpy(&fields.viewport_control_raw, viewport_control,
-             sizeof(viewport_control));
-
-      struct agx_ppp_viewport_payload_core encoded;
-      const bool packed =
-         agx_ppp_viewport_payload_core_pack(dev->chip, &fields, &encoded);
-      assert(packed);
-      if (!packed)
-         return;
-
-      struct agx_ptr T = agx_pool_alloc_aligned(
-         &batch->pool, encoded.length, AGX_PPP_HEADER_ALIGN);
-      memcpy(T.cpu, encoded.bytes, encoded.length);
-      struct agx_ppp_update ppp = {
-         .head = (uint8_t *)T.cpu + encoded.length,
-         .gpu_base = T.gpu,
-         .total_size = encoded.length,
-         .cpu_base = T.cpu,
-      };
-      const bool emitted = agx_gallium_ppp_fini(batch, out, &ppp);
-      assert(emitted);
-      return;
    }
 
    /* Upload state */
@@ -3819,8 +3779,272 @@ agx_point_object_type(struct agx_rasterizer *rast)
 #define MAX_PPP_UPDATES 2
 #define IS_DIRTY(ST)    !!(ctx->dirty & AGX_DIRTY_##ST)
 
+static uint32_t
+agx_g17p_stencil_word(const struct pipe_stencil_state *stencil)
+{
+   return agx_ppp_hal200_stencil_pack(
+      stencil->enabled, stencil->func,
+      agx_stencil_ops[stencil->fail_op],
+      agx_stencil_ops[stencil->zfail_op],
+      agx_stencil_ops[stencil->zpass_op], stencil->valuemask,
+      stencil->writemask);
+}
+
 static uint8_t *
-agx_encode_state(struct agx_batch *batch, uint8_t *out)
+agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
+                         struct agx_compiled_shader *vs,
+                         uint32_t *draw_state_offset)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   struct agx_rasterizer *rast = ctx->rast;
+   if (dev->chip != AGX_CHIP_G17P || !draw_state_offset ||
+       vs->b.info.nonzero_viewport)
+      return NULL;
+
+   const bool is_points = batch->reduced_prim == MESA_PRIM_POINTS;
+   const bool is_lines = batch->reduced_prim == MESA_PRIM_LINES;
+   const enum agx_object_type object_type =
+      is_points  ? agx_point_object_type(rast)
+      : is_lines ? AGX_OBJECT_TYPE_LINE
+                 : AGX_OBJECT_TYPE_TRIANGLE;
+
+   unsigned minx, miny, maxx, maxy;
+   agx_get_scissor_extents(&ctx->viewport[0],
+                           rast->base.scissor ? &ctx->scissor[0] : NULL,
+                           &batch->key, &minx, &miny, &maxx, &maxy);
+   float minz, maxz;
+   util_viewport_zmin_zmax(&ctx->viewport[0], rast->base.clip_halfz, &minz,
+                           &maxz);
+
+   const bool depth_bias_enable =
+      rast->depth_bias && object_type == AGX_OBJECT_TYPE_TRIANGLE;
+   const struct agx_ppp_hal200_raster_fields raster_fields = {
+      .scissor_enable = true,
+      .depth_bias_enable = depth_bias_enable,
+      .max_x = MIN2(maxx, UINT16_MAX),
+      .min_x = MIN2(minx, UINT16_MAX),
+      .max_y = MIN2(maxy, UINT16_MAX),
+      .min_y = MIN2(miny, UINT16_MAX),
+      .min_z_raw = fui(minz),
+      .max_z_raw = fui(maxz),
+      .depth_bias_raw = fui(depth_bias_enable ? rast->base.offset_units * 2.0f
+                                               : 0.0f),
+      .slope_scale_raw =
+         fui(depth_bias_enable ? rast->base.offset_scale : 0.0f),
+      .clamp_raw = fui(depth_bias_enable ? rast->base.offset_clamp : 0.0f),
+   };
+   struct agx_ppp_hal200_raster_state raster_state;
+   if (!agx_ppp_hal200_raster_state_build(dev->chip, &raster_fields,
+                                           &raster_state))
+      return NULL;
+
+   void *scissor = util_dynarray_grow_bytes(
+      &batch->scissor, 1, sizeof(raster_state.scissor));
+   void *depth_bias = util_dynarray_grow_bytes(
+      &batch->depth_bias, 1, sizeof(raster_state.depth_bias));
+   memcpy(scissor, raster_state.scissor, sizeof(raster_state.scissor));
+   memcpy(depth_bias, raster_state.depth_bias, sizeof(raster_state.depth_bias));
+
+   struct agx_ppp_viewport_payload_fields viewport_fields = {
+      .viewport_count = 1,
+   };
+   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+   agx_pack(region_clip, REGION_CLIP, cfg) {
+      cfg.enable = true;
+      cfg.min_x = minx / 32;
+      cfg.min_y = miny / 32;
+      cfg.max_x = DIV_ROUND_UP(MAX2(maxx, 1), 32);
+      cfg.max_y = DIV_ROUND_UP(MAX2(maxy, 1), 32);
+   }
+   memcpy(&viewport_fields.region_clip_raw[0], region_clip,
+          sizeof(region_clip));
+   const struct pipe_viewport_state *vp = &ctx->viewport[0];
+   viewport_fields.viewports[0] = (struct agx_ppp_viewport_transform_raw){
+      .translate_x = fui(vp->translate[0]),
+      .scale_x = fui(vp->scale[0]),
+      .translate_y = fui(vp->translate[1]),
+      .scale_y = fui(vp->scale[1]),
+      .translate_z = fui(rast->base.clip_halfz
+                            ? vp->translate[2]
+                            : vp->translate[2] - vp->scale[2]),
+      .scale_z = fui(rast->base.clip_halfz ? vp->scale[2]
+                                           : vp->scale[2] * 2.0f),
+   };
+   struct agx_ppp_viewport_payload_core viewport;
+   if (!agx_ppp_viewport_payload_core_pack(dev->chip, &viewport_fields,
+                                            &viewport))
+      return NULL;
+
+   uint64_t fragment_program = 0;
+   agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
+                      MESA_SHADER_FRAGMENT, 0, 0, &fragment_program);
+   if (!fragment_program)
+      return NULL;
+
+   const struct agx_ppp_hal200_fragment_fields fs_fields = {
+      .resource_counts = ctx->linked.fs->cf.nr_bindings << 16,
+      .varying_table = batch->varyings,
+      .stage_program = fragment_program,
+   };
+   struct agx_ppp_hal200_graphics_core fs_record;
+   if (!agx_ppp_hal200_fragment_core_pack(dev->chip, &fs_fields, &fs_record))
+      return NULL;
+
+   uint32_t output_size;
+   if (!agx_ppp_hal200_output_size_pack(vs->uvs.size, 0, &output_size))
+      return NULL;
+
+   const bool stencil_test = ctx->zs->base.stencil[0].enabled;
+   enum agx_visibility_mode visibility = AGX_VISIBILITY_MODE_NONE;
+   uint16_t query_index = 0;
+   if (ctx->active_queries && ctx->occlusion_query) {
+      visibility = ctx->occlusion_query->type == PIPE_QUERY_OCCLUSION_COUNTER
+                      ? AGX_VISIBILITY_MODE_COUNTING
+                      : AGX_VISIBILITY_MODE_BOOLEAN;
+      query_index = agx_get_oq_index(batch, ctx->occlusion_query);
+   }
+   uint32_t fragment_control = raster_state.fragment_control |
+                               (stencil_test ? UINT32_C(0x000c0000) : 0);
+   uint32_t occlusion_query;
+   if (!agx_ppp_hal200_occlusion_pack(dev->chip, visibility, query_index,
+                                      fragment_control, &fragment_control,
+                                      &occlusion_query))
+      return NULL;
+
+   struct agx_fragment_face_packed front_face, back_face;
+   agx_pack(&front_face, FRAGMENT_FACE, cfg) {
+      cfg.stencil_reference = ctx->stencil_ref.ref_value[0];
+      cfg.line_width = rast->line_width;
+      cfg.polygon_mode = rast->polygon_mode;
+   }
+   agx_pack(&back_face, FRAGMENT_FACE, cfg) {
+      cfg.stencil_reference =
+         ctx->stencil_ref.ref_value[ctx->zs->base.stencil[1].enabled ? 1 : 0];
+      cfg.line_width = rast->line_width;
+      cfg.polygon_mode = rast->polygon_mode;
+   }
+   const bool depth_test =
+      batch->key.zsbuf.texture && ctx->zs->base.depth_enabled;
+   if (!agx_ppp_hal200_depth_face_pack(
+          dev->chip, depth_test, ctx->zs->base.depth_writemask,
+          ctx->zs->base.depth_func, front_face.opaque[0],
+          &front_face.opaque[0]) ||
+       !agx_ppp_hal200_depth_face_pack(
+          dev->chip, depth_test, ctx->zs->base.depth_writemask,
+          ctx->zs->base.depth_func, back_face.opaque[0],
+          &back_face.opaque[0]))
+      return NULL;
+
+   struct agx_fragment_face_2_packed face_2;
+   agx_pack_fragment_face_2(&face_2, object_type, &ctx->fs->b.info);
+
+   const uint32_t pass_type = ctx->linked.fs->fragment_control.opaque[0] >> 29;
+   if (pass_type != AGX_PASS_TYPE_OPAQUE &&
+       pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
+       pass_type != AGX_PASS_TYPE_PUNCH_THROUGH)
+      return NULL;
+   uint32_t secondary_control = UINT32_C(0x00000200) | (pass_type << 29);
+   if (pass_type == AGX_PASS_TYPE_PUNCH_THROUGH)
+      secondary_control |= UINT32_C(1) << 26;
+
+   const struct agx_ppp_hal200_graphics_fields output_fields = {
+      .words = {(ctx->linked.fs->cf.nr_bindings ? UINT32_C(0x10000) : 0) |
+                   (ctx->linked.fs->cf.reads_z ? UINT32_C(0x200000) : 0),
+                0, 0, output_size,
+                AGX_PPP_HAL200_PRIMARY_FACE_HEADER, fragment_control},
+   };
+   const struct agx_ppp_hal200_graphics_fields primary_fields = {
+      .words = {fragment_control, front_face.opaque[0],
+                agx_g17p_stencil_word(&ctx->zs->base.stencil[0]),
+                back_face.opaque[0],
+                agx_g17p_stencil_word(ctx->zs->base.stencil[1].enabled
+                                        ? &ctx->zs->base.stencil[1]
+                                        : &ctx->zs->base.stencil[0]),
+                occlusion_query},
+   };
+   const struct agx_ppp_hal200_graphics_fields secondary_fields = {
+      .words = {secondary_control, face_2.opaque[0], face_2.opaque[0],
+                UINT32_C(0x0001ffff)},
+   };
+
+   uint32_t cull = UINT32_C(0x00000480);
+   if (!agx_ppp_hal200_cull_mode_pack(dev->chip, rast->base.cull_face,
+                                      rast->base.front_ccw, cull, &cull) ||
+       !agx_ppp_hal200_cull_provoking_pack(
+          dev->chip, rast->base.flatshade_first ? 0 : 2, cull, &cull) ||
+       !agx_ppp_hal200_depth_clip_pack(dev->chip, rast->base.depth_clip_near,
+                                       cull, &cull) ||
+       !agx_ppp_hal200_rasterizer_discard_pack(
+          dev->chip, rast->base.rasterizer_discard, secondary_control, cull,
+          &secondary_control, &cull))
+      return NULL;
+
+   struct agx_ppp_hal200_graphics_core output_record, primary_record;
+   struct agx_ppp_hal200_graphics_core secondary_record, cull_record;
+   struct agx_ppp_hal200_graphics_fields final_secondary = secondary_fields;
+   final_secondary.words[0] = secondary_control;
+   const struct agx_ppp_hal200_graphics_fields cull_fields = {
+      .words = {cull},
+   };
+   const struct agx_ppp_w_clamp_cull2_fields w_cull2_fields = {
+      .w_clamp_raw = 0,
+      .cull2_raw = UINT32_C(0x80),
+   };
+   struct agx_ppp_w_clamp_cull2_core w_cull2;
+   if (!agx_ppp_hal200_graphics_core_pack(
+          dev->chip, AGX_PPP_HAL200_GRAPHICS_OUTPUT, &output_fields,
+          &output_record) ||
+       !agx_ppp_hal200_graphics_core_pack(
+          dev->chip, AGX_PPP_HAL200_GRAPHICS_PRIMARY_FACE, &primary_fields,
+          &primary_record) ||
+       !agx_ppp_hal200_graphics_core_pack(
+          dev->chip, AGX_PPP_HAL200_GRAPHICS_SECONDARY_FACE, &final_secondary,
+          &secondary_record) ||
+       !agx_ppp_hal200_graphics_core_pack(
+          dev->chip, AGX_PPP_HAL200_GRAPHICS_CULL, &cull_fields,
+          &cull_record) ||
+       !agx_ppp_w_clamp_cull2_core_pack(dev->chip, &w_cull2_fields,
+                                         &w_cull2))
+      return NULL;
+
+   uint8_t bind_group[AGX_G17P_BIND_GROUP_BYTES] = {0};
+   memcpy(&bind_group[0x00], fs_record.bytes, fs_record.length);
+   memcpy(&bind_group[0x1c], output_record.bytes, output_record.length);
+   memcpy(&bind_group[0x30], primary_record.bytes, primary_record.length);
+   memcpy(&bind_group[0x4c], secondary_record.bytes, secondary_record.length);
+   memcpy(&bind_group[0x60], w_cull2.bytes, w_cull2.length);
+   memcpy(&bind_group[0x6c], cull_record.bytes, cull_record.length);
+
+   struct agx_ptr state = agx_pool_alloc_aligned(
+      &batch->pool, AGX_G17P_BIND_STATE_BYTES, 64);
+   uint64_t compact_state;
+   struct agx_g17p_bind_state_upload uploaded;
+   if (!state.cpu ||
+       !agx_gallium_vdm_compact(batch, state.gpu, &compact_state) ||
+       !agx_g17p_upload_bind_state(
+          state.cpu, AGX_G17P_BIND_STATE_BYTES, compact_state, bind_group,
+          viewport.bytes, viewport.length,
+          batch->linked_varyings.counts_32.opaque[0],
+          batch->linked_varyings.counts_16.opaque[0], &uploaded))
+      return NULL;
+
+   struct agx_ptr indices = agx_pool_alloc_aligned(&batch->pool, 8, 4);
+   uint64_t compact_indices;
+   if (!indices.cpu ||
+       !agx_gallium_vdm_compact(batch, indices.gpu, &compact_indices) ||
+       !agx_g17p_upload_draw_indices(
+          indices.cpu, 8, compact_indices, batch->scissor.size,
+          batch->depth_bias.size, draw_state_offset))
+      return NULL;
+
+   memcpy(out, uploaded.tail.bytes, uploaded.tail.length);
+   return out + uploaded.tail.length;
+}
+
+static uint8_t *
+agx_encode_state(struct agx_batch *batch, uint8_t *out,
+                 uint32_t *draw_state_offset)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
@@ -3828,6 +4052,9 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
    /* If nothing is dirty, encode nothing */
    if (!ctx->dirty)
       return out;
+
+   if (draw_state_offset)
+      *draw_state_offset = 0;
 
    struct agx_rasterizer *rast = ctx->rast;
    unsigned ppp_updates = 0;
@@ -3847,7 +4074,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
             AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
 
          struct agx_ptr t =
-            agx_pool_alloc_aligned(&batch->pipeline_pool, linkage_size, 16);
+            agx_pool_alloc_aligned(&batch->pipeline_pool, linkage_size,
+                                   dev->chip == AGX_CHIP_G17P ? 64 : 16);
 
          agx_link_varyings_vs_fs(t.cpu, &batch->linked_varyings,
                                  vs->uvs.user_size, &ctx->linked.fs->cf,
@@ -3857,7 +4085,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                     : 0,
                                  &batch->generate_primitive_id);
 
-         batch->varyings = agx_usc_addr(dev, t.gpu);
+         batch->varyings =
+            dev->chip == AGX_CHIP_G17P ? t.gpu : agx_usc_addr(dev, t.gpu);
       } else {
          batch->varyings = 0;
       }
@@ -3866,7 +4095,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
       ppp_updates++;
    }
 
-   if (IS_DIRTY(VS) || varyings_dirty) {
+   if (dev->chip == AGX_CHIP_G17P || IS_DIRTY(VS) || varyings_dirty) {
       struct agx_vdm_state_vertex_shader_word_0_packed counts;
       agx_pack(&counts, VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
          cfg.uniform_register_count = vs->b.info.push_count;
@@ -3930,6 +4159,9 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
          out += 4;
       }
    }
+
+   if (dev->chip == AGX_CHIP_G17P)
+      return agx_g17p_emit_bind_state(batch, out, vs, draw_state_offset);
 
    struct agx_pool *pool = &batch->pool;
 
@@ -4168,7 +4400,8 @@ agx_primitive_for_pipe(enum mesa_prim mode)
 
 static uint8_t *
 agx_g17p_emit_draw_body(uint8_t *out, const struct agx_draw *draw,
-                        enum agx_primitive primitive, uint32_t restart_index)
+                        enum agx_primitive primitive, uint32_t restart_index,
+                        uint32_t draw_state_offset)
 {
    if (draw->indexed) {
       const struct agx_vdm_hal200_indexed_draw_fields fields = {
@@ -4176,6 +4409,7 @@ agx_g17p_emit_draw_body(uint8_t *out, const struct agx_draw *draw,
          .index_size_B = agx_index_size_to_B(draw->index_size),
          .restart_enable = draw->restart,
          .restart_index = restart_index,
+         .draw_state_context_offset = draw_state_offset,
          .index_buffer = draw->index_buffer,
          .index_buffer_range_B = draw->index_buffer_range_B,
          .first_index = draw->start,
@@ -4183,32 +4417,53 @@ agx_g17p_emit_draw_body(uint8_t *out, const struct agx_draw *draw,
          .instance_count = draw->b.count[1],
          .base_vertex = (int32_t)draw->index_bias,
       };
-      struct agx_vdm_hal200_indexed_draw_body packed;
-      const bool valid = agx_vdm_hal200_indexed_draw_body_pack(
-         AGX_CHIP_G17P, &fields, &packed);
-      assert(valid);
-      if (!valid)
-         return out;
-
-      memcpy(out, packed.bytes, packed.length);
-      return out + packed.length;
+      if (draw_state_offset) {
+         struct agx_vdm_hal200_indexed_draw packed;
+         const bool valid = agx_vdm_hal200_indexed_draw_pack(
+            AGX_CHIP_G17P, &fields, &packed);
+         assert(valid);
+         if (!valid)
+            return out;
+         memcpy(out, packed.bytes, packed.length);
+         return out + packed.length;
+      } else {
+         struct agx_vdm_hal200_indexed_draw_body packed;
+         const bool valid = agx_vdm_hal200_indexed_draw_body_pack(
+            AGX_CHIP_G17P, &fields, &packed);
+         assert(valid);
+         if (!valid)
+            return out;
+         memcpy(out, packed.bytes, packed.length);
+         return out + packed.length;
+      }
    }
 
    const struct agx_vdm_hal200_direct_draw_fields fields = {
+      .draw_state_context_offset = draw_state_offset,
       .primitive = primitive,
       .vertex_count = draw->b.count[0],
       .instance_count = draw->b.count[1],
       .vertex_start = draw->start,
    };
-   struct agx_vdm_hal200_direct_draw_body packed;
-   const bool valid = agx_vdm_hal200_direct_draw_body_pack(
-      AGX_CHIP_G17P, &fields, &packed);
-   assert(valid);
-   if (!valid)
-      return out;
-
-   memcpy(out, packed.bytes, packed.length);
-   return out + packed.length;
+   if (draw_state_offset) {
+      struct agx_vdm_hal200_direct_draw packed;
+      const bool valid = agx_vdm_hal200_direct_draw_pack(
+         AGX_CHIP_G17P, &fields, &packed);
+      assert(valid);
+      if (!valid)
+         return out;
+      memcpy(out, packed.bytes, packed.length);
+      return out + packed.length;
+   } else {
+      struct agx_vdm_hal200_direct_draw_body packed;
+      const bool valid = agx_vdm_hal200_direct_draw_body_pack(
+         AGX_CHIP_G17P, &fields, &packed);
+      assert(valid);
+      if (!valid)
+         return out;
+      memcpy(out, packed.bytes, packed.length);
+      return out + packed.length;
+   }
 }
 
 static uint64_t
@@ -5707,23 +5962,30 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * We only need to do this once per draw as long as we conservatively
     * estimate the maximum bytes of VDM commands that this draw will emit.
     */
-   agx_ensure_cmdbuf_has_space(
-      batch, &batch->vdm,
-      (AGX_VDM_STATE_LENGTH * 2) + (AGX_PPP_STATE_LENGTH * MAX_PPP_UPDATES) +
-         AGX_VDM_STATE_RESTART_INDEX_LENGTH +
-         AGX_VDM_STATE_VERTEX_SHADER_WORD_0_LENGTH +
-         AGX_VDM_STATE_VERTEX_SHADER_WORD_1_LENGTH +
-         AGX_VDM_STATE_VERTEX_OUTPUTS_LENGTH +
-         AGX_VDM_STATE_VERTEX_UNKNOWN_LENGTH + 4 /* padding */ +
-         AGX_INDEX_LIST_LENGTH + AGX_INDEX_LIST_BUFFER_LO_LENGTH +
-         AGX_INDEX_LIST_COUNT_LENGTH + AGX_INDEX_LIST_INSTANCES_LENGTH +
-         AGX_INDEX_LIST_START_LENGTH + AGX_INDEX_LIST_BUFFER_SIZE_LENGTH);
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   const size_t command_space =
+      dev->chip == AGX_CHIP_G17P
+         ? AGX_VDM_STATE_UPDATE_LENGTH + AGX_VDM_HAL200_BIND_TAIL_LENGTH +
+              AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH +
+              AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH + AGX_VDM_BARRIER_LENGTH
+         : (AGX_VDM_STATE_LENGTH * 2) +
+              (AGX_PPP_STATE_LENGTH * MAX_PPP_UPDATES) +
+              AGX_VDM_STATE_RESTART_INDEX_LENGTH +
+              AGX_VDM_STATE_VERTEX_SHADER_WORD_0_LENGTH +
+              AGX_VDM_STATE_VERTEX_SHADER_WORD_1_LENGTH +
+              AGX_VDM_STATE_VERTEX_OUTPUTS_LENGTH +
+              AGX_VDM_STATE_VERTEX_UNKNOWN_LENGTH + 4 /* padding */ +
+              AGX_INDEX_LIST_LENGTH + AGX_INDEX_LIST_BUFFER_LO_LENGTH +
+              AGX_INDEX_LIST_COUNT_LENGTH + AGX_INDEX_LIST_INSTANCES_LENGTH +
+              AGX_INDEX_LIST_START_LENGTH + AGX_INDEX_LIST_BUFFER_SIZE_LENGTH;
+   agx_ensure_cmdbuf_has_space(batch, &batch->vdm, command_space);
 
-   uint8_t *out = agx_encode_state(batch, batch->vdm.current);
+   uint32_t draw_state_offset = 0;
+   uint8_t *out =
+      agx_encode_state(batch, batch->vdm.current, &draw_state_offset);
    if (!out)
       return;
 
-   struct agx_device *dev = agx_device(ctx->base.screen);
    if (dev->chip != AGX_CHIP_G17P && info->index_size &&
        info->primitive_restart) {
       agx_push(out, VDM_STATE, cfg)
@@ -5755,7 +6017,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    const enum agx_primitive primitive = agx_primitive_for_pipe(info->mode);
    if (dev->chip == AGX_CHIP_G17P && !indirect)
       out = agx_g17p_emit_draw_body(out, &draw, primitive,
-                                   info->restart_index);
+                                   info->restart_index, draw_state_offset);
    else
       out = (void *)agx_vdm_draw((uint32_t *)out, dev->chip, draw, primitive);
 
