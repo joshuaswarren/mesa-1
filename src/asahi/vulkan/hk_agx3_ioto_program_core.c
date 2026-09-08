@@ -6,6 +6,7 @@
 #include "hk_agx3_ioto_program_core.h"
 
 #include "asahi/compiler/agx3_graphics_program.h"
+#include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/compiler/agx3_binder.h"
@@ -559,137 +560,35 @@ hk_agx3_g17p_native_indirect_compute_dispatch_append(
                                                              sink);
 }
 
-static bool
-hk_agx3_g17p_compute_state_tail(
-   const struct hk_agx3_g17p_compute_program_desc *desc,
-   struct agx_ioto_state_tail_output *tail)
-{
-   if (!desc || !tail || desc->shader_binary_size == 0 ||
-       desc->nr_gprs == 0 || desc->scratch_size != 0)
-      return false;
-
-   /* The program kind the caller asked for, defaulting to the direct-dispatch
-    * kind exactly as the add3 witness announces its own compute shader.  See
-    * the graphics path above for why f1 is a selector rather than a size:
-    * deriving it from `shader_binary_size` made this 118-byte shader announce
-    * itself as GRID_HELPER, the kind the indirect grid-setup helper uses, and
-    * made every shader over 256 bytes fail the compose.
-    *
-    * A native indirect dispatch needs the other two kinds: its main record's
-    * program announces INDIRECT_ADD3 and its grid helper announces
-    * GRID_HELPER.  Both are witnessed values that
-    * agx_ioto_g17p_runtime_compute_tail_build() already accepts; every other
-    * value is rejected there, so an invalid selector fails the compose rather
-    * than producing a program. */
-   const enum agx_ioto_g17p_compute_ldshdr_f1 fetch = desc->ldshdr_f1;
-   struct agx_ioto_state_tail_output staged;
-   const bool tail_ok = desc->threadgroup_memory_size_B
-      ? agx_ioto_g17p_runtime_compute_tail_build_shared(
-           desc->shader_va, fetch, desc->threadgroup_memory_size_B, &staged)
-      : agx_ioto_g17p_runtime_compute_tail_build(desc->shader_va, fetch,
-                                                 &staged);
-   if (!tail_ok)
-      return false;
-
-   /* Declare the shader's compiler-D footprint.
-    *
-    * agx_ioto_g17p_runtime_compute_tail_build() leaves SPECTPR entirely zero,
-    * because it was recovered from the hand-written add3 witness, whose
-    * register use fits the default allocation. Apple's ShaderInfo field 38 is
-    * staging bytes, independently of the ordinary GPR allocation; the G17P
-    * graphics path already supplies the same `agx3_staging_halfs * 2` value.
-    * Do not substitute nr_gprs here: storage image staging uses 16 halves even
-    * when the compiler happens to allocate a different main-register count.
-    */
-   struct agx_ioto_state spectpr;
-   if (!desc->compiler_d_valid ||
-       !agx_ioto_g17p_compiler_spectpr_build(desc->scratch_size,
-                                             desc->compiler_d,
-                                             &spectpr) ||
-       !agx_ioto_state_pack_spectpr(
-          AGX_CHIP_G17P, &spectpr,
-          staged.bytes + AGX_IOTO_SPECLM_SIZE + AGX_IOTO_LDSHDR_SIZE,
-          AGX_IOTO_SPECTPR_SIZE))
-      return false;
-
-   *tail = staged;
-   return true;
-}
-
 bool
 hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program)
 {
-   if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (desc->uniform_range_count != 0 && !desc->uniform_ranges))
+   if (!program || !desc)
       return false;
-
-   struct agx_ioto_state_tail_output tail;
-   if (!hk_agx3_g17p_compute_state_tail(desc, &tail))
+   const struct agx3_g17p_compute_program_desc common_desc = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .uniform_ranges = desc->uniform_ranges,
+      .uniform_range_count = desc->uniform_range_count,
+      .shader_binary_size = desc->shader_binary_size,
+      .scratch_size = desc->scratch_size,
+      .nr_gprs = desc->nr_gprs,
+      .compiler_d_valid = desc->compiler_d_valid,
+      .compiler_d = desc->compiler_d,
+      .threadgroup_memory_size_B = desc->threadgroup_memory_size_B,
+      .launch_sources = desc->launch_sources,
+      .ldshdr_f1 = desc->ldshdr_f1,
+   };
+   struct agx3_g17p_compute_program common;
+   if (!agx3_g17p_compute_program_generate(chip, &common_desc, &common))
       return false;
 
    struct hk_agx3_g17p_compute_program staged = {0};
-   size_t written = 0;
-   if (desc->uniform_range_count == 0) {
-      if (!agx_ioto_g17p_no_resource_program_compose(
-             desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-             &written))
-         return false;
-   } else {
-      uint8_t body[HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE];
-      struct agx_ioto_inflight_load
-         loads[HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS];
-      struct agx_ioto_inflight_load
-         sort[HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS];
-      struct agx_ioto_load_cache_entry
-         cache[HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS];
-      size_t body_bound, chunk_count;
-      if (!agx3_ioto_uniform_program_body_bound(
-             chip, desc->uniform_ranges, desc->uniform_range_count,
-             &body_bound, &chunk_count) ||
-          body_bound > sizeof(body) ||
-          chunk_count > HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS)
-         return false;
-
-      const struct agx3_ioto_uniform_program_desc load_desc = {
-         .program_va = desc->program_va,
-         .ranges = desc->uniform_ranges,
-         .range_count = desc->uniform_range_count,
-      };
-      const struct agx3_ioto_uniform_program_workspace workspace = {
-         .body = body,
-         .body_capacity = sizeof(body),
-         .loads = loads,
-         .load_capacity = sizeof(loads) / sizeof(loads[0]),
-         .sort = sort,
-         .sort_capacity = sizeof(sort) / sizeof(sort[0]),
-         .cache = cache,
-         .cache_capacity = sizeof(cache) / sizeof(cache[0]),
-      };
-      size_t body_size, copy_offset;
-      if (!agx3_ioto_uniform_program_body_generate(
-             chip, &load_desc, workspace, &body_size, &copy_offset) ||
-          copy_offset > body_size ||
-          !agx_ioto_g17p_resource_program_compose(
-             desc->program_va, body, copy_offset, body + copy_offset,
-             body_size - copy_offset, &tail, staged.bytes,
-             sizeof(staged.bytes), &written))
-         return false;
-   }
-
-   if (written > UINT16_MAX)
-      return false;
-
-   const struct agx3_g17p_native_compute_program_desc launch_desc = {
-      .program_va = desc->program_va,
-      .shader_va = desc->shader_va,
-      .launch_sources = desc->launch_sources,
-   };
-   if (!agx3_g17p_native_compute_program_bind(&launch_desc, &staged.launch))
-      return false;
-
-   staged.length = (uint16_t)written;
+   memcpy(staged.bytes, common.bytes, common.length);
+   staged.length = common.length;
+   staged.launch = common.launch;
    *program = staged;
    return true;
 }

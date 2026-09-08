@@ -10,6 +10,7 @@
 #include <xf86drm.h>
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/layout/layout.h"
+#include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/lib/decode.h"
 #include "drm-uapi/asahi_drm.h"
 #include "drm-uapi/drm_fourcc.h"
@@ -1530,8 +1531,17 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
                   struct drm_asahi_cmd_compute *cmdbuf)
 {
    /* Finalize the encoder */
-   agx_pack(batch->cdm.current, CDM_STREAM_TERMINATE, _)
-      ;
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   if (dev->chip == AGX_CHIP_G17P) {
+      uint8_t terminate[AGX3_CDM_STREAM_TERMINATE_SIZE];
+      if (!agx3_cdm_stream_terminate_pack(dev->chip, terminate))
+         UNREACHABLE("G17P CDM terminate must be grounded");
+      memcpy(batch->cdm.current, terminate, sizeof(terminate));
+      batch->cdm.current += sizeof(terminate);
+   } else {
+      agx_pack(batch->cdm.current, CDM_STREAM_TERMINATE, _)
+         ;
+   }
 
    agx_batch_add_bo(batch, batch->cdm.bo);
 

@@ -11,6 +11,7 @@
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
+#include "asahi/lib/agx3_cdm_decode_core.h"
 #include "asahi/lib/agx_vdm_decode_core.h"
 #include "asahi/lib/agx_vdm_hal200_bind_tail_core.h"
 #include "asahi/isa/disasm.h"
@@ -23,6 +24,7 @@
 #define G17P_USC_BASE UINT64_C(0x10000000000)
 #define MAX_RECORDS 65536
 #define MAX_IOTO_PROGRAM_SIZE 6144
+#define G17P_CDM_DIRECT_LAUNCH_SIZE 40
 
 static uint32_t
 load_le32(const uint8_t *p)
@@ -288,6 +290,101 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
    }
 
    return fail_at(cursor, "Ioto program has no bounded terminator");
+}
+
+bool
+asahi_g17p_compute_validate(
+   const struct asahi_g17p_stream_memory *memory,
+   const struct drm_asahi_cmd_compute *compute,
+   struct asahi_g17p_compute_stats *stats)
+{
+   struct asahi_g17p_compute_stats local = {0};
+   bool need_barrier = false;
+
+   if (stats)
+      memset(stats, 0, sizeof(*stats));
+   if (!memory || !memory->read || !memory->owned || !memory->span ||
+       !compute || compute->flags || !compute->cdm_ctrl_stream_base ||
+       compute->cdm_ctrl_stream_end <= compute->cdm_ctrl_stream_base ||
+       compute->cdm_ctrl_stream_end - compute->cdm_ctrl_stream_base >
+          SIZE_MAX ||
+       !memory->owned(memory->data, compute->cdm_ctrl_stream_base,
+                      (size_t)(compute->cdm_ctrl_stream_end -
+                               compute->cdm_ctrl_stream_base)))
+      return fail_at(compute ? compute->cdm_ctrl_stream_base : 0,
+                     "compute stream bounds are invalid");
+
+   uint64_t cursor = compute->cdm_ctrl_stream_base;
+   for (unsigned iteration = 0; iteration < MAX_RECORDS; ++iteration) {
+      if (cursor >= compute->cdm_ctrl_stream_end)
+         return fail_at(cursor, "compute stream ended without terminate");
+
+      const uint64_t remaining = compute->cdm_ctrl_stream_end - cursor;
+      uint8_t bytes[G17P_CDM_DIRECT_LAUNCH_SIZE] = {0};
+      const size_t readable = MIN2((size_t)remaining, sizeof(bytes));
+      if (!read_owned(memory, cursor, bytes, readable))
+         return fail_at(cursor, "compute record is not owned");
+
+      struct agx3_cdm_decoded_record record;
+      if (!agx3_cdm_decode_one(AGX_CHIP_G17P, bytes, readable, &record) ||
+          !record.length || record.length > remaining)
+         return fail_at(cursor, "unknown or truncated AGX3 compute record");
+
+      switch (record.kind) {
+      case AGX3_CDM_RECORD_LAUNCH: {
+         if (need_barrier || (record.data.launch.pipeline & 63) ||
+             !record.data.launch.pipeline ||
+             record.length != G17P_CDM_DIRECT_LAUNCH_SIZE ||
+             record.data.launch.opaque_word3 !=
+                (UINT32_C(0x40000000) |
+                 ((record.data.launch.pipeline >> 40) & 0xff)))
+            return fail_at(cursor, "compute launch ordering is invalid");
+
+         for (unsigned axis = 0; axis < 3; ++axis) {
+            if (!record.data.launch.global_size[axis] ||
+                !record.data.launch.local_size[axis])
+               return fail_at(cursor, "compute launch has a zero dimension");
+         }
+
+         struct asahi_g17p_stream_stats shader_stats = {0};
+         if (!validate_ioto_program(memory, record.data.launch.pipeline,
+                                    false, true, &shader_stats))
+            return fail_at(cursor, "compute launch Ioto program is invalid");
+
+         local.launches++;
+         need_barrier = true;
+         break;
+      }
+
+      case AGX3_CDM_RECORD_BARRIER:
+         if (!need_barrier || record.data.barrier.flags != 0)
+            return fail_at(cursor, "compute barrier is not canonical");
+         local.barriers++;
+         need_barrier = false;
+         break;
+
+      case AGX3_CDM_RECORD_STREAM_TERMINATE:
+         if (need_barrier || !local.launches ||
+             cursor + record.length != compute->cdm_ctrl_stream_end)
+            return fail_at(cursor, "compute terminator is not final");
+         local.terminated = true;
+         if (stats)
+            *stats = local;
+         return true;
+
+      case AGX3_CDM_RECORD_STREAM_LINK:
+      case AGX3_CDM_RECORD_LINK_PADDING:
+      case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
+      case AGX3_CDM_RECORD_SECONDARY_BARRIER:
+      case AGX3_CDM_RECORD_UNKNOWN:
+      default:
+         return fail_at(cursor, "compute record is outside native Gallium");
+      }
+
+      cursor += record.length;
+   }
+
+   return fail_at(cursor, "compute record limit reached before terminate");
 }
 
 static uint64_t

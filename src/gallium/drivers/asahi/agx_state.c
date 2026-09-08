@@ -9,11 +9,13 @@
 #include <errno.h>
 #include <stdio.h>
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx3_code_container_core.h"
 #include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
@@ -1601,7 +1603,8 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
        * distinct suffix is recovered. */
       .no_preamble = dev->chip == AGX_CHIP_G17P &&
                      (stage == MESA_SHADER_VERTEX ||
-                      stage == MESA_SHADER_FRAGMENT),
+                      stage == MESA_SHADER_FRAGMENT ||
+                      stage == MESA_SHADER_COMPUTE),
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3513,6 +3516,112 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
    return agx_usc_addr(dev, t.gpu);
 }
 
+static bool
+agx_g17p_append_compute(struct agx_batch *batch,
+                        const struct agx_shader_info *info,
+                        const void *binary, struct agx_bo *constant_bo,
+                        struct agx_grid grid, struct agx_workgroup wg,
+                        const struct agx3_ioto_uniform_range *ranges,
+                        size_t range_count, unsigned variable_shared_mem)
+{
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   if (dev->chip != AGX_CHIP_G17P || !info || !binary ||
+       grid.mode != AGX_CDM_MODE_DIRECT || !info->main_size || !info->nr_gprs ||
+       info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
+       !info->agx3_staging_known ||
+       (info->main_offset != 0 &&
+        info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
+       info->main_offset > info->binary_size ||
+       info->main_size > info->binary_size - info->main_offset ||
+       (range_count && !ranges) || !wg.x || !wg.y || !wg.z)
+      return false;
+
+   const size_t block_size = agx3_code_block_size(info->main_size);
+   if (!block_size || block_size > SIZE_MAX - AGX3_CONTAINER_LEAD_SIZE)
+      return false;
+
+   struct agx_bo *shader_bo = NULL;
+   struct agx_ptr shader = agx_pool_alloc_aligned_with_bo(
+      &batch->pipeline_pool, AGX3_CONTAINER_LEAD_SIZE + block_size, 128,
+      &shader_bo);
+   if (!shader.cpu || !shader_bo)
+      return false;
+
+   agx3_build_container_lead(shader.cpu);
+   const uint8_t *bytes = binary;
+   if (!agx3_build_code_block(
+          (uint8_t *)shader.cpu + AGX3_CONTAINER_LEAD_SIZE, block_size,
+          bytes + info->main_offset, info->main_size, info->main_size,
+          info->main_offset ? bytes : NULL, false))
+      return false;
+   const uint64_t shader_va =
+      shader.gpu + AGX3_CONTAINER_LEAD_SIZE + AGX3_CODE_BLOCK_ENTRY_OFFSET;
+
+   struct agx_bo *program_bo = NULL;
+   struct agx_ptr program = agx_pool_alloc_aligned_with_bo(
+      &batch->pipeline_pool, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE,
+      AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
+   if (!program.cpu || !program_bo || !agx_va_in_usc_window(dev, shader_va) ||
+       !agx_va_in_usc_window(dev, program.gpu))
+      return false;
+
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(
+          info->uses_resource_info_query, info->uses_ray_traversal,
+          info->ray_traversal_depth_nonzero, &launch_sources))
+      return false;
+
+   const uint64_t shared = (uint64_t)info->local_size + variable_shared_mem;
+   if (shared > UINT32_MAX)
+      return false;
+   const struct agx3_g17p_compute_program_desc desc = {
+      .program_va = program.gpu,
+      .shader_va = shader_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = info->main_size,
+      .scratch_size = info->scratch_size,
+      .nr_gprs = info->nr_gprs,
+      .compiler_d_valid = info->agx3_staging_known,
+      .compiler_d = (uint32_t)info->agx3_staging_halfs * 2,
+      .threadgroup_memory_size_B =
+         shared ? MAX2(256u, ALIGN_POT((uint32_t)shared, 64u)) : 0,
+      .launch_sources = launch_sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct agx3_g17p_compute_program native;
+   if (!agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
+      return false;
+   memcpy(program.cpu, native.bytes, native.length);
+
+   if (agx_bo_sync_for_device(
+          shader_bo, shader.gpu - shader_bo->va->addr,
+          AGX3_CONTAINER_LEAD_SIZE + block_size) ||
+       agx_bo_sync_for_device(program_bo, program.gpu - program_bo->va->addr,
+                              native.length))
+      return false;
+
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {wg.x, wg.y, wg.z},
+      .dimensions = grid.count[2] != 1 || wg.z != 1
+                       ? 3
+                    : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = batch->cdm.current,
+      .capacity = batch->cdm.end - batch->cdm.current,
+   };
+   if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
+                                                  &sink))
+      return false;
+   batch->cdm.current += sink.length;
+   if (constant_bo)
+      agx_batch_add_bo(batch, constant_bo);
+   return true;
+}
+
 static void
 agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
                     struct agx_workgroup wg,
@@ -3541,6 +3650,82 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
    struct agx_precompiled_shader *cs =
       agx_get_precompiled(&batch->ctx->bg_eot, program);
+
+   if (dev->chip == AGX_CHIP_G17P) {
+      if (!cs || !cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
+          cs->info.nr_preamble_gprs || cs->info.rodata.size_16 ||
+          !cs->info.agx3_staging_known || !args || !arg_size ||
+          arg_size > UINT16_MAX * 2u ||
+          cs->entry_offset > UINT64_MAX - cs->ptr ||
+          !cs->b.workgroup.x || !cs->b.workgroup.y || !cs->b.workgroup.z ||
+          agx_is_indirect(grid)) {
+         agx_native_descriptor_rejected(dev, "precompiled compute program");
+      }
+
+      if (!grid.count[0] || !grid.count[1] || !grid.count[2])
+         return;
+
+      const uint64_t uploaded_data =
+         agx_pool_upload_aligned(&batch->pool, args, arg_size, 4);
+      const struct agx3_ioto_uniform_range range = {
+         .start_halfs = 0,
+         .size_halfs = DIV_ROUND_UP(arg_size, 2),
+         .address = uploaded_data,
+      };
+      struct agx3_cdm_direct_template_sources launch_sources;
+      if (!uploaded_data ||
+          !agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                     &launch_sources))
+         agx_native_descriptor_rejected(dev, "precompiled compute resources");
+
+      struct agx_bo *program_bo = NULL;
+      struct agx_ptr native_program = agx_pool_alloc_aligned_with_bo(
+         &batch->pipeline_pool, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE,
+         AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
+      const struct agx3_g17p_compute_program_desc desc = {
+         .program_va = native_program.gpu,
+         .shader_va = cs->ptr + cs->entry_offset,
+         .uniform_ranges = &range,
+         .uniform_range_count = 1,
+         .shader_binary_size = cs->info.main_size,
+         .nr_gprs = cs->info.nr_gprs,
+         .compiler_d_valid = cs->info.agx3_staging_known,
+         .compiler_d = (uint32_t)cs->info.agx3_staging_halfs * 2,
+         .launch_sources = launch_sources,
+         .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+      };
+      struct agx3_g17p_compute_program native;
+      if (!native_program.cpu || !program_bo ||
+          !agx_va_in_usc_window(dev, native_program.gpu) ||
+          !agx_va_in_usc_window(dev, desc.shader_va) ||
+          !agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
+         agx_native_descriptor_rejected(dev, "precompiled compute Ioto");
+      memcpy(native_program.cpu, native.bytes, native.length);
+      if (agx_bo_sync_for_device(program_bo,
+                                 native_program.gpu - program_bo->va->addr,
+                                 native.length))
+         agx_native_descriptor_rejected(dev, "precompiled compute upload");
+
+      const struct agx3_compute_direct_grid direct = {
+         .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+         .size = {grid.count[0], grid.count[1], grid.count[2]},
+         .local_size = {cs->b.workgroup.x, cs->b.workgroup.y,
+                        cs->b.workgroup.z},
+         .dimensions = grid.count[2] != 1 || cs->b.workgroup.z != 1
+                          ? 3
+                       : grid.count[1] != 1 || cs->b.workgroup.y != 1 ? 2 : 1,
+      };
+      struct agx3_compute_dispatch_sink sink = {
+         .data = batch->cdm.current,
+         .capacity = batch->cdm.end - batch->cdm.current,
+      };
+      if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
+                                                     &sink))
+         agx_native_descriptor_rejected(dev, "precompiled compute launch");
+      batch->cdm.current += sink.length;
+      agx_batch_add_bo(batch, cs->bo);
+      return;
+   }
 
    struct agx_ptr t =
       agx_pool_alloc_aligned(&batch->pipeline_pool, agx_usc_size(15), 64);
@@ -6552,6 +6737,48 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
 
    agx_update_descriptors(batch, cs);
    agx_upload_uniforms(batch);
+
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   if (dev->chip == AGX_CHIP_G17P) {
+      struct agx3_ioto_uniform_range ranges[AGX_MAX_PUSH_RANGES + 1];
+      size_t range_count = 0;
+      for (unsigned i = 0; i < cs->push_range_count; ++i) {
+         const struct agx_push_range *push = &cs->push[i];
+         const uint64_t table = batch->uniforms.tables[push->table];
+         if (push->table == AGX_SYSVAL_TABLE_PARAMS && !table)
+            continue;
+         if (!table || (push->uniform & 1) || (push->length & 1) ||
+             !push->length || range_count == ARRAY_SIZE(ranges))
+            agx_native_descriptor_rejected(dev, "compute uniform range");
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = push->uniform,
+            .size_halfs = push->length,
+            .address = table + push->offset,
+         };
+      }
+
+      if (cs->b.info.rodata.size_16) {
+         const struct agx_rodata *rodata = &cs->b.info.rodata;
+         const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
+         if (!cs->bo || !cs->bo->va || (rodata->base_uniform & 1) ||
+             (rodata->size_16 & 1) || !rodata->size_16 ||
+             range_count == ARRAY_SIZE(ranges) ||
+             rodata->offset > cs->bo->size ||
+             size_B > cs->bo->size - rodata->offset)
+            agx_native_descriptor_rejected(dev, "compute constant range");
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = rodata->base_uniform,
+            .size_halfs = rodata->size_16,
+            .address = cs->bo->va->addr + rodata->offset,
+         };
+      }
+
+      if (!agx_g17p_append_compute(batch, &cs->b.info, cs->b.binary, cs->bo,
+                                   grid, wg, ranges, range_count,
+                                   variable_shared_mem))
+         agx_native_descriptor_rejected(dev, "compute Ioto dispatch");
+      return;
+   }
 
    // TODO: This is broken.
    size_t subgroups_per_core = 0;

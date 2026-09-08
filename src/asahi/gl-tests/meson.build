@@ -80,6 +80,78 @@ gl_buffer_sync = executable(
   build_by_default : false,
 )
 
+gl_compute = executable(
+  'asahi-g17p-gl-compute',
+  files('test-g17p-gl-compute.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-compute-software-control',
+  gl_compute,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+run_target(
+  'asahi-g17p-gl-compute-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_compute,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+)
+
+test(
+  'asahi-g17p-gl-compute-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_compute,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-compute-rejects-truncated-terminate',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_compute,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
+    'ASAHI_SHIM_G17P_TRUNCATE_COMPUTE_END=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  should_fail : true,
+  suite : ['asahi'],
+)
+
 test(
   'asahi-g17p-gl-buffer-sync-software-control',
   gl_buffer_sync,

@@ -102,6 +102,7 @@ static struct {
 } shim_mappings;
 
 static struct asahi_g17p_stream_stats matrix_stats;
+static struct asahi_g17p_compute_stats compute_stats;
 
 static bool
 matrix_case_matches(const char *name,
@@ -220,6 +221,24 @@ check_matrix_coverage(void)
    }
 
    fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
+}
+
+static void __attribute__((destructor))
+check_compute_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE"))
+      return;
+
+   if (!compute_stats.launches ||
+       compute_stats.launches != compute_stats.barriers ||
+       !compute_stats.terminated) {
+      fprintf(stderr,
+              "shim: incomplete G17P compute coverage: launches=%u "
+              "barriers=%u terminated=%u\n",
+              compute_stats.launches, compute_stats.barriers,
+              compute_stats.terminated);
+      _Exit(EXIT_FAILURE);
+   }
 }
 
 static bool
@@ -560,6 +579,33 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
                  "updates, %u links\n",
                  stats.draws, stats.indexed_draws, stats.state_updates,
                  stats.links);
+      } else if (header->cmd_type == DRM_ASAHI_CMD_COMPUTE) {
+         if (header->size < offsetof(struct drm_asahi_cmd_compute,
+                                     cdm_ctrl_stream_end) +
+                               sizeof(uint64_t))
+            return -EINVAL;
+
+         struct drm_asahi_cmd_compute compute = {0};
+         memcpy(&compute, header + 1, MIN2(sizeof(compute), header->size));
+         if (getenv("ASAHI_SHIM_G17P_TRUNCATE_COMPUTE_END") &&
+             compute.cdm_ctrl_stream_end >= 4)
+            compute.cdm_ctrl_stream_end -= 4;
+         const struct asahi_g17p_stream_memory memory = {
+            .data = (void *)(intptr_t)fd,
+            .read = shim_gpu_read,
+            .owned = shim_gpu_owned,
+            .span = shim_gpu_span,
+            .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+         };
+         struct asahi_g17p_compute_stats stats;
+         if (!asahi_g17p_compute_validate(&memory, &compute, &stats))
+            return -EINVAL;
+         compute_stats.launches += stats.launches;
+         compute_stats.barriers += stats.barriers;
+         compute_stats.terminated |= stats.terminated;
+         fprintf(stderr,
+                 "shim: G17P CDM validated: %u launches, %u barriers\n",
+                 stats.launches, stats.barriers);
       }
 
       cursor += command_size;

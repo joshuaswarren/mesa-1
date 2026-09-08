@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 struct drm_asahi_cmd_render;
+struct drm_asahi_cmd_compute;
 
 struct asahi_g17p_stream_memory {
    void *data;
@@ -50,6 +51,12 @@ struct asahi_g17p_stream_config {
    uint64_t depth_bias_base;
 };
 
+struct asahi_g17p_compute_stats {
+   unsigned launches;
+   unsigned barriers;
+   bool terminated;
+};
+
 bool asahi_g17p_stream_validate(
    const struct asahi_g17p_stream_memory *memory,
    const struct asahi_g17p_stream_config *config,
@@ -58,3 +65,8 @@ bool asahi_g17p_stream_validate(
 bool asahi_g17p_render_aux_validate(
    const struct asahi_g17p_stream_memory *memory,
    const struct drm_asahi_cmd_render *render);
+
+bool asahi_g17p_compute_validate(
+   const struct asahi_g17p_stream_memory *memory,
+   const struct drm_asahi_cmd_compute *compute,
+   struct asahi_g17p_compute_stats *stats);
