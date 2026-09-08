@@ -71,7 +71,7 @@ draw_and_read(GLuint program, GLint uniform, uint8_t pixel[4])
    glClear(GL_COLOR_BUFFER_BIT);
    glUseProgram(program);
    if (uniform >= 0)
-      glUniform4f(uniform, 0.9f, 0.7f, 0.3f, 1.0f);
+      glUniform4f(uniform, 0.125f, 0.375f, 0.625f, 1.0f);
    glDrawArrays(GL_TRIANGLES, 0, 3);
    glFinish();
 
@@ -124,7 +124,7 @@ main(void)
       "#version 300 es\n"
       "precision highp float;\n"
       "layout(location=0) out vec4 colour;\n"
-      "void main() { colour = vec4(0.9, 0.7, 0.3, 1.0); }\n";
+      "void main() { colour = vec4(0.125, 0.375, 0.625, 1.0); }\n";
    static const char uniform_fs[] =
       "#version 300 es\n"
       "precision highp float;\n"
@@ -140,7 +140,10 @@ main(void)
    const GLint location = glGetUniformLocation(uniform, "source_colour");
    uint8_t literal_pixel[4] = {0};
    uint8_t uniform_pixel[4] = {0};
-   static const uint8_t expected[4] = {230, 178, 76, 255};
+   /* Avoid exact x.5 UNORM boundaries: native and software conversions may
+    * legally choose opposite tie directions, while literal and uniform
+    * shader sources must still produce byte-identical pixels. */
+   static const uint8_t expected[4] = {32, 96, 159, 255};
    bool ok = literal && uniform && location >= 0 &&
              draw_and_read(literal, -1, literal_pixel) &&
              draw_and_read(uniform, location, uniform_pixel);
