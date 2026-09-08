@@ -6561,6 +6561,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index f32 = I->src[half_first ? 1 : 0];
             const agx_index f16 = I->src[half_first ? 0 : 1];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            uint16_t encoded_wait = wait;
+            /* The exact mixed-half endpoint carries only slot 0. If both the
+             * texture sample and the uniform load are live, retire slot 1
+             * with the established native wait NOP before issuing the fused
+             * multiply; do not discard either dependency. */
+            if (encoded_wait & ~UINT16_C(1)) {
+               if (!agx3_retire_slots_noop(emission, enc,
+                                            encoded_wait & ~UINT16_C(1)))
+                  AGX3_REFUSE(I);
+               encoded_wait &= 1;
+            }
             if (!agx3_src_is_register(f32) || !agx3_src_is_register(f16) ||
                 f32.memory || f16.memory || (f32.value & 1) ||
                 agx_channels(f32) != 1 || agx_channels(f16) != 1 ||
@@ -6570,7 +6581,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_alu_fmul_mixed_half(
                    enc, I->dest[0].value, f32.value, f16.value,
                    agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
-                   I->dest[0].cache, wait, bytes, &len) ||
+                   I->dest[0].cache, encoded_wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

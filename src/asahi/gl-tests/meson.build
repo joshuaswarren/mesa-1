@@ -11,6 +11,42 @@ gl_resources = executable(
   build_by_default : false,
 )
 
+gl_state_matrix = executable(
+  'asahi-g17p-gl-state-matrix',
+  files('test-g17p-gl-state-matrix.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-state-matrix-software-control',
+  gl_state_matrix,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+run_target(
+  'asahi-g17p-gl-state-matrix-shim',
+  command : [
+    prog_python,
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_state_matrix,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_MATRIX=1',
+  ],
+)
+
 test(
   'asahi-g17p-gl-resources-software-control',
   gl_resources,

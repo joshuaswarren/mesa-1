@@ -220,6 +220,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
       return false;
 
    nir_tex_instr *tex = nir_instr_as_tex(instr);
+   const bool gen9 = data && *(const bool *)data;
    b->cursor = nir_before_instr(instr);
 
    if (nir_tex_instr_is_query(tex) && tex->op != nir_texop_lod)
@@ -379,7 +380,8 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0) {
 
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
-                            nir_iadd_imm(b, nir_u2u16(b, sampler), 1));
+                            nir_iadd_imm(b, nir_u2u16(b, sampler),
+                                         gen9 ? 0 : 1));
    }
 
    return true;

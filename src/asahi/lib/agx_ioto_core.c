@@ -395,6 +395,24 @@ agx_ioto_decode_program_record(enum agx_chip chip, const void *stream,
       return true;
    }
 
+   /* G17P's ordinary/background fragment release is a GPU0-only six-byte
+    * encoding emitted by the bounded program composer. It is not the GPU1
+    * PIXREL form in the public record table; recognize only the two exact
+    * byte-witnessed payloads so a program walk cannot lose its boundary. */
+   if (chip == AGX_CHIP_G17P && available >= 6 && bytes[0] == 0x07 &&
+       bytes[1] == 0x02 && bytes[2] == 0x54 &&
+       (bytes[3] == 0xf3 || bytes[3] == 0x00) && bytes[4] == 0x02 &&
+       bytes[5] == 0x00) {
+      out->kind = AGX_IOTO_PROGRAM_RECORD_IOTO;
+      out->length = 6;
+      out->ioto.kind = AGX_IOTO_KIND_PIXREL_EP0;
+      out->ioto.length = 6;
+      memcpy(out->ioto.bytes, bytes, 6);
+      memcpy(out->bytes, bytes, 6);
+      *consumed = 6;
+      return true;
+   }
+
    /* The GPU0 compiler writes this AGX3b device load inline instead of
     * constructing an AGXIotoInstruction object.  Its low eleven opcode bits
     * and fourteen-byte boundary are exact; every other bit remains opaque. */

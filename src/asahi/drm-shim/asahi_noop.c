@@ -10,7 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "asahi_g17p_stream_validator.h"
 #include "util/macros.h"
 #include "drm-shim/drm_shim.h"
 #include "drm-uapi/asahi_drm.h"
@@ -84,6 +86,252 @@ struct asahi_device {
 static struct asahi_device asahi = {
    .next_offset = 0x1000,
 };
+
+struct asahi_vm_mapping {
+   int fd;
+   uint64_t address;
+   uint64_t size;
+   uint64_t object_offset;
+   struct shim_bo *bo;
+};
+
+static struct {
+   struct asahi_vm_mapping *entries;
+   size_t count;
+   size_t capacity;
+} shim_mappings;
+
+static struct asahi_g17p_stream_stats matrix_stats;
+
+static bool
+matrix_case_matches(const char *name,
+                    const struct asahi_g17p_stream_stats *stats)
+{
+   if (!name)
+      return true;
+   if (!strcmp(name, "clear-only"))
+      return stats->clear_only;
+   if (!strcmp(name, "nonindexed unchanged-state body"))
+      return stats->draws == 2 && stats->state_updates == 1 &&
+             stats->body_only;
+   if (!strcmp(name, "indexed u8 without restart"))
+      return stats->indexed_draws == 1 && stats->index_size_mask == 1 &&
+             stats->restart_disabled;
+   if (!strcmp(name, "indexed u16 topology and restart"))
+      return stats->indexed_draws == 1 && stats->index_size_mask == 2 &&
+             stats->restart_enabled;
+   if (!strcmp(name, "indexed u32 without restart"))
+      return stats->indexed_draws == 1 && stats->index_size_mask == 4 &&
+             stats->restart_disabled;
+   if (!strcmp(name, "indirect nonindexed"))
+      return stats->indirect_nonindexed && !stats->indirect_indexed;
+   if (!strcmp(name, "indirect indexed"))
+      return stats->indirect_indexed;
+   if (!strcmp(name, "viewport and scissor"))
+      return stats->viewport_changed && stats->scissor_changed;
+   if (!strcmp(name, "cull and front face"))
+      return stats->cull_enabled;
+   if (!strcmp(name, "depth and stencil"))
+      return stats->depth_enabled && stats->stencil_enabled;
+   if (!strcmp(name, "blend"))
+      return stats->draws == 1 && stats->varying_fs;
+   if (!strcmp(name, "fragment program without varyings"))
+      return stats->no_varying_fs;
+   if (!strcmp(name, "rasterizer discard"))
+      return stats->rasterizer_discard;
+   if (!strcmp(name, "linked stream with state re-emission"))
+      return stats->draws == 5000 && stats->state_updates == 5000 &&
+             stats->links > 0;
+   return true;
+}
+
+static void
+merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
+{
+   if (stats->varying_fs && stats->fragment_code) {
+      if (matrix_stats.fragment_code &&
+          matrix_stats.fragment_code != stats->fragment_code)
+         matrix_stats.blend_enabled = true;
+      else if (!matrix_stats.fragment_code)
+         matrix_stats.fragment_code = stats->fragment_code;
+   }
+   matrix_stats.draws += stats->draws;
+   matrix_stats.indexed_draws += stats->indexed_draws;
+   matrix_stats.state_updates += stats->state_updates;
+   matrix_stats.links += stats->links;
+   matrix_stats.primitive_mask |= stats->primitive_mask;
+   matrix_stats.index_size_mask |= stats->index_size_mask;
+#define MERGE_FLAG(name) matrix_stats.name |= stats->name
+   MERGE_FLAG(clear_only);
+   MERGE_FLAG(body_only);
+   MERGE_FLAG(restart_enabled);
+   MERGE_FLAG(restart_disabled);
+   MERGE_FLAG(indirect_nonindexed);
+   MERGE_FLAG(indirect_indexed);
+   MERGE_FLAG(varying_fs);
+   MERGE_FLAG(no_varying_fs);
+   MERGE_FLAG(viewport_changed);
+   MERGE_FLAG(scissor_changed);
+   MERGE_FLAG(cull_enabled);
+   MERGE_FLAG(depth_enabled);
+   MERGE_FLAG(stencil_enabled);
+   MERGE_FLAG(blend_enabled);
+   MERGE_FLAG(rasterizer_discard);
+#undef MERGE_FLAG
+}
+
+static void __attribute__((destructor))
+check_matrix_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_MATRIX"))
+      return;
+
+   const uint32_t required_primitives =
+      (UINT32_C(1) << 0) | (UINT32_C(1) << 1) | (UINT32_C(1) << 6) |
+      (UINT32_C(1) << 9) | (UINT32_C(1) << 11);
+   const bool complete =
+      matrix_stats.clear_only && matrix_stats.body_only &&
+      (matrix_stats.primitive_mask & required_primitives) ==
+         required_primitives &&
+      (matrix_stats.index_size_mask & 7) == 7 &&
+      matrix_stats.restart_enabled && matrix_stats.restart_disabled &&
+      matrix_stats.indirect_nonindexed && matrix_stats.indirect_indexed &&
+      matrix_stats.varying_fs && matrix_stats.no_varying_fs &&
+      matrix_stats.viewport_changed && matrix_stats.scissor_changed &&
+      matrix_stats.cull_enabled && matrix_stats.depth_enabled &&
+      matrix_stats.stencil_enabled && matrix_stats.blend_enabled &&
+      matrix_stats.rasterizer_discard && matrix_stats.links &&
+      matrix_stats.state_updates >= 5000;
+   if (!complete) {
+      fprintf(stderr,
+              "shim: incomplete G17P matrix coverage: prim=%#x index=%#x "
+              "draws=%u state=%u links=%u flags=%u%u%u%u%u%u%u%u%u%u%u%u%u%u\n",
+              matrix_stats.primitive_mask, matrix_stats.index_size_mask,
+              matrix_stats.draws, matrix_stats.state_updates,
+              matrix_stats.links, matrix_stats.clear_only,
+              matrix_stats.body_only, matrix_stats.restart_enabled,
+              matrix_stats.restart_disabled, matrix_stats.indirect_nonindexed,
+              matrix_stats.indirect_indexed, matrix_stats.varying_fs,
+              matrix_stats.no_varying_fs, matrix_stats.viewport_changed,
+              matrix_stats.scissor_changed, matrix_stats.cull_enabled,
+              matrix_stats.depth_enabled, matrix_stats.stencil_enabled,
+              matrix_stats.blend_enabled);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
+}
+
+static bool
+range_contains(uint64_t base, uint64_t size, uint64_t address,
+               size_t access_size)
+{
+   return address >= base && access_size <= size &&
+          address - base <= size - access_size;
+}
+
+static const struct asahi_vm_mapping *
+find_mapping(int fd, uint64_t address, size_t size)
+{
+   for (size_t i = shim_mappings.count; i > 0; --i) {
+      const struct asahi_vm_mapping *mapping = &shim_mappings.entries[i - 1];
+      if (mapping->fd == fd &&
+          range_contains(mapping->address, mapping->size, address, size))
+         return mapping;
+   }
+
+   return NULL;
+}
+
+static void
+remove_mappings(int fd, uint64_t address, uint64_t size)
+{
+   const uint64_t end = address + size;
+   for (size_t i = 0; i < shim_mappings.count;) {
+      struct asahi_vm_mapping *mapping = &shim_mappings.entries[i];
+      const uint64_t mapping_end = mapping->address + mapping->size;
+      if (mapping->fd != fd || address >= mapping_end ||
+          mapping->address >= end) {
+         ++i;
+         continue;
+      }
+
+      drm_shim_bo_put(mapping->bo);
+      *mapping = shim_mappings.entries[--shim_mappings.count];
+   }
+}
+
+static bool
+add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
+{
+   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
+   struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, op->handle);
+   if (!bo || op->offset > bo->size || op->range > bo->size - op->offset) {
+      if (bo)
+         drm_shim_bo_put(bo);
+      return false;
+   }
+
+   remove_mappings(fd, op->addr, op->range);
+   if (shim_mappings.count == shim_mappings.capacity) {
+      const size_t capacity = MAX2(shim_mappings.capacity * 2, 64);
+      void *entries = realloc(shim_mappings.entries,
+                              capacity * sizeof(*shim_mappings.entries));
+      if (!entries) {
+         drm_shim_bo_put(bo);
+         return false;
+      }
+      shim_mappings.entries = entries;
+      shim_mappings.capacity = capacity;
+   }
+
+   shim_mappings.entries[shim_mappings.count++] = (struct asahi_vm_mapping){
+      .fd = fd,
+      .address = op->addr,
+      .size = op->range,
+      .object_offset = op->offset,
+      .bo = bo,
+   };
+   if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
+      fprintf(stderr, "shim: map %#llx..%#llx handle %u offset %#llx\n",
+              (unsigned long long)op->addr,
+              (unsigned long long)(op->addr + op->range), op->handle,
+              (unsigned long long)op->offset);
+   return true;
+}
+
+static bool
+shim_gpu_owned(void *data, uint64_t address, size_t size)
+{
+   return find_mapping((int)(intptr_t)data, address, size) != NULL;
+}
+
+static bool
+shim_gpu_span(void *data, uint64_t address, size_t *available)
+{
+   const struct asahi_vm_mapping *mapping =
+      find_mapping((int)(intptr_t)data, address, 1);
+   if (!mapping || !available)
+      return false;
+
+   *available = mapping->size - (address - mapping->address);
+   return true;
+}
+
+static bool
+shim_gpu_read(void *data, uint64_t address, void *dst, size_t size)
+{
+   const struct asahi_vm_mapping *mapping =
+      find_mapping((int)(intptr_t)data, address, size);
+   if (!mapping)
+      return false;
+
+   const uint64_t bo_offset =
+      mapping->object_offset + (address - mapping->address);
+   const uint64_t file_offset = mapping->bo->mem_addr + bo_offset;
+   return pread(shim_device.mem_fd, dst, size, (off_t)file_offset) ==
+          (ssize_t)size;
+}
 
 static int
 asahi_ioctl_noop(int fd, unsigned long request, void *arg)
@@ -241,9 +489,82 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
                  (unsigned long long)shim_vm.kernel_end);
          return -EINVAL;
       }
+
+      if (op->flags & DRM_ASAHI_BIND_UNBIND) {
+         remove_mappings(fd, op->addr, op->range);
+      } else if (!add_mapping(fd, op)) {
+         fprintf(stderr, "shim: gem_bind: invalid BO mapping\n");
+         return -EINVAL;
+      }
    }
 
    return 0;
+}
+
+static int
+asahi_ioctl_submit(int fd, unsigned long request, void *arg)
+{
+   const struct drm_asahi_submit *submit = arg;
+   const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
+   if (!validate || !strcmp(validate, "0") || shim_params() != &params_g17p)
+      return 0;
+
+   const uint8_t *cmdbuf = (const void *)(uintptr_t)submit->cmdbuf;
+   size_t cursor = 0;
+   while (cursor < submit->cmdbuf_size) {
+      if (submit->cmdbuf_size - cursor < sizeof(struct drm_asahi_cmd_header))
+         return -EINVAL;
+
+      const struct drm_asahi_cmd_header *header = (const void *)(cmdbuf + cursor);
+      const size_t command_size = sizeof(*header) + header->size;
+      if (command_size > submit->cmdbuf_size - cursor)
+         return -EINVAL;
+
+      if (header->cmd_type == DRM_ASAHI_CMD_RENDER) {
+         if (header->size < offsetof(struct drm_asahi_cmd_render,
+                                     vdm_ctrl_stream_base) +
+                               sizeof(uint64_t))
+            return -EINVAL;
+
+         struct drm_asahi_cmd_render render = {0};
+         memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+         const struct asahi_g17p_stream_memory memory = {
+            .data = (void *)(intptr_t)fd,
+            .read = shim_gpu_read,
+            .owned = shim_gpu_owned,
+            .span = shim_gpu_span,
+            .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+         };
+         struct asahi_g17p_stream_stats stats;
+         const struct asahi_g17p_stream_config config = {
+            .root = render.vdm_ctrl_stream_base,
+            .scissor_base = render.isp_scissor_base,
+            .depth_bias_base = render.isp_dbias_base,
+         };
+         if (!asahi_g17p_stream_validate(&memory, &config, &stats))
+            return -EINVAL;
+         const char *matrix_case = getenv("ASAHI_SHIM_G17P_CASE");
+         const bool auxiliary_clear = stats.clear_only && matrix_case &&
+                                      strcmp(matrix_case, "clear-only");
+         if (!auxiliary_clear && !matrix_case_matches(matrix_case, &stats)) {
+            fprintf(stderr, "shim: G17P matrix case '%s' semantic mismatch\n",
+                    matrix_case);
+            return -EINVAL;
+         }
+         if (!auxiliary_clear && matrix_case && !strcmp(matrix_case, "blend"))
+            stats.blend_enabled = true;
+         merge_stream_stats(&stats);
+         fprintf(stderr,
+                 "shim: G17P VDM validated: %u draws, %u indexed, %u state "
+                 "updates, %u links\n",
+                 stats.draws, stats.indexed_draws, stats.state_updates,
+                 stats.links);
+      }
+
+      cursor += command_size;
+   }
+
+   return cursor == submit->cmdbuf_size ? 0 : -EINVAL;
 }
 
 static ioctl_fn_t driver_ioctls[] = {
@@ -256,7 +577,7 @@ static ioctl_fn_t driver_ioctls[] = {
    [DRM_ASAHI_QUEUE_CREATE] = asahi_ioctl_noop,
    [DRM_ASAHI_QUEUE_DESTROY] = asahi_ioctl_noop,
    [DRM_ASAHI_GEM_BIND_OBJECT] = asahi_ioctl_gem_bind_object,
-   [DRM_ASAHI_SUBMIT] = asahi_ioctl_noop,
+   [DRM_ASAHI_SUBMIT] = asahi_ioctl_submit,
 };
 
 void

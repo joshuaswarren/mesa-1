@@ -545,6 +545,24 @@ check_program_records(void)
       0x67, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9a,
       0xbc, 0xde, 0xf0, 0x24, 0x68, 0xac, 0xe0,
    };
+   static const uint8_t g17p_pixrel[][6] = {
+      {0x07, 0x02, 0x54, 0xf3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x00, 0x02, 0x00},
+   };
+
+   for (unsigned i = 0; i < 2; ++i) {
+      struct agx_ioto_program_record record;
+      size_t consumed = 99;
+      CHECK(agx_ioto_decode_program_record(
+         AGX_CHIP_G17P, g17p_pixrel[i], sizeof(g17p_pixrel[i]), &record,
+         &consumed));
+      CHECK(record.kind == AGX_IOTO_PROGRAM_RECORD_IOTO);
+      CHECK(record.ioto.kind == AGX_IOTO_KIND_PIXREL_EP0);
+      CHECK(consumed == sizeof(g17p_pixrel[i]));
+      CHECK(!agx_ioto_decode_program_record(
+         AGX_CHIP_G16G, g17p_pixrel[i], sizeof(g17p_pixrel[i]), &record,
+         &consumed));
+   }
 
    for (size_t i = 0; i < sizeof(all_targets) / sizeof(all_targets[0]); ++i) {
       const enum agx_chip chip = all_targets[i];

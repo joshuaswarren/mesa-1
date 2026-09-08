@@ -10,6 +10,7 @@ import tempfile
 
 
 shim, vendor, gallium, binary = map(pathlib.Path, sys.argv[1:5])
+binary_args = sys.argv[5:]
 env = dict(os.environ)
 
 with tempfile.TemporaryDirectory(prefix="asahi-gl-shim-") as tmp:
@@ -33,4 +34,4 @@ with tempfile.TemporaryDirectory(prefix="asahi-gl-shim-") as tmp:
     env.setdefault("ASAHI_SHIM_CHIP", "g17p")
     env["ASAHI_GL_NOOP_SHIM"] = "1"
 
-    sys.exit(subprocess.call([str(binary)], env=env))
+    sys.exit(subprocess.call([str(binary), *binary_args], env=env))

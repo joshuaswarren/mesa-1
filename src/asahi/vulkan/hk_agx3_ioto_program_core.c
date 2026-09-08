@@ -5,6 +5,7 @@
 
 #include "hk_agx3_ioto_program_core.h"
 
+#include "asahi/compiler/agx3_graphics_program.h"
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/compiler/agx3_binder.h"
@@ -237,20 +238,7 @@ hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size)
 {
-   size_t body, chunks;
-   if (!size || chip != AGX_CHIP_G17P ||
-       range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES ||
-       !agx3_ioto_uniform_program_body_bound(chip, ranges, range_count,
-                                              &body, &chunks) ||
-       chunks > HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS ||
-       body > HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
-                 AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE)
-      return false;
-
-   /* The vertex envelope is four bytes larger than the fragment envelope.
-    * Preserve the native composition and allocate only this shader's bound. */
-   *size = body + AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
-   return true;
+   return agx3_g17p_graphics_program_bound(chip, ranges, range_count, size);
 }
 
 bool
@@ -258,87 +246,27 @@ hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program)
 {
-   if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (desc->writes_sample_mask && !desc->fragment) ||
-       desc->uniform_range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES ||
-       (desc->uniform_range_count != 0 && !desc->uniform_ranges))
+   if (!program || !desc)
       return false;
-
-   struct agx_ioto_state_tail_output tail;
-   if (!hk_agx3_g17p_graphics_state_tail(desc, &tail, true))
+   const struct agx3_g17p_graphics_program_desc shared_desc = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .uniform_ranges = desc->uniform_ranges,
+      .uniform_range_count = desc->uniform_range_count,
+      .shader_binary_size = desc->shader_binary_size,
+      .scratch_size = desc->scratch_size,
+      .nr_gprs = desc->nr_gprs,
+      .compiler_d_valid = desc->compiler_d_valid,
+      .compiler_d = desc->compiler_d,
+      .fragment = desc->fragment,
+      .writes_sample_mask = desc->writes_sample_mask,
+   };
+   struct agx3_g17p_graphics_program shared;
+   if (!agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared))
       return false;
-
-   struct hk_agx3_g17p_graphics_program staged = {0};
-   size_t written = 0;
-   if (desc->uniform_range_count == 0) {
-      const bool composed =
-         desc->fragment && desc->writes_sample_mask
-            ? agx_ioto_g17p_coverage_fragment_program_compose(
-                 desc->program_va, NULL, 0, NULL, 0, &tail, staged.bytes,
-                 sizeof(staged.bytes), &written)
-            : desc->fragment
-            ? agx_ioto_g17p_fragment_no_resource_program_compose(
-                 desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-                 &written)
-            : agx_ioto_g17p_no_resource_program_compose(
-                 desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-                 &written);
-      const size_t expected =
-         desc->fragment ? AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
-                        : AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
-      if (!composed || written != expected)
-         return false;
-   } else {
-      size_t bound;
-      if (!hk_agx3_g17p_graphics_program_bound(
-             chip, desc->uniform_ranges, desc->uniform_range_count, &bound))
-         return false;
-      uint8_t body[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
-      struct agx_ioto_inflight_load loads[HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
-      struct agx_ioto_inflight_load sort[HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
-      struct agx_ioto_load_cache_entry cache[HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
-      const struct agx3_ioto_uniform_program_desc load_desc = {
-         .program_va = desc->program_va,
-         .ranges = desc->uniform_ranges,
-         .range_count = desc->uniform_range_count,
-      };
-      const struct agx3_ioto_uniform_program_workspace workspace = {
-         .body = body,
-         .body_capacity = sizeof(body),
-         .loads = loads,
-         .load_capacity = sizeof(loads) / sizeof(loads[0]),
-         .sort = sort,
-         .sort_capacity = sizeof(sort) / sizeof(sort[0]),
-         .cache = cache,
-         .cache_capacity = sizeof(cache) / sizeof(cache[0]),
-      };
-
-      size_t body_size, copy_offset;
-      if (!agx3_ioto_uniform_program_body_generate(
-             chip, &load_desc, workspace, &body_size, &copy_offset) ||
-          copy_offset > body_size ||
-          !(desc->fragment && desc->writes_sample_mask
-               ? agx_ioto_g17p_coverage_fragment_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)
-               : desc->fragment
-               ? agx_ioto_g17p_fragment_resource_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)
-               : agx_ioto_g17p_resource_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)))
-         return false;
-   }
-
-   if (written > UINT16_MAX)
-      return false;
-
-   staged.length = (uint16_t)written;
-   *program = staged;
+   memset(program, 0, sizeof(*program));
+   memcpy(program->bytes, shared.bytes, shared.length);
+   program->length = shared.length;
    return true;
 }
 

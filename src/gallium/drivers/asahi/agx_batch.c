@@ -200,8 +200,8 @@ agx_batch_init(struct agx_context *ctx,
 
    agx_bo_reference(screen->rodata);
    agx_pool_init(&batch->pool, dev, "Batch pool", 0, true);
-   agx_pool_init(&batch->pipeline_pool, dev, "Batch low VA pool", AGX_BO_LOW_VA,
-                 true);
+   agx_pool_init(&batch->pipeline_pool, dev, "Batch executable low VA pool",
+                 AGX_BO_LOW_VA | AGX_BO_EXEC, true);
 
    /* These allocations can happen only once and will just be zeroed (not freed)
     * during batch clean up. The memory is owned by the context.

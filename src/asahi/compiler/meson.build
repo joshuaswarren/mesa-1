@@ -48,6 +48,8 @@ libasahi_agx_files = files(
   'agx3_ioto_load_packer.h',
   'agx3_ioto_uniform_program.c',
   'agx3_ioto_uniform_program.h',
+  'agx3_graphics_program.c',
+  'agx3_graphics_program.h',
   'agx3_tex_core.c',
   'agx3_falu_mod_core.c',
   'agx3_vary_core.c',
