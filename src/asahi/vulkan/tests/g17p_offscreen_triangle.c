@@ -3247,7 +3247,7 @@ main(void)
                      checksum);
 #elif G17P_TEXEL_FETCH_LOD
    printf(PROBE_NAME ": PASS — texelFetch selected exact mip 2 through "
-                     "the integer level staging path immediately/3s; "
+                     "the native immediate-level path immediately/3s; "
                      "all source/readback guards unchanged, checksum %016" PRIx64
                      "\n", checksum);
 #elif G17P_CUBE_SAMPLE
