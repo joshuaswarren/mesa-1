@@ -2368,8 +2368,14 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       prolog = hk_get_prolog_epilog(dev, &key->prolog, sizeof(key->prolog),
                                     build_fs_prolog, false, false,
                                     key->prolog.cf_base);
-      if (!prolog)
+      if (!prolog) {
+         mesa_loge("fragment prolog compilation failed: stats=%u cull=%u "
+                   "api-mask=%#x run-zs=%u cf-base=%u",
+                   key->prolog.statistics, key->prolog.cull_distance_size,
+                   key->prolog.api_sample_mask, key->prolog.run_zs_tests,
+                   key->prolog.cf_base);
          return NULL;
+      }
    }
 
    /* If sample shading is used, don't stop at the epilog, there's a
@@ -2383,17 +2389,39 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
                               ? build_g17p_fs_epilog
                               : agx_nir_fs_epilog,
                            true, epilog_stop, 0);
-   if (!epilog)
+   if (!epilog) {
+      uint32_t link = 0;
+      memcpy(&link, &key->epilog.link, sizeof(link));
+      mesa_loge("fragment epilog compilation failed: link=%#010x samples=%u "
+                "shaded=%u stop=%u small=%u preserve-zero=%u srgb=%u "
+                "formats=%x/%x/%x/%x remap=%d/%d/%d/%d",
+                link, key->epilog.nr_samples, key->nr_samples_shaded,
+                epilog_stop, key->epilog.force_small_tile,
+                key->epilog.preserve_zero_mask, key->epilog.lower_srgb,
+                key->epilog.rt_formats[0], key->epilog.rt_formats[1],
+                key->epilog.rt_formats[2], key->epilog.rt_formats[3],
+                key->epilog.remap[0], key->epilog.remap[1],
+                key->epilog.remap[2], key->epilog.remap[3]);
       return NULL;
+   }
 
    struct hk_fast_link_key *key_clone =
       ralloc_memdup(shader->linked.ht, key, sizeof(*key));
-   if (!key_clone)
+   if (!key_clone) {
+      mesa_loge("fragment fast-link key allocation failed");
       return NULL;
+   }
 
    struct hk_linked_shader *linked =
       hk_fast_link(dev, true, shader, prolog, epilog, key->nr_samples_shaded);
    if (!linked) {
+      uint32_t link_info = 0;
+      memcpy(&link_info, &key->epilog.link, sizeof(link_info));
+      mesa_loge("fragment fast-link failed: link=%#010x samples=%u shaded=%u "
+                "prolog=%u main=%u epilog=%u",
+                link_info, key->epilog.nr_samples, key->nr_samples_shaded,
+                prolog != NULL, shader->b.binary != NULL,
+                epilog->binary != NULL);
       ralloc_free(key_clone);
       return NULL;
    }
