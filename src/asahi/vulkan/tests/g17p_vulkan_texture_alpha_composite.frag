@@ -5,7 +5,7 @@ layout(set = 0, binding = 0) uniform sampler2D sources[2];
 layout(set = 0, binding = 1, std140) uniform CompositeParams {
    uint source_index;
    float opacity;
-   float texel_offset;
+   vec2 texel_offset;
 } params;
 
 layout(location = 0) in vec2 uv;
@@ -20,6 +20,6 @@ void main()
     * A quarter-mip1-texel offset forces real 2x2 linear filtering rather than
     * accidentally sampling exact texel centres. */
    uint source_index = params.source_index + source_bias - 1u;
-   out_color = texture(sources[source_index],
-                       uv + vec2(params.texel_offset)) * params.opacity;
+   out_color = texture(sources[source_index], uv + params.texel_offset) *
+               params.opacity;
 }

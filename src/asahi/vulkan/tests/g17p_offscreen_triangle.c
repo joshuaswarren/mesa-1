@@ -222,6 +222,12 @@
 #define G17P_COMPOSITE_SPLIT 0
 #endif
 
+#ifndef G17P_COMPOSITE_FRACTIONAL_INSET
+#define G17P_COMPOSITE_FRACTIONAL_INSET 0
+#endif
+
+#define G17P_COMPOSITE_OPACITY_COUNT 17
+
 #if G17P_COMPOSITE_SPLIT < 0 || G17P_COMPOSITE_SPLIT > 3
 #error "G17P_COMPOSITE_SPLIT must select one of two diagonals and windings"
 #endif
@@ -624,9 +630,9 @@
 #ifndef IMAGE_HEIGHT
 #define IMAGE_HEIGHT 32
 #endif
-#if G17P_TEXTURE_ALPHA_COMPOSITE &&                                  \
-   ((IMAGE_WIDTH % 32) != 0 || (IMAGE_HEIGHT % 32) != 0)
-#error "the alpha-composite extents must be positive multiples of 32"
+#if G17P_TEXTURE_ALPHA_COMPOSITE && \
+   (IMAGE_WIDTH < 17 || IMAGE_HEIGHT < 1)
+#error "the alpha-composite extent must fit all 17 opacity bands"
 #endif
 #define IMAGE_LAYERS ((G17P_MULTIVIEW || G17P_LAYER_OUTPUT) ? 2 : 1)
 
@@ -1831,26 +1837,26 @@ verify_readback(const uint8_t *map)
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
       const unsigned x = pixel % IMAGE_WIDTH;
       const unsigned y = pixel / IMAGE_WIDTH;
-      unsigned coverage_eighths;
-      if (x == IMAGE_WIDTH - 1 && y == IMAGE_HEIGHT - 1)
-         coverage_eighths = 0;
-      else if (x == IMAGE_WIDTH - 1)
-         coverage_eighths = (y & 1) ? 2 : 6;
-      else if (y == IMAGE_HEIGHT - 1)
-         coverage_eighths = (x & 1) ? 2 : 6;
-      else
-         coverage_eighths = ((x ^ y) & 1) ? 5 : 3;
-      const unsigned edge_width = IMAGE_WIDTH / 32;
+      const bool covered = !G17P_COMPOSITE_FRACTIONAL_INSET ||
+                           (x >= 4 && x < 14 && y >= 3 && y < 12);
+      uint8_t expected_pixel[4] = {128, 64, 128, 255};
+      unsigned coverage_eighths = 0;
+      if (covered) {
+         if (x == IMAGE_WIDTH - 1 && y == IMAGE_HEIGHT - 1)
+            coverage_eighths = ((x ^ y) & 1) ? 8 : 0;
+         else if (x == IMAGE_WIDTH - 1)
+            coverage_eighths = ((x ^ y) & 1) ? 6 : 2;
+         else if (y == IMAGE_HEIGHT - 1)
+            coverage_eighths = ((x ^ y) & 1) ? 6 : 2;
+         else
+            coverage_eighths = ((x ^ y) & 1) ? 5 : 3;
+      }
       const unsigned opacity_sixteenths =
-         x < edge_width
-            ? 0
-            : x >= IMAGE_WIDTH - edge_width
-                 ? 16
-                 : 1 + (x - edge_width) / (2 * edge_width);
+         (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
       const unsigned product = coverage_eighths * opacity_sixteenths;
-      const uint8_t expected_pixel[4] = {
-         128 - product, 64 + product, 128 - product, 255,
-      };
+      expected_pixel[0] -= product;
+      expected_pixel[1] += product;
+      expected_pixel[2] -= product;
 #else
       const uint8_t *expected_pixel = expected;
 #endif
@@ -2639,12 +2645,28 @@ main(void)
    /* Two triangles sharing a full-surface diagonal. Every pixel, including
     * the shared edge, must be covered exactly once. The integer attribute
     * forces a flat input ahead of the smooth UV in the fragment program. */
+#if G17P_COMPOSITE_FRACTIONAL_INSET
+   /* A 10x9 quad translated by quarter pixels. Its clip coordinates are
+    * fractional for this odd target, while sample centres 4..13 by 3..11
+    * remain safely inside its outer edges. */
+   static const struct composite_vertex vertices[] = {
+      {{(2.0f * 4.25f / IMAGE_WIDTH) - 1.0f,
+        (2.0f * 3.25f / IMAGE_HEIGHT) - 1.0f}, 1},
+      {{(2.0f * 14.25f / IMAGE_WIDTH) - 1.0f,
+        (2.0f * 3.25f / IMAGE_HEIGHT) - 1.0f}, 1},
+      {{(2.0f * 4.25f / IMAGE_WIDTH) - 1.0f,
+        (2.0f * 12.25f / IMAGE_HEIGHT) - 1.0f}, 1},
+      {{(2.0f * 14.25f / IMAGE_WIDTH) - 1.0f,
+        (2.0f * 12.25f / IMAGE_HEIGHT) - 1.0f}, 1},
+   };
+#else
    static const struct composite_vertex vertices[] = {
       {{-1.0f, -1.0f}, 1},
       {{1.0f, -1.0f}, 1},
       {{-1.0f, 1.0f}, 1},
       {{1.0f, 1.0f}, 1},
    };
+#endif
 #else
    static const float vertices[][2] = {
       {-1.0f, -1.0f},
@@ -2843,7 +2865,7 @@ main(void)
       COMPOSITE_INDEX_SUFFIX_BYTES = 64,
       COMPOSITE_UNIFORM_OFFSET = 64,
       COMPOSITE_UNIFORM_STRIDE = 64,
-      COMPOSITE_OPACITY_COUNT = 17,
+      COMPOSITE_OPACITY_COUNT = G17P_COMPOSITE_OPACITY_COUNT,
       COMPOSITE_UNIFORM_SUFFIX_BYTES = 64,
    };
 #if G17P_COMPOSITE_SPLIT == 0
@@ -2877,8 +2899,7 @@ main(void)
    struct composite_params {
       uint32_t source_index;
       float opacity;
-      float texel_offset;
-      uint32_t pad;
+      float texel_offset[2];
    };
    uint8_t composite_uniform_expected[COMPOSITE_UNIFORM_OFFSET +
                                       COMPOSITE_OPACITY_COUNT *
@@ -2894,7 +2915,10 @@ main(void)
       const struct composite_params params = {
          .source_index = 1,
          .opacity = step / 16.0f,
-         .texel_offset = 1.0f / (4.0f * IMAGE_WIDTH),
+         .texel_offset = {
+            1.0f / (4.0f * IMAGE_WIDTH),
+            1.0f / (4.0f * IMAGE_HEIGHT),
+         },
       };
       memcpy(composite_uniform_expected + COMPOSITE_UNIFORM_OFFSET +
                 step * COMPOSITE_UNIFORM_STRIDE,
@@ -4275,20 +4299,12 @@ main(void)
    vkCmdBindIndexBuffer(command_buffer, composite_index.buffer,
                         COMPOSITE_INDEX_BUFFER_OFFSET, VK_INDEX_TYPE_UINT16);
    for (uint32_t step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
-      const uint32_t edge_width = IMAGE_WIDTH / 32;
+      const uint32_t min_x = step * IMAGE_WIDTH / COMPOSITE_OPACITY_COUNT;
+      const uint32_t max_x =
+         (step + 1) * IMAGE_WIDTH / COMPOSITE_OPACITY_COUNT;
       const VkRect2D alpha_scissor = {
-         .offset = {
-            step == 0
-               ? 0
-               : step == 16
-                    ? IMAGE_WIDTH - edge_width
-                    : edge_width + (step - 1) * 2 * edge_width,
-            0,
-         },
-         .extent = {
-            (step == 0 || step == 16) ? edge_width : 2 * edge_width,
-            IMAGE_HEIGHT,
-         },
+         .offset = {min_x, 0},
+         .extent = {max_x - min_x, IMAGE_HEIGHT},
       };
       const uint32_t dynamic_offset = step * COMPOSITE_UNIFORM_STRIDE;
       vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
