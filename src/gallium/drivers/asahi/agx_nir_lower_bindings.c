@@ -175,10 +175,12 @@ agx_nir_lower_bindings(nir_shader *shader,
  * cannot: its indirect operand is a native global-heap index.
  *
  * Once texture lowering has made the crawl explicit, put a statically bound
- * fetch back on its texture-state register.  Keep the handle alive for the
+ * access back on its texture-state register.  Keep the handle alive for the
  * independent load_from_texture_handle_agx users which implement the Gen9
  * clamp.  This preserves the bounds operation without presenting AGX2
- * addressing to the native fetch instruction.
+ * addressing to the native fetch/sample instruction.  Filtered array samples
+ * need the same treatment: their layer clamp forces a crawl, but HAL200's
+ * witnessed array SMP uses the ordinary immediate texture/sampler pair.
  */
 bool
 agx_nir_rebind_g17p_texture_crawls(nir_shader *shader)
@@ -193,7 +195,8 @@ agx_nir_rebind_g17p_texture_crawls(nir_shader *shader)
                continue;
 
             nir_tex_instr *tex = nir_instr_as_tex(instr);
-            if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms)
+            if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms &&
+                !tex->is_array)
                continue;
 
             const int handle_idx =
