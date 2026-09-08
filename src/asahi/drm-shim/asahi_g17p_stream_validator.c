@@ -242,6 +242,27 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                           !memory->owned(memory->data, b, 32)))
                         return fail_at(cursor,
                                        "Ioto nested resource pointer is unowned");
+                     if (memory->verbose && a > UINT32_MAX &&
+                         b > UINT32_MAX && a < (UINT64_C(1) << 48) &&
+                         b < (UINT64_C(1) << 48)) {
+                        uint8_t texture[32] = {0}, sampler[32] = {0};
+                        if (memory->read(memory->data, a, texture,
+                                         sizeof(texture)) &&
+                            memory->read(memory->data, b, sampler,
+                                         sizeof(sampler))) {
+                           fprintf(stderr,
+                                   "shim: G17P resource pair texture=%#llx "
+                                   "sampler=%#llx texture-bytes=",
+                                   (unsigned long long)a,
+                                   (unsigned long long)b);
+                           for (unsigned j = 0; j < sizeof(texture); ++j)
+                              fprintf(stderr, "%02x", texture[j]);
+                           fprintf(stderr, " sampler-bytes=");
+                           for (unsigned j = 0; j < sizeof(sampler); ++j)
+                              fprintf(stderr, "%02x", sampler[j]);
+                           fprintf(stderr, "\n");
+                        }
+                     }
                   }
                }
             }

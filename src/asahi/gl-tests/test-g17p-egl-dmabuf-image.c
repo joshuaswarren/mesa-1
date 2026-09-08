@@ -25,6 +25,13 @@
 #define GUARD_BYTE 0xa5
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+static const uint8_t first_bgra[4] = {0x11, 0x22, 0x33, 0xff};
+static const uint8_t second_bgra[4] = {0x77, 0x66, 0x55, 0xff};
+static const uint8_t first_rgba[4] = {0x33, 0x22, 0x11, 0xff};
+static const uint8_t second_rgba[4] = {0x55, 0x66, 0x77, 0xff};
+static const uint8_t clear_bgra[4] = {0x66, 0x55, 0x44, 0xff};
+static const uint8_t clear_rgba[4] = {0x44, 0x55, 0x66, 0xff};
+
 struct guarded_pixels {
    uint8_t before[GUARD_SIZE];
    uint8_t data[DATA_BYTES];
@@ -109,7 +116,8 @@ map_read(struct gbm_bo *bo, const struct guarded_pixels *expected)
 }
 
 static bool
-gl_read(const uint8_t rgba[4], bool noop)
+gl_read(const char *phase, const uint8_t rgba[4], const uint8_t storage[4],
+        const uint8_t stale[4], bool noop)
 {
    struct guarded_pixels got;
    memset(&got, GUARD_BYTE, sizeof(got));
@@ -120,13 +128,62 @@ gl_read(const uint8_t rgba[4], bool noop)
       return false;
    if (noop)
       return true;
+   unsigned exact = 0, zero = 0, raw = 0, old = 0, other = 0;
+   unsigned first_bad = UINT32_MAX;
    for (unsigned i = 0; i < WIDTH * HEIGHT; ++i) {
-      if (memcmp(&got.data[4 * i], rgba, 4) != 0) {
-         fprintf(stderr, "GL dma-buf pixel %u mismatch\n", i);
-         return false;
-      }
+      const uint8_t *pixel = &got.data[4 * i];
+      if (!memcmp(pixel, rgba, 4))
+         exact++;
+      else if (!memcmp(pixel, (const uint8_t[4]){0, 0, 0, 0}, 4))
+         zero++;
+      else if (storage && !memcmp(pixel, storage, 4))
+         raw++;
+      else if (stale && !memcmp(pixel, stale, 4))
+         old++;
+      else
+         other++;
+      if (first_bad == UINT32_MAX && memcmp(pixel, rgba, 4))
+         first_bad = i;
    }
-   return true;
+
+   if (exact == WIDTH * HEIGHT)
+      return true;
+
+   const uint8_t *pixel = &got.data[4 * first_bad];
+   fprintf(stderr,
+           "%s: first bad pixel %u got=%02x%02x%02x%02x "
+           "expected=%02x%02x%02x%02x classes exact=%u zero=%u "
+           "raw-bgra=%u stale=%u other=%u\n",
+           phase, first_bad, pixel[0], pixel[1], pixel[2], pixel[3], rgba[0],
+           rgba[1], rgba[2], rgba[3], exact, zero, raw, old, other);
+   return false;
+}
+
+static bool
+native_texture_control(bool noop)
+{
+   struct guarded_pixels upload;
+   fill_raw(&upload, first_rgba);
+
+   GLuint texture, fbo;
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, WIDTH, HEIGHT, 0, GL_RGBA,
+                GL_UNSIGNED_BYTE, upload.data);
+   glGenFramebuffers(1, &fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          texture, 0);
+   const bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE &&
+                   gl_ok("native texture control") &&
+                   gl_read("native texture control", first_rgba, first_rgba,
+                           NULL, noop);
+   glDeleteFramebuffers(1, &fbo);
+   glDeleteTextures(1, &texture);
+   return ok;
 }
 
 static bool
@@ -248,6 +305,8 @@ main(void)
       return 1;
    }
 
+   const bool native_control_ok = native_texture_control(noop);
+
    const int drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
    struct gbm_device *gbm = drm_fd >= 0 ? gbm_create_device(drm_fd) : NULL;
    const uint32_t use = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
@@ -257,11 +316,6 @@ main(void)
        gbm_bo_get_plane_count(original) != 1)
       return 1;
 
-   static const uint8_t first_bgra[4] = {0x11, 0x22, 0x33, 0xff};
-   static const uint8_t second_bgra[4] = {0x77, 0x66, 0x55, 0xff};
-   static const uint8_t first_rgba[4] = {0x33, 0x22, 0x11, 0xff};
-   static const uint8_t second_rgba[4] = {0x55, 0x66, 0x77, 0xff};
-   static const uint8_t clear_bgra[4] = {0x66, 0x55, 0x44, 0xff};
    struct guarded_pixels first, second, cleared;
    fill_raw(&first, first_bgra);
    fill_raw(&second, second_bgra);
@@ -335,8 +389,10 @@ main(void)
    close(fd);
    gbm_bo_destroy(original);
    original = NULL;
-   if (!map_read(retained, &first) || !gl_read(first_rgba, noop))
+   if (!map_read(retained, &first))
       return 1;
+   bool gl_pixels_ok = gl_read("first CPU upload", first_rgba, first_bgra,
+                               NULL, noop);
 
    glClearColor(68.0f / 255.0f, 85.0f / 255.0f, 102.0f / 255.0f, 1.0f);
    glClear(GL_COLOR_BUFFER_BIT);
@@ -344,6 +400,8 @@ main(void)
    if (!gl_ok("first imported clear") ||
        !map_read(retained, noop ? &first : &cleared))
       return 1;
+   gl_pixels_ok &= gl_read("first GPU clear", clear_rgba, clear_bgra,
+                            first_rgba, noop);
 
    if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                        EGL_NO_CONTEXT) ||
@@ -351,16 +409,21 @@ main(void)
        !glIsTexture(texture) || !glIsFramebuffer(fbo))
       return 1;
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-   if (!map_write(retained, &second) || !gl_read(second_rgba, noop))
+   if (!map_write(retained, &second))
       return 1;
+   gl_pixels_ok &= gl_read("second CPU upload", second_rgba, second_bgra,
+                            clear_rgba, noop);
 
    glClearColor(68.0f / 255.0f, 85.0f / 255.0f, 102.0f / 255.0f, 1.0f);
    glClear(GL_COLOR_BUFFER_BIT);
    glFinish();
    if (!map_read(retained, noop ? &second : &cleared))
       return 1;
+   gl_pixels_ok &= gl_read("second GPU clear", clear_rgba, clear_bgra,
+                            second_rgba, noop);
 
-   if (!guard_ok(first.before) || !guard_ok(first.after) ||
+   if (!native_control_ok || !gl_pixels_ok ||
+       !guard_ok(first.before) || !guard_ok(first.after) ||
        !guard_ok(second.before) || !guard_ok(second.after) ||
        !guard_ok(cleared.before) || !guard_ok(cleared.after))
       return 1;
