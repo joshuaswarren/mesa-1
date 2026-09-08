@@ -35,15 +35,6 @@ agx_vdm_index_list_primitive_supported(uint8_t primitive)
    return agx_vdm_index_list_direct_primitive_supported_inline(primitive);
 }
 
-static bool
-agx_vdm_index_list_index_size_supported(
-   enum agx_vdm_index_list_index_size index_size)
-{
-   return index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 ||
-          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 ||
-          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U32;
-}
-
 bool
 agx_vdm_index_list_direct_target_supported(enum agx_chip chip)
 {
@@ -165,7 +156,7 @@ agx_vdm_index_list_direct_indexed_unpack(
 
    if ((header & UINT32_C(0xfff00000)) != expected_fixed ||
        !agx_vdm_index_list_primitive_supported(primitive) ||
-       !agx_vdm_index_list_index_size_supported(index_size) ||
+       !agx_vdm_index_list_index_size_supported_inline(chip, index_size) ||
        agx_vdm_index_list_load_le32(&raw[12]) == 0 || high_word > 0xff ||
        (hal300 &&
         agx_vdm_index_list_load_le32(&raw[opaque_offset]) != UINT32_C(7)))
@@ -299,7 +290,7 @@ agx_vdm_index_list_indirect_indexed_unpack(
    const bool restart_enable = (header & (UINT32_C(1) << 16)) != 0;
 
    if (!agx_vdm_index_list_primitive_supported(primitive) ||
-       !agx_vdm_index_list_index_size_supported(index_size))
+       !agx_vdm_index_list_index_size_supported_inline(chip, index_size))
       return false;
 
    const uint32_t index_buffer_lo = agx_vdm_index_list_load_le32(&raw[12]);

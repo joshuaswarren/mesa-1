@@ -144,6 +144,18 @@ agx_vdm_index_list_direct_is_hal300_inline(enum agx_chip chip)
 }
 
 static inline bool
+agx_vdm_index_list_index_size_supported_inline(enum agx_chip chip,
+                                                uint8_t index_size)
+{
+   /* U8 is grounded by the native G17P/HAL200 golden.  The HAL300 captures
+    * cover U16/U32 only, so keep that distinct encoding family fail-closed. */
+   return index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 ||
+          index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U32 ||
+          (index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 &&
+           !agx_vdm_index_list_direct_is_hal300_inline(chip));
+}
+
+static inline bool
 agx_vdm_index_list_direct_primitive_supported_inline(uint8_t primitive)
 {
    switch (primitive) {
@@ -181,9 +193,8 @@ agx_vdm_index_list_direct_pack_words(
    if (!agx_vdm_index_list_direct_target_supported_inline(chip) ||
        !agx_vdm_index_list_direct_primitive_supported_inline(primitive) ||
        instances == 0 ||
-       (indexed && ((index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 &&
-                     index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 &&
-                     index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U32) ||
+       (indexed && (!agx_vdm_index_list_index_size_supported_inline(
+                       chip, index_size) ||
                     index_buffer >= ((uint64_t)1 << 48))))
       return false;
 
@@ -250,9 +261,8 @@ agx_vdm_index_list_indirect_pack_words(
    if (!agx_vdm_index_list_direct_target_supported_inline(chip) ||
        !agx_vdm_index_list_direct_primitive_supported_inline(primitive) ||
        indirect_buffer >= ((uint64_t)1 << 48) || (indirect_buffer & 3u) != 0 ||
-       (indexed && ((index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U8 &&
-                     index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 &&
-                     index_size != AGX_VDM_INDEX_LIST_INDEX_SIZE_U32) ||
+       (indexed && (!agx_vdm_index_list_index_size_supported_inline(
+                       chip, index_size) ||
                     index_buffer >= ((uint64_t)1 << 48))))
       return false;
 

@@ -460,13 +460,26 @@ check_rejections(void)
    }
 
    for (unsigned index_size = 0; index_size < 8; ++index_size) {
-      if (index_size <= 2)
+      if (index_size == 1 || index_size == 2)
          continue;
       struct agx_vdm_index_list_direct_indexed_info bad = indexed_info;
       struct agx_vdm_index_list_direct_indexed encoded;
       bad.index_size = (enum agx_vdm_index_list_index_size)index_size;
       CHECK(!agx_vdm_index_list_direct_indexed_pack(AGX_CHIP_G17S, &bad,
                                                     &encoded));
+   }
+
+   {
+      struct agx_vdm_index_list_direct_indexed_info u8 = indexed_info;
+      struct agx_vdm_index_list_direct_indexed encoded;
+      struct agx_vdm_index_list_direct_indexed_info decoded;
+      u8.index_size = AGX_VDM_INDEX_LIST_INDEX_SIZE_U8;
+      CHECK(agx_vdm_index_list_direct_indexed_pack(AGX_CHIP_G17P, &u8,
+                                                   &encoded));
+      encoded = indexed_hal300;
+      encoded.bytes[2] &= (uint8_t)~0x0e;
+      CHECK(!agx_vdm_index_list_direct_indexed_unpack(
+         AGX_CHIP_G17S, encoded.bytes, encoded.length, &decoded));
    }
 
    {
