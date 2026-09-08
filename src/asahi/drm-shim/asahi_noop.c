@@ -101,8 +101,25 @@ static struct {
    size_t capacity;
 } shim_mappings;
 
+static unsigned invalid_vm_binds;
+
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
+
+static void __attribute__((destructor))
+check_vm_bind_lifetime(void)
+{
+   if (!getenv("ASAHI_SHIM_EXPECT_VALID_VM_BINDS"))
+      return;
+
+   if (invalid_vm_binds) {
+      fprintf(stderr, "shim: observed %u invalid VM_BIND operations\n",
+              invalid_vm_binds);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr, "shim: all VM_BIND operations had nonzero ranges\n");
+}
 
 static bool
 matrix_case_matches(const char *name,
@@ -378,6 +395,12 @@ remove_mappings(int fd, uint64_t address, uint64_t size)
          continue;
       }
 
+      if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
+         fprintf(stderr, "shim: unmap %#llx..%#llx (bound %#llx..%#llx)\n",
+                 (unsigned long long)address, (unsigned long long)end,
+                 (unsigned long long)mapping->address,
+                 (unsigned long long)mapping_end);
+
       drm_shim_bo_put(mapping->bo);
       *mapping = shim_mappings.entries[--shim_mappings.count];
    }
@@ -590,6 +613,13 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
                                                              bind->stride);
       uint64_t start = op->addr;
       uint64_t end = start + op->range;
+
+      if (!op->range) {
+         fprintf(stderr, "shim: gem_bind: zero-sized range at %#llx\n",
+                 (unsigned long long)start);
+         invalid_vm_binds++;
+         return -EINVAL;
+      }
 
       if (end < start || start < params->vm_start || end > params->vm_end) {
          fprintf(stderr,

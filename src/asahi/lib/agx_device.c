@@ -180,7 +180,20 @@ agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
 
    int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_VM_BIND, &vm_bind);
    if (ret) {
-      fprintf(stderr, "DRM_IOCTL_ASAHI_VM_BIND failed\n");
+      const int saved_errno = errno;
+      fprintf(stderr, "DRM_IOCTL_ASAHI_VM_BIND failed: %s (vm=%u, ops=%u)",
+              strerror(saved_errno), vm_bind.vm_id, vm_bind.num_binds);
+      for (uint32_t i = 0; i < count; ++i) {
+         fprintf(stderr,
+                 "%s{addr=%#llx range=%#llx offset=%#llx handle=%u "
+                 "flags=%#x}",
+                 i ? ", " : ": ", (unsigned long long)ops[i].addr,
+                 (unsigned long long)ops[i].range,
+                 (unsigned long long)ops[i].offset, ops[i].handle,
+                 ops[i].flags);
+      }
+      fputc('\n', stderr);
+      errno = saved_errno;
    }
 
    return ret;
