@@ -178,7 +178,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->src_a_16 ? (d->src_a >= 256) : ((d->src_a & 1) || d->src_a + 2 > 256))
       return false;
    if (d->addend_is_immediate &&
-       (d->no_addend || d->multiplier_is_register || d->addend_immediate > 255 ||
+       (d->no_addend || d->addend_immediate > 255 ||
         d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend ||
         d->src_c_cache || d->src_c_kill))
       return false;
@@ -238,7 +238,9 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       KV(9, 2),  KV(10, dest_width), KV(23, 2), KV(24, src_a_width),
       KV(38, 2), KV(39, mult_width), KV(53, 2),
    };
-   /* Pure multiply: no addend field, and f53 drops to 1. */
+   /* An absent or immediate addend selects the immediate-C endpoint and f53
+    * drops to 1. Fresh G17P code for a*b+1 proves this independently for a
+    * register multiplier as well as the existing immediate multiplier. */
    const struct agx3_field_kv baseline_reg_nc[] = {
       KV(9, 2),  KV(10, dest_width), KV(23, 2),
       KV(24, src_a_width),  KV(38, 2), KV(39, mult_width), KV(53, 1),

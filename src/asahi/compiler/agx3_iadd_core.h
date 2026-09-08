@@ -183,7 +183,8 @@ struct agx3_imad_desc {
    bool multiplier_16;   /* multiplier register is a single 16-bit half */
    bool multiplier_sign_extend; /* f43, the slot-B counterpart of f28 */
    bool addend_is_immediate;
-   uint16_t addend_immediate; /* native slot-C unsigned8 immediate */
+   /* Native slot-C unsigned8 immediate, with either multiplier source class. */
+   uint16_t addend_immediate;
    uint16_t src_c;     /* addend register half */
    bool src_c_kill, src_c_cache;
    /*

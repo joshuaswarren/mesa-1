@@ -27,6 +27,10 @@
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 
+#ifndef G17P_PIPELINE_STATISTICS
+#define G17P_PIPELINE_STATISTICS 0
+#endif
+
 #define T8140_DEVICE_ID 0x8140
 #define IMAGE_WIDTH 512
 #define IMAGE_HEIGHT 512
@@ -112,6 +116,13 @@ struct timestamp_output {
 struct occlusion_output {
    uint64_t prefix_guard;
    struct output_slot slot;
+   uint64_t suffix_guard;
+};
+
+struct statistics_output {
+   uint64_t prefix_guard;
+   uint64_t values[2];
+   uint64_t availability;
    uint64_t suffix_guard;
 };
 
@@ -204,8 +215,28 @@ check_unavailable(VkDevice device, VkQueryPool pool, uint32_t query,
 }
 
 static void
+check_unavailable_statistics(VkDevice device, VkQueryPool pool, uint32_t query)
+{
+   struct statistics_output out = {
+      .prefix_guard = OUTPUT_GUARD,
+      .values = {OUTPUT_GUARD, OUTPUT_GUARD},
+      .availability = OUTPUT_GUARD,
+      .suffix_guard = OUTPUT_GUARD,
+   };
+   const VkResult result = vkGetQueryPoolResults(
+      device, pool, query, 1,
+      sizeof(out) - offsetof(struct statistics_output, values), out.values,
+      sizeof(out),
+      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+   if (result != VK_NOT_READY || out.prefix_guard != OUTPUT_GUARD ||
+       out.values[0] != OUTPUT_GUARD || out.values[1] != OUTPUT_GUARD ||
+       out.availability != 0 || out.suffix_guard != OUTPUT_GUARD)
+      die("unavailable pipeline-statistics result or guard is not exact");
+}
+
+static void
 check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
-              unsigned pass)
+              VkQueryPool statistics, unsigned pass)
 {
    struct timestamp_output ts = {
       .prefix_guard = OUTPUT_GUARD,
@@ -223,6 +254,12 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
                .guard = OUTPUT_GUARD},
       .suffix_guard = OUTPUT_GUARD,
    };
+   struct statistics_output stats = {
+      .prefix_guard = OUTPUT_GUARD,
+      .values = {OUTPUT_GUARD, OUTPUT_GUARD},
+      .availability = OUTPUT_GUARD,
+      .suffix_guard = OUTPUT_GUARD,
+   };
    const VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT |
                                     VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
 
@@ -236,9 +273,19 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
                                                      slot),
                                &oq.slot.value, sizeof(oq.slot), flags),
          "vkGetQueryPoolResults(occlusion)");
+   if (G17P_PIPELINE_STATISTICS) {
+      check(vkGetQueryPoolResults(device, statistics, 0, 1,
+                                  sizeof(stats) - offsetof(
+                                     struct statistics_output, values),
+                                  stats.values, sizeof(stats), flags),
+            "vkGetQueryPoolResults(pipeline statistics)");
+   }
 
    if (!guards_intact(ts.slots, 2, ts.prefix_guard, ts.suffix_guard) ||
-       !guards_intact(&oq.slot, 1, oq.prefix_guard, oq.suffix_guard))
+       !guards_intact(&oq.slot, 1, oq.prefix_guard, oq.suffix_guard) ||
+       (G17P_PIPELINE_STATISTICS &&
+        (stats.prefix_guard != OUTPUT_GUARD ||
+         stats.suffix_guard != OUTPUT_GUARD)))
       die("query result write crossed a guarded output boundary");
    if (ts.slots[0].availability != 1 || ts.slots[1].availability != 1 ||
        oq.slot.availability != 1)
@@ -247,6 +294,10 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
       die("reused timestamp interval is zero or not strictly increasing");
    if (oq.slot.value != EXPECTED_SAMPLES)
       die("reused precise occlusion result is not exact");
+   if (G17P_PIPELINE_STATISTICS &&
+       (stats.availability != 1 || stats.values[0] != 3 ||
+        stats.values[1] != 1))
+      die("reused IA vertex/primitive statistics are not exact");
 
    printf("g17p-vulkan-queries: pass %u — timestamps %llu < %llu, "
           "occlusion=%llu; availability and guards exact\n",
@@ -254,6 +305,11 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
           (unsigned long long)ts.slots[0].value,
           (unsigned long long)ts.slots[1].value,
           (unsigned long long)oq.slot.value);
+   if (G17P_PIPELINE_STATISTICS)
+      printf("g17p-vulkan-pipeline-statistics: pass %u — "
+             "IA vertices=%llu, primitives=%llu; availability and guards exact\n",
+             pass, (unsigned long long)stats.values[0],
+             (unsigned long long)stats.values[1]);
 }
 
 int
@@ -337,7 +393,8 @@ main(int argc, char **argv)
       if (!candidate.limits.timestampComputeAndGraphics ||
           candidate.limits.timestampPeriod != 1.0f ||
           !candidate_features.occlusionQueryPrecise ||
-          candidate_features.pipelineStatisticsQuery)
+          candidate_features.pipelineStatisticsQuery !=
+             G17P_PIPELINE_STATISTICS)
          die("T8140 query advertisement differs from the bounded profile");
 
       uint32_t queue_count = 0;
@@ -378,6 +435,7 @@ main(int argc, char **argv)
    };
    const VkPhysicalDeviceFeatures enabled_features = {
       .occlusionQueryPrecise = features.occlusionQueryPrecise,
+      .pipelineStatisticsQuery = features.pipelineStatisticsQuery,
    };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -447,12 +505,24 @@ main(int argc, char **argv)
       .queryType = VK_QUERY_TYPE_OCCLUSION,
       .queryCount = 2,
    };
+   const VkQueryPoolCreateInfo statistics_info = {
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+      .queryCount = 2,
+      .pipelineStatistics =
+         VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+         VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT,
+   };
    VkQueryPool timestamps = VK_NULL_HANDLE;
    VkQueryPool occlusion = VK_NULL_HANDLE;
+   VkQueryPool statistics = VK_NULL_HANDLE;
    check(vkCreateQueryPool(device, &timestamp_info, NULL, &timestamps),
          "vkCreateQueryPool(timestamp)");
    check(vkCreateQueryPool(device, &occlusion_info, NULL, &occlusion),
          "vkCreateQueryPool(occlusion)");
+   if (G17P_PIPELINE_STATISTICS)
+      check(vkCreateQueryPool(device, &statistics_info, NULL, &statistics),
+            "vkCreateQueryPool(pipeline statistics)");
 
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
@@ -737,6 +807,8 @@ main(int argc, char **argv)
             "vkBeginCommandBuffer");
       vkCmdResetQueryPool(command_buffer, timestamps, 0, 3);
       vkCmdResetQueryPool(command_buffer, occlusion, 0, 2);
+      if (G17P_PIPELINE_STATISTICS)
+         vkCmdResetQueryPool(command_buffer, statistics, 0, 2);
       vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                           timestamps, 0);
       vkCmdBeginRenderPass(command_buffer, &render_begin,
@@ -747,7 +819,11 @@ main(int argc, char **argv)
                              &vertex_offset);
       vkCmdBeginQuery(command_buffer, occlusion, 0,
                       VK_QUERY_CONTROL_PRECISE_BIT);
+      if (G17P_PIPELINE_STATISTICS)
+         vkCmdBeginQuery(command_buffer, statistics, 0, 0);
       vkCmdDraw(command_buffer, 3, 1, 0, 0);
+      if (G17P_PIPELINE_STATISTICS)
+         vkCmdEndQuery(command_buffer, statistics, 0);
       vkCmdEndQuery(command_buffer, occlusion, 0);
       vkCmdEndRenderPass(command_buffer);
       vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -757,8 +833,9 @@ main(int argc, char **argv)
 
    printf("g17p-vulkan-queries: %s (device %#x), queue %u: "
           "timestamps=graphics+compute/64-bit/1ns, precise-occlusion=yes, "
-          "pipeline-statistics=no\n",
-          properties.deviceName, properties.deviceID, queue_family);
+          "pipeline-statistics=%s\n",
+          properties.deviceName, properties.deviceID, queue_family,
+          G17P_PIPELINE_STATISTICS ? "IA-vertices+primitives" : "no");
 
    if (execute) {
       VkQueue queue = VK_NULL_HANDLE;
@@ -781,11 +858,13 @@ main(int argc, char **argv)
          if (wait == VK_TIMEOUT)
             die("bounded two-second fence wait timed out");
          check(wait, "vkWaitForFences");
-         check_results(device, timestamps, occlusion, pass);
+         check_results(device, timestamps, occlusion, statistics, pass);
          vkDestroyFence(device, fence, NULL);
       }
       check_unavailable(device, timestamps, 2, "timestamp");
       check_unavailable(device, occlusion, 1, "occlusion");
+      if (G17P_PIPELINE_STATISTICS)
+         check_unavailable_statistics(device, statistics, 1);
       puts("g17p-vulkan-queries: reset/reuse PASS; unavailable results and "
            "availability exact");
    } else {
@@ -806,6 +885,8 @@ main(int argc, char **argv)
    vkDestroyBuffer(device, vertex_buffer, NULL);
    vkFreeMemory(device, vertex_memory, NULL);
    vkDestroyQueryPool(device, occlusion, NULL);
+   if (statistics != VK_NULL_HANDLE)
+      vkDestroyQueryPool(device, statistics, NULL);
    vkDestroyQueryPool(device, timestamps, NULL);
    vkDestroyDevice(device, NULL);
    vkDestroyInstance(instance, NULL);

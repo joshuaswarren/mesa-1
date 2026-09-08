@@ -52,6 +52,7 @@ main(void)
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 || i == LIBAGX_COPY_XFB_COUNTERS ||
+          i == LIBAGX_INCREMENT_IA ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1)
          CHECK(libagx_g17p[i] != NULL);
@@ -107,6 +108,38 @@ main(void)
    CHECK(xfb_info->agx3_staging_known);
    CHECK(xfb_info->agx3_staging_halfs == 0);
    CHECK(memcmp(xfb_binary + xfb_info->binary_size - sizeof(end), end,
+                sizeof(end)) == 0);
+
+   /* Pipeline-statistics IA accounting uses this exact generated kernel. Its
+    * register-register-plus-immediate MAD is independently pinned against the
+    * fresh Apple G17P witness in test-agx3-iadd-core.c. Keep the whole Mesa ABI
+    * program stable as well: it is launched before the render and updates only
+    * the non-null counter addresses supplied by the query root. */
+   const uint32_t *ia_blob = libagx_g17p[LIBAGX_INCREMENT_IA];
+   CHECK(ia_blob != NULL);
+   if (!ia_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *ia_info = (const void *)ia_blob;
+   const uint8_t *ia_binary =
+      (const uint8_t *)ia_blob + sizeof(*ia_info);
+   CHECK(ia_info->preamble_offset == 0);
+   CHECK(ia_info->main_offset == 0);
+   CHECK(ia_info->main_size == 1360);
+   CHECK(ia_info->binary_size == 1360);
+   CHECK(ia_info->nr_gprs == 26);
+   CHECK(ia_info->nr_preamble_gprs == 0);
+   CHECK(ia_info->push_count == 28);
+   CHECK(ia_info->workgroup_size[0] == 1);
+   CHECK(ia_info->workgroup_size[1] == 1);
+   CHECK(ia_info->workgroup_size[2] == 1);
+   CHECK(ia_info->local_size == 0);
+   CHECK(ia_info->imageblock_stride == 0);
+   CHECK(!ia_info->uses_txf);
+   CHECK(ia_info->agx3_staging_known);
+   CHECK(ia_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
+         UINT64_C(0x3d4ea3afaa2e9e27));
+   CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
    /* Apple G17P compiles the equivalent four- and five-word predicate/copy

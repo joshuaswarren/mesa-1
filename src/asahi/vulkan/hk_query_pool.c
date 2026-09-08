@@ -264,9 +264,36 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       return;
    }
 
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
+   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: {
+      const uint32_t reports = hk_reports_per_query(pool);
+      if (!reports || pool->query_stride !=
+                         (uint64_t)reports * sizeof(struct hk_query_report)) {
+         vk_command_buffer_set_error(&cmd->vk,
+                                     VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
+      /* These pools have a dense u32 availability array followed by dense,
+       * fixed-stride u64 reports. Reset both address domains explicitly. A
+       * multiview-generated zero uses the same path with availability set. */
+      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
+                             pool->bo->va->addr +
+                                (uint64_t)first_index * sizeof(uint32_t),
+                             (uint64_t)num_queries * sizeof(uint32_t),
+                             set_available ? 1 : 0);
+      if (vk_command_buffer_has_error(&cmd->vk))
+         return;
+
+      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
+                             pool->bo->va->addr +
+                                hk_query_offset(pool, first_index),
+                             (uint64_t)num_queries * pool->query_stride, 0);
+      return;
+   }
+
    default:
-      /* No native reset encoding is grounded for statistics, transform
-       * feedback, or any future query layout. */
+      /* No native reset encoding is grounded for any future query layout. */
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -565,8 +592,10 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       struct hk_root_descriptor_table *root = &cmd->state.gfx.descriptors.root;
       cmd->state.gfx.descriptors.root_dirty = true;
 
-      root->draw.pipeline_stats = hk_query_report_addr(dev, pool, query);
-      root->draw.pipeline_stats_flags = pool->vk.pipeline_statistics;
+      root->draw.pipeline_stats =
+         end ? 0 : hk_query_report_addr(dev, pool, query);
+      root->draw.pipeline_stats_flags =
+         end ? 0 : pool->vk.pipeline_statistics;
 
       /* XXX: I don't think is correct... when does the query become available
        * exactly?

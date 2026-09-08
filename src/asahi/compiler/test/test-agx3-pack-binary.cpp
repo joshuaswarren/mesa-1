@@ -1114,6 +1114,28 @@ TEST_F(AGX3PackBinary, G17PNarrowImmediateMADMatchesNative)
    pack(bad, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, G17PRegisterMADImmediateAddendUsesNativeEndpoint)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_index a = agx_register(4, AGX_SIZE_32);
+   agx_index m = agx_register(0, AGX_SIZE_32);
+   a.discard = true;
+   m.discard = true;
+   agx_imad_to(b, agx_register(0, AGX_SIZE_32), a, m,
+               agx_immediate(1), 0);
+   agx_stop(b);
+
+   static const uint8_t native[] = {
+      0x9f,0x00,0x54,0x00,0x02,0x08,0x00,0x08,0xd0,0x26,0x0a,0x00,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, WideSignedMultiplyMatchesNativeWitness)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

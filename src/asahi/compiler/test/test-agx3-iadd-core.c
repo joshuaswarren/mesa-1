@@ -311,6 +311,22 @@ test_native_immediate_subtract(void)
 static void
 test_native_imad_immediate_addend(void)
 {
+   static const uint8_t apple_reg_imm[12] = {
+      0x9f,0x00,0x56,0x00,0x02,0x08,0x00,0x08,0xd0,0x26,0x0a,0x00,
+   };
+   /* Fresh Apple G17P AIR 7326f3e6841d... / native fbc46f52c6ff...
+    * from `out[i] = a[i] * b[i] + 1u`. This is the exact register
+    * multiplier plus immediate addend that libagx_increment_ia requires. */
+   const struct agx3_imad_desc apple_reg_imm_desc = {
+      .dest=0, .src_a=4, .src_a_kill=true,
+      .multiplier_is_register=true, .multiplier_reg=0,
+      .multiplier_kill=true, .addend_is_immediate=true,
+      .addend_immediate=1, .wait_mask=32,
+   };
+   uint8_t apple_out[AGX3_IADD_MAX_LENGTH], apple_len = 0;
+   CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &apple_reg_imm_desc,
+                          apple_out, &apple_len));
+   CHECK(apple_len == 12 && !memcmp(apple_out, apple_reg_imm, 12));
    static const uint8_t native[6][12] = {
       {0x9f,0x00,0x56,0x00,0x02,0x00,0x94,0x28,0x50,0x22,0x02,0x00},
       {0x9f,0x00,0x56,0x00,0x02,0x04,0x94,0x28,0x50,0x20,0x02,0x00},
@@ -333,6 +349,12 @@ test_native_imad_immediate_addend(void)
    uint8_t out[AGX3_IADD_MAX_LENGTH],len;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    d.addend_immediate=5; d.src_c_kill=true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+   d = apple_reg_imm_desc;
+   d.addend_immediate = 256;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+   d = apple_reg_imm_desc;
+   d.src_c = 2;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
 
    /* applegpu-nt 32023.917, apple-g17p ushort MAD. The vector form pins

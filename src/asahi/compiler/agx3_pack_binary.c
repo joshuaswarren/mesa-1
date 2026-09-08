@@ -5380,7 +5380,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * and register multiplier variants have distinct baselines. */
             const bool no_addend = c.type == AGX_INDEX_IMMEDIATE &&
                                    c.value == 0 && !c.abs && !c.neg;
-            const bool addend_imm = mult_imm &&
+            const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
                c.value <= 0xff && !c.abs && !c.neg && !c.memory;
             const bool addend_ok =

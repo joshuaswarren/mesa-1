@@ -1231,6 +1231,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Hardware-ready exact IA statistics oracle. The feature stays hidden by
+    # default and this target opts into the bounded G17P qualification path.
+    executable(
+      'g17p-vulkan-pipeline-statistics',
+      files('tests/g17p_vulkan_queries.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_PIPELINE_STATISTICS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Game-feature probe: enables every advertised Vulkan 1.1/1.2/1.3
     # feature, then compiles AND records a dispatch for each SPIR-V module.
     # The record half is what catches a feature the compiler accepts but the
