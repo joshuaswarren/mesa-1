@@ -52,13 +52,24 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (p_format == PIPE_FORMAT_NONE)
       return 0;
 
-   /* Keep compressed families independent on G17P. The complete BC family is
-    * capture-backed; ETC2/EAC and ASTC still need public decode oracles before
-    * their Vulkan feature bits and format capabilities can be exposed. */
+   /* Keep compressed-family reporting atomic with the corresponding Vulkan
+    * feature.  The native G17P descriptor path already carries independent
+    * ETC2/EAC and ASTC codec selectors; the hidden switches expose both the
+    * family feature and every sampled/upload format for the consolidated
+    * hardware qualification run. */
    if (pdev->dev.chip == AGX_CHIP_G17P &&
        util_format_is_compressed(p_format) &&
-       !hk_g17p_bc_format_supported(vk_format))
-      return 0;
+       !hk_g17p_bc_format_supported(vk_format)) {
+      const enum util_format_layout layout =
+         util_format_description(p_format)->layout;
+      const bool enabled =
+         (layout == UTIL_FORMAT_LAYOUT_ETC &&
+          hk_g17p_unverified_feature("etc2_eac")) ||
+         (layout == UTIL_FORMAT_LAYOUT_ASTC &&
+          hk_g17p_unverified_feature("astc_ldr"));
+      if (!enabled)
+         return 0;
+   }
 
    /* NPOT formats only supported for texel buffers */
    if (!util_is_power_of_two_nonzero(util_format_get_blocksize(p_format)))

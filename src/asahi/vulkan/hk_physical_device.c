@@ -262,7 +262,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
  * Until then HK_G17P_UNVERIFIED_FEATURES=<name>[,<name>...] advertises one,
  * for exactly that probe.
  */
-static bool
+bool
 hk_g17p_unverified_feature(const char *name)
 {
    const char *list = debug_get_option("HK_G17P_UNVERIFIED_FEATURES", NULL);
@@ -310,9 +310,13 @@ hk_get_device_features(
       .alphaToOne = true,
       .multiViewport = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 = dev->chip != AGX_CHIP_G17P,
+      .textureCompressionETC2 =
+         dev->chip != AGX_CHIP_G17P ||
+         hk_g17p_unverified_feature("etc2_eac"),
       .textureCompressionBC = true,
-      .textureCompressionASTC_LDR = dev->chip != AGX_CHIP_G17P,
+      .textureCompressionASTC_LDR =
+         dev->chip != AGX_CHIP_G17P ||
+         hk_g17p_unverified_feature("astc_ldr"),
       .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = instance->vertex_stores,
