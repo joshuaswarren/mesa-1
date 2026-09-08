@@ -683,6 +683,26 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-texture-alpha-composite-narrow-single',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_NARROW_SINGLE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-repeated-full',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_REPEATED_FULL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-texture-grad',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],

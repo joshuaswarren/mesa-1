@@ -238,6 +238,19 @@
 #define G17P_COMPOSITE_SINGLE_DRAW 0
 #endif
 
+#ifndef G17P_COMPOSITE_NARROW_SINGLE
+#define G17P_COMPOSITE_NARROW_SINGLE 0
+#endif
+
+#ifndef G17P_COMPOSITE_REPEATED_FULL
+#define G17P_COMPOSITE_REPEATED_FULL 0
+#endif
+
+#if (G17P_COMPOSITE_SINGLE_DRAW + G17P_COMPOSITE_NARROW_SINGLE +            \
+     G17P_COMPOSITE_REPEATED_FULL) > 1
+#error "select one alpha-composite draw/scissor diagnostic"
+#endif
+
 #if G17P_COMPOSITE_NO_FLAT && G17P_COMPOSITE_EXPLICIT_LOD
 #error "select one alpha-composite diagnostic shader"
 #endif
@@ -1865,8 +1878,10 @@ verify_readback(const uint8_t *map)
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
       const unsigned x = pixel % IMAGE_WIDTH;
       const unsigned y = pixel / IMAGE_WIDTH;
-      const bool covered = !G17P_COMPOSITE_FRACTIONAL_INSET ||
-                           (x >= 4 && x < 14 && y >= 3 && y < 12);
+      const bool covered =
+         G17P_COMPOSITE_NARROW_SINGLE ? x < 2 :
+         (!G17P_COMPOSITE_FRACTIONAL_INSET ||
+          (x >= 4 && x < 14 && y >= 3 && y < 12));
       uint8_t expected_pixel[4] = {128, 64, 128, 255};
       unsigned coverage_eighths = 0;
       if (covered) {
@@ -1879,9 +1894,10 @@ verify_readback(const uint8_t *map)
          else
             coverage_eighths = ((x ^ y) & 1) ? 5 : 3;
       }
-      const unsigned opacity_sixteenths = G17P_COMPOSITE_SINGLE_DRAW
-         ? 16
-         : (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
+      const unsigned opacity_sixteenths =
+         (G17P_COMPOSITE_SINGLE_DRAW || G17P_COMPOSITE_REPEATED_FULL) ? 16 :
+         G17P_COMPOSITE_NARROW_SINGLE ? 1 :
+         (((x + 1) * G17P_COMPOSITE_OPACITY_COUNT) - 1) / IMAGE_WIDTH;
       const unsigned product = coverage_eighths * opacity_sixteenths;
       expected_pixel[0] -= product;
       expected_pixel[1] += product;
@@ -4337,6 +4353,35 @@ main(void)
                            pipeline_layout, 0, 1, &descriptor_set, 1,
                            &dynamic_offset);
    vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+#elif G17P_COMPOSITE_NARROW_SINGLE
+   /* Hold draw count at one while reproducing the physical 2-pixel scissor
+    * width from the failing 32-wide opacity sweep. */
+   const VkRect2D alpha_scissor = {
+      .extent = {2, IMAGE_HEIGHT},
+   };
+   const uint32_t dynamic_offset = COMPOSITE_UNIFORM_STRIDE;
+   vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
+   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline_layout, 0, 1, &descriptor_set, 1,
+                           &dynamic_offset);
+   vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+#elif G17P_COMPOSITE_REPEATED_FULL
+   /* Hold the physical scissor at the full target while retaining all 17
+    * dynamic-state/bind/draw transitions. The first 16 draws have zero
+    * opacity; only the final opaque draw contributes to the exact oracle. */
+   const VkRect2D alpha_scissor = {
+      .extent = {IMAGE_WIDTH, IMAGE_HEIGHT},
+   };
+   for (uint32_t step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
+      const uint32_t dynamic_offset =
+         (step + 1 == COMPOSITE_OPACITY_COUNT ? 16 : 0) *
+         COMPOSITE_UNIFORM_STRIDE;
+      vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissor);
+      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline_layout, 0, 1, &descriptor_set, 1,
+                              &dynamic_offset);
+      vkCmdDrawIndexed(command_buffer, 6, 1, COMPOSITE_FIRST_INDEX, 0, 0);
+   }
 #else
    for (uint32_t step = 0; step < COMPOSITE_OPACITY_COUNT; ++step) {
       const uint32_t min_x = step * IMAGE_WIDTH / COMPOSITE_OPACITY_COUNT;
