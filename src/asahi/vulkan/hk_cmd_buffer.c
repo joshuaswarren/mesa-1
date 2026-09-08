@@ -1174,6 +1174,7 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 static bool
 hk_g17p_graphics_uniform_ranges(
    struct hk_cmd_buffer *cmd, struct hk_shader *s,
+   const struct hk_linked_shader *linked,
    struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
    size_t *range_count)
 {
@@ -1240,14 +1241,15 @@ hk_g17p_graphics_uniform_ranges(
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (cmd->state.gfx.uses_blend_constant) {
          /* The non-monolithic blend epilog reads the four constants from
-          * AGX_ABI_FUNI_BLEND_R..A (halves4..11). The legacy USC path bound
-          * this range, but the HAL200 Ioto path omitted it, leaving every
-          * factor zero on G17P. Texture pointer ranges currently occupy
-          * halves0..7, so fail closed for the overlapping combined case
-          * until its independently witnessed ABI is implemented. */
-         if (s->info.agx3_combined_sampler_valid ||
-             s->info.agx3_indexed_sampler_valid || !root_ptr ||
+          * the base selected by its linked key. It is half4 for the standard
+          * ABI and moves beyond the main shader footprint when HAL200 native
+          * texture/sampler pointers occupy halves0..7. */
+         const uint16_t blend_base = linked->g17p_blend_constant_base
+                                        ? linked->g17p_blend_constant_base
+                                        : AGX_ABI_FUNI_BLEND_R;
+         if (!root_ptr ||
              !hk_agx3_g17p_fragment_blend_constants_range(
+                blend_base,
                 root_ptr + hk_root_descriptor_offset(draw.blend_constant),
                 &ranges[count]))
             return false;
@@ -1396,7 +1398,8 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 
       struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
       size_t range_count;
-      if (!hk_g17p_graphics_uniform_ranges(cmd, s, ranges, &range_count)) {
+      if (!hk_g17p_graphics_uniform_ranges(cmd, s, linked, ranges,
+                                            &range_count)) {
          mesa_loge_once(
             "G17P graphics uniform ranges refused: stage=%u root=%" PRIx64
             " sets=%u uses_root=%u combined=%u indexed=%u blend_constants=%u "

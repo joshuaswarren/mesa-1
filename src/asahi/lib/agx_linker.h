@@ -297,6 +297,12 @@ struct agx_fs_epilog_key {
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;
+
+   /* Absolute uniform-half base for dynamic blend constants. Zero selects
+    * the standard fragment ABI at AGX_ABI_FUNI_BLEND_R. HAL200 resource
+    * pointers occupy that standard range, so a linked G17P epilog may place
+    * the constants after the main shader's uniform footprint instead. */
+   uint16_t blend_constant_base;
 };
 
 void agx_nir_vs_prolog(struct nir_builder *b, const void *key_);

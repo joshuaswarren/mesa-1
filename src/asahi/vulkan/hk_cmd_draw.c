@@ -2484,6 +2484,8 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       return NULL;
    }
 
+   linked->g17p_blend_constant_base = key->epilog.blend_constant_base;
+
    _mesa_hash_table_insert(shader->linked.ht, key_clone, linked);
    return linked;
 }
@@ -3941,6 +3943,33 @@ uses_blend_constant(const struct vk_color_blend_state *cb)
    return false;
 }
 
+/* HAL200 texture and sampler heaps consume fragment uniform halves0..7. The
+ * ordinary ABI's blend constants at halves4..11 therefore cannot coexist
+ * with an indexed/combined texture shader. Shader parts can address any even
+ * uniform half directly, so place the epilog-only constants after every main
+ * shader range. The Ioto program publishes that exact relocated range.
+ */
+static bool
+hk_g17p_relocated_blend_constant_base(const struct hk_shader *fs,
+                                      uint16_t *base_out)
+{
+   if (!fs || !base_out)
+      return false;
+
+   unsigned base = MAX2(AGX_G17P_TXF_ROOT_HALFS, fs->b.info.push_count);
+   if (fs->b.info.rodata.size_16) {
+      const unsigned rodata_end = fs->b.info.rodata.base_uniform +
+                                  fs->b.info.rodata.size_16;
+      base = MAX2(base, rodata_end);
+   }
+   base = ALIGN_POT(base, 2);
+   if (base > 512 - 8)
+      return false;
+
+   *base_out = base;
+   return true;
+}
+
 void
 agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                     uint64_t attribs_read, struct agx_velem_key *keys)
@@ -4232,6 +4261,17 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .blend.logicop_func = vk_logic_op_to_pipe(dyn->cb.logic_op),
          .preserve_zero_mask = dev->dev.chip == AGX_CHIP_G17P,
       };
+
+      if (dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
+          (fs->info.agx3_combined_sampler_valid ||
+           fs->info.agx3_indexed_sampler_valid) &&
+          !hk_g17p_relocated_blend_constant_base(
+             fs, &key.epilog.blend_constant_base)) {
+         vk_command_buffer_set_error(&cmd->vk,
+                                     VK_ERROR_FEATURE_NOT_PRESENT);
+         cs->current = out;
+         return;
+      }
 
       for (unsigned rt = 0; rt < ARRAY_SIZE(dyn->cal.color_map); ++rt) {
          int map = dyn->cal.color_map[rt];

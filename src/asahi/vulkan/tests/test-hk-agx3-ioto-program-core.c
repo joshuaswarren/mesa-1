@@ -946,6 +946,36 @@ test_g17p_basic_graphics_program(void)
    }
    resource.uniform_ranges = two_attribs_and_set;
 
+   /* Exact Omarchy shell fragment interface: native texture/sampler heap
+    * pointers in halves0..7, root plus three descriptor-set pointers in
+    * halves12..27, and the linked epilog's relocated blend constants in
+    * halves28..35. All three independently addressed ranges must coexist in
+    * one HAL200 Ioto program. */
+   const struct agx3_ioto_uniform_range indexed_blend_root[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 12, .size_halfs = 16, .address = 0x2000},
+      {.start_halfs = 28, .size_halfs = 8, .address = 0x3000},
+   };
+   resource = fragment;
+   resource.uniform_ranges = indexed_blend_root;
+   resource.uniform_range_count = ARRAY_SIZE(indexed_blend_root);
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &resource, &program));
+   CHECK(program.length > AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE &&
+         program.length <= HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE);
+   const struct hk_agx3_g17p_graphics_program indexed_blend_program = program;
+   for (unsigned i = 0; i < ARRAY_SIZE(indexed_blend_root); ++i) {
+      struct agx3_ioto_uniform_range changed[ARRAY_SIZE(indexed_blend_root)];
+      memcpy(changed, indexed_blend_root, sizeof(changed));
+      changed[i].address += 0x40;
+      resource.uniform_ranges = changed;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &resource, &program));
+      CHECK(program.length == indexed_blend_program.length &&
+            memcmp(program.bytes, indexed_blend_program.bytes,
+                   program.length) != 0);
+   }
+
    /* Full attribute pointers + clamps, descriptor root, and constant pool.
     * Every range must affect actual native CProg bytes independently. */
    const struct agx3_ioto_uniform_range full_vertex[] = {
@@ -954,6 +984,7 @@ test_g17p_basic_graphics_program(void)
       {.start_halfs = 108, .size_halfs = 36, .address = 0x3000},
       {.start_halfs = 144, .size_halfs = 128, .address = 0x4000},
    };
+   resource = vertex;
    resource.uniform_ranges = full_vertex;
    resource.uniform_range_count = ARRAY_SIZE(full_vertex);
    size_t bound = 0;
@@ -1462,14 +1493,25 @@ test_g17p_root_range(void)
 
    struct agx3_ioto_uniform_range blend = {0};
    CHECK(hk_agx3_g17p_fragment_blend_constants_range(
-      UINT64_C(0x10000028040), &blend));
+      4, UINT64_C(0x10000028040), &blend));
    CHECK(blend.start_halfs == 4 && blend.size_halfs == 8 &&
          blend.address == UINT64_C(0x10000028040));
+
+   CHECK(hk_agx3_g17p_fragment_blend_constants_range(
+      28, UINT64_C(0x10000028040), &blend));
+   CHECK(blend.start_halfs == 28 && blend.size_halfs == 8 &&
+         blend.address == UINT64_C(0x10000028040));
    const struct agx3_ioto_uniform_range blend_before = blend;
-   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(0, &blend));
+   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(28, 0, &blend));
    CHECK(memcmp(&blend, &blend_before, sizeof(blend)) == 0);
    CHECK(!hk_agx3_g17p_fragment_blend_constants_range(
-      UINT64_C(0x10000028040), NULL));
+      28, UINT64_C(0x10000028040), NULL));
+   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(
+      27, UINT64_C(0x10000028040), &blend));
+   CHECK(memcmp(&blend, &blend_before, sizeof(blend)) == 0);
+   CHECK(!hk_agx3_g17p_fragment_blend_constants_range(
+      506, UINT64_C(0x10000028040), &blend));
+   CHECK(memcmp(&blend, &blend_before, sizeof(blend)) == 0);
    return 0;
 }
 

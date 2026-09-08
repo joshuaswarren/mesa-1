@@ -298,13 +298,15 @@ hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
 
 bool
 hk_agx3_g17p_fragment_blend_constants_range(
-   uint64_t blend_constants_va, struct agx3_ioto_uniform_range *range)
+   uint16_t start_halfs, uint64_t blend_constants_va,
+   struct agx3_ioto_uniform_range *range)
 {
-   if (!blend_constants_va || !range)
+   if (!blend_constants_va || !range || (start_halfs & 1) != 0 ||
+       start_halfs > 512 - 8)
       return false;
 
    *range = (struct agx3_ioto_uniform_range){
-      .start_halfs = 4,
+      .start_halfs = start_halfs,
       .size_halfs = 8,
       .address = blend_constants_va,
    };

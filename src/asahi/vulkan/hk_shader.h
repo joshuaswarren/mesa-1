@@ -329,6 +329,10 @@ struct hk_linked_shader {
     */
    bool sw_indexing;
 
+   /* Absolute uniform-half base selected by the fragment epilog key for its
+    * dynamic blend constants. Zero means the standard half4 ABI. */
+   uint16_t g17p_blend_constant_base;
+
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.
     */

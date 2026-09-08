@@ -92,20 +92,25 @@ map_vs_part_uniform(nir_intrinsic_instr *intr, unsigned nr_attribs,
 }
 
 static int
-map_fs_part_uniform(nir_intrinsic_instr *intr)
+map_fs_part_uniform(nir_intrinsic_instr *intr,
+                    const struct agx_fs_epilog_key *key)
 {
+   const unsigned blend_base = key && key->blend_constant_base
+                                  ? key->blend_constant_base
+                                  : AGX_ABI_FUNI_BLEND_R;
+
    switch (intr->intrinsic) {
    case nir_intrinsic_load_blend_const_color_r_float:
-      return AGX_ABI_FUNI_BLEND_R;
+      return blend_base;
 
    case nir_intrinsic_load_blend_const_color_g_float:
-      return AGX_ABI_FUNI_BLEND_G;
+      return blend_base + 2;
 
    case nir_intrinsic_load_blend_const_color_b_float:
-      return AGX_ABI_FUNI_BLEND_B;
+      return blend_base + 4;
 
    case nir_intrinsic_load_blend_const_color_a_float:
-      return AGX_ABI_FUNI_BLEND_A;
+      return blend_base + 6;
 
    default:
       return -1;
@@ -125,7 +130,7 @@ lower_non_monolithic_uniforms(nir_builder *b, nir_intrinsic_instr *intr,
                                               4),
                                  layout->uniform_base);
    } else {
-      unif = map_fs_part_uniform(intr);
+      unif = map_fs_part_uniform(intr, data);
    }
 
    if (unif >= 0) {
@@ -602,7 +607,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
 
    /* Finally, lower uniforms according to our ABI */
    nir_shader_intrinsics_pass(b->shader, lower_non_monolithic_uniforms,
-                              nir_metadata_control_flow, NULL);
+                              nir_metadata_control_flow, (void *)key);
 
    /* There is no shader part after the epilog, so we're always responsible for
     * running our own tests, unless the fragment shader forced early tests.
