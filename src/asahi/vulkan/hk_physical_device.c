@@ -781,9 +781,11 @@ hk_get_device_features(
        * count/clamp/stride oracle batch is qualified. */
       features->drawIndirectCount =
          hk_g17p_unverified_feature("draw_indirect_count");
-      /* Application-authored gl_Layer remains a separate qualification item;
-       * multiview uses the driver's ViewIndex-to-Layer lowering instead. */
-      features->shaderOutputLayer = false;
+      /* G17P's native layer output occupies the high half of the shared
+       * layer/viewport UVS scalar. Keep the public bit paired with the exact
+       * two-instance/two-layer image qualification. */
+      features->shaderOutputLayer =
+         hk_g17p_unverified_feature("shader_output_layer");
       /* The HAL300 bind tail now emits the complete viewport/region-clip and
        * consecutive scissor/depth arrays, and the vertex compiler writes the
        * native packed layer/viewport UVS sysval. Keep public exposure opt-in

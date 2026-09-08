@@ -180,6 +180,8 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    matrix_stats.links += stats->links;
    matrix_stats.viewport_count =
       MAX2(matrix_stats.viewport_count, stats->viewport_count);
+   matrix_stats.max_instance_count =
+      MAX2(matrix_stats.max_instance_count, stats->max_instance_count);
    matrix_stats.primitive_mask |= stats->primitive_mask;
    matrix_stats.index_size_mask |= stats->index_size_mask;
 #define MERGE_FLAG(name) matrix_stats.name |= stats->name
@@ -288,6 +290,28 @@ check_multiview_coverage(void)
 
    fprintf(stderr,
            "shim: complete G17P two-view/layer render stream coverage\n");
+}
+
+static void __attribute__((destructor))
+check_layer_output_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_LAYER_OUTPUT"))
+      return;
+
+   if (!multiview_layers_two || matrix_stats.draws != 1 ||
+       matrix_stats.state_updates != 1 ||
+       matrix_stats.max_instance_count != 2 || !matrix_stats.layer_output) {
+      fprintf(stderr,
+              "shim: incomplete G17P layer-output coverage: layers=%u "
+              "draws=%u state=%u instances=%u layer-output=%u\n",
+              multiview_layers_two, matrix_stats.draws,
+              matrix_stats.state_updates, matrix_stats.max_instance_count,
+              matrix_stats.layer_output);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P application-authored layer-output coverage\n");
 }
 
 static void __attribute__((destructor))
@@ -707,7 +731,8 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
-         if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW"))
+         if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW") ||
+             getenv("ASAHI_SHIM_G17P_EXPECT_LAYER_OUTPUT"))
             multiview_layers_two |= render.layers == 2;
          const struct asahi_g17p_stream_memory memory = {
             .data = (void *)(intptr_t)fd,

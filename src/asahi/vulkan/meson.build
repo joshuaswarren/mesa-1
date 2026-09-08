@@ -565,6 +565,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Application-authored gl_Layer image oracle, independent of multiview's
+    # driver-injected ViewIndex-to-Layer lowering.
+    executable(
+      'g17p-vulkan-layer-output',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_LAYER_OUTPUT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-implicit-lod',
       files('tests/g17p_offscreen_triangle.c'),

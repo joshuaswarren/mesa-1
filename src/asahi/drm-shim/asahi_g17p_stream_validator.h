@@ -26,6 +26,7 @@ struct asahi_g17p_stream_stats {
    unsigned state_updates;
    unsigned links;
    unsigned viewport_count;
+   unsigned max_instance_count;
    uint32_t primitive_mask;
    uint8_t index_size_mask;
    bool clear_only;

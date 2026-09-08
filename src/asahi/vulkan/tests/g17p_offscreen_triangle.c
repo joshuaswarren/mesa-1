@@ -246,6 +246,10 @@
 #define G17P_MULTIVIEW 0
 #endif
 
+#ifndef G17P_LAYER_OUTPUT
+#define G17P_LAYER_OUTPUT 0
+#endif
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE ||     \
@@ -559,6 +563,11 @@
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rg16_sint_frag_spv
+#elif G17P_LAYER_OUTPUT
+#include "g17p_vulkan_layer_vert.h"
+#include "g17p_wsi_triangle_frag.h"
+#define G17P_VERT_SPV g17p_vulkan_layer_vert_spv
+#define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
 #elif G17P_F16_IO
 #include "g17p_vulkan_f16_io_frag.h"
 #include "g17p_vulkan_f16_io_vert.h"
@@ -584,7 +593,7 @@
 #define T8140_DEVICE_ID 0x8140
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
-#define IMAGE_LAYERS (G17P_MULTIVIEW ? 2 : 1)
+#define IMAGE_LAYERS ((G17P_MULTIVIEW || G17P_LAYER_OUTPUT) ? 2 : 1)
 
 #if G17P_INDIRECT_DRAW
 #define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
@@ -1200,6 +1209,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_LAYER_OUTPUT
+#define PROBE_NAME "g17p-vulkan-layer-output"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (READBACK_PAYLOAD_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MULTIVIEW
 #define PROBE_NAME "g17p-vulkan-multiview"
 #define READBACK_IMAGE_USAGE 0
@@ -1270,7 +1284,8 @@ VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
-   G17P_MULTIVIEW || G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
+   G17P_ADVANCED_BLEND
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1821,6 +1836,8 @@ main(void)
        getenv("G17P_MSAA_RECORD_ONLY") != NULL) ||
       (G17P_INDIRECT_DRAW && getenv("G17P_INDIRECT_RECORD_ONLY") != NULL) ||
       (G17P_MULTIVIEW && getenv("G17P_MULTIVIEW_RECORD_ONLY") != NULL) ||
+      (G17P_LAYER_OUTPUT &&
+       getenv("G17P_LAYER_OUTPUT_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
@@ -1904,8 +1921,9 @@ main(void)
       .applicationVersion = 1,
       .pEngineName = "none",
       .engineVersion = 1,
-      .apiVersion = G17P_INDIRECT_DRAW ? VK_API_VERSION_1_2
-                                      : VK_API_VERSION_1_1,
+      .apiVersion = (G17P_INDIRECT_DRAW || G17P_LAYER_OUTPUT)
+                       ? VK_API_VERSION_1_2
+                       : VK_API_VERSION_1_1,
    };
    const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -1918,7 +1936,8 @@ main(void)
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
-   G17P_MULTIVIEW || G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
+   G17P_ADVANCED_BLEND
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2041,6 +2060,20 @@ main(void)
       die("T8140/G17P lacks wideLines or bresenhamLines");
 #endif
 
+#if G17P_LAYER_OUTPUT
+   VkPhysicalDeviceVulkan12Features layer_available12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+   };
+   VkPhysicalDeviceFeatures2 layer_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &layer_available12,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &layer_available);
+   if (!layer_available12.shaderOutputLayer ||
+       properties.limits.maxFramebufferLayers < 2)
+      die("T8140/G17P does not advertise vertex shader layer output");
+#endif
+
 #if G17P_INDIRECT_DRAW
    VkPhysicalDeviceVulkan12Features indirect_available12 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -2145,6 +2178,12 @@ main(void)
 #endif
    };
 #endif
+#if G17P_LAYER_OUTPUT
+   const VkPhysicalDeviceVulkan12Features layer_enabled12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .shaderOutputLayer = VK_TRUE,
+   };
+#endif
 #if G17P_INDIRECT_DRAW
    const VkPhysicalDeviceVulkan12Features indirect_enabled12 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -2188,6 +2227,8 @@ main(void)
       .pNext = &enabled11,
 #elif G17P_BRESENHAM_LINES
       .pNext = &enabled_lines,
+#elif G17P_LAYER_OUTPUT
+      .pNext = &layer_enabled12,
 #elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D
       .pNext = &host_copy_features,
 #elif G17P_INDIRECT_DRAW
@@ -2968,8 +3009,9 @@ main(void)
    const VkImageViewCreateInfo view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
-      .viewType = G17P_MULTIVIEW ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                : VK_IMAGE_VIEW_TYPE_2D,
+      .viewType = (G17P_MULTIVIEW || G17P_LAYER_OUTPUT)
+                     ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                     : VK_IMAGE_VIEW_TYPE_2D,
       .format = IMAGE_FORMAT,
       .subresourceRange = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3592,7 +3634,7 @@ main(void)
       .pAttachments = framebuffer_views,
       .width = IMAGE_WIDTH,
       .height = IMAGE_HEIGHT,
-      .layers = 1,
+      .layers = G17P_LAYER_OUTPUT ? IMAGE_LAYERS : 1,
    };
    VkFramebuffer framebuffer;
    check(vkCreateFramebuffer(device, &framebuffer_info, NULL, &framebuffer),
@@ -3786,7 +3828,9 @@ main(void)
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
 #endif
-#if G17P_VERTEX_FORMAT
+#if G17P_LAYER_OUTPUT
+   vkCmdDraw(command_buffer, 3, IMAGE_LAYERS, 0, 0);
+#elif G17P_VERTEX_FORMAT
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #elif G17P_INSTANCE_RATE
    vkCmdDraw(command_buffer, 6, 2, 0, 3);
@@ -3935,7 +3979,7 @@ main(void)
 #endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
-   if (record_only && !G17P_MULTIVIEW) {
+   if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -3953,7 +3997,7 @@ main(void)
    };
    check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
-   G17P_MULTIVIEW ||                                                     \
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT ||                               \
    G17P_INDEX_RESTART ||                                                \
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
@@ -3990,7 +4034,13 @@ main(void)
          "vkWaitForFences");
 #endif
 
-#if G17P_MULTIVIEW
+#if G17P_LAYER_OUTPUT
+   if (record_only) {
+      printf(PROBE_NAME ": PASS — feature advertised, shader compiled, "
+                        "and two-instance/layer command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_MULTIVIEW
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "and two-view command stream submitted\n");
@@ -4063,7 +4113,7 @@ main(void)
 #endif
 
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||     \
-   G17P_MULTIVIEW ||                                                       \
+   G17P_MULTIVIEW || G17P_LAYER_OUTPUT ||                                  \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
@@ -4139,7 +4189,12 @@ main(void)
 #else
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
-#if G17P_MULTIVIEW
+#if G17P_LAYER_OUTPUT
+   printf(PROBE_NAME ": PASS — two instances selected exact layers 0 and 1 "
+                     "immediately/3s; all readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_MULTIVIEW
    printf(PROBE_NAME ": PASS — both view 0/layer 0 and view 1/layer 1 "
                      "contain the exact full-frame image immediately/3s; "
                      "all readback guards unchanged, checksum %016" PRIx64

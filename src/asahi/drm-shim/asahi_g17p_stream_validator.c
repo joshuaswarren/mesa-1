@@ -819,6 +819,10 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          if (!have_state || restart_seen)
             return fail_at(cursor, "non-indexed draw has invalid state order");
          local.draws++;
+         if (record.data.index_list_nonindexed.instances >
+             local.max_instance_count)
+            local.max_instance_count =
+               record.data.index_list_nonindexed.instances;
          local.primitive_mask |=
             UINT32_C(1) << record.data.index_list_nonindexed.primitive;
          cursor += record.length;
