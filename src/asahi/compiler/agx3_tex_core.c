@@ -420,11 +420,10 @@ agx3_tex_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 
 bool
 agx3_tex_encode_image_write_rgba8_2d(
-   enum agx_isa_encoding enc, uint16_t wait_mask, uint8_t image_index,
-   bool normalized,
+   enum agx_isa_encoding enc, const struct agx3_image_write_desc *d,
    uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len)
 {
-   if (out == NULL || len == NULL)
+   if (d == NULL || out == NULL || len == NULL)
       return false;
 
    memset(out, 0, AGX3_IMAGE_WRITE_LENGTH);
@@ -433,24 +432,49 @@ agx3_tex_encode_image_write_rgba8_2d(
     * not an imgwci field. The fixed native instruction always waits for the
     * staging-slot2 writes, so both an outstanding slot1 producer and data
     * already retired by an earlier consumer use the same grounded bytes. */
-   if (enc != AGX_ISA_ENCODING_AGX3B || (wait_mask & ~1u) != 0 ||
-       !((image_index == 0 && !normalized) ||
-         (image_index == 1 && normalized)))
+   const unsigned kind =
+      d->image_kind ? d->image_kind : AGX3_TEX_OPERAND_IMMEDIATE;
+   const bool immediate = kind == AGX3_TEX_OPERAND_IMMEDIATE;
+   const bool reg = kind == AGX3_TEX_OPERAND_REGISTER;
+   if (enc != AGX_ISA_ENCODING_AGX3B || (d->wait_mask & ~1u) != 0 ||
+       (!immediate && !reg) ||
+       (immediate && (d->image_kill ||
+          !((d->image_value == 0 && !d->normalized) ||
+            (d->image_value == 1 && d->normalized)))) ||
+       (reg && (!d->normalized || (d->image_value & 1) ||
+                d->image_value > 126)))
       return false;
 
-   /* Nonzero field values recovered by decoding the native 16-byte
-    * imgwci.ep0. Every omitted field is intentionally zero; the composer
-    * validates the complete selected form. Fields 70/91 are the only
-    * differences in Apple's sampled-float-to-write-state1 witness. */
-   const struct agx3_field_kv fields[] = {
+   /* Nonzero field values recovered from native imgwci.ep0 instructions.
+    * Every omitted field is intentionally zero. The direct state selector is
+    * f91. Native argument-buffer indexing instead uses f92 for a killed GPR
+    * or f93 for a retained GPR, with f99/f100 selecting that operand family.
+    * The composer validates the complete selected form. */
+   struct agx3_field_kv fields[24] = {
       KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
       KV(51, 1),  KV(52, 1),  KV(60, 1),   KV(71, 2), KV(72, 1),
-      KV(74, 1),  KV(79, 4),  KV(85, 3),   KV(86, 3), KV(99, 1),
-      KV(100, 1), KV(113, 1), KV(70, normalized), KV(91, image_index),
+      KV(74, 1),  KV(85, 3),  KV(86, 3),   KV(113, 1),
+      KV(70, d->normalized),
    };
+   unsigned n = 15;
+   if (immediate) {
+      fields[n++] = (struct agx3_field_kv)KV(79, 4);
+      fields[n++] = (struct agx3_field_kv)KV(91, d->image_value);
+      fields[n++] = (struct agx3_field_kv)KV(99, 1);
+      fields[n++] = (struct agx3_field_kv)KV(100, 1);
+   } else if (d->image_kill) {
+      fields[n++] = (struct agx3_field_kv)KV(92, d->image_value);
+      fields[n++] = (struct agx3_field_kv)KV(99, 2);
+      fields[n++] = (struct agx3_field_kv)KV(100, 2);
+      fields[n++] = (struct agx3_field_kv)KV(103, 1);
+   } else {
+      fields[n++] = (struct agx3_field_kv)KV(93, d->image_value);
+      fields[n++] = (struct agx3_field_kv)KV(99, 3);
+      fields[n++] = (struct agx3_field_kv)KV(100, 2);
+   }
 
    if (!agx3_bind_compose(enc, "imgwci", 0, fields,
-                          sizeof(fields) / sizeof(fields[0]),
+                          n,
                           NULL, 0, out, len) ||
        *len != AGX3_IMAGE_WRITE_LENGTH) {
       memset(out, 0, AGX3_IMAGE_WRITE_LENGTH);

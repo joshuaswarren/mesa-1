@@ -857,6 +857,15 @@ agx3_tex_imm(agx_index index, uint16_t value)
           !index.memory && !index.abs && !index.neg;
 }
 
+static bool
+agx3_tex_plain_uniform64(agx_index index)
+{
+   return index.type == AGX_INDEX_UNIFORM && index.size == AGX_SIZE_64 &&
+          agx_channels(index) == 1 && !(index.value & 1) &&
+          index.value <= 252 && !index.memory && !index.abs && !index.neg &&
+          !index.kill && !index.cache && !index.discard;
+}
+
 /* Translate the corpus-grounded 2D texel fetch. Dynamic integer LOD is
  * published into operand bank 6; every other texture axis remains a
  * deliberate refusal. */
@@ -1004,6 +1013,17 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
 {
    const bool normalized = I->format == AGX_FORMAT_U8NORM ||
                            I->format == AGX_FORMAT_RGB10A2;
+   const bool immediate_state = agx3_tex_imm(I->src[3], 0) &&
+      I->src[4].type == AGX_INDEX_IMMEDIATE &&
+      !I->src[4].memory && !I->src[4].abs && !I->src[4].neg &&
+      ((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
+       (I->src[4].value == 1 && normalized));
+   const bool register_state = normalized &&
+      agx3_tex_plain_uniform64(I->src[3]) &&
+      agx3_tex_plain_reg(I->src[4]) &&
+      I->src[4].size == AGX_SIZE_32 && agx_channels(I->src[4]) == 1 &&
+      !(I->src[4].value & 1) && I->src[4].value <= 126 &&
+      !(I->src[4].cache && (I->src[4].discard || I->src[4].kill));
    if (enc != AGX_ISA_ENCODING_AGX3B || I->nr_dests != 0 ||
        I->nr_srcs != 5 ||
        I->dim != AGX_DIM_2D || I->coherent || (wait_mask & ~1u) != 0 ||
@@ -1012,10 +1032,8 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        I->src[0].value > 248 || !agx3_tex_plain_reg(I->src[1]) ||
        I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 2 ||
        (I->src[1].value & 1) || I->src[1].value > 252 ||
-       !agx3_tex_imm(I->src[2], 0) || !agx3_tex_imm(I->src[3], 0) ||
-       I->src[4].type != AGX_INDEX_IMMEDIATE ||
-       !((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
-         (I->src[4].value == 1 && normalized))) {
+       !agx3_tex_imm(I->src[2], 0) ||
+       (!immediate_state && !register_state)) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
@@ -1049,8 +1067,17 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    }
 
    uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
+   const struct agx3_image_write_desc d = {
+      .wait_mask = wait_mask,
+      .image_kind = register_state ? AGX3_TEX_OPERAND_REGISTER :
+                                     AGX3_TEX_OPERAND_IMMEDIATE,
+      .image_value = I->src[4].value,
+      .image_kill = register_state &&
+                    (I->src[4].discard || I->src[4].kill),
+      .normalized = normalized,
+   };
    if (!agx3_tex_encode_image_write_rgba8_2d(
-          enc, 1, I->src[4].value, normalized, imgwci, &imgwci_len) ||
+          enc, &d, imgwci, &imgwci_len) ||
        !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
       if (agx_compiler_debug & AGX_DBG_SHADERS)

@@ -299,18 +299,29 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
 #define AGX3_TEX_COPY_MAX_LENGTH 10u
 
 /*
- * Exact G17P storage-image write instruction from the native
- * `texture2d<uint, access::read_write>` and sampled-float-to-rgba8 witnesses.
- * The bounded forms name PBE state 0/UINT or state 1/UNORM, consume the fixed
- * coordinate/data staging lanes populated by the caller, and wait on staging
- * slot 2. The wait is the one upstream texture dependency consumed by the
- * first data-staging write.
+ * Exact G17P storage-image write instruction from native direct and
+ * argument-buffer-indexed `texture2d<..., access::write>` witnesses. The
+ * instruction consumes fixed coordinate/data staging lanes populated by the
+ * caller and waits on staging slot 2. `wait_mask` is the upstream texture
+ * dependency consumed by the first data-staging write, not an imgwci field.
+ *
+ * IMMEDIATE names the two descriptor-specialized states already used by the
+ * public transfer paths: state 0/UINT and state 1/UNORM. REGISTER names an
+ * even 32-bit GPR containing a native argument-buffer heap index; only the
+ * normalized form is witnessed. UNIFORM remains deliberately unsupported.
  */
 #define AGX3_IMAGE_WRITE_LENGTH 16u
 
+struct agx3_image_write_desc {
+   uint16_t wait_mask;
+   enum agx3_tex_operand_kind image_kind;
+   uint16_t image_value;
+   bool image_kill;
+   bool normalized;
+};
+
 bool agx3_tex_encode_image_write_rgba8_2d(
-   enum agx_isa_encoding enc, uint16_t wait_mask, uint8_t image_index,
-   bool normalized,
+   enum agx_isa_encoding enc, const struct agx3_image_write_desc *d,
    uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len);
 
 /* A native staging COPY must preserve a coordinate GPR if later work uses
