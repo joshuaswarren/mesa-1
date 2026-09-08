@@ -1969,6 +1969,38 @@ build_cs_2d_image_access(bool store)
    return b.shader;
 }
 
+static nir_shader *
+build_cs_2d_texel_fetch(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "AGX3 robust sampled 2D texel fetch");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *handle = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 64), .desc_set = 0);
+   nir_def *gid = nir_load_global_invocation_id(&b, 32);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_uint32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_trim_vector(&b, gid, 2));
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+   tex->src[2] =
+      nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_scratch(&b, &tex->def, nir_imm_int(&b, 0), .write_mask = 0xf,
+                     .align_mul = 16);
+   return b.shader;
+}
+
 static bool
 test_g17p_2d_robustness_scope(void)
 {
@@ -2004,6 +2036,33 @@ test_g17p_2d_robustness_scope(void)
       if (!ok)
          return false;
    }
+
+   nir_shader *nir = build_cs_2d_texel_fetch();
+   agx_nir_lower_texture_for_generation(nir, 9);
+   unsigned fetches = 0, selects = 0, descriptor_loads = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex) {
+            nir_tex_instr *tex = nir_instr_as_tex(instr);
+            if (tex->op == nir_texop_txf) {
+               const int coord =
+                  nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+               fetches += coord >= 0 &&
+                          tex->src[coord].src.ssa->num_components == 2;
+            }
+         } else if (instr->type == nir_instr_type_alu) {
+            selects += nir_instr_as_alu(instr)->op == nir_op_bcsel;
+         } else if (instr->type == nir_instr_type_intrinsic) {
+            descriptor_loads +=
+               nir_instr_as_intrinsic(instr)->intrinsic ==
+               nir_intrinsic_load_global_constant;
+         }
+      }
+   }
+   const bool sampled_ok = fetches == 1 && selects >= 2 && descriptor_loads > 0;
+   ralloc_free(nir);
+   if (!sampled_ok)
+      return false;
 
    return true;
 }

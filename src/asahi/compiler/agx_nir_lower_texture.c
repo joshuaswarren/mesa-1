@@ -239,6 +239,26 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
    /* Apply txf workaround, see libagx_lower_txf_robustness */
    bool is_txf = ((tex->op == nir_texop_txf) || (tex->op == nir_texop_txf_ms));
+   nir_def *g17p_plain_txf_oob = NULL;
+
+   /* G17P's raw 2D integer fetch is memory-safe but does not return the
+    * Vulkan robustness value for every out-of-view coordinate.  The older
+    * workaround below only runs when LOD/layer state needs rewriting, leaving
+    * the overwhelmingly common 2D LOD0 case exposed.  Predicate that case
+    * explicitly, fetch texel (0,0) for an invalid coordinate so the hardware
+    * access itself stays inside the view, and select the required zero result
+    * after the fetch. */
+   if (gen9 && tex->op == nir_texop_txf &&
+       tex->sampler_dim == GLSL_SAMPLER_DIM_2D && !tex->is_array &&
+       !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP)) {
+      nir_def *size = nir_trim_vector(b, nir_get_texture_size(b, tex), 2);
+      nir_def *checked = nir_trim_vector(b, coord, 2);
+      g17p_plain_txf_oob = nir_bany(b, nir_uge(b, checked, size));
+      coord = nir_bcsel(b, g17p_plain_txf_oob,
+                        nir_imm_zero(b, coord->num_components,
+                                     coord->bit_size),
+                        coord);
+   }
 
    if (is_txf &&
        (has_nonzero_lod(tex) || tex->is_array ||
@@ -382,6 +402,15 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
                             nir_iadd_imm(b, nir_u2u16(b, sampler),
                                          gen9 ? 0 : 1));
+   }
+
+   if (g17p_plain_txf_oob) {
+      b->cursor = nir_after_instr(instr);
+      nir_def *robust = nir_bcsel(
+         b, g17p_plain_txf_oob,
+         nir_imm_zero(b, tex->def.num_components, tex->def.bit_size),
+         &tex->def);
+      nir_def_rewrite_uses_after(&tex->def, robust);
    }
 
    return true;
