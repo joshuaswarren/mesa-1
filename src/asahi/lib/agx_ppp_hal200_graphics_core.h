@@ -52,6 +52,19 @@ bool agx_ppp_hal200_cull_mode_pack(enum agx_chip chip, unsigned cull_mode,
 bool agx_ppp_hal200_cull_provoking_pack(enum agx_chip chip, unsigned selector,
                                        uint32_t original, uint32_t *out);
 
+/* Native G17P face-state setters preserve these legacy semantic fields inside
+ * the fixed HAL200 PRIMARY/SECONDARY records. */
+bool agx_ppp_hal200_fragment_face_raster_pack(
+   enum agx_chip chip, unsigned line_width, unsigned polygon_mode,
+   uint32_t original, uint32_t *out);
+
+bool agx_ppp_hal200_fragment_face_object_pack(
+   enum agx_chip chip, unsigned object_type, uint32_t original,
+   uint32_t *out);
+
+bool agx_ppp_hal200_primitive_msaa_pack(enum agx_chip chip, bool enable,
+                                       uint32_t original, uint32_t *out);
+
 /* Native setDepthClipMode: CULL bits11:10 are 01 for clip and 10 for clamp. */
 bool agx_ppp_hal200_depth_clip_pack(enum agx_chip chip, bool depth_clip,
                                    uint32_t original, uint32_t *out);

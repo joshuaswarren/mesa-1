@@ -213,6 +213,37 @@ main(void)
    check(AGX_PPP_HAL200_GRAPHICS_CULL, cull_words, 1, cull_expected,
          sizeof(cull_expected));
 
+   /* A 3px line is 0x2f in 4:4-minus-one form. Polygon mode line occupies
+    * PRIMARY_FACE bits18:19 on both faces. */
+   uint32_t face = UINT32_C(0x07200f5a);
+   assert(agx_ppp_hal200_fragment_face_raster_pack(
+      AGX_CHIP_G17P, 0x2f, 1, face, &face));
+   assert(face == UINT32_C(0x07242f5a));
+
+   uint32_t face2 = UINT32_C(0x07e00000);
+   assert(agx_ppp_hal200_fragment_face_object_pack(
+      AGX_CHIP_G17P, 1, face2, &face2));
+   assert(face2 == UINT32_C(0x17e00000));
+
+   uint32_t bresenham_cull = cull_words[0];
+   assert(agx_ppp_hal200_primitive_msaa_pack(
+      AGX_CHIP_G17P, true, bresenham_cull, &bresenham_cull));
+   assert(bresenham_cull == UINT32_C(0x00018480));
+
+   /* Every helper is fail-closed and leaves caller state untouched. */
+   uint32_t rejected = UINT32_C(0xa5a5a5a5);
+   assert(!agx_ppp_hal200_fragment_face_raster_pack(
+      AGX_CHIP_G17G, 0x0f, 1, 0, &rejected));
+   assert(!agx_ppp_hal200_fragment_face_raster_pack(
+      AGX_CHIP_G17P, 0x100, 1, 0, &rejected));
+   assert(!agx_ppp_hal200_fragment_face_raster_pack(
+      AGX_CHIP_G17P, 0x0f, 3, 0, &rejected));
+   assert(!agx_ppp_hal200_fragment_face_object_pack(
+      AGX_CHIP_G17P, 3, 0, &rejected));
+   assert(!agx_ppp_hal200_primitive_msaa_pack(
+      AGX_CHIP_G17G, true, 0, &rejected));
+   assert(rejected == UINT32_C(0xa5a5a5a5));
+
    /* Grounded native depth bitfields; all unrelated bits survive. */
    uint32_t depth_face = 0;
    assert(agx_ppp_hal200_depth_face_pack(AGX_CHIP_G17P, true, true,

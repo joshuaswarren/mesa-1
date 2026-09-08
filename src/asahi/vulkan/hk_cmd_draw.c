@@ -3084,6 +3084,23 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 UINT32_C(0x07e00000), UINT32_C(0x0001ffff)},
    };
 
+   const unsigned line_width = agx_pack_line_width(dyn->rs.line.width);
+   const unsigned polygon_mode = dyn->rs.polygon_mode;
+   const unsigned object_type = gfx->object_type;
+   if (!agx_ppp_hal200_fragment_face_raster_pack(
+          dev->dev.chip, line_width, polygon_mode, primary_fields.words[1],
+          &primary_fields.words[1]) ||
+       !agx_ppp_hal200_fragment_face_raster_pack(
+          dev->dev.chip, line_width, polygon_mode, primary_fields.words[3],
+          &primary_fields.words[3]) ||
+       !agx_ppp_hal200_fragment_face_object_pack(
+          dev->dev.chip, object_type, secondary_fields.words[1],
+          &secondary_fields.words[1]) ||
+       !agx_ppp_hal200_fragment_face_object_pack(
+          dev->dev.chip, object_type, secondary_fields.words[2],
+          &secondary_fields.words[2]))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
    struct agx_ppp_hal200_graphics_core cull_record;
    struct agx_ppp_hal200_graphics_fields cull_fields = {
       .words = {UINT32_C(0x00000480)},
@@ -3106,6 +3123,12 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           dev->dev.chip, hk_rast_discard(cmd), secondary_fields.words[0],
           cull_fields.words[0], &secondary_fields.words[0],
           &cull_fields.words[0]))
+      return hk_g17p_bind_tail_refused(__LINE__);
+   if (!agx_ppp_hal200_primitive_msaa_pack(
+          dev->dev.chip,
+          object_type == AGX_OBJECT_TYPE_LINE &&
+             dyn->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR,
+          cull_fields.words[0], &cull_fields.words[0]))
       return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_w_clamp_cull2_core w_cull2_record;
