@@ -3395,8 +3395,14 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        b->shader->stage != MESA_SHADER_FRAGMENT &&
        (instr->op == nir_texop_txl || instr->op == nir_texop_txf) &&
-       lod_is_zero)
+       lod_is_zero) {
       lod_mode = AGX_LOD_MODE_LOD_MIN;
+      /* The native G17P vertex form carries level zero in the instruction.
+       * Keeping NIR's fp32 zero SSA here made texture_sample source 1 two
+       * half-registers wide even though the explicit-level IR operand is one,
+       * so validation failed before the packer could select that form. */
+      lod = agx_immediate(0);
+   }
 
    if (lod_mode == AGX_LOD_MODE_AUTO_LOD) {
       /* Ignored logically but asserted 0 */
