@@ -230,9 +230,9 @@ agx_draw_indirect_index_buffer_size_word(struct agx_draw d,
 }
 
 static inline uint32_t
-agx_draw_indirect_restart_index(enum agx_index_size index_size)
+agx_primitive_restart_index(enum agx_index_size index_size)
 {
-   return index_size == AGX_INDEX_SIZE_U16 ? 0xffffu : 0xffffffffu;
+   return BITFIELD_MASK(8 * agx_index_size_to_B(index_size));
 }
 
 static bool
@@ -271,7 +271,7 @@ agx_vdm_draw_supported(enum agx_chip chip, struct agx_draw draw,
       return agx_vdm_index_list_indirect_pack_words(
          chip, (uint8_t)topology, draw.indexed, draw.restart,
          (uint8_t)draw.index_size, ib, draw.b.ptr,
-         draw.indexed ? agx_draw_indirect_restart_index(draw.index_size) : 0,
+         draw.indexed ? agx_primitive_restart_index(draw.index_size) : 0,
          size_word, &words);
    }
 
@@ -351,7 +351,7 @@ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
                              draw.restart, (uint8_t)draw.index_size, ib,
                              draw.b.ptr,
                              draw.indexed
-                                ? agx_draw_indirect_restart_index(
+                                ? agx_primitive_restart_index(
                                      draw.index_size)
                                 : 0,
                              size_word, &words);
@@ -455,7 +455,7 @@ agx_vdm_draw_size(enum agx_chip chip, struct agx_draw draw)
                 chip, 0, draw.indexed, draw.restart,
                 (uint8_t)draw.index_size, ib, draw.b.ptr,
                 draw.indexed
-                   ? agx_draw_indirect_restart_index(draw.index_size)
+                   ? agx_primitive_restart_index(draw.index_size)
                    : 0,
                 size_word, &words))
             return 0;

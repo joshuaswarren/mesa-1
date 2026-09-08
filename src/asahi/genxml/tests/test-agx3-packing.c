@@ -281,6 +281,10 @@ test_agx3_cdm_launch(void)
 static void
 test_agx3_live_vdm_draw(void)
 {
+   CHECK_EQ(agx_primitive_restart_index(AGX_INDEX_SIZE_U8), UINT8_MAX);
+   CHECK_EQ(agx_primitive_restart_index(AGX_INDEX_SIZE_U16), UINT16_MAX);
+   CHECK_EQ(agx_primitive_restart_index(AGX_INDEX_SIZE_U32), UINT32_MAX);
+
    static const uint8_t nonindexed_g15[] = {
       0x00, 0x06, 0xc4, 0x61, 0x44, 0x33, 0x22, 0x11,
       0x02, 0x00, 0x00, 0x00, 0xdd, 0xcc, 0xbb, 0xaa,

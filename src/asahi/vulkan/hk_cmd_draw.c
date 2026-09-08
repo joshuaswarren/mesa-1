@@ -5094,7 +5094,13 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                   .index_size_B =
                      draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
                   .restart_enable = draw.restart,
-                  .restart_index = cmd->state.gfx.index.restart,
+                  /* Geometry/XFB lowers a non-indexed API draw to a synthetic
+                   * indexed draw.  Derive the fixed Vulkan restart value from
+                   * that draw, not from the original bound-index state. */
+                  .restart_index = draw.indexed
+                                      ? agx_primitive_restart_index(
+                                           draw.index_size)
+                                      : 0,
                   .index_buffer = draw.index_buffer,
                   .index_buffer_range_B = draw.index_buffer_range_B,
                   .indirect_buffer = draw.b.ptr,
@@ -5119,7 +5125,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                   .primitive = (uint8_t)topology,
                   .index_size_B = agx_index_size_to_B(draw.index_size),
                   .restart_enable = draw.restart,
-                  .restart_index = cmd->state.gfx.index.restart,
+                  .restart_index =
+                     agx_primitive_restart_index(draw.index_size),
                   .draw_state_context_offset = draw_state_offset,
                   .index_buffer = draw.index_buffer,
                   .index_buffer_range_B = draw.index_buffer_range_B,
