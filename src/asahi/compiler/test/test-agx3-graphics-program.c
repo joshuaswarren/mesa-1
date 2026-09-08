@@ -109,9 +109,12 @@ main(void)
    /* The exact layered array-wire EOT grows to 110 bytes and its r0..r6
     * coordinate prefix rounds to a sixteen-half GPR allocation. It keeps the
     * same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch span. */
-   eot.pbe_argument_va--;
+   eot.pbe_argument_va = UINT64_C(0x4000030000);
    eot.shader_binary_size = 110;
    eot.nr_gprs = 16;
+   eot.staging_halfs = 8;
+   eot.attachment_count = 1;
+   eot.imageblock_offset1_B = 0;
    CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                             &eot_program));
    CHECK(eot_program.length > 0 &&
