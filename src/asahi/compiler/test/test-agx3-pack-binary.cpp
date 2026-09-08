@@ -965,7 +965,7 @@ TEST_F(AGX3PackBinary, FaddMinifloatPreservesWaitLivenessAndCommutativity)
       agx_index live = agx_register(0, AGX_SIZE_32);
       agx_index last = live;
       live.discard = false;
-      last.discard = true;
+      last.kill = last.discard = true;
       agx_index imm = agx_immediate(0x20);
       agx_fadd_to(b, agx_register(4, AGX_SIZE_32),
                   order ? imm : live, order ? live : imm);
@@ -994,12 +994,31 @@ TEST_F(AGX3PackBinary, FaddMinifloatPreservesWaitLivenessAndCommutativity)
    }
 }
 
+TEST_F(AGX3PackBinary, FaddTwoMinifloatsFoldsToLdimm)
+{
+   for (bool swapped : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_fadd_to(b, agx_register(2, AGX_SIZE_32),
+                  agx_immediate(swapped ? 0x80 : 0x30),
+                  agx_immediate(swapped ? 0x30 : 0x80));
+      agx_stop(b);
+      struct agx3_encoded_ldimm load;
+      ASSERT_TRUE(agx3_pack_ldimm_u32(AGX_ISA_ENCODING_AGX3B, 2,
+                                      0x3f800000, &load));
+      std::vector<uint8_t> expected(load.bytes,
+                                    load.bytes + load.length);
+      const uint8_t stop[] = {0x0e, 0x00, 0x00, 0x00};
+      append(expected, stop, sizeof(stop));
+      EXPECT_EQ(pack(b), expected);
+   }
+}
+
 TEST_F(AGX3PackBinary, FaddMinifloatRefusesRemainingUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
       SCOPED_TRACE(variant);
-      /* Negation and saturation now have their own exact G17P encoders. */
-      if (variant == 4 || variant == 9)
+      /* Negation, two-minifloat folding, and saturation have exact paths. */
+      if (variant == 4 || variant == 7 || variant == 9)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -5997,17 +6016,24 @@ TEST_F(AGX3PackBinary, ModifiedFaddWaitAndLifetimeStayFused)
 TEST_F(AGX3PackBinary, NarrowFaddKeepsOddHalfAndLiveInput)
 {
    for (bool swapped : {false,true}) {
+      for (bool dead : {false, true}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index source = agx_register(2, AGX_SIZE_32);
+      source.kill = source.discard = dead;
       agx_index zero = agx_immediate(0x80);
       agx_fadd_to(b, agx_register(1, AGX_SIZE_16),
                   swapped ? zero : source, swapped ? source : zero);
       agx_stop(b);
       auto code = pack(b);
-      /* One16-bit rounding ADD, with no source discard and no widening. */
-      const uint8_t expected[6] = {0x01,0x03,0x14,0x81,0x04,0x02};
+      /* One 16-bit rounding ADD. A post-RA kill is representable exactly
+       * when DISCARD owns the same final use, as in Gallium's readback CS. */
+      const uint8_t expected[2][6] = {
+         {0x01,0x03,0x14,0x81,0x04,0x02},
+         {0x01,0x03,0x1c,0x81,0x04,0x02},
+      };
       ASSERT_EQ(code.size(),10);
-      EXPECT_EQ(memcmp(code.data(),expected,6),0);
+      EXPECT_EQ(memcmp(code.data(),expected[dead],6),0);
+      }
    }
 }
 

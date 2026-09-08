@@ -810,6 +810,33 @@ agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
    NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
             nir_metadata_control_flow, (void *)&gen9);
 
+   if (gen9) {
+      /* HAL200's texture2d::read consumes a full uint LOD through the integer
+       * PACK_SMPIR operand. Keep the shared 16-bit lowering above for its
+       * robustness arithmetic, then restore the hardware ABI on the final
+       * texel-fetch instruction. */
+      nir_foreach_function_impl(impl, s) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_tex)
+                  continue;
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               if (tex->op != nir_texop_txf)
+                  continue;
+               const int lod =
+                  nir_tex_instr_src_index(tex, nir_tex_src_lod);
+               if (lod < 0 || nir_src_bit_size(tex->src[lod].src) == 32)
+                  continue;
+               assert(nir_src_bit_size(tex->src[lod].src) == 16);
+               nir_builder b = nir_builder_at(nir_before_instr(instr));
+               nir_src_rewrite(&tex->src[lod].src,
+                               nir_u2u32(&b, tex->src[lod].src.ssa));
+               progress = true;
+            }
+         }
+      }
+   }
+
    return progress;
 }
 

@@ -6518,6 +6518,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Constant propagation can expose a float add whose two operands
+          * are exact minifloats after scheduling. Fold it to the ordinary
+          * native LDIMM instead of pretending either immediate is a GPR. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate && !wait &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE &&
+             !I->src[0].memory && !I->src[1].memory &&
+             !I->src[0].abs && !I->src[1].abs &&
+             !I->src[0].neg && !I->src[1].neg) {
+            const float value = agx_minifloat_decode(I->src[0].value) +
+                                agx_minifloat_decode(I->src[1].value);
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            struct agx3_encoded_ldimm encoded;
+            if (!agx3_pack_ldimm_u32(enc, I->dest[0].value, bits, &encoded) ||
+                !agx3_append(emission, encoded.bytes, encoded.length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* AGX models a narrowing float conversion as add with exact -0.
           * Keep one native operation, with actual source lifetime and waits. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
@@ -6528,7 +6550,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index src = I->src[swap ? 1 : 0];
             const agx_index zero = I->src[swap ? 0 : 1];
             if (agx3_src_is_register(src) && !src.memory && !src.abs && !src.neg &&
-                !src.kill && src.size == AGX_SIZE_32 && agx_channels(src) == 1 &&
+                (!src.kill || src.discard) && src.size == AGX_SIZE_32 &&
+                agx_channels(src) == 1 &&
                 zero.type == AGX_INDEX_IMMEDIATE && zero.value == 0x80 &&
                 !zero.memory && !zero.abs && !zero.neg) {
                const struct agx3_falu_runtime runtime = {
@@ -6921,7 +6944,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                continue;
             }
             if (imm.memory || imm.abs || imm.neg ||
-                !agx3_src_is_register(reg) || reg.abs || reg.kill ||
+                !agx3_src_is_register(reg) || reg.abs ||
+                (reg.kill && !reg.discard) ||
                 (multiply && reg.neg) ||
                 (reg.cache && reg.discard) ||
                 reg.size != AGX_SIZE_32 || agx_channels(reg) != 1)
