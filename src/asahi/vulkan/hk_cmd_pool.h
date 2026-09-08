@@ -27,7 +27,18 @@ struct hk_cmd_bo {
    struct list_head link;
 };
 
+struct hk_vdm_slab;
+
+struct hk_vdm_allocation {
+   struct list_head link;
+   struct hk_vdm_slab *slab;
+   uint64_t addr;
+   uint64_t alias;
+   uint64_t size;
+};
+
 struct agx_device;
+struct agx_ptr;
 
 bool hk_g17p_vdm_low_window_enabled(const struct agx_device *dev);
 
@@ -37,10 +48,9 @@ struct hk_cmd_pool {
    /** List of hk_cmd_bo */
    struct list_head free_bos;
    struct list_head free_usc_bos;
-   struct list_head free_vdm_bos;
+   struct list_head vdm_slabs;
    uint32_t num_free_bos;
    uint32_t num_free_usc_bos;
-   uint32_t num_free_vdm_bos;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_cmd_pool, vk.base, VkCommandPool,
@@ -53,14 +63,16 @@ hk_cmd_pool_device(struct hk_cmd_pool *pool)
 }
 
 VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool force_usc,
-                              bool force_vdm,
                               struct hk_cmd_bo **bo_out);
 
 void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, struct list_head *bos);
 void hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool,
                                   struct list_head *bos);
-void hk_cmd_pool_free_vdm_bo_list(struct hk_cmd_pool *pool,
-                                  struct list_head *bos);
-
 VkResult hk_cmd_bo_ensure_vdm_alias(struct hk_cmd_pool *pool,
                                     struct hk_cmd_bo *bo);
+
+VkResult hk_cmd_pool_alloc_vdm(struct hk_cmd_pool *pool, uint64_t size,
+                               uint64_t alignment, struct agx_ptr *ptr,
+                               struct hk_vdm_allocation **allocation);
+void hk_cmd_pool_free_vdm(struct hk_cmd_pool *pool,
+                          struct hk_vdm_allocation *allocation);

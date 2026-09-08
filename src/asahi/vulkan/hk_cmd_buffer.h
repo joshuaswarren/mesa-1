@@ -493,6 +493,7 @@ struct hk_uploader {
    uint8_t *map;
    uint64_t base;
    uint32_t offset;
+   uint32_t capacity;
 };
 
 struct hk_cmd_buffer {
@@ -504,10 +505,11 @@ struct hk_cmd_buffer {
    } state;
 
    struct {
-      /* VDM roots and nested payloads have a finite low alias aperture on
-       * G17P. Keep them densely packed away from ordinary main uploads. */
       struct hk_uploader main, usc, vdm;
    } uploader;
+
+   /* Command-pool slab spans leased by this command buffer's VDM uploader. */
+   struct list_head vdm_allocations;
 
    /* List of all recorded control streams */
    struct list_head control_streams;

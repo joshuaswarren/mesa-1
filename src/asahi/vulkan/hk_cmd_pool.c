@@ -11,6 +11,12 @@
 #include "drm-uapi/asahi_drm.h"
 #include "util/u_debug.h"
 
+struct hk_vdm_slab {
+   struct list_head link;
+   struct hk_cmd_bo *bo;
+   struct util_vma_heap heap;
+};
+
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
@@ -131,6 +137,89 @@ hk_cmd_bo_destroy(struct hk_cmd_pool *pool, struct hk_cmd_bo *bo)
    vk_free(&pool->vk.alloc, bo);
 }
 
+static struct hk_vdm_slab *
+hk_cmd_pool_create_vdm_slab(struct hk_cmd_pool *pool)
+{
+   struct hk_vdm_slab *slab = calloc(1, sizeof(*slab));
+   if (!slab)
+      return NULL;
+
+   if (hk_cmd_bo_create(pool, false, &slab->bo) != VK_SUCCESS ||
+       hk_cmd_bo_ensure_vdm_alias(pool, slab->bo) != VK_SUCCESS) {
+      if (slab->bo)
+         hk_cmd_bo_destroy(pool, slab->bo);
+      free(slab);
+      return NULL;
+   }
+
+   util_vma_heap_init(&slab->heap, slab->bo->bo->va->addr,
+                      slab->bo->bo->size);
+   slab->heap.alloc_high = false;
+   list_addtail(&slab->link, &pool->vdm_slabs);
+   return slab;
+}
+
+VkResult
+hk_cmd_pool_alloc_vdm(struct hk_cmd_pool *pool, uint64_t size,
+                      uint64_t alignment, struct agx_ptr *ptr,
+                      struct hk_vdm_allocation **allocation)
+{
+   if (!size || size > HK_CMD_BO_SIZE || !alignment || !ptr || !allocation)
+      return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   uint64_t addr = 0;
+   struct hk_vdm_slab *owner = NULL;
+   list_for_each_entry(struct hk_vdm_slab, slab, &pool->vdm_slabs, link) {
+      addr = util_vma_heap_alloc(&slab->heap, size, alignment);
+      if (addr) {
+         owner = slab;
+         break;
+      }
+   }
+
+   if (!owner) {
+      owner = hk_cmd_pool_create_vdm_slab(pool);
+      if (!owner)
+         return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+      addr = util_vma_heap_alloc(&owner->heap, size, alignment);
+      if (!addr)
+         return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
+
+   struct hk_vdm_allocation *lease = calloc(1, sizeof(*lease));
+   if (!lease) {
+      util_vma_heap_free(&owner->heap, addr, size);
+      return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   *lease = (struct hk_vdm_allocation){
+      .slab = owner,
+      .addr = addr,
+      .alias = owner->bo->g17p_vdm_alias +
+               (addr - owner->bo->bo->va->addr),
+      .size = size,
+   };
+   *ptr = (struct agx_ptr){
+      .gpu = addr,
+      .cpu = (uint8_t *)owner->bo->map + (addr - owner->bo->bo->va->addr),
+   };
+   *allocation = lease;
+   return VK_SUCCESS;
+}
+
+void
+hk_cmd_pool_free_vdm(UNUSED struct hk_cmd_pool *pool,
+                     struct hk_vdm_allocation *allocation)
+{
+   if (!allocation)
+      return;
+
+   util_vma_heap_free(&allocation->slab->heap, allocation->addr,
+                      allocation->size);
+   free(allocation);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateCommandPool(VkDevice _device,
                      const VkCommandPoolCreateInfo *pCreateInfo,
@@ -156,8 +245,7 @@ hk_CreateCommandPool(VkDevice _device,
    pool->num_free_bos = 0;
    list_inithead(&pool->free_usc_bos);
    pool->num_free_usc_bos = 0;
-   list_inithead(&pool->free_vdm_bos);
-   pool->num_free_vdm_bos = 0;
+   list_inithead(&pool->vdm_slabs);
 
    *pCmdPool = hk_cmd_pool_to_handle(pool);
 
@@ -165,7 +253,7 @@ hk_CreateCommandPool(VkDevice _device,
 }
 
 static void
-hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
+hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool, bool destroy_live)
 {
    list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos, link)
       hk_cmd_bo_destroy(pool, bo);
@@ -179,28 +267,29 @@ hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
    list_inithead(&pool->free_usc_bos);
    pool->num_free_usc_bos = 0;
 
-   list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_vdm_bos, link)
-      hk_cmd_bo_destroy(pool, bo);
+   list_for_each_entry_safe(struct hk_vdm_slab, slab, &pool->vdm_slabs, link) {
+      if (!destroy_live && slab->heap.free_size != slab->bo->bo->size)
+         continue;
 
-   list_inithead(&pool->free_vdm_bos);
-   pool->num_free_vdm_bos = 0;
+      list_del(&slab->link);
+      util_vma_heap_finish(&slab->heap);
+      hk_cmd_bo_destroy(pool, slab->bo);
+      free(slab);
+   }
+
+   if (destroy_live)
+      list_inithead(&pool->vdm_slabs);
 }
 
 VkResult
-hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool usc, bool vdm,
+hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool usc,
                      struct hk_cmd_bo **bo_out)
 {
-   assert(!(usc && vdm));
    struct hk_cmd_bo *bo = NULL;
    if (usc) {
       if (!list_is_empty(&pool->free_usc_bos)) {
          bo = list_first_entry(&pool->free_usc_bos, struct hk_cmd_bo, link);
          pool->num_free_usc_bos--;
-      }
-   } else if (vdm) {
-      if (!list_is_empty(&pool->free_vdm_bos)) {
-         bo = list_first_entry(&pool->free_vdm_bos, struct hk_cmd_bo, link);
-         pool->num_free_vdm_bos--;
       }
    } else {
       if (!list_is_empty(&pool->free_bos)) {
@@ -245,20 +334,6 @@ hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
    }
 }
 
-void
-hk_cmd_pool_free_vdm_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
-{
-   list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
-      list_del(&bo->link);
-      if (pool->num_free_vdm_bos >= HK_CMD_POOL_BO_MAX) {
-         hk_cmd_bo_destroy(pool, bo);
-      } else {
-         list_addtail(&bo->link, &pool->free_vdm_bos);
-         pool->num_free_vdm_bos++;
-      }
-   }
-}
-
 VKAPI_ATTR void VKAPI_CALL
 hk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
                       const VkAllocationCallbacks *pAllocator)
@@ -270,7 +345,7 @@ hk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
       return;
 
    vk_command_pool_finish(&pool->vk);
-   hk_cmd_pool_destroy_bos(pool);
+   hk_cmd_pool_destroy_bos(pool, true);
    vk_free2(&device->vk.alloc, pAllocator, pool);
 }
 
@@ -281,5 +356,5 @@ hk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
    VK_FROM_HANDLE(hk_cmd_pool, pool, commandPool);
 
    vk_command_pool_trim(&pool->vk, flags);
-   hk_cmd_pool_destroy_bos(pool);
+   hk_cmd_pool_destroy_bos(pool, false);
 }

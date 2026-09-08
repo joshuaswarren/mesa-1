@@ -34,6 +34,11 @@
 #define IMAGE_WIDTH 32
 #define IMAGE_HEIGHT 32
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
+#ifdef G17P_VDM_CAPACITY
+#define COMMAND_BUFFER_COUNT 193
+#else
+#define COMMAND_BUFFER_COUNT 1
+#endif
 
 #define VK_FN(name) static PFN_##name name
 
@@ -622,15 +627,20 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
       .commandPool = command_pool,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = 1,
+      .commandBufferCount = COMMAND_BUFFER_COUNT,
    };
-   VkCommandBuffer command_buffer;
-   check(vkAllocateCommandBuffers(device, &command_allocate, &command_buffer),
+   VkCommandBuffer command_buffers[COMMAND_BUFFER_COUNT];
+   check(vkAllocateCommandBuffers(device, &command_allocate, command_buffers),
          "vkAllocateCommandBuffers");
+   VkCommandBuffer command_buffer = command_buffers[0];
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
    };
+#ifdef G17P_VDM_CAPACITY
+   for (unsigned command = 0; command < COMMAND_BUFFER_COUNT; ++command) {
+      command_buffer = command_buffers[command];
+#endif
    check(vkBeginCommandBuffer(command_buffer, &begin_info),
          "vkBeginCommandBuffer");
 #ifdef G17P_OCCLUSION_QUERY
@@ -693,7 +703,13 @@ main(void)
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+#ifdef G17P_VDM_CAPACITY
+   }
+   puts("g17p-vdm-capacity: 193 live command buffers recorded");
+   return EXIT_SUCCESS;
+#else
    fprintf(stderr, "g17p-render-only: command buffer recorded\n");
+#endif
 
 #ifdef G17P_OCCLUSION_QUERY
    if (getenv("G17P_QUERY_RECORD_ONLY")) {

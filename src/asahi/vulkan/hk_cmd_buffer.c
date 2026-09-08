@@ -58,13 +58,21 @@ hk_g17p_vdm_lookup(struct hk_cmd_buffer *cmd, uint64_t primary, bool bind)
    if (!hk_g17p_vdm_low_window_enabled(&dev->dev))
       return primary;
 
-   struct list_head *lists[] = {
-      &cmd->uploader.vdm.bos,
-      &cmd->uploader.main.bos,
-   };
+   list_for_each_entry(struct hk_vdm_allocation, allocation,
+                       &cmd->vdm_allocations, link) {
+      if (primary < allocation->addr ||
+          primary - allocation->addr >= allocation->size)
+         continue;
 
-   for (unsigned l = 0; l < ARRAY_SIZE(lists); ++l) {
-      list_for_each_entry(struct hk_cmd_bo, bo, lists[l], link) {
+      const uint64_t alias =
+         allocation->alias + (primary - allocation->addr);
+      uint32_t compact = 0;
+      if (agx_g17p_vdm_alias_compact(alias, &compact))
+         return compact;
+   }
+
+   {
+      list_for_each_entry(struct hk_cmd_bo, bo, &cmd->uploader.main.bos, link) {
          const uint64_t start = bo->bo->va->addr;
          if (primary < start || primary - start >= bo->bo->size)
             continue;
@@ -129,7 +137,11 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    hk_cmd_pool_free_bo_list(pool, &cmd->uploader.main.bos);
    hk_cmd_pool_free_usc_bo_list(pool, &cmd->uploader.usc.bos);
-   hk_cmd_pool_free_vdm_bo_list(pool, &cmd->uploader.vdm.bos);
+   list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
+                            &cmd->vdm_allocations, link) {
+      list_del(&allocation->link);
+      hk_cmd_pool_free_vdm(pool, allocation);
+   }
 
    list_for_each_entry_safe(struct hk_cs, it, &cmd->control_streams, node) {
       list_del(&it->node);
@@ -187,7 +199,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
 
    list_inithead(&cmd->uploader.main.bos);
    list_inithead(&cmd->uploader.usc.bos);
-   list_inithead(&cmd->uploader.vdm.bos);
+   list_inithead(&cmd->vdm_allocations);
    list_inithead(&cmd->control_streams);
 
    *cmd_buffer_out = &cmd->vk;
@@ -214,6 +226,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->uploader.vdm.map = NULL;
    cmd->uploader.vdm.base = 0;
    cmd->uploader.vdm.offset = 0;
+   cmd->uploader.vdm.capacity = 0;
 
    cmd->current_cs.gfx = NULL;
    cmd->current_cs.cs = NULL;
@@ -256,18 +269,15 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 }
 
 static VkResult
-hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc, bool vdm,
+hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,
                        struct hk_cmd_bo **bo_out)
 {
-   VkResult result =
-      hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, vdm, bo_out);
+   VkResult result = hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, bo_out);
    if (result != VK_SUCCESS)
       return result;
 
    if (usc)
       list_addtail(&(*bo_out)->link, &cmd->uploader.usc.bos);
-   else if (vdm)
-      list_addtail(&(*bo_out)->link, &cmd->uploader.vdm.bos);
    else
       list_addtail(&(*bo_out)->link, &cmd->uploader.main.bos);
 
@@ -276,16 +286,14 @@ hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc, bool vdm,
 
 static struct agx_ptr
 hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
-                   uint32_t size, uint32_t alignment, bool usc, bool vdm)
+                   uint32_t size, uint32_t alignment, bool usc)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   assert(!(usc && vdm));
 
    /* Specially handle large allocations owned by the command buffer, e.g. used
     * for statically allocated vertex output buffers with geometry shaders.
     */
    if (size > HK_CMD_BO_SIZE) {
-      assert(!vdm && "large VDM allocations need explicit alias tracking");
       uint32_t flags = usc ? AGX_BO_LOW_VA : 0;
       struct agx_bo *bo =
          agx_bo_create(&dev->dev, size, 0, flags, "Large pool allocation");
@@ -318,18 +326,10 @@ hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
    }
 
    struct hk_cmd_bo *bo;
-   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, vdm, &bo);
+   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, &bo);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);
       return (struct agx_ptr){0};
-   }
-
-   if (vdm) {
-      result = hk_cmd_bo_ensure_vdm_alias(hk_cmd_buffer_pool(cmd), bo);
-      if (unlikely(result != VK_SUCCESS)) {
-         vk_command_buffer_set_error(&cmd->vk, result);
-         return (struct agx_ptr){0};
-      }
    }
 
    /* Pick whichever of the current upload BO and the new BO will have more
@@ -356,7 +356,7 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
 {
    struct hk_uploader *uploader =
       usc ? &cmd->uploader.usc : &cmd->uploader.main;
-   return hk_pool_alloc_from(cmd, uploader, size, alignment, usc, false);
+   return hk_pool_alloc_from(cmd, uploader, size, alignment, usc);
 }
 
 struct agx_ptr
@@ -367,8 +367,35 @@ hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
    if (!hk_g17p_vdm_low_window_enabled(&dev->dev))
       return hk_pool_alloc(cmd, size, alignment);
 
-   return hk_pool_alloc_from(cmd, &cmd->uploader.vdm, size, alignment, false,
-                             true);
+   struct hk_uploader *uploader = &cmd->uploader.vdm;
+   uint32_t offset = align(uploader->offset, alignment);
+   if (uploader->map && offset <= uploader->capacity &&
+       size <= uploader->capacity - offset) {
+      uploader->offset = offset + size;
+      return (struct agx_ptr){
+         .gpu = uploader->base + offset,
+         .cpu = uploader->map + offset,
+      };
+   }
+
+   const uint32_t chunk_size =
+      align(MAX2(size, HK_G17P_VDM_ROOT_SIZE), HK_G17P_VDM_ROOT_SIZE);
+   struct agx_ptr chunk = {0};
+   struct hk_vdm_allocation *allocation = NULL;
+   const VkResult result = hk_cmd_pool_alloc_vdm(
+      hk_cmd_buffer_pool(cmd), chunk_size, HK_G17P_VDM_ROOT_SIZE, &chunk,
+      &allocation);
+   if (unlikely(result != VK_SUCCESS)) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return (struct agx_ptr){0};
+   }
+
+   list_addtail(&allocation->link, &cmd->vdm_allocations);
+   uploader->map = chunk.cpu;
+   uploader->base = chunk.gpu;
+   uploader->offset = size;
+   uploader->capacity = chunk_size;
+   return chunk;
 }
 
 uint64_t

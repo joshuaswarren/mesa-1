@@ -1080,6 +1080,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Record more live graphics command buffers than the 192-slot G17P VDM
+    # aperture. Their compact command spans must share command-pool slabs.
+    executable(
+      'g17p-vulkan-vdm-capacity',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VDM_CAPACITY=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-timestamp-query',
       files('tests/g17p_vulkan_timestamp_query.c'),
