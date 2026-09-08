@@ -758,14 +758,16 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_screen *screen = agx_screen(ctx->base.screen);
 
-   /* We allocate the worst-case sync array size since this won't be excessive
-    * for most workloads
+   /* At most every BO contributes an input wait, followed by the explicit and
+    * inter-context input fences. The submission then appends two output
+    * fences, which also need full records in the same allocation.
     */
    unsigned max_syncs = batch->bo_list.bit_count + 2;
+   unsigned sync_capacity = max_syncs + 2;
    unsigned in_sync_count = 0;
    unsigned shared_bo_count = 0;
    struct drm_asahi_sync *syncs =
-      malloc((max_syncs * sizeof(struct drm_asahi_sync)) + 2);
+      malloc(sync_capacity * sizeof(*syncs));
    struct agx_bo **shared_bos = malloc(max_syncs * sizeof(struct agx_bo *));
 
    uint64_t wait_seqid = p_atomic_read(&screen->flush_wait_seqid);
@@ -913,6 +915,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     * serializes all submissions once any context flushes once).
     */
    struct drm_asahi_sync *out_syncs = syncs + in_sync_count;
+   assert(in_sync_count + 2 <= sync_capacity);
 
    out_syncs[0] = (struct drm_asahi_sync){
       .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,

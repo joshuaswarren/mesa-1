@@ -106,6 +106,7 @@ static unsigned invalid_vm_binds;
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
 static bool multiview_layers_two;
+static unsigned synchronized_render_submits;
 
 static void __attribute__((destructor))
 check_vm_bind_lifetime(void)
@@ -373,17 +374,18 @@ check_swap_lifecycle_coverage(void)
     * real draw; a lost back buffer, stale context binding, or resize failure
     * makes the count short even when EGL itself reports success. */
    if (matrix_stats.draws != 16 || matrix_stats.state_updates != 16 ||
-       !matrix_stats.no_varying_fs) {
+       synchronized_render_submits != 16 || !matrix_stats.no_varying_fs) {
       fprintf(stderr,
               "shim: incomplete G17P swap lifecycle: draws=%u state=%u "
-              "no-varying=%u\n",
+              "synchronized=%u no-varying=%u\n",
               matrix_stats.draws, matrix_stats.state_updates,
-              matrix_stats.no_varying_fs);
+              synchronized_render_submits, matrix_stats.no_varying_fs);
       _Exit(EXIT_FAILURE);
    }
 
    fprintf(stderr,
-           "shim: complete G17P 16-frame swap/resize lifecycle coverage\n");
+           "shim: complete G17P 16-frame synchronized swap/resize lifecycle "
+           "coverage\n");
 }
 
 static void __attribute__((destructor))
@@ -754,6 +756,8 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+         if (submit->in_sync_count > 0 && submit->out_sync_count == 2)
+            synchronized_render_submits++;
          if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW") ||
              getenv("ASAHI_SHIM_G17P_EXPECT_LAYER_OUTPUT"))
             multiview_layers_two |= render.layers == 2;
