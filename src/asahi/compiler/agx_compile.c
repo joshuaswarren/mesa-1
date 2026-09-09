@@ -2618,6 +2618,29 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
+      /* Hyprland's colour-management shaders add a highp accumulator to a
+       * mediump matrix term. There is no grounded plain mixed-width FADD on
+       * G17P, so widen the half input explicitly and use the ordinary f32
+       * register form. Keep the separately witnessed abs(f32) + f16 endpoint
+       * available for its exact modifier shape. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 && !I->saturate &&
+          I->dest[0].size == AGX_SIZE_32) {
+         for (unsigned s = 0; s < 2; ++s) {
+            const unsigned other = s ^ 1;
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+                I->src[s].size != AGX_SIZE_16 || I->src[s].abs ||
+                I->src[s].neg || I->src[other].type == AGX_INDEX_IMMEDIATE ||
+                I->src[other].size != AGX_SIZE_32 ||
+                I->src[other].abs || I->src[other].neg)
+               continue;
+
+            agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+            agx_fmov_to(&b, widened, I->src[s]);
+            I->src[s] = widened;
+         }
+      }
+
       /* Native half FMA can carry a minifloat addend, but both multiplier
        * inputs are registers. Constant propagation commonly produces
        * clamp-like x * 0.5h + 0.5h; materialize only multiplier constants and
@@ -2813,6 +2836,162 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
             agx_index widened = agx_temp(ctx, AGX_SIZE_32);
             agx_fmov_to(&b, widened, I->src[0]);
             I->src[0] = widened;
+         }
+      }
+
+      /* Motion-blur loop bounds compare a highp value against a minifloat and
+       * select a half-register boolean or a raw 16-bit immediate. Neither
+       * mixed axis is grounded together, so materialize both constants and
+       * use the general four-register half FSEL. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_16 && !I->saturate) {
+         const bool compare_immediate_first =
+            I->src[0].type == AGX_INDEX_IMMEDIATE;
+         const unsigned compare_immediate = compare_immediate_first ? 0 : 1;
+         const unsigned compare_register = compare_immediate ^ 1;
+         const bool select_immediate_first =
+            I->src[2].type == AGX_INDEX_IMMEDIATE;
+         const unsigned select_immediate = select_immediate_first ? 2 : 3;
+         const unsigned select_register = select_immediate == 2 ? 3 : 2;
+
+         if (I->src[compare_immediate].type == AGX_INDEX_IMMEDIATE &&
+             I->src[compare_register].type != AGX_INDEX_IMMEDIATE &&
+             I->src[compare_register].size == AGX_SIZE_32 &&
+             !I->src[compare_register].abs &&
+             !I->src[compare_register].neg &&
+             I->src[select_immediate].type == AGX_INDEX_IMMEDIATE &&
+             I->src[select_immediate].value <= 1 &&
+             !I->src[select_immediate].abs &&
+             !I->src[select_immediate].neg &&
+             I->src[select_register].type != AGX_INDEX_IMMEDIATE &&
+             I->src[select_register].size == AGX_SIZE_16 &&
+             !I->src[select_register].abs &&
+             !I->src[select_register].neg) {
+            float value =
+               agx_minifloat_decode(I->src[compare_immediate].value);
+            if (I->src[compare_immediate].abs)
+               value = fabsf(value);
+            if (I->src[compare_immediate].neg)
+               value = -value;
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            I->src[compare_immediate] = agx_mov_imm(&b, 32, bits);
+            I->src[select_immediate] =
+               agx_mov_imm(&b, 16, I->src[select_immediate].value);
+         }
+      }
+
+      /* A mediump zero test selecting either a highp value or zero can use
+       * the grounded full-register/zero mixed-result FSEL once its comparator
+       * is widened. Leave both zero immediates inline so existing compact
+       * encodings, including stock vkcube, remain byte-identical. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32 && !I->saturate &&
+          ((I->src[0].type == AGX_INDEX_IMMEDIATE &&
+            I->src[0].value == 0 && I->src[1].type != AGX_INDEX_IMMEDIATE &&
+            I->src[1].size == AGX_SIZE_16) ||
+           (I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value == 0 && I->src[0].type != AGX_INDEX_IMMEDIATE &&
+            I->src[0].size == AGX_SIZE_16)) &&
+          ((I->src[2].type == AGX_INDEX_IMMEDIATE &&
+            I->src[2].value == 0 && I->src[3].type != AGX_INDEX_IMMEDIATE &&
+            I->src[3].size == AGX_SIZE_32) ||
+           (I->src[3].type == AGX_INDEX_IMMEDIATE &&
+            I->src[3].value == 0 && I->src[2].type != AGX_INDEX_IMMEDIATE &&
+            I->src[2].size == AGX_SIZE_32))) {
+         const unsigned half_src =
+            I->src[0].type == AGX_INDEX_IMMEDIATE ? 1 : 0;
+         if (!I->src[half_src].abs && !I->src[half_src].neg) {
+            agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+            agx_fmov_to(&b, widened, I->src[half_src]);
+            I->src[half_src] = widened;
+         }
+      }
+
+      /* Hyprland colour management compares mediump values against compact
+       * constants and compares highp values against abs(highp), selecting two
+       * independent highp registers. Normalize those comparator-only shapes
+       * to the general four-register f32 select. This avoids extending a
+       * modifier or mixed-width field beyond the endpoints witnessed for it. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32 && !I->saturate &&
+          I->fcond == AGX_FCOND_GE &&
+          ((I->src[0].type != AGX_INDEX_IMMEDIATE &&
+            I->src[0].size == AGX_SIZE_16) ||
+           (I->src[1].type != AGX_INDEX_IMMEDIATE &&
+            I->src[1].size == AGX_SIZE_16) ||
+           I->src[0].abs || I->src[1].abs) &&
+          ((I->src[2].type == AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
+            !I->src[2].neg) ||
+           (I->src[2].size == AGX_SIZE_32 && !I->src[2].abs &&
+            !I->src[2].neg)) &&
+          ((I->src[3].type == AGX_INDEX_IMMEDIATE && !I->src[3].abs &&
+            !I->src[3].neg) ||
+           (I->src[3].size == AGX_SIZE_32 && !I->src[3].abs &&
+            !I->src[3].neg)) &&
+          (I->src[2].type != AGX_INDEX_IMMEDIATE ||
+           I->src[3].type != AGX_INDEX_IMMEDIATE)) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE) {
+               float value = agx_minifloat_decode(I->src[s].value);
+               if (I->src[s].abs)
+                  value = fabsf(value);
+               if (I->src[s].neg)
+                  value = -value;
+
+               uint32_t bits;
+               memcpy(&bits, &value, sizeof(bits));
+               I->src[s] = agx_mov_imm(&b, 32, bits);
+            } else if (I->src[s].size == AGX_SIZE_16 &&
+                       !I->src[s].abs && !I->src[s].neg) {
+               agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+               agx_fmov_to(&b, widened, I->src[s]);
+               I->src[s] = widened;
+            } else if (I->src[s].size == AGX_SIZE_32 && I->src[s].abs &&
+                       !I->src[s].neg) {
+               agx_index source = I->src[s];
+               source.abs = false;
+               agx_index mask =
+                  agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+               agx_index absolute = agx_temp(ctx, AGX_SIZE_32);
+               agx_bitop_to(&b, absolute, source, mask, 0x8 /* AND */);
+               I->src[s] = absolute;
+            }
+         }
+      }
+
+      /* Conditional discard lowers a standalone comparison to byte selection
+       * after register allocation. Materialize a nonzero minifloat comparator
+       * while a temporary can still be allocated, so Hyprland's alpha == 1.0
+       * predicate reaches the grounded two-register comparison form. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMP && I->nr_srcs == 2 &&
+          I->dest[0].size == AGX_SIZE_16 &&
+          ctx->stage == MESA_SHADER_FRAGMENT &&
+          ctx->nir->info.fs.uses_discard) {
+         const bool immediate_first =
+            I->src[0].type == AGX_INDEX_IMMEDIATE;
+         const unsigned immediate_src = immediate_first ? 0 : 1;
+         const unsigned register_src = immediate_src ^ 1;
+
+         if (I->src[immediate_src].type == AGX_INDEX_IMMEDIATE &&
+             I->src[immediate_src].value != 0 &&
+             I->src[register_src].type != AGX_INDEX_IMMEDIATE &&
+             I->src[register_src].size == AGX_SIZE_32 &&
+             !I->src[register_src].abs && !I->src[register_src].neg) {
+            float value =
+               agx_minifloat_decode(I->src[immediate_src].value);
+            if (I->src[immediate_src].abs)
+               value = fabsf(value);
+            if (I->src[immediate_src].neg)
+               value = -value;
+
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            I->src[immediate_src] = agx_mov_imm(&b, 32, bits);
          }
       }
 

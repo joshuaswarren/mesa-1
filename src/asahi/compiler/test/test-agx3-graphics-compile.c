@@ -4204,6 +4204,87 @@ build_fs_quickshell_abs_scale(void)
    return fs_finish(&b);
 }
 
+/* Hyprland's colour-management matrix accumulates a mediump term into a
+ * highp result. The backend must widen the half input before the plain f32
+ * add instead of asking the packer for an ungrounded mixed-width FADD. */
+static nir_shader *
+build_fs_hyprland_cm_mixed_add(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 Hyprland CM mixed-add FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_def *y = nir_channel(&b, input, 2);
+   nir_def *half = nir_f2f16(&b, nir_channel(&b, input, 1));
+   nir_def *sum = nir_fadd(&b, x, nir_f2f32(&b, half));
+   nir_def *mixed_compare = nir_bcsel(
+      &b, nir_fge(&b, half, nir_imm_floatN_t(&b, 0.5, 16)), x, y);
+   nir_def *absolute_compare = nir_bcsel(
+      &b, nir_fge(&b, x, nir_fabs(&b, y)),
+      nir_channel(&b, input, 1), nir_channel(&b, input, 3));
+   nir_def *register_or_zero = nir_bcsel(
+      &b, nir_flt(&b, half, nir_imm_floatN_t(&b, 0.0, 16)), x,
+      nir_imm_float(&b, 0.0));
+   fs_store_colour(
+      &b, nir_vec4(&b, sum, mixed_compare, absolute_compare,
+                   register_or_zero));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* Hyprland's optional discard path turns a highp alpha comparison against
+ * 1.0 into a mediump 1/0 mask. Materialize the compare constant so the
+ * grounded register-comparison/byte-selection endpoint is used. */
+static nir_shader *
+build_fs_hyprland_discard_predicate(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Hyprland discard predicate FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *alpha = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_discard_if(&b, nir_feq(&b, alpha, nir_imm_float(&b, 1.0)));
+   fs_store_colour(&b, nir_vec4(&b, alpha, alpha, alpha, alpha));
+   b.shader->info.fs.uses_discard = true;
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* Hyprland clamps the motion-blur loop bound through a float comparison that
+ * selects a raw 16-bit one or a retained half register. Both constants must
+ * be materialized before using the general half-register FSEL. */
+static nir_shader *
+build_fs_hyprland_motion_bound(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Hyprland motion bound FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *value = nir_channel(&b, input, 0);
+   nir_def *half = nir_f2f16(&b, nir_channel(&b, input, 1));
+   nir_def *bound = nir_bcsel(
+      &b, nir_flt(&b, nir_imm_float(&b, 1.0), value),
+      nir_imm_intN_t(&b, 1, 16), half);
+   nir_def *wide = nir_f2f32(&b, bound);
+   fs_store_colour(&b, nir_vec4(&b, wide, value, wide, value));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 /* glmark2's buffer scene combines both half-ALU shapes that used to fail
  * closed: exp2 of a negated mediump value followed by x * 0.5h + 0.5h. */
 static nir_shader *
@@ -4733,6 +4814,12 @@ static const struct agx3_graphics_case cases[] = {
     AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
    {"fs-transcendentals", build_fs_funops, true},
    {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
+    .g17p_only = true},
+   {"fs-hyprland-cm-mixed-add", build_fs_hyprland_cm_mixed_add, true,
+    .g17p_only = true},
+   {"fs-hyprland-discard-predicate", build_fs_hyprland_discard_predicate,
+    true, .g17p_only = true},
+   {"fs-hyprland-motion-bound", build_fs_hyprland_motion_bound, true,
     .g17p_only = true},
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
     .g17p_only = true},
