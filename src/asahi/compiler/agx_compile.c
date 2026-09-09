@@ -2634,28 +2634,40 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                value = -value;
             I->src[s] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
          }
-      }
 
-      /* The recovered register-register half add has no grounded negate
-       * field. Preserve half subtraction through the witnessed FMA form:
-       * a - b = fma(a, 1.0h, -b). This stays fused and carries the source
-       * lifetimes through the already validated src2-negate encoding. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_HADD && I->nr_srcs == 2 &&
-          I->src[0].neg != I->src[1].neg && !I->src[0].abs &&
-          !I->src[1].abs && I->src[0].type != AGX_INDEX_IMMEDIATE &&
-          I->src[1].type != AGX_INDEX_IMMEDIATE) {
-         if (I->src[0].neg) {
-            const agx_index tmp = I->src[0];
-            I->src[0] = I->src[1];
-            I->src[1] = tmp;
+         /* The immediate-addend form has no grounded multiplier-negate bit.
+          * When either multiplicand is negated, load the addend as an exact
+          * half so the general register FMA can carry the witnessed product
+          * sign. This is refract's fused 1.0h - x*x operation. */
+         if (I->src[2].type == AGX_INDEX_IMMEDIATE &&
+             (I->src[0].neg || I->src[1].neg || I->src[2].abs ||
+              I->src[2].neg)) {
+            float value = agx_minifloat_decode(I->src[2].value);
+            if (I->src[2].abs)
+               value = fabsf(value);
+            if (I->src[2].neg)
+               value = -value;
+            I->src[2] =
+               agx_mov_imm(&b, 16, _mesa_float_to_half(value));
          }
 
-         I->op = AGX_OPCODE_HFMA;
-         I->src[2] = I->src[1];
-         I->src[1] =
-            agx_mov_imm(&b, 16, _mesa_float_to_half(1.0f));
-         I->nr_srcs = 3;
+         /* The grounded half FMA carries negate but not absolute modifiers.
+          * Clear a register's sign bit explicitly, preserving a following
+          * negate as -abs(x), before register allocation. */
+         for (unsigned s = 0; s < 3; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE || !I->src[s].abs)
+               continue;
+
+            const bool negate = I->src[s].neg;
+            agx_index source = I->src[s];
+            source.abs = false;
+            source.neg = false;
+            agx_index mask = agx_mov_imm(&b, 16, UINT16_C(0x7fff));
+            agx_index absolute = agx_temp(ctx, AGX_SIZE_16);
+            agx_bitop_to(&b, absolute, source, mask, 0x8 /* AND */);
+            absolute.neg = negate;
+            I->src[s] = absolute;
+         }
       }
 
       /* Only saturation through -0.0h and 1.0h - x have grounded immediate
@@ -2685,6 +2697,53 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                   agx_mov_imm(&b, 16, _mesa_float_to_half(value));
             }
          }
+      }
+
+      /* Half add has no register absolute field. Materialize abs by clearing
+       * the sign bit, retaining a following negate for the FMA subtraction
+       * lowering below. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_HADD && I->nr_srcs == 2) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE || !I->src[s].abs)
+               continue;
+
+            const bool negate = I->src[s].neg;
+            agx_index source = I->src[s];
+            source.abs = false;
+            source.neg = false;
+            agx_index mask = agx_mov_imm(&b, 16, UINT16_C(0x7fff));
+            agx_index absolute = agx_temp(ctx, AGX_SIZE_16);
+            agx_bitop_to(&b, absolute, source, mask, 0x8 /* AND */);
+            absolute.neg = negate;
+            I->src[s] = absolute;
+         }
+      }
+
+      /* The recovered register-register half add has no grounded negate
+       * field. Preserve signed sums through the witnessed FMA form:
+       * a - b = fma(a, 1.0h, -b), while -a - b uses both grounded FMA sign
+       * bits. Do this after materializing constants so terrain's 0.5h - x
+       * shape reaches the same register FMA path. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_HADD && I->nr_srcs == 2 &&
+          (I->src[0].neg || I->src[1].neg) && !I->src[0].abs &&
+          !I->src[1].abs && I->src[0].type != AGX_INDEX_IMMEDIATE &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE) {
+         if (I->src[0].neg && !I->src[1].neg) {
+            const agx_index tmp = I->src[0];
+            I->src[0] = I->src[1];
+            I->src[1] = tmp;
+         }
+
+         const bool product_neg = I->src[0].neg;
+         I->src[0].neg = false;
+         I->op = AGX_OPCODE_HFMA;
+         I->src[2] = I->src[1];
+         I->src[1] =
+            agx_mov_imm(&b, 16, _mesa_float_to_half(1.0f));
+         I->src[1].neg = product_neg;
+         I->nr_srcs = 3;
       }
 
       /* G17P's grounded scalar-half min/max takes four half registers. NIR
@@ -2779,6 +2838,36 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
             agx_index widened = agx_temp(ctx, AGX_SIZE_32);
             agx_fmov_to(&b, widened, I->src[value_src]);
             I->src[value_src] = widened;
+         }
+      }
+
+      /* The general half compare/select takes four registers. When a half
+       * comparison selects a register or a minifloat, materialize the latter;
+       * terrain uses this for threshold ? value : 0.0h. Keep f32 comparisons
+       * selecting byte constants on their separate grounded form. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_16 &&
+          I->src[0].type != AGX_INDEX_IMMEDIATE &&
+          I->src[0].size == AGX_SIZE_16 &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE &&
+          I->src[1].size == AGX_SIZE_16 &&
+          (I->src[2].type == AGX_INDEX_IMMEDIATE ||
+           I->src[3].type == AGX_INDEX_IMMEDIATE) &&
+          (I->src[2].type == AGX_INDEX_IMMEDIATE ||
+           I->src[2].size == AGX_SIZE_16) &&
+          (I->src[3].type == AGX_INDEX_IMMEDIATE ||
+           I->src[3].size == AGX_SIZE_16)) {
+         for (unsigned s = 2; s < 4; ++s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+               continue;
+
+            float value = agx_minifloat_decode(I->src[s].value);
+            if (I->src[s].abs)
+               value = fabsf(value);
+            if (I->src[s].neg)
+               value = -value;
+            I->src[s] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
          }
       }
 

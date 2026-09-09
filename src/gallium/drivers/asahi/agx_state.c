@@ -874,6 +874,7 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
          (state->target == PIPE_TEXTURE_2D_ARRAY ||
           state->target == PIPE_TEXTURE_3D ||
           state->target == PIPE_TEXTURE_CUBE ||
+          rsrc->mipmapped ||
           state->u.tex.first_level != 0 || state->u.tex.last_level != 0);
       if (gen9_range) {
          unsigned layers =

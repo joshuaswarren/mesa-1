@@ -7895,6 +7895,29 @@ TEST_F(AGX3PackBinary, HalfSqrtMatchesNativeSequenceAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, MixedHalfMultiplyRetainsUncachedHalf)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index f32 = agx_register(16, AGX_SIZE_32);
+   agx_index f16 = agx_register(13, AGX_SIZE_16);
+   f32.discard = true;
+   f16.cache = true;
+   agx_fmul_to(b, agx_register(15, AGX_SIZE_16), f32, f16);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 15, 16, 13, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   std::vector<uint8_t> want;
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

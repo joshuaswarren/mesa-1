@@ -4320,6 +4320,60 @@ build_fs_glmark2_ideas(void)
    return fs_finish(&b);
 }
 
+/* refract computes 1.0h - x*x as a fused half operation. The negated
+ * multiplier requires the general product-negate FMA, with its immediate
+ * addend materialized as an exact half register. */
+static nir_shader *
+build_fs_glmark2_refract(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 refract FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *v = nir_f2f16(&b, v32);
+   nir_def *one_minus_square = nir_ffma(
+      &b, nir_fneg(&b, v), v, nir_imm_floatN_t(&b, 1.0, 16));
+   fs_store_colour(
+      &b, nir_vec4(&b, v, one_minus_square, one_minus_square,
+                   one_minus_square));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* terrain's blur and procedural-noise variants form mediump offsets such as
+ * 0.5h - x. Constant materialization must expose this as the grounded
+ * register FMA subtraction form before register allocation. */
+static nir_shader *
+build_fs_glmark2_terrain_offset(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 terrain offset FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *v = nir_f2f16(&b, nir_channel(&b, v32, 0));
+   nir_def *w = nir_f2f16(&b, nir_channel(&b, v32, 1));
+   nir_def *offset = nir_fadd(
+      &b, nir_imm_floatN_t(&b, 0.5, 16), nir_fneg(&b, v));
+   nir_def *absolute_fma = nir_ffma(
+      &b, v, nir_fabs(&b, w), nir_imm_floatN_t(&b, 0.25, 16));
+   nir_def *negative_sum =
+      nir_fadd(&b, nir_fneg(&b, v), nir_fneg(&b, w));
+   nir_def *threshold = nir_bcsel(
+      &b, nir_fge(&b, v, w), negative_sum, nir_imm_floatN_t(&b, 0.0, 16));
+   fs_store_colour(
+      &b, nir_vec4(&b, offset, absolute_fma, negative_sum, threshold));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -4689,6 +4743,10 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-glmark2-bump", build_fs_glmark2_bump, true,
     .g17p_only = true},
    {"fs-glmark2-ideas", build_fs_glmark2_ideas, true,
+    .g17p_only = true},
+   {"fs-glmark2-refract", build_fs_glmark2_refract, true,
+    .g17p_only = true},
+   {"fs-glmark2-terrain-offset", build_fs_glmark2_terrain_offset, true,
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},

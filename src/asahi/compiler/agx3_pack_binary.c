@@ -8208,6 +8208,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool half_first = I->src[0].size == AGX_SIZE_16;
             const agx_index f32 = I->src[half_first ? 1 : 0];
             const agx_index f16 = I->src[half_first ? 0 : 1];
+            /* This endpoint witnesses retained and discarded half inputs,
+             * but not the optional cache hint. NONE preserves a live source
+             * in its GPR without requesting the ungrounded cache form. */
+            const enum agx3_alu_hint f16_hint =
+               f16.discard ? AGX3_ALU_HINT_DISCARD : AGX3_ALU_HINT_NONE;
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             uint16_t encoded_wait = wait;
             /* The exact mixed-half endpoint carries only slot 0. If both the
@@ -8228,7 +8233,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (f16.cache && f16.discard) ||
                 !agx3_alu_fmul_mixed_half(
                    enc, I->dest[0].value, f32.value, f16.value,
-                   agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
+                   agx3_post_ra_hint(f32), f16_hint,
                    I->dest[0].cache, encoded_wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);

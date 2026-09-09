@@ -552,6 +552,19 @@ test_native_packers(void)
    CHECK(!agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &mip2));
 
+   /* Gallium can sample only level zero from a render target whose backing
+    * allocation still contains a complete miptree.  unk_mipmapped makes that
+    * base-only view extended too, so it requires the allocation's end VA. */
+   struct AGX_TEXTURE mipmapped_base = semantic;
+   mipmapped_base.layout = AGX_LAYOUT_GPU;
+   mipmapped_base.unk_mipmapped = true;
+   mipmapped_base.acceleration_buffer = UINT64_C(0x100000c000);
+   CHECK(agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &mipmapped_base));
+   mipmapped_base.acceleration_buffer = 0;
+   CHECK(!agx_gallium_pack_native_texture(
+      AGX_DESCRIPTOR_GENERATION_9, &native, &mipmapped_base));
+
    cube.extended = false;
    CHECK(!agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
