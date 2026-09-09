@@ -71,8 +71,12 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
       assert(vk_sync_type_is_drm_syncobj(wait->sync->type));
       const struct vk_drm_syncobj *syncobj = vk_sync_as_drm_syncobj(wait->sync);
 
-      drmSyncobjTransfer(fd, queue->drm.syncobj, ++queue->drm.timeline_value,
-                         syncobj->syncobj, wait->wait_value, 0);
+      int ret = drmSyncobjTransfer(
+         fd, queue->drm.syncobj, ++queue->drm.timeline_value,
+         syncobj->syncobj, wait->wait_value, 0);
+      if (ret)
+         return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                          "DRM_IOCTL_SYNCOBJ_TRANSFER failed: %m");
    }
 
    /* Transfer the queue timeline into each out fence. They will all be
@@ -85,8 +89,12 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
       const struct vk_drm_syncobj *syncobj =
          vk_sync_as_drm_syncobj(signal->sync);
 
-      drmSyncobjTransfer(fd, syncobj->syncobj, signal->signal_value,
-                         queue->drm.syncobj, queue->drm.timeline_value, 0);
+      int ret = drmSyncobjTransfer(
+         fd, syncobj->syncobj, signal->signal_value,
+         queue->drm.syncobj, queue->drm.timeline_value, 0);
+      if (ret)
+         return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                          "DRM_IOCTL_SYNCOBJ_TRANSFER failed: %m");
    }
 
    return VK_SUCCESS;

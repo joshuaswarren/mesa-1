@@ -189,6 +189,34 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_present_submit_rollback_env = environment(
+    g17p_acquire_rollback_environment)
+  g17p_present_submit_rollback_env.set(
+    'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'present-submit-failure')
+  test(
+    'hk_g17p_present_submit_rollback',
+    g17p_acquire_rollback,
+    args : ['--present-submit-failure'],
+    env : g17p_present_submit_rollback_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-present-submit-rollback'],
+    timeout : 30,
+  )
+
+  g17p_empty_submit_failure_env = environment(
+    g17p_acquire_rollback_environment)
+  g17p_empty_submit_failure_env.set(
+    'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'empty-submit-failure')
+  test(
+    'hk_g17p_empty_submit_failure',
+    g17p_acquire_rollback,
+    args : ['--empty-submit-failure'],
+    env : g17p_empty_submit_failure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-empty-submit-failure'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

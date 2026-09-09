@@ -33,6 +33,7 @@
 #include "vk_common_entrypoints.h"
 #include "vk_debug_utils.h"
 #include "vk_device.h"
+#include "vk_drm_syncobj.h"
 #include "vk_pipeline_cache.h"
 #include "vk_shader.h"
 
@@ -524,6 +525,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
+   dev->vk.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
    dev->vk.check_status = hk_check_status;
    dev->vk.get_timestamp = hk_get_timestamp;

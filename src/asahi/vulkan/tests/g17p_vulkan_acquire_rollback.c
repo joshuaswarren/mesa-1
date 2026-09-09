@@ -86,6 +86,24 @@ check(VkResult result, const char *what)
    } while (0)
 
 static VkResult
+present_waiting(VkQueue queue, VkSwapchainKHR swapchain,
+                VkSemaphore render_done, uint32_t image_index,
+                VkResult *per_swapchain)
+{
+   *per_swapchain = VK_SUCCESS;
+   const VkPresentInfoKHR present_info = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &render_done,
+      .swapchainCount = 1,
+      .pSwapchains = &swapchain,
+      .pImageIndices = &image_index,
+      .pResults = per_swapchain,
+   };
+   return vkQueuePresentKHR(queue, &present_info);
+}
+
+static VkResult
 submit_and_present(VkQueue queue, VkSwapchainKHR swapchain,
                    VkSemaphore acquired, VkSemaphore render_done,
                    uint32_t image_index, VkResult *per_swapchain)
@@ -103,17 +121,8 @@ submit_and_present(VkQueue queue, VkSwapchainKHR swapchain,
    check(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
          "vkQueueSubmit");
 
-   *per_swapchain = VK_SUCCESS;
-   const VkPresentInfoKHR present_info = {
-      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-      .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &render_done,
-      .swapchainCount = 1,
-      .pSwapchains = &swapchain,
-      .pImageIndices = &image_index,
-      .pResults = per_swapchain,
-   };
-   return vkQueuePresentKHR(queue, &present_info);
+   return present_waiting(queue, swapchain, render_done, image_index,
+                          per_swapchain);
 }
 
 int
@@ -122,15 +131,23 @@ main(int argc, char **argv)
    if (argc != 2 || (strcmp(argv[1], "--semaphore-failure") &&
                      strcmp(argv[1], "--fence-failure") &&
                      strcmp(argv[1], "--present-import-failure") &&
-                     strcmp(argv[1], "--present-export-failure")))
+                     strcmp(argv[1], "--present-export-failure") &&
+                     strcmp(argv[1], "--present-submit-failure") &&
+                     strcmp(argv[1], "--empty-submit-failure")))
       die("usage: " TEST_NAME " <--semaphore-failure|--fence-failure|"
-           "--present-import-failure|--present-export-failure>");
+           "--present-import-failure|--present-export-failure|"
+           "--present-submit-failure|--empty-submit-failure>");
 
    const char *test_case = argv[1] + 2;
+   const bool empty_submit_failure =
+      !strcmp(test_case, "empty-submit-failure");
+   const bool present_submit_failure =
+      !strcmp(test_case, "present-submit-failure");
    const bool present_failure =
       !strcmp(test_case, "present-import-failure") ||
-      !strcmp(test_case, "present-export-failure");
-   const char *configured = getenv(present_failure
+      !strcmp(test_case, "present-export-failure") ||
+      present_submit_failure;
+   const char *configured = getenv((present_failure || empty_submit_failure)
       ? "ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK"
       : "ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
    if (!configured || strcmp(configured, test_case))
@@ -324,6 +341,44 @@ main(int argc, char **argv)
       check(vkCreateSemaphore(device, &semaphore_info, NULL, &held_acquired),
             "vkCreateSemaphore(held acquired)");
    }
+
+   if (empty_submit_failure) {
+      uint32_t image_index = UINT32_MAX;
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
+                                  VK_NULL_HANDLE, &image_index),
+            "vkAcquireNextImageKHR(empty submit)");
+
+      const VkPipelineStageFlags wait_stage =
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      const VkSubmitInfo submit_info = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .waitSemaphoreCount = 1,
+         .pWaitSemaphores = &acquired,
+         .pWaitDstStageMask = &wait_stage,
+         .signalSemaphoreCount = 1,
+         .pSignalSemaphores = &render_done,
+      };
+      VkResult result =
+         vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+      if (result != VK_ERROR_DEVICE_LOST) {
+         fprintf(stderr,
+                 TEST_NAME ": injected empty submit returned %d, expected %d\n",
+                 result, VK_ERROR_DEVICE_LOST);
+         return EXIT_FAILURE;
+      }
+
+      vkDestroySemaphore(device, render_done, NULL);
+      vkDestroySemaphore(device, acquired, NULL);
+      vkDestroySwapchainKHR(device, swapchain, NULL);
+      vkDestroyDevice(device, NULL);
+      vkDestroySurfaceKHR(instance, surface, NULL);
+      vkDestroyInstance(instance, NULL);
+      dlclose(loader);
+      printf(TEST_NAME ": PASS — failed empty-submit sync transfer was "
+                       "propagated as device loss; teardown completed\n");
+      return EXIT_SUCCESS;
+   }
+
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
    };
@@ -362,9 +417,22 @@ main(int argc, char **argv)
       VkResult result = submit_and_present(queue, swapchain, acquired,
                                            render_done, first_image,
                                            &per_swapchain);
+      if (present_submit_failure) {
+         if (result != VK_ERROR_UNKNOWN ||
+             per_swapchain != VK_ERROR_UNKNOWN) {
+            fprintf(stderr,
+                    TEST_NAME ": injected pre-present submit returned %d/%d, "
+                              "expected %d\n",
+                    result, per_swapchain, VK_ERROR_UNKNOWN);
+            return EXIT_FAILURE;
+         }
+
+         result = present_waiting(queue, swapchain, render_done, first_image,
+                                  &per_swapchain);
+      }
       if (result != VK_SUCCESS || per_swapchain != VK_SUCCESS) {
          fprintf(stderr,
-                 TEST_NAME ": dma-buf sync-file fallback returned %d/%d\n",
+                 TEST_NAME ": WSI present recovery returned %d/%d\n",
                  result, per_swapchain);
          return EXIT_FAILURE;
       }
@@ -417,9 +485,15 @@ main(int argc, char **argv)
    dlclose(loader);
 
    if (present_failure) {
-      printf(TEST_NAME ": PASS — dma-buf sync-file %s failure fell back to "
-                       "a CPU wait; image zero was presented and reacquired\n",
-             strstr(test_case, "import") ? "import" : "export");
+      if (present_submit_failure) {
+         printf(TEST_NAME ": PASS — failed pre-present sync submission was "
+                          "cleaned; retry presented and reacquired image zero\n");
+      } else {
+         printf(TEST_NAME ": PASS — dma-buf sync-file %s failure fell back "
+                          "to a CPU wait; image zero was presented and "
+                          "reacquired\n",
+                strstr(test_case, "import") ? "import" : "export");
+      }
    } else {
       printf(TEST_NAME ": PASS — %s rolled back image zero and temporary "
                        "payloads; retry submit/present/teardown completed\n",

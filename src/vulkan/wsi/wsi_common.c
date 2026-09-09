@@ -2042,8 +2042,13 @@ wsi_queue_submit2_unordered(const struct wsi_device *wsi,
                             struct vk_queue *queue,
                             const VkSubmitInfo2 *info,
                             uint32_t fence_count,
-                            const VkFence *fences)
+                            const VkFence *fences,
+                            bool *main_submit_succeeded,
+                            uint32_t *submitted_fence_count)
 {
+   *main_submit_succeeded = false;
+   *submitted_fence_count = 0;
+
    if (!wsi->disable_unordered_submits &&
        info->commandBufferInfoCount == 0 &&
        queue->base.device->copy_sync_payloads != NULL) {
@@ -2051,12 +2056,15 @@ wsi_queue_submit2_unordered(const struct wsi_device *wsi,
        * just signal the signal semaphores and fences with the wait semaphores
        * and skip the queue entirely.
        */
-      return vk_device_copy_semaphore_payloads(queue->base.device,
-                                               info->waitSemaphoreInfoCount,
-                                               info->pWaitSemaphoreInfos,
-                                               info->signalSemaphoreInfoCount,
-                                               info->pSignalSemaphoreInfos,
-                                               fence_count, fences);
+      VkResult result = vk_device_copy_semaphore_payloads(
+         queue->base.device, info->waitSemaphoreInfoCount,
+         info->pWaitSemaphoreInfos, info->signalSemaphoreInfoCount,
+         info->pSignalSemaphoreInfos, fence_count, fences);
+      if (result == VK_SUCCESS) {
+         *main_submit_succeeded = true;
+         *submitted_fence_count = fence_count;
+      }
+      return result;
    }
 
    VkResult result = wsi->QueueSubmit2(vk_queue_to_handle(queue), 1, info,
@@ -2064,6 +2072,10 @@ wsi_queue_submit2_unordered(const struct wsi_device *wsi,
                                                        : VK_NULL_HANDLE);
    if (result != VK_SUCCESS)
       return result;
+
+   *main_submit_succeeded = true;
+   if (fence_count > 0)
+      *submitted_fence_count = 1;
 
    for (uint32_t i = 1; i < fence_count; i++) {
       const VkSubmitInfo2 submit_info = {
@@ -2073,6 +2085,8 @@ wsi_queue_submit2_unordered(const struct wsi_device *wsi,
                                  1, &submit_info, fences[i]);
       if (result != VK_SUCCESS)
          return result;
+
+      *submitted_fence_count = i + 1;
    }
 
    return VK_SUCCESS;
@@ -2108,6 +2122,20 @@ wsi_image_signal_info_add_fence(struct wsi_image_signal_info *info,
    info->fences[info->fence_count++] = fence;
 }
 
+static VkResult
+wsi_reset_internal_binary_semaphore(struct vk_device *device,
+                                    VkSemaphore semaphore_handle)
+{
+   if (semaphore_handle == VK_NULL_HANDLE)
+      return VK_SUCCESS;
+
+   struct vk_semaphore *semaphore =
+      vk_semaphore_from_handle(semaphore_handle);
+   assert(semaphore->type == VK_SEMAPHORE_TYPE_BINARY);
+   assert(semaphore->temporary == NULL);
+   return vk_sync_reset(device, &semaphore->permanent);
+}
+
 VkResult
 wsi_common_queue_present(const struct wsi_device *wsi,
                          struct vk_queue *queue,
@@ -2118,8 +2146,17 @@ wsi_common_queue_present(const struct wsi_device *wsi,
    VkResult final_result = handle_trace(queue, dev, current_frame);
 
    STACK_ARRAY(VkResult, results, pPresentInfo->swapchainCount);
-   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
+   STACK_ARRAY(bool, throttle_fence_armed, pPresentInfo->swapchainCount);
+   STACK_ARRAY(bool, throttle_fence_submitted, pPresentInfo->swapchainCount);
+   STACK_ARRAY(bool, blit_semaphore_submitted, pPresentInfo->swapchainCount);
+   STACK_ARRAY(bool, cleanup_safe, pPresentInfo->swapchainCount);
+   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
       results[i] = VK_SUCCESS;
+      throttle_fence_armed[i] = false;
+      throttle_fence_submitted[i] = false;
+      blit_semaphore_submitted[i] = false;
+      cleanup_safe[i] = true;
+   }
 
    /* First, do the throttle waits, creating the throttle fences if needed */
    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
@@ -2136,6 +2173,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                                        &swapchain->fences[image_index]);
          if (results[i] != VK_SUCCESS)
             continue;
+
+         throttle_fence_armed[i] = true;
       } else {
          MESA_TRACE_SCOPE("throttle");
          results[i] = wsi->WaitForFences(vk_device_to_handle(dev),
@@ -2148,6 +2187,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                                        1, &swapchain->fences[image_index]);
          if (results[i] != VK_SUCCESS)
             continue;
+
+         throttle_fence_armed[i] = true;
       }
    }
 
@@ -2338,9 +2379,15 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       STACK_ARRAY(VkFence, fences,
                   pPresentInfo->swapchainCount *
                   ARRAY_SIZE(image_signal_infos[0].fences));
+      STACK_ARRAY(uint32_t, throttle_fence_index,
+                  pPresentInfo->swapchainCount);
+      STACK_ARRAY(bool, blit_semaphore_in_submit,
+                  pPresentInfo->swapchainCount);
       uint32_t command_buffer_count = 0, signal_semaphore_count = 0, fence_count = 0;
 
       for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+         throttle_fence_index[i] = UINT32_MAX;
+         blit_semaphore_in_submit[i] = false;
          VK_FROM_HANDLE(wsi_swapchain, swapchain, pPresentInfo->pSwapchains[i]);
          uint32_t image_index = pPresentInfo->pImageIndices[i];
          struct wsi_image *image =
@@ -2359,6 +2406,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             }
             for (uint32_t j = 0; j < image_signal_infos[i].fence_count; j++)
                fences[fence_count++] = image_signal_infos[i].fences[j];
+            throttle_fence_index[i] =
+               fence_count - image_signal_infos[i].fence_count;
          }
 
          if (results[i] != VK_SUCCESS)
@@ -2388,6 +2437,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                .semaphore = swapchain->blit.semaphores[image_index],
             };
+            blit_semaphore_in_submit[i] = true;
             continue;
          }
 
@@ -2416,8 +2466,33 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          .signalSemaphoreInfoCount = signal_semaphore_count,
          .pSignalSemaphoreInfos = signal_semaphore_infos,
       };
-      VkResult result = wsi_queue_submit2_unordered(wsi, queue, &submit_info,
-                                                    fence_count, fences);
+      bool main_submit_succeeded;
+      uint32_t submitted_fence_count;
+      VkResult result = wsi_queue_submit2_unordered(
+         wsi, queue, &submit_info, fence_count, fences,
+         &main_submit_succeeded, &submitted_fence_count);
+      if (main_submit_succeeded) {
+         for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+            if (blit_semaphore_in_submit[i])
+               blit_semaphore_submitted[i] = true;
+         }
+      }
+      for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+         if (throttle_fence_index[i] < submitted_fence_count)
+            throttle_fence_submitted[i] = true;
+      }
+      if (result != VK_SUCCESS && main_submit_succeeded &&
+          submitted_fence_count > 0) {
+         VkResult wait_result = wsi->WaitForFences(
+            vk_device_to_handle(dev), 1, &fences[0], true, ~0ull);
+         if (wait_result != VK_SUCCESS) {
+            result = wait_result;
+            for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+               if (throttle_fence_index[i] != UINT32_MAX)
+                  cleanup_safe[i] = false;
+            }
+         }
+      }
       if (result != VK_SUCCESS) {
          /* If this failed, everything failed */
          for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
@@ -2426,6 +2501,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          }
       }
 
+      STACK_ARRAY_FINISH(blit_semaphore_in_submit);
+      STACK_ARRAY_FINISH(throttle_fence_index);
       STACK_ARRAY_FINISH(fences);
       STACK_ARRAY_FINISH(signal_semaphore_infos);
       STACK_ARRAY_FINISH(command_buffer_infos);
@@ -2477,10 +2554,15 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          .signalSemaphoreInfoCount = image_signal_infos[i].semaphore_count,
          .pSignalSemaphoreInfos = image_signal_infos[i].semaphore_infos,
       };
-      results[i] = wsi_queue_submit2_unordered(wsi, swapchain->blit.queue,
-                                               &submit_info,
-                                               image_signal_infos[i].fence_count,
-                                               image_signal_infos[i].fences);
+      bool main_submit_succeeded;
+      uint32_t submitted_fence_count;
+      results[i] = wsi_queue_submit2_unordered(
+         wsi, swapchain->blit.queue, &submit_info,
+         image_signal_infos[i].fence_count,
+         image_signal_infos[i].fences, &main_submit_succeeded,
+         &submitted_fence_count);
+      if (submitted_fence_count > 0)
+         throttle_fence_submitted[i] = true;
    }
 
    /* Finally, we can present */
@@ -2531,12 +2613,9 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             results[i] = wsi->WaitForFences(vk_device_to_handle(dev), 1,
                                             &swapchain->fences[image_index],
                                             true, ~0ull);
-            if (results[i] == VK_SUCCESS) {
-               struct vk_semaphore *semaphore = vk_semaphore_from_handle(
-                  swapchain->dma_buf_semaphore);
-               assert(semaphore->temporary == NULL);
-               results[i] = vk_sync_reset(dev, &semaphore->permanent);
-            }
+            if (results[i] == VK_SUCCESS)
+               results[i] = wsi_reset_internal_binary_semaphore(
+                  dev, swapchain->dma_buf_semaphore);
          }
          if (results[i] != VK_SUCCESS)
             continue;
@@ -2554,9 +2633,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       if (regions && regions->pRegions)
          region = &regions->pRegions[i];
 
-      results[i] = swapchain->queue_present(swapchain, image_index,
-                                            image_signal_infos[i].present_id,
-                                            region);
+      results[i] = swapchain->queue_present(
+         swapchain, image_index, image_signal_infos[i].present_id, region);
       if (results[i] != VK_SUCCESS && results[i] != VK_SUBOPTIMAL_KHR)
          continue;
 
@@ -2564,6 +2642,58 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          VkDeviceMemory mem = swapchain->get_wsi_image(swapchain, image_index)->memory;
          wsi->set_memory_ownership(swapchain->device, mem, false);
       }
+   }
+
+   /* A failed pre-present submission can leave an armed throttle fence with
+    * no signal operation, or partially signal private binary semaphores.  Wait
+    * for any accepted signal work before dropping the private fence and
+    * resetting the binary WSI semaphores.  A later present of the
+    * still-acquired image then cannot hang or double-signal them. */
+   for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+      if (results[i] == VK_SUCCESS ||
+          results[i] == VK_ERROR_DEVICE_LOST ||
+          !throttle_fence_armed[i] || !cleanup_safe[i])
+         continue;
+
+      VK_FROM_HANDLE(wsi_swapchain, swapchain,
+                     pPresentInfo->pSwapchains[i]);
+      uint32_t image_index = pPresentInfo->pImageIndices[i];
+      struct wsi_image *image =
+         swapchain->get_wsi_image(swapchain, image_index);
+      if (!image->acquired)
+         continue;
+
+      VkResult cleanup_result = VK_SUCCESS;
+      if (throttle_fence_submitted[i]) {
+         cleanup_result = wsi->WaitForFences(
+            vk_device_to_handle(dev), 1,
+            &swapchain->fences[image_index], true, ~0ull);
+      } else if (blit_semaphore_submitted[i]) {
+         VK_FROM_HANDLE(vk_semaphore, semaphore,
+                        swapchain->blit.semaphores[image_index]);
+         cleanup_result = vk_sync_wait(
+            dev, &semaphore->permanent, 0, VK_SYNC_WAIT_PENDING, UINT64_MAX);
+      }
+
+      if (cleanup_result == VK_SUCCESS) {
+         cleanup_result = wsi_reset_internal_binary_semaphore(
+            dev, swapchain->dma_buf_semaphore);
+
+         if (swapchain->blit.semaphores) {
+            VkResult blit_result = wsi_reset_internal_binary_semaphore(
+               dev, swapchain->blit.semaphores[image_index]);
+            if (cleanup_result == VK_SUCCESS)
+               cleanup_result = blit_result;
+         }
+
+         wsi->DestroyFence(vk_device_to_handle(dev),
+                           swapchain->fences[image_index],
+                           &swapchain->alloc);
+         swapchain->fences[image_index] = VK_NULL_HANDLE;
+      }
+
+      if (cleanup_result != VK_SUCCESS)
+         results[i] = cleanup_result;
    }
 
    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
@@ -2577,6 +2707,10 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 
    STACK_ARRAY_FINISH(image_signal_infos);
    STACK_ARRAY_FINISH(semaphore_wait_infos);
+   STACK_ARRAY_FINISH(cleanup_safe);
+   STACK_ARRAY_FINISH(blit_semaphore_submitted);
+   STACK_ARRAY_FINISH(throttle_fence_submitted);
+   STACK_ARRAY_FINISH(throttle_fence_armed);
    STACK_ARRAY_FINISH(results);
 
    return final_result;

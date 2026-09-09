@@ -102,15 +102,23 @@ static unsigned wsi_rollback_sync_file_exports;
 static unsigned wsi_rollback_failed_sync_file_export;
 static unsigned wsi_rollback_waits_after_sync_failure;
 static unsigned wsi_rollback_syncobj_resets_after_failure;
+static unsigned wsi_rollback_failed_transfer;
 static uint32_t wsi_rollback_fallback_wait_handle;
 static uint32_t wsi_rollback_fallback_wait_flags;
 static uint32_t wsi_rollback_failed_sync_file_export_handle;
 static uint32_t wsi_rollback_first_sync_file_export_handle;
 static uint32_t wsi_rollback_first_reset_handle;
+static uint32_t wsi_rollback_partial_signal_handle;
+static uint32_t wsi_rollback_failed_transfer_handle;
+static uint64_t wsi_rollback_submit_reset_handles;
 static bool wsi_rollback_dmabuf_import_failed;
 static bool wsi_rollback_sync_file_export_failed;
 static bool wsi_rollback_fallback_wait_shape_valid;
 static bool wsi_rollback_first_reset_shape_valid;
+static bool wsi_rollback_submit_transfer_failed;
+static bool wsi_rollback_submit_cleanup_before_retry;
+static bool wsi_rollback_submit_retry_marker_seen;
+static bool wsi_rollback_stale_fence_wait_rejected;
 
 static const char *
 queue_progress_lifecycle_case(void)
@@ -256,6 +264,10 @@ check_wsi_rollback_lifecycle(void)
       !strcmp(test_case, "present-import-failure");
    const bool present_export_failure =
       !strcmp(test_case, "present-export-failure");
+   const bool present_submit_failure =
+      !strcmp(test_case, "present-submit-failure");
+   const bool empty_submit_failure =
+      !strcmp(test_case, "empty-submit-failure");
    const unsigned expected_imports = semaphore_failure ? 3 : 4;
    const unsigned expected_syncobjs = semaphore_failure ? 12 : 13;
    const uint64_t expected_handles =
@@ -267,7 +279,7 @@ check_wsi_rollback_lifecycle(void)
       wsi_rollback_created_handles == expected_handles &&
       wsi_rollback_destroyed_handles == expected_handles &&
       wsi_rollback_sync_imports == expected_imports &&
-      wsi_rollback_transfers == 6 &&
+      wsi_rollback_transfers == 5 &&
       wsi_rollback_import_failed &&
       wsi_rollback_marker_seen &&
       wsi_rollback_cleanup_before_marker &&
@@ -282,7 +294,7 @@ check_wsi_rollback_lifecycle(void)
       wsi_rollback_created_handles == UINT64_C(0x1ffe) &&
       wsi_rollback_destroyed_handles == UINT64_C(0x1ffe) &&
       wsi_rollback_sync_imports == 3 &&
-      wsi_rollback_transfers == 16 &&
+      wsi_rollback_transfers == 13 &&
       wsi_rollback_dmabuf_exports == 4 &&
       wsi_rollback_dmabuf_imports ==
          (present_import_failure ? 4 : 3) &&
@@ -307,7 +319,61 @@ check_wsi_rollback_lifecycle(void)
       (!present_export_failure ||
        wsi_rollback_failed_sync_file_export_handle ==
           wsi_rollback_first_sync_file_export_handle);
-   const bool exact = exact_acquire || exact_present;
+   const bool exact_submit =
+      present_submit_failure &&
+      wsi_rollback_syncobj_creates == 13 &&
+      wsi_rollback_syncobj_destroys == 13 &&
+      wsi_rollback_created_handles == UINT64_C(0x3ffe) &&
+      wsi_rollback_destroyed_handles == UINT64_C(0x3ffe) &&
+      wsi_rollback_sync_imports == 3 &&
+      wsi_rollback_transfers == 15 &&
+      wsi_rollback_dmabuf_exports == 4 &&
+      wsi_rollback_dmabuf_imports == 4 &&
+      !wsi_rollback_dmabuf_import_failed &&
+      wsi_rollback_failed_dmabuf_import == 0 &&
+      wsi_rollback_sync_file_exports == 3 &&
+      wsi_rollback_first_sync_file_export_handle == 3 &&
+      !wsi_rollback_sync_file_export_failed &&
+      wsi_rollback_failed_sync_file_export == 0 &&
+      wsi_rollback_waits_after_sync_failure == 2 &&
+      wsi_rollback_fallback_wait_shape_valid &&
+      wsi_rollback_fallback_wait_handle == 9 &&
+      wsi_rollback_fallback_wait_flags ==
+         (DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
+          DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) &&
+      wsi_rollback_syncobj_resets_after_failure == 8 &&
+      wsi_rollback_first_reset_shape_valid &&
+      wsi_rollback_first_reset_handle == 3 &&
+      wsi_rollback_submit_transfer_failed &&
+      wsi_rollback_failed_transfer == 4 &&
+      wsi_rollback_partial_signal_handle == 3 &&
+      wsi_rollback_failed_transfer_handle == 8 &&
+      wsi_rollback_submit_reset_handles == UINT64_C(0x228) &&
+      wsi_rollback_submit_retry_marker_seen &&
+      wsi_rollback_submit_cleanup_before_retry &&
+      !wsi_rollback_stale_fence_wait_rejected;
+   const bool exact_empty_submit =
+      empty_submit_failure &&
+      wsi_rollback_syncobj_creates == 6 &&
+      wsi_rollback_syncobj_destroys == 6 &&
+      wsi_rollback_created_handles == UINT64_C(0x7e) &&
+      wsi_rollback_destroyed_handles == UINT64_C(0x7e) &&
+      wsi_rollback_sync_imports == 1 &&
+      wsi_rollback_transfers == 2 &&
+      wsi_rollback_dmabuf_exports == 2 &&
+      wsi_rollback_dmabuf_imports == 1 &&
+      wsi_rollback_sync_file_exports == 0 &&
+      wsi_rollback_waits_after_sync_failure == 0 &&
+      wsi_rollback_syncobj_resets_after_failure == 0 &&
+      wsi_rollback_submit_transfer_failed &&
+      wsi_rollback_failed_transfer == 2 &&
+      wsi_rollback_partial_signal_handle == 2 &&
+      wsi_rollback_failed_transfer_handle == 5 &&
+      !wsi_rollback_submit_retry_marker_seen &&
+      !wsi_rollback_submit_cleanup_before_retry &&
+      !wsi_rollback_stale_fence_wait_rejected;
+   const bool exact = exact_acquire || exact_present || exact_submit ||
+                      exact_empty_submit;
 
    if (!exact) {
       fprintf(stderr,
@@ -316,7 +382,9 @@ check_wsi_rollback_lifecycle(void)
               "failed-h=%u marker=%u clean-before-marker=%u transfers=%u "
               "dmabuf=%u/%u dmabuf-failed=%u@%u sync-exports=%u "
               "sync-export-first=%u failed=%u@%u:%u fallback-waits=%u "
-              "wait=%u/%#x resets=%u first-reset=%u/%u\n",
+              "wait=%u/%#x resets=%u first-reset=%u/%u "
+              "submit-fail=%u@%u partial=%u failed=%u retry=%u/%u "
+              "stale-wait=%u reset-mask=%#llx\n",
               test_case, wsi_rollback_syncobj_creates,
               wsi_rollback_syncobj_destroys,
               (unsigned long long)wsi_rollback_created_handles,
@@ -342,14 +410,24 @@ check_wsi_rollback_lifecycle(void)
               wsi_rollback_fallback_wait_flags,
               wsi_rollback_syncobj_resets_after_failure,
               wsi_rollback_first_reset_shape_valid,
-              wsi_rollback_first_reset_handle);
+              wsi_rollback_first_reset_handle,
+              wsi_rollback_submit_transfer_failed,
+              wsi_rollback_failed_transfer,
+              wsi_rollback_partial_signal_handle,
+              wsi_rollback_failed_transfer_handle,
+              wsi_rollback_submit_retry_marker_seen,
+              wsi_rollback_submit_cleanup_before_retry,
+              wsi_rollback_stale_fence_wait_rejected,
+              (unsigned long long)wsi_rollback_submit_reset_handles);
       _Exit(EXIT_FAILURE);
    }
 
    fprintf(stderr,
            "shim: exact WSI rollback '%s': syncobjs=%u/%u imports=%u "
            "clean-before-marker=%u transfers=%u dmabuf=%u/%u@%u "
-           "sync-exports=%u fallback-waits=%u wait=%u/%#x resets=%u\n",
+           "sync-exports=%u fallback-waits=%u wait=%u/%#x resets=%u "
+           "submit=%u@%u partial=%u failed=%u retry=%u/%u "
+           "reset-mask=%#llx\n",
            test_case, wsi_rollback_syncobj_creates,
            wsi_rollback_syncobj_destroys,
            wsi_rollback_sync_imports,
@@ -362,7 +440,14 @@ check_wsi_rollback_lifecycle(void)
            wsi_rollback_waits_after_sync_failure,
            wsi_rollback_fallback_wait_handle,
            wsi_rollback_fallback_wait_flags,
-           wsi_rollback_syncobj_resets_after_failure);
+           wsi_rollback_syncobj_resets_after_failure,
+           wsi_rollback_submit_transfer_failed,
+           wsi_rollback_failed_transfer,
+           wsi_rollback_partial_signal_handle,
+           wsi_rollback_failed_transfer_handle,
+           wsi_rollback_submit_retry_marker_seen,
+           wsi_rollback_submit_cleanup_before_retry,
+           (unsigned long long)wsi_rollback_submit_reset_handles);
 }
 
 static uint32_t
@@ -719,6 +804,25 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
          wsi_rollback_marker_seen = true;
       }
 
+      if (wsi_rollback_submit_transfer_failed &&
+          !wsi_rollback_submit_retry_marker_seen) {
+         const bool failed_handle_valid =
+            wsi_rollback_failed_transfer_handle > 0 &&
+            wsi_rollback_failed_transfer_handle < 64;
+         const bool partial_handle_valid =
+            wsi_rollback_partial_signal_handle > 0 &&
+            wsi_rollback_partial_signal_handle < 64;
+         const uint64_t failed_bit = failed_handle_valid
+            ? UINT64_C(1) << wsi_rollback_failed_transfer_handle : 0;
+         const uint64_t partial_bit = partial_handle_valid
+            ? UINT64_C(1) << wsi_rollback_partial_signal_handle : 0;
+         wsi_rollback_submit_cleanup_before_retry =
+            failed_handle_valid && partial_handle_valid &&
+            (wsi_rollback_destroyed_handles & failed_bit) &&
+            (wsi_rollback_submit_reset_handles & partial_bit);
+         wsi_rollback_submit_retry_marker_seen = true;
+      }
+
       wsi_rollback_syncobj_creates++;
       create->handle = wsi_rollback_syncobj_creates;
       if (create->handle < 64) {
@@ -761,9 +865,36 @@ static int
 drm_shim_ioctl_syncobj_transfer(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_transfer *transfer = arg;
+   const char *test_case = wsi_rollback_case();
 
-   if (wsi_rollback_case())
+   if (test_case) {
       wsi_rollback_transfers++;
+      if (!strcmp(test_case, "present-submit-failure")) {
+         if (wsi_rollback_transfers == 3)
+            wsi_rollback_partial_signal_handle = transfer->dst_handle;
+
+         if (!wsi_rollback_submit_transfer_failed &&
+             wsi_rollback_transfers == 4) {
+            wsi_rollback_submit_transfer_failed = true;
+            wsi_rollback_failed_transfer = wsi_rollback_transfers;
+            wsi_rollback_failed_transfer_handle = transfer->dst_handle;
+            errno = ENOMEM;
+            return -1;
+         }
+      } else if (!strcmp(test_case, "empty-submit-failure")) {
+         if (wsi_rollback_transfers == 1)
+            wsi_rollback_partial_signal_handle = transfer->dst_handle;
+
+         if (!wsi_rollback_submit_transfer_failed &&
+             wsi_rollback_transfers == 2) {
+            wsi_rollback_submit_transfer_failed = true;
+            wsi_rollback_failed_transfer = wsi_rollback_transfers;
+            wsi_rollback_failed_transfer_handle = transfer->dst_handle;
+            errno = ENOMEM;
+            return -1;
+         }
+      }
+   }
 
    if (queue_progress_lifecycle_case()) {
       queue_progress_transfers++;
@@ -789,7 +920,8 @@ drm_shim_ioctl_syncobj_fd_to_handle(int fd, unsigned long request, void *arg)
       return 0;
 
    wsi_rollback_sync_imports++;
-   if (!strncmp(test_case, "present-", strlen("present-")))
+   if (!strncmp(test_case, "present-", strlen("present-")) ||
+       !strcmp(test_case, "empty-submit-failure"))
       return 0;
 
    const unsigned fail_at = !strcmp(test_case, "fence-failure") ? 2 : 1;
@@ -874,7 +1006,8 @@ drm_shim_ioctl_syncobj_reset(int fd, unsigned long request, void *arg)
    const struct drm_syncobj_array *reset = arg;
 
    if (wsi_rollback_dmabuf_import_failed ||
-       wsi_rollback_sync_file_export_failed) {
+       wsi_rollback_sync_file_export_failed ||
+       wsi_rollback_submit_transfer_failed) {
       const uint32_t *handles = (const void *)(uintptr_t)reset->handles;
       wsi_rollback_syncobj_resets_after_failure++;
       if (wsi_rollback_syncobj_resets_after_failure == 1) {
@@ -882,6 +1015,14 @@ drm_shim_ioctl_syncobj_reset(int fd, unsigned long request, void *arg)
             reset->count_handles == 1 && handles && handles[0] != 0;
          if (handles && reset->count_handles)
             wsi_rollback_first_reset_handle = handles[0];
+      }
+
+      if (wsi_rollback_submit_transfer_failed && handles) {
+         for (uint32_t i = 0; i < reset->count_handles; i++) {
+            if (handles[i] < 64)
+               wsi_rollback_submit_reset_handles |=
+                  UINT64_C(1) << handles[i];
+         }
       }
    }
 
@@ -955,6 +1096,18 @@ static int
 drm_shim_ioctl_syncobj_wait(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_wait *wait = arg;
+   const uint32_t *handles = (const void *)(uintptr_t)wait->handles;
+
+   if (wsi_rollback_submit_transfer_failed &&
+       !wsi_rollback_submit_retry_marker_seen && handles) {
+      for (uint32_t i = 0; i < wait->count_handles; i++) {
+         if (handles[i] == wsi_rollback_failed_transfer_handle) {
+            wsi_rollback_stale_fence_wait_rejected = true;
+            errno = ETIME;
+            return -ETIME;
+         }
+      }
+   }
 
    if (getenv("ASAHI_SHIM_TIMEOUT_SYNC_WAIT_ONCE") &&
        !timed_out_sync_wait_once) {
@@ -967,8 +1120,8 @@ drm_shim_ioctl_syncobj_wait(int fd, unsigned long request, void *arg)
       waited_after_dmabuf_import_failure = true;
 
    if (wsi_rollback_dmabuf_import_failed ||
-       wsi_rollback_sync_file_export_failed) {
-      const uint32_t *handles = (const void *)(uintptr_t)wait->handles;
+       wsi_rollback_sync_file_export_failed ||
+       wsi_rollback_submit_transfer_failed) {
       wsi_rollback_waits_after_sync_failure++;
       if (wsi_rollback_waits_after_sync_failure == 1) {
          wsi_rollback_fallback_wait_shape_valid =
