@@ -25,6 +25,7 @@
 #include "agx_compile.h"
 #include "agx3_alu_core.h"
 #include "agx3_copy_core.h"
+#include "agx3_isel_core.h"
 #include "agx3_sr_core.h"
 #include "agx3_tex_core.h"
 #include "agx_nir.h"
@@ -914,6 +915,21 @@ build_fs_sample_mask_in(void)
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 sample-mask input FS");
    nir_def *mask = nir_load_sample_mask_in(&b);
    nir_def *value = nir_u2f32(&b, mask);
+   fs_store_colour(&b, nir_vec4(&b, value, value, value,
+                                nir_imm_float(&b, 1.0f)));
+   return fs_finish(&b);
+}
+
+/* A two-sided material choosing a value from gl_FrontFacing. */
+static nir_shader *
+build_fs_front_facing(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 front-facing FS");
+   nir_def *front = nir_load_front_face(&b, 1);
+   nir_def *bits = nir_bcsel(&b, front, nir_imm_int(&b, 17),
+                             nir_imm_int(&b, 3));
+   nir_def *value = nir_u2f32(&b, bits);
    fs_store_colour(&b, nir_vec4(&b, value, value, value,
                                 nir_imm_float(&b, 1.0f)));
    return fs_finish(&b);
@@ -3454,6 +3470,7 @@ struct agx3_graphics_case {
    bool expected_g17p_implicit_coord_group;
    bool expected_g17p_sampled_fragment;
    bool expected_g17p_sample_mask_input;
+   bool expected_g17p_front_facing;
 };
 
 static bool
@@ -3526,6 +3543,71 @@ g17p_sample_mask_input_protocol(const struct agx_shader_part *part)
                                     shift_length))
                            return true;
                      }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
+static bool
+g17p_front_facing_protocol(const struct agx_shader_part *part)
+{
+   const uint8_t *binary = part->binary;
+   uint8_t sr_bytes[AGX3_SR_MAX_LENGTH];
+   uint8_t sr_length = 0;
+
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      for (unsigned sr_dest = 0; sr_dest < 256; ++sr_dest) {
+         const struct agx3_sr_desc sr = {
+            .dest = sr_dest,
+            .width = AGX3_SR_W16,
+            .sr = 41,
+            .slot = slot,
+         };
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, sr_bytes,
+                             &sr_length))
+            continue;
+
+         for (unsigned sr_off = 0;
+              sr_off + sr_length <= part->info.binary_size; ++sr_off) {
+            if (memcmp(binary + sr_off, sr_bytes, sr_length))
+               continue;
+
+            for (unsigned dest = 0; dest < 256; dest += 2) {
+               for (unsigned hint = AGX3_ALU_HINT_NONE;
+                    hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+                  struct agx3_isel_desc isel = {
+                     .dest = dest,
+                     .cmp0 = sr_dest,
+                     .cmp1 = 0,
+                     .cond = AGX3_ISEL_ICOND_EQ,
+                     .cmp1_immediate = true,
+                     .cmp_16 = true,
+                     .explicit_hints = true,
+                     .true_kind = AGX3_ISEL_IMMEDIATE,
+                     .false_kind = AGX3_ISEL_IMMEDIATE,
+                     .sel_true = 17,
+                     .sel_false = 3,
+                     .wait_mask = 1u << (slot - 1),
+                  };
+                  isel.cache[0] = hint == AGX3_ALU_HINT_CACHE;
+                  isel.discard[0] = hint == AGX3_ALU_HINT_DISCARD;
+
+                  uint8_t isel_bytes[AGX3_ISEL_MAX_LENGTH];
+                  uint8_t isel_length = 0;
+                  if (!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &isel,
+                                        isel_bytes, &isel_length))
+                     continue;
+
+                  for (unsigned isel_off = sr_off + sr_length;
+                       isel_off + isel_length <= part->info.binary_size;
+                       ++isel_off) {
+                     if (!memcmp(binary + isel_off, isel_bytes, isel_length))
+                        return true;
                   }
                }
             }
@@ -3626,6 +3708,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
    {"fs-sample-mask-in", build_fs_sample_mask_in, true, .g17p_only = true,
     .expected_g17p_sample_mask_input = true},
+   {"fs-front-facing", build_fs_front_facing, true, .g17p_only = true,
+    .expected_g17p_front_facing = true},
    {"fs-depth-write", build_fs_depth, true, .g17p_only = true,
     .expected_g17p_depth = true},
    {"fs-depth-only", build_fs_depth_only, true, .g17p_only = true,
@@ -3779,6 +3863,14 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          if (!result)
             fprintf(stderr,
                     "%s %s: missing native SR39 W16 read/shift protocol\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_front_facing) {
+         result = g17p_front_facing_protocol(&part);
+         if (!result)
+            fprintf(stderr, "%s %s: missing native SR41 W16 read\n",
                     enc_name(enc), c->name);
       }
 

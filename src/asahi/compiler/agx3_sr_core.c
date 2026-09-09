@@ -25,7 +25,7 @@
  * G17P vertex shaders and compile to `0cdd1006` / `0cd81006` for destination
  * r0.
  *
- * Two more 16-bit numbers are fragment-only and were added from the G17P
+ * Three more 16-bit numbers are fragment-only and were added from the G17P
  * writeout session (offline `applegpu-nt -arch applegpu_g17p`, 2026-08-31):
  *
  *  - 39 is the *incoming* coverage word. PROVEN: a fragment shader that reads
@@ -37,6 +37,9 @@
  *    kill-all constant from that formula requires T = 0xF0, i.e. a four-bit
  *    mask in bits 4..7 exactly like SR 39. Presence and use are PROVEN;
  *    "the per-invocation target-sample mask" is INFERRED from that arithmetic.
+ *  - 41 is the back-facing predicate. A `[[front_facing]] ? 17 : 3` fragment
+ *    reads SR41 and selects 17 when that value equals zero, directly pinning
+ *    both the register identity and its polarity.
  */
 bool
 agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
@@ -47,7 +50,7 @@ agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
       case 17: case 18: case 19: case 20: case 21: case 22:
       case 34: case 36:
       /* fragment-only, see the comment above */
-      case 2: case 39:
+      case 2: case 39: case 41:
          return true;
       default:
          return false;

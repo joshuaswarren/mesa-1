@@ -595,7 +595,8 @@ agx3_is_async(const agx_instr *I)
  * combination Apple never emitted -- fails closed so the shader is honestly
  * rejected, not miscompiled. */
 static bool
-agx3_map_sr(enum agx_sr sr, uint8_t *apple, enum agx3_sr_width *width)
+agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
+            enum agx3_sr_width *width)
 {
 #define SR(mesa, num, w)                                                       \
    case mesa:                                                                  \
@@ -621,7 +622,18 @@ agx3_map_sr(enum agx_sr sr, uint8_t *apple, enum agx3_sr_width *width)
       SR(AGX_SR_THREAD_POSITION_IN_GRID_X, 23, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Y, 24, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Z, 25, AGX3_SR_W32);
-      SR(AGX_SR_INPUT_SAMPLE_MASK, 39, AGX3_SR_W16);
+   case AGX_SR_INPUT_SAMPLE_MASK:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 39;
+      *width = AGX3_SR_W16;
+      return true;
+   case AGX_SR_BACKFACING:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 41;
+      *width = AGX3_SR_W16;
+      return true;
       /* The semantic enum carries the hardware SR byte (0xd8/0xdd), while
        * agx3_sr_core consumes Apple's anonymous normalized f21 value. */
       SR(AGX_SR_INSTANCE_ID, 46, AGX3_SR_W32);
@@ -637,8 +649,8 @@ agx3_map_sr(enum agx_sr sr, uint8_t *apple, enum agx3_sr_width *width)
  * into a half register (consumers or an explicit zero-extend handle the rest),
  * and no witness reads one at another width. */
 static bool
-agx3_translate_sr(const agx_instr *I, uint8_t slot, uint16_t wait_mask,
-                  struct agx3_sr_desc *d)
+agx3_translate_sr(enum agx_isa_encoding enc, const agx_instr *I, uint8_t slot,
+                  uint16_t wait_mask, struct agx3_sr_desc *d)
 {
    memset(d, 0, sizeof(*d));
 
@@ -650,7 +662,7 @@ agx3_translate_sr(const agx_instr *I, uint8_t slot, uint16_t wait_mask,
 
    uint8_t apple;
    enum agx3_sr_width width;
-   if (!agx3_map_sr(I->sr, &apple, &width))
+   if (!agx3_map_sr(enc, I->sr, &apple, &width))
       return false;
    if (width == AGX3_SR_W32 ? dst.size != AGX_SIZE_32 : dst.size != AGX_SIZE_16)
       return false;
@@ -6046,7 +6058,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_sr_desc d;
             uint8_t bytes[AGX3_SR_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_sr(I, slot, wait, &d) ||
+            if (!agx3_translate_sr(enc, I, slot, wait, &d) ||
                 !agx3_sr_encode(enc, &d, bytes, &len))
                AGX3_REFUSE(I);
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);

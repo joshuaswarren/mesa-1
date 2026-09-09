@@ -134,6 +134,27 @@ TEST(AGX3SrCore, FragmentCoverageInputs)
    }
 }
 
+TEST(AGX3SrCore, G17PBackFacingInput)
+{
+   const struct agx3_sr_desc d = {
+      .dest = 0,
+      .width = AGX3_SR_W16,
+      .sr = 41,
+      .slot = 1,
+   };
+   static const uint8_t native[] = {0x04, 0xc5, 0x10, 0x06};
+   uint8_t out[AGX3_SR_MAX_LENGTH];
+   uint8_t len = 0;
+
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(native));
+   EXPECT_EQ(0, memcmp(out, native, len));
+
+   struct agx3_sr_desc wide = d;
+   wide.width = AGX3_SR_W32;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &wide, out, &len));
+}
+
 TEST(AGX3SrCore, WaitEscalatesToLongForm)
 {
    /* A wait bit cannot ride the compact form; Apple's own at_dev_nr witness

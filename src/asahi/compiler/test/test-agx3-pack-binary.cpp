@@ -4395,6 +4395,28 @@ TEST_F(AGX3PackBinary, RefusesUnwitnessedSr)
    pack(b, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, G17PFrontFacingUsesNativeBackFacingSr)
+{
+   /* Apple's front_facing fragment reads a native W16 SR41. The value is
+    * zero on a front face, so it is Mesa's existing BACKFACING semantic and
+    * the shared front-face lowering keeps its logical inversion. */
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_get_sr_to(b, agx_register(0, AGX_SIZE_16), AGX_SR_BACKFACING);
+   agx_stop(b);
+   const std::vector<uint8_t> native = {
+      0x04,0xc5,0x10,0x06, 0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+
+   /* The semantic identity is grounded only on applegpu_g17p. */
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_get_sr_to(b, agx_register(0, AGX_SIZE_16), AGX_SR_BACKFACING);
+   agx_stop(b);
+   pack(b, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, LoadAddStoreCarriesWait)
 {
    /* A load, an add that consumes the load result, and a store. The add must
