@@ -771,12 +771,10 @@ hk_get_device_features(
        * G17P-compiled libagx XFB counter-copy kernel. */
       features->transformFeedback = true;
       features->geometryStreams = false;
-      /* Precompiled predicate kernels now use the same direct HAL200 Ioto
-       * launch as the public compute path, followed by native indirect Index
-       * Lists.  Keep the API bit paired with its extension until the complete
-       * count/clamp/stride oracle batch is qualified. */
-      features->drawIndirectCount =
-         hk_g17p_unverified_feature("draw_indirect_count");
+      /* Precompiled predicate kernels use the same direct HAL200 Ioto launch
+       * as the public compute path, followed by native indirect Index Lists.
+       * Both indexed and non-indexed count/clamp/stride paths are qualified. */
+      features->drawIndirectCount = true;
       /* G17P's native layer output occupies the high half of the shared
        * layer/viewport UVS scalar.  The public bit is backed by the exact
        * two-instance/two-layer image qualification. */
@@ -1489,9 +1487,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * write zero instead of the blended colour. */
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
-
-      if (!hk_g17p_unverified_feature("draw_indirect_count"))
-         supported_extensions.KHR_draw_indirect_count = false;
 
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
