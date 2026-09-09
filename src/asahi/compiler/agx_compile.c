@@ -2636,6 +2636,55 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          }
       }
 
+      /* The recovered register-register half add has no grounded negate
+       * field. Preserve half subtraction through the witnessed FMA form:
+       * a - b = fma(a, 1.0h, -b). This stays fused and carries the source
+       * lifetimes through the already validated src2-negate encoding. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_HADD && I->nr_srcs == 2 &&
+          I->src[0].neg != I->src[1].neg && !I->src[0].abs &&
+          !I->src[1].abs && I->src[0].type != AGX_INDEX_IMMEDIATE &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE) {
+         if (I->src[0].neg) {
+            const agx_index tmp = I->src[0];
+            I->src[0] = I->src[1];
+            I->src[1] = tmp;
+         }
+
+         I->op = AGX_OPCODE_HFMA;
+         I->src[2] = I->src[1];
+         I->src[1] =
+            agx_mov_imm(&b, 16, _mesa_float_to_half(1.0f));
+         I->nr_srcs = 3;
+      }
+
+      /* A half comparison against a minifloat selecting two half registers
+       * has no separately grounded immediate form. Materialize the compare
+       * constant so it uses the general four-register half select whose
+       * conditions and lifetime fields are already recovered. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_16 &&
+          I->src[2].type != AGX_INDEX_IMMEDIATE &&
+          I->src[2].size == AGX_SIZE_16 &&
+          I->src[3].type != AGX_INDEX_IMMEDIATE &&
+          I->src[3].size == AGX_SIZE_16) {
+         for (unsigned s = 0; s < 2; ++s) {
+            const unsigned other = s ^ 1;
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE ||
+                I->src[other].type == AGX_INDEX_IMMEDIATE ||
+                I->src[other].size != AGX_SIZE_16)
+               continue;
+
+            float value = agx_minifloat_decode(I->src[s].value);
+            if (I->src[s].abs)
+               value = fabsf(value);
+            if (I->src[s].neg)
+               value = -value;
+            I->src[s] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+         }
+      }
+
       /* Multiplication is commutative.  Keep a sole immediate in the second
        * multiply slot, matching Apple's native IMAD form and the existing
        * grounded G17P encoder.  Geometry/XFB arithmetic naturally arrives

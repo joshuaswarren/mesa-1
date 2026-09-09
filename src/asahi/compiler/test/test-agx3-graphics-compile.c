@@ -3731,6 +3731,32 @@ build_fs_glmark2_buffer(void)
    return fs_finish(&b);
 }
 
+/* glmark2's control-flow scenes retain a mediump input across floor() and
+ * then subtract the rounded value. This exercises both the optional cached
+ * floor source and the exact half-subtract legalization used by those scenes. */
+static nir_shader *
+build_fs_glmark2_control(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 control FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 3, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *v = nir_f2f16(&b, nir_channel(&b, input, 0));
+   nir_def *rounded = nir_ffloor(&b, v);
+   nir_def *fraction = nir_fsub(&b, v, rounded);
+   nir_def *choice = nir_bcsel(
+      &b, nir_fge(&b, v, nir_imm_floatN_t(&b, 0.5, 16)),
+      nir_f2f16(&b, nir_channel(&b, input, 1)),
+      nir_f2f16(&b, nir_channel(&b, input, 2)));
+   fs_store_colour(&b, nir_vec4(&b, v, rounded, fraction, choice));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -4090,6 +4116,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
     .g17p_only = true},
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
+    .g17p_only = true},
+   {"fs-glmark2-control", build_fs_glmark2_control, true,
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},

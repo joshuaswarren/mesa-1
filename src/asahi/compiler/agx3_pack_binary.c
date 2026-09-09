@@ -6575,13 +6575,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hfloor(enc, dest.value, src.value,
-                                         agx3_post_ra_hint(src), dest.cache,
-                                         wait, bytes, &len)
+            /* The recovered half form has retained/discard source states but
+             * no grounded source-cache bit. Cache is an optional post-RA
+             * scheduling hint, so retain the register source when requested. */
+            const enum agx3_alu_hint hint =
+               half && src.cache ? AGX3_ALU_HINT_NONE
+                                 : agx3_post_ra_hint(src);
+            if (!(half ? agx3_alu_hfloor(enc, dest.value, src.value, hint,
+                                         dest.cache, wait, bytes, &len)
                        : agx3_alu_f32floor(enc, dest.value, src.value,
-                                           agx3_post_ra_hint(src), dest.cache,
-                                           wait, src.neg, src.abs, bytes,
-                                           &len)) ||
+                                           hint, dest.cache, wait, src.neg,
+                                           src.abs, bytes, &len)) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

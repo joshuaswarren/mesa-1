@@ -7872,16 +7872,28 @@ TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndRefusesModifier)
 
 TEST_F(AGX3PackBinary, HalfFloorMatchesNativeAndRefusesModifier)
 {
-   agx_builder *b=builder(AGX_ISA_ENCODING_AGX3B);
-   agx_index src=agx_register(3,AGX_SIZE_16); src.discard=true;
-   agx_floor_to(b,agx_register(3,AGX_SIZE_16),src); agx_stop(b);
-   const auto code=pack(b);
-   const uint8_t native[]={0x2f,0x00,0x54,0x03,0x02,0x06,0xac,0x60,0x02,0x00};
-   ASSERT_EQ(code.size(),sizeof(native)+4);
-   EXPECT_EQ(memcmp(code.data(),native,sizeof(native)),0);
-   b=builder(AGX_ISA_ENCODING_AGX3B); src=agx_register(2,AGX_SIZE_16);
-   src.abs=true; agx_floor_to(b,agx_register(2,AGX_SIZE_16),src); agx_stop(b);
-   EXPECT_TRUE(pack(b,false).empty());
+   for (unsigned cached = 0; cached < 2; ++cached) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index src = agx_register(3, AGX_SIZE_16);
+      src.cache = cached;
+      src.discard = !cached;
+      agx_floor_to(b, agx_register(3, AGX_SIZE_16), src);
+      agx_stop(b);
+      const auto code = pack(b);
+      const uint8_t native[][10] = {
+         {0x2f,0x00,0x54,0x03,0x02,0x06,0xac,0x60,0x02,0x00},
+         {0x2f,0x00,0x54,0x03,0x02,0x06,0x8c,0x60,0x02,0x00},
+      };
+      ASSERT_EQ(code.size(), sizeof(native[cached]) + 4);
+      EXPECT_EQ(memcmp(code.data(), native[cached], sizeof(native[cached])), 0);
+   }
+
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(2, AGX_SIZE_16);
+   src.abs = true;
+   agx_floor_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfCeilMatchesNativeAndRefusesModifier)
