@@ -2272,25 +2272,28 @@ agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 11, out, len);
 }
 
-/*
- * The 32-bit log2/exp2 pair. Field-for-field the half forms below with f10 and
- * f26 raised from 1 to 2, and with all six wait slots reachable rather than
- * only slot 6, which is the same relationship f32rsqrt has to hrsqrt.
- */
+/* log2/exp2 share independently selected f10 destination and f26 source
+ * widths. Full-width forms have all six recovered wait bits; any half-width
+ * log2 is currently grounded for no wait and slot 6. */
 static bool
-agx3_alu_f32_unop(enum agx_isa_encoding enc, const char *mnemonic,
-                  uint16_t dest, uint16_t src, enum agx3_alu_hint hint,
-                  bool dest_cache, uint16_t wait_mask, bool src_neg,
-                  bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+agx3_alu_unop(enum agx_isa_encoding enc, const char *mnemonic,
+              uint16_t dest, uint16_t src, bool dest_half, bool src_half,
+              enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+              bool src_neg, bool src_abs,
+              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 || (dest & 1) || (src & 1) ||
+       src >= 256 || (!dest_half && (dest & 1)) ||
+       (!src_half && (src & 1)) ||
        (wait_mask & ~UINT16_C(0x3f)) ||
+       ((dest_half || src_half) && wait_mask != 0 &&
+        wait_mask != (1u << 5)) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE)
       return false;
 
    const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 2}, {25, 2}, {26, 2},
+      {9, 2}, {10, dest_half ? 1 : 2}, {25, 2},
+      {26, src_half ? 1 : 2},
    };
    struct agx3_field_kv fields[13] = {
       {2, dest}, {18, src}, {11, dest_cache},
@@ -2309,8 +2312,8 @@ agx3_alu_f32log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_f32_unop(enc, "f32log2", dest, src, hint, dest_cache,
-                            wait_mask, false, false, out, len);
+   return agx3_alu_log2(enc, dest, src, false, false, false, false, hint,
+                        dest_cache, wait_mask, out, len);
 }
 
 bool
@@ -2318,8 +2321,8 @@ agx3_alu_f32exp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_f32_unop(enc, "f32exp2", dest, src, hint, dest_cache,
-                            wait_mask, false, false, out, len);
+   return agx3_alu_unop(enc, "f32exp2", dest, src, false, false, hint,
+                        dest_cache, wait_mask, false, false, out, len);
 }
 
 bool
@@ -2328,8 +2331,23 @@ agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint16_t wait_mask, bool src_neg, bool src_abs,
                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_f32_unop(enc, "f32log2", dest, src, hint, dest_cache,
-                            wait_mask, src_neg, src_abs, out, len);
+   return agx3_alu_log2(enc, dest, src, false, false, src_abs, src_neg, hint,
+                        dest_cache, wait_mask, out, len);
+}
+
+bool
+agx3_alu_log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+              bool dest_half, bool src_half, bool src_abs, bool src_neg,
+              enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   /* applegpu_g17p's f32log2 operand grammar names halves 0..191. Full
+    * scalars additionally require their ordinary even-pair alignment. */
+   if (dest >= 192 || src >= 192)
+      return false;
+
+   return agx3_alu_unop(enc, "f32log2", dest, src, dest_half, src_half, hint,
+                        dest_cache, wait_mask, src_neg, src_abs, out, len);
 }
 
 bool
@@ -2338,8 +2356,8 @@ agx3_alu_f32exp2_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint16_t wait_mask, bool src_neg, bool src_abs,
                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_f32_unop(enc, "f32exp2", dest, src, hint, dest_cache,
-                            wait_mask, src_neg, src_abs, out, len);
+   return agx3_alu_unop(enc, "f32exp2", dest, src, false, false, hint,
+                        dest_cache, wait_mask, src_neg, src_abs, out, len);
 }
 
 /*
@@ -2464,24 +2482,8 @@ agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                uint8_t *len)
 {
-   /* f32log2 uses the same explicit half-width controls as exp2.  Fresh
-    * Apple kernels independently cover both half lanes, source lifetime,
-    * destination caching, and slot-6/no dependency forms. */
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 ||
-       (hint != AGX3_ALU_HINT_NONE && hint != AGX3_ALU_HINT_DISCARD) ||
-       (wait_mask != 0 && wait_mask != 32))
-      return false;
-
-   const struct agx3_field_kv base[] = {
-      {9,2},{10,1},{25,2},{26,1},
-   };
-   const struct agx3_field_kv fields[] = {
-      {2,dest}, {18,src}, {11,dest_cache},
-      {29,hint == AGX3_ALU_HINT_DISCARD}, {40,wait_mask == 32},
-   };
-   return agx3_bind_compose(enc, "f32log2", 0, base, 4, fields, 5,
-                            out, len);
+   return agx3_alu_log2(enc, dest, src, true, true, false, false, hint,
+                        dest_cache, wait_mask, out, len);
 }
 
 bool

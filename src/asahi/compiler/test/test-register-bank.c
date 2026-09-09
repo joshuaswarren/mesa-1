@@ -15,6 +15,7 @@ struct fixture {
    BITSET_DECLARE(used, AGX_NUM_REGS);
    BITSET_DECLARE(low_gpr, 512);
    BITSET_DECLARE(texture_gpr, 512);
+   BITSET_DECLARE(log2_gpr, 512);
    BITSET_DECLARE(high_gpr, 512);
    unsigned variables, high_water, memory_count;
 };
@@ -34,6 +35,7 @@ init(struct fixture *f, unsigned bound, unsigned reserved)
       .ncomps = f->widths, .sizes = f->sizes, .classes = f->classes,
       .used_regs[RA_GPR] = f->used, .bound[RA_GPR] = bound,
       .low_gpr = f->low_gpr, .texture_gpr = f->texture_gpr,
+      .log2_gpr = f->log2_gpr,
       .high_gpr = f->high_gpr,
       .count[RA_GPR] = &f->high_water, .count[RA_MEM] = &f->memory_count,
    };
@@ -114,6 +116,18 @@ main(void)
    assert(dest_limit(&f.ra, &producer, 0) == 16);
    f.key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
    assert(dest_limit(&f.ra, &producer, 0) == 256);
+
+   init(&f, 256, 0);
+   producer.op = AGX_OPCODE_LOG2;
+   assert(dest_limit(&f.ra, &producer, 0) == 192);
+   producer.op = AGX_OPCODE_COLLECT;
+   assert(dest_limit(&f.ra, &producer, 0) == 256);
+   BITSET_SET(f.log2_gpr, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 192);
+   BITSET_SET(f.texture_gpr, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 128);
+   BITSET_SET(f.low_gpr, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 16);
 
    init(&f, 256, 0);
    for (unsigned reg = 0; reg < 128; reg += 2)

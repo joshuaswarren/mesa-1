@@ -119,6 +119,9 @@ struct ra_ctx {
    /* SSA values read by G17P's seven-bit texture COPY/CEM source fields. */
    BITSET_WORD *texture_gpr;
 
+   /* SSA values read by G17P's 192-half f32log2 operand domain. */
+   BITSET_WORD *log2_gpr;
+
    /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
     * register bank. */
    BITSET_WORD *high_gpr;
@@ -369,6 +372,11 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
        ra_class_for_index(I->dest[d]) == RA_GPR &&
        BITSET_TEST(rctx->texture_gpr, I->dest[d].value))
       limit = MIN2(limit, 128);
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       (I->op == AGX_OPCODE_LOG2 ||
+        BITSET_TEST(rctx->log2_gpr, I->dest[d].value)))
+      limit = MIN2(limit, 192);
    return limit;
 }
 
@@ -1692,6 +1700,7 @@ agx_ra(agx_context *ctx)
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *log2_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
@@ -1721,6 +1730,14 @@ agx_ra(agx_context *ctx)
              I->src[5].type == AGX_INDEX_NORMAL)
             BITSET_SET(texture_gpr, I->src[5].value);
       }
+
+      /* Both the result and source operands of G17P f32log2 are bounded to
+       * halves 0..191 by the recovered native form. dest_limit handles the
+       * instruction result directly; mark the defining SSA of its source so
+       * high register pressure cannot produce a post-RA refusal. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_LOG2 && I->src[0].type == AGX_INDEX_NORMAL)
+         BITSET_SET(log2_gpr, I->src[0].value);
 
       /* G17P cube CEM rereads its XYZ vector after writing fixed scratch r0
        * and r7. Constrain the coordinate vector itself above that bank; its
@@ -1803,6 +1820,7 @@ agx_ra(agx_context *ctx)
          .visited = visited,
          .low_gpr = low_gpr,
          .texture_gpr = texture_gpr,
+         .log2_gpr = log2_gpr,
          .high_gpr = high_gpr,
          .bound[RA_GPR] = max_regs,
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
@@ -1964,6 +1982,7 @@ agx_ra(agx_context *ctx)
    free(phi_web);
    free(low_gpr);
    free(texture_gpr);
+   free(log2_gpr);
    free(high_gpr);
    free(src_to_collect_phi);
    free(ncomps);

@@ -6617,26 +6617,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* f10 and f26 independently select scalar result/source width. This
+          * matters for mediump texture results promoted before logarithmic
+          * transfer functions, as in GTK's component-transfer shader. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_LOG2 &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
-            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
                 (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != dest.size || agx_channels(src) != 1 ||
-                (half && (src.abs || src.neg)) || src.kill ||
+                (src.size != AGX_SIZE_16 && src.size != AGX_SIZE_32) ||
+                agx_channels(src) != 1 || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hlog2(enc, dest.value, src.value,
-                                        agx3_post_ra_hint(src), dest.cache,
-                                        wait, bytes, &len)
-                       : agx3_alu_f32log2_mod(enc, dest.value, src.value,
-                                              agx3_post_ra_hint(src),
-                                              dest.cache, wait, src.neg,
-                                              src.abs, bytes, &len)) ||
+            if (!agx3_alu_log2(
+                   enc, dest.value, src.value, dest.size == AGX_SIZE_16,
+                   src.size == AGX_SIZE_16, src.abs, src.neg,
+                   agx3_post_ra_hint(src), dest.cache, wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

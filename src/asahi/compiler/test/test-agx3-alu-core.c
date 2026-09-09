@@ -3420,7 +3420,7 @@ static void test_native_half_log2(void)
       if (bad == 0) enc = AGX_ISA_ENCODING_AGX3C;
       if (bad == 1) dest = 256;
       if (bad == 2) src = 256;
-      if (bad == 3) hint = AGX3_ALU_HINT_CACHE;
+      if (bad == 3) hint = (enum agx3_alu_hint)3;
       if (bad == 4) wait = 1;
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
       memset(bytes, 0xa5, sizeof(bytes));
@@ -3431,6 +3431,111 @@ static void test_native_half_log2(void)
          assert(bytes[j] == 0xa5);
    }
    puts("Native half log2: five exact Apple vectors and narrow refusal guards PASS");
+}
+
+static void test_native_mixed_width_log2(void)
+{
+   /* Fresh current-Xcode applegpu_g17p kernels. f10 and f26 independently
+    * select the destination and source width. The matrix also pins an odd
+    * half source, both lifetimes, result caching, modifiers, and wait/no-wait
+    * without relying on a synthetic field composition. */
+   static const struct {
+      uint16_t dest, src;
+      bool dest_half, src_half, src_abs, src_neg;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *bytes;
+   } cases[] = {
+      {0,0,true, true, false,false,AGX3_ALU_HINT_DISCARD,true, 32,
+       "2f0256000300ac600000"},
+      {0,2,true, true, false,false,AGX3_ALU_HINT_CACHE,  true, 32,
+       "2f02560003048e600000"},
+      {0,0,false,true, false,false,AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256000200a8400000"},
+      {0,2,false,true, false,false,AGX3_ALU_HINT_CACHE,  false,32,
+       "2f02560002048a400000"},
+      {0,3,false,true, false,false,AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256000206a8400000"},
+      {0,0,false,true, false,false,AGX3_ALU_HINT_DISCARD,false,0,
+       "2f0254000200a8400000"},
+      {0,0,false,true, true, false,AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256000200a8c00000"},
+      {0,0,false,true, false,true, AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256000200a8400100"},
+      {0,0,false,true, true, true, AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256000200a8c00100"},
+      {0,0,false,true, false,false,AGX3_ALU_HINT_DISCARD,true, 32,
+       "2f0256000300a8400000"},
+      {2,2,true, false,false,false,AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256020204b4600000"},
+      {2,4,true, false,false,false,AGX3_ALU_HINT_CACHE,  false,32,
+       "2f025602020896600000"},
+      {2,2,true, false,true, false,AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256020204b4e00000"},
+      {2,2,true, false,false,true, AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256020204b4600100"},
+      {2,2,true, false,true, true, AGX3_ALU_HINT_DISCARD,false,32,
+       "2f0256020204b4e00100"},
+   };
+
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_log2(
+         AGX_ISA_ENCODING_AGX3B, cases[i].dest, cases[i].src,
+         cases[i].dest_half, cases[i].src_half, cases[i].src_abs,
+         cases[i].src_neg, cases[i].hint, cases[i].dest_cache,
+         cases[i].wait, bytes, &len));
+      exact(bytes, len, cases[i].bytes);
+   }
+
+   /* The recovered operand grammar names halves 0..191. A full scalar
+    * consumes an aligned pair; a half may independently select the final odd
+    * half. */
+   for (unsigned dest_half = 0; dest_half < 2; ++dest_half) {
+      for (unsigned src_half = 0; src_half < 2; ++src_half) {
+         uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+         assert(agx3_alu_log2(
+            AGX_ISA_ENCODING_AGX3B, dest_half ? 191 : 190,
+            src_half ? 191 : 190, dest_half, src_half, false, false,
+            AGX3_ALU_HINT_NONE, false, 0,
+            bytes, &len));
+         assert(len == 10);
+      }
+   }
+
+   struct {
+      enum agx_isa_encoding enc;
+      uint16_t dest, src;
+      bool dest_half, src_half;
+      enum agx3_alu_hint hint;
+      uint16_t wait;
+   } bad[] = {
+      {AGX_ISA_ENCODING_AGX3C, 0,   0,   false,true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 256, 0,   true, true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 0,   256, false,true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 192, 0,   true, true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 0,   192, false,true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 255, 0,   false,true, AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 0,   255, false,false,AGX3_ALU_HINT_NONE,0},
+      {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,true, AGX3_ALU_HINT_NONE,1},
+      {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,true,
+       (enum agx3_alu_hint)3, 0},
+      {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,false,AGX3_ALU_HINT_NONE,64},
+   };
+   for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
+      memset(bytes, 0xa5, sizeof(bytes));
+      assert(!agx3_alu_log2(
+         bad[i].enc, bad[i].dest, bad[i].src, bad[i].dest_half,
+         bad[i].src_half, false, false, bad[i].hint, false, bad[i].wait,
+         bytes, &len));
+      assert(len == 0xa5);
+      for (unsigned j = 0; j < sizeof(bytes); ++j)
+         assert(bytes[j] == 0xa5);
+   }
+
+   puts("Native mixed-width log2: fifteen exact Apple vectors and strict width/register guards PASS");
 }
 
 static void test_native_half_floor(void)
@@ -3562,6 +3667,7 @@ int main(void){
    test_native_half_rsqrt();
    test_native_half_exp2();
    test_native_half_log2();
+   test_native_mixed_width_log2();
    test_native_half_floor();
    test_native_half_ceil();
    test_native_asr32();

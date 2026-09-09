@@ -639,6 +639,7 @@ TEST_F(AGX3PackBinary, G17PI32EOTRefusesConflictingSelectorOverrides)
                          AGX_FORMAT_I32, AGX_DIM_2D, true);
    agx_stop(b);
    EXPECT_TRUE(pack(b, false).empty());
+
 }
 
 TEST_F(AGX3PackBinary, G17PI32EOTRefusesAmbiguousWordCount)
@@ -8801,7 +8802,7 @@ TEST_F(AGX3PackBinary, HalfExp2MatchesNativeNegateAndRefusesAbsolute)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
-TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndRefusesModifier)
+TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndModifiers)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index src = agx_register(3, AGX_SIZE_16);
@@ -8819,6 +8820,65 @@ TEST_F(AGX3PackBinary, HalfLog2MatchesNativeAndRefusesModifier)
    src = agx_register(2, AGX_SIZE_16);
    src.neg = true;
    agx_log2_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   const uint8_t native_neg[] = {
+      0x2f,0x02,0x54,0x02,0x02,0x04,0x8c,0x60,0x01,0x00,
+   };
+   const auto neg_code = pack(b);
+   ASSERT_EQ(neg_code.size(), sizeof(native_neg) + 4);
+   EXPECT_EQ(memcmp(neg_code.data(), native_neg, sizeof(native_neg)), 0);
+}
+
+TEST_F(AGX3PackBinary, MixedWidthLog2MatchesCurrentGtkAndNativeModifiers)
+{
+   /* Exact unchanged GTK component-transfer post-RA shape. Half 76 is read
+    * directly and the float result begins at the aligned pair 64. */
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_log2_to(b, agx_register(64, AGX_SIZE_32),
+               agx_register(76, AGX_SIZE_16));
+   agx_stop(b);
+   const uint8_t gtk_native[] = {
+      0x2f,0x02,0x54,0x40,0x02,0x98,0x88,0x40,0x00,0x00,
+   };
+   const auto gtk_code = pack(b);
+   ASSERT_EQ(gtk_code.size(), sizeof(gtk_native) + 4);
+   EXPECT_EQ(memcmp(gtk_code.data(), gtk_native, sizeof(gtk_native)), 0);
+
+   /* Fresh Apple half-input/full-output form with an odd source and both
+    * modifiers. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(3, AGX_SIZE_16);
+   src.abs = true;
+   src.neg = true;
+   src.discard = true;
+   agx_log2_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const uint8_t modified_native[] = {
+      0x2f,0x02,0x54,0x00,0x02,0x06,0xa8,0xc0,0x01,0x00,
+   };
+   const auto modified_code = pack(b);
+   ASSERT_EQ(modified_code.size(), sizeof(modified_native) + 4);
+   EXPECT_EQ(memcmp(modified_code.data(), modified_native,
+                    sizeof(modified_native)), 0);
+
+   /* A full-width destination/source still requires aligned register pairs,
+    * and mixed-width waits outside the witnessed no-wait/slot-6 domain must
+    * remain a low-level refusal. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_log2_to(b, agx_register(3, AGX_SIZE_32),
+               agx_register(2, AGX_SIZE_16));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_log2_to(b, agx_register(0, AGX_SIZE_32),
+               agx_register(192, AGX_SIZE_16));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_log2_to(b, agx_register(192, AGX_SIZE_16),
+               agx_register(0, AGX_SIZE_16));
    agx_stop(b);
    EXPECT_TRUE(pack(b, false).empty());
 }

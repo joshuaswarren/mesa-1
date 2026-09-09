@@ -553,6 +553,14 @@ bool agx3_alu_f32log2_mod(enum agx_isa_encoding enc, uint16_t dest,
                           bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
                           uint8_t *len);
 
+/* Native logarithm with independently selected scalar result/source widths.
+ * Any half-width form is currently grounded for no wait or slot 6. */
+bool agx3_alu_log2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                   bool dest_half, bool src_half, bool src_abs, bool src_neg,
+                   enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len);
+
 bool agx3_alu_f32exp2_mod(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t src, enum agx3_alu_hint hint,
                           bool dest_cache, uint16_t wait_mask, bool src_neg,
