@@ -375,6 +375,53 @@ check_direct_resolve_shapes(void)
    return true;
 }
 
+static bool
+check_stencil_blit_shapes(void)
+{
+   struct pipe_resource src = {.format = PIPE_FORMAT_S8_UINT};
+   struct pipe_resource dst = {.format = PIPE_FORMAT_S8_UINT};
+   struct pipe_blit_info info = {
+      .src = {.resource = &src, .format = PIPE_FORMAT_S8_UINT},
+      .dst = {.resource = &dst, .format = PIPE_FORMAT_S8_UINT},
+      .mask = PIPE_MASK_S,
+   };
+
+   if (!agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "standalone stencil blit shape was rejected\n");
+      return false;
+   }
+
+   info.src.format = PIPE_FORMAT_Z24_UNORM_S8_UINT;
+   if (!agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "packed-to-standalone stencil blit was rejected\n");
+      return false;
+   }
+
+   info.src.format = PIPE_FORMAT_Z32_FLOAT;
+   if (agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "stencil blit without a source plane was accepted\n");
+      return false;
+   }
+   info.src.format = PIPE_FORMAT_S8_UINT;
+   info.mask = PIPE_MASK_S | PIPE_MASK_R;
+   if (agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "mixed colour/stencil blit was accepted\n");
+      return false;
+   }
+   info.mask = PIPE_MASK_ZS;
+   if (agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "depth blit without depth planes was accepted\n");
+      return false;
+   }
+   info.src.resource = NULL;
+   if (agx_g17p_stencil_plane_blit_shape(&info)) {
+      fprintf(stderr, "stencil blit without a source was accepted\n");
+      return false;
+   }
+
+   return true;
+}
+
 int
 main(void)
 {
@@ -414,6 +461,9 @@ main(void)
       return 1;
 
    if (!check_direct_resolve_shapes())
+      return 1;
+
+   if (!check_stencil_blit_shapes())
       return 1;
 
    if (!check_es3_compile_contract(pctx))

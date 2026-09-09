@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WIDTH 64
 #define HEIGHT 64
@@ -255,7 +256,61 @@ main(void)
    if (!gl_ok("depth texture raw/compare sample") || !pixel_ok(pixel, noop))
       return 1;
 
+   /* Standalone S8 renderbuffers take the same lossless plane-copy path as
+    * the separate stencil storage behind packed depth/stencil textures. */
+   GLuint stencil_rb[2], stencil_fbo[2];
+   glGenRenderbuffers(2, stencil_rb);
+   glGenFramebuffers(2, stencil_fbo);
+   glStencilMask(0xff);
+   for (unsigned i = 0; i < 2; ++i) {
+      glBindRenderbuffer(GL_RENDERBUFFER, stencil_rb[i]);
+      glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, WIDTH, HEIGHT);
+      glBindFramebuffer(GL_FRAMEBUFFER, stencil_fbo[i]);
+      glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                                GL_RENDERBUFFER, stencil_rb[i]);
+      glDrawBuffers(1, &none);
+      glReadBuffer(GL_NONE);
+      if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+         return 1;
+      glClearStencil(i ? 0 : 0x5a);
+      glClear(GL_STENCIL_BUFFER_BIT);
+   }
+
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, stencil_fbo[0]);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, stencil_fbo[1]);
+   glBlitFramebuffer(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT,
+                     GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+   glFinish();
+   if (!gl_ok("standalone stencil framebuffer blit"))
+      return 1;
+
+   glBindFramebuffer(GL_FRAMEBUFFER, colour_fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                          GL_TEXTURE_2D, 0, 0);
+   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+                             GL_RENDERBUFFER, stencil_rb[1]);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      return 1;
+   glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+   glEnable(GL_STENCIL_TEST);
+   glStencilFunc(GL_EQUAL, 0x5a, 0xff);
+   glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+   glStencilMask(0x00);
+   glUseProgram(sample_program);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glDisable(GL_STENCIL_TEST);
+   glFinish();
+   memset(pixel, 0, sizeof(pixel));
+   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                pixel);
+   if (!gl_ok("standalone stencil blit observation") ||
+       !pixel_ok(pixel, noop))
+      return 1;
+
    glDeleteSamplers(2, sampler);
+   glDeleteFramebuffers(2, stencil_fbo);
+   glDeleteRenderbuffers(2, stencil_rb);
    glDeleteFramebuffers(1, &colour_fbo);
    glDeleteTextures(1, &colour_texture);
    glDeleteFramebuffers(2, depth_fbo);

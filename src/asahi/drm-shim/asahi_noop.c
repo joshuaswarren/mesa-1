@@ -468,11 +468,11 @@ check_depth_texture_coverage(void)
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE"))
       return;
 
-   /* One API depth draw, the lowered depth and physical S8 plane blits, and
-    * one colour draw which consumes raw depth, shadow depth, and the copied
-    * stencil value.  A refused combined Z/S epilog produced only two draws;
-    * silently dropping either lowered plane produces three. */
-   if (matrix_stats.draws != 4 || matrix_stats.state_updates != 4 ||
+   /* One API depth draw, the lowered depth and physical S8 plane blits, one
+    * colour draw which consumes raw depth/shadow depth/copied stencil, then
+    * the standalone S8 plane blit and its stencil-tested observer. A refused
+    * standalone blit omits one of the final two draws. */
+   if (matrix_stats.draws != 6 || matrix_stats.state_updates != 6 ||
        !matrix_stats.depth_enabled || !matrix_stats.stencil_enabled ||
        !matrix_stats.varying_fs) {
       fprintf(stderr,
