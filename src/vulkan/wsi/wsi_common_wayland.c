@@ -3944,8 +3944,10 @@ fail_free_wl_images:
 fail_free_wl_chain:
    wsi_wl_swapchain_chain_free(chain, pAllocator);
 fail:
+   /* A rejected competing create never owned the surface. */
+   if (wsi_wl_surface->chain == chain)
+      wsi_wl_surface->chain = NULL;
    vk_free(pAllocator, chain);
-   wsi_wl_surface->chain = NULL;
 
    assert(result != VK_SUCCESS);
    return result;

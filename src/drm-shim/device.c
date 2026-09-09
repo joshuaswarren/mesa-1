@@ -270,6 +270,7 @@ check_wsi_rollback_lifecycle(void)
       !strcmp(test_case, "empty-submit-failure");
    const bool release_failure = !strcmp(test_case, "release-failure");
    const bool present_priority = !strcmp(test_case, "present-priority");
+   const bool wayland_ownership = !strcmp(test_case, "wayland-ownership");
    const unsigned expected_imports = semaphore_failure ? 3 : 4;
    const unsigned expected_syncobjs = semaphore_failure ? 12 : 13;
    const uint64_t expected_handles =
@@ -416,9 +417,30 @@ check_wsi_rollback_lifecycle(void)
       !wsi_rollback_import_failed &&
       !wsi_rollback_submit_transfer_failed &&
       !wsi_rollback_stale_fence_wait_rejected;
+   const bool exact_wayland_ownership =
+      wayland_ownership &&
+      wsi_rollback_syncobj_creates == 2 &&
+      wsi_rollback_syncobj_destroys == 2 &&
+      wsi_rollback_created_handles == UINT64_C(0x6) &&
+      wsi_rollback_destroyed_handles == UINT64_C(0x6) &&
+      wsi_rollback_sync_imports == 0 &&
+      wsi_rollback_transfers == 0 &&
+      wsi_rollback_dmabuf_exports == 0 &&
+      wsi_rollback_dmabuf_imports == 0 &&
+      !wsi_rollback_dmabuf_import_failed &&
+      wsi_rollback_failed_dmabuf_import == 0 &&
+      wsi_rollback_sync_file_exports == 0 &&
+      !wsi_rollback_sync_file_export_failed &&
+      wsi_rollback_failed_sync_file_export == 0 &&
+      wsi_rollback_waits_after_sync_failure == 0 &&
+      wsi_rollback_syncobj_resets_after_failure == 0 &&
+      wsi_rollback_submit_reset_handles == 0 &&
+      !wsi_rollback_import_failed &&
+      !wsi_rollback_submit_transfer_failed &&
+      !wsi_rollback_stale_fence_wait_rejected;
    const bool exact = exact_acquire || exact_present || exact_submit ||
                       exact_empty_submit || exact_release ||
-                      exact_present_priority;
+                      exact_present_priority || exact_wayland_ownership;
 
    if (!exact) {
       fprintf(stderr,

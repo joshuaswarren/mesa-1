@@ -291,6 +291,22 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  if with_platform_wayland
+    g17p_wayland_ownership_env = environment(
+      g17p_acquire_rollback_environment)
+    g17p_wayland_ownership_env.set('MESA_VK_WSI_DEBUG', 'sw')
+    g17p_wayland_ownership_env.set(
+      'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'wayland-ownership')
+    test(
+      'hk_g17p_wayland_swapchain_ownership',
+      g17p_wayland_swapchain_ownership,
+      env : g17p_wayland_ownership_env,
+      depends : _dev_icd,
+      suite : ['asahi', 'g17p-wayland-swapchain-ownership'],
+     timeout : 30,
+    )
+  endif
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

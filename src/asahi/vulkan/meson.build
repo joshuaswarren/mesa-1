@@ -556,6 +556,14 @@ if with_tests
       c_args : [c_msvc_compat_args, '-DG17P_WSI_WAYLAND'],
       gnu_symbol_visibility : 'hidden',
     )
+    g17p_wayland_swapchain_ownership = executable(
+      'g17p-vulkan-wayland-ownership',
+      files('tests/g17p_vulkan_wayland_ownership.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl, dep_thread, dep_wayland_client, dep_wayland_server],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
   endif
 
   if host_machine.system() == 'linux'
