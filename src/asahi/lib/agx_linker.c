@@ -36,6 +36,18 @@
 
 static_assert(AGX_ABI_FIN_SAMPLE_MASK == 2, "r1l known");
 
+void
+agx_fs_epilog_apply_device_policy(enum agx_chip chip,
+                                  struct agx_fs_epilog_key *key)
+{
+   if (!key)
+      return;
+
+   const bool g17p = chip == AGX_CHIP_G17P;
+   key->preserve_zero_mask = g17p;
+   key->lower_srgb = g17p;
+}
+
 /* clang-format off */
 static const uint8_t sample_loop_header[] = {
    /* mov_imm r0l, 0x0, 0b0 */

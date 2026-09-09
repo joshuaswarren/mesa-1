@@ -115,6 +115,66 @@ draw_texture_blend(GLuint program, GLint sampler, GLuint texture,
    return true;
 }
 
+static bool
+draw_srgb_blend_and_mask(GLuint program, GLint uniform, bool noop)
+{
+   GLuint texture, fbo;
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_SRGB8_ALPHA8, WIDTH, HEIGHT);
+   glGenFramebuffers(1, &fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          texture, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      fprintf(stderr, "sRGB framebuffer is incomplete\n");
+      return false;
+   }
+
+   glDisable(GL_BLEND);
+   glClearColor(0.125f, 0.375f, 0.625f, 0.5f);
+   glClear(GL_COLOR_BUFFER_BIT);
+   glUseProgram(program);
+   glUniform4f(uniform, 0.5f, 0.25f, 0.125f, 0.5f);
+   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   glEnable(GL_BLEND);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glFinish();
+
+   uint8_t blended[4] = {0};
+   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                blended);
+
+   /* A fully disabled colour mask is still a covered draw. G17P must issue
+    * the raw encoded tile load/store pair or EOT loses the prior result. */
+   glDisable(GL_BLEND);
+   glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+   glFinish();
+   uint8_t masked[4] = {0};
+   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                masked);
+   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+   const GLenum error = glGetError();
+   static const uint8_t expected[4] = {152, 152, 164, 128};
+   bool ok = error == GL_NO_ERROR &&
+             (noop || (!memcmp(blended, expected, sizeof(blended)) &&
+                       !memcmp(masked, expected, sizeof(masked))));
+   if (!ok) {
+      fprintf(stderr,
+              "sRGB blend/mask pixels {%u,%u,%u,%u} {%u,%u,%u,%u}, "
+              "expected {%u,%u,%u,%u}, error %#x\n",
+              blended[0], blended[1], blended[2], blended[3], masked[0],
+              masked[1], masked[2], masked[3], expected[0], expected[1],
+              expected[2], expected[3], error);
+   }
+
+   glDeleteFramebuffers(1, &fbo);
+   glDeleteTextures(1, &texture);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -244,6 +304,7 @@ main(void)
               alpha_pixel[1], alpha_pixel[2], alpha_pixel[3]);
       ok = false;
    }
+   ok &= draw_srgb_blend_and_mask(uniform, location, noop);
 
    glDeleteTextures(1, &texture);
    glDeleteVertexArrays(1, &vao);
@@ -256,7 +317,7 @@ main(void)
    eglTerminate(display);
    if (!ok)
       return EXIT_FAILURE;
-   puts(noop ? "G17P literal/uniform and textured blend draws submitted"
-             : "G17P literal/uniform and textured blend pixels exact");
+   puts(noop ? "G17P literal/uniform, textured, and sRGB policy draws submitted"
+             : "G17P literal/uniform, textured, and sRGB policy pixels exact");
    return EXIT_SUCCESS;
 }

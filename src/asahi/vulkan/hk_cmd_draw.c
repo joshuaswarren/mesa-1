@@ -4253,13 +4253,12 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       key.epilog = (struct agx_fs_epilog_key){
          .link = fs->info.fs.epilog_key,
          .nr_samples = MAX2(dyn->ms.rasterization_samples, 1),
-         .lower_srgb = dev->dev.chip == AGX_CHIP_G17P,
          .blend.alpha_to_coverage = dyn->ms.alpha_to_coverage_enable,
          .blend.alpha_to_one = dyn->ms.alpha_to_one_enable,
          .blend.logicop_enable = dyn->cb.logic_op_enable,
          .blend.logicop_func = vk_logic_op_to_pipe(dyn->cb.logic_op),
-         .preserve_zero_mask = dev->dev.chip == AGX_CHIP_G17P,
       };
+      agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 
       if (dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
           (fs->info.agx3_combined_sampler_valid ||

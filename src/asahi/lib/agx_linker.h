@@ -305,6 +305,11 @@ struct agx_fs_epilog_key {
    uint16_t blend_constant_base;
 };
 
+/* Apply framebuffer rules which are properties of the hardware generation,
+ * not API state. Keep Gallium and Honeykrisp on the same epilog contract. */
+void agx_fs_epilog_apply_device_policy(enum agx_chip chip,
+                                       struct agx_fs_epilog_key *key);
+
 void agx_nir_vs_prolog(struct nir_builder *b, const void *key_);
 void agx_nir_vs_prolog_raw(struct nir_builder *b, const void *key_);
 void agx_nir_fs_epilog(struct nir_builder *b, const void *key_);

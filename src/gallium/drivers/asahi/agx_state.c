@@ -2774,6 +2774,7 @@ agx_update_fs(struct agx_batch *batch)
       .main = ctx->fs,
       .nr_samples_shaded = ctx->fs->epilog_key.sample_shading ? nr_samples : 0,
    };
+   agx_fs_epilog_apply_device_policy(dev->chip, &link_key.epilog.fs);
 
    for (unsigned i = 0; i < PIPE_MAX_COLOR_BUFS; ++i) {
       link_key.epilog.fs.rt_formats[i] = batch->key.cbufs[i].format;
