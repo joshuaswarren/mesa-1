@@ -66,6 +66,30 @@ main(void)
    expect_refused("AGX2 colour entry",
                   agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX2, b, &len));
 
+   /* Native multi-RT shaders allocate two pixel classes per tile partition.
+    * Prove the architectural mapping independently of any workload layout. */
+   static const struct {
+      uint32_t read, write, combined;
+   } partitions[] = {
+      {8, 4, 12}, {32, 16, 48}, {128, 64, 192},
+   };
+   for (unsigned i = 0; i < sizeof(partitions) / sizeof(partitions[0]); ++i) {
+      uint32_t read = 0, write = 0, combined = 0;
+      if (!agx3_pixel_colour_partition_classes(i, &read, &write, &combined) ||
+          read != partitions[i].read || write != partitions[i].write ||
+          combined != partitions[i].combined) {
+         fprintf(stderr, "FAIL colour partition %u classes\n", i);
+         failures++;
+      }
+   }
+   {
+      uint32_t read = 0, write = 0, combined = 0;
+      if (agx3_pixel_colour_partition_classes(3, &read, &write, &combined)) {
+         fprintf(stderr, "FAIL unwitnessed colour partition accepted\n");
+         failures++;
+      }
+   }
+
    /* AGX3b pixwait: the writeout mask passes straight through, and f34
     * separates the colour classes from the depth/coverage class. */
    static const struct {

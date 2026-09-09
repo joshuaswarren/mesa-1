@@ -4452,107 +4452,121 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
    return phase == 4 ? write : NULL;
 }
 
-/* The native WBOIT layout is one RGBA16F target followed by one R8 target in
- * the same tilebuffer. Both colour stores belong to one pixel transaction, so
- * enter once before the first pixel wait and release only after the second
- * store. The accumulation target may also carry its raw I16 reload when
- * additive blending is enabled, as in vkQuake's MBOIT pass. */
-static bool
-agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
+/* G17P allocates two pixel classes per colour-tile partition.  Fresh native
+ * two-RGBA8 and RGBA16F+R8 shaders agree on the same partition protocol even
+ * though their byte offsets differ: partition 1 uses read/write/combined
+ * classes 32/16/48 and partition 0 uses 8/4/12.  The mixed programmable-blend
+ * witness is wboit-blend.nat SHA256
+ * ae46c7cc23179c4df4f59e081eb10c69666af181da48103c1f0ebcf3d46b85e4;
+ * its fragment text SHA256 is
+ * ce78a72cac5cf5d4e49dc240b56ac72d7ba89d234de912a7833759d918759c44.
+ *
+ * Derive partition identity from the sorted physical tile offsets rather than
+ * a format or workload name.  Every partition must have one terminal store;
+ * loads are optional, and the pre-RA sink guarantees stores descend to the
+ * zero-offset final release.  Three partitions are the complete native class
+ * corpus (the third uses 128/64/192); anything wider stays fail-closed.
+ */
+#define AGX3_G17P_MAX_COLOUR_PARTITIONS 3
+
+struct agx3_g17p_mrt_protocol {
+   bool valid;
+   uint8_t count;
+   uint16_t offsets[AGX3_G17P_MAX_COLOUR_PARTITIONS];
+   uint8_t loads[AGX3_G17P_MAX_COLOUR_PARTITIONS];
+   uint8_t stores[AGX3_G17P_MAX_COLOUR_PARTITIONS];
+};
+
+static int
+agx3_g17p_mrt_partition(const struct agx3_g17p_mrt_protocol *p,
+                        uint16_t offset)
 {
-   unsigned blocks = 0, f16 = 0, r8 = 0;
-   unsigned f16_loads = 0, r8_loads = 0;
-
-   agx_foreach_block(ctx, block) {
-      if (++blocks != 1)
-         return false;
-
-      agx_foreach_instr_in_block(block, I) {
-         if (I->op == AGX_OPCODE_LD_TILE) {
-            if (I->explicit_coords)
-               return false;
-            if (I->format == AGX_FORMAT_I16 && I->mask == 15 &&
-                I->pixel_offset == 0)
-               f16_loads++;
-            else if (I->format == AGX_FORMAT_U8NORM && I->mask == 1 &&
-                     I->pixel_offset == 8)
-               r8_loads++;
-            else
-               return false;
-         } else if (I->op == AGX_OPCODE_ST_TILE) {
-            if (I->explicit_coords)
-               return false;
-            if (I->format == AGX_FORMAT_F16 && I->mask == 15 &&
-                I->pixel_offset == 0)
-               f16++;
-            else if (I->format == AGX_FORMAT_U8NORM && I->mask == 1 &&
-                     I->pixel_offset == 8)
-               r8++;
-            else
-               return false;
-         }
-      }
+   for (unsigned i = 0; i < p->count; ++i) {
+      if (p->offsets[i] == offset)
+         return i;
    }
 
-   return blocks == 1 && f16_loads <= 1 && r8_loads == 1 && f16 == 1 &&
-          r8 == 1;
+   return -1;
 }
 
-/* Fresh MetalToolchain v27.1.5194.15 G17P evidence for two opaque RGBA8
- * attachments (mrt.nat SHA256
- * b6484363c120f218f20aaea9d69d0f114479fbc098333c7280e7b232f663f620)
- * ends in four FLTNORMs followed by this exact transaction:
- *
- *   870254000600 870254300800 e70654020002014e00000000
- *   070254300000 8702540c0800 e70654000000014e00000000
- *   0702540c0200
- *
- * The pre-RA pass sinks and reverses the two stores to keep both packed
- * values live.  Revalidate the complete post-RA graph here before selecting
- * the native per-target writeout classes.
- */
-static const agx_instr *
-agx3_g17p_rgba8_mrt_wait(agx_context *ctx)
+static struct agx3_g17p_mrt_protocol
+agx3_g17p_mrt_protocol(agx_context *ctx)
 {
-   unsigned blocks = 0, packs = 0, stores = 0, waits = 0;
-   const agx_instr *wait = NULL;
+   struct agx3_g17p_mrt_protocol p = {0};
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       !ctx->agx3_mrt_tile_ops_ordered ||
+       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
+       list_length(&ctx->blocks) != 1)
+      return p;
 
-   agx_foreach_block(ctx, block) {
-      if (++blocks != 1)
-         return NULL;
+   agx_foreach_instr_global(ctx, I) {
+      if (agx3_is_cf_op(I) || I->op == AGX_OPCODE_SIGNAL_PIX)
+         return (struct agx3_g17p_mrt_protocol){0};
+      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+         continue;
+      if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
+         return (struct agx3_g17p_mrt_protocol){0};
 
-      agx_foreach_instr_in_block(block, I) {
-         if (I->op == AGX_OPCODE_STOP)
-            continue;
-         if (I->op == AGX_OPCODE_WAIT_PIX) {
-            if (I->writeout != 12 || ++waits != 1 || stores || packs)
-               return NULL;
-            wait = I;
-         } else if (I->op == AGX_OPCODE_FLTNORM_AGX3) {
-            if (waits != 1 || stores || ++packs > 4)
-               return NULL;
-         } else if (I->op == AGX_OPCODE_ST_TILE) {
-            const unsigned expected_offset = stores == 0 ? 4 : 0;
-            if (waits != 1 || packs != 4 || stores >= 2 ||
-                I->nr_dests != 0 || I->nr_srcs != 3 ||
-                I->format != AGX_FORMAT_U8NORM || I->mask != 15 ||
-                I->explicit_coords || I->pixel_offset != expected_offset ||
-                !agx3_src_is_register(I->src[0]) || I->src[0].memory ||
-                I->src[0].size != AGX_SIZE_16 ||
-                agx_channels(I->src[0]) != 2 ||
-                I->src[1].type != AGX_INDEX_IMMEDIATE ||
-                I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
-                !agx_is_null(I->src[2]))
-               return NULL;
-            stores++;
-         } else {
-            return NULL;
+      unsigned i;
+      for (i = 0; i < p.count; ++i) {
+         if (p.offsets[i] == I->pixel_offset)
+            break;
+      }
+      if (i == p.count) {
+         if (p.count == ARRAY_SIZE(p.offsets))
+            return (struct agx3_g17p_mrt_protocol){0};
+         p.offsets[p.count++] = I->pixel_offset;
+      }
+   }
+   if (p.count < 2)
+      return (struct agx3_g17p_mrt_protocol){0};
+
+   for (unsigned i = 0; i < p.count; ++i) {
+      for (unsigned j = i + 1; j < p.count; ++j) {
+         if (p.offsets[j] < p.offsets[i]) {
+            const uint16_t tmp = p.offsets[i];
+            p.offsets[i] = p.offsets[j];
+            p.offsets[j] = tmp;
          }
       }
    }
+   if (p.offsets[0] != 0)
+      return (struct agx3_g17p_mrt_protocol){0};
 
-   return blocks == 1 && waits == 1 && packs == 4 && stores == 2 ? wait
-                                                                 : NULL;
+   unsigned next_store = p.count;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+         continue;
+
+      const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
+      if (partition < 0 || I->nr_srcs < 2 ||
+          I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1].type !=
+             AGX_INDEX_IMMEDIATE ||
+          I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1].value !=
+             AGX3_TILE_ALL_SAMPLES)
+         return (struct agx3_g17p_mrt_protocol){0};
+
+      if (I->op == AGX_OPCODE_LD_TILE) {
+         if (++p.loads[partition] > 1 || next_store != p.count)
+            return (struct agx3_g17p_mrt_protocol){0};
+      } else {
+         if (++p.stores[partition] > 1 || next_store == 0 ||
+             partition != (int)--next_store)
+            return (struct agx3_g17p_mrt_protocol){0};
+      }
+   }
+
+   for (unsigned i = 0; i < p.count; ++i) {
+      uint32_t read_class, write_class, combined_class;
+      if (p.stores[i] != 1 ||
+          !agx3_pixel_colour_partition_classes(
+             i, &read_class, &write_class, &combined_class))
+         return (struct agx3_g17p_mrt_protocol){0};
+   }
+
+   p.valid = next_store == 0;
+   return p;
 }
 
 /* Prove complete shader-part shapes from post-RA IR. EXPORT is an ABI
@@ -5009,36 +5023,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          ctx->stage == MESA_SHADER_FRAGMENT && texture_samples_left != 0;
    }
 
-   /* The valid G17P colour-only corpus has one class-12 wait/store bracket:
-    * an entry gate immediately before the ordinary wait, and a final release
-    * immediately after the store. Restrict synthesis to that exact API-shader
-    * shape; programmable blending, MRT and special BG/EOT programs retain
-    * their existing independently witnessed protocols. */
-   const bool g17p_wboit_mrt_colour =
-      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
-      !ctx->key->fs.ignore_tib_dependencies &&
-      agx3_is_g17p_wboit_mrt_colour(ctx);
-   const agx_instr *g17p_rgba8_mrt_wait =
-      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
-            !ctx->key->fs.ignore_tib_dependencies
-         ? agx3_g17p_rgba8_mrt_wait(ctx)
-         : NULL;
-   const bool g17p_rgba8_mrt_colour = g17p_rgba8_mrt_wait != NULL;
+   /* The valid G17P colour-only corpus has one class-12 wait/store bracket.
+    * Multi-RT shaders instead select read/write classes by sorted tile
+    * partition and release each partition in descending order. */
+   const struct agx3_g17p_mrt_protocol g17p_mrt =
+      agx3_g17p_mrt_protocol(ctx);
    const bool g17p_colour_protocol =
       (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 1 &&
-       tile_loads_left == 0) || g17p_wboit_mrt_colour ||
-      g17p_rgba8_mrt_colour;
+       tile_loads_left == 0) || g17p_mrt.valid;
 
    /* Multiple colour stores need an attachment-specific pixel transaction.
-    * The captured G17P forms are the WBOIT pair and the opaque two-RGBA8 pair
-    * above; emitting individual tile operations without either exact bracket
-    * produces a syntactically valid but unusable shader. */
+    * Emitting individual tile operations without a proven partition graph
+    * produces a syntactically valid shader that writes only partition zero. */
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
-       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left > 1 &&
-       !g17p_wboit_mrt_colour && !g17p_rgba8_mrt_colour)
+       tile_stores_left > 1 && !g17p_mrt.valid)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.
@@ -5079,11 +5080,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
    const bool g17p_pixel_protocol =
       g17p_colour_protocol || g17p_blend_protocol || has_coverage_write;
-   const agx_instr *g17p_deferred_write = g17p_rgba8_mrt_colour
-      ? g17p_rgba8_mrt_wait
-      : (g17p_pixel_protocol
-            ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
-            : NULL);
+   const agx_instr *g17p_deferred_write =
+      g17p_pixel_protocol && !g17p_mrt.valid
+         ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
+         : NULL;
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
@@ -5853,6 +5853,29 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                g17p_deferred_zs_wait = I;
                continue;
             }
+            /* Multi-RT colour waits in the generic IR do not identify a tile
+             * partition.  Retire their scoreboard dependencies here; the
+             * exact partition-specific wait is emitted immediately beside
+             * its LLDCol/LSTCol below. */
+            if (g17p_mrt.valid && I->op == AGX_OPCODE_WAIT_PIX &&
+                I->writeout != 1) {
+               const bool mrt_has_loads = g17p_mrt.loads[0] ||
+                  g17p_mrt.loads[1] || g17p_mrt.loads[2];
+               if (mrt_has_loads && !g17p_colour_open) {
+                  uint8_t entry[AGX3_PIXEL_MAX_LENGTH];
+                  uint8_t entry_len = 0;
+                  if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
+                      !agx3_append(emission, entry, entry_len))
+                     AGX3_REFUSE(I);
+                  ctx->agx3_colour_link.entry_emitted = true;
+                  ctx->agx3_colour_link.entry_offset =
+                     emission->size - entry_len - initial_size;
+                  g17p_colour_open = true;
+               }
+               if (!agx3_retire_slots_noop(emission, enc, wait))
+                  AGX3_REFUSE(I);
+               continue;
+            }
             if (I == g17p_deferred_write) {
                /* The scoreboard has already retired these dependencies here.
                 * Keep that retirement at the original instruction, independent
@@ -5863,10 +5886,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             const bool colour_entry_wait =
                I->writeout == 1 ||
-               I->writeout ==
-                  ((g17p_blend_protocol || g17p_wboit_mrt_colour) ? 8
-                                                                  : 0xc) ||
-               (g17p_wboit_mrt_colour && I->writeout == 0xc);
+               I->writeout == (g17p_blend_protocol ? 8 : 0xc);
             if (g17p_pixel_protocol && I->op == AGX_OPCODE_WAIT_PIX &&
                 colour_entry_wait &&
                 !g17p_colour_open) {
@@ -5927,13 +5947,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                assert(tile_stores_left > 0);
                last = --tile_stores_left == 0;
             }
-            if (I->op == AGX_OPCODE_ST_TILE && g17p_rgba8_mrt_colour) {
-               if (wait != 0 || I->pixel_offset != (last ? 0 : 4))
+            if (g17p_mrt.valid) {
+               const int partition =
+                  agx3_g17p_mrt_partition(&g17p_mrt, I->pixel_offset);
+               uint32_t read_class, write_class, combined_class;
+               if (partition < 0 ||
+                   !agx3_pixel_colour_partition_classes(
+                      partition, &read_class, &write_class, &combined_class))
                   AGX3_REFUSE(I);
 
-               uint8_t bytes[AGX3_TILE_MAX_LENGTH];
+               uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
                uint8_t len = 0;
-               const uint32_t writeout = last ? 12 : 48;
                if (!g17p_colour_open) {
                   if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
                       !agx3_append(emission, bytes, len))
@@ -5943,11 +5967,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      emission->size - len - initial_size;
                   g17p_colour_open = true;
                }
-               if (!agx3_pixel_wait(enc, writeout, 0, bytes, &len) ||
+
+               const bool load = I->op == AGX_OPCODE_LD_TILE;
+               const uint32_t acquire =
+                  load ? read_class
+                       : g17p_mrt.loads[partition] ? write_class
+                                                  : combined_class;
+               if (!agx3_pixel_wait(enc, acquire, wait, bytes, &len) ||
                    !agx3_append(emission, bytes, len) ||
                    !agx3_emit_tile(emission, enc, I, slot, 0, false, false) ||
-                   !agx3_pixel_release(enc, writeout, last, 0, bytes, &len) ||
-                   !agx3_append(emission, bytes, len))
+                   (!load &&
+                    (!agx3_pixel_release(enc, combined_class, last, 0, bytes,
+                                        &len) ||
+                     !agx3_append(emission, bytes, len))))
                   AGX3_REFUSE(I);
                continue;
             }

@@ -571,6 +571,7 @@ typedef struct {
    unsigned agx3_staging_halfs;
    bool agx3_staging_known;
    bool agx3_fltnorm_start;
+   bool agx3_mrt_tile_ops_ordered;
    struct agx3_colour_link_info agx3_colour_link;
 
    /* Promoted constants. These will be appended to the binary at the end. */

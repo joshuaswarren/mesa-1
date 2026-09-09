@@ -88,6 +88,23 @@ agx3_pixel_colour_entry(enum agx_isa_encoding enc,
 }
 
 bool
+agx3_pixel_colour_partition_classes(unsigned partition,
+                                    uint32_t *read_class,
+                                    uint32_t *write_class,
+                                    uint32_t *combined_class)
+{
+   if (partition >= 3 || read_class == NULL || write_class == NULL ||
+       combined_class == NULL)
+      return false;
+
+   const uint32_t shift = 2 * partition;
+   *read_class = 8u << shift;
+   *write_class = 4u << shift;
+   *combined_class = 12u << shift;
+   return true;
+}
+
+bool
 agx3_pixel_wait(enum agx_isa_encoding enc, uint32_t writeout,
                 uint16_t wait_mask, uint8_t out[AGX3_PIXEL_MAX_LENGTH],
                 uint8_t *len)

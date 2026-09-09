@@ -43,6 +43,18 @@ bool agx3_pixel_colour_entry(enum agx_isa_encoding enc,
                              uint8_t out[AGX3_PIXEL_MAX_LENGTH], uint8_t *len);
 
 /*
+ * Return the read, write, and combined pixel classes for one colour-tile
+ * partition.  G17P assigns two class bits per partition: RT0 uses 8/4/12,
+ * RT1 uses 32/16/48, and RT2 uses 128/64/192.  These are the complete
+ * partition classes witnessed by native multi-RT shaders; higher partitions
+ * fail closed.
+ */
+bool agx3_pixel_colour_partition_classes(unsigned partition,
+                                         uint32_t *read_class,
+                                         uint32_t *write_class,
+                                         uint32_t *combined_class);
+
+/*
  * Wait for the writeout classes named by `writeout` before continuing.
  *
  * `writeout` is the AGX2 wait_pix immediate. Accepted values are exactly those

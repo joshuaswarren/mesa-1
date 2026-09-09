@@ -4684,54 +4684,70 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    return true;
 }
 
-/* Apple's G17P two-RGBA8 fragment writes both packed colours before entering
- * the pixel transaction, then commits RT1 followed by RT0.  In particular,
- * the native tail is:
+/* Apple's G17P multi-RT fragments finish colour partitions in descending
+ * order and make partition zero the final release.  This holds for both the
+ * opaque two-RGBA8 witness (offsets 4, 0) and the mixed RGBA16F+R8 witnesses
+ * (offsets 8, 0), including programmable blending.  Sink the stores while
+ * they are still in SSA so every payload remains live through the native
+ * ordering and RA cannot reuse an earlier target's physical register.
  *
- *   entry; wait 0x30; store +4; release 0x30;
- *   wait 0x0c; store +0; release-last 0x0c
- *
- * Preserve that ordering without extending physical-register lifetimes after
- * RA: sink and reverse only the exact opaque two-target graph while it is
- * still in SSA.  The packer independently revalidates the resulting graph.
+ * This is partition-driven, not format- or workload-driven.  It is restricted
+ * to straight-line fragment epilogs and internal background programs, and it
+ * refuses any non-colour side effect.  The packer independently proves the
+ * partition graph before selecting the corresponding pixel classes.
  */
 static bool
-agx3_sink_g17p_rgba8_mrt_stores(agx_context *ctx)
+agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
-       !ctx->key->secondary || ctx->key->fs.ignore_tib_dependencies ||
+       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
        list_length(&ctx->blocks) != 1)
       return false;
 
-   agx_instr *stores[2] = {0}, *stop = NULL;
-   unsigned waits = 0, packs = 0, store_count = 0;
+   agx_instr *loads[3] = {0}, *stores[3] = {0}, *stop = NULL;
+   agx_instr *first_wait = NULL;
+   unsigned load_count = 0, store_count = 0;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
          switch (I->op) {
          case AGX_OPCODE_PRELOAD:
          case AGX_OPCODE_COLLECT:
+         case AGX_OPCODE_SPLIT:
             break;
          case AGX_OPCODE_WAIT_PIX:
-            if (I->writeout != 12 || ++waits != 1)
+            if (I->writeout == 1)
                return false;
+            if (!first_wait)
+               first_wait = I;
             break;
          case AGX_OPCODE_FLTNORM_AGX3:
-            packs++;
             break;
          case AGX_OPCODE_ST_TILE:
             if (store_count >= ARRAY_SIZE(stores) || I->nr_dests != 0 ||
-                I->nr_srcs != 3 || I->format != AGX_FORMAT_U8NORM ||
-                I->mask != 15 || I->explicit_coords ||
-                I->pixel_offset != store_count * 4 ||
+                I->nr_srcs != 3 || I->explicit_coords ||
                 I->src[0].type != AGX_INDEX_NORMAL || I->src[0].memory ||
-                I->src[0].size != AGX_SIZE_16 ||
-                agx_channels(I->src[0]) != 2 ||
                 I->src[1].type != AGX_INDEX_IMMEDIATE ||
                 I->src[1].value != 0xff ||
                 !agx_is_null(I->src[2]))
                return false;
+            for (unsigned i = 0; i < store_count; ++i) {
+               if (stores[i]->pixel_offset == I->pixel_offset)
+                  return false;
+            }
             stores[store_count++] = I;
+            break;
+         case AGX_OPCODE_LD_TILE:
+            if (load_count >= ARRAY_SIZE(loads) || I->nr_dests != 1 ||
+                I->nr_srcs != 2 || I->explicit_coords ||
+                I->src[0].type != AGX_INDEX_IMMEDIATE ||
+                I->src[0].value != 0xff || !agx_is_null(I->src[1]))
+               return false;
+            for (unsigned i = 0; i < load_count; ++i) {
+               if (loads[i]->pixel_offset == I->pixel_offset)
+                  return false;
+            }
+            loads[load_count++] = I;
             break;
          case AGX_OPCODE_STOP:
             if (stop)
@@ -4739,20 +4755,56 @@ agx3_sink_g17p_rgba8_mrt_stores(agx_context *ctx)
             stop = I;
             break;
          default:
-            return false;
+            if (!agx_opcodes_info[I->op].can_eliminate)
+               return false;
+            break;
          }
       }
    }
 
-   if (!stop || waits != 1 || packs != 4 || store_count != 2)
+   if (!stop || store_count < 2)
       return false;
 
-   /* RT1 first, then RT0, immediately before STOP.  Moving the SSA stores
-    * keeps both packed values live so RA cannot reuse RT0's register early. */
-   for (int i = 1; i >= 0; --i) {
+   if (load_count && !first_wait)
+      return false;
+
+   /* Native acquires and loads higher partitions first.  Move only the tile
+    * loads themselves; their SSA consumers stay in place and RA extends the
+    * values' physical lifetimes safely. */
+   for (unsigned i = 0; i < load_count; ++i) {
+      for (unsigned j = i + 1; j < load_count; ++j) {
+         if (loads[j]->pixel_offset > loads[i]->pixel_offset) {
+            agx_instr *tmp = loads[i];
+            loads[i] = loads[j];
+            loads[j] = tmp;
+         }
+      }
+   }
+   agx_instr *load_anchor = first_wait;
+   for (unsigned i = 0; i < load_count; ++i) {
+      list_del(&loads[i]->link);
+      list_add(&loads[i]->link, &load_anchor->link);
+      load_anchor = loads[i];
+   }
+
+   /* Sort physical tile partitions by byte offset, highest first. */
+   for (unsigned i = 0; i < store_count; ++i) {
+      for (unsigned j = i + 1; j < store_count; ++j) {
+         if (stores[j]->pixel_offset > stores[i]->pixel_offset) {
+            agx_instr *tmp = stores[i];
+            stores[i] = stores[j];
+            stores[j] = tmp;
+         }
+      }
+   }
+   if (stores[store_count - 1]->pixel_offset != 0)
+      return false;
+
+   for (unsigned i = 0; i < store_count; ++i) {
       list_del(&stores[i]->link);
       list_addtail(&stores[i]->link, &stop->link);
    }
+   ctx->agx3_mrt_tile_ops_ordered = true;
    return true;
 }
 
@@ -4988,7 +5040,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_print_shader(ctx, stdout);
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
-   AGX_PASS(ctx, agx3_sink_g17p_rgba8_mrt_stores);
+   AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);

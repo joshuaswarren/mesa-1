@@ -375,28 +375,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
             : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
-   static int rt1_via_slot0 = -1;
-   if (rt1_via_slot0 < 0)
-      rt1_via_slot0 = debug_get_bool_option(
-         "HK_G17P_WBOIT_EOT_RT1_VIA_SLOT0", false);
-   const bool diagnostic_rt1_slot0 =
-      store && wboit_mrt && dual_mrt_active && rt1_via_slot0;
-   static int rt1_from_rt0 = -1;
-   if (rt1_from_rt0 < 0)
-      rt1_from_rt0 = debug_get_bool_option(
-         "HK_G17P_WBOIT_EOT_RT1_FROM_RT0", false);
-   const bool diagnostic_rt1_from_rt0 =
-      diagnostic_rt1_slot0 && rt1_from_rt0;
-   struct agx_bg_eot_key shader_key = *key;
-   if (diagnostic_rt1_slot0) {
-      shader_key.op[1] = AGX_BG_EOT_NONE;
-      shader_key.tib.logical_format[0] = PIPE_FORMAT_R8_UNORM;
-      shader_key.tib.logical_format[1] = PIPE_FORMAT_NONE;
-      shader_key.tib._offset_B[0] = 0;
-   }
-
    struct agx_bg_eot_shader *shader =
-      agx_get_bg_eot_shader(&dev->bg_eot, &shader_key);
+      agx_get_bg_eot_shader(&dev->bg_eot, key);
    const bool shader_resources_match =
       shader &&
       (store || (op == AGX_BG_EOT_NONE
@@ -504,15 +484,12 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          target1_pbe = key->tib.layered ? iview1->planes[0].layered_eot
                                         : iview1->planes[0].eot;
       }
-      struct hk_native_pbe_descriptor pbe_arguments[2] = {
-         diagnostic_rt1_slot0 ? target1_pbe : target_pbe,
-      };
-      if (dual_mrt_active && !diagnostic_rt1_slot0)
+      struct hk_native_pbe_descriptor pbe_arguments[2] = {target_pbe};
+      if (dual_mrt_active)
          pbe_arguments[1] = target1_pbe;
       const size_t pbe_argument_size =
-         dual_mrt_active && !diagnostic_rt1_slot0
-         ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
-         : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
+         dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
+                         : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
       const uint64_t pbe_argument_va =
          hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
       if (!pbe_argument_va)
@@ -522,14 +499,10 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .program_va = program_bo->va->addr,
          .shader_va = shader->ptr + shader->info.main_offset,
          .pbe_argument_va = pbe_argument_va,
-         .imageblock_offset_B = agx_tilebuffer_offset_B(
-            &key->tib, diagnostic_rt1_from_rt0 ? 0
-                                               : diagnostic_rt1_slot0 ? 1 : 0),
-         .attachment_count =
-            dual_mrt_active && !diagnostic_rt1_slot0 ? 2 : 1,
+         .imageblock_offset_B = agx_tilebuffer_offset_B(&key->tib, 0),
+         .attachment_count = dual_mrt_active ? 2 : 1,
          .imageblock_offset1_B =
-            dual_mrt_active && !diagnostic_rt1_slot0
-            ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
+            dual_mrt_active ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
          .nr_gprs = shader->info.nr_gprs,
