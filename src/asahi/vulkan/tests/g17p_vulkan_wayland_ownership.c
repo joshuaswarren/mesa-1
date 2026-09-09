@@ -44,9 +44,16 @@ VK_FN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
 VK_FN(vkGetPhysicalDeviceSurfaceFormatsKHR);
 VK_FN(vkCreateDevice);
 VK_FN(vkDestroyDevice);
+VK_FN(vkGetDeviceQueue);
 VK_FN(vkCreateSwapchainKHR);
 VK_FN(vkDestroySwapchainKHR);
 VK_FN(vkGetSwapchainImagesKHR);
+VK_FN(vkCreateSemaphore);
+VK_FN(vkDestroySemaphore);
+VK_FN(vkAcquireNextImageKHR);
+VK_FN(vkQueueSubmit);
+VK_FN(vkQueuePresentKHR);
+VK_FN(vkQueueWaitIdle);
 
 struct mock_server {
    struct wl_display *display;
@@ -57,7 +64,82 @@ struct mock_server {
    atomic_uint pools_destroyed;
    atomic_uint buffers_created;
    atomic_uint buffers_destroyed;
+   struct wl_resource *pending_buffer;
 };
+
+struct allocation_control {
+   atomic_bool fail_next_object;
+   atomic_uint injected_failures;
+};
+
+struct allocation_header {
+   void *base;
+   size_t size;
+};
+
+static void *
+test_alloc(void *user_data, size_t size, size_t alignment,
+           VkSystemAllocationScope scope)
+{
+   struct allocation_control *control = user_data;
+   if (scope == VK_SYSTEM_ALLOCATION_SCOPE_OBJECT &&
+       atomic_exchange(&control->fail_next_object, false)) {
+      atomic_fetch_add(&control->injected_failures, 1);
+      return NULL;
+   }
+
+   alignment = alignment < sizeof(void *) ? sizeof(void *) : alignment;
+   if (alignment - 1 > SIZE_MAX - sizeof(struct allocation_header) ||
+       size > SIZE_MAX - sizeof(struct allocation_header) - (alignment - 1))
+      return NULL;
+   size_t total = size + alignment - 1 + sizeof(struct allocation_header);
+   void *base = malloc(total);
+   if (!base)
+      return NULL;
+
+   uintptr_t address = (uintptr_t)base + sizeof(struct allocation_header);
+   address = (address + alignment - 1) & ~(uintptr_t)(alignment - 1);
+   struct allocation_header *header =
+      (struct allocation_header *)(address - sizeof(*header));
+   header->base = base;
+   header->size = size;
+   return (void *)address;
+}
+
+static void
+test_free(void *user_data, void *memory)
+{
+   (void)user_data;
+   if (!memory)
+      return;
+
+   struct allocation_header *header =
+      (struct allocation_header *)((uintptr_t)memory - sizeof(*header));
+   free(header->base);
+}
+
+static void *
+test_realloc(void *user_data, void *original, size_t size, size_t alignment,
+             VkSystemAllocationScope scope)
+{
+   if (!original)
+      return test_alloc(user_data, size, alignment, scope);
+   if (!size) {
+      test_free(user_data, original);
+      return NULL;
+   }
+
+   struct allocation_header *header =
+      (struct allocation_header *)((uintptr_t)original - sizeof(*header));
+   size_t old_size = header->size;
+   void *replacement = test_alloc(user_data, size, alignment, scope);
+   if (!replacement)
+      return NULL;
+
+   memcpy(replacement, original, old_size < size ? old_size : size);
+   test_free(user_data, original);
+   return replacement;
+}
 
 static void
 die(const char *what)
@@ -124,8 +206,63 @@ buffer_resource_destroyed(struct wl_resource *resource)
    atomic_fetch_add(&server->buffers_destroyed, 1);
 }
 
+static void
+surface_attach(struct wl_client *client, struct wl_resource *resource,
+               struct wl_resource *buffer, int32_t x, int32_t y)
+{
+   (void)client;
+   (void)x;
+   (void)y;
+   struct mock_server *server = wl_resource_get_user_data(resource);
+   server->pending_buffer = buffer;
+}
+
+static void
+surface_damage(struct wl_client *client, struct wl_resource *resource,
+               int32_t x, int32_t y, int32_t width, int32_t height)
+{
+   (void)client;
+   (void)resource;
+   (void)x;
+   (void)y;
+   (void)width;
+   (void)height;
+}
+
+static void
+surface_frame(struct wl_client *client, struct wl_resource *resource,
+              uint32_t callback_id)
+{
+   (void)resource;
+   struct wl_resource *callback =
+      wl_resource_create(client, &wl_callback_interface, 1, callback_id);
+   if (!callback) {
+      wl_client_post_no_memory(client);
+      return;
+   }
+
+   wl_callback_send_done(callback, 1);
+   wl_resource_destroy(callback);
+}
+
+static void
+surface_commit(struct wl_client *client, struct wl_resource *resource)
+{
+   (void)client;
+   struct mock_server *server = wl_resource_get_user_data(resource);
+   if (server->pending_buffer) {
+      wl_buffer_send_release(server->pending_buffer);
+      server->pending_buffer = NULL;
+   }
+}
+
 static const struct wl_surface_interface surface_implementation = {
    .destroy = destroy_resource,
+   .attach = surface_attach,
+   .damage = surface_damage,
+   .frame = surface_frame,
+   .commit = surface_commit,
+   .damage_buffer = surface_damage,
 };
 
 static void
@@ -332,8 +469,13 @@ expect_window_in_use(VkDevice device, const VkSwapchainCreateInfoKHR *info,
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+   if (argc > 2 ||
+       (argc == 2 && strcmp(argv[1], "--present-allocation-failure")))
+      die("usage: " TEST_NAME " [--present-allocation-failure]");
+   const bool present_allocation_failure = argc == 2;
+
    struct mock_server server = {0};
    server.display = wl_display_create();
    if (!server.display)
@@ -376,6 +518,16 @@ main(void)
       die("libvulkan.so.1 has no vkGetInstanceProcAddr");
    LOAD_GLOBAL(vkCreateInstance);
 
+   struct allocation_control allocation_control = {0};
+   const VkAllocationCallbacks allocation_callbacks = {
+      .pUserData = &allocation_control,
+      .pfnAllocation = test_alloc,
+      .pfnReallocation = test_realloc,
+      .pfnFree = test_free,
+   };
+   const VkAllocationCallbacks *instance_allocator =
+      present_allocation_failure ? &allocation_callbacks : NULL;
+
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = TEST_NAME,
@@ -392,7 +544,7 @@ main(void)
       .ppEnabledExtensionNames = instance_extensions,
    };
    VkInstance instance;
-   check(vkCreateInstance(&instance_info, NULL, &instance),
+   check(vkCreateInstance(&instance_info, instance_allocator, &instance),
          "vkCreateInstance");
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
@@ -470,12 +622,20 @@ main(void)
       .queueCount = 1,
       .pQueuePriorities = &priority,
    };
-   const char *device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+   const char *device_extensions[] = {
+      VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+      VK_KHR_PRESENT_ID_EXTENSION_NAME,
+   };
+   const VkPhysicalDevicePresentIdFeaturesKHR present_id_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+      .presentId = VK_TRUE,
+   };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = present_allocation_failure ? &present_id_features : NULL,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-      .enabledExtensionCount = 1,
+      .enabledExtensionCount = present_allocation_failure ? 2 : 1,
       .ppEnabledExtensionNames = device_extensions,
    };
    VkDevice device;
@@ -485,6 +645,13 @@ main(void)
    LOAD_DEVICE(device, vkCreateSwapchainKHR);
    LOAD_DEVICE(device, vkDestroySwapchainKHR);
    LOAD_DEVICE(device, vkGetSwapchainImagesKHR);
+   LOAD_DEVICE(device, vkGetDeviceQueue);
+   LOAD_DEVICE(device, vkCreateSemaphore);
+   LOAD_DEVICE(device, vkDestroySemaphore);
+   LOAD_DEVICE(device, vkAcquireNextImageKHR);
+   LOAD_DEVICE(device, vkQueueSubmit);
+   LOAD_DEVICE(device, vkQueuePresentKHR);
+   LOAD_DEVICE(device, vkQueueWaitIdle);
 
    VkSurfaceCapabilitiesKHR capabilities;
    check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface,
@@ -527,32 +694,113 @@ main(void)
    VkSwapchainKHR first;
    check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &first),
          "vkCreateSwapchainKHR(first)");
-   expected_buffers += swapchain_image_count(device, first);
+   const uint32_t first_image_count = swapchain_image_count(device, first);
+   expected_buffers += first_image_count;
 
-   expect_window_in_use(device, &swapchain_info, "first rejected create");
-   expect_window_in_use(device, &swapchain_info, "second rejected create");
+   if (present_allocation_failure) {
+      VkQueue queue;
+      vkGetDeviceQueue(device, queue_family, 0, &queue);
+      const VkSemaphoreCreateInfo semaphore_info = {
+         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+      VkSemaphore acquired, render_done;
+      check(vkCreateSemaphore(device, &semaphore_info, NULL, &acquired),
+            "vkCreateSemaphore(acquired)");
+      check(vkCreateSemaphore(device, &semaphore_info, NULL, &render_done),
+            "vkCreateSemaphore(render done)");
 
-   VkSwapchainCreateInfoKHR replacement_info = swapchain_info;
-   replacement_info.oldSwapchain = first;
-   VkSwapchainKHR replacement;
-   check(vkCreateSwapchainKHR(device, &replacement_info, NULL, &replacement),
-         "vkCreateSwapchainKHR(replacement)");
-   expected_buffers += swapchain_image_count(device, replacement);
+      /* Touch every image once so the common WSI throttle fences are already
+       * allocated before the targeted backend allocation failure. */
+      for (unsigned present = 0; present <= first_image_count; present++) {
+         const bool inject_failure = present == first_image_count;
+         uint32_t image_index = UINT32_MAX;
+         check(vkAcquireNextImageKHR(device, first, UINT64_MAX, acquired,
+                                     VK_NULL_HANDLE, &image_index),
+               "vkAcquireNextImageKHR");
 
-   vkDestroySwapchainKHR(device, first, NULL);
-   expect_window_in_use(device, &swapchain_info,
-                        "create after retired swapchain destruction");
-   vkDestroySwapchainKHR(device, replacement, NULL);
+         const VkPipelineStageFlags wait_stage =
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+         const VkSubmitInfo submit_info = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &acquired,
+            .pWaitDstStageMask = &wait_stage,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &render_done,
+         };
+         check(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
+               "vkQueueSubmit");
 
-   VkSwapchainKHR final;
-   check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &final),
-         "vkCreateSwapchainKHR(after release)");
-   expected_buffers += swapchain_image_count(device, final);
-   vkDestroySwapchainKHR(device, final, NULL);
+         const uint64_t present_id = 1;
+         const VkPresentIdKHR present_id_info = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+            .swapchainCount = 1,
+            .pPresentIds = &present_id,
+         };
+         VkResult per_swapchain = VK_SUCCESS;
+         const VkPresentInfoKHR present_info = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext = inject_failure ? &present_id_info : NULL,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &render_done,
+            .swapchainCount = 1,
+            .pSwapchains = &first,
+            .pImageIndices = &image_index,
+            .pResults = &per_swapchain,
+         };
+
+         if (inject_failure)
+            atomic_store(&allocation_control.fail_next_object, true);
+         VkResult result = vkQueuePresentKHR(queue, &present_info);
+         if (!inject_failure) {
+            check(result, "vkQueuePresentKHR(warmup)");
+            if (per_swapchain != VK_SUCCESS)
+               die("warmup present returned a per-swapchain error");
+            check(vkQueueWaitIdle(queue), "vkQueueWaitIdle(warmup)");
+         } else if (result != VK_ERROR_DEVICE_LOST ||
+                    per_swapchain != VK_ERROR_DEVICE_LOST) {
+            fprintf(stderr,
+                    TEST_NAME ": allocation failure returned %d/%d, expected "
+                              "%d\n",
+                    result, per_swapchain, VK_ERROR_DEVICE_LOST);
+            return EXIT_FAILURE;
+         }
+      }
+
+      if (atomic_load(&allocation_control.injected_failures) != 1)
+         die("present tracking allocation did not fail exactly once");
+      if (vkQueueWaitIdle(queue) != VK_ERROR_DEVICE_LOST)
+         die("present allocation failure did not latch device loss");
+
+      vkDestroySemaphore(device, render_done, NULL);
+      vkDestroySemaphore(device, acquired, NULL);
+      vkDestroySwapchainKHR(device, first, NULL);
+   } else {
+      expect_window_in_use(device, &swapchain_info, "first rejected create");
+      expect_window_in_use(device, &swapchain_info, "second rejected create");
+
+      VkSwapchainCreateInfoKHR replacement_info = swapchain_info;
+      replacement_info.oldSwapchain = first;
+      VkSwapchainKHR replacement;
+      check(vkCreateSwapchainKHR(device, &replacement_info, NULL, &replacement),
+            "vkCreateSwapchainKHR(replacement)");
+      expected_buffers += swapchain_image_count(device, replacement);
+
+      vkDestroySwapchainKHR(device, first, NULL);
+      expect_window_in_use(device, &swapchain_info,
+                           "create after retired swapchain destruction");
+      vkDestroySwapchainKHR(device, replacement, NULL);
+
+      VkSwapchainKHR final;
+      check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &final),
+            "vkCreateSwapchainKHR(after release)");
+      expected_buffers += swapchain_image_count(device, final);
+      vkDestroySwapchainKHR(device, final, NULL);
+   }
 
    vkDestroyDevice(device, NULL);
    vkDestroySurfaceKHR(instance, surface, NULL);
-   vkDestroyInstance(instance, NULL);
+   vkDestroyInstance(instance, instance_allocator);
    dlclose(loader);
 
    wl_surface_destroy(wl_surface);
@@ -567,7 +815,8 @@ main(void)
    const unsigned pools_destroyed = atomic_load(&server.pools_destroyed);
    const unsigned buffers_created = atomic_load(&server.buffers_created);
    const unsigned buffers_destroyed = atomic_load(&server.buffers_destroyed);
-   if (expected_buffers != 12 || surfaces_created != 1 ||
+   const unsigned exact_buffers = present_allocation_failure ? 4 : 12;
+   if (expected_buffers != exact_buffers || surfaces_created != 1 ||
        surfaces_destroyed != 1 ||
        pools_created != expected_buffers || pools_destroyed != expected_buffers ||
        buffers_created != expected_buffers ||
@@ -590,9 +839,15 @@ main(void)
    if (thread_result != 0)
       die("Wayland server thread failed");
 
-   printf(TEST_NAME ": PASS — rejected creates preserved the active "
-                    "swapchain through replacement and destruction; "
-                    "Wayland objects=%u/%u\n",
-          buffers_created, buffers_destroyed);
+   if (present_allocation_failure) {
+      printf(TEST_NAME ": PASS — post-enqueue present allocation failure "
+                       "latched device loss; Wayland objects=%u/%u\n",
+             buffers_created, buffers_destroyed);
+   } else {
+      printf(TEST_NAME ": PASS — rejected creates preserved the active "
+                       "swapchain through replacement and destruction; "
+                       "Wayland objects=%u/%u\n",
+             buffers_created, buffers_destroyed);
+   }
    return EXIT_SUCCESS;
 }

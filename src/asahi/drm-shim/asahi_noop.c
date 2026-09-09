@@ -199,9 +199,12 @@ check_wsi_rollback_lifecycle(void)
    if (!test_case)
       return;
 
+   const unsigned expected_submits =
+      !strcmp(test_case, "wayland-present-allocation") ? 5 : 0;
+
    if (wsi_rollback_queue_creates != 1 ||
        wsi_rollback_queue_destroys != 1 ||
-       wsi_rollback_submits != 0) {
+       wsi_rollback_submits != expected_submits) {
       fprintf(stderr,
               "shim: bad Asahi WSI rollback '%s': queue=%u/%u "
               "hardware-submits=%u\n",

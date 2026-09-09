@@ -3233,6 +3233,30 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
       queue_dispatched = true;
    }
 
+   struct wsi_wl_present_id *id = NULL;
+   if (present_id > 0 || (mode_fifo && chain->commit_timer) ||
+       util_perfetto_is_tracing_enabled() || chain->timing_request.serial) {
+      id = vk_zalloc(chain->wsi_wl_surface->display->wsi_wl->alloc,
+                     sizeof(*id), sizeof(uintptr_t),
+                     VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!id) {
+         /* Common WSI has already enqueued the semaphore waits and any blit.
+          * An OOM return would require leaving that synchronization untouched;
+          * since it cannot be rolled back, the specification requires device
+          * loss instead. */
+         VK_FROM_HANDLE(vk_device, device, wsi_chain->device);
+         return vk_device_set_lost(
+            device, "Wayland present tracking allocation failed after enqueue");
+      }
+
+      id->chain = chain;
+      id->present_id = present_id;
+      id->alloc = chain->wsi_wl_surface->display->wsi_wl->alloc;
+      id->timing_serial = chain->timing_request.serial;
+      id->img = &chain->images[image_index].base;
+      id->user_target_time = chain->timing_request.time != 0;
+   }
+
    if (chain->base.image_info.explicit_sync) {
       struct wsi_wl_image *image = &chain->images[image_index];
       /* Incremented by signal in base queue_present. */
@@ -3274,18 +3298,7 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
 			0, 0, INT32_MAX, INT32_MAX);
    }
 
-   if (present_id > 0 || (mode_fifo && chain->commit_timer) ||
-       util_perfetto_is_tracing_enabled() || chain->timing_request.serial) {
-      struct wsi_wl_present_id *id =
-         vk_zalloc(chain->wsi_wl_surface->display->wsi_wl->alloc, sizeof(*id), sizeof(uintptr_t),
-                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      id->chain = chain;
-      id->present_id = present_id;
-      id->alloc = chain->wsi_wl_surface->display->wsi_wl->alloc;
-      id->timing_serial = chain->timing_request.serial;
-      id->img = &chain->images[image_index].base;
-      id->user_target_time = chain->timing_request.time != 0;
-
+   if (id) {
       mtx_lock(&chain->present_ids.lock);
 
       if (mode_fifo && chain->fifo && chain->commit_timer)
