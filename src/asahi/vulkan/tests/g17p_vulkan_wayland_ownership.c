@@ -2,8 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Public Vulkan oracle for Wayland surface ownership across failed and
- * successful swapchain replacement.  A minimal in-process compositor exposes
+ * Public Vulkan oracle for Wayland surface and swapchain lifetime across
+ * failure, retry, and replacement.  A minimal in-process compositor exposes
  * wl_compositor and wl_shm, keeping the test hermetic under the G17P DRM shim.
  */
 
@@ -69,8 +69,66 @@ struct mock_server {
 
 struct allocation_control {
    atomic_bool fail_next_object;
+   atomic_bool poison_frees;
    atomic_uint injected_failures;
 };
+
+struct wrapper_control {
+   atomic_bool fail_enabled;
+   atomic_uint calls_since_arm;
+   atomic_uint injected_failures;
+   atomic_uint created;
+   atomic_uint destroyed;
+   void *fail_proxy;
+};
+
+static struct wrapper_control wrapper_control;
+static once_flag wrapper_symbols_once = ONCE_FLAG_INIT;
+static void *(*real_wl_proxy_create_wrapper)(void *);
+static void (*real_wl_proxy_wrapper_destroy)(void *);
+
+static void
+load_wrapper_symbols(void)
+{
+   real_wl_proxy_create_wrapper =
+      (void *(*)(void *))dlsym(RTLD_NEXT, "wl_proxy_create_wrapper");
+   real_wl_proxy_wrapper_destroy =
+      (void (*)(void *))dlsym(RTLD_NEXT, "wl_proxy_wrapper_destroy");
+   if (!real_wl_proxy_create_wrapper || !real_wl_proxy_wrapper_destroy) {
+      fprintf(stderr, TEST_NAME ": failed to resolve Wayland wrapper symbols\n");
+      _Exit(EXIT_FAILURE);
+   }
+}
+
+__attribute__((visibility("default"))) void *
+wl_proxy_create_wrapper(void *proxy)
+{
+   call_once(&wrapper_symbols_once, load_wrapper_symbols);
+
+   if (atomic_load(&wrapper_control.fail_enabled) &&
+       proxy == wrapper_control.fail_proxy) {
+      const unsigned call =
+         atomic_fetch_add(&wrapper_control.calls_since_arm, 1) + 1;
+      if (call == 1 &&
+          atomic_exchange(&wrapper_control.fail_enabled, false)) {
+         atomic_fetch_add(&wrapper_control.injected_failures, 1);
+         return NULL;
+      }
+   }
+
+   void *wrapper = real_wl_proxy_create_wrapper(proxy);
+   if (wrapper)
+      atomic_fetch_add(&wrapper_control.created, 1);
+   return wrapper;
+}
+
+__attribute__((visibility("default"))) void
+wl_proxy_wrapper_destroy(void *proxy_wrapper)
+{
+   call_once(&wrapper_symbols_once, load_wrapper_symbols);
+   real_wl_proxy_wrapper_destroy(proxy_wrapper);
+   atomic_fetch_add(&wrapper_control.destroyed, 1);
+}
 
 struct allocation_header {
    void *base;
@@ -109,12 +167,14 @@ test_alloc(void *user_data, size_t size, size_t alignment,
 static void
 test_free(void *user_data, void *memory)
 {
-   (void)user_data;
    if (!memory)
       return;
 
+   struct allocation_control *control = user_data;
    struct allocation_header *header =
       (struct allocation_header *)((uintptr_t)memory - sizeof(*header));
+   if (atomic_load(&control->poison_frees))
+      memset(memory, 0xa5, header->size);
    free(header->base);
 }
 
@@ -471,10 +531,14 @@ expect_window_in_use(VkDevice device, const VkSwapchainCreateInfoKHR *info,
 int
 main(int argc, char **argv)
 {
+   const bool present_allocation_failure =
+      argc == 2 && !strcmp(argv[1], "--present-allocation-failure");
+   const bool surface_init_retry =
+      argc == 2 && !strcmp(argv[1], "--surface-init-retry");
    if (argc > 2 ||
-       (argc == 2 && strcmp(argv[1], "--present-allocation-failure")))
-      die("usage: " TEST_NAME " [--present-allocation-failure]");
-   const bool present_allocation_failure = argc == 2;
+       (argc == 2 && !present_allocation_failure && !surface_init_retry))
+      die("usage: " TEST_NAME
+          " [--present-allocation-failure|--surface-init-retry]");
 
    struct mock_server server = {0};
    server.display = wl_display_create();
@@ -519,6 +583,7 @@ main(int argc, char **argv)
    LOAD_GLOBAL(vkCreateInstance);
 
    struct allocation_control allocation_control = {0};
+   atomic_store(&allocation_control.poison_frees, surface_init_retry);
    const VkAllocationCallbacks allocation_callbacks = {
       .pUserData = &allocation_control,
       .pfnAllocation = test_alloc,
@@ -526,7 +591,7 @@ main(int argc, char **argv)
       .pfnFree = test_free,
    };
    const VkAllocationCallbacks *instance_allocator =
-      present_allocation_failure ? &allocation_callbacks : NULL;
+      (present_allocation_failure || surface_init_retry) ? &allocation_callbacks : NULL;
 
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -691,6 +756,28 @@ main(int argc, char **argv)
    };
 
    uint32_t expected_buffers = 0;
+   if (surface_init_retry) {
+      atomic_store(&wrapper_control.calls_since_arm, 0);
+      wrapper_control.fail_proxy = wl_surface;
+      atomic_store(&wrapper_control.fail_enabled, true);
+
+      VkSwapchainKHR failed = VK_NULL_HANDLE;
+      VkResult result =
+         vkCreateSwapchainKHR(device, &swapchain_info, NULL, &failed);
+      if (result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+         if (result == VK_SUCCESS)
+            vkDestroySwapchainKHR(device, failed, NULL);
+         fprintf(stderr,
+                 TEST_NAME ": surface wrapper failure returned %d, expected "
+                           "%d\n",
+                 result, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return EXIT_FAILURE;
+      }
+      if (atomic_load(&wrapper_control.injected_failures) != 1 ||
+          atomic_load(&wrapper_control.calls_since_arm) != 1)
+         die("surface wrapper creation did not fail exactly once");
+   }
+
    VkSwapchainKHR first;
    check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &first),
          "vkCreateSwapchainKHR(first)");
@@ -775,6 +862,14 @@ main(int argc, char **argv)
       vkDestroySemaphore(device, render_done, NULL);
       vkDestroySemaphore(device, acquired, NULL);
       vkDestroySwapchainKHR(device, first, NULL);
+   } else if (surface_init_retry) {
+      vkDestroySwapchainKHR(device, first, NULL);
+
+      VkSwapchainKHR second;
+      check(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &second),
+            "vkCreateSwapchainKHR(after recovered destruction)");
+      expected_buffers += swapchain_image_count(device, second);
+      vkDestroySwapchainKHR(device, second, NULL);
    } else {
       expect_window_in_use(device, &swapchain_info, "first rejected create");
       expect_window_in_use(device, &swapchain_info, "second rejected create");
@@ -815,18 +910,22 @@ main(int argc, char **argv)
    const unsigned pools_destroyed = atomic_load(&server.pools_destroyed);
    const unsigned buffers_created = atomic_load(&server.buffers_created);
    const unsigned buffers_destroyed = atomic_load(&server.buffers_destroyed);
-   const unsigned exact_buffers = present_allocation_failure ? 4 : 12;
+   const unsigned wrappers_created = atomic_load(&wrapper_control.created);
+   const unsigned wrappers_destroyed = atomic_load(&wrapper_control.destroyed);
+   const unsigned exact_buffers =
+      present_allocation_failure ? 4 : surface_init_retry ? 8 : 12;
    if (expected_buffers != exact_buffers || surfaces_created != 1 ||
        surfaces_destroyed != 1 ||
        pools_created != expected_buffers || pools_destroyed != expected_buffers ||
        buffers_created != expected_buffers ||
-       buffers_destroyed != expected_buffers) {
+       buffers_destroyed != expected_buffers ||
+       wrappers_created != wrappers_destroyed) {
       fprintf(stderr,
               TEST_NAME ": bad Wayland lifetime: surfaces=%u/%u pools=%u/%u "
-                        "buffers=%u/%u expected=%u\n",
+                        "buffers=%u/%u wrappers=%u/%u expected=%u\n",
               surfaces_created, surfaces_destroyed, pools_created,
               pools_destroyed, buffers_created, buffers_destroyed,
-              expected_buffers);
+              wrappers_created, wrappers_destroyed, expected_buffers);
       return EXIT_FAILURE;
    }
 
@@ -843,6 +942,12 @@ main(int argc, char **argv)
       printf(TEST_NAME ": PASS — post-enqueue present allocation failure "
                        "latched device loss; Wayland objects=%u/%u\n",
              buffers_created, buffers_destroyed);
+   } else if (surface_init_retry) {
+      printf(TEST_NAME ": PASS — surface wrapper allocation failed once, "
+                       "then retry and reuse succeeded; Wayland objects=%u/%u "
+                       "wrappers=%u/%u\n",
+             buffers_created, buffers_destroyed, wrappers_created,
+             wrappers_destroyed);
    } else {
       printf(TEST_NAME ": PASS — rejected creates preserved the active "
                        "swapchain through replacement and destruction; "

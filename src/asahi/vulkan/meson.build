@@ -562,6 +562,7 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl, dep_thread, dep_wayland_client, dep_wayland_server],
       c_args : [c_msvc_compat_args],
+      export_dynamic : true,
       gnu_symbol_visibility : 'hidden',
     )
   endif

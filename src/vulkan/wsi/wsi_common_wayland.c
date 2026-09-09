@@ -2482,8 +2482,10 @@ static VkResult wsi_wl_surface_init(struct wsi_wl_surface *wsi_wl_surface,
 fail:
    loader_wayland_surface_destroy(&wsi_wl_surface->wayland_surface);
 
-   if (wsi_wl_surface->display)
+   if (wsi_wl_surface->display) {
       wsi_wl_display_destroy(wsi_wl_surface->display);
+      wsi_wl_surface->display = NULL;
+   }
    return result;
 }
 
