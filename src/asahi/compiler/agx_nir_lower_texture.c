@@ -389,8 +389,9 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
       nir_tex_instr_add_src(tex, nir_tex_src_lod_bias_min_agx, packed);
    }
 
-   /* We reserve bound sampler #0, so we offset bound samplers by 1 and
-    * otherwise map bound samplers as-is.
+   /* We reserve bound sampler #0 for texel fetch on every generation, so
+    * offset API samplers by one. Bindless sampler handles already name their
+    * heap entries directly and are left unchanged.
     */
    nir_def *sampler = nir_steal_tex_src(tex, nir_tex_src_sampler_offset);
    if (!sampler)
@@ -400,8 +401,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0) {
 
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
-                            nir_iadd_imm(b, nir_u2u16(b, sampler),
-                                         gen9 ? 0 : 1));
+                            nir_iadd_imm(b, nir_u2u16(b, sampler), 1));
    }
 
    if (g17p_plain_txf_oob) {

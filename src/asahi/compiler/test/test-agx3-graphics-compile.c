@@ -3078,7 +3078,7 @@ test_g17p_eot_block_store(void)
  * it must not run the combined-sampler pass that it independently checks.
  */
 static nir_shader *
-build_fs_texture_index_abi(bool compact_native)
+build_fs_texture_index_abi(bool compact_native, bool gen9_bound)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 textured-triangle FS");
@@ -3108,7 +3108,11 @@ build_fs_texture_index_abi(bool compact_native)
    b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
 
    NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
-   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   if (gen9_bound)
+      NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+               AGX_DESCRIPTOR_GENERATION_9);
+   else
+      NIR_PASS(_, b.shader, agx_nir_lower_texture);
    agx_preprocess_nir(b.shader);
    fs_lower(b.shader);
    NIR_PASS(_, b.shader, agx_nir_lower_texture);
@@ -3118,7 +3122,7 @@ build_fs_texture_index_abi(bool compact_native)
 static nir_shader *
 build_fs_texture_imm(void)
 {
-   return build_fs_texture_index_abi(false);
+   return build_fs_texture_index_abi(false, false);
 }
 
 /* Hyprland's ordinary surface path may sample the client texture and then a
@@ -3301,7 +3305,7 @@ build_vs_indexed_texture_sample(void)
 static nir_shader *
 build_fs_texture_compact_native(void)
 {
-   return build_fs_texture_index_abi(true);
+   return build_fs_texture_index_abi(true, false);
 }
 
 static nir_shader *
@@ -3394,29 +3398,34 @@ static bool
 test_texture_index_abis(void)
 {
    nir_shader *legacy = build_fs_texture_imm();
+   nir_shader *g17p_bound = build_fs_texture_index_abi(false, true);
    nir_shader *native = build_fs_texture_compact_native();
-   unsigned samples = 0;
-   bool legacy_ok = true;
+   unsigned bound_samples = 0;
+   bool bound_ok = true;
 
-   nir_foreach_function_impl(impl, legacy) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_tex)
-               continue;
+   nir_shader *bound[] = {legacy, g17p_bound};
+   for (unsigned i = 0; i < ARRAY_SIZE(bound); ++i) {
+      nir_foreach_function_impl(impl, bound[i]) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_tex)
+                  continue;
 
-            const nir_tex_instr *tex = nir_instr_as_tex(instr);
-            const int sampler =
-               nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
-            ++samples;
-            legacy_ok &= sampler >= 0 &&
-                         nir_src_is_const(tex->src[sampler].src) &&
-                         nir_src_as_uint(tex->src[sampler].src) == 1;
+               const nir_tex_instr *tex = nir_instr_as_tex(instr);
+               const int sampler =
+                  nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
+               ++bound_samples;
+               bound_ok &= sampler >= 0 &&
+                           nir_src_is_const(tex->src[sampler].src) &&
+                           nir_src_as_uint(tex->src[sampler].src) == 1;
+            }
          }
       }
    }
 
-   bool ok = legacy_ok && samples == 1 &&
+   bool ok = bound_ok && bound_samples == ARRAY_SIZE(bound) &&
              !has_compact_native_sample(legacy) &&
+             !has_compact_native_sample(g17p_bound) &&
              has_compact_native_sample(native);
 
    /* The old specialized result had no handles, but still selected sampler
@@ -3431,6 +3440,7 @@ test_texture_index_abis(void)
    }
    ok &= !has_compact_native_sample(native);
    ralloc_free(legacy);
+   ralloc_free(g17p_bound);
    ralloc_free(native);
    return ok;
 }

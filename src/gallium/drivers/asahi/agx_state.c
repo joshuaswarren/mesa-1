@@ -3357,14 +3357,20 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
       : AGX_SAMPLER_LENGTH + (custom_borders ? AGX_BORDER_LENGTH : 0);
 
    if (g17p) {
-      const unsigned count = MAX2(ctx->stage[stage].sampler_count, 1);
+      const unsigned count = nr_samplers;
       struct agx_ptr T = agx_pool_alloc_aligned(
          &batch->pool, sampler_length * count, 64);
       memset(T.cpu, 0, sampler_length * count);
 
-      for (unsigned i = 0; i < count; ++i) {
+      /* Native indexed read() and sample() share this table. Match
+       * Honeykrisp's ABI by keeping the exact texel-fetch sampler at zero and
+       * placing API samplers after it. */
+      if (!agx_gallium_pack_g17p_txf_sampler(dev->chip, T.cpu))
+         agx_native_descriptor_rejected(dev, "texel-fetch sampler");
+
+      for (unsigned i = 0; i < ctx->stage[stage].sampler_count; ++i) {
          struct agx_sampler_state *sampler = ctx->stage[stage].samplers[i];
-         uint8_t *out = (uint8_t *)T.cpu + sampler_length * i;
+         uint8_t *out = (uint8_t *)T.cpu + sampler_length * (i + 1);
          if (sampler) {
             const struct pipe_sampler_state *state = &sampler->base;
             agx_pack(out, SAMPLER_HAL200, cfg) {
