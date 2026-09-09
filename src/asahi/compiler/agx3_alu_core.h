@@ -570,6 +570,12 @@ bool agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                     uint8_t *len);
 
+/* Native scalar-half base-2 exponential with the recovered source negate. */
+bool agx3_alu_hexp2_neg(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, enum agx3_alu_hint hint,
+                        bool dest_cache, uint16_t wait_mask, bool src_neg,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native scalar half base-2 logarithm. */
 bool agx3_alu_hlog2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     enum agx3_alu_hint hint, bool dest_cache,

@@ -887,17 +887,21 @@ TEST_F(AGX3PackBinary, HalfUVRefusesUngroundedModes)
 TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
 {
    for (unsigned i = 0; i < 2; ++i) {
-      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
-      agx_index src = agx_register(2, AGX_SIZE_16);
-      src.discard = true;
-      agx_index dest = agx_register(2, AGX_SIZE_16);
-      agx_hmul_to(b, dest, src, agx_immediate(i ? 0x50 : 0x40));
-      agx_stop(b);
-      const auto code = pack(b);
-      const uint8_t times2[] = {0x10, 0xc0, 0x15, 0x02, 0x80, 0x00};
-      const uint8_t times4[] = {0x10, 0xd0, 0x15, 0x02, 0x80, 0x00};
-      ASSERT_EQ(code.size(), 10u);
-      EXPECT_EQ(memcmp(code.data(), i ? times4 : times2, 6), 0);
+      for (unsigned order = 0; order < 2; ++order) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_index src = agx_register(2, AGX_SIZE_16);
+         src.discard = true;
+         agx_index dest = agx_register(2, AGX_SIZE_16);
+         agx_index immediate = agx_immediate(i ? 0x50 : 0x40);
+         agx_hmul_to(b, dest, order ? immediate : src,
+                     order ? src : immediate);
+         agx_stop(b);
+         const auto code = pack(b);
+         const uint8_t times2[] = {0x10, 0xc0, 0x15, 0x02, 0x80, 0x00};
+         const uint8_t times4[] = {0x10, 0xd0, 0x15, 0x02, 0x80, 0x00};
+         ASSERT_EQ(code.size(), 10u);
+         EXPECT_EQ(memcmp(code.data(), i ? times4 : times2, 6), 0);
+      }
    }
 
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -7809,7 +7813,7 @@ TEST_F(AGX3PackBinary, HalfReciprocalSqrtMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
-TEST_F(AGX3PackBinary, HalfExp2MatchesNativeAndRefusesModifier)
+TEST_F(AGX3PackBinary, HalfExp2MatchesNativeNegateAndRefusesAbsolute)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index src = agx_register(3, AGX_SIZE_16);
@@ -7822,6 +7826,19 @@ TEST_F(AGX3PackBinary, HalfExp2MatchesNativeAndRefusesModifier)
    };
    ASSERT_EQ(code.size(), sizeof(native) + 4);
    EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_16);
+   src.neg = true;
+   src.discard = true;
+   agx_exp2_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   const uint8_t native_neg[] = {
+      0xaf,0x02,0x54,0x02,0x02,0x04,0xac,0x60,0x01,0x00,
+   };
+   const auto neg_code = pack(b);
+   ASSERT_EQ(neg_code.size(), sizeof(native_neg) + 4);
+   EXPECT_EQ(memcmp(neg_code.data(), native_neg, sizeof(native_neg)), 0);
 
    b = builder(AGX_ISA_ENCODING_AGX3B);
    src = agx_register(2, AGX_SIZE_16);

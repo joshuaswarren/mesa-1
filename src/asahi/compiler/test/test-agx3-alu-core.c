@@ -2640,19 +2640,21 @@ static void test_native_half_exp2(void)
       bool dest_cache;
       uint16_t wait;
       const char *bytes;
+      bool src_neg;
    } cases[] = {
       {3,2,AGX3_ALU_HINT_NONE,    false,32,"af02560302048c600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, false,32,"af0256020204ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, false, 0,"af0254020204ac600000"},
       {3,3,AGX3_ALU_HINT_DISCARD, false, 0,"af0254030206ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, true, 32,"af0256020304ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false,32,"af0256020204ac600100", true},
    };
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-      assert(agx3_alu_hexp2(AGX_ISA_ENCODING_AGX3B, cases[i].dest,
-                            cases[i].src, cases[i].hint,
-                            cases[i].dest_cache, cases[i].wait,
-                            bytes, &len));
+      assert(agx3_alu_hexp2_neg(AGX_ISA_ENCODING_AGX3B, cases[i].dest,
+                                cases[i].src, cases[i].hint,
+                                cases[i].dest_cache, cases[i].wait,
+                                cases[i].src_neg, bytes, &len));
       exact(bytes, len, cases[i].bytes);
    }
 
@@ -2673,7 +2675,7 @@ static void test_native_half_exp2(void)
       for (unsigned j = 0; j < sizeof(bytes); ++j)
          assert(bytes[j] == 0xa5);
    }
-   puts("Native half exp2: five exact Apple vectors and narrow refusal guards PASS");
+   puts("Native half exp2: six exact Apple vectors and narrow refusal guards PASS");
 }
 
 static void test_native_half_log2(void)

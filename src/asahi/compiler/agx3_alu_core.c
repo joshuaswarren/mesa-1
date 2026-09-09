@@ -2219,6 +2219,16 @@ agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                uint8_t *len)
 {
+   return agx3_alu_hexp2_neg(enc, dest, src, hint, dest_cache, wait_mask,
+                             false, out, len);
+}
+
+bool
+agx3_alu_hexp2_neg(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                   enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, bool src_neg,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    /* As with reciprocal sqrt, f32exp2 uses explicit scalar-half width
     * selectors.  Fresh Apple kernels cover odd halves, retained/dead input,
     * destination caching, and slot-6/no dependency forms. */
@@ -2233,9 +2243,10 @@ agx3_alu_hexp2(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    };
    const struct agx3_field_kv fields[] = {
       {2,dest}, {18,src}, {11,dest_cache},
-      {29,hint == AGX3_ALU_HINT_DISCARD}, {40,wait_mask == 32},
+      {29,hint == AGX3_ALU_HINT_DISCARD}, {31,src_neg},
+      {40,wait_mask == 32},
    };
-   return agx3_bind_compose(enc, "f32exp2", 0, base, 4, fields, 5,
+   return agx3_bind_compose(enc, "f32exp2", 0, base, 4, fields, 6,
                             out, len);
 }
 

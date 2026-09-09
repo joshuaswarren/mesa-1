@@ -13,6 +13,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "util/bitset.h"
 #include "util/glheader.h"
+#include "util/half_float.h"
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_debug.h"
@@ -2616,6 +2617,25 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+      /* Native half FMA can carry a minifloat addend, but both multiplier
+       * inputs are registers. Constant propagation commonly produces
+       * clamp-like x * 0.5h + 0.5h; materialize only multiplier constants and
+       * preserve the fused immediate-addend form. */
+      if (I->op == AGX_OPCODE_HFMA && I->nr_srcs == 3) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+               continue;
+
+            float value = agx_minifloat_decode(I->src[s].value);
+            if (I->src[s].abs)
+               value = fabsf(value);
+            if (I->src[s].neg)
+               value = -value;
+            I->src[s] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+         }
+      }
+
       /* Multiplication is commutative.  Keep a sole immediate in the second
        * multiply slot, matching Apple's native IMAD form and the existing
        * grounded G17P encoder.  Geometry/XFB arithmetic naturally arrives

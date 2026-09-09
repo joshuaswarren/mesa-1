@@ -6505,8 +6505,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * folds a negation into a float source, so exp(-x) -- vkQuake's fog
           * term, in every one of its fragment shaders -- arrives here as an
           * exp2 of a negated register and refused the shader. Only the 32-bit
-          * modifier forms are wired up: that is where both the witnesses and
-          * the refusals are. */
+          * modifier forms are wired up. The half form also has a recovered
+          * negate bit, used by mediump exp(-x). */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_EXP2 &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
@@ -6516,13 +6516,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 src.size != dest.size || agx_channels(src) != 1 ||
-                (half && (src.abs || src.neg)) || src.kill ||
+                (half && src.abs) || src.kill ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hexp2(enc, dest.value, src.value,
-                                        agx3_post_ra_hint(src), dest.cache,
-                                        wait, bytes, &len)
+            if (!(half ? agx3_alu_hexp2_neg(enc, dest.value, src.value,
+                                            agx3_post_ra_hint(src), dest.cache,
+                                            wait, src.neg, bytes, &len)
                        : agx3_alu_f32exp2_mod(enc, dest.value, src.value,
                                               agx3_post_ra_hint(src),
                                               dest.cache, wait, src.neg,
@@ -8133,9 +8133,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
-             agx3_src_is_register(I->src[0]) &&
-             I->src[1].type == AGX_INDEX_IMMEDIATE) {
-            agx_index dst = I->dest[0], src = I->src[0], imm = I->src[1];
+             ((agx3_src_is_register(I->src[0]) &&
+               I->src[1].type == AGX_INDEX_IMMEDIATE) ||
+              (I->src[0].type == AGX_INDEX_IMMEDIATE &&
+               agx3_src_is_register(I->src[1])))) {
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            agx_index dst = I->dest[0];
+            agx_index src = I->src[immediate_first ? 1 : 0];
+            agx_index imm = I->src[immediate_first ? 0 : 1];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!agx3_src_is_register(dst) || dst.memory ||
                 dst.size != AGX_SIZE_16 || agx_channels(dst) != 1 ||
