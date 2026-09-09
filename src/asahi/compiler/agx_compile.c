@@ -3112,34 +3112,43 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
          I->src[s] = widened;
       }
 
-      bool mixed = false, has_neg = false, unsupported_modifier = false;
+      bool mixed = false, has_modifier = false, unsupported_modifier = false;
       agx_foreach_src(I, s) {
          mixed |= I->src[s].type == AGX_INDEX_IMMEDIATE ||
                   I->src[s].size != AGX_SIZE_32;
-         has_neg |= I->src[s].neg;
-         unsupported_modifier |= I->src[s].abs ||
-                                 (I->src[s].neg &&
+         has_modifier |= I->src[s].abs || I->src[s].neg;
+         unsupported_modifier |= ((I->src[s].abs || I->src[s].neg) &&
                                   (I->src[s].type == AGX_INDEX_IMMEDIATE ||
                                    I->src[s].size != AGX_SIZE_32));
       }
 
       /* The native modifier form takes three full F32 registers. Preserve
-       * exact fneg semantics for mixed/minifloat FMA shapes by flipping the
-       * source sign bit before register allocation. The resulting FMA has no
+       * exact fabs/fneg semantics for mixed/minifloat FMA shapes by clearing
+       * and then flipping the source sign bit before register allocation. The resulting FMA has no
        * modifier and stays on the already-grounded mixed-source form. */
-      if (!mixed || !has_neg || unsupported_modifier)
+      if (!mixed || !has_modifier || unsupported_modifier)
          continue;
 
       agx_foreach_src(I, s) {
-         if (!I->src[s].neg)
+         const bool absolute = I->src[s].abs, negate = I->src[s].neg;
+         if (!absolute && !negate)
             continue;
 
          agx_index source = I->src[s];
-         source.neg = false;
-         agx_index sign = agx_mov_imm(&b, 32, UINT32_C(0x80000000));
-         agx_index flipped = agx_temp(ctx, AGX_SIZE_32);
-         agx_bitop_to(&b, flipped, source, sign, 0x6);
-         I->src[s] = flipped;
+         source.abs = source.neg = false;
+         if (absolute) {
+            agx_index mask = agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+            agx_index cleared = agx_temp(ctx, AGX_SIZE_32);
+            agx_bitop_to(&b, cleared, source, mask, 0x8);
+            source = cleared;
+         }
+         if (negate) {
+            agx_index sign = agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+            agx_index flipped = agx_temp(ctx, AGX_SIZE_32);
+            agx_bitop_to(&b, flipped, source, sign, 0x6);
+            source = flipped;
+         }
+         I->src[s] = source;
       }
    }
 }
