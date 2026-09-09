@@ -13,6 +13,9 @@ struct fixture {
    enum ra_class classes[512];
    uint16_t assignments[512], origins[512], values[AGX_NUM_REGS];
    BITSET_DECLARE(used, AGX_NUM_REGS);
+   BITSET_DECLARE(low_gpr, 512);
+   BITSET_DECLARE(texture_gpr, 512);
+   BITSET_DECLARE(high_gpr, 512);
    unsigned variables, high_water, memory_count;
 };
 
@@ -30,6 +33,8 @@ init(struct fixture *f, unsigned bound, unsigned reserved)
       .shader = &f->shader, .ssa_to_reg = f->assignments,
       .ncomps = f->widths, .sizes = f->sizes, .classes = f->classes,
       .used_regs[RA_GPR] = f->used, .bound[RA_GPR] = bound,
+      .low_gpr = f->low_gpr, .texture_gpr = f->texture_gpr,
+      .high_gpr = f->high_gpr,
       .count[RA_GPR] = &f->high_water, .count[RA_MEM] = &f->memory_count,
    };
    BITSET_SET_COUNT(f->used, 0, reserved);
@@ -91,6 +96,25 @@ int
 main(void)
 {
    struct fixture f;
+
+   /* G17P texture staging names a seven-bit source half-register. Its SSA
+    * producer is bounded to the low 128 halves, composing with the stricter
+    * low-tile bank and leaving other generations unconstrained. */
+   init(&f, 256, 0);
+   agx_index constrained = {
+      .type = AGX_INDEX_NORMAL, .value = 7, .size = AGX_SIZE_32,
+   };
+   agx_instr producer = {
+      .op = AGX_OPCODE_COLLECT, .dest = &constrained, .nr_dests = 1,
+   };
+   assert(dest_limit(&f.ra, &producer, 0) == 256);
+   BITSET_SET(f.texture_gpr, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 128);
+   BITSET_SET(f.low_gpr, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 16);
+   f.key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   assert(dest_limit(&f.ra, &producer, 0) == 256);
+
    init(&f, 256, 0);
    for (unsigned reg = 0; reg < 128; reg += 2)
       value(&f, reg, 2, AGX_SIZE_32);

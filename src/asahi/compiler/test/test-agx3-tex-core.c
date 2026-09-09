@@ -1072,6 +1072,33 @@ test_copy_witnesses(void)
       }
       checks++;
    }
+
+   /* Current-Xcode applegpu_g17p high-pressure texture kernel. Apple places
+    * the float2 at halves 88/90, proving that the old <=60 direct-coordinate
+    * policy does not apply to the staged COPY source. */
+   CHECK(agx3_tex_stage_copy(AGX_ISA_ENCODING_AGX3B, 0, 88, 3, 1u << 2,
+                             bytes, &length));
+   CHECK(hex_eq(bytes, length, "0b592f00428000080000"));
+   CHECK(agx3_tex_stage_copy(AGX_ISA_ENCODING_AGX3B, 2, 90, 3, 0, bytes,
+                             &length));
+   CHECK(hex_eq(bytes, length, "1b5b2f00420000080000"));
+
+   /* COPY's source field is exactly seven bits. Exercise every legal aligned
+    * value, then prove that bit 7 refuses instead of aliasing half 128 to 0. */
+   for (unsigned src = 0; src < 128; src += 2)
+      CHECK(agx3_tex_stage_copy(AGX_ISA_ENCODING_AGX3B, 0, src, 1, 0,
+                                bytes, &length));
+
+   memset(bytes, 0xa5, sizeof(bytes));
+   length = 0xff;
+   CHECK(!agx3_tex_stage_copy(AGX_ISA_ENCODING_AGX3B, 0, 128, 1, 0,
+                              bytes, &length));
+   CHECK(length == 0);
+   for (unsigned i = 0; i < sizeof(bytes); ++i)
+      CHECK(bytes[i] == 0);
+   CHECK(!agx3_tex_stage_copy(AGX_ISA_ENCODING_AGX3C, 0, 128, 1, 0,
+                              bytes, &length));
+   CHECK(length == 0);
    return 0;
 }
 

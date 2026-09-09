@@ -532,8 +532,11 @@ agx3_tex_stage_copy_hints(enum agx_isa_encoding enc, uint16_t dest, uint16_t src
    if (enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C)
       return false;
 
-   /* One even 32-bit register each way, as in every witness. */
-   if ((dest & 1) || (src & 1) || dest >= 256 || src >= 256)
+   /* One even 32-bit register each way, as in every witness. The source field
+    * is seven bits wide. Unlike PACK_SMPIR, COPY has no separately recovered
+    * bit 7, so accepting a high-bank source would alias it into the low bank.
+    */
+   if ((dest & 1) || (src & 1) || dest >= 256 || src >= 128)
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -556,7 +559,7 @@ agx3_tex_stage_copy_hints(enum agx_isa_encoding enc, uint16_t dest, uint16_t src
    struct agx3_field_kv ov[12];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(5, dest);
-   ov[n++] = (struct agx3_field_kv)KV(16, src & 0x7f);
+   ov[n++] = (struct agx3_field_kv)KV(16, src);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);

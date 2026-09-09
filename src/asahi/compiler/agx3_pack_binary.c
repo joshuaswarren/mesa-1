@@ -1015,7 +1015,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
           ((I->dim == AGX_DIM_2D_ARRAY || ms_array || ms_2d || three_d)
               ? 3 : 2) ||
        (stage_coordinates ? ((I->src[0].value & 1) ||
-         I->src[0].value + 2 * agx_channels(I->src[0]) > 256) :
+         I->src[0].value + 2 * agx_channels(I->src[0]) > 128) :
          ((I->src[0].value & 3) || I->src[0].value > 60)) ||
        ((ms_array || ms_2d)
            ? !agx3_tex_imm(I->src[1], 0)
@@ -1341,7 +1341,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * staging copies name two halves apart. */
    const bool gradient_operand = agx3_tex_plain_reg(I->src[1]) &&
       I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 4 &&
-      (I->src[1].value & 1) == 0 && I->src[1].value + 6 < 256;
+      (I->src[1].value & 1) == 0 && I->src[1].value + 6 < 128;
    const bool valid_lod = explicit_lod ?
       (enc == AGX_ISA_ENCODING_AGX3B &&
        (valid_immediate_lod || scalar_lod_reg)) :
@@ -1364,14 +1364,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
       !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
       !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
-   /* AGX3B coordinates are copied to the fixed staging bank before SMP.
-    * Ordinary array layers are named directly by the sample's 8-bit register
-    * field. A 2D shadow-array layer has its own packed producer, while a cube
-    * shadow-array combines the layer with CEM's face. The third scalar must
-    * not wrap any form. Plain 2D sources retain their narrower GPR bound even
-    * though their staging destination is fixed. */
-   /* CEM's three recovered GPR source fields are seven bits. */
-   const unsigned max_coord = (array || cube) ? 120 : three_d ? 248 : 60;
+   /* AGX3B coordinates are copied to the fixed staging bank before SMP. COPY
+    * and CEM each name a seven-bit source half-register, so the entire vector
+    * must end below half 128. AGX3C retains its independently recovered direct
+    * coordinate bound. */
+   const unsigned max_coord = enc == AGX_ISA_ENCODING_AGX3B
+                                 ? 128 - (2 * agx_channels(I->src[0]))
+                                 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
@@ -1401,7 +1400,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (shadow
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
-              agx_channels(I->src[5]) != 1 || I->src[5].value > 254)
+              agx_channels(I->src[5]) != 1 || I->src[5].value > 126)
            : offset ? !immediate_offset : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||

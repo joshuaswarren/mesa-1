@@ -116,6 +116,9 @@ struct ra_ctx {
    /* SSA values that must begin in G17P's corpus-grounded low store bank. */
    BITSET_WORD *low_gpr;
 
+   /* SSA values read by G17P's seven-bit texture COPY/CEM source fields. */
+   BITSET_WORD *texture_gpr;
+
    /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
     * register bank. */
    BITSET_WORD *high_gpr;
@@ -354,14 +357,18 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
 {
    enum ra_class cls = ra_class_for_index(I->dest[d]);
    unsigned limit = rctx->bound[cls];
-   /* G17P TEX encodes a seven-bit half-register destination. ALU values and
-    * texture coordinates retain access to the entire register file. */
+   /* G17P TEX encodes a seven-bit half-register destination. Coordinate and
+    * other staged sources are bounded separately through texture_gpr below. */
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        (I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_TEXTURE_LOAD))
       limit = MIN2(limit, 128);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        BITSET_TEST(rctx->low_gpr, I->dest[d].value))
       limit = MIN2(limit, 16);
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       BITSET_TEST(rctx->texture_gpr, I->dest[d].value))
+      limit = MIN2(limit, 128);
    return limit;
 }
 
@@ -1684,6 +1691,7 @@ agx_ra(agx_context *ctx)
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
@@ -1691,6 +1699,28 @@ agx_ra(agx_context *ctx)
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(low_gpr, I->src[0].value);
+
+      /* G17P publishes sampled coordinates through COPY, whose source field
+       * has seven bits and no high-bit extension. CEM has the same source
+       * domain. Keep every SSA vector that reaches either path below half
+       * 128; the packer independently rejects precoloured high-bank inputs.
+       * Gradient scalars and shadow references use the same COPY producer. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+           I->op == AGX_OPCODE_TEXTURE_LOAD ||
+           I->op == AGX_OPCODE_IMAGE_LOAD)) {
+         if (I->src[0].type == AGX_INDEX_NORMAL)
+            BITSET_SET(texture_gpr, I->src[0].value);
+
+         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             I->lod_mode == AGX_LOD_MODE_LOD_GRAD &&
+             I->src[1].type == AGX_INDEX_NORMAL)
+            BITSET_SET(texture_gpr, I->src[1].value);
+
+         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->shadow &&
+             I->src[5].type == AGX_INDEX_NORMAL)
+            BITSET_SET(texture_gpr, I->src[5].value);
+      }
 
       /* G17P cube CEM rereads its XYZ vector after writing fixed scratch r0
        * and r7. Constrain the coordinate vector itself above that bank; its
@@ -1772,6 +1802,7 @@ agx_ra(agx_context *ctx)
          .classes = classes,
          .visited = visited,
          .low_gpr = low_gpr,
+         .texture_gpr = texture_gpr,
          .high_gpr = high_gpr,
          .bound[RA_GPR] = max_regs,
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
@@ -1932,6 +1963,7 @@ agx_ra(agx_context *ctx)
 
    free(phi_web);
    free(low_gpr);
+   free(texture_gpr);
    free(high_gpr);
    free(src_to_collect_phi);
    free(ncomps);

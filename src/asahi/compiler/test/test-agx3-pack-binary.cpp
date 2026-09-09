@@ -4572,6 +4572,79 @@ TEST_F(AGX3PackBinary, Implicit2DRebasesMaterializedCoordinates)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
+TEST_F(AGX3PackBinary, Implicit2DCoordinateCopySourceBank)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+
+   /* The first pair is the exact current GTK component-transfer placement;
+    * the second ends on the last two legal COPY source halves. */
+   for (const unsigned source : {84u, 124u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      agx_index coord = agx_register(source, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_instr *tex = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+         AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE,
+         false);
+      tex->mask = 15;
+      for (unsigned channel = 0; channel < 4; ++channel)
+         agx_export(b, agx_register(8 + 2 * channel, AGX_SIZE_32),
+                    8 + 2 * channel);
+
+      std::vector<uint8_t> want;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, source, 1, 0, false,
+                                            true, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, source + 2, 1, 0,
+                                            false, true, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+      append(want, bytes, len);
+      const struct agx3_tex_sample_desc sample = {
+         .dest = 8,
+         .coord = 0,
+         .width = AGX3_TEX_W32,
+         .mask = 15,
+         .lod = AGX3_TEX_LOD_AUTO,
+         .slot = 1,
+         .wait_mask = 1,
+         .final = true,
+         .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+      };
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                   bytes, &len));
+      append(want, bytes, len);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* Half 128 used to be masked onto half 0 by the low-level composer. The
+    * complete post-RA instruction must now fail closed. */
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   agx_index coord = agx_register(128, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_instr *tex = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   tex->mask = 15;
+   pack(b, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, FragmentImplicit2DStagesNativeCoordinates)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
