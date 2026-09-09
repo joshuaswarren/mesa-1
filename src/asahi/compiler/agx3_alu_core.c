@@ -1849,11 +1849,23 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
  * literally `enum agx_fcond`, and it is orthogonal to the operand routing.
  * The last row is why an inverted condition needs no separate encoding --
  * Apple spells it by exchanging the two selected values.
+ *
+ * GTK's CICP conversion also reaches `0.5 >= fabs(x)`. Fresh G17P kernels
+ * show Apple canonicalizing it to `fabs(x) <= 0.5` on long endpoint 35:
+ *
+ *   <=   02 03 07 a1 07 04 03 02 00 06 00 80 01 00
+ *   >=   02 03 07 a1 07 04 02 02 00 06 00 80 01 00
+ *   >    02 03 07 a1 03 04 02 02 00 06 00 80 01 00
+ *   <    02 03 07 a1 03 04 03 02 00 06 00 80 01 00
+ *   ==   02 03 07 a1 07 04 00 02 00 06 00 80 01 00
+ *
+ * Field47 is the only new semantic bit; operand fields, lifetime hints and
+ * the condition retain their ordinary FSEL meanings.
  */
 bool
 agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
-                             uint16_t src0, uint8_t minifloat, uint16_t src2,
-                             uint16_t src3,
+                             uint16_t src0, uint8_t minifloat, bool src0_abs,
+                             uint16_t src2, uint16_t src3,
                              const enum agx3_alu_hint hints[4],
                              unsigned condition, bool dest_cache,
                              uint16_t wait_mask,
@@ -1870,8 +1882,12 @@ agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
        condition != 5 && condition != 6)
       return false;
 
-   /* One scoreboard slot at a time: the selector is a three-bit code. */
+   /* The compact endpoint exposes the full single-slot wait selector.  The
+    * absolute endpoint is freshly witnessed with the native load slot (5);
+    * callers retire any other slot before composing it. */
    if ((wait_mask & ~UINT16_C(0x3f)) || (wait_mask & (wait_mask - 1)))
+      return false;
+   if (src0_abs && wait_mask != 0 && wait_mask != 32)
       return false;
 
    for (unsigned i = 0; i < 4; ++i) {
@@ -1884,7 +1900,7 @@ agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
    if (hints[1] != AGX3_ALU_HINT_NONE)
       return false;
 
-   struct agx3_field_kv fields[24];
+   struct agx3_field_kv fields[25];
    unsigned n = 0;
    fields[n++] = (struct agx3_field_kv){3, dest};
    fields[n++] = (struct agx3_field_kv){10, 2};
@@ -1895,6 +1911,8 @@ agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
    fields[n++] = (struct agx3_field_kv){43, 2};
    fields[n++] = (struct agx3_field_kv){44, hints[0] == AGX3_ALU_HINT_CACHE};
    fields[n++] = (struct agx3_field_kv){46, hints[0] == AGX3_ALU_HINT_DISCARD};
+   if (src0_abs)
+      fields[n++] = (struct agx3_field_kv){47, 1};
    fields[n++] = (struct agx3_field_kv){51, minifloat};
    fields[n++] = (struct agx3_field_kv){59, 1};
    fields[n++] = (struct agx3_field_kv){60, 2};
@@ -1916,7 +1934,8 @@ agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
       }
    }
 
-   return agx3_bind_compose(enc, "fsel", 27, NULL, 0, fields, n, out, len);
+   return agx3_bind_compose(enc, "fsel", src0_abs ? 35 : 27, NULL, 0,
+                            fields, n, out, len);
 }
 
 bool

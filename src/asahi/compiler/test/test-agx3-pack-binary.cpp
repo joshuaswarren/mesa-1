@@ -2067,6 +2067,53 @@ TEST_F(AGX3PackBinary, HyprlandAbsoluteSecondFsel)
    EXPECT_EQ(pack(b), target);
 }
 
+TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatFsel)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index absolute = agx_register(2, AGX_SIZE_32);
+   absolute.abs = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(32),
+                  absolute, agx_register(4, AGX_SIZE_32),
+                  agx_register(6, AGX_SIZE_32), AGX_FCOND_GE);
+   agx_stop(b);
+
+   /* Exact current-toolchain applegpu_g17p bytes for the no-wait kernel
+    * `0.5 >= fabs(x) ? y : z`, plus STOP. */
+   const std::vector<uint8_t> native = {
+      0x02, 0x03, 0x07, 0xa1, 0x07, 0x04, 0x03, 0x02,
+      0x00, 0x06, 0x00, 0x00, 0x01, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+}
+
+TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatRefusesModifiers)
+{
+   for (unsigned mode = 0; mode < 8; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, mode == 1 ? AGX_SIZE_16
+                                                 : AGX_SIZE_32);
+      agx_index threshold = agx_immediate(32);
+      agx_index compare = agx_register(2, mode == 2 ? AGX_SIZE_16
+                                                    : AGX_SIZE_32);
+      agx_index if_true = agx_register(4, AGX_SIZE_32);
+      agx_index if_false = agx_register(mode == 3 ? 7 : 6, AGX_SIZE_32);
+      compare.abs = true;
+      if (mode == 4)
+         compare.neg = true;
+      if (mode == 5)
+         threshold.abs = true;
+      if (mode == 6)
+         if_true.abs = true;
+      if (mode == 7)
+         compare.cache = compare.discard = true;
+      agx_fcmpsel_to(b, dest, threshold, compare, if_true, if_false,
+                     AGX_FCOND_GE);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, OrderedAbsoluteFselRefusesUnwitnessedDoubleAbs)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

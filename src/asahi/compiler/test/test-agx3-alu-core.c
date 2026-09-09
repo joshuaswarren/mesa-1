@@ -3114,7 +3114,7 @@ static void test_native_f32_minifloat_select(void)
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
       assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20,
-                                          6, 10, hints, cases[i].condition,
+                                          false, 6, 10, hints, cases[i].condition,
                                           false, 0, bytes, &len));
       exact(bytes, len, cases[i].bytes);
 
@@ -3123,39 +3123,87 @@ static void test_native_f32_minifloat_select(void)
       assert(bytes[6] == cases[i].apple_byte6);
    }
 
-   /* The minifloat spans the same field as every other fsel immediate. */
+   /* Fresh current-toolchain applegpu_g17p kernels for `0.5 OP fabs(x)`.
+    * Apple reverses the operands, places fabs(x) in source0, and uses the
+    * long endpoint whose field47 is the absolute modifier. */
+   static const struct {
+      unsigned condition;
+      const char *bytes;
+   } absolute[] = {
+      {6 /* le */, "020307a107040302000600800100"},
+      {5 /* ge */, "020307a107040202000600800100"},
+      {2 /* gt */, "020307a103040202000600800100"},
+      {1 /* lt */, "020307a103040302000600800100"},
+      {0 /* eq */, "020307a107040002000600800100"},
+   };
+   const enum agx3_alu_hint absolute_hints[4] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   for (unsigned i = 0; i < sizeof(absolute) / sizeof(absolute[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_fcmp_select_f32_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, 2, 0x20, true, 4, 6,
+         absolute_hints, absolute[i].condition, false, 32, bytes, &len));
+      exact(bytes, len, absolute[i].bytes);
+   }
+
+   /* Apple spells != as EQ with the selected values exchanged here too. */
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x00, 6,
+   assert(agx3_alu_fcmp_select_f32_imm(
+      AGX_ISA_ENCODING_AGX3B, 0, 2, 0x20, true, 6, 4,
+      absolute_hints, 0, false, 32, bytes, &len));
+   exact(bytes, len, "020307a107060002000400800100");
+
+   /* The minifloat spans the same field as every other fsel immediate. */
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x00, false, 6,
                                        10, hints, 1, false, 0, bytes, &len));
    exact(bytes, len, "12030f8102060302000a");
-   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0xff, 6,
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0xff, false, 6,
                                        10, hints, 1, false, 0, bytes, &len));
    exact(bytes, len, "12031fff02061302000a");
 
    /* Waits, lifetimes and the cached destination stay orthogonal. */
-   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+   assert(agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, 6,
                                        10, hints, 2, true, 32, bytes, &len));
    exact(bytes, len, "12032fa1020602c2000a");
 
    /* Fail closed: the wrong encoding, an unwitnessed condition, a wait
     * spanning two slots, an odd register, and a lifetime on the immediate. */
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, false, 6,
                                         10, hints, 1, false, 0, bytes, &len));
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, 6,
                                         10, hints, 3, false, 0, bytes, &len));
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, 6,
                                         10, hints, 7, false, 0, bytes, &len));
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, 6,
                                         10, hints, 1, false, 3, bytes, &len));
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, 6,
                                         10, hints, 1, false, 0, bytes, &len));
    const enum agx3_alu_hint bad[4] = {
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
    };
-   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, 6,
+   assert(!agx3_alu_fcmp_select_f32_imm(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, 6,
                                         10, bad, 1, false, 0, bytes, &len));
-   puts("Native f32 minifloat select: Apple's five witnessed conditions, "
+   assert(!agx3_alu_fcmp_select_f32_imm(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, true, 6, 10,
+      absolute_hints, 1, false, 1, bytes, &len));
+   assert(agx3_alu_fcmp_select_f32_imm(
+      AGX_ISA_ENCODING_AGX3B, 254, 252, 0xff, true, 250, 248,
+      absolute_hints, 1, true, 0, bytes, &len));
+   assert(!agx3_alu_fcmp_select_f32_imm(
+      AGX_ISA_ENCODING_AGX3B, 254, 253, 0xff, true, 250, 248,
+      absolute_hints, 1, true, 0, bytes, &len));
+   const enum agx3_alu_hint gtk_hints[4] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   assert(agx3_alu_fcmp_select_f32_imm(
+      AGX_ISA_ENCODING_AGX3B, 20, 12, 0x20, true, 30, 20,
+      gtk_hints, 6, false, 0, bytes, &len));
+   exact(bytes, len, "a28d07a1071e0302001400000100");
+   puts("Native f32 minifloat select: Apple's plain and absolute conditions, "
         "immediate span, wait/lifetime orthogonality and fail-closed PASS");
 }
 

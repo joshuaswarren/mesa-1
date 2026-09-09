@@ -7276,9 +7276,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
              agx3_vary_reg32(I->src[2]) && agx3_vary_reg32(I->src[3]) &&
              agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1 &&
-             ((agx3_vary_reg32(I->src[0]) &&
+             ((agx3_mod_src_ok(I->src[0]) &&
                I->src[1].type == AGX_INDEX_IMMEDIATE) ||
-              (agx3_vary_reg32(I->src[1]) &&
+              (agx3_mod_src_ok(I->src[1]) &&
                I->src[0].type == AGX_INDEX_IMMEDIATE))) {
             const bool immediate_first =
                I->src[0].type == AGX_INDEX_IMMEDIATE;
@@ -7290,8 +7290,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             bool invalid = immediate.value > 255 ||
                            agx_channels(compare) != 1;
             for (unsigned i = 0; i < 4; ++i)
-               invalid |= I->src[i].abs || I->src[i].neg || I->src[i].kill ||
-                          I->src[i].memory ||
+               invalid |= (I->src[i].abs && i != (immediate_first ? 1 : 0)) ||
+                          I->src[i].neg || I->src[i].kill || I->src[i].memory ||
                           (I->src[i].cache && I->src[i].discard);
             if (invalid)
                AGX3_REFUSE(I);
@@ -7304,7 +7304,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx3_post_ra_hint(I->src[false_src])};
 
             uint16_t fsel_wait = wait;
-            if (fsel_wait & (fsel_wait - 1)) {
+            if ((compare.abs && fsel_wait != 0 && fsel_wait != 32) ||
+                (fsel_wait & (fsel_wait - 1))) {
                if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
@@ -7313,7 +7314,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!agx3_alu_fcmp_select_f32_imm(
                    enc, I->dest[0].value, compare.value,
-                   (uint8_t)immediate.value, I->src[true_src].value,
+                   (uint8_t)immediate.value, compare.abs,
+                   I->src[true_src].value,
                    I->src[false_src].value, hints, condition,
                    I->dest[0].cache, fsel_wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))

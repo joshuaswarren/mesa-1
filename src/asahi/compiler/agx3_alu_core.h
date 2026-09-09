@@ -374,13 +374,15 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
 /*
  * Compare a 32-bit float against a minifloat immediate and select either of
  * two 32-bit registers -- what `x < k ? a : b` becomes once Mesa carries the
- * constant as a minifloat. Conditions are enum agx_fcond; eq, lt, gt, ge and
- * le are witnessed, ltn and gtn are not and are refused. An inverted
+ * constant as a minifloat. The compared register may carry fabs; that native
+ * form uses the long endpoint. Conditions are enum agx_fcond; eq, lt, gt, ge
+ * and le are witnessed, ltn and gtn are not and are refused. An inverted
  * condition needs no encoding of its own: Apple spells `!=` as `==` with the
  * two selected operands exchanged.
  */
 bool agx3_alu_fcmp_select_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   uint16_t src0, uint8_t minifloat,
+                                  bool src0_abs,
                                   uint16_t src2, uint16_t src3,
                                   const enum agx3_alu_hint hints[4],
                                   unsigned condition, bool dest_cache,
