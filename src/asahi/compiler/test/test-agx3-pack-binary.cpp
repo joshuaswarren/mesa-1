@@ -966,6 +966,64 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, AlphaCoverageBoundarySelectMatchesNative)
+{
+   enum modifier {
+      NONE,
+      COMPARE_ABS,
+      COMPARE_NEG,
+      COMPARE_KILL,
+      COMPARE_CONFLICTING_HINTS,
+      THRESHOLD_ABS,
+      SELECTED_ABS,
+      SELECTED_NEG,
+      SELECTED_KILL,
+      SATURATE,
+   };
+
+   auto build = [&](enum modifier kind, bool fail_closed) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index compare = agx_register(2, AGX_SIZE_32);
+      agx_index threshold = agx_immediate(0x6f); /* 15.5 */
+      agx_index selected = agx_register(0, AGX_SIZE_32);
+      compare.discard = selected.discard = true;
+
+      switch (kind) {
+      case NONE: break;
+      case COMPARE_ABS: compare.abs = true; break;
+      case COMPARE_NEG: compare.neg = true; break;
+      case COMPARE_KILL: compare.kill = true; break;
+      case COMPARE_CONFLICTING_HINTS: compare.cache = true; break;
+      case THRESHOLD_ABS: threshold.abs = true; break;
+      case SELECTED_ABS: selected.abs = true; break;
+      case SELECTED_NEG: selected.neg = true; break;
+      case SELECTED_KILL: selected.kill = true; break;
+      case SATURATE: break;
+      }
+
+      agx_instr *I = agx_fcmpsel_to(
+         b, agx_register(14, AGX_SIZE_32), compare, threshold, selected,
+         agx_immediate(0), AGX_FCOND_GE);
+      I->saturate = kind == SATURATE;
+      agx_stop(b);
+      return pack(b, !fail_closed);
+   };
+
+   /* Exact post-RA alpha-to-coverage shape. The physical destination needs
+    * Apple's ten-byte ep22 form; the terminal instruction follows it. */
+   const uint8_t expected[] = {
+      0x72, 0x03, 0x0b, 0xef, 0x86, 0x00, 0x12, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(build(NONE, false),
+             std::vector<uint8_t>(expected, expected + sizeof(expected)));
+
+   for (unsigned bad = COMPARE_ABS; bad <= SATURATE; ++bad) {
+      SCOPED_TRACE(bad);
+      EXPECT_TRUE(build((enum modifier)bad, true).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;

@@ -1754,9 +1754,22 @@ static void test_native_minifloat_mixed_select(void)
          AGX3_ALU_HINT_NONE,
       };
       assert(agx3_alu_fcmp_minifloat_select_mixed(
-         AGX_ISA_ENCODING_AGX3B, 0, 8, 0x20, selected, immediate, hints,
+         AGX_ISA_ENCODING_AGX3B, 0, 8, 0x10, selected, immediate, hints,
          5, false, false, 32, bytes, &len));
       exact(bytes, len, "02090b91248002c2");
+   }
+   {
+      /* Exact native `a >= 15.5 ? v : 0` alpha-coverage boundary. */
+      const uint16_t selected[] = {0, 0};
+      const bool immediate[] = {false, true};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 4, 0x6f, selected, immediate, hints,
+         5, false, false, 32, bytes, &len));
+      exact(bytes, len, "02050bef248012c2");
    }
    {
       const uint16_t selected[] = {255, 0};
@@ -1820,7 +1833,7 @@ static void test_native_minifloat_mixed_select(void)
          AGX_ISA_ENCODING_AGX3B, 2, 22, 0x40, glitch_selected,
          glitch_immediate, glitch_hints, 1, false, true, 0, bytes, &len));
    }
-   puts("Native minifloat mixed select: seven exact Apple vectors and bounds PASS");
+   puts("Native minifloat mixed select: eight exact Apple vectors and bounds PASS");
 }
 
 static void test_native_fadd_abs_mixed_half(void)

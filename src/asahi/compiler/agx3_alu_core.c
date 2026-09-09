@@ -1112,11 +1112,13 @@ agx3_alu_fcmp_minifloat_select_mixed(
                : (selected_immediate[0] == selected_immediate[1]))
       return false;
 
-   /* The only measured GE family is Hyprland's full-width
-    * `a >= 0.25 ? register : 0` form. */
+   /* The measured GE family has a full result and selects a full register or
+    * zero. The compare immediate is the ordinary AGX minifloat: fresh native
+    * witnesses cover 0.25 through 16.0, including the alpha-to-coverage
+    * boundary 15.5. */
    if (condition == 5 &&
-       (dest_16 || minifloat != 0x20 || selected_immediate[0] ||
-        !selected_immediate[1] || selected[1] != 0))
+       (dest_16 || selected_immediate[0] || !selected_immediate[1] ||
+        selected[1] != 0))
       return false;
 
    for (unsigned i = 0; i < 2; ++i) {
@@ -1152,9 +1154,7 @@ agx3_alu_fcmp_minifloat_select_mixed(
       {dest_16 ? 3 : 17, dest},
       {dest_16 ? 12 : 26, dest_cache},
       {35, compare},
-      /* The ep10 LUT aliases logical minifloat 0x20 with field value 0x10.
-       * Apple's G17P binary chooses the latter spelling for this GE form. */
-      {51, condition == 5 ? 0x10 : minifloat},
+      {51, minifloat},
       {selected_immediate[0] ? 68 : 69, selected[0]},
       {selected_immediate[1] ? 85 : 86, selected[1]},
       {44, hints[0] == AGX3_ALU_HINT_CACHE},
@@ -1173,8 +1173,9 @@ agx3_alu_fcmp_minifloat_select_mixed(
       }
    }
 
-   /* Apple's witnessed GE/minifloat vector uses the eight-byte ep10 form;
-    * the older EQ/LT corpus uses ep22/25/26 according to result width. */
+   /* Apple's witnessed GE/minifloat vectors use the eight-byte ep10 form when
+    * the physical destination permits it. The older EQ/LT corpus uses
+    * ep22/25/26 according to result width. */
    const unsigned preferred = condition == 5
                                  ? 10
                                  : (dest_16 ? ((dest & 1) ? 26 : 25) : 22);

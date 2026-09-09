@@ -1118,6 +1118,75 @@ test_g17p_divergent_quad_loop(void)
    return ok;
 }
 
+static nir_shader *
+build_fs_alpha_coverage_boundary(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P alpha-to-coverage pixel boundary FS");
+   nir_def *zero = nir_imm_float(&b, 0.0f);
+   nir_def *one = nir_imm_float(&b, 1.0f);
+   nir_def *pixel = nir_u2u32(&b, nir_load_pixel_coord(&b));
+   nir_def *frag_x = nir_fadd_imm(
+      &b, nir_u2f32(&b, nir_channel(&b, pixel, 0)), 0.5f);
+   nir_def *alpha = nir_bcsel(
+      &b, nir_flt_imm(&b, frag_x, 16.0f),
+      zero, one);
+   nir_def *colour = nir_vec4(&b, one, zero, zero, alpha);
+   for (unsigned c = 0; c < 4; ++c)
+      nir_export_agx(&b, nir_channel(&b, colour, c),
+                     .base = AGX_ABI_FOUT_COLOUR(0) + 2 * c);
+
+   /* Match the Vulkan frontend ordering: FragCoord.xy becomes the native
+    * pixel-coordinate system value plus its half-pixel center before the AGX
+    * optimizer folds the boundary to the exactly representable 15.5. */
+   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   agx_preprocess_nir_g17p(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+static bool
+test_g17p_alpha_coverage_boundary(void)
+{
+   /* Exact post-RA select from the unchanged Vulkan fragment:
+    *   gl_FragCoord.x < 16.0 ? 0.0 : 1.0
+    * Pixel-center lowering reverses that to x >= 15.5. Physical r7 cannot
+    * use native ep10, so the composer must choose this ten-byte ep22 form. */
+   static const uint8_t expected_fsel[] = {
+      0x72, 0x01, 0x0b, 0xef, 0x06,
+      0x08, 0x12, 0x02, 0x20, 0x80,
+   };
+   nir_shader *nir = build_fs_alpha_coverage_boundary();
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part) && part.binary;
+   bool found = false;
+   for (unsigned i = 0;
+        ok && i + sizeof(expected_fsel) <= part.info.binary_size; ++i) {
+      if (!memcmp((const uint8_t *)part.binary + i, expected_fsel,
+                  sizeof(expected_fsel))) {
+         found = true;
+         break;
+      }
+   }
+   ok &= found;
+   if (!ok && part.binary) {
+      fprintf(stderr, "G17P alpha-coverage boundary (%u bytes):",
+              part.info.binary_size);
+      for (unsigned i = 0; i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
 /* A real post-lowering interpolateAtSample shape. Deriving the runtime sample
  * index from the pixel coordinate keeps it dynamic without leaving an
  * unlowered load_sample_id intrinsic for the backend. */
@@ -4831,6 +4900,12 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--alpha-coverage-only")) {
+      const bool ok = test_g17p_alpha_coverage_boundary();
+      fprintf(stderr, "G17P alpha-coverage boundary select: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--quad-control-only")) {
       const bool ok = test_g17p_quad_control_modes() &&
                       test_g17p_divergent_quad_loop();
@@ -4970,6 +5045,8 @@ main(int argc, char **argv)
    if (!test_g17p_quad_control_modes())
       all_ok = false;
    if (!test_g17p_divergent_quad_loop())
+      all_ok = false;
+   if (!test_g17p_alpha_coverage_boundary())
       all_ok = false;
 
    if (!test_g17p_vkcube_fragment_main())
