@@ -790,22 +790,80 @@ out:
    return valid;
 }
 
+/* Explicit sample coordinates are an opaque 32-bit token. Require the most
+ * recent overlapping write in this block to be ITRCOORDS, so a legacy ITER
+ * sample-index register or an unrelated arithmetic value cannot accidentally
+ * select the native f32interp coordinate leaf. A tied final interpolation is
+ * valid because sources are read before its destination overwrites the token. */
 static bool
-agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
-                 const agx_instr *I, uint16_t wait_mask, bool first, bool fragment)
+agx3_sample_coords_use(const agx_block *block, const agx_instr *consumer)
 {
-   if (wait_mask != 0 || I->nr_dests != 1 || I->nr_srcs != 2 ||
-       !agx3_vary_reg32(I->dest[0]) ||
-       I->src[0].type != AGX_INDEX_IMMEDIATE ||
-       I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != 0)
+   if (consumer->nr_srcs != 2 || !agx3_vary_reg32(consumer->src[1]))
       return false;
 
-   enum agx3_vary_location location;
-   if (!agx3_map_vary_location(I->interpolation, &location))
+   const unsigned base = consumer->src[1].value;
+   const agx_instr *producer = NULL;
+   agx_foreach_instr_in_block(block, I) {
+      if (I == consumer)
+         return producer != NULL;
+
+      agx_foreach_dest(I, d) {
+         const agx_index dst = I->dest[d];
+         if (!agx3_src_is_register(dst) || dst.memory)
+            continue;
+         const unsigned end = dst.value + agx_index_size_16(dst);
+         if (end <= base || dst.value >= base + 2)
+            continue;
+
+         producer = I->op == AGX_OPCODE_ITRCOORDS_AGX3 && dst.value == base &&
+                          dst.size == AGX_SIZE_32 && agx_channels(dst) == 1
+                       ? I
+                       : NULL;
+      }
+   }
+
+   return false;
+}
+
+static bool
+agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
+                 const agx_instr *I, uint16_t wait_mask, bool first,
+                 bool fragment)
+{
+   if (wait_mask != 0 || I->nr_dests != 1 || I->nr_srcs != 2 ||
+       !agx3_vary_reg32(I->dest[0]) || I->src[0].type != AGX_INDEX_IMMEDIATE)
       return false;
+
+   const bool sample = I->interpolation == AGX_INTERPOLATION_SAMPLE;
+   enum agx3_vary_location location;
+   if (sample) {
+      if (enc != AGX_ISA_ENCODING_AGX3B || first ||
+          !agx3_vary_reg32(I->src[1]) || I->src[1].kill ||
+          (I->src[1].cache && I->src[1].discard))
+         return false;
+   } else {
+      if (I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != 0 ||
+          !agx3_map_vary_location(I->interpolation, &location))
+         return false;
+   }
 
    uint8_t bytes[AGX3_VARY_MAX_LENGTH];
    uint8_t len = 0;
+   if (sample && I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
+      if (I->saturate)
+         return false;
+      return agx3_vary_projective_rhw_sample(enc, I->dest[0].value,
+                                             I->src[0].value, I->src[1].value,
+                                             I->src[1].discard, bytes, &len) &&
+             agx3_append(emission, bytes, len);
+   }
+   if (sample) {
+      return agx3_vary_interp_sample(enc, I->dest[0].value, I->src[0].value,
+                                     I->perspective, I->src[1].value,
+                                     I->src[1].discard, bytes, &len) &&
+             agx3_append(emission, bytes, len);
+   }
+
    if (I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
       if (I->saturate || location != AGX3_VARY_CENTER)
          return false;
@@ -822,6 +880,27 @@ agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
        location == AGX3_VARY_CENTER);
    return agx3_vary_interp_at_start(enc, I->dest[0].value, I->src[0].value,
                                     native_mode, location, first, bytes, &len) &&
+          agx3_append(emission, bytes, len);
+}
+
+static bool
+agx3_emit_itrcoords(struct util_dynarray *emission, enum agx_isa_encoding enc,
+                    const agx_instr *I, uint16_t wait_mask)
+{
+   if (I->nr_dests != 1 || I->nr_srcs != 1 || !agx3_vary_reg32(I->dest[0]) ||
+       !agx3_src_is_register(I->src[0]) || I->src[0].memory ||
+       I->src[0].size != AGX_SIZE_16 || agx_channels(I->src[0]) != 1 ||
+       I->src[0].value >= 256 || I->src[0].abs || I->src[0].neg ||
+       I->src[0].kill || (I->src[0].cache && I->src[0].discard))
+      return false;
+
+   uint8_t bytes[AGX3_VARY_MAX_LENGTH];
+   uint8_t len = 0;
+   /* Cache is an optional post-RA hint. The fresh ITRCOORDS witnesses cover
+    * the unmarked and terminal source forms, so preserve the terminal bit and
+    * deliberately leave a merely cached source unmarked. */
+   return agx3_vary_sample_coords(enc, I->dest[0].value, I->src[0].value,
+                                  I->src[0].discard, wait_mask, bytes, &len) &&
           agx3_append(emission, bytes, len);
 }
 
@@ -4847,6 +4926,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * LOD samples.  This conservatively preserves helper-capable lanes;
           * plain varying-only fragments retain the marker below. */
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+             scan_I->op == AGX_OPCODE_ITRCOORDS_AGX3 ||
              scan_I->op == AGX_OPCODE_DFDX ||
              scan_I->op == AGX_OPCODE_DFDY)
             g17p_fragment_helper_protocol = true;
@@ -5359,8 +5439,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         if (I->op == AGX_OPCODE_ITRCOORDS_AGX3) {
+            if (ctx->stage != MESA_SHADER_FRAGMENT ||
+                !agx3_emit_itrcoords(emission, enc, I, wait))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (I->op == AGX_OPCODE_INTERP_AGX3 ||
              I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
+            if (I->interpolation == AGX_INTERPOLATION_SAMPLE &&
+                !agx3_sample_coords_use(block, I))
+               AGX3_REFUSE(I);
             if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 &&
                 (enc != AGX_ISA_ENCODING_AGX3B ||
                  ctx->stage != MESA_SHADER_FRAGMENT ||

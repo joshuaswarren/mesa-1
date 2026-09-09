@@ -17,16 +17,20 @@ is_b(enum agx_isa_encoding e)
 
 static bool
 agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
-                    uint16_t coef_index, bool perspective,
-                    enum agx3_vary_location location, bool first, bool projective_rhw,
-                    uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+                      uint16_t coef_index, bool perspective,
+                      enum agx3_vary_location location, bool first,
+                      bool projective_rhw, bool explicit_sample,
+                      uint16_t coords, bool coords_kill,
+                      uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
    if ((enc != AGX_ISA_ENCODING_AGX3B &&
         enc != AGX_ISA_ENCODING_AGX3C) ||
        (first && enc != AGX_ISA_ENCODING_AGX3B) ||
        (projective_rhw && (enc != AGX_ISA_ENCODING_AGX3B ||
-                           location != AGX3_VARY_CENTER || !perspective ||
-                           coef_index > 0x7f)) ||
+                           (!explicit_sample && location != AGX3_VARY_CENTER) ||
+                           !perspective || coef_index > 0x7f)) ||
+       (explicit_sample && (enc != AGX_ISA_ENCODING_AGX3B || first ||
+                            (coords & 1) != 0 || coords >= 256)) ||
        (dest & 1) != 0 || dest >= 256 ||
        (location != AGX3_VARY_CENTER && location != AGX3_VARY_CENTROID))
       return false;
@@ -40,14 +44,23 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
    ov[n++] = (struct agx3_field_kv)KV(22, coef_index);
    ov[n++] = (struct agx3_field_kv)KV(11, perspective ? 1 : 0);
-   if (location == AGX3_VARY_CENTER) {
+   if (explicit_sample) {
+      /* Apple Metal 32023.917, applegpu_g17p. The source SHA-256
+       * 2f0835ef... produces perspective, no-perspective, and mixed
+       * center/sample programs:
+       * f39/f40 select a 32-bit coordinate register, f32 names the token,
+       * and f41/f43 are its live/final-use alternatives. */
+      ov[n++] = (struct agx3_field_kv)KV(39, 2);
+      ov[n++] = (struct agx3_field_kv)KV(32, coords);
+      ov[n++] = (struct agx3_field_kv)KV(coords_kill ? 43 : 41, 1);
+   } else if (location == AGX3_VARY_CENTER) {
       ov[n++] = (struct agx3_field_kv)KV(37, 66);
       ov[n++] = (struct agx3_field_kv)KV(39, 7);
       ov[n++] = (struct agx3_field_kv)KV(41, 0);
       ov[n++] = (struct agx3_field_kv)KV(32, 0);
    } else {
-      /* Centroid and ordinary per-sample interpolation use the same leaf.
-       * Explicit at-sample setup remains outside this codec. */
+      /* Centroid interpolation uses the same register-source leaf, with the
+       * native implicit coordinate register selected by the shade model. */
       ov[n++] = (struct agx3_field_kv)KV(39, 2);
       ov[n++] = (struct agx3_field_kv)KV(41, 1);
       ov[n++] =
@@ -62,13 +75,65 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_vary_sample_coords(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t sample_index, bool sample_index_kill,
+                        uint16_t wait_mask, uint8_t out[AGX3_VARY_MAX_LENGTH],
+                        uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || (dest & 1) != 0 || dest >= 256 ||
+       sample_index >= 256 || (wait_mask & ~0x3f) != 0)
+      return false;
+
+   /* Fresh Apple Metal 32023.917 `interpolate_at_sample` and
+    * `[[sample_{,no_}perspective]]` witnesses. ITRCOORDS is an eight-byte
+    * G17P instruction: register/32-bit destination, register/16-bit sample
+    * source, and sample mode f38=2. */
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(11, 1), KV(23, 2), KV(24, 1), KV(38, 2),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(16, sample_index);
+   if (sample_index_kill)
+      ov[n++] = (struct agx3_field_kv)KV(27, 1);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
+
+   return agx3_bind_compose(enc, "itrcoords", 0, base, 6, ov, n, out, len);
+}
+
+bool
+agx3_vary_interp_sample(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t coef_index, bool perspective, uint16_t coords,
+                        bool coords_kill, uint8_t out[AGX3_VARY_MAX_LENGTH],
+                        uint8_t *len)
+{
+   return agx3_vary_interp_mode(enc, dest, coef_index, perspective,
+                                AGX3_VARY_CENTER, false, false, true, coords,
+                                coords_kill, out, len);
+}
+
+bool
+agx3_vary_projective_rhw_sample(enum agx_isa_encoding enc, uint16_t dest,
+                                uint16_t coef_index, uint16_t coords,
+                                bool coords_kill,
+                                uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_vary_interp_mode(enc, dest, coef_index, true, AGX3_VARY_CENTER,
+                                false, true, true, coords, coords_kill, out,
+                                len);
+}
+
+bool
 agx3_vary_interp_at_start(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t coef_index, bool perspective,
                          enum agx3_vary_location location, bool first,
                          uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
    return agx3_vary_interp_mode(enc, dest, coef_index, perspective, location,
-                               first, false, out, len);
+                                first, false, false, 0, false, out, len);
 }
 
 bool
@@ -77,7 +142,7 @@ agx3_vary_projective_rhw(enum agx_isa_encoding enc, uint16_t dest,
                          uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
    return agx3_vary_interp_mode(enc, dest, coef_index, true, AGX3_VARY_CENTER,
-                               first, true, out, len);
+                                first, true, false, 0, false, out, len);
 }
 
 bool

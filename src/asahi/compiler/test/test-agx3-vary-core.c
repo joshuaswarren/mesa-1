@@ -51,6 +51,91 @@ int main(void){
       else pass++;
    }
    {
+      /* Fresh Apple Metal 32023.917 applegpu_g17p witnesses from
+       * explicit_sample.metal (source SHA-256 2f0835ef...). These isolate
+       * ITRCOORDS, perspective/projective f32interp, no-perspective
+       * f32interp, and the coordinate token's live/final-use alternatives. */
+      static const uint8_t coords_terminal[] = {0xaf, 0x04, 0x54, 0x0a,
+                                                0x03, 0x06, 0x0a, 0x03};
+      static const uint8_t coords_unmarked[] = {0xaf, 0x04, 0x54, 0x00,
+                                                0x03, 0x10, 0x0a, 0x02};
+      static const uint8_t projective_live[] = {0x2f, 0x05, 0x54, 0x0c, 0x03,
+                                                0x00, 0x05, 0x02, 0x09, 0x00};
+      static const uint8_t perspective_live[] = {0x2f, 0x05, 0x54, 0x0c, 0x03,
+                                                 0x06, 0x05, 0x02, 0x08, 0x00};
+      static const uint8_t linear_terminal[] = {0x2f, 0x05, 0x54, 0x10, 0x02,
+                                                0x08, 0x08, 0x02, 0x20, 0x00};
+      uint8_t out[AGX3_VARY_MAX_LENGTH];
+      uint8_t len = 0;
+
+      if (!agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 10, 3, true, 0, out,
+                                   &len) ||
+          len != sizeof(coords_terminal) ||
+          memcmp(out, coords_terminal, sizeof(coords_terminal)))
+         fail++;
+      else
+         pass++;
+      if (!agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 0, 8, false, 0, out,
+                                   &len) ||
+          len != sizeof(coords_unmarked) ||
+          memcmp(out, coords_unmarked, sizeof(coords_unmarked)))
+         fail++;
+      else
+         pass++;
+      if (!agx3_vary_projective_rhw_sample(AGX_ISA_ENCODING_AGX3B, 12, 0, 10,
+                                           false, out, &len) ||
+          len != sizeof(projective_live) ||
+          memcmp(out, projective_live, sizeof(projective_live)))
+         fail++;
+      else
+         pass++;
+      if (!agx3_vary_interp_sample(AGX_ISA_ENCODING_AGX3B, 12, 3, true, 10,
+                                   false, out, &len) ||
+          len != sizeof(perspective_live) ||
+          memcmp(out, perspective_live, sizeof(perspective_live)))
+         fail++;
+      else
+         pass++;
+      if (!agx3_vary_interp_sample(AGX_ISA_ENCODING_AGX3B, 16, 4, false, 16,
+                                   true, out, &len) ||
+          len != sizeof(linear_terminal) ||
+          memcmp(out, linear_terminal, sizeof(linear_terminal)))
+         fail++;
+      else
+         pass++;
+
+      if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3C, 0, 0, true, 0, out,
+                                  &len))
+         fail++;
+      else
+         pass++;
+      if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 1, 0, true, 0, out,
+                                  &len))
+         fail++;
+      else
+         pass++;
+      if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 0, 256, true, 0, out,
+                                  &len))
+         fail++;
+      else
+         pass++;
+      if (agx3_vary_sample_coords(AGX_ISA_ENCODING_AGX3B, 0, 0, true, 0x40, out,
+                                  &len))
+         fail++;
+      else
+         pass++;
+      if (agx3_vary_interp_sample(AGX_ISA_ENCODING_AGX3B, 0, 0, false, 3, false,
+                                  out, &len))
+         fail++;
+      else
+         pass++;
+      if (agx3_vary_projective_rhw_sample(AGX_ISA_ENCODING_AGX3B, 0, 128, 0,
+                                          false, out, &len))
+         fail++;
+      else
+         pass++;
+   }
+   {
       /* Fresh Apple flat float3 fragment, 2026-09-05: only its first
        * coefficient load carries f48. Later loads preserve the old codec. */
       const uint8_t first[] = {0x1f,0x0b,0x54,0x07,0x00,0x05};

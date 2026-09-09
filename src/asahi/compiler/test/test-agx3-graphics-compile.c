@@ -892,6 +892,29 @@ build_fs_interpolated(void)
    return fs_finish(&b);
 }
 
+/* A real post-lowering interpolateAtSample shape. Deriving the runtime sample
+ * index from the pixel coordinate keeps it dynamic without leaving an
+ * unlowered load_sample_id intrinsic for the backend. */
+static nir_shader *
+build_fs_interpolated_at_sample(void)
+{
+   nir_builder b =
+      nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
+                                     "G17P explicit at-sample interpolated FS");
+
+   nir_def *pixel = nir_u2u32(&b, nir_load_pixel_coord(&b));
+   nir_def *sample = nir_iand_imm(&b, nir_channel(&b, pixel, 0), 3);
+   nir_def *bary = nir_load_barycentric_at_sample(
+      &b, 32, sample, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+
+   fs_store_colour(&b, colour);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 /* Fragment shader with a discard: lowered to a sample_mask write. */
 static nir_shader *
 build_fs_discard(void)
@@ -3635,6 +3658,7 @@ struct agx3_graphics_case {
    bool expected_g17p_sampled_fragment;
    bool expected_g17p_sample_mask_input;
    bool expected_g17p_front_facing;
+   bool expected_g17p_explicit_sample;
 };
 
 static bool
@@ -3657,6 +3681,45 @@ g17p_implicit_coord_group(const struct agx_shader_part *part)
 
    return part->info.binary_size >= sizeof(expected) &&
           !memcmp(part->binary, expected, sizeof(expected));
+}
+
+static bool
+g17p_explicit_sample_protocol(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   const unsigned size = part->info.binary_size;
+
+   for (unsigned i = 0; i + 8 <= size; ++i) {
+      /* G17P ITRCOORDS.sample: fixed opcode bytes, no input-start marker,
+       * and f38=2 in bit57. Its f2 destination is byte3 for the allocator
+       * range exercised here. */
+      if (code[i] != 0xaf || (code[i + 1] & 0x0f) != 0x04 ||
+          code[i + 2] != 0x54 || !(code[i + 7] & 0x02))
+         continue;
+
+      const unsigned coords = code[i + 3];
+      unsigned interps = 0;
+      bool projective_rhw = false;
+      bool terminal = false;
+      for (unsigned j = i + 8; j + 10 <= size; ++j) {
+         if (code[j] != 0x2f || code[j + 2] != 0x54 ||
+             ((code[j + 6] & 0x7f) << 1) != coords)
+            continue;
+
+         const unsigned coordinate_liveness = code[j + 8] & 0x28;
+         if (coordinate_liveness != 0x08 && coordinate_liveness != 0x20)
+            continue;
+
+         interps++;
+         projective_rhw |= (code[j + 8] & 1) != 0;
+         terminal |= coordinate_liveness == 0x20;
+      }
+
+      if (interps >= 2 && projective_rhw && terminal)
+         return true;
+   }
+
+   return false;
 }
 
 static bool
@@ -3852,6 +3915,8 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_binary = g17p_flat_colour,
     .expected_g17p_binary_size = sizeof(g17p_flat_colour)},
    {"fs-interpolated-varying", build_fs_interpolated, true},
+   {"fs-interpolated-at-sample", build_fs_interpolated_at_sample, true,
+    .g17p_only = true, .expected_g17p_explicit_sample = true},
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
    {"fs-textured-triangle", build_fs_texture_imm, true,
     .expected_g17p_sampled_fragment = true},
@@ -4035,6 +4100,16 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          result = g17p_front_facing_protocol(&part);
          if (!result)
             fprintf(stderr, "%s %s: missing native SR41 W16 read\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_explicit_sample) {
+         result = g17p_explicit_sample_protocol(&part);
+         if (!result)
+            fprintf(stderr,
+                    "%s %s: missing native ITRCOORDS/f32interp "
+                    "sample token chain\n",
                     enc_name(enc), c->name);
       }
 

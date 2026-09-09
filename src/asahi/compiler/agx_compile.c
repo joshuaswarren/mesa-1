@@ -617,8 +617,10 @@ agx_interp_for_bary(nir_intrinsic_instr *bary, agx_index *sample_index)
 /* AGX3 removed AGX2's fused projective iterator. Build Apple's witnessed
  * scalar software sequence while values are still in SSA so register
  * allocation can place the temporary RHW, reciprocal, and channels safely.
- * Dynamic coefficient indices and explicit at-sample coordinates remain on
- * the legacy IR path so the AGX3 packer rejects them instead of guessing. */
+ * G17P explicit at-sample interpolation first computes one ITRCOORDS token
+ * from the low half of the sample index, then shares it across RHW and every
+ * scalar channel. Dynamic coefficient indices remain on the legacy IR path
+ * so the AGX3 packer rejects them instead of guessing. */
 static bool
 agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
                         agx_index sample_index, unsigned components,
@@ -627,11 +629,35 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
 {
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ||
        (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
-       cf.type != AGX_INDEX_IMMEDIATE ||
-       sample_index.type != AGX_INDEX_IMMEDIATE || sample_index.value != 0 ||
-       (interp != AGX_INTERPOLATION_CENTER &&
-        interp != AGX_INTERPOLATION_CENTROID))
+       cf.type != AGX_INDEX_IMMEDIATE)
       return false;
+
+   agx_index interp_coords = agx_zero();
+   if (interp == AGX_INTERPOLATION_SAMPLE) {
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+          (sample_index.size != AGX_SIZE_16 &&
+           sample_index.size != AGX_SIZE_32))
+         return false;
+
+      agx_index sample_half = sample_index;
+      if (sample_index.size == AGX_SIZE_32) {
+         sample_half = agx_temp(b->shader, AGX_SIZE_16);
+         agx_subdivide_to(b, sample_half, sample_index, 0);
+      }
+
+      /* ITRCOORDS has only a register source. This also keeps a constant
+       * sample ID out of generic immediate promotion later in the backend. */
+      if (sample_half.type != AGX_INDEX_NORMAL)
+         sample_half = agx_mov(b, sample_half);
+
+      interp_coords = agx_temp(b->shader, AGX_SIZE_32);
+      agx_itrcoords_agx3_to(b, interp_coords, sample_half);
+   } else if ((interp != AGX_INTERPOLATION_CENTER &&
+               interp != AGX_INTERPOLATION_CENTROID) ||
+              sample_index.type != AGX_INDEX_IMMEDIATE ||
+              sample_index.value != 0) {
+      return false;
+   }
 
    agx_index reciprocal_w = agx_null();
    if (perspective) {
@@ -641,10 +667,11 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
 
       agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          interp == AGX_INTERPOLATION_CENTER)
-         agx_rhw_interp_agx3_to(b, rhw, rhw_cf, sample_index, interp);
+          (interp == AGX_INTERPOLATION_CENTER ||
+           interp == AGX_INTERPOLATION_SAMPLE))
+         agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
       else
-         agx_interp_agx3_to(b, rhw, rhw_cf, sample_index, interp, true);
+         agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
       reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
                         ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
                         : agx_rcp(b, rhw);
@@ -656,7 +683,7 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
       channel_cf.value += c;
 
       agx_index raw = agx_temp(b->shader, AGX_SIZE_32);
-      agx_interp_agx3_to(b, raw, channel_cf, sample_index, interp,
+      agx_interp_agx3_to(b, raw, channel_cf, interp_coords, interp,
                          perspective);
       if (perspective &&
           b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {

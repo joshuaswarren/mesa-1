@@ -8,6 +8,8 @@
  *               fragment input coefficient. Perspective is done in software
  *               (interp RHW, rcp, interp channel, mul), so this is the bare
  *               linear iterator.
+ *   at-sample -> itrcoords + f32interp : compute an explicit sample's
+ *               coordinate token once, then consume it for each coefficient.
  *   ldcf     -> ldcfr     : raw <A,B,C> coefficient load.
  *   st_vary  -> uvsw      : unified-vertex-store write of one 32-bit component.
  *
@@ -56,6 +58,30 @@ bool agx3_vary_interp_at(enum agx_isa_encoding enc, uint16_t dest,
 bool agx3_vary_projective_rhw(enum agx_isa_encoding enc, uint16_t dest,
                              uint16_t coef_index, bool first,
                              uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
+
+/* Explicit at-sample interpolation is witnessed on G17P only. ITRCOORDS
+ * consumes a 16-bit sample index and produces an even-aligned 32-bit
+ * coordinate token. `sample_index_kill` selects the native last-use bit and
+ * `wait_mask` waits for asynchronous producers of the sample index. */
+bool agx3_vary_sample_coords(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t sample_index, bool sample_index_kill,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
+
+/* Consume an ITRCOORDS token in the sample-coordinate f32interp leaf.
+ * `coords_kill` must be false while later scalar interpolations still need
+ * the token and true on its final use. */
+bool agx3_vary_interp_sample(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t coef_index, bool perspective,
+                             uint16_t coords, bool coords_kill,
+                             uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
+
+/* Projective RHW variant of the explicit sample-coordinate leaf. */
+bool agx3_vary_projective_rhw_sample(enum agx_isa_encoding enc, uint16_t dest,
+                                     uint16_t coef_index, uint16_t coords,
+                                     bool coords_kill,
+                                     uint8_t out[AGX3_VARY_MAX_LENGTH],
+                                     uint8_t *len);
 
 bool agx3_vary_interp_at_start(enum agx_isa_encoding enc, uint16_t dest,
                                uint16_t coef_index, bool perspective,

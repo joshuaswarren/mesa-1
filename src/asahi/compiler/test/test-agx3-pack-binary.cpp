@@ -4673,14 +4673,51 @@ TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
    }
 }
 
-TEST_F(AGX3PackBinary, RefusesExplicitSampleInterpolation)
+TEST_F(AGX3PackBinary, ExplicitSampleInterpolationMatchesApple)
 {
-   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
-   agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(3),
-                      agx_register(2, AGX_SIZE_16), AGX_INTERPOLATION_SAMPLE,
-                      false);
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+
+   agx_index sample = agx_register(4, AGX_SIZE_16);
+   sample.discard = true;
+   agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32), sample);
+
+   agx_index coords = agx_register(4, AGX_SIZE_32);
+   coords.discard = true;
+   agx_interp_agx3_to(b, agx_register(4, AGX_SIZE_32), agx_immediate(0), coords,
+                      AGX_INTERPOLATION_SAMPLE, false);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+
+   /* Fresh Apple sample_no_perspective fragment: tied terminal ITRCOORDS
+    * followed by its final scalar f32interp and Mesa's canonical end. */
+   const std::vector<uint8_t> native = {
+      0xaf, 0x04, 0x54, 0x04, 0x03, 0x08, 0x0a, 0x03, 0x2f, 0x05, 0x54,
+      0x04, 0x02, 0x00, 0x02, 0x02, 0x20, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+}
+
+TEST_F(AGX3PackBinary, ExplicitSampleInterpolationStaysFailClosed)
+{
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32),
+                            agx_register(2, AGX_SIZE_16));
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+   }
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      /* A register is not a coordinate token without a dominating native
+       * ITRCOORDS producer, even though it fits the physical f32 field. */
+      agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(3),
+                         agx_register(2, AGX_SIZE_32), AGX_INTERPOLATION_SAMPLE,
+                         false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+   }
 }
 
 TEST_F(AGX3PackBinary, VertexStagingProducerMatchesAppleAndPreservesLiveness)
