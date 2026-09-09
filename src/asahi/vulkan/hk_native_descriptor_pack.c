@@ -102,6 +102,7 @@ hk_pack_native_texture(unsigned generation,
          .height = legacy->height,
          .samples = legacy->samples,
          .has_levels = has_levels,
+         .compressed = legacy->compressed,
          .state_control = legacy->mode | (legacy->compression << 2),
          .address = legacy->address,
          .srgb = legacy->srgb,
@@ -110,10 +111,10 @@ hk_pack_native_texture(unsigned generation,
          .depth = legacy->layout == AGX_LAYOUT_LINEAR ? 1 : legacy->depth,
          .page_aligned_layers = plain_2d ? false : legacy->page_aligned_layers,
          .extended = extended,
-         /* Gen9 reuses this wire address as the face-range end VA for an
-          * uncompressed cube descriptor. */
          .acceleration_buffer =
-            legacy->extended ? legacy->acceleration_buffer : 0,
+            legacy->compressed && legacy->extended
+               ? legacy->acceleration_buffer
+               : 0,
          .depth_linear = legacy->layout == AGX_LAYOUT_LINEAR &&
                                legacy->extended
                             ? legacy->depth_linear
@@ -127,15 +128,6 @@ hk_pack_native_texture(unsigned generation,
       };
 
       AGX_TEXTURE_GEN9_pack(out->opaque, &cfg);
-
-      /* All recovered native A18 cube descriptors carry word1 bit 27 together
-       * with their extended face-range end VA.  This bit is also present on
-       * Metal's larger tiled 2D resources, so keep the policy dimension-
-       * bounded until the wider layout selector is named. */
-      if ((legacy->dimension == AGX_TEXTURE_DIMENSION_CUBE ||
-           legacy->dimension == AGX_TEXTURE_DIMENSION_CUBE_ARRAY) &&
-          legacy->extended && legacy->acceleration_buffer)
-         out->opaque[1] |= BITFIELD_BIT(27);
       return true;
    }
 

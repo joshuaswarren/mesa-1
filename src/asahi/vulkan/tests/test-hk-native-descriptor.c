@@ -162,17 +162,26 @@ check_gen9_astc_4x4_texture(void)
 }
 
 static void
-check_gen9_cube_texture(void)
+check_gen9_cube_textures(void)
 {
-   /* A18 Pro EXP-0015 type_cube: the secondary VA is exactly six 16x16
-    * RGBA8 face strides after the primary VA. */
-   static const uint8_t expected[32] = {
+   /* EXP-0017/EXP-M4-07 prove that an uncompressed cube is six consecutive
+    * 2D Morton planes. The Vulkan probe's exact 64x64 shape has neither a
+    * compression selector nor an auxiliary VA. */
+   static const uint8_t uncompressed_expected[32] = {
+      0x26,0x0a,0x88,0xf6,0x03,0xfc,0x00,0x00,
+      0x50,0x1c,0x00,0x00,0x10,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+   };
+   /* A18 Pro EXP-0015 type_cube is shader-read-only and therefore losslessly
+    * compressed. Its auxiliary metadata begins after all six 16x16 faces. */
+   static const uint8_t compressed_expected[32] = {
       0x26,0x0a,0x88,0xf6,0x00,0x3c,0x00,0x08,
       0x50,0x1c,0x00,0x00,0x10,0x00,0x00,0x80,
       0xd0,0x1d,0x00,0x00,0x10,0x00,0x00,0x00,
       0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
    };
-   const struct AGX_TEXTURE semantic = {
+   struct AGX_TEXTURE semantic = {
       AGX_TEXTURE_header,
       .dimension = AGX_TEXTURE_DIMENSION_CUBE,
       .layout = AGX_LAYOUT_GPU,
@@ -182,24 +191,31 @@ check_gen9_cube_texture(void)
       .swizzle_g = AGX_CHANNEL_G,
       .swizzle_b = AGX_CHANNEL_B,
       .swizzle_a = AGX_CHANNEL_A,
-      .width = 16,
-      .height = 16,
+      .width = 64,
+      .height = 64,
       .depth = 1,
       .address = UINT64_C(0x1000001c500),
-      .extended = true,
-      .acceleration_buffer = UINT64_C(0x1000001dd00),
    };
    struct hk_native_texture_descriptor packed;
    assert(hk_pack_native_texture(9, &packed, &semantic));
-   assert(memcmp(&packed, expected, sizeof(expected)) == 0);
+   assert(memcmp(&packed, uncompressed_expected,
+                 sizeof(uncompressed_expected)) == 0);
+
+   semantic.width = 16;
+   semantic.height = 16;
+   semantic.compressed = true;
+   semantic.extended = true;
+   semantic.acceleration_buffer = UINT64_C(0x1000001dd00);
+   assert(hk_pack_native_texture(9, &packed, &semantic));
+   assert(memcmp(&packed, compressed_expected,
+                 sizeof(compressed_expected)) == 0);
 }
 
 static void
 check_gen9_cube_array_texture(void)
 {
-   /* Cube arrays retain the native cube descriptor's extended face-range
-    * address and selector, while depth counts cubes rather than faces. This
-    * is the exact two-cube composition of EXP-0015's captured cube fields. */
+   /* The shader-read-only capture is compressed: depth counts cubes, while
+    * the compression metadata follows all twelve face planes. */
    static const uint8_t expected[32] = {
       0x27,0x0a,0x88,0xf6,0x00,0x3c,0x00,0x08,
       0x50,0x1c,0x00,0x00,0x10,0x40,0x00,0x80,
@@ -220,6 +236,7 @@ check_gen9_cube_array_texture(void)
       .height = 16,
       .depth = 2,
       .address = UINT64_C(0x1000001c500),
+      .compressed = true,
       .extended = true,
       .acceleration_buffer = UINT64_C(0x1000001f500),
    };
@@ -302,7 +319,7 @@ main(void)
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();
-   check_gen9_cube_texture();
+   check_gen9_cube_textures();
    check_gen9_cube_array_texture();
    check_gen9_bc_textures();
 
