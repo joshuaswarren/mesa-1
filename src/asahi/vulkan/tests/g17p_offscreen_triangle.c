@@ -29,6 +29,10 @@
 #define G17P_F16_IO 0
 #endif
 
+#ifndef G17P_SAMPLE_RATE_SHADING
+#define G17P_SAMPLE_RATE_SHADING 0
+#endif
+
 #ifndef G17P_RG16_UNORM
 #define G17P_RG16_UNORM 0
 #endif
@@ -416,11 +420,17 @@
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
      G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
+     G17P_SAMPLE_RATE_SHADING +                                            \
      G17P_TEXTURE_ALPHA_COMPOSITE) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_VERTEX_FORMAT == 1
+#if G17P_SAMPLE_RATE_SHADING
+#include "g17p_vulkan_sample_rate_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_sample_rate_frag_spv
+#elif G17P_VERTEX_FORMAT == 1
 #include "g17p_vulkan_vertex_unorm_vert.h"
 #include "g17p_wsi_triangle_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_vertex_unorm_vert_spv
@@ -861,6 +871,10 @@
 
 #ifndef G17P_MSAA_SAMPLES
 #define G17P_MSAA_SAMPLES 1
+#endif
+
+#if G17P_SAMPLE_RATE_SHADING && G17P_MSAA_SAMPLES != 4
+#error "the sample-rate shading oracle requires exactly four samples"
 #endif
 
 #if G17P_MSAA_SAMPLES != 1 && G17P_MSAA_SAMPLES != 2 && \
@@ -1369,6 +1383,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (READBACK_PAYLOAD_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SAMPLE_RATE_SHADING
+#define PROBE_NAME "g17p-vulkan-sample-rate-shading4"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MSAA_SAMPLES > 1
 #define PROBE_NAME "g17p-msaa-triangle"
 #define READBACK_IMAGE_USAGE 0
@@ -1436,7 +1455,7 @@ VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
-   G17P_TEXTURE_ALPHA_COMPOSITE
+   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1900,6 +1919,10 @@ verify_readback(const uint8_t *map)
    static const uint8_t expected[8] = {
       0xff, 0xff, 0xae, 0x47, 0xcd, 0x0c, 0xff, 0xff,
    };
+#elif G17P_SAMPLE_RATE_SHADING
+   /* Four independent SampleID invocations write red, green, blue and white;
+    * the average resolve is exactly half intensity in every RGB channel. */
+   static const uint8_t expected[4] = {128, 128, 128, 255};
 #elif G17P_RASTER_DISCARD
    static const uint8_t expected[4] = {0, 0, 0, 255};
 #else
@@ -2143,7 +2166,7 @@ main(void)
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
-   G17P_TEXTURE_ALPHA_COMPOSITE
+   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2329,6 +2352,15 @@ main(void)
 #endif
 #endif
 
+#if G17P_SAMPLE_RATE_SHADING
+   VkPhysicalDeviceFeatures2 sample_rate_available = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &sample_rate_available);
+   if (!sample_rate_available.features.sampleRateShading)
+      die("T8140/G17P does not advertise per-sample fragment shading");
+#endif
+
    if (!(properties.limits.framebufferColorSampleCounts &
          (VkSampleCountFlags)G17P_MSAA_SAMPLES))
       die("requested color sample count is not advertised");
@@ -2443,6 +2475,11 @@ main(void)
       .shaderSampledImageArrayDynamicIndexing = VK_TRUE,
    };
 #endif
+#if G17P_SAMPLE_RATE_SHADING
+   const VkPhysicalDeviceFeatures sample_rate_features = {
+      .sampleRateShading = VK_TRUE,
+   };
+#endif
 #if G17P_DYNAMIC_BLEND
    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT enabled_dynamic3 = {
       .sType =
@@ -2486,7 +2523,9 @@ main(void)
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-#if G17P_INDIRECT_DRAW
+#if G17P_SAMPLE_RATE_SHADING
+      .pEnabledFeatures = &sample_rate_features,
+#elif G17P_INDIRECT_DRAW
       .pEnabledFeatures = &indirect_enabled,
 #elif G17P_MULTI_VIEWPORT
       .pEnabledFeatures = &viewport_enabled,
@@ -4051,6 +4090,8 @@ main(void)
    const VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
       .rasterizationSamples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
+      .sampleShadingEnable = G17P_SAMPLE_RATE_SHADING,
+      .minSampleShading = G17P_SAMPLE_RATE_SHADING ? 1.0f : 0.0f,
    };
 #if G17P_ADVANCED_BLEND
    const VkPipelineColorBlendAdvancedStateCreateInfoEXT advanced_blend = {
@@ -5124,6 +5165,10 @@ main(void)
                      "updates produced exact split output immediately/3s, "
                      "guards unchanged, checksum %016" PRIx64 "\n",
           checksum);
+#elif G17P_SAMPLE_RATE_SHADING
+   printf(PROBE_NAME ": PASS — four distinct SampleID colours averaged to "
+                     "exact RGBA8 immediately/3s; all guards unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #elif G17P_ADVANCED_BLEND
    printf(PROBE_NAME ": PASS — coherent conjoint MULTIPLY produced exact "
                      "nonpremultiplied RGBA8 output immediately/3s, guards "

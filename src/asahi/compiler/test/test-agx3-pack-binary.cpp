@@ -4296,6 +4296,70 @@ TEST_F(AGX3PackBinary, G17PMultisampleTileSelectorsMatchNative)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
+{
+   key.fs.ignore_tib_dependencies = true;
+
+   for (unsigned samples : {2u, 4u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+
+      std::vector<uint8_t> want;
+      for (unsigned i = 0; i < samples; ++i) {
+         const unsigned tagged = (samples == 2 ? 0x20 : 0x40) | (1u << i);
+         agx_st_tile(b, value, agx_immediate(tagged), agx_null(),
+                     AGX_FORMAT_U8NORM, 15, 0, false);
+
+         uint8_t tile[AGX3_TILE_MAX_LENGTH], tile_len = 0;
+         const enum agx3_tile_coverage coverage =
+            static_cast<enum agx3_tile_coverage>(
+               (samples == 2 ? AGX3_TILE_COV_2X_SAMPLE_0
+                             : AGX3_TILE_COV_4X_SAMPLE_0) + i);
+         ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0,
+                                     AGX3_TILE_W8, 15, 0, coverage, 0,
+                                     tile, &tile_len));
+         append(want, tile, tile_len);
+      }
+      agx_stop(b);
+
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* A duplicate selector is not a complete sample domain. */
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+
+   /* The same stores in an ordinary fragment require the colour protocol. */
+   {
+      key.fs.ignore_tib_dependencies = false;
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_st_tile(b, value, agx_immediate(0x22), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, TileLoadSequenceBoundaryMarkers)
 {
    for (int e = 0; e < 2; ++e) {

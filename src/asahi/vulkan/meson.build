@@ -1169,6 +1169,16 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-sample-rate-shading4',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_SAMPLE_RATE_SHADING=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-hostcopy-triangle',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],

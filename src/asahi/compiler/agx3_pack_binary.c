@@ -4475,6 +4475,83 @@ struct agx3_g17p_mrt_protocol {
    uint8_t stores[AGX3_G17P_MAX_COLOUR_PARTITIONS];
 };
 
+/* A multisample background reload writes every sample of one tilebuffer
+ * partition explicitly after fetching it from the multisample attachment.
+ * These are not multiple render targets: agx_nir_lower_g17p_tile_samples()
+ * tags the stores with the exact 2x/4x one-hot selectors recovered for
+ * LSTCOL, while every store retains the same RT byte offset and format.
+ *
+ * Keep this admission as narrow as the native selector evidence.  Ordinary
+ * fragment shaders still require the colour transaction protocol below;
+ * only an ignore-TIB-dependencies auxiliary shader may emit one complete,
+ * duplicate-free set of per-sample stores to partition zero.
+ */
+static bool
+agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       !ctx->key->fs.ignore_tib_dependencies ||
+       list_length(&ctx->blocks) != 1)
+      return false;
+
+   unsigned tag = 0;
+   unsigned sample_mask = 0;
+   unsigned stores = 0;
+   enum agx_format format = 0;
+   unsigned component_mask = 0;
+   bool stopped = false;
+
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped)
+         return false;
+
+      if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
+         continue;
+      }
+
+      if (agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
+          I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
+         return false;
+
+      if (I->op != AGX_OPCODE_ST_TILE)
+         continue;
+
+      if (I->nr_srcs != 3 || I->pixel_offset != 0 || I->explicit_coords ||
+          I->src[1].type != AGX_INDEX_IMMEDIATE ||
+          I->src[1].size != AGX_SIZE_16 || I->src[1].memory ||
+          I->src[1].abs || I->src[1].neg || I->src[1].cache ||
+          I->src[1].discard || I->src[1].kill ||
+          !agx_is_null(I->src[2]))
+         return false;
+
+      const unsigned this_tag = I->src[1].value & ~0xfu;
+      const unsigned this_sample = I->src[1].value & 0xfu;
+      if ((this_tag != AGX3_TILE_2X_TAG &&
+           this_tag != AGX3_TILE_4X_TAG) ||
+          !util_is_power_of_two_nonzero(this_sample) ||
+          (sample_mask & this_sample))
+         return false;
+
+      if (stores == 0) {
+         tag = this_tag;
+         format = I->format;
+         component_mask = I->mask;
+      } else if (this_tag != tag || I->format != format ||
+                 I->mask != component_mask) {
+         return false;
+      }
+
+      sample_mask |= this_sample;
+      stores++;
+   }
+
+   return stopped &&
+          ((tag == AGX3_TILE_2X_TAG && stores == 2 && sample_mask == 0x3) ||
+           (tag == AGX3_TILE_4X_TAG && stores == 4 && sample_mask == 0xf));
+}
+
 static int
 agx3_g17p_mrt_partition(const struct agx3_g17p_mrt_protocol *p,
                         uint16_t offset)
@@ -5043,6 +5120,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * partition and release each partition in descending order. */
    const struct agx3_g17p_mrt_protocol g17p_mrt =
       agx3_g17p_mrt_protocol(ctx);
+   const bool g17p_msaa_background_stores =
+      agx3_g17p_msaa_background_store_protocol(ctx);
    const bool g17p_colour_protocol =
       (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -5054,7 +5133,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * produces a syntactically valid shader that writes only partition zero. */
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
-       tile_stores_left > 1 && !g17p_mrt.valid)
+       tile_stores_left > 1 && !g17p_mrt.valid &&
+       !g17p_msaa_background_stores)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.

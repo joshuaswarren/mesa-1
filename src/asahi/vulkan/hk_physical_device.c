@@ -736,7 +736,11 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
       features->tessellationShader = false;
-      features->sampleRateShading = false;
+      /* Per-sample main/epilog execution and native 2x/4x tile selectors are
+       * implemented. Keep the public core feature opt-in until the strict 4x
+       * SampleID/average-resolve image oracle has executed on G17P. */
+      features->sampleRateShading =
+         hk_g17p_unverified_feature("sample_rate_shading");
       /* IA vertex/primitive recording, including reset/reuse/unavailable
        * handling, has passed its exact hardware oracle twice. Every applicable
        * graphics/compute counter now has a strict native helper or fragment-
