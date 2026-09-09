@@ -73,6 +73,8 @@ hk_files = files(
   'hk_native_sampler.h',
   'hk_physical_device.c',
   'hk_physical_device.h',
+  'hk_pipeline_statistics_core.c',
+  'hk_pipeline_statistics_core.h',
   'hk_private.h',
   'hk_query_pool.c',
   'hk_query_pool.h',
@@ -97,6 +99,19 @@ if with_tests
             'hk_nir_lower_robust_image.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_pipeline_statistics_core',
+    executable(
+      'hk_pipeline_statistics_core_test',
+      files('tests/test-hk-pipeline-statistics-core.c',
+            'hk_pipeline_statistics_core.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),
@@ -1761,8 +1776,8 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    # Hardware-ready exact IA statistics oracle. The feature stays hidden by
-    # default and this target opts into the bounded G17P qualification path.
+    # Hardware-ready exact pipeline-statistics oracle. Each invocation accepts
+    # exactly one graphics or compute counter so failures stay attributable.
     executable(
       'g17p-vulkan-pipeline-statistics',
       files('tests/g17p_vulkan_queries.c'),

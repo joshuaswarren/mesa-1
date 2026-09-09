@@ -185,7 +185,8 @@ main(void)
           properties.limits.timestampPeriod != 1.0f ||
           features.geometryShader || features.tessellationShader ||
           !features.samplerAnisotropy || features.sparseBinding ||
-          !features.occlusionQueryPrecise || features.pipelineStatisticsQuery ||
+          !features.occlusionQueryPrecise ||
+          !features.pipelineStatisticsQuery ||
           !has_bounded_g17p_queue(devices[i])) {
          die("T8140/G17P properties do not match the bounded profile");
       }

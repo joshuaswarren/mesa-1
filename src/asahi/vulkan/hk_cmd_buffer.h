@@ -27,6 +27,7 @@
 #include "hk_cs_root_size.h"
 #include "hk_descriptor_set.h"
 #include "hk_drm_render_core.h"
+#include "hk_pipeline_statistics_core.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/u_dynarray.h"
@@ -876,8 +877,10 @@ hk_pipeline_stat_addr(struct hk_cmd_buffer *cmd,
       assert(!cmd->in_meta && "queries paused for meta");
       assert(util_bitcount(stat) == 1 && "by construction");
 
-      /* Prefix sum to determine the compacted index in the query pool */
-      uint32_t index = util_bitcount(flags & (stat - 1));
+      uint32_t index;
+      const bool present =
+         hk_pipeline_statistics_report_index(flags, stat, &index);
+      assert(present && "enabled statistic has a compact report index");
 
       return root->draw.pipeline_stats + (sizeof(uint64_t) * index);
    } else {

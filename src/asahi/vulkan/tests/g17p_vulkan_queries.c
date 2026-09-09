@@ -3,10 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Strict public Vulkan query fixture for T8140/G17P.  It uses only the query
- * scope advertised by the public device profile: graphics/compute timestamps
- * and precise occlusion.  This graphics fixture does not create a compute
- * pipeline, and pipeline-statistics queries are deliberately not created
- * because the G17P profile does not advertise them.
+ * scope advertised by the public device profile: graphics/compute timestamps,
+ * precise occlusion, and pipeline statistics. The dedicated statistics build
+ * accepts one counter name per run so every hardware result is attributable.
  *
  * --record-only records and destroys a command buffer without submission.
  * --execute additionally requires G17P_QUERY_EXECUTION_ACK=YES, bounds the
@@ -26,6 +25,7 @@
 
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
+#include "g17p_vulkan_compute_noroot_spv.h"
 
 #ifndef G17P_PIPELINE_STATISTICS
 #define G17P_PIPELINE_STATISTICS 0
@@ -76,6 +76,7 @@ VK_FN(vkDestroyShaderModule);
 VK_FN(vkCreatePipelineLayout);
 VK_FN(vkDestroyPipelineLayout);
 VK_FN(vkCreateGraphicsPipelines);
+VK_FN(vkCreateComputePipelines);
 VK_FN(vkDestroyPipeline);
 VK_FN(vkCreateFramebuffer);
 VK_FN(vkDestroyFramebuffer);
@@ -93,6 +94,7 @@ VK_FN(vkCmdEndRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
+VK_FN(vkCmdDispatch);
 VK_FN(vkCmdBeginQuery);
 VK_FN(vkCmdEndQuery);
 VK_FN(vkCreateFence);
@@ -121,10 +123,39 @@ struct occlusion_output {
 
 struct statistics_output {
    uint64_t prefix_guard;
-   uint64_t values[2];
+   uint64_t value;
    uint64_t availability;
    uint64_t suffix_guard;
 };
+
+struct statistic_case {
+   const char *name;
+   VkQueryPipelineStatisticFlagBits bit;
+   uint64_t expected;
+   bool compute;
+   bool fullscreen;
+};
+
+static const struct statistic_case statistic_cases[] = {
+   {"ia-vertices", VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT,
+    3, false, false},
+   {"ia-primitives", VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT,
+    1, false, false},
+   {"vs-invocations", VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT,
+    3, false, false},
+   {"clipping-invocations",
+    VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT, 1, false, false},
+   {"clipping-primitives",
+    VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT, 1, false, false},
+   {"fragment-invocations",
+    VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT,
+    EXPECTED_SAMPLES, false, true},
+   {"compute-invocations",
+    VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT, 192, true,
+    false},
+};
+
+static const struct statistic_case *selected_statistic;
 
 static void
 die(const char *what)
@@ -219,17 +250,17 @@ check_unavailable_statistics(VkDevice device, VkQueryPool pool, uint32_t query)
 {
    struct statistics_output out = {
       .prefix_guard = OUTPUT_GUARD,
-      .values = {OUTPUT_GUARD, OUTPUT_GUARD},
+      .value = OUTPUT_GUARD,
       .availability = OUTPUT_GUARD,
       .suffix_guard = OUTPUT_GUARD,
    };
    const VkResult result = vkGetQueryPoolResults(
       device, pool, query, 1,
-      sizeof(out) - offsetof(struct statistics_output, values), out.values,
+      sizeof(out) - offsetof(struct statistics_output, value), &out.value,
       sizeof(out),
       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
    if (result != VK_NOT_READY || out.prefix_guard != OUTPUT_GUARD ||
-       out.values[0] != OUTPUT_GUARD || out.values[1] != OUTPUT_GUARD ||
+       out.value != OUTPUT_GUARD ||
        out.availability != 0 || out.suffix_guard != OUTPUT_GUARD)
       die("unavailable pipeline-statistics result or guard is not exact");
 }
@@ -256,12 +287,30 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
    };
    struct statistics_output stats = {
       .prefix_guard = OUTPUT_GUARD,
-      .values = {OUTPUT_GUARD, OUTPUT_GUARD},
+      .value = OUTPUT_GUARD,
       .availability = OUTPUT_GUARD,
       .suffix_guard = OUTPUT_GUARD,
    };
    const VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT |
                                     VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
+
+   if (G17P_PIPELINE_STATISTICS) {
+      check(vkGetQueryPoolResults(
+               device, statistics, 0, 1,
+               sizeof(stats) - offsetof(struct statistics_output, value),
+               &stats.value, sizeof(stats), flags),
+            "vkGetQueryPoolResults(pipeline statistic)");
+      if (stats.prefix_guard != OUTPUT_GUARD ||
+          stats.suffix_guard != OUTPUT_GUARD || stats.availability != 1 ||
+          stats.value != selected_statistic->expected)
+         die("pipeline-statistics value, availability, or guard is not exact");
+
+      printf("g17p-vulkan-pipeline-statistics: pass %u — %s=%llu; "
+             "availability and guards exact\n",
+             pass, selected_statistic->name,
+             (unsigned long long)stats.value);
+      return;
+   }
 
    check(vkGetQueryPoolResults(device, timestamps, 0, 2,
                                sizeof(ts) - offsetof(struct timestamp_output,
@@ -273,19 +322,8 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
                                                      slot),
                                &oq.slot.value, sizeof(oq.slot), flags),
          "vkGetQueryPoolResults(occlusion)");
-   if (G17P_PIPELINE_STATISTICS) {
-      check(vkGetQueryPoolResults(device, statistics, 0, 1,
-                                  sizeof(stats) - offsetof(
-                                     struct statistics_output, values),
-                                  stats.values, sizeof(stats), flags),
-            "vkGetQueryPoolResults(pipeline statistics)");
-   }
-
    if (!guards_intact(ts.slots, 2, ts.prefix_guard, ts.suffix_guard) ||
-       !guards_intact(&oq.slot, 1, oq.prefix_guard, oq.suffix_guard) ||
-       (G17P_PIPELINE_STATISTICS &&
-        (stats.prefix_guard != OUTPUT_GUARD ||
-         stats.suffix_guard != OUTPUT_GUARD)))
+       !guards_intact(&oq.slot, 1, oq.prefix_guard, oq.suffix_guard))
       die("query result write crossed a guarded output boundary");
    if (ts.slots[0].availability != 1 || ts.slots[1].availability != 1 ||
        oq.slot.availability != 1)
@@ -294,31 +332,41 @@ check_results(VkDevice device, VkQueryPool timestamps, VkQueryPool occlusion,
       die("reused timestamp interval is zero or not strictly increasing");
    if (oq.slot.value != EXPECTED_SAMPLES)
       die("reused precise occlusion result is not exact");
-   if (G17P_PIPELINE_STATISTICS &&
-       (stats.availability != 1 || stats.values[0] != 3 ||
-        stats.values[1] != 1))
-      die("reused IA vertex/primitive statistics are not exact");
-
    printf("g17p-vulkan-queries: pass %u — timestamps %llu < %llu, "
           "occlusion=%llu; availability and guards exact\n",
           pass,
           (unsigned long long)ts.slots[0].value,
           (unsigned long long)ts.slots[1].value,
           (unsigned long long)oq.slot.value);
-   if (G17P_PIPELINE_STATISTICS)
-      printf("g17p-vulkan-pipeline-statistics: pass %u — "
-             "IA vertices=%llu, primitives=%llu; availability and guards exact\n",
-             pass, (unsigned long long)stats.values[0],
-             (unsigned long long)stats.values[1]);
 }
 
 int
 main(int argc, char **argv)
 {
-   if (argc != 2 || (strcmp(argv[1], "--record-only") != 0 &&
-                     strcmp(argv[1], "--execute") != 0)) {
-      fprintf(stderr, "usage: %s <--record-only|--execute>\n", argv[0]);
+   const int expected_argc = G17P_PIPELINE_STATISTICS ? 3 : 2;
+   if (argc != expected_argc ||
+       (strcmp(argv[1], "--record-only") != 0 &&
+        strcmp(argv[1], "--execute") != 0)) {
+      fprintf(stderr, "usage: %s <--record-only|--execute>%s\n", argv[0],
+              G17P_PIPELINE_STATISTICS ? " <statistic>" : "");
       return EXIT_FAILURE;
+   }
+
+   if (G17P_PIPELINE_STATISTICS) {
+      for (unsigned i = 0;
+           i < sizeof(statistic_cases) / sizeof(statistic_cases[0]); ++i) {
+         if (!strcmp(argv[2], statistic_cases[i].name)) {
+            selected_statistic = &statistic_cases[i];
+            break;
+         }
+      }
+      if (!selected_statistic) {
+         fputs("statistics: ia-vertices, ia-primitives, vs-invocations, "
+               "clipping-invocations, clipping-primitives, "
+               "fragment-invocations, compute-invocations\n",
+               stderr);
+         return EXIT_FAILURE;
+      }
    }
 
    const bool execute = strcmp(argv[1], "--execute") == 0;
@@ -393,8 +441,7 @@ main(int argc, char **argv)
       if (!candidate.limits.timestampComputeAndGraphics ||
           candidate.limits.timestampPeriod != 1.0f ||
           !candidate_features.occlusionQueryPrecise ||
-          candidate_features.pipelineStatisticsQuery !=
-             G17P_PIPELINE_STATISTICS)
+          !candidate_features.pipelineStatisticsQuery)
          die("T8140 query advertisement differs from the bounded profile");
 
       uint32_t queue_count = 0;
@@ -470,6 +517,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCreatePipelineLayout);
    LOAD_DEVICE(device, vkDestroyPipelineLayout);
    LOAD_DEVICE(device, vkCreateGraphicsPipelines);
+   LOAD_DEVICE(device, vkCreateComputePipelines);
    LOAD_DEVICE(device, vkDestroyPipeline);
    LOAD_DEVICE(device, vkCreateFramebuffer);
    LOAD_DEVICE(device, vkDestroyFramebuffer);
@@ -487,6 +535,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
+   LOAD_DEVICE(device, vkCmdDispatch);
    LOAD_DEVICE(device, vkCmdBeginQuery);
    LOAD_DEVICE(device, vkCmdEndQuery);
    LOAD_DEVICE(device, vkCreateFence);
@@ -510,19 +559,20 @@ main(int argc, char **argv)
       .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
       .queryCount = 2,
       .pipelineStatistics =
-         VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
-         VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT,
+         G17P_PIPELINE_STATISTICS ? selected_statistic->bit : 0,
    };
    VkQueryPool timestamps = VK_NULL_HANDLE;
    VkQueryPool occlusion = VK_NULL_HANDLE;
    VkQueryPool statistics = VK_NULL_HANDLE;
-   check(vkCreateQueryPool(device, &timestamp_info, NULL, &timestamps),
-         "vkCreateQueryPool(timestamp)");
-   check(vkCreateQueryPool(device, &occlusion_info, NULL, &occlusion),
-         "vkCreateQueryPool(occlusion)");
-   if (G17P_PIPELINE_STATISTICS)
+   if (G17P_PIPELINE_STATISTICS) {
       check(vkCreateQueryPool(device, &statistics_info, NULL, &statistics),
             "vkCreateQueryPool(pipeline statistics)");
+   } else {
+      check(vkCreateQueryPool(device, &timestamp_info, NULL, &timestamps),
+            "vkCreateQueryPool(timestamp)");
+      check(vkCreateQueryPool(device, &occlusion_info, NULL, &occlusion),
+            "vkCreateQueryPool(occlusion)");
+   }
 
    VkPhysicalDeviceMemoryProperties memory_properties;
    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
@@ -534,14 +584,24 @@ main(int argc, char **argv)
          VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
       die("RGBA8 optimal images lack color-attachment support");
 
-   static const float vertices[][2] = {
+   static const float fullscreen_vertices[][2] = {
       {-1.0f, -1.0f},
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+   static const float inbounds_vertices[][2] = {
+      {-0.5f, -0.5f},
+      {0.5f, -0.5f},
+      {0.0f, 0.5f},
+   };
+   const float (*vertices)[2] =
+      G17P_PIPELINE_STATISTICS && !selected_statistic->fullscreen
+         ? inbounds_vertices
+         : fullscreen_vertices;
+   const size_t vertices_size = sizeof(fullscreen_vertices);
    const VkBufferCreateInfo vertex_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(vertices),
+      .size = vertices_size,
       .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
@@ -564,10 +624,10 @@ main(int argc, char **argv)
    check(vkBindBufferMemory(device, vertex_buffer, vertex_memory, 0),
          "vkBindBufferMemory(vertex)");
    void *vertex_map = NULL;
-   check(vkMapMemory(device, vertex_memory, 0, sizeof(vertices), 0,
+   check(vkMapMemory(device, vertex_memory, 0, vertices_size, 0,
                      &vertex_map),
          "vkMapMemory(vertex)");
-   memcpy(vertex_map, vertices, sizeof(vertices));
+   memcpy(vertex_map, vertices, vertices_size);
    vkUnmapMemory(device, vertex_memory);
 
    const VkImageCreateInfo image_info = {
@@ -684,7 +744,7 @@ main(int argc, char **argv)
    };
    const VkVertexInputBindingDescription vertex_binding = {
       .binding = 0,
-      .stride = sizeof(vertices[0]),
+      .stride = sizeof(fullscreen_vertices[0]),
       .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
    };
    const VkVertexInputAttributeDescription vertex_attribute = {
@@ -751,9 +811,38 @@ main(int argc, char **argv)
       .renderPass = render_pass,
    };
    VkPipeline pipeline = VK_NULL_HANDLE;
-   check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
-                                   NULL, &pipeline),
-         "vkCreateGraphicsPipelines");
+   if (!G17P_PIPELINE_STATISTICS || !selected_statistic->compute) {
+      check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                      &pipeline_info, NULL, &pipeline),
+            "vkCreateGraphicsPipelines");
+   }
+
+   VkShaderModule compute_module = VK_NULL_HANDLE;
+   VkPipeline compute_pipeline = VK_NULL_HANDLE;
+   if (G17P_PIPELINE_STATISTICS && selected_statistic->compute) {
+      const VkShaderModuleCreateInfo compute_module_info = {
+         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+         .codeSize = sizeof(g17p_vulkan_compute_noroot_spv),
+         .pCode = g17p_vulkan_compute_noroot_spv,
+      };
+      check(vkCreateShaderModule(device, &compute_module_info, NULL,
+                                 &compute_module),
+            "vkCreateShaderModule(compute)");
+      const VkComputePipelineCreateInfo compute_pipeline_info = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = compute_module,
+            .pName = "main",
+         },
+         .layout = pipeline_layout,
+      };
+      check(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1,
+                                     &compute_pipeline_info, NULL,
+                                     &compute_pipeline),
+            "vkCreateComputePipelines");
+   }
 
    const VkFramebufferCreateInfo framebuffer_info = {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
@@ -805,29 +894,46 @@ main(int argc, char **argv)
       VkCommandBuffer command_buffer = command_buffers[pass];
       check(vkBeginCommandBuffer(command_buffer, &begin_info),
             "vkBeginCommandBuffer");
-      vkCmdResetQueryPool(command_buffer, timestamps, 0, 3);
-      vkCmdResetQueryPool(command_buffer, occlusion, 0, 2);
-      if (G17P_PIPELINE_STATISTICS)
+      if (G17P_PIPELINE_STATISTICS) {
          vkCmdResetQueryPool(command_buffer, statistics, 0, 2);
-      vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                          timestamps, 0);
-      vkCmdBeginRenderPass(command_buffer, &render_begin,
-                           VK_SUBPASS_CONTENTS_INLINE);
-      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        pipeline);
-      vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
-                             &vertex_offset);
-      vkCmdBeginQuery(command_buffer, occlusion, 0,
-                      VK_QUERY_CONTROL_PRECISE_BIT);
-      if (G17P_PIPELINE_STATISTICS)
          vkCmdBeginQuery(command_buffer, statistics, 0, 0);
-      vkCmdDraw(command_buffer, 3, 1, 0, 0);
-      if (G17P_PIPELINE_STATISTICS)
+
+         if (selected_statistic->compute) {
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              compute_pipeline);
+            vkCmdDispatch(command_buffer, 2, 3, 1);
+         } else {
+            vkCmdBeginRenderPass(command_buffer, &render_begin,
+                                 VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline);
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
+                                   &vertex_offset);
+            vkCmdDraw(command_buffer, 3, 1, 0, 0);
+            vkCmdEndRenderPass(command_buffer);
+         }
+
          vkCmdEndQuery(command_buffer, statistics, 0);
-      vkCmdEndQuery(command_buffer, occlusion, 0);
-      vkCmdEndRenderPass(command_buffer);
-      vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                          timestamps, 1);
+      } else {
+         vkCmdResetQueryPool(command_buffer, timestamps, 0, 3);
+         vkCmdResetQueryPool(command_buffer, occlusion, 0, 2);
+         vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             timestamps, 0);
+         vkCmdBeginRenderPass(command_buffer, &render_begin,
+                              VK_SUBPASS_CONTENTS_INLINE);
+         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline);
+         vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
+                                &vertex_offset);
+         vkCmdBeginQuery(command_buffer, occlusion, 0,
+                         VK_QUERY_CONTROL_PRECISE_BIT);
+         vkCmdDraw(command_buffer, 3, 1, 0, 0);
+         vkCmdEndQuery(command_buffer, occlusion, 0);
+         vkCmdEndRenderPass(command_buffer);
+         vkCmdWriteTimestamp(command_buffer,
+                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps,
+                             1);
+      }
       check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
    }
 
@@ -835,7 +941,7 @@ main(int argc, char **argv)
           "timestamps=graphics+compute/64-bit/1ns, precise-occlusion=yes, "
           "pipeline-statistics=%s\n",
           properties.deviceName, properties.deviceID, queue_family,
-          G17P_PIPELINE_STATISTICS ? "IA-vertices+primitives" : "no");
+          G17P_PIPELINE_STATISTICS ? selected_statistic->name : "not sampled");
 
    if (execute) {
       VkQueue queue = VK_NULL_HANDLE;
@@ -861,33 +967,48 @@ main(int argc, char **argv)
          check_results(device, timestamps, occlusion, statistics, pass);
          vkDestroyFence(device, fence, NULL);
       }
-      check_unavailable(device, timestamps, 2, "timestamp");
-      check_unavailable(device, occlusion, 1, "occlusion");
-      if (G17P_PIPELINE_STATISTICS)
+      if (G17P_PIPELINE_STATISTICS) {
          check_unavailable_statistics(device, statistics, 1);
-      puts("g17p-vulkan-queries: reset/reuse PASS; unavailable results and "
-           "availability exact");
+      } else {
+         check_unavailable(device, timestamps, 2, "timestamp");
+         check_unavailable(device, occlusion, 1, "occlusion");
+      }
+      printf("%s: reset/reuse PASS; unavailable results and availability "
+             "exact\n",
+             G17P_PIPELINE_STATISTICS
+                ? "g17p-vulkan-pipeline-statistics"
+                : "g17p-vulkan-queries");
    } else {
-      puts("g17p-vulkan-queries: record-only PASS — no queue submission or "
-           "query-result read performed");
+      printf("%s: record-only PASS — no queue submission or query-result "
+             "read performed\n",
+             G17P_PIPELINE_STATISTICS
+                ? "g17p-vulkan-pipeline-statistics"
+                : "g17p-vulkan-queries");
    }
 
    vkDestroyCommandPool(device, command_pool, NULL);
    vkDestroyFramebuffer(device, framebuffer, NULL);
-   vkDestroyPipeline(device, pipeline, NULL);
+   if (compute_pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, compute_pipeline, NULL);
+   if (pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, pipeline, NULL);
    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
    vkDestroyShaderModule(device, frag_module, NULL);
    vkDestroyShaderModule(device, vert_module, NULL);
+   if (compute_module != VK_NULL_HANDLE)
+      vkDestroyShaderModule(device, compute_module, NULL);
    vkDestroyRenderPass(device, render_pass, NULL);
    vkDestroyImageView(device, view, NULL);
    vkDestroyImage(device, image, NULL);
    vkFreeMemory(device, image_memory, NULL);
    vkDestroyBuffer(device, vertex_buffer, NULL);
    vkFreeMemory(device, vertex_memory, NULL);
-   vkDestroyQueryPool(device, occlusion, NULL);
+   if (occlusion != VK_NULL_HANDLE)
+      vkDestroyQueryPool(device, occlusion, NULL);
    if (statistics != VK_NULL_HANDLE)
       vkDestroyQueryPool(device, statistics, NULL);
-   vkDestroyQueryPool(device, timestamps, NULL);
+   if (timestamps != VK_NULL_HANDLE)
+      vkDestroyQueryPool(device, timestamps, NULL);
    vkDestroyDevice(device, NULL);
    vkDestroyInstance(instance, NULL);
    dlclose(loader);

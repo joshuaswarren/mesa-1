@@ -12,6 +12,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_pipeline_statistics_core.h"
 #include "hk_shader.h"
 
 #include "libagx_dgc.h"
@@ -32,6 +33,8 @@
 struct hk_query_report {
    uint64_t value;
 };
+static_assert(sizeof(struct hk_query_report) == sizeof(uint64_t),
+              "CPU result ABI requires contiguous u64 reports");
 
 static inline bool
 hk_has_available(const struct hk_query_pool *pool)
@@ -242,11 +245,10 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
          return;
       }
 
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
-                             pool->bo->va->addr +
-                                (uint64_t)first_index * sizeof(uint32_t),
-                             (uint64_t)num_queries * sizeof(uint32_t),
-                             set_available ? 1 : 0);
+      const uint64_t availability =
+         pool->bo->va->addr + (uint64_t)first_index * sizeof(uint32_t);
+      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
+                             (uint64_t)num_queries * sizeof(uint32_t), 0);
       if (vk_command_buffer_has_error(&cmd->vk))
          return;
 
@@ -261,6 +263,12 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
       }
+
+      /* Availability is the publication store: when synthesizing available
+       * multiview results, write it only after every report is initialized. */
+      if (set_available)
+         hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
+                                (uint64_t)num_queries * sizeof(uint32_t), 1);
       return;
    }
 
@@ -277,11 +285,10 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       /* These pools have a dense u32 availability array followed by dense,
        * fixed-stride u64 reports. Reset both address domains explicitly. A
        * multiview-generated zero uses the same path with availability set. */
-      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs,
-                             pool->bo->va->addr +
-                                (uint64_t)first_index * sizeof(uint32_t),
-                             (uint64_t)num_queries * sizeof(uint32_t),
-                             set_available ? 1 : 0);
+      const uint64_t availability =
+         pool->bo->va->addr + (uint64_t)first_index * sizeof(uint32_t);
+      hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
+                             (uint64_t)num_queries * sizeof(uint32_t), 0);
       if (vk_command_buffer_has_error(&cmd->vk))
          return;
 
@@ -289,6 +296,13 @@ emit_zero_queries_g17p(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
                              pool->bo->va->addr +
                                 hk_query_offset(pool, first_index),
                              (uint64_t)num_queries * pool->query_stride, 0);
+      if (vk_command_buffer_has_error(&cmd->vk))
+         return;
+
+      /* Publish synthesized available results only after their reports. */
+      if (set_available)
+         hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, availability,
+                                (uint64_t)num_queries * sizeof(uint32_t), 1);
       return;
    }
 
@@ -332,6 +346,21 @@ host_zero_queries(struct hk_device *dev, struct hk_query_pool *pool,
                   uint32_t first_index, uint32_t num_queries,
                   bool set_available)
 {
+   if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
+      const struct hk_pipeline_statistics_layout layout = {
+         .query_count = pool->vk.query_count,
+         .reports_per_query = hk_reports_per_query(pool),
+         .query_start_B = pool->query_start,
+         .query_stride_B = pool->query_stride,
+         .size_B = pool->query_start +
+                   ((uint64_t)pool->vk.query_count * pool->query_stride),
+      };
+      hk_pipeline_statistics_reset_host(agx_bo_map(pool->bo), &layout,
+                                        first_index, num_queries,
+                                        set_available);
+      return;
+   }
+
    for (uint32_t i = 0; i < num_queries; i++) {
       struct hk_query_report *reports =
          hk_query_report_map(dev, pool, first_index + i);
@@ -367,24 +396,45 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    if (!pool)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   /* We place the availability first and then data */
-   pool->query_start = 0;
-   if (hk_has_available(pool)) {
-      pool->query_start = align(pool->vk.query_count * sizeof(uint32_t),
-                                sizeof(struct hk_query_report));
+   /* We place the availability first and then data. Pipeline-statistics pools
+    * use the independently tested 64-bit layout path so large query counts
+    * cannot wrap a 32-bit BO size. */
+   size_t bo_size = 0;
+   if (pool->vk.query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
+      struct hk_pipeline_statistics_layout layout;
+      if (!hk_pipeline_statistics_layout_init(
+             pool->vk.query_count, pool->vk.pipeline_statistics, &layout) ||
+          layout.size_B > SIZE_MAX) {
+         vk_query_pool_destroy(&dev->vk, pAllocator, &pool->vk);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+
+      pool->query_start = layout.query_start_B;
+      pool->query_stride = layout.query_stride_B;
+      bo_size = layout.size_B;
+   } else {
+      pool->query_start = 0;
+      if (hk_has_available(pool)) {
+         pool->query_start =
+            align64((uint64_t)pool->vk.query_count * sizeof(uint32_t),
+                    sizeof(struct hk_query_report));
+      }
+
+      const uint32_t reports_per_query = hk_reports_per_query(pool);
+      pool->query_stride =
+         (uint64_t)reports_per_query * sizeof(struct hk_query_report);
    }
 
-   uint32_t reports_per_query = hk_reports_per_query(pool);
-   pool->query_stride = reports_per_query * sizeof(struct hk_query_report);
-
    if (pool->vk.query_count > 0) {
-      uint32_t bo_size = pool->query_start;
+      if (pool->vk.query_type != VK_QUERY_TYPE_PIPELINE_STATISTICS) {
+         bo_size = pool->query_start;
 
-      /* For occlusion queries, we stick the query index remapping here */
-      if (occlusion_queries)
-         bo_size += sizeof(uint16_t) * pool->vk.query_count;
-      else
-         bo_size += pool->query_stride * pool->vk.query_count;
+         /* For occlusion queries, we stick the query index remapping here */
+         if (occlusion_queries)
+            bo_size += sizeof(uint16_t) * (size_t)pool->vk.query_count;
+         else
+            bo_size += pool->query_stride * (size_t)pool->vk.query_count;
+      }
 
       /* The kernel requires that timestamp buffers are SHARED */
       enum agx_bo_flags flags = AGX_BO_WRITEBACK;
@@ -597,9 +647,12 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       root->draw.pipeline_stats_flags =
          end ? 0 : pool->vk.pipeline_statistics;
 
-      /* XXX: I don't think is correct... when does the query become available
-       * exactly?
-       */
+      /* IA/VS/clip counters may be written by the pre-graphics helper and FS
+       * counters by the VDM workload itself, so any graphics statistic makes
+       * availability a post-graphics write. A compute-only query increments
+       * and publishes availability in the same ordered general CDM stream.
+       * Mixed queries also select post-graphics; when no VDM is live that
+       * stream is appended after the current compute stream. */
       graphics = pool->vk.pipeline_statistics &
                  ~VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
       break;
@@ -693,19 +746,6 @@ hk_query_wait_for_available(struct hk_device *dev, struct hk_query_pool *pool,
    return vk_device_set_lost(&dev->vk, "query timeout");
 }
 
-static void
-cpu_write_query_result(void *dst, uint32_t idx, VkQueryResultFlags flags,
-                       uint64_t result)
-{
-   if (flags & VK_QUERY_RESULT_64_BIT) {
-      uint64_t *dst64 = dst;
-      dst64[idx] = result;
-   } else {
-      uint32_t *dst32 = dst;
-      dst32[idx] = result;
-   }
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
                        uint32_t firstQuery, uint32_t queryCount,
@@ -732,24 +772,14 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
          available = true;
       }
 
-      bool write_results = available || (flags & VK_QUERY_RESULT_PARTIAL_BIT);
-
       const struct hk_query_report *src = hk_query_report_map(dev, pool, query);
       assert(i * stride < dataSize);
       void *dst = (char *)pData + i * stride;
 
       uint32_t reports = hk_reports_per_query(pool);
-      if (write_results) {
-         for (uint32_t j = 0; j < reports; j++) {
-            cpu_write_query_result(dst, j, flags, src[j].value);
-         }
-      }
-
-      if (!write_results)
+      if (!hk_query_write_cpu_result(dst, &src[0].value, reports, available,
+                                     flags))
          status = VK_NOT_READY;
-
-      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
-         cpu_write_query_result(dst, reports, flags, available);
    }
 
    return status;

@@ -305,8 +305,8 @@ main(void)
    vkGetPhysicalDeviceFeatures(physical, &physical_features);
    if (!physical_features.occlusionQueryPrecise)
       die("T8140 does not advertise precise occlusion queries");
-   if (physical_features.pipelineStatisticsQuery)
-      die("T8140 unexpectedly advertises ungrounded pipeline statistics");
+   if (!physical_features.pipelineStatisticsQuery)
+      die("T8140 does not advertise pipeline statistics");
    if (!properties.limits.timestampComputeAndGraphics ||
        properties.limits.timestampPeriod != 1.0f)
       die("T8140 timestamp properties differ from the bounded profile");

@@ -737,11 +737,11 @@ hk_get_device_features(
       features->geometryShader = false;
       features->tessellationShader = false;
       features->sampleRateShading = false;
-      /* The native graphics-counter stores and contiguous query-pool reset
-       * path are implemented. Keep the public promise opt-in until the exact
-       * IA-vertex/primitive execution oracle passes on G17P hardware. */
-      features->pipelineStatisticsQuery =
-         hk_g17p_unverified_feature("pipeline_statistics");
+      /* IA vertex/primitive recording, including reset/reuse/unavailable
+       * handling, has passed its exact hardware oracle twice. Every applicable
+       * graphics/compute counter now has a strict native helper or fragment-
+       * prolog compiler oracle and shares the guarded compact-report ABI. */
+      features->pipelineStatisticsQuery = true;
       /* The graphics-stage descriptor, storage-write and atomic paths are
        * complete and record through HAL200. Keep their public promise behind
        * the exact side-effect qualification run; retain the older
