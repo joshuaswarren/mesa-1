@@ -2127,6 +2127,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       so->info.uses_fbfetch = nir->info.fs.uses_fbfetch_output;
+      so->info.writes_memory = nir->info.writes_memory;
       so->info.inputs_linear_shaded = nir->info.linear_varyings;
       so->info.inputs_flat_shaded = nir->info.inputs_read &
                                     ~nir->info.linear_varyings &
@@ -2824,7 +2825,13 @@ agx_update_fs(struct agx_batch *batch)
    link_key.epilog.fs.blend.alpha_to_coverage &= msaa;
 
    /* The main shader must not run tests if the epilog will */
-   bool epilog_discards = link_key.epilog.fs.blend.alpha_to_coverage;
+   const bool nontrivial_force_early =
+      ctx->fs->b.info.early_fragment_tests &&
+      (ctx->fs->b.info.writes_sample_mask ||
+       (ctx->fs->so && ctx->fs->so->info.writes_memory));
+   bool epilog_discards = agx_fs_epilog_may_discard(
+      &link_key.epilog.fs.link,
+      link_key.epilog.fs.blend.alpha_to_coverage, nontrivial_force_early);
    batch->uniforms.no_epilog_discard = !epilog_discards ? ~0 : 0;
 
    bool prolog_discards = (link_key.prolog.fs.api_sample_mask != 0xff ||
@@ -2832,8 +2839,11 @@ agx_update_fs(struct agx_batch *batch)
                            link_key.prolog.fs.polygon_stipple);
 
    /* The prolog runs tests if neither the main shader nor epilog will */
-   link_key.prolog.fs.run_zs_tests = !ctx->fs->b.info.writes_sample_mask &&
+   link_key.prolog.fs.run_zs_tests = !nontrivial_force_early &&
+                                     !ctx->fs->b.info.writes_sample_mask &&
                                      !epilog_discards && prolog_discards;
+
+   link_key.epilog.fs.link.already_ran_zs |= nontrivial_force_early;
 
    if (link_key.prolog.fs.cull_distance_size)
       link_key.prolog.fs.cf_base = ctx->fs->b.info.varyings.fs.nr_cf;

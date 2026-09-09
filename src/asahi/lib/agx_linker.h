@@ -310,6 +310,12 @@ struct agx_fs_epilog_key {
 void agx_fs_epilog_apply_device_policy(enum agx_chip chip,
                                        struct agx_fs_epilog_key *key);
 
+/* Depth/stencil exports run tests in the epilog just like alpha-to-coverage
+ * can discard there. Forced-early main shaders have already run those tests. */
+bool agx_fs_epilog_may_discard(const struct agx_fs_epilog_link_info *link,
+                               bool alpha_to_coverage,
+                               bool nontrivial_force_early);
+
 void agx_nir_vs_prolog(struct nir_builder *b, const void *key_);
 void agx_nir_vs_prolog_raw(struct nir_builder *b, const void *key_);
 void agx_nir_fs_epilog(struct nir_builder *b, const void *key_);

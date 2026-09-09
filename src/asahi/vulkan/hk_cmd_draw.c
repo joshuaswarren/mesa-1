@@ -4087,10 +4087,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       fs && (fs->b.info.early_fragment_tests &&
              (fs->b.info.writes_sample_mask || fs->info.fs.writes_memory));
 
-   bool epilog_discards = dyn->ms.alpha_to_coverage_enable ||
-                          (fs && (fs->info.fs.epilog_key.write_z ||
-                                  fs->info.fs.epilog_key.write_s));
-   epilog_discards &= !nontrivial_force_early;
+   bool epilog_discards = agx_fs_epilog_may_discard(
+      fs ? &fs->info.fs.epilog_key : NULL,
+      dyn->ms.alpha_to_coverage_enable, nontrivial_force_early);
 
    if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE)) {
       desc->root.draw.no_epilog_discard = !epilog_discards ? ~0 : 0;

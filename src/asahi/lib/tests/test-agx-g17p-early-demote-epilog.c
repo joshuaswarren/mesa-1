@@ -57,6 +57,25 @@ test_single_sample_shading(void)
    return ok;
 }
 
+static bool
+test_epilog_discard_policy(void)
+{
+   struct agx_fs_epilog_link_info link = {0};
+   if (agx_fs_epilog_may_discard(&link, false, false) ||
+       !agx_fs_epilog_may_discard(NULL, true, false) ||
+       agx_fs_epilog_may_discard(NULL, true, true))
+      return false;
+
+   link.write_z = true;
+   if (!agx_fs_epilog_may_discard(&link, false, false) ||
+       agx_fs_epilog_may_discard(&link, false, true))
+      return false;
+
+   link.write_z = false;
+   link.write_s = true;
+   return agx_fs_epilog_may_discard(&link, false, false);
+}
+
 static nir_shader *
 build_early_demote_fs(void)
 {
@@ -131,6 +150,10 @@ main(void)
 {
    if (!test_single_sample_shading()) {
       fprintf(stderr, "G17P 1x sample shading was not folded to pixel shading\n");
+      return 1;
+   }
+   if (!test_epilog_discard_policy()) {
+      fprintf(stderr, "fragment epilog discard policy lost a tested axis\n");
       return 1;
    }
 

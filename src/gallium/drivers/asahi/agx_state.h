@@ -301,6 +301,7 @@ struct agx_uncompiled_shader {
       uint8_t cull_distance_size;
       bool has_edgeflags;
       bool uses_fbfetch;
+      bool writes_memory;
 
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;

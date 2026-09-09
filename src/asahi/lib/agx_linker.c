@@ -48,6 +48,15 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
    key->lower_srgb = g17p;
 }
 
+bool
+agx_fs_epilog_may_discard(const struct agx_fs_epilog_link_info *link,
+                          bool alpha_to_coverage,
+                          bool nontrivial_force_early)
+{
+   return !nontrivial_force_early &&
+          (alpha_to_coverage || (link && (link->write_z || link->write_s)));
+}
+
 /* clang-format off */
 static const uint8_t sample_loop_header[] = {
    /* mov_imm r0l, 0x0, 0b0 */
