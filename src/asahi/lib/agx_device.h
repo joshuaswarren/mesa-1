@@ -260,8 +260,8 @@ struct agx_device {
    struct agx_bo *g17p_render_context_bo;
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
-   /* G17P command-pool BO aliases whose compact VDM offsets must remain below
-    * 0x02000000. Protected by vma_lock like the other heaps. */
+   /* Native command-pool BO aliases with representable 32-bit context offsets.
+    * Protected by vma_lock like the other heaps. */
    struct util_vma_heap g17p_vdm_alias_heap;
    uint64_t main_heap_base;
    uint64_t main_heap_size;

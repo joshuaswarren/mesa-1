@@ -502,8 +502,15 @@ test_g17p_vdm_command_alias_heap(void)
    uint32_t compact = 0;
    assert(agx_g17p_vdm_alias_compact(first, &compact));
    assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_START);
+   /* SuperTuxKart creates more than the old 192 live 128-KiB command BOs
+    * during pipeline warmup. Offsets must survive the former +32-MiB bound. */
+   assert(agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x02000000), &compact));
+   assert(compact == UINT32_C(0x02000000));
    assert(agx_g17p_vdm_alias_compact(last + command_bo_size - 1, &compact));
-   assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_END - 1);
+   assert(compact == UINT32_MAX);
+   assert(!agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_USER_BASE + (UINT64_C(1) << 32), &compact));
    assert(!agx_g17p_vdm_alias_compact(AGX_G17P_VDM_ALIAS_BASE - 1,
                                       &compact));
    assert(!agx_g17p_vdm_alias_compact(first, NULL));
