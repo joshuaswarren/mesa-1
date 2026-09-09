@@ -261,3 +261,34 @@ TEST(Tilebuffer, G17PRGB565EOTKey)
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
    EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 }
+
+TEST(Tilebuffer, G17PPacked16EOTKey)
+{
+   struct agx_shader_key key = {};
+   const enum pipe_format packed[] = {
+      PIPE_FORMAT_R5G5B5A1_UNORM,
+      PIPE_FORMAT_B5G5R5A1_UNORM,
+      PIPE_FORMAT_R5G5B5X1_UNORM,
+      PIPE_FORMAT_B5G5R5X1_UNORM,
+      PIPE_FORMAT_R4G4B4A4_UNORM,
+      PIPE_FORMAT_B4G4R4A4_UNORM,
+      PIPE_FORMAT_A4B4G4R4_UNORM,
+      PIPE_FORMAT_A4R4G4B4_UNORM,
+   };
+
+   for (enum pipe_format format : packed) {
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {format};
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(formats, 1, 1, false);
+
+      EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0),
+                PIPE_FORMAT_R16_FLOAT);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+      agx_g17p_configure_rt0_eot_key(format, &key);
+      EXPECT_EQ(key.g17p_rt0_eot_words, 2);
+      EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
+      EXPECT_FALSE(key.g17p_rt0_eot_i32);
+      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
+   }
+}

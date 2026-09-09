@@ -74,6 +74,17 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       break;
    case PIPE_FORMAT_R5G6B5_UNORM:
    case PIPE_FORMAT_B5G6R5_UNORM:
+   /* The packed 5551/4444 formats expand to four F16 tile lanes. The PBE
+    * performs the final memory packing, so their EOT shape is two words just
+    * like RGBA16F rather than the distinct three-lane RGB565 program. */
+   case PIPE_FORMAT_R5G5B5A1_UNORM:
+   case PIPE_FORMAT_B5G5R5A1_UNORM:
+   case PIPE_FORMAT_R5G5B5X1_UNORM:
+   case PIPE_FORMAT_B5G5R5X1_UNORM:
+   case PIPE_FORMAT_R4G4B4A4_UNORM:
+   case PIPE_FORMAT_B4G4R4A4_UNORM:
+   case PIPE_FORMAT_A4B4G4R4_UNORM:
+   case PIPE_FORMAT_A4R4G4B4_UNORM:
    case PIPE_FORMAT_R32G32_FLOAT:
    case PIPE_FORMAT_R16G16B16A16_FLOAT:
    case PIPE_FORMAT_R16G16B16A16_UNORM:
