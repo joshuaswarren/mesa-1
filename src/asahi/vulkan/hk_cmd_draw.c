@@ -4257,10 +4257,6 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       key.epilog.link.already_ran_zs |= nontrivial_force_early;
 
       struct hk_rendering_state *render = &cmd->state.gfx.render;
-      const bool diagnostic_rt1_source_only =
-         dev->dev.chip == AGX_CHIP_G17P &&
-         agx_g17p_classify_mrt(&render->tilebuffer) == AGX_G17P_MRT_WBOIT &&
-         debug_get_bool_option("HK_G17P_WBOIT_RT1_SOURCE_ONLY", false);
       for (uint32_t i = 0; i < render->color_att_count; i++) {
          key.epilog.rt_formats[i] =
             hk_format_to_pipe_format(render->color_att[i].vk_format);
@@ -4277,19 +4273,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           * nir_lower_blend always blends, so use a default blend state when
           * blending is disabled at an API level.
           */
-         if (diagnostic_rt1_source_only && i == 1 && write_enable) {
-            /* Diagnostic only: bypass the RT1 background value and its tile
-             * load while retaining the API shader's location-1 export and the
-             * real offset-8 tile store.  A nonzero hardware result isolates a
-             * broken background clear/reload; an all-zero result instead
-             * localizes the failure to MRT export/store publication. */
-            key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
-               .colormask = write_mask,
-               .mode = agx_pack_blend_standard(
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO),
-            };
-         } else if (dev->dev.chip == AGX_CHIP_G17P && !write_enable) {
+         if (dev->dev.chip == AGX_CHIP_G17P && !write_enable) {
             key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
                .colormask = BITFIELD_MASK(4),
                .mode = agx_pack_blend_standard(

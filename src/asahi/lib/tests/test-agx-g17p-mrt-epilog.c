@@ -94,7 +94,6 @@ compile_rgba8_mrt_epilog(const struct agx_fs_epilog_link_info *link,
 
 static bool
 compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
-                             bool rt1_source_only,
                              struct agx_shader_part *part)
 {
    struct agx_fs_epilog_key key = {
@@ -113,14 +112,10 @@ compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
       PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE,
       PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE);
    key.blend.rt[1].colormask = 0x1;
-   key.blend.rt[1].mode = rt1_source_only
-      ? agx_pack_blend_standard(
-           PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
-           PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO)
-      : agx_pack_blend_standard(
-           PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO,
-           PIPE_BLENDFACTOR_INV_SRC_COLOR, PIPE_BLEND_ADD,
-           PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_INV_SRC_ALPHA);
+   key.blend.rt[1].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO,
+      PIPE_BLENDFACTOR_INV_SRC_COLOR, PIPE_BLEND_ADD,
+      PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_INV_SRC_ALPHA);
 
    nir_builder b = nir_builder_init_simple_shader(
       0, &agx_nir_options, "G17P vkQuake MBOIT epilog");
@@ -265,7 +260,7 @@ main(void)
 
    struct agx_shader_part vkquake_part = {0};
    const bool vkquake_ok =
-      compile_vkquake_mboit_epilog(&actual_link, false, &vkquake_part) &&
+      compile_vkquake_mboit_epilog(&actual_link, &vkquake_part) &&
       vkquake_part.binary && vkquake_part.info.main_offset == 0 &&
       vkquake_part.info.main_size == vkquake_part.info.binary_size &&
       vkquake_part.info.agx3_colour_link.entry_emitted &&
@@ -311,44 +306,6 @@ main(void)
       return 1;
    }
    free(vkquake_part.binary);
-
-   struct agx_shader_part source_only_part = {0};
-   if (!compile_vkquake_mboit_epilog(&actual_link, true,
-                                     &source_only_part)) {
-      fprintf(stderr, "G17P source-only RT1 discriminator did not compile\n");
-      return 1;
-   }
-   /* This is the exact opt-in hardware discriminator selected by
-    * HK_G17P_WBOIT_RT1_SOURCE_ONLY.  It retains the real base-16 export and
-    * offset-8 store, but has no RT1 tile load, so its result is independent of
-    * background clear/reload state. */
-   static const uint8_t expected_source_only[] = {
-      0x87,0x02,0x54,0x00,0x06,0x00,0x87,0x02,0x54,0x08,
-      0x08,0x00,0x67,0x06,0x54,0x00,0x00,0x00,0x01,0x8e,
-      0x02,0x00,0x00,0x00,0x29,0x00,0x3c,0x81,0x00,0xc2,
-      0x29,0x05,0x18,0x09,0x39,0x00,0x3c,0x81,0x08,0x02,
-      0x09,0x07,0x18,0x0b,0x39,0x02,0x3c,0x81,0x00,0x02,
-      0x39,0x07,0x18,0x0d,0x49,0x02,0x3c,0x81,0x08,0x02,
-      0x19,0x09,0x18,0x0f,0x41,0x05,0x3c,0x81,0x00,0x02,
-      0x41,0x01,0x3c,0x81,0x04,0x02,0x51,0x07,0x3c,0x81,
-      0x00,0x02,0x51,0x03,0x3c,0x81,0x04,0x02,0x9f,0x11,
-      0x54,0x00,0x02,0x00,0x20,0x88,0x11,0x04,0x9f,0x11,
-      0x54,0x02,0x02,0x00,0x28,0x88,0x11,0x04,0x97,0x04,
-      0x54,0x04,0x02,0x20,0x02,0x10,0x44,0xc0,0x87,0x02,
-      0x54,0x30,0x08,0x00,0xe7,0x06,0x54,0x04,0x00,0x04,
-      0x01,0x42,0x00,0x00,0x00,0x00,0x07,0x02,0x54,0x30,
-      0x00,0x00,0x87,0x02,0x54,0x04,0x08,0x00,0xe7,0x06,
-      0x54,0x00,0x00,0x00,0x01,0x0e,0x00,0x00,0x00,0x00,
-      0x07,0x02,0x54,0x0c,0x02,0x00,0x0e,0x00,0x00,0x00,
-   };
-   if (source_only_part.info.main_offset != 0 ||
-       source_only_part.info.main_size != sizeof(expected_source_only) ||
-       memcmp(source_only_part.binary, expected_source_only,
-              sizeof(expected_source_only))) {
-      fprintf(stderr, "G17P source-only RT1 discriminator bytes changed\n");
-      return 1;
-   }
-   free(source_only_part.binary);
 
    static const uint8_t expected_main[] = {
       0x4b,0x06,0x01,0x08,0x5b,0x00,0x01,0x08,0x6b,0x04,
