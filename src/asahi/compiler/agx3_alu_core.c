@@ -1230,6 +1230,82 @@ agx3_alu_fcmp_minifloat_select_mixed(
    return false;
 }
 
+bool
+agx3_alu_fcmp_half_minifloat_select_f32(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
+   uint8_t minifloat, const uint16_t selected[2],
+   const bool selected_immediate[2], const enum agx3_alu_hint hints[3],
+   unsigned condition, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !selected ||
+       !selected_immediate || !hints || !out || !len || dest >= 256 ||
+       (dest & 1) || compare >= 256 ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+
+   if (selected_immediate[0] && selected_immediate[1])
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (selected[i] >= 256 ||
+          (!selected_immediate[i] && (selected[i] & 1)) ||
+          (selected_immediate[i] && hints[i + 1] != AGX3_ALU_HINT_NONE))
+         return false;
+   }
+   for (unsigned i = 0; i < 3; ++i) {
+      if ((unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   /* Fresh Metal kernels for all five comparisons use fsel.ep27 with two
+    * registers. Register/zero alternatives use ep22 and f68/f85 for the
+    * immediate instead. In both, f35 is the scalar-half comparator and f51
+    * the ordinary minifloat. These endpoints have only the slot-6 wait bit;
+    * callers retire another producer slot before composing them. */
+   const bool mixed_selected =
+      selected_immediate[0] || selected_immediate[1];
+   struct agx3_field_kv base[13];
+   unsigned nbase = 0;
+   if (mixed_selected) {
+      base[nbase++] = (struct agx3_field_kv){0, 1};
+      base[nbase++] = (struct agx3_field_kv){24, 2};
+      base[nbase++] = (struct agx3_field_kv){25, 2};
+   } else {
+      base[nbase++] = (struct agx3_field_kv){10, 2};
+      base[nbase++] = (struct agx3_field_kv){11, 2};
+   }
+   base[nbase++] = (struct agx3_field_kv){42, 2};
+   base[nbase++] = (struct agx3_field_kv){43, 1};
+   base[nbase++] = (struct agx3_field_kv){59, 1};
+   base[nbase++] = (struct agx3_field_kv){60, 2};
+   base[nbase++] = (struct agx3_field_kv){76,
+                                          selected_immediate[0] ? 1 : 2};
+   base[nbase++] = (struct agx3_field_kv){77, 2};
+   base[nbase++] = (struct agx3_field_kv){93,
+                                          selected_immediate[1] ? 1 : 2};
+   base[nbase++] = (struct agx3_field_kv){94, 2};
+   struct agx3_field_kv fields[14] = {
+      {mixed_selected ? 17 : 3, dest},
+      {mixed_selected ? 26 : 12, dest_cache},
+      {35, compare},
+      {51, minifloat},
+      {selected_immediate[0] ? 68 : 69, selected[0]},
+      {selected_immediate[1] ? 85 : 86, selected[1]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {78, hints[1] == AGX3_ALU_HINT_CACHE},
+      {80, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {95, hints[2] == AGX3_ALU_HINT_CACHE},
+      {97, hints[2] == AGX3_ALU_HINT_DISCARD},
+      {107, wait_mask == 32},
+      {110, condition},
+   };
+   return agx3_bind_compose(enc, "fsel", mixed_selected ? 22 : 27, base,
+                            nbase, fields, 14, out, len);
+}
+
 /* Compare a half/full float register with floating zero, selecting full float
  * registers. The three source lifetimes are independent (including aliases).
  * Native Metal uses these compact forms for mixed-precision shader selects. */
@@ -1568,7 +1644,9 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
    const bool abs_compare = compare_abs[0] || compare_abs[1];
    const bool abs_immediate_select =
       abs_compare && (immediate[0] || immediate[1]);
-   if (abs_compare && (compare_zero || condition > 2 || dest_16))
+   if (abs_compare &&
+       (compare_zero || dest_16 ||
+        (condition > 2 && compare_abs[0] == compare_abs[1])))
       return false;
 
    struct agx3_field_kv base[12];

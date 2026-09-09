@@ -158,6 +158,15 @@ bool agx3_alu_fcmp_minifloat_select_mixed(
    unsigned condition, bool dest_16, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Compare a scalar half against a minifloat and select f32 values, with at
+ * most one byte-immediate alternative. */
+bool agx3_alu_fcmp_half_minifloat_select_f32(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
+   uint8_t minifloat, const uint16_t selected[2],
+   const bool selected_immediate[2], const enum agx3_alu_hint hints[3],
+   unsigned condition, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Plain f32 register FADD/FMUL/FMA with actual post-RA source hints and
  * scheduler waits. Compact witnessed forms only; unsupported wait combinations
  * return false so the caller can retire them explicitly before retrying. */
@@ -338,7 +347,8 @@ bool agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t sourc
                         uint8_t *length);
 
 /* G17P register/immediate FSEL. Absolute compare modifiers are grounded for
- * f32 eq/lt/gt with register-register comparators and f32 selected values. */
+ * f32 eq/lt/gt, plus GE/LE with exactly one absolute comparator, with f32
+ * selected values. */
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4], bool compare_zero,
                                   const bool compare_abs[2],

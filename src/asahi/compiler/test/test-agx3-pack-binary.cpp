@@ -1696,6 +1696,102 @@ TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
    EXPECT_EQ(pack(b), std::vector<uint8_t>(native, native + sizeof(native)));
 }
 
+TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselShapes)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index half = agx_register(6, AGX_SIZE_16);
+   agx_fcmpsel_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(32), half,
+                  agx_register(8, AGX_SIZE_32),
+                  agx_register(16, AGX_SIZE_32), AGX_FCOND_GE);
+   agx_stop(b);
+   const std::vector<uint8_t> half_threshold = {
+      0x42, 0x06, 0x07, 0xa1, 0x06, 0x08, 0x03, 0x02, 0x00,
+      0x10, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), half_threshold);
+
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   half = agx_register(6, AGX_SIZE_16);
+   half.cache = true;
+   agx_index selected = agx_register(8, AGX_SIZE_32);
+   selected.cache = true;
+   agx_fcmpsel_to(b, agx_register(20, AGX_SIZE_32), half,
+                  agx_immediate(0), selected, agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> register_or_zero = {
+      0xa2, 0x86, 0x03, 0x81, 0x02, 0x88, 0x03, 0x02, 0x20,
+      0x80, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), register_or_zero);
+}
+
+TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselRefusesUngroundedModes)
+{
+   for (unsigned mode = 0; mode < 10; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      agx_index half = agx_register(6, AGX_SIZE_16);
+      agx_index immediate = agx_immediate(32);
+      agx_index if_true = agx_register(8, AGX_SIZE_32);
+      agx_index if_false = agx_register(16, AGX_SIZE_32);
+      if (mode == 1)
+         dest.size = AGX_SIZE_16;
+      if (mode == 2)
+         half.abs = true;
+      if (mode == 3)
+         half.neg = true;
+      if (mode == 4)
+         half.cache = half.discard = true;
+      if (mode == 5)
+         half.kill = true;
+      if (mode == 6)
+         immediate.value = 256;
+      if (mode == 7)
+         if_true.value = 9;
+      if (mode == 8)
+         if_false = agx_immediate(0);
+      agx_instr *fsel = agx_fcmpsel_to(b, dest, immediate, half,
+                                       mode == 8 ? agx_immediate(0) : if_true,
+                                       if_false, AGX_FCOND_GE);
+      fsel->saturate = mode == 9;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
+TEST_F(AGX3PackBinary, HyprlandAbsoluteSecondFsel)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index plain = agx_register(26, AGX_SIZE_32);
+   agx_index absolute = agx_register(8, AGX_SIZE_32);
+   plain.cache = absolute.cache = true;
+   absolute.abs = true;
+   agx_fcmpsel_to(b, agx_register(16, AGX_SIZE_32), plain, absolute,
+                  agx_register(22, AGX_SIZE_32),
+                  agx_register(16, AGX_SIZE_32), AGX_FCOND_GE);
+   agx_stop(b);
+   const std::vector<uint8_t> target = {
+      0x82, 0x9b, 0x07, 0x89, 0x07, 0x16, 0x02, 0x00, 0x00,
+      0x10, 0x00, 0x00, 0x02, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), target);
+}
+
+TEST_F(AGX3PackBinary, OrderedAbsoluteFselRefusesUnwitnessedDoubleAbs)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(2, AGX_SIZE_32);
+   agx_index c = agx_register(4, AGX_SIZE_32);
+   a.abs = c.abs = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_32), a, c,
+                  agx_register(6, AGX_SIZE_32),
+                  agx_register(8, AGX_SIZE_32), AGX_FCOND_GE);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

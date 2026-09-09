@@ -1836,6 +1836,75 @@ static void test_native_minifloat_mixed_select(void)
    puts("Native minifloat mixed select: eight exact Apple vectors and bounds PASS");
 }
 
+static void test_native_half_minifloat_select_f32(void)
+{
+   static const struct {
+      unsigned condition;
+      const char *bytes;
+   } vectors[] = {
+      {6, "02000fa1060203c20004"},
+      {1, "02000fa1020203c20004"},
+      {2, "02000fa1020202c20004"},
+      {5, "02000fa1060202c20004"},
+      {0, "02000fa1060200c20004"},
+   };
+   const uint16_t selected[] = {2, 4};
+   const bool selected_immediate[] = {false, false};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fcmp_half_minifloat_select_f32(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 32, selected, selected_immediate, hints,
+         vectors[i].condition, false, 32, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   const uint16_t register_zero[] = {2, 0};
+   const bool register_zero_immediate[] = {false, true};
+   assert(agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0, register_zero,
+      register_zero_immediate, hints, 1, false, 32, bytes, &len));
+   exact(bytes, len, "02000b81020203c22080");
+   const uint16_t zero_register[] = {0, 2};
+   const bool zero_register_immediate[] = {true, false};
+   assert(agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0, zero_register,
+      zero_register_immediate, hints, 1, false, 32, bytes, &len));
+   exact(bytes, len, "02000b81228003c20002");
+
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 32, selected, selected_immediate, hints,
+      6, false, 32, bytes, &len));
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, 32, selected, selected_immediate, hints,
+      6, false, 32, bytes, &len));
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 256, 32, selected, selected_immediate, hints,
+      6, false, 32, bytes, &len));
+   const uint16_t odd_selected[] = {1, 4};
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 32, odd_selected, selected_immediate,
+      hints, 6, false, 32, bytes, &len));
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 32, selected, selected_immediate, hints,
+      3, false, 32, bytes, &len));
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 32, selected, selected_immediate, hints,
+      6, false, 1, bytes, &len));
+   const enum agx3_alu_hint bad_hints[] = {
+      (enum agx3_alu_hint)3, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 32, selected, selected_immediate,
+      bad_hints, 6, false, 32, bytes, &len));
+   const bool both_immediate[] = {true, true};
+   assert(!agx3_alu_fcmp_half_minifloat_select_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 32, selected, both_immediate, hints, 6,
+      false, 32, bytes, &len));
+   puts("Native half/minifloat full FSEL: seven exact Apple vectors and bounds PASS");
+}
+
 static void test_native_fadd_abs_mixed_half(void)
 {
    static const struct {
@@ -2332,7 +2401,42 @@ static void test_native_select_reg_imm(void)
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
       false,both_abs,reg0_imm,no_hints,2,false,false,32,bytes,&len));
    exact(bytes,len,"3201030303040200208000800300");
-   puts("Native absolute-comparison FSEL: nine exact G17P vectors PASS");
+
+   /* Hyprland's colour conversion compares a full value against one
+    * absolute full value.  Fresh direct-value Metal kernels cover every
+    * ordered condition on the same long endpoint. */
+   const uint16_t abs_second_src[]={2,4,6,0};
+   const bool abs_second[]={false,true};
+   const enum agx3_alu_hint abs_second_hints[]={AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_DISCARD};
+   static const struct {
+      unsigned condition;
+      const char *bytes;
+   } abs_ordered[] = {
+      {5,"0203070507060200800000800200"},
+      {6,"0203070507060300800000800200"},
+      {1,"0203070503060300800000800200"},
+      {2,"0203070503060200800000800200"},
+      {0,"0203070507060000800000800200"},
+   };
+   for (unsigned i=0;i<sizeof(abs_ordered)/sizeof(abs_ordered[0]);++i) {
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,abs_second,
+         reg_immediate,abs_second_hints,abs_ordered[i].condition,false,false,
+         32,bytes,&len));
+      exact(bytes,len,abs_ordered[i].bytes);
+   }
+
+   const uint16_t abs_first_src[]={4,2,6,0};
+   const bool abs_first[]={true,false};
+   assert(agx3_alu_fcmp_select_reg_imm(
+      AGX_ISA_ENCODING_AGX3B,0,abs_first_src,false,abs_first,reg_immediate,
+      abs_second_hints,6,false,false,32,bytes,&len));
+   exact(bytes,len,"0205070307060300800000800100");
+   assert(!agx3_alu_fcmp_select_reg_imm(
+      AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,both_abs,reg_immediate,
+      abs_second_hints,5,false,false,32,bytes,&len));
+   puts("Native absolute-comparison FSEL: fifteen exact G17P vectors PASS");
 }
 
 static void test_native_half_min(void)
@@ -2902,6 +3006,7 @@ int main(void){
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
    test_native_minifloat_mixed_select();
+   test_native_half_minifloat_select_f32();
    test_native_fadd_mixed_half();
    test_native_fadd_abs_mixed_half();
    test_native_half_fma();

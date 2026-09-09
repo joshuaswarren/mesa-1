@@ -7164,6 +7164,72 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /* Hyprland's HLG transfer path compares a scalar-half value against
+          * a minifloat threshold and selects two full floats.  Keep the half
+          * in its assigned physical half; a leading immediate only reverses
+          * the comparison, while an inverted condition exchanges results. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_fcond_witnessed_select(I->fcond) &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             (agx3_vary_reg32(I->src[2]) ||
+              I->src[2].type == AGX_INDEX_IMMEDIATE) &&
+             (agx3_vary_reg32(I->src[3]) ||
+              I->src[3].type == AGX_INDEX_IMMEDIATE) &&
+             !(I->src[2].type == AGX_INDEX_IMMEDIATE &&
+               I->src[3].type == AGX_INDEX_IMMEDIATE) &&
+             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1 &&
+             ((agx3_half_reg(I->src[0]) &&
+               I->src[1].type == AGX_INDEX_IMMEDIATE) ||
+              (I->src[0].type == AGX_INDEX_IMMEDIATE &&
+               agx3_half_reg(I->src[1])))) {
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index immediate = I->src[immediate_first ? 0 : 1];
+            const agx_index compare = I->src[immediate_first ? 1 : 0];
+            const unsigned true_src = I->invert_cond ? 3 : 2;
+            const unsigned false_src = I->invert_cond ? 2 : 3;
+            bool invalid = immediate.value > UINT8_MAX;
+            for (unsigned i = 0; i < 4; ++i)
+               invalid |= I->src[i].abs || I->src[i].neg || I->src[i].kill ||
+                          I->src[i].memory || agx_channels(I->src[i]) != 1 ||
+                          (I->src[i].cache && I->src[i].discard);
+            if (invalid)
+               AGX3_REFUSE(I);
+
+            const uint16_t selected[] = {
+               I->src[true_src].value, I->src[false_src].value};
+            const bool selected_immediate[] = {
+               I->src[true_src].type == AGX_INDEX_IMMEDIATE,
+               I->src[false_src].type == AGX_INDEX_IMMEDIATE};
+            const enum agx3_alu_hint hints[] = {
+               agx3_post_ra_hint(compare),
+               selected_immediate[0]
+                  ? AGX3_ALU_HINT_NONE
+                  : agx3_post_ra_hint(I->src[true_src]),
+               selected_immediate[1]
+                  ? AGX3_ALU_HINT_NONE
+                  : agx3_post_ra_hint(I->src[false_src])};
+            const unsigned condition =
+               immediate_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
+            uint16_t fsel_wait = wait;
+            if (fsel_wait != 0 && fsel_wait != 32) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_fcmp_half_minifloat_select_f32(
+                   enc, I->dest[0].value, compare.value,
+                   (uint8_t)immediate.value, selected, selected_immediate,
+                   hints, condition, I->dest[0].cache, fsel_wait, bytes,
+                   &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /*
           * A 32-bit float compared against a minifloat immediate, selecting
           * either of two 32-bit registers. This is what an ordinary
