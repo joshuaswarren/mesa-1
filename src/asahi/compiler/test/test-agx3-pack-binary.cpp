@@ -2197,7 +2197,7 @@ TEST_F(AGX3PackBinary, G17PHalfInverseRefusesUnwitnessedOperands)
    }
 }
 
-TEST_F(AGX3PackBinary, G17PU32ToHalfMatchesNative)
+TEST_F(AGX3PackBinary, G17PI32ToHalfMatchesNative)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index dest = agx_register(0, AGX_SIZE_16);
@@ -2206,14 +2206,31 @@ TEST_F(AGX3PackBinary, G17PU32ToHalfMatchesNative)
                   agx_register(2, AGX_SIZE_32), AGX_ROUND_RTE);
    agx_stop(b);
 
+   /* The Apple witness carried a wait on its async source. This synthetic
+    * builder has no producer, so only that dependency bit clears. */
    static const uint8_t native[] = {
-      0xa7, 0x17, 0x54, 0x00, 0x03, 0x04, 0x88, 0x20,
+      0xa7, 0x07, 0x54, 0x00, 0x03, 0x04, 0x88, 0x20,
    };
    std::vector<uint8_t> want(std::begin(native), std::end(native));
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
+
+   agx_builder *signed_dead = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index source = agx_register(0, AGX_SIZE_32);
+   source.discard = true;
+   agx_convert_to(signed_dead, agx_register(0, AGX_SIZE_16),
+                  agx_immediate(AGX_CONVERT_S32_TO_F), source,
+                  AGX_ROUND_RTE);
+   agx_stop(signed_dead);
+   static const uint8_t native_signed_dead[] = {
+      0xa7, 0x07, 0x54, 0x00, 0x02, 0x00, 0xa8, 0x60,
+   };
+   std::vector<uint8_t> want_signed(std::begin(native_signed_dead),
+                                    std::end(native_signed_dead));
+   append(want_signed, end.bytes, end.length);
+   EXPECT_EQ(pack(signed_dead), want_signed);
 
    agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index cached = agx_register(2, AGX_SIZE_32);

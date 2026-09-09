@@ -1268,24 +1268,31 @@ agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
-agx3_alu_u32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                    enum agx3_alu_hint hint, bool dest_cache,
-                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                    uint8_t *len)
+agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    bool is_signed, enum agx3_alu_hint hint,
+                    bool dest_cache, uint16_t wait_mask,
+                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 || (src & 1) || hint != AGX3_ALU_HINT_NONE || wait_mask)
+       src >= 256 || (src & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       hint == AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
 
-   /* applegpu-nt 32023.917 emits int2flt with f10=1 for a half result,
-    * f25/f26=2 for unsigned32 input, and f33=1 for this conversion form. */
+   /* applegpu-nt 32023.917 emits int2flt with f10=1 for a half result and
+    * f25/f26=2 for a32-bit integer input. f30 selects signed conversion;
+    * f27/f29 carry the post-RA source hint and f33..f38 are dependency waits.
+    * Exact witnesses cover signed/unsigned, live/dead, no-wait and wait0. */
    const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 1}, {25, 2}, {26, 2}, {33, 1},
+      {9, 2}, {10, 1}, {25, 2}, {26, 2},
    };
-   const struct agx3_field_kv fields[] = {
+   struct agx3_field_kv fields[12] = {
       {2, dest}, {11, dest_cache}, {18, src},
+      {29, hint == AGX3_ALU_HINT_DISCARD}, {30, is_signed},
    };
-   return agx3_bind_compose(enc, "int2flt", 0, base, 5, fields, 3, out, len);
+   unsigned n = 5;
+   for (unsigned i = 0; i < 6; ++i)
+      fields[n++] = (struct agx3_field_kv){33 + i, !!(wait_mask & (1u << i))};
+   return agx3_bind_compose(enc, "int2flt", 0, base, 4, fields, n, out, len);
 }
 
 bool

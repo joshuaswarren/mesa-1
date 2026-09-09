@@ -8085,14 +8085,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* shaderFloat16 commonly converts an invocation/index value directly
-          * from unsigned32 into a scalar half. This has a native result-width
-          * form distinct from the established u32-to-f32 conversion. */
+         /* shaderFloat16 commonly converts invocation/index values directly
+          * from signed or unsigned32 into a scalar half. This has a native
+          * result-width form distinct from the established i32-to-f32 form. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->round == AGX_ROUND_RTE &&
              I->src[0].type == AGX_INDEX_IMMEDIATE &&
-             I->src[0].value == AGX_CONVERT_U32_TO_F &&
+             (I->src[0].value == AGX_CONVERT_U32_TO_F ||
+              I->src[0].value == AGX_CONVERT_S32_TO_F) &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 &&
              agx_channels(I->dest[0]) == 1 &&
@@ -8100,8 +8101,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
              !(I->src[1].cache && I->src[1].discard)) {
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
-            if (!agx3_alu_u32_to_f16(
+            if (!agx3_alu_i32_to_f16(
                    enc, I->dest[0].value, I->src[1].value,
+                   I->src[0].value == AGX_CONVERT_S32_TO_F,
                    agx3_post_ra_hint(I->src[1]), I->dest[0].cache, wait,
                    bytes, &len) ||
                 !agx3_append(emission, bytes, len))

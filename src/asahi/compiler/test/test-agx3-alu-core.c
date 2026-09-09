@@ -1297,24 +1297,33 @@ static void test_int_to_float_liveness(void)
    puts("Integer-to-float: four native signed/unsigned live/dead vectors PASS");
 }
 
-static void test_u32_to_f16(void)
+static void test_i32_to_f16(void)
 {
    uint8_t out[AGX3_ALU_MAX_LENGTH], len;
-   assert(agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
-                              AGX3_ALU_HINT_NONE, true, 0, out, &len));
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
+                              AGX3_ALU_HINT_NONE, true, 1, out, &len));
    exact(out, len, "a717540003048820");
-   assert(agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 0,
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 0, false,
                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   exact(out, len, "a717540202008820");
-   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3C, 0, 2,
+   exact(out, len, "a707540202008820");
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
+                              AGX3_ALU_HINT_DISCARD, false, 0, out, &len));
+   exact(out, len, "a70754000200a820");
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 0, true,
+                              AGX3_ALU_HINT_DISCARD, false, 0, out, &len));
+   exact(out, len, "a70754000200a860");
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 0, true,
+                              AGX3_ALU_HINT_NONE, true, 1, out, &len));
+   exact(out, len, "a717540203008860");
+   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3C, 0, 2, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3,
+   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
+   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
                                AGX3_ALU_HINT_CACHE, false, 0, out, &len));
-   assert(!agx3_alu_u32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2,
-                               AGX3_ALU_HINT_NONE, false, 1, out, &len));
-   puts("Native u32-to-f16: two exact Apple vectors and refusals PASS");
+   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
+                               AGX3_ALU_HINT_NONE, false, 0x40, out, &len));
+   puts("Native i32-to-f16: five exact Apple vectors and refusals PASS");
 }
 
 static void
@@ -2780,7 +2789,7 @@ int main(void){
    test_native_u16_arithmetic();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
-   test_u32_to_f16();
+   test_i32_to_f16();
    test_float_compare_select();
    test_float_compare_zero();
    test_integer_lifetimes();
