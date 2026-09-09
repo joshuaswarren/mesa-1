@@ -603,6 +603,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    executable(
+      'g17p-vulkan-secondary-command-buffer',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_SECONDARY_COMMAND_BUFFER=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Exact public Vulkan oracle for G17P wide Bresenham line state.
     executable(
       'g17p-vulkan-bresenham-lines',

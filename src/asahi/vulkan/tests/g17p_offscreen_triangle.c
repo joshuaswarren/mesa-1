@@ -199,6 +199,10 @@
 #define G17P_INDIRECT_DRAW 0
 #endif
 
+#ifndef G17P_SECONDARY_COMMAND_BUFFER
+#define G17P_SECONDARY_COMMAND_BUFFER 0
+#endif
+
 #if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 4
 #error "select a valid G17P indirect draw oracle"
 #endif
@@ -1472,6 +1476,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SECONDARY_COMMAND_BUFFER
+#define PROBE_NAME "g17p-vulkan-secondary-command-buffer"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_HOST_IMAGE_COPY
 #define PROBE_NAME "g17p-hostcopy-triangle"
 #define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
@@ -1531,6 +1540,9 @@ VK_FN(vkCreateCommandPool);
 VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
+#if G17P_SECONDARY_COMMAND_BUFFER
+VK_FN(vkCmdExecuteCommands);
+#endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
 VK_FN(vkCmdPipelineBarrier);
 #endif
@@ -2195,6 +2207,8 @@ main(void)
        getenv("G17P_ADVANCED_BLEND_RECORD_ONLY") != NULL) ||
       (G17P_RASTER_DISCARD &&
        getenv("G17P_RASTER_DISCARD_RECORD_ONLY") != NULL) ||
+      (G17P_SECONDARY_COMMAND_BUFFER &&
+       getenv("G17P_SECONDARY_COMMAND_BUFFER_RECORD_ONLY") != NULL) ||
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
@@ -2726,6 +2740,9 @@ main(void)
    LOAD_DEVICE(device, vkAllocateCommandBuffers);
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
+#if G17P_SECONDARY_COMMAND_BUFFER
+   LOAD_DEVICE(device, vkCmdExecuteCommands);
+#endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
 #endif
@@ -4493,6 +4510,14 @@ main(void)
    VkCommandBuffer command_buffer;
    check(vkAllocateCommandBuffers(device, &command_allocate, &command_buffer),
          "vkAllocateCommandBuffers");
+#if G17P_SECONDARY_COMMAND_BUFFER
+   VkCommandBufferAllocateInfo secondary_allocate = command_allocate;
+   secondary_allocate.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+   VkCommandBuffer secondary_command_buffer;
+   check(vkAllocateCommandBuffers(device, &secondary_allocate,
+                                  &secondary_command_buffer),
+         "vkAllocateCommandBuffers(secondary)");
+#endif
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -4627,7 +4652,35 @@ main(void)
       .pClearValues = &clear,
 #endif
    };
+#if G17P_SECONDARY_COMMAND_BUFFER
+   const VkCommandBufferInheritanceInfo secondary_inheritance = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+      .renderPass = render_pass,
+      .subpass = 0,
+      .framebuffer = framebuffer,
+   };
+   const VkCommandBufferBeginInfo secondary_begin = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT |
+               VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+      .pInheritanceInfo = &secondary_inheritance,
+   };
+#endif
    vkCmdBeginRenderPass(command_buffer, &render_begin,
+#if G17P_SECONDARY_COMMAND_BUFFER
+                        VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+   check(vkBeginCommandBuffer(secondary_command_buffer, &secondary_begin),
+         "vkBeginCommandBuffer(secondary)");
+   vkCmdBindPipeline(secondary_command_buffer,
+                     VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   const VkDeviceSize secondary_vertex_offset = 0;
+   vkCmdBindVertexBuffers(secondary_command_buffer, 0, 1, &vertex_buffer,
+                          &secondary_vertex_offset);
+   vkCmdDraw(secondary_command_buffer, 3, 1, 0, 0);
+   check(vkEndCommandBuffer(secondary_command_buffer),
+         "vkEndCommandBuffer(secondary)");
+   vkCmdExecuteCommands(command_buffer, 1, &secondary_command_buffer);
+#else
                         VK_SUBPASS_CONTENTS_INLINE);
 #if !G17P_CUBE_SAMPLE
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -4861,6 +4914,7 @@ main(void)
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #endif
+#endif
    vkCmdEndRenderPass(command_buffer);
 
 #if G17P_RGBA8_MRT
@@ -4924,7 +4978,8 @@ main(void)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT &&
-       !G17P_MULTI_VIEWPORT && !G17P_SHADER_QUAD_CONTROL) {
+       !G17P_MULTI_VIEWPORT && !G17P_SHADER_QUAD_CONTROL &&
+       !G17P_SECONDARY_COMMAND_BUFFER) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -5001,6 +5056,12 @@ main(void)
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, divergent quad shader "
                         "compiled, and command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_SECONDARY_COMMAND_BUFFER
+   if (record_only) {
+      printf(PROBE_NAME ": RECORD PASS — inherited secondary draw replayed "
+                        "into a validated G17P command stream\n");
       return EXIT_SUCCESS;
    }
 #endif
@@ -5482,6 +5543,10 @@ main(void)
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UNORM exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_SECONDARY_COMMAND_BUFFER
+   printf(PROBE_NAME ": PASS — secondary render-pass draw produced exact "
+                     "RGBA8 immediately/3s, 128 guard bytes unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #else
    printf(PROBE_NAME ": PASS — %ux%u RGBA8, checksum "
           "%016" PRIx64 "\n",
