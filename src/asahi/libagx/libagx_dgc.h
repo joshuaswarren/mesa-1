@@ -799,13 +799,101 @@ agx_usc_words_precomp(GLOBAL uint32_t *out, CONST struct agx_shader *s,
    agx_usc_push_blob(&b, s->usc.data, s->usc.size);
 }
 
-/* This prototype is sufficient for sizing the output */
+static inline uint32_t
+agx_robust_index_clamped_count(uint32_t requested, uint32_t available)
+{
+   const uint32_t limit =
+      available > 0xffffffffu - 32
+         ? 0xffffffffu
+         : available + 32;
+   return requested < limit ? requested : limit;
+}
+
+static inline bool
+agx_robust_index_shadow_sizes(uint32_t count, enum agx_index_size index_size,
+                              uint32_t *payload_B, uint32_t *allocation_B)
+{
+   if (index_size > AGX_INDEX_SIZE_U32 ||
+       count > (0xffffffffu - 15) >> index_size)
+      return false;
+
+   *payload_B = agx_indices_to_B(count, index_size);
+   *allocation_B = align(*payload_B, 16);
+   return true;
+}
+
+/*
+ * Robust indexed draws are generated on the GPU after the indirect argument
+ * record is visible.  G17P's HAL200 direct indexed body is not just the
+ * generic Index List: it always starts with the native restart State Update,
+ * and a freshly emitted render state additionally requires its context-
+ * relative draw-state selector immediately before that body.
+ *
+ * Keep the exact construction shared between the OpenCL producer and host
+ * tests.  Older command-stream generations retain their existing generic
+ * body unchanged.
+ */
+static inline GLOBAL uint32_t *
+agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
+                          struct agx_draw draw,
+                          enum agx_primitive topology,
+                          uint32_t draw_state_context_offset,
+                          bool render_state_emitted)
+{
+   const uint64_t ib =
+      draw.index_buffer + agx_indices_to_B(draw.start, draw.index_size);
+   const uint32_t range_B =
+      draw.index_buffer_range_B -
+      agx_indices_to_B(draw.start, draw.index_size);
+
+   if (agx_vdm_index_list_direct_target_supported_inline(chip)) {
+      struct agx_vdm_index_list_direct_words words;
+      if (!agx_vdm_index_list_direct_pack_words(
+             chip, (uint8_t)topology, true, draw.restart,
+             (uint8_t)draw.index_size, ib, draw.b.count[0], draw.b.count[1],
+             draw.index_bias, align(range_B, 4) >> 2, &words))
+         return out;
+
+      if (chip == AGX_CHIP_G17P) {
+         if (render_state_emitted)
+            *out++ = draw_state_context_offset;
+
+         *out++ = 0x40000001u;
+         *out++ = agx_primitive_restart_index(draw.index_size);
+      }
+
+      for (unsigned i = 0; i < words.count; ++i)
+         *out++ = words.words[i];
+      return out;
+   }
+
+   /* This producer receives a host-validated direct indexed draw. Keep its
+    * failure path free of the printf/abort ABI: G17P precompiled machine code
+    * is cacheable and cannot embed a process-local diagnostic-buffer address. */
+   *out++ = 0x61f00000u | ((uint32_t)(ib >> 32) & 0xffu) |
+            ((uint32_t)topology << 8) |
+            ((uint32_t)draw.index_size << 17) |
+            (draw.restart ? 1u << 16 : 0);
+   *out++ = (uint32_t)ib;
+   *out++ = draw.b.count[0];
+   *out++ = draw.b.count[1];
+   *out++ = draw.index_bias;
+   *out++ = align(range_B, 4) >> 2;
+   return out;
+}
+
 static inline unsigned
-libagx_draw_robust_index_vdm_size(enum agx_chip chip)
+libagx_draw_robust_index_vdm_size(enum agx_chip chip,
+                                  bool render_state_emitted)
 {
    struct agx_draw draw =
       agx_draw_indexed(0, 1, 0, 0, 0, 0, 4, AGX_INDEX_SIZE_U16, false);
-   return agx_vdm_draw_size(chip, draw);
+   unsigned size_B = agx_vdm_draw_size(chip, draw);
+
+   if (chip == AGX_CHIP_G17P)
+      size_B += 8 + (render_state_emitted ? 4 : 0);
+
+   return size_B;
 }
 
 static inline unsigned

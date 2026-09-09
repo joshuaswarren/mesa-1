@@ -407,6 +407,117 @@ test_agx3_live_vdm_draw(void)
       }
    }
 
+   /* G17P's GPU-generated robust draw must match the complete native HAL200
+    * indexed body.  A fresh render-state publication carries the preceding
+    * context-relative selector; an unchanged state begins at the mandatory
+    * restart State Update instead. */
+   static const uint8_t robust_g17p[] = {
+      0x01, 0x00, 0x00, 0x40, 0xff, 0xff, 0xff, 0xff,
+      0x34, 0x09, 0xf5, 0x61, 0xbc, 0x9a, 0x78, 0x56,
+      0x04, 0x03, 0x02, 0x01, 0x03, 0x00, 0x00, 0x00,
+      0xf9, 0xff, 0xff, 0xff, 0x40, 0x30, 0x20, 0x10,
+      0x12, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t robust_g17p_with_state[] = {
+      0x00, 0x80, 0x04, 0x00,
+      0x01, 0x00, 0x00, 0x40, 0xff, 0xff, 0xff, 0xff,
+      0x34, 0x09, 0xf5, 0x61, 0xbc, 0x9a, 0x78, 0x56,
+      0x04, 0x03, 0x02, 0x01, 0x03, 0x00, 0x00, 0x00,
+      0xf9, 0xff, 0xff, 0xff, 0x40, 0x30, 0x20, 0x10,
+      0x12, 0x00, 0x00, 0x00,
+   };
+   const struct agx_draw robust_draw =
+      agx_draw_indexed(UINT32_C(0x01020304), 3, 0, UINT32_C(0xfffffff9), 0,
+                       UINT64_C(0x123456789abc), UINT32_C(0x4080c100),
+                       AGX_INDEX_SIZE_U32, true);
+   uint32_t robust_packed[10] = {0};
+   CHECK_EQ(libagx_draw_robust_index_vdm_size(AGX_CHIP_G17P, false),
+            sizeof(robust_g17p));
+   uint32_t *robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G17P, robust_draw, (enum agx_primitive)9, 0,
+      false);
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(robust_g17p));
+   ++checks;
+   if (memcmp(robust_packed, robust_g17p, sizeof(robust_g17p))) {
+      fprintf(stderr, "G17P robust indexed body mismatch\n");
+      exit(1);
+   }
+
+   memset(robust_packed, 0, sizeof(robust_packed));
+   CHECK_EQ(libagx_draw_robust_index_vdm_size(AGX_CHIP_G17P, true),
+            sizeof(robust_g17p_with_state));
+   robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G17P, robust_draw, (enum agx_primitive)9,
+      UINT32_C(0x48000), true);
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(robust_g17p_with_state));
+   ++checks;
+   if (memcmp(robust_packed, robust_g17p_with_state,
+              sizeof(robust_g17p_with_state))) {
+      fprintf(stderr, "G17P robust indexed state/body mismatch\n");
+      exit(1);
+   }
+
+   /* The HAL200 framing is G17P-only; M3's existing GPU-generated packet is
+    * byte-for-byte unchanged even if the caller's state flag is set. */
+   memset(robust_packed, 0, sizeof(robust_packed));
+   CHECK_EQ(libagx_draw_robust_index_vdm_size(AGX_CHIP_G15G, true),
+            sizeof(indexed_g15));
+   robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G15G, robust_draw, (enum agx_primitive)9,
+      UINT32_C(0x48000), true);
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(indexed_g15));
+   ++checks;
+   if (memcmp(robust_packed, indexed_g15, sizeof(indexed_g15))) {
+      fprintf(stderr, "M3 robust indexed body changed\n");
+      exit(1);
+   }
+
+   /* The assertion-free device producer retains the exact AGX2 packet too. */
+   uint32_t agx2_expected[8] = {0}, agx2_robust[8] = {0};
+   struct agx_draw agx2_draw = robust_draw;
+   agx2_draw.index_buffer = UINT64_C(0x3456789abc);
+   uint32_t *agx2_expected_end =
+      agx_vdm_draw(agx2_expected, AGX_CHIP_G13G, agx2_draw,
+                   (enum agx_primitive)9);
+   uint32_t *agx2_robust_end =
+      agx_vdm_draw_robust_index(agx2_robust, AGX_CHIP_G13G, agx2_draw,
+                                (enum agx_primitive)9, UINT32_C(0x48000),
+                                true);
+   const size_t agx2_size =
+      (uintptr_t)agx2_expected_end - (uintptr_t)agx2_expected;
+   CHECK_EQ((uintptr_t)agx2_robust_end - (uintptr_t)agx2_robust, agx2_size);
+   CHECK_EQ(libagx_draw_robust_index_vdm_size(AGX_CHIP_G13G, true),
+            agx2_size);
+   ++checks;
+   if (memcmp(agx2_expected, agx2_robust, agx2_size)) {
+      fprintf(stderr, "AGX2 robust indexed body changed\n");
+      exit(1);
+   }
+
+   /* The shadow-buffer calculation must never wrap either the 32-index
+    * extension limit or the byte allocation passed to the GPU heap. */
+   CHECK_EQ(agx_robust_index_clamped_count(64, UINT32_MAX - 16), 64);
+   CHECK_EQ(agx_robust_index_clamped_count(UINT32_MAX, UINT32_MAX - 16),
+            UINT32_MAX);
+   CHECK_EQ(agx_robust_index_clamped_count(100, 12), 44);
+   uint32_t payload_B = 0, allocation_B = 0;
+   CHECK_EQ(agx_robust_index_shadow_sizes(
+               (UINT32_MAX - 15) >> AGX_INDEX_SIZE_U32,
+               AGX_INDEX_SIZE_U32, &payload_B, &allocation_B),
+            true);
+   CHECK_EQ(payload_B, UINT32_C(0xfffffff0));
+   CHECK_EQ(allocation_B, UINT32_C(0xfffffff0));
+   CHECK_EQ(agx_robust_index_shadow_sizes(
+               ((UINT32_MAX - 15) >> AGX_INDEX_SIZE_U32) + 1,
+               AGX_INDEX_SIZE_U32, &payload_B, &allocation_B),
+            false);
+   CHECK_EQ(agx_robust_index_shadow_sizes(
+               1, (enum agx_index_size)3, &payload_B, &allocation_B),
+            false);
+
    struct agx_draw rejected = {
       .b = agx_3d(1, 1, 1),
    };

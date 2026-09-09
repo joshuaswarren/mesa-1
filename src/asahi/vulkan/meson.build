@@ -1135,6 +1135,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Robust indexed indirect draws are GPU-patched before VDM consumption.
+    # This variant exercises both a freshly published and a reused HAL200
+    # draw-state context in one command buffer.
+    executable(
+      'g17p-vulkan-draw-indexed-indirect-robust',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_INDIRECT_DRAW=5'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-draw-indirect-count',
       files('tests/g17p_offscreen_triangle.c'),

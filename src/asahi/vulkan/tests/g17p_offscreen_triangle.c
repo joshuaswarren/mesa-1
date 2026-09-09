@@ -194,7 +194,8 @@
 #define G17P_RGBA32_SFLOAT 0
 #endif
 
-/* 1/2 = direct-count indirect nonindexed/indexed, 3/4 = count variants. */
+/* 1/2 = direct-count indirect nonindexed/indexed, 3/4 = count variants,
+ * 5 = indexed indirect with robustBufferAccess enabled. */
 #ifndef G17P_INDIRECT_DRAW
 #define G17P_INDIRECT_DRAW 0
 #endif
@@ -203,13 +204,16 @@
 #define G17P_SECONDARY_COMMAND_BUFFER 0
 #endif
 
-#if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 4
+#if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 5
 #error "select a valid G17P indirect draw oracle"
 #endif
 
 #define G17P_INDIRECT_INDEXED                                                \
-   (G17P_INDIRECT_DRAW == 2 || G17P_INDIRECT_DRAW == 4)
-#define G17P_INDIRECT_COUNT (G17P_INDIRECT_DRAW >= 3)
+   (G17P_INDIRECT_DRAW == 2 || G17P_INDIRECT_DRAW == 4 ||                    \
+    G17P_INDIRECT_DRAW == 5)
+#define G17P_INDIRECT_COUNT                                                   \
+   (G17P_INDIRECT_DRAW == 3 || G17P_INDIRECT_DRAW == 4)
+#define G17P_ROBUST_INDEXED (G17P_INDIRECT_DRAW == 5)
 
 #ifndef G17P_INDEX_RESTART
 #define G17P_INDEX_RESTART 0
@@ -1195,6 +1199,11 @@
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_INDIRECT_DRAW == 4
 #define PROBE_NAME "g17p-vulkan-draw-indexed-indirect-count"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_ROBUST_INDEXED
+#define PROBE_NAME "g17p-vulkan-draw-indexed-indirect-robust"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
@@ -2491,17 +2500,14 @@ main(void)
    if (!indirect_available.features.drawIndirectFirstInstance ||
        !indirect_available.features.multiDrawIndirect)
       die("required core indirect-draw features are not advertised");
-#if G17P_INDIRECT_COUNT
+#if G17P_ROBUST_INDEXED
+   if (!indirect_available.features.robustBufferAccess)
+      die("robustBufferAccess is not advertised");
+#endif
    if (!indirect_available12.drawIndirectCount ||
        !has_device_extension(physical,
                              VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME))
-      die("indirect-count variants are not advertised");
-#else
-   if (indirect_available12.drawIndirectCount ||
-       has_device_extension(physical,
-                            VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME))
-      die("unqualified indirect-count variants are advertised");
-#endif
+      die("qualified indirect-count support is not advertised");
 #endif
 
 #if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
@@ -2616,6 +2622,7 @@ main(void)
       .drawIndirectCount = G17P_INDIRECT_COUNT,
    };
    const VkPhysicalDeviceFeatures indirect_enabled = {
+      .robustBufferAccess = G17P_ROBUST_INDEXED,
       .multiDrawIndirect = VK_TRUE,
       .drawIndirectFirstInstance = VK_TRUE,
    };
@@ -4925,7 +4932,7 @@ main(void)
 #elif G17P_INDIRECT_DRAW == 1
    vkCmdDrawIndirect(command_buffer, indirect.buffer, INDIRECT_COMMAND_OFFSET,
                      2, INDIRECT_COMMAND_STRIDE);
-#elif G17P_INDIRECT_DRAW == 2
+#elif G17P_INDIRECT_DRAW == 2 || G17P_ROBUST_INDEXED
    vkCmdBindIndexBuffer(command_buffer, index.buffer, INDEX_BUFFER_OFFSET,
                         VK_INDEX_TYPE_UINT16);
    vkCmdDrawIndexedIndirect(command_buffer, indirect.buffer,
@@ -5085,7 +5092,7 @@ main(void)
 
    if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT &&
        !G17P_MULTI_VIEWPORT && !G17P_SHADER_QUAD_CONTROL &&
-       !G17P_SECONDARY_COMMAND_BUFFER) {
+       !G17P_SECONDARY_COMMAND_BUFFER && !G17P_ROBUST_INDEXED) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -5168,6 +5175,12 @@ main(void)
    if (record_only) {
       printf(PROBE_NAME ": RECORD PASS — inherited secondary draw replayed "
                         "into a validated G17P command stream\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_ROBUST_INDEXED
+   if (record_only) {
+      printf(PROBE_NAME ": RECORD PASS — two robust indexed indirect draws "
+                        "submitted with fresh and reused HAL200 draw state\n");
       return EXIT_SUCCESS;
    }
 #endif
@@ -5454,6 +5467,12 @@ main(void)
                      "firstIndex/baseVertex/firstInstance, 384 guard bytes "
                      "unchanged, checksum "
                      "%016" PRIx64 "\n",
+          checksum);
+#elif G17P_ROBUST_INDEXED
+   printf(PROBE_NAME ": PASS — robust vkCmdDrawIndexedIndirect exact "
+                     "immediately/3s, two records exercise fresh/reused "
+                     "HAL200 draw state, all command/index/readback guards "
+                     "unchanged, checksum %016" PRIx64 "\n",
           checksum);
 #elif G17P_INDIRECT_DRAW == 3
    printf(PROBE_NAME ": PASS — vkCmdDrawIndirectCount exact immediately/3s, "

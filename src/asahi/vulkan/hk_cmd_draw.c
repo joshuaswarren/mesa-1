@@ -4978,8 +4978,16 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    adj &= !geom;
    *needs_idx_robust =
       hk_needs_index_robustness(cmd, draw, conditional_direct);
+   /* The G17P robust-index producer emits the same native HAL200 indexed
+    * body as an ordinary draw, only after a pre-graphics compute pass has
+    * bounded the index range.  It therefore needs the ordinary render-state
+    * publication path as well; the generated body carries the matching
+    * context-relative selector when that publication is fresh. */
+   const bool g17p_robust_index_path =
+      dev->dev.chip == AGX_CHIP_G17P && *needs_idx_robust;
    const bool ordinary_draw_path =
-      !geom && !tess && !adj && !*needs_idx_robust;
+      !geom && !tess && !adj &&
+      (!*needs_idx_robust || g17p_robust_index_path);
    const bool xfb_passthrough_path =
       dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
       !*needs_idx_robust && gfx->xfb_enabled &&
@@ -5206,9 +5214,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    /* Validate the native index domain before robustness or geometry lowering
-    * can introduce a pre-render compute dispatch. G17P has a native indirect
-    * Index List, but the software robustness rewrite does not yet publish its
-    * HAL200 draw-state selector, so keep that combination fail-closed. */
+    * can introduce a pre-render compute dispatch.  Indirect robust draws keep
+    * their application range for the ordered GPU-side bounds pass; direct
+    * draws still prove their complete span here. */
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
       uint64_t address;
       uint32_t size_word;
@@ -5223,14 +5231,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
              api_draw.index_buffer, api_draw.index_buffer_range_B,
              api_draw.start, api_draw.b.count[0],
              agx_index_size_to_B(api_draw.index_size), &address, &size_word));
-      const bool robust_indirect =
-         agx_is_indirect(draw_.b) &&
-         (dev->vk.enabled_features.robustBufferAccess ||
-          dev->vk.enabled_features.robustBufferAccess2 ||
-          dev->vk.enabled_features.pipelineRobustness) &&
-         !conditional_direct_indexed;
       if (!valid_index_size ||
-          robust_indirect ||
           cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] ||
           (agx_is_indirect(draw_.b)
@@ -5241,9 +5242,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    draw_.index_buffer, draw_.index_buffer_range_B, draw_.start,
                    draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
                    &address, &size_word))) {
-         mesa_loge("native G17P indexed draw requires an in-bounds "
-                   "uint8/uint16/uint32 span without geometry or indirect "
-                   "robustness lowering");
+         mesa_loge("native G17P indexed draw requires a valid "
+                   "uint8/uint16/uint32 range without geometry");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -5355,14 +5355,32 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             return;
          }
 
-         size_t size_B =
-            libagx_draw_robust_index_vdm_size(dev->dev.chip);
+         uint32_t draw_state_offset = 0;
+         if (dev->dev.chip == AGX_CHIP_G17P &&
+             g17p_native_bind_tail_emitted) {
+            struct agx_ptr draw_state = hk_pool_vdm_alloc(cmd, 8, 4);
+            if (!draw_state.cpu ||
+                !hk_g17p_upload_draw_indices(
+                   draw_state.cpu, 8, draw_state.gpu, cs->scissor.size,
+                   cs->depth_bias.size,
+                   MAX2(cmd->vk.dynamic_graphics_state.vp.viewport_count, 1),
+                   &draw_state_offset)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+         }
+
+         size_t size_B = libagx_draw_robust_index_vdm_size(
+            dev->dev.chip, g17p_native_bind_tail_emitted);
          uint64_t target = hk_cs_alloc_for_indirect(cs, size_B);
 
          libagx_draw_robust_index(cmd, agx_1d(32), AGX_BARRIER_ALL | AGX_PREGFX,
                                   target, hk_heap(cmd), draw.b.ptr,
                                   draw.index_buffer, draw.index_buffer_range_B,
                                   draw.restart, dev->dev.chip, topology,
+                                  draw_state_offset,
+                                  g17p_native_bind_tail_emitted,
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {

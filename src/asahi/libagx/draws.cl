@@ -368,6 +368,8 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
                          uint64_t in_buf_ptr, uint32_t in_buf_range_B,
                          ushort restart, enum agx_chip chip,
                          enum agx_primitive topology,
+                         uint32_t draw_state_context_offset,
+                         uint32_t render_state_emitted,
                          enum agx_index_size index_size__3)
 {
    uint tid = get_sub_group_local_id();
@@ -387,8 +389,11 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
       draw.index_buffer_range_B = 4;
       draw.start = 0;
    } else if (agx_direct_draw_overreads_indices(draw)) {
-      constant void *in_buf = (constant void *)agx_draw_index_buffer(draw);
-      uint in_size_el = agx_draw_index_range_el(draw);
+      uint start_B = agx_indices_to_B(draw.start, draw.index_size);
+      constant void *in_buf =
+         (constant void *)(draw.index_buffer + start_B);
+      uint in_size_el =
+         (draw.index_buffer_range_B - start_B) >> draw.index_size;
       uint in_size_B = agx_indices_to_B(in_size_el, index_size);
 
       /* After a small number of zeroes at the end, extra zeroes cannot change
@@ -396,33 +401,56 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
        * times. Therefore we clamp the number of zeroes we need to extend with.
        * This makes the memset constant time.
        */
-      draw.b.count[0] = min(draw.b.count[0], in_size_el + 32);
+      draw.b.count[0] =
+         agx_robust_index_clamped_count(draw.b.count[0], in_size_el);
 
       uint out_size_el = draw.b.count[0];
-      uint out_size_B = agx_indices_to_B(out_size_el, index_size);
+      uint out_size_B = 0, alloc_size_B = 0;
+      bool size_valid = agx_robust_index_shadow_sizes(
+         out_size_el, index_size, &out_size_B, &alloc_size_B);
 
-      /* Allocate memory for the shadow index buffer */
-      global uchar *padded;
-      if (first) {
-         padded = poly_heap_alloc(heap, out_size_B);
+      /* Allocate memory for the shadow index buffer.  The general geometry
+       * allocator reports overflow through the AGX2 printf/abort ABI.  This
+       * G17P-capable precompiled kernel cannot bake a process-local printf
+       * address into cached machine code, so make overflow memory-safe here:
+       * every lane observes the same atomic allocation and an exhausted heap
+       * emits an empty indexed draw instead of touching an invalid address. */
+      uint padded_offs = 0;
+      if (first && size_valid) {
+         padded_offs = atomic_fetch_add(
+            (volatile global atomic_uint *)(&heap->bottom), alloc_size_B);
       }
-      padded = (global uchar *)sub_group_broadcast((uintptr_t)padded, 0);
 
-      draw.index_buffer = (uintptr_t)padded;
-      draw.index_buffer_range_B = out_size_B;
-      draw.start = 0;
+      padded_offs = sub_group_broadcast(padded_offs, 0);
+      bool allocated =
+         size_valid &&
+         poly_heap_allocation_fits(padded_offs, alloc_size_B, heap->size);
+      global uchar *padded = heap->base + padded_offs;
 
-      /* Clone the index buffer. The destination is aligned as a post-condition
-       * of poly_heap_alloc_nonatomic.
-       */
-      libagx_memcpy_to_aligned((global uint *)padded, in_buf, in_size_B, tid,
-                               32);
+      if (!allocated) {
+         draw.b.count[0] = 0;
+         draw.index_buffer = AGX_ZERO_PAGE_ADDRESS;
+         draw.index_buffer_range_B = 4;
+         draw.start = 0;
+      } else {
+         draw.index_buffer = (uintptr_t)padded;
+         draw.index_buffer_range_B = out_size_B;
+         draw.start = 0;
 
-      /* Extend with up to 32 zeroes with a small memset */
-      libagx_memset_small(padded + in_size_B, 0, out_size_B - in_size_B, tid);
+         /* Clone the index buffer. The destination is aligned as a
+          * post-condition of the heap allocation above. */
+         libagx_memcpy_to_aligned((global uint *)padded, in_buf, in_size_B,
+                                  tid, 32);
+
+         /* Extend with up to 32 zeroes with a small memset */
+         libagx_memset_small(padded + in_size_B, 0, out_size_B - in_size_B,
+                             tid);
+      }
    }
 
    if (first) {
-      agx_vdm_draw(vdm, chip, draw, topology);
+      agx_vdm_draw_robust_index(vdm, chip, draw, topology,
+                                draw_state_context_offset,
+                                render_state_emitted != 0);
    }
 }
