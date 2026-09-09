@@ -9226,6 +9226,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Apple keeps exact half constants in scalar halves through an f32
+          * add.  This is the form used repeatedly by Hyprland's colour
+          * management paths; widening the retained half first costs a live
+          * full register and post-RA may legitimately preserve this native
+          * mixed operation.  Addition is commutative, so canonicalize either
+          * IR order to the native f32/f16 field order. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_vary_reg32(I->dest[0]) &&
+             agx_channels(I->dest[0]) == 1 &&
+             !I->src[0].abs && !I->src[0].neg &&
+             !I->src[1].abs && !I->src[1].neg &&
+             ((agx3_mod_src_ok(I->src[0]) && agx3_half_reg(I->src[1])) ||
+              (agx3_half_reg(I->src[0]) && agx3_mod_src_ok(I->src[1])))) {
+            const bool half_first = agx3_half_reg(I->src[0]);
+            const agx_index f32 = I->src[half_first ? 1 : 0];
+            const agx_index f16 = I->src[half_first ? 0 : 1];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (f32.kill || f16.kill || (f32.cache && f32.discard) ||
+                (f16.cache && f16.discard) ||
+                !agx3_alu_fadd_mixed_half(
+                   enc, I->dest[0].value, f32.value, f16.value,
+                   agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
+                   I->dest[0].cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* G17P adds an absolute f32 source directly to a scalar-half
           * register. Keep the half in its assigned register rather than
           * widening it through a temporary. */

@@ -1879,6 +1879,63 @@ static void test_native_fadd_abs_mixed_half(void)
    puts("Native abs-f32 plus half add: five exact Apple vectors and bounds PASS");
 }
 
+static void test_native_fadd_mixed_half(void)
+{
+   static const struct {
+      uint16_t dest, f32, f16, wait;
+      enum agx3_alu_hint hint32, hint16;
+      bool dest_cache;
+      const char *bytes;
+   } vectors[] = {
+      /* add_dead */
+      {0, 0, 4, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011c0400c0"},
+      /* add_half_live */
+      {0, 0, 8, 1, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011c080020"},
+      /* add_float_live */
+      {0, 2, 0, 32, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD, false,
+       "0903140000c0"},
+      /* add_half_pair, second channel: physical half 7 is intentionally odd. */
+      {2, 2, 7, 0, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "19031c061000"},
+      /* add_reuse_odd: the odd half and destination are both retained. */
+      {0, 0, 5, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_CACHE, true,
+       "09012c8410c0"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fadd_mixed_half(
+         AGX_ISA_ENCODING_AGX3B, vectors[i].dest, vectors[i].f32,
+         vectors[i].f16, vectors[i].hint32, vectors[i].hint16,
+         vectors[i].dest_cache, vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 0, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, 0, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, 0, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 256, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0, (enum agx3_alu_hint)3,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0, AGX3_ALU_HINT_NONE,
+      (enum agx3_alu_hint)3, false, 0, bytes, &len));
+   assert(!agx3_alu_fadd_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0, AGX3_ALU_HINT_NONE,
+      AGX3_ALU_HINT_NONE, false, 64, bytes, &len));
+   puts("Native f32 plus half add: five exact Apple vectors and bounds PASS");
+}
+
 static void test_native_half_add(void)
 {
    {
@@ -2845,6 +2902,7 @@ int main(void){
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
    test_native_minifloat_mixed_select();
+   test_native_fadd_mixed_half();
    test_native_fadd_abs_mixed_half();
    test_native_half_fma();
    test_native_half_fma_minifloat_addend();

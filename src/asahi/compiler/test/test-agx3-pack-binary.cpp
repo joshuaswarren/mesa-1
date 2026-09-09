@@ -1104,6 +1104,84 @@ TEST_F(AGX3PackBinary, MinifloatSpecializationDeclinesOtherGroundedForms)
    EXPECT_GT(pack(b).size(), 4u);
 }
 
+TEST_F(AGX3PackBinary, F32PlusHalfMatchesHyprlandNativeShapes)
+{
+   for (unsigned order = 0; order < 2; ++order) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      agx_index f32 = agx_register(0, AGX_SIZE_32);
+      agx_index f16 = agx_register(5, AGX_SIZE_16);
+      dest.cache = true;
+      f32.discard = true;
+      f16.cache = true;
+      agx_fadd_to(b, dest, order ? f16 : f32, order ? f32 : f16);
+      agx_stop(b);
+      const std::vector<uint8_t> hyprland = {
+         0x09, 0x01, 0x2c, 0x84, 0x10, 0x00, 0x0e, 0x00, 0x00, 0x00,
+      };
+      const auto code = pack(b);
+      EXPECT_EQ(code, hyprland);
+   }
+
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index f32 = agx_register(2, AGX_SIZE_32);
+   agx_index f16 = agx_register(7, AGX_SIZE_16);
+   f32.discard = f16.discard = true;
+   agx_fadd_to(b, agx_register(2, AGX_SIZE_32), f32, f16);
+   agx_stop(b);
+   const uint8_t native_odd_no_wait[] = {
+      0x19, 0x03, 0x1c, 0x06, 0x10, 0x00,
+   };
+   const auto code = pack(b);
+   ASSERT_EQ(code.size(), sizeof(native_odd_no_wait) + 4);
+   EXPECT_EQ(memcmp(code.data(), native_odd_no_wait,
+                    sizeof(native_odd_no_wait)), 0);
+
+   /* Exact post-RA shape from Hyprland's colour-management branches. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   f32 = agx_register(2, AGX_SIZE_32);
+   f16 = agx_register(1, AGX_SIZE_16);
+   f16.cache = true;
+   agx_fadd_to(b, agx_register(2, AGX_SIZE_32), f32, f16);
+   agx_stop(b);
+   const uint8_t hyprland_ra[] = {
+      0x19, 0x03, 0x04, 0x80, 0x10, 0x00,
+   };
+   const auto hyprland_code = pack(b);
+   ASSERT_EQ(hyprland_code.size(), sizeof(hyprland_ra) + 4);
+   EXPECT_EQ(memcmp(hyprland_code.data(), hyprland_ra,
+                    sizeof(hyprland_ra)), 0);
+}
+
+TEST_F(AGX3PackBinary, F32PlusHalfRefusesUngroundedModes)
+{
+   for (unsigned mode = 0; mode < 9; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      agx_index f32 = agx_register(0, AGX_SIZE_32);
+      agx_index f16 = agx_register(5, AGX_SIZE_16);
+      if (mode == 1)
+         f32.neg = true;
+      if (mode == 2)
+         f16.neg = true;
+      if (mode == 3)
+         f16.abs = true;
+      if (mode == 4)
+         f16.cache = f16.discard = true;
+      if (mode == 5)
+         f16.kill = true;
+      if (mode == 6)
+         f32.value = 1;
+      if (mode == 7)
+         dest.size = AGX_SIZE_16;
+      agx_instr *add = agx_fadd_to(b, dest, f32, f16);
+      add->saturate = mode == 8;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
