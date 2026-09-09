@@ -621,6 +621,7 @@ agx3_map_sr(enum agx_sr sr, uint8_t *apple, enum agx3_sr_width *width)
       SR(AGX_SR_THREAD_POSITION_IN_GRID_X, 23, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Y, 24, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Z, 25, AGX3_SR_W32);
+      SR(AGX_SR_INPUT_SAMPLE_MASK, 39, AGX3_SR_W16);
       /* The semantic enum carries the hardware SR byte (0xd8/0xdd), while
        * agx3_sr_core consumes Apple's anonymous normalized f21 value. */
       SR(AGX_SR_INSTANCE_ID, 46, AGX3_SR_W32);
@@ -8703,6 +8704,39 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_alu_extract_imm32(enc,dst.value,src,I->src[2].value,hints,
                                          dst.cache,wait,bytes,&length) ||
                 !agx3_append(emission,bytes,length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* Apple exposes [[sample_mask]] in bits 4..7 of a native ushort
+          * special-register read.  Preserve that narrow value through the
+          * exact immediate SRL instead of materializing a full-width shift
+          * count, which selects a different G17P instruction domain. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFEIL &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             I->src[2].type == AGX_INDEX_IMMEDIATE &&
+             I->src[2].value >= 1 && I->src[2].value <= 31 &&
+             !I->src[2].memory && !I->src[2].abs && !I->src[2].neg &&
+             !I->src[2].kill && !I->src[2].cache &&
+             !I->src[2].discard) {
+            const agx_index dest = I->dest[0], value = I->src[1];
+            const agx_index base = I->src[0];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                !agx3_src_is_register(value) || value.memory ||
+                value.size != AGX_SIZE_16 || agx_channels(value) != 1 ||
+                value.abs || value.neg || value.kill ||
+                (value.cache && value.discard))
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_srl_imm16(
+                   enc, dest.value, value.value, I->src[2].value,
+                   agx3_post_ra_hint(value), dest.cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }

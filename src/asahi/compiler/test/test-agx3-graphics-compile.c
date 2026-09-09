@@ -23,7 +23,9 @@
  */
 
 #include "agx_compile.h"
+#include "agx3_alu_core.h"
 #include "agx3_copy_core.h"
+#include "agx3_sr_core.h"
 #include "agx3_tex_core.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
@@ -900,6 +902,19 @@ build_fs_discard(void)
    fs_store_colour(&b, nir_vec4(&b, nir_imm_float(&b, 0.25f),
                                 nir_imm_float(&b, 0.5f),
                                 nir_imm_float(&b, 0.75f),
+                                nir_imm_float(&b, 1.0f)));
+   return fs_finish(&b);
+}
+
+/* A multisample shader reading the API-visible incoming coverage mask. */
+static nir_shader *
+build_fs_sample_mask_in(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 sample-mask input FS");
+   nir_def *mask = nir_load_sample_mask_in(&b);
+   nir_def *value = nir_u2f32(&b, mask);
+   fs_store_colour(&b, nir_vec4(&b, value, value, value,
                                 nir_imm_float(&b, 1.0f)));
    return fs_finish(&b);
 }
@@ -3438,6 +3453,7 @@ struct agx3_graphics_case {
    uint8_t expected_g17p_depth;
    bool expected_g17p_implicit_coord_group;
    bool expected_g17p_sampled_fragment;
+   bool expected_g17p_sample_mask_input;
 };
 
 static bool
@@ -3460,6 +3476,64 @@ g17p_implicit_coord_group(const struct agx_shader_part *part)
 
    return part->info.binary_size >= sizeof(expected) &&
           !memcmp(part->binary, expected, sizeof(expected));
+}
+
+static bool
+g17p_sample_mask_input_protocol(const struct agx_shader_part *part)
+{
+   const uint8_t *binary = part->binary;
+   uint8_t sr_bytes[AGX3_SR_MAX_LENGTH];
+   uint8_t sr_length = 0;
+
+   /* Apple's [[sample_mask]] input is the 16-bit SR39 RLD followed by an
+    * immediate ushort SRL extracting bits 4..7. Search across allocation and
+    * liveness choices, but require the SRL to consume the RLD register and
+    * wait on its exact async slot. */
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      for (unsigned sr_dest = 0; sr_dest < 256; ++sr_dest) {
+         const struct agx3_sr_desc d = {
+            .dest = sr_dest,
+            .width = AGX3_SR_W16,
+            .sr = 39,
+            .slot = slot,
+         };
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, sr_bytes,
+                             &sr_length))
+            continue;
+
+         for (unsigned sr_off = 0;
+              sr_off + sr_length <= part->info.binary_size; ++sr_off) {
+            if (memcmp(binary + sr_off, sr_bytes, sr_length))
+               continue;
+
+            for (unsigned shift_dest = 0; shift_dest < 256; ++shift_dest) {
+               for (unsigned hint = AGX3_ALU_HINT_NONE;
+                    hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+                  for (unsigned dest_cache = 0; dest_cache <= 1;
+                       ++dest_cache) {
+                     uint8_t shift_bytes[AGX3_ALU_MAX_LENGTH];
+                     uint8_t shift_length = 0;
+                     if (!agx3_alu_srl_imm16(
+                            AGX_ISA_ENCODING_AGX3B, shift_dest, sr_dest, 4,
+                            hint, dest_cache, 1u << (slot - 1), shift_bytes,
+                            &shift_length))
+                        continue;
+
+                     for (unsigned shift_off = sr_off + sr_length;
+                          shift_off + shift_length <= part->info.binary_size;
+                          ++shift_off) {
+                        if (!memcmp(binary + shift_off, shift_bytes,
+                                    shift_length))
+                           return true;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   return false;
 }
 
 static bool
@@ -3550,6 +3624,8 @@ static const struct agx3_graphics_case cases[] = {
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
+   {"fs-sample-mask-in", build_fs_sample_mask_in, true, .g17p_only = true,
+    .expected_g17p_sample_mask_input = true},
    {"fs-depth-write", build_fs_depth, true, .g17p_only = true,
     .expected_g17p_depth = true},
    {"fs-depth-only", build_fs_depth_only, true, .g17p_only = true,
@@ -3695,6 +3771,15 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          fprintf(stderr, "%s %s: sampled-fragment constant-program flag "
                          "mismatch\n",
                  enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_sample_mask_input) {
+         result = g17p_sample_mask_input_protocol(&part);
+         if (!result)
+            fprintf(stderr,
+                    "%s %s: missing native SR39 W16 read/shift protocol\n",
+                    enc_name(enc), c->name);
       }
 
       if (result && c->lower_combined_sampler) {

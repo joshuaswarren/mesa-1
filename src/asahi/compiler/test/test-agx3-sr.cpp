@@ -100,6 +100,40 @@ TEST(AGX3SrCore, HardwareVertexInvocationInputs)
    }
 }
 
+TEST(AGX3SrCore, FragmentCoverageInputs)
+{
+   /* Apple's isolated fragment probes read the per-invocation 1x coverage
+    * seed from SR2 and API-visible SampleMaskIn from bits 4..7 of SR39. Both
+    * are native half-register reads; neither has a witnessed 32-bit form. */
+   static const struct {
+      uint8_t sr;
+      uint8_t bytes[4];
+   } cases[] = {
+      {2, {0x04, 0x84, 0x10, 0x06}},
+      {39, {0x04, 0xc2, 0x10, 0x06}},
+   };
+
+   for (int e = 0; e < 2; ++e) {
+      for (const auto &c : cases) {
+         const struct agx3_sr_desc d = {
+            .dest = 0,
+            .width = AGX3_SR_W16,
+            .sr = c.sr,
+            .slot = 1,
+         };
+         uint8_t out[AGX3_SR_MAX_LENGTH];
+         uint8_t len = 0;
+         ASSERT_TRUE(agx3_sr_encode(enc_of(e), &d, out, &len));
+         ASSERT_EQ(len, sizeof(c.bytes));
+         EXPECT_EQ(0, memcmp(out, c.bytes, len));
+
+         struct agx3_sr_desc wide = d;
+         wide.width = AGX3_SR_W32;
+         EXPECT_FALSE(agx3_sr_encode(enc_of(e), &wide, out, &len));
+      }
+   }
+}
+
 TEST(AGX3SrCore, WaitEscalatesToLongForm)
 {
    /* A wait bit cannot ride the compact form; Apple's own at_dev_nr witness

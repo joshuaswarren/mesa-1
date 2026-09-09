@@ -1495,6 +1495,53 @@ static void test_native_u16_arithmetic(void)
 }
 
 static void
+test_native_u16_shift_right_immediate(void)
+{
+   static const struct {
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      const char *bytes;
+   } witnesses[] = {
+      /* Fresh applegpu_g17p [[sample_mask]] extraction. */
+      {0, 0, 1, AGX3_ALU_HINT_DISCARD, true,
+       "a710540003001000c0110100"},
+      /* Apple's constant sample-mask fragment path. */
+      {1, 0, 1, AGX3_ALU_HINT_CACHE, true,
+       "a710540103001200c0100100"},
+      /* Apple's per-sample fragment path. */
+      {15, 14, 2, AGX3_ALU_HINT_CACHE, true,
+       "a720540f031c1200c0100100"},
+   };
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_srl_imm16(
+         AGX_ISA_ENCODING_AGX3B, witnesses[i].dest, witnesses[i].src, 4,
+         witnesses[i].hint, witnesses[i].dest_cache, witnesses[i].wait, out,
+         &len));
+      exact(out, len, witnesses[i].bytes);
+   }
+
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3C, 0, 0, 4,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 0,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 32,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 256, 0, 4,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 256, 4,
+                              AGX3_ALU_HINT_NONE, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 4,
+                              (enum agx3_alu_hint)3, false, 0, out, &len));
+   assert(!agx3_alu_srl_imm16(AGX_ISA_ENCODING_AGX3B, 0, 0, 4,
+                              AGX3_ALU_HINT_NONE, false, 1u << 6, out,
+                              &len));
+   puts("Native u16 immediate SRL: three exact Apple vectors and refusals PASS");
+}
+
+static void
 test_blur_half_arithmetic(void)
 {
    uint8_t out[AGX3_ALU_MAX_LENGTH],len;
@@ -2806,6 +2853,7 @@ int main(void){
    test_native_extract32();
    test_blur_half_arithmetic();
    test_native_u16_arithmetic();
+   test_native_u16_shift_right_immediate();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
    test_i32_to_f16();

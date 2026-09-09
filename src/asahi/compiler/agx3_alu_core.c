@@ -1418,6 +1418,41 @@ agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
 }
 
 bool
+agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                   unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || out == NULL || len == NULL ||
+       dest >= 256 || src >= 256 || shift < 1 || shift > 31 ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+
+   /* applegpu_g17p emits this form when extracting [[sample_mask]] from
+    * bits 4..7 of SR39. f30 is the immediate shift; f38/f39 select its
+    * implicit full-width boundary operand rather than a second GPR. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, 2}, {24, 1},
+      {38, 1}, {39, 2}, {52, 1}, {53, 2},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest},
+      {11, dest_cache},
+      {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+      {30, shift},
+   };
+   unsigned n = 6;
+   for (unsigned i = 0; i < 6; ++i) {
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){60 + i, 1};
+   }
+
+   return agx3_bind_compose(enc, "srl", 0, base, 8, fields, n, out, len);
+}
+
+bool
 agx3_alu_extract_imm32(enum agx_isa_encoding enc, uint16_t dest,
                        const uint16_t low_high[2], unsigned shift,
                        const enum agx3_alu_hint hints[2], bool dest_cache,

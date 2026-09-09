@@ -2000,6 +2000,16 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_get_sr_to(b, dst, AGX_SR_SAMPLES_LOG2);
 
    case nir_intrinsic_load_sample_mask_in:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+         /* Apple's G17P fragment ABI exposes the API-visible sample mask in
+          * bits 4..7 of native W16 SR39.  Extract it before widening to NIR's
+          * uint32_t result; reading SR39 as W32 selects an unwitnessed form. */
+         agx_index native = agx_temp(b->shader, AGX_SIZE_16);
+         agx_index shifted = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_ushr_to(b, shifted, native, agx_immediate(4));
+         return agx_mov_to(b, dst, shifted);
+      }
       return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
    case nir_intrinsic_load_sample_mask:

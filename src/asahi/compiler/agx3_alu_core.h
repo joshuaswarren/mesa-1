@@ -82,6 +82,13 @@ bool agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native 16-bit logical shift-right by an immediate bit count. */
+bool agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, unsigned shift,
+                        enum agx3_alu_hint hint, bool dest_cache,
+                        uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P unshifted IADD/ISUB, preserving the canonical operation form. */
 bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           uint16_t dest, const uint16_t src[2],
