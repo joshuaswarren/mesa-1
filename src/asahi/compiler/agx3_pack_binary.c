@@ -5665,16 +5665,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset -= initial_size;
                g17p_colour_open = true;
             }
-            /* The sample emitter stages two 32-bit coordinates, a third for
-             * 3D, the auxiliary scalar bank for a per-lane level or bias, or
-             * the four gradient banks that reach half 14. */
+            /* ShaderInfo fields 38/42 describe the sampler-private staging
+             * extent in bytes, not the highest GPR supplying an operand.
+             * Apple's one-cube fragments report 24 bytes for direct,
+             * argument-buffer, retained-coordinate, and explicit-level
+             * forms alike, even when CEM reads coordinates as high as r20
+             * and when its producer transaction uses slot 6.  CEM publishes
+             * two normalized coordinates plus the selected face, so account
+             * for the exact six-dword/twelve-half private extent independent
+             * of post-RA source placement. */
             const bool staged_scalar =
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
-                    native_staged_coords ? 4
+                    (I->dim == AGX_DIM_CUBE ||
+                     I->dim == AGX_DIM_CUBE_ARRAY) ? 12
+                    : native_staged_coords ? 4
                     : I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
                     : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
                        I->dim == AGX_DIM_3D)

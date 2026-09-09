@@ -1603,7 +1603,11 @@ test_g17p_native_cube_sample(void)
          safe_cem_input |= !memcmp((uint8_t *)part.binary + off, candidate,
                                    length);
    }
-   ok &= native_smp && cube_z && safe_cem_input;
+   /* Apple reports ShaderInfo fields38/42 = 24 bytes for both direct and
+    * per-lane argument-buffer cube samples.  This remains twelve halves even
+    * though this NIR shape puts XYZ and descriptors in allocator-chosen GPRs. */
+   ok &= native_smp && cube_z && safe_cem_input &&
+         part.info.agx3_staging_known && part.info.agx3_staging_halfs == 12;
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
@@ -1680,7 +1684,8 @@ test_g17p_native_cube_array_sample(void)
         ++off)
       native_smp |= !memcmp((uint8_t *)part.binary + off, hk_native_smp,
                             sizeof(hk_native_smp));
-   ok &= native_smp;
+   ok &= native_smp && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 12;
    free(part.binary);
    ralloc_free(b.shader);
    return ok;

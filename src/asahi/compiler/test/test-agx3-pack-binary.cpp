@@ -8335,6 +8335,9 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
+   /* applegpu_g17p ShaderInfo fields 38/42 are 24 bytes for this exact
+    * one-cube shape. They are sampler-private staging, not coord GPR 4..8. */
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
@@ -8405,6 +8408,9 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
 
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->max_reg, 43u);
+   /* The lane-indexed Apple argument-buffer cube uses slot 6 and still
+    * reports fields38/42 = 24: scoreboard slot does not resize staging. */
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
@@ -8489,6 +8495,7 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
@@ -8565,6 +8572,7 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       ASSERT_TRUE(agx3_pack_end(enc, &end));
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
    }
 }
 
@@ -9193,7 +9201,7 @@ TEST_F(AGX3PackBinary, ShadowCubeStagesCompareBeforeCEM)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 20);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
 }
 
 TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
@@ -9261,7 +9269,7 @@ TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 20);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
 }
 
 TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
