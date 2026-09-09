@@ -439,6 +439,14 @@ bool agx3_alu_fmax_f32_imm(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native reciprocal with independently selected result/source widths and
+ * source modifiers. Both 16- and 32-bit registers use the same f32rcp form. */
+bool agx3_alu_rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  bool dest_half, bool src_half, bool src_abs, bool src_neg,
+                  enum agx3_alu_hint hint, bool dest_cache,
+                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                  uint8_t *len);
+
 bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                    enum agx3_alu_hint hint, bool dest_cache,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
@@ -448,8 +456,8 @@ bool agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
  * Full-precision reciprocal and reciprocal square root.
  *
  * These are the same two Apple forms the half encoders above use; f26 selects
- * the source width (1 = one 16-bit half, 2 = a 32-bit pair) and, for rsqrt,
- * f10 selects the destination's. Only the half widths were wired up, so every
+ * the source width (1 = one 16-bit half, 2 = a 32-bit pair) and f10 selects
+ * the destination's. Only the half widths were wired up, so every
  * fragment shader containing a float divide or a normalize() -- which NIR
  * lowers to frcp / frsq on 32-bit values -- was refused outright.
  *

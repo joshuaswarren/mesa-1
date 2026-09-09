@@ -2149,24 +2149,48 @@ agx3_alu_fmax_f32_imm(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+             bool dest_half, bool src_half, bool src_abs, bool src_neg,
+             enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 128 ||
+       src >= 128 || (!dest_half && (dest & 1)) || (!src_half && (src & 1)) ||
+       (wait_mask & ~UINT16_C(0x3f)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   /* Fresh applegpu_g17p kernels cover all four result/source width pairs.
+    * f10 and f26 independently select a scalar half (1) or float (2), while
+    * f30/f31 fold ABS/NEG into the source. Lifetimes, result caching, and all
+    * six producer slots are orthogonal to those arithmetic fields. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, dest_half ? 1 : 2}, {25, 2},
+      {26, src_half ? 1 : 2}, {43, 2},
+   };
+   struct agx3_field_kv fields[13] = {
+      {2, dest},
+      {11, dest_cache},
+      {18, src},
+      {27, hint == AGX3_ALU_HINT_CACHE},
+      {29, hint == AGX3_ALU_HINT_DISCARD},
+      {30, src_abs},
+      {31, src_neg},
+   };
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[7 + slot] = (struct agx3_field_kv){49 + slot,
+                                               !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "f32rcp", 0, base, 5, fields, 13, out, len);
+}
+
+bool
 agx3_alu_hrcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
               enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 || (wait_mask & ~UINT16_C(0x3f)) ||
-       (unsigned)hint > AGX3_ALU_HINT_CACHE)
-      return false;
-   const struct agx3_field_kv base[] = {
-      {9,2},{10,2},{25,2},{26,1},{43,2},
-   };
-   struct agx3_field_kv fields[11] = {
-      {2,dest},{18,src},{11,dest_cache},
-      {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
-   };
-   for (unsigned i=0;i<6;i++)
-      fields[5+i]=(struct agx3_field_kv){49+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"f32rcp",0,base,5,fields,11,out,len);
+   return agx3_alu_rcp(enc, dest, src, true, true, false, false, hint,
+                       dest_cache, wait_mask, out, len);
 }
 
 bool
@@ -2174,24 +2198,8 @@ agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                 enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   /* Identical to the half form except f26 = 2, a 32-bit source pair. */
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 || (dest & 1) || (src & 1) ||
-       (wait_mask & ~UINT16_C(0x3f)) ||
-       (unsigned)hint > AGX3_ALU_HINT_CACHE)
-      return false;
-   const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 2}, {25, 2}, {26, 2}, {43, 2},
-   };
-   struct agx3_field_kv fields[11] = {
-      {2, dest}, {18, src}, {11, dest_cache},
-      {27, hint == AGX3_ALU_HINT_CACHE},
-      {29, hint == AGX3_ALU_HINT_DISCARD},
-   };
-   for (unsigned i = 0; i < 6; ++i)
-      fields[5 + i] =
-         (struct agx3_field_kv){49 + i, !!(wait_mask & (1u << i))};
-   return agx3_bind_compose(enc, "f32rcp", 0, base, 5, fields, 11, out, len);
+   return agx3_alu_rcp(enc, dest, src, false, false, false, false, hint,
+                       dest_cache, wait_mask, out, len);
 }
 
 bool

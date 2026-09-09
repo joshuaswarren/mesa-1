@@ -6531,25 +6531,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Reciprocal, at either width. Only the half form was wired up, so a
-          * 32-bit float divide -- which NIR lowers to frcp -- refused the
-          * whole shader. f26 selects the source width; the 32-bit encoding is
-          * witnessed against Apple's own `1.0f / a[i]` (agx3_alu_core.h). */
+         /* Reciprocal widths are independent. In particular, mediump texture
+          * data commonly feeds a full-precision divide in GTK's colour
+          * conversion shaders. f10/f26 select the result/source widths, while
+          * f30/f31 carry source ABS/NEG without a separate move. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_RCP &&
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest=I->dest[0], src=I->src[0];
-            const bool half = dest.size == AGX_SIZE_16;
             if (!agx3_src_is_register(dest) || dest.memory ||
                 (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
-                src.size != dest.size || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill || (src.cache && src.discard))
+                (src.size != AGX_SIZE_16 && src.size != AGX_SIZE_32) ||
+                agx_channels(src) != 1 || src.kill ||
+                (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if (!(half ? agx3_alu_hrcp : agx3_alu_f32rcp)(
-                   enc,dest.value,src.value,agx3_post_ra_hint(src),
-                   dest.cache,wait,bytes,&len) ||
+            if (!agx3_alu_rcp(
+                   enc, dest.value, src.value, dest.size == AGX_SIZE_16,
+                   src.size == AGX_SIZE_16, src.abs, src.neg,
+                   agx3_post_ra_hint(src), dest.cache, wait, bytes, &len) ||
                 !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;

@@ -8192,26 +8192,120 @@ TEST_F(AGX3PackBinary, HalfClampDoesNotCarryLoadWaitIntoSecondSelect)
    EXPECT_EQ(memcmp(code.data(), expected_chain, sizeof(expected_chain)), 0);
 }
 
-TEST_F(AGX3PackBinary, HalfReciprocalRoutesNoWaitAndRefusesModifier)
+TEST_F(AGX3PackBinary, GtkMixedReciprocalMatchesNative)
 {
+   struct width_case {
+      enum agx_size dest_size, src_size;
+      uint16_t dest, src;
+      const uint8_t bytes[10];
+   };
+   const width_case widths[] = {
+      {AGX_SIZE_16, AGX_SIZE_16, 2, 2,
+       {0xaf, 0x00, 0x54, 0x02, 0x02, 0x04, 0x10, 0x46, 0x30, 0x00}},
+      {AGX_SIZE_32, AGX_SIZE_16, 0, 0,
+       {0xaf, 0x00, 0x54, 0x00, 0x02, 0x00, 0x10, 0x44, 0x20, 0x00}},
+      {AGX_SIZE_16, AGX_SIZE_32, 2, 2,
+       {0xaf, 0x00, 0x54, 0x02, 0x02, 0x04, 0x10, 0x4a, 0x30, 0x00}},
+      {AGX_SIZE_32, AGX_SIZE_32, 0, 0,
+       {0xaf, 0x00, 0x54, 0x00, 0x02, 0x00, 0x10, 0x48, 0x20, 0x00}},
+   };
+   for (const width_case &v : widths) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index src = agx_register(v.src, v.src_size);
+      src.discard = true;
+      agx_rcp_to(b, agx_register(v.dest, v.dest_size), src);
+      agx_stop(b);
+      std::vector<uint8_t> native(v.bytes, v.bytes + sizeof(v.bytes));
+      native.insert(native.end(), {0x0e, 0x00, 0x00, 0x00});
+      EXPECT_EQ(pack(b), native);
+   }
+
+   /* Exact post-RA blocker from GTK gskgpuconvertbuiltin: a cached odd half
+    * texture channel feeds a cached full-precision reciprocal result. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
-   agx_index dest = agx_register(0, AGX_SIZE_16);
+   agx_index dest = agx_register(6, AGX_SIZE_32);
    agx_index src = agx_register(3, AGX_SIZE_16);
    dest.cache = src.cache = true;
    agx_rcp_to(b, dest, src);
    agx_stop(b);
-   const auto code = pack(b);
-   const uint8_t expected[] = {
-      0xaf,0x00,0x54,0x00,0x03,0x06,0x02,0x44,0x20,0x00,
+   const std::vector<uint8_t> expected = {
+      0xaf, 0x00, 0x54, 0x06, 0x03, 0x06, 0x02, 0x44, 0x20, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
    };
-   ASSERT_EQ(code.size(), sizeof(expected) + 4);
-   EXPECT_EQ(memcmp(code.data(), expected, sizeof(expected)), 0);
+   EXPECT_EQ(pack(b), expected);
 
-   b = builder(AGX_ISA_ENCODING_AGX3B);
-   src.neg = true;
-   agx_rcp_to(b, dest, src);
-   agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   /* Source ABS and NEG are native fields rather than legalization moves. */
+   for (unsigned modifiers = 0; modifiers < 4; ++modifiers) {
+      b = builder(AGX_ISA_ENCODING_AGX3B);
+      dest = agx_register(0, AGX_SIZE_32);
+      src = agx_register(0, AGX_SIZE_16);
+      src.discard = true;
+      src.abs = modifiers & 1;
+      src.neg = modifiers & 2;
+      agx_rcp_to(b, dest, src);
+      agx_stop(b);
+      const std::vector<uint8_t> native = {
+         0xaf, 0x00, 0x54, 0x00, 0x02, 0x00, 0x10, 0x44,
+         (uint8_t)(0x20 | (modifiers << 6)), 0x00,
+         0x0e, 0x00, 0x00, 0x00,
+      };
+      EXPECT_EQ(pack(b), native) << "modifiers=" << modifiers;
+   }
+}
+
+TEST_F(AGX3PackBinary, ReciprocalWidthsRefuseUngroundedModes)
+{
+   for (unsigned mode = 0; mode < 18; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      agx_index src = agx_register(0, AGX_SIZE_16);
+      src.discard = true;
+
+      if (mode == 1)
+         dest.size = AGX_SIZE_64;
+      if (mode == 2)
+         src.size = AGX_SIZE_64;
+      if (mode == 3)
+         dest.memory = true;
+      if (mode == 4)
+         src.memory = true;
+      if (mode == 5)
+         src.kill = true;
+      if (mode == 6)
+         src.cache = true;
+      if (mode == 7)
+         dest.value = 1;
+      if (mode == 8) {
+         src.size = AGX_SIZE_32;
+         src.value = 1;
+      }
+      if (mode == 9)
+         dest.channels_m1 = 1;
+      if (mode == 10)
+         src.channels_m1 = 1;
+      if (mode == 11)
+         src = agx_immediate(0);
+      if (mode == 12)
+         src = agx_uniform(0, AGX_SIZE_16);
+      if (mode == 14) {
+         dest.size = AGX_SIZE_16;
+         dest.value = 128;
+      }
+      if (mode == 15)
+         src.value = 128;
+      if (mode == 16)
+         dest.value = 128;
+      if (mode == 17) {
+         src.size = AGX_SIZE_32;
+         src.value = 128;
+      }
+
+      agx_instr *rcp = agx_rcp_to(b, dest, src);
+      rcp->saturate = mode == 13;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+   }
 }
 
 TEST_F(AGX3PackBinary, HalfReciprocalSqrtMatchesNativeAndRefusesModifier)

@@ -2830,25 +2830,125 @@ static void test_native_half_clamp(void)
    puts("Native half clamp: exact internal Apple FSEL plus canonical no-wait tail PASS");
 }
 
-static void test_native_half_reciprocal(void)
+static void
+test_native_reciprocal_widths(void)
 {
    static const struct {
-      uint16_t dest;
+      uint16_t dest, src, wait;
+      bool dest_half, src_half, src_abs, src_neg, dest_cache;
       enum agx3_alu_hint hint;
       const char *bytes;
-   } cases[]={
-      {0,AGX3_ALU_HINT_CACHE,"af005600030602442000"},
-      {4,AGX3_ALU_HINT_DISCARD,"af005604030610442000"},
+   } cases[] = {
+      /* The four independent destination/source width combinations. */
+      {2, 2, 32, true, true, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005602020410463000"},
+      {0, 0, 32, false, true, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005600020010442000"},
+      {2, 2, 32, true, false, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af0056020204104a3000"},
+      {0, 0, 32, false, false, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005600020010482000"},
+
+      /* Source arithmetic modifiers on GTK's float-from-half form. */
+      {0, 0, 32, false, true, true, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005600020010446000"},
+      {0, 0, 32, false, true, false, true, false,
+       AGX3_ALU_HINT_DISCARD, "af00560002001044a000"},
+      {0, 0, 32, false, true, true, true, false,
+       AGX3_ALU_HINT_DISCARD, "af00560002001044e000"},
+
+      /* Source/result lifetime fields are independent. */
+      {0, 2, 32, false, true, false, false, false,
+       AGX3_ALU_HINT_CACHE, "af005600020402442000"},
+      {0, 0, 32, false, true, false, false, true,
+       AGX3_ALU_HINT_DISCARD, "af005600030010442000"},
+      {0, 2, 32, false, true, false, false, true,
+       AGX3_ALU_HINT_CACHE, "af005600030402442000"},
+
+      /* Odd half input, no dependency, and texture producer slot zero. */
+      {0, 3, 32, false, true, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005600020610442000"},
+      {0, 0, 0, false, true, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af005400020010442000"},
+      {0, 0, 1, false, true, false, false, false,
+       AGX3_ALU_HINT_DISCARD, "af105400020010442000"},
    };
-   for (unsigned i=0;i<2;i++) {
-      uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_hrcp(AGX_ISA_ENCODING_AGX3B,cases[i].dest,3,
-                           cases[i].hint,true,32,bytes,&len));
-      exact(bytes,len,cases[i].bytes);
-      assert(!agx3_alu_hrcp(AGX_ISA_ENCODING_AGX3C,cases[i].dest,3,
-                            cases[i].hint,true,32,bytes,&len));
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      assert(agx3_alu_rcp(
+         AGX_ISA_ENCODING_AGX3B, cases[i].dest, cases[i].src,
+         cases[i].dest_half, cases[i].src_half, cases[i].src_abs,
+         cases[i].src_neg, cases[i].hint, cases[i].dest_cache,
+         cases[i].wait, bytes, &len));
+      exact(bytes, len, cases[i].bytes);
    }
-   puts("Native half reciprocal: two complete Apple live/dead f32rcp vectors PASS");
+
+   unsigned forms = 0;
+   for (unsigned dest_half = 0; dest_half < 2; ++dest_half) {
+      for (unsigned src_half = 0; src_half < 2; ++src_half) {
+         for (unsigned modifiers = 0; modifiers < 4; ++modifiers) {
+            for (unsigned hint = 0; hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+               for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
+                  for (unsigned wait = 0; wait < 64; ++wait) {
+                     const bool ok = agx3_alu_rcp(
+                        AGX_ISA_ENCODING_AGX3B, dest_half ? 127 : 126,
+                        src_half ? 127 : 126, dest_half, src_half,
+                        modifiers & 1, modifiers & 2,
+                        (enum agx3_alu_hint)hint, dest_cache, wait, bytes,
+                        &len);
+                     if (!ok)
+                        fprintf(stderr,
+                                "RCP compose failed: dh=%u sh=%u mod=%u "
+                                "hint=%u dc=%u wait=%u\n",
+                                dest_half, src_half, modifiers, hint,
+                                dest_cache, wait);
+                     assert(ok);
+                     assert(len == 10);
+                     ++forms;
+                  }
+               }
+            }
+         }
+      }
+   }
+   assert(forms == 6144);
+
+   memset(bytes, 0xa5, sizeof(bytes));
+   len = 0xa5;
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, false, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 128, 0, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 128, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, false, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, true, false, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, true, false, false,
+      (enum agx3_alu_hint)3, false, 0, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 64, bytes, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, NULL, &len));
+   assert(!agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, NULL));
+   assert(len == 0xa5);
+   for (unsigned i = 0; i < sizeof(bytes); ++i)
+      assert(bytes[i] == 0xa5);
+
+   puts("Native reciprocal widths/modifiers: thirteen exact Apple vectors, "
+        "6144 field combinations and strict bounds PASS");
 }
 
 static void test_native_half_rsqrt(void)
@@ -3110,7 +3210,7 @@ int main(void){
    test_native_f32_minmax();
    test_native_f32_minifloat_select();
    test_native_half_clamp();
-   test_native_half_reciprocal();
+   test_native_reciprocal_widths();
    test_native_half_rsqrt();
    test_native_half_exp2();
    test_native_half_log2();
