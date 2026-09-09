@@ -44,9 +44,9 @@ main(void)
    memcpy(wide, pairs, sizeof(wide));
    for (unsigned i = 0; i < AGX_VDM_HAL200_BIND_COUNT; ++i)
       wide[i].context_offset = UINT32_C(0xffffffe0) + 4 * i;
-   assert(agx_vdm_hal200_bind_tail_pack(AGX_CHIP_G16G, wide, &packed));
+   assert(agx_vdm_hal200_bind_tail_pack(AGX_CHIP_G17P, wide, &packed));
    assert(agx_vdm_hal200_bind_tail_unpack(
-      AGX_CHIP_G16G, packed.bytes, packed.length, unpacked));
+      AGX_CHIP_G17P, packed.bytes, packed.length, unpacked));
    assert(memcmp(unpacked, wide, sizeof(wide)) == 0);
 
    assert(!agx_vdm_hal200_bind_tail_pack(AGX_CHIP_G17G, pairs, &packed));
