@@ -241,7 +241,10 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_fill_uint4") ||
           !strcmp(func->name, "libagx_predicate_indirect") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
-          !strcmp(func->name, "libagx_increment_ia");
+          !strcmp(func->name, "libagx_increment_ia") ||
+          !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
+          !strcmp(func->name, "libagx_copy_query") ||
+          !strcmp(func->name, "libagx_increment_cs_invocations");
 }
 
 static nir_def *
@@ -421,6 +424,12 @@ main(int argc, char **argv)
                  "libagx_copy_xfb_counters_0_g17p,\n"
                  "    [LIBAGX_INCREMENT_IA] = "
                  "libagx_increment_ia_0_g17p,\n"
+                 "    [LIBAGX_INCREMENT_IA_RESTART_NONNULL] = "
+                 "libagx_increment_ia_restart_nonnull_0_g17p,\n"
+                 "    [LIBAGX_COPY_QUERY] = "
+                 "libagx_copy_query_0_g17p,\n"
+                 "    [LIBAGX_INCREMENT_CS_INVOCATIONS] = "
+                 "libagx_increment_cs_invocations_0_g17p,\n"
                  "};\n\n");
       }
    }

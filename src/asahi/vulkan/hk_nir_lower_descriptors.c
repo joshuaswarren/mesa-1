@@ -509,9 +509,19 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 
       unsigned off1 = hk_root_descriptor_offset(draw.pipeline_stats);
       unsigned off2 = hk_root_descriptor_offset(draw.pipeline_stats_flags);
+      static_assert(hk_root_descriptor_offset(draw.pipeline_stats) == 368,
+                    "pipeline-statistics compiler oracle ABI");
+      static_assert(hk_root_descriptor_offset(draw.pipeline_stats_flags) ==
+                       376,
+                    "pipeline-statistics compiler oracle ABI");
 
       nir_def *base = load_root(b, 1, 64, nir_imm_int(b, off1), 8);
-      nir_def *flags = load_root(b, 1, 16, nir_imm_int(b, off2), 2);
+      /* Keep the VkFlags field at its native 32-bit width. Besides preserving
+       * every public statistic bit, G17P has an exact live-source U32 popcount
+       * form for the compact report index. A U16 load instead leaves this
+       * value live across both the popcount and presence test and requires an
+       * unwitnessed cached-half popcount. */
+      nir_def *flags = load_root(b, 1, 32, nir_imm_int(b, off2), 4);
 
       unsigned query = nir_intrinsic_base(intrin);
       VkQueryPipelineStatisticFlagBits bit = translate_pipeline_stat_bit(query);

@@ -5099,12 +5099,26 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
 
    if (draw.restart) {
       uint32_t index_size_B = agx_index_size_to_B(draw.index_size);
+      struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-      libagx_increment_ia_restart(
-         cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices, ia_prims,
-         vs_invocations, c_prims, c_inv, draw_ptr, draw.index_buffer,
-         agx_draw_index_range_el(draw), cmd->state.gfx.index.restart,
-         index_size_B, prim, patch_size);
+      if (dev->dev.chip == AGX_CHIP_G17P) {
+         /* G17P does not expose geometry or tessellation, so disabled
+          * statistics are represented by the writable scratch page and all
+          * five addresses are valid. Use the native specialization that does
+          * not need to reduce nullable 64-bit pointers. */
+         assert(!geom && !tess);
+         libagx_increment_ia_restart_nonnull(
+            cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices,
+            ia_prims, vs_invocations, c_prims, c_inv, draw_ptr,
+            draw.index_buffer, agx_draw_index_range_el(draw),
+            cmd->state.gfx.index.restart, index_size_B, prim, patch_size);
+      } else {
+         libagx_increment_ia_restart(
+            cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices,
+            ia_prims, vs_invocations, c_prims, c_inv, draw_ptr,
+            draw.index_buffer, agx_draw_index_range_el(draw),
+            cmd->state.gfx.index.restart, index_size_B, prim, patch_size);
+      }
    } else {
       libagx_increment_ia(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
                           ia_vertices, ia_prims, vs_invocations, c_prims, c_inv,
@@ -5162,7 +5176,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       if ((draw_.index_size != AGX_INDEX_SIZE_U8 &&
            draw_.index_size != AGX_INDEX_SIZE_U16 &&
            draw_.index_size != AGX_INDEX_SIZE_U32) ||
-          robust_indirect || ia_stats ||
+          robust_indirect ||
           cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] ||
           (agx_is_indirect(draw_.b)
@@ -5173,8 +5187,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
                    &address, &size_word))) {
          mesa_loge("native G17P indexed draw requires an in-bounds "
-                   "uint8/uint16/uint32 span without geometry, query, or "
-                   "indirect robustness lowering");
+                   "uint8/uint16/uint32 span without geometry or indirect "
+                   "robustness lowering");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }

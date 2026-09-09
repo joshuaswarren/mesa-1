@@ -53,6 +53,9 @@ main(void)
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 || i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_INCREMENT_IA ||
+          i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
+          i == LIBAGX_COPY_QUERY ||
+          i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1)
          CHECK(libagx_g17p[i] != NULL);
@@ -141,6 +144,63 @@ main(void)
          UINT64_C(0x3d4ea3afaa2e9e27));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
+
+   /* These are the remaining helpers needed by the public G17P pipeline-
+    * statistics promise: restart-aware graphics accounting, Vulkan result
+    * copies, and compute-invocation accounting. Pin each complete generated
+    * program and its launch ABI, not merely the non-null dispatch-table slot. */
+   const struct {
+      unsigned index;
+      uint32_t main_offset;
+      uint32_t main_size;
+      uint32_t binary_size;
+      uint16_t nr_gprs;
+      uint16_t push_count;
+      uint16_t workgroup_size[3];
+      uint16_t local_size;
+      uint64_t hash;
+   } statistics[] = {
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2938, 3066, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xd75a8ff635144550)},
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
+       UINT64_C(0x3b6988993fef71a1)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
+       UINT64_C(0xd292b1db166dd1e9)},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
+      const uint32_t *statistics_blob = libagx_g17p[statistics[i].index];
+      CHECK(statistics_blob != NULL);
+      if (!statistics_blob)
+         continue;
+      const struct agx_precompiled_kernel_info *statistics_info =
+         (const void *)statistics_blob;
+      const uint8_t *statistics_binary =
+         (const uint8_t *)statistics_blob + sizeof(*statistics_info);
+      const uint64_t hash =
+         fnv1a64(statistics_binary, statistics_info->binary_size);
+      CHECK(statistics_info->preamble_offset == 0);
+      CHECK(statistics_info->main_offset == statistics[i].main_offset);
+      CHECK(statistics_info->main_size == statistics[i].main_size);
+      CHECK(statistics_info->binary_size == statistics[i].binary_size);
+      CHECK(statistics_info->nr_gprs == statistics[i].nr_gprs);
+      CHECK(statistics_info->nr_preamble_gprs == 0);
+      CHECK(statistics_info->push_count == statistics[i].push_count);
+      CHECK(statistics_info->workgroup_size[0] ==
+            statistics[i].workgroup_size[0]);
+      CHECK(statistics_info->workgroup_size[1] ==
+            statistics[i].workgroup_size[1]);
+      CHECK(statistics_info->workgroup_size[2] ==
+            statistics[i].workgroup_size[2]);
+      CHECK(statistics_info->local_size == statistics[i].local_size);
+      CHECK(statistics_info->imageblock_stride == 0);
+      CHECK(!statistics_info->uses_txf);
+      CHECK(statistics_info->agx3_staging_known);
+      CHECK(statistics_info->agx3_staging_halfs == 0);
+      CHECK(hash == statistics[i].hash);
+      CHECK(memcmp(statistics_binary + statistics_info->binary_size -
+                      sizeof(end),
+                   end, sizeof(end)) == 0);
+   }
 
    /* Apple G17P compiles the equivalent four- and five-word predicate/copy
     * kernels to the same control, address and device-store instruction

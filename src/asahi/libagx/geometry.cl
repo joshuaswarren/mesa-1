@@ -24,19 +24,19 @@ libagx_increment_ia(global uint32_t *ia_vertices,
                      c_invs, draw, prim, verts_per_patch);
 }
 
-KERNEL(1024)
-libagx_increment_ia_restart(global uint32_t *ia_vertices,
-                            global uint32_t *ia_primitives,
-                            global uint32_t *vs_invocations,
-                            global uint32_t *c_prims, global uint32_t *c_invs,
-                            constant uint32_t *draw, uint64_t index_buffer,
-                            uint32_t index_buffer_range_el,
-                            uint32_t restart_index, uint32_t index_size_B,
-                            enum mesa_prim prim, unsigned verts_per_patch)
+static inline void
+increment_ia_restart(global uint32_t *ia_vertices,
+                     global uint32_t *ia_primitives,
+                     global uint32_t *vs_invocations,
+                     global uint32_t *c_prims, global uint32_t *c_invs,
+                     constant uint32_t *draw, uint64_t index_buffer,
+                     uint32_t index_buffer_range_el, uint32_t restart_index,
+                     uint32_t index_size_B, enum mesa_prim prim,
+                     unsigned verts_per_patch, bool pointers_nonnull,
+                     local uint *scratch)
 {
    uint tid = cl_global_id.x;
    unsigned count = draw[0];
-   local uint scratch;
 
    uint start = draw[2];
    uint partial = 0;
@@ -51,19 +51,24 @@ libagx_increment_ia_restart(global uint32_t *ia_vertices,
    }
 
    /* Accumulate the partials across the workgroup */
-   scratch = 0;
+   *scratch = 0;
    barrier(CLK_LOCAL_MEM_FENCE);
-   atomic_add(&scratch, partial);
+   atomic_add(scratch, partial);
    barrier(CLK_LOCAL_MEM_FENCE);
 
    /* Elect a single thread from the workgroup to increment the counters */
    if (tid == 0) {
-      poly_increment_counters(ia_vertices, vs_invocations, NULL,
-                              scratch * draw[1]);
+      uint count = *scratch * draw[1];
+      if (pointers_nonnull) {
+         *ia_vertices += count;
+         *vs_invocations += count;
+      } else {
+         poly_increment_counters(ia_vertices, vs_invocations, NULL, count);
+      }
    }
 
    /* TODO: We should vectorize this */
-   if ((ia_primitives || c_prims || c_invs) && tid == 0) {
+   if ((pointers_nonnull || ia_primitives || c_prims || c_invs) && tid == 0) {
       uint accum = 0;
       int last_restart = -1;
       for (uint i = 0; i < count; ++i) {
@@ -82,8 +87,51 @@ libagx_increment_ia_restart(global uint32_t *ia_vertices,
             prim, count - last_restart - 1, verts_per_patch);
       }
 
-      poly_increment_counters(ia_primitives, c_prims, c_invs, accum * draw[1]);
+      uint count = accum * draw[1];
+      if (pointers_nonnull) {
+         *ia_primitives += count;
+         *c_prims += count;
+         *c_invs += count;
+      } else {
+         poly_increment_counters(ia_primitives, c_prims, c_invs, count);
+      }
    }
+}
+
+KERNEL(1024)
+libagx_increment_ia_restart(global uint32_t *ia_vertices,
+                            global uint32_t *ia_primitives,
+                            global uint32_t *vs_invocations,
+                            global uint32_t *c_prims, global uint32_t *c_invs,
+                            constant uint32_t *draw, uint64_t index_buffer,
+                            uint32_t index_buffer_range_el,
+                            uint32_t restart_index, uint32_t index_size_B,
+                            enum mesa_prim prim, unsigned verts_per_patch)
+{
+   local uint scratch;
+   increment_ia_restart(ia_vertices, ia_primitives, vs_invocations, c_prims,
+                        c_invs, draw, index_buffer, index_buffer_range_el,
+                        restart_index, index_size_B, prim, verts_per_patch,
+                        false, &scratch);
+}
+
+/* Honeykrisp's native G17P path passes the scratch page for every disabled
+ * counter and does not expose geometry or tessellation.  All five addresses
+ * are therefore valid and non-null, allowing this specialization to avoid
+ * pointer-presence reductions while preserving the exact restart accounting. */
+KERNEL(1024)
+libagx_increment_ia_restart_nonnull(
+   global uint32_t *ia_vertices, global uint32_t *ia_primitives,
+   global uint32_t *vs_invocations, global uint32_t *c_prims,
+   global uint32_t *c_invs, constant uint32_t *draw, uint64_t index_buffer,
+   uint32_t index_buffer_range_el, uint32_t restart_index,
+   uint32_t index_size_B, enum mesa_prim prim, unsigned verts_per_patch)
+{
+   local uint scratch;
+   increment_ia_restart(ia_vertices, ia_primitives, vs_invocations, c_prims,
+                        c_invs, draw, index_buffer, index_buffer_range_el,
+                        restart_index, index_size_B, prim, verts_per_patch,
+                        true, &scratch);
 }
 
 KERNEL(1024)

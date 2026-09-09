@@ -7704,6 +7704,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * also just consume a 16-bit operand in a 32-bit op -- the width is
           * per-operand -- but that folds into the consumer and there is no
           * consumer here.) Both halves of this pair are witnessed encodings.
+          * The half-copy corpus does not map every combination of scoreboard
+          * waits. Preserve its directly encodable waits. For any other mask,
+          * retire the producer through the grounded band no-op first, as for
+          * uniform copies and derivatives, then emit the exact zero-wait
+          * copy-and-clear pair.
           */
          if (I->op == AGX_OPCODE_BITOP &&
              (I->truth_table & 0xfu) == AGX3_SEL_TT_MOV &&
@@ -7717,15 +7722,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              (I->dest[0].value & 1) == 0) {
             uint8_t lo[AGX3_COPY_MAX_LENGTH], hi[AGX3_STAGE_MAX_LENGTH];
             uint8_t lo_len = 0, hi_len = 0;
-            if (!agx3_copy_encode_reg16(enc, I->dest[0].value,
-                                        I->src[0].value, I->dest[0].cache,
-                                        I->src[0].cache, I->src[0].discard,
-                                        wait, lo, &lo_len) ||
+            bool copied = agx3_copy_encode_reg16(
+               enc, I->dest[0].value, I->src[0].value, I->dest[0].cache,
+               I->src[0].cache, I->src[0].discard, wait, lo, &lo_len);
+            bool retired = false;
+            if (!copied && wait) {
+               retired = agx3_retire_slots_noop(emission, enc, wait);
+               copied = retired && agx3_copy_encode_reg16(
+                                     enc, I->dest[0].value, I->src[0].value,
+                                     I->dest[0].cache, I->src[0].cache,
+                                     I->src[0].discard, 0, lo, &lo_len);
+            }
+            if (!copied ||
                 !agx3_clr(enc, I->dest[0].value + 1, true, false, hi,
                           &hi_len) ||
                 !agx3_append(emission, lo, lo_len) ||
                 !agx3_append(emission, hi, hi_len))
                AGX3_REFUSE(I);
+            if (retired)
+               outstanding &= (uint16_t)~wait;
             continue;
          }
 
@@ -9088,9 +9103,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
             if (wait && !agx3_retire_slots_noop(emission, enc, wait))
                AGX3_REFUSE(I);
+            enum agx3_alu_hint hint = agx3_post_ra_hint(src);
+            /* An in-place popcount consumes the old register value and then
+             * overwrites it. Post-RA has no separate lifetime hint on this
+             * tied operand, but that is exactly the witnessed discard form
+             * (including Apple's U32 dest=src=0 program). */
+            if (hint == AGX3_ALU_HINT_NONE && dest.value == src.value)
+               hint = AGX3_ALU_HINT_DISCARD;
             if (!agx3_alu_popcount(enc, dest.value, src.value, half,
-                                   agx3_post_ra_hint(src), dest.cache, 0,
-                                   bytes, &length) ||
+                                   hint, dest.cache, 0, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;

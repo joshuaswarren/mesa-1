@@ -41,6 +41,9 @@
 
 static const uint8_t agx3_end[] = {0x0e, 0x00, 0x00, 0x00};
 
+static bool g17p_sample_mask_input_protocol(
+   const struct agx_shader_part *part);
+
 /* Apple G17P's byte-exact immediate colour packing followed by the deferred
  * colour-write fence and normalized RGBA8 store. */
 static const uint8_t g17p_flat_colour[] = {
@@ -942,6 +945,138 @@ build_fs_sample_mask_in(void)
    fs_store_colour(&b, nir_vec4(&b, value, value, value,
                                 nir_imm_float(&b, 1.0f)));
    return fs_finish(&b);
+}
+
+/* Exact post-descriptor-lowering shape of Honeykrisp's fragment pipeline-
+ * statistics prolog, including the current root-table offsets. The dynamic
+ * compact-index calculation, helper exclusion, incoming sample-mask popcount,
+ * scratch-page fallback and 32-bit global atomic are the production operations
+ * emitted by build_fs_prolog(). */
+static nir_shader *
+build_fs_pipeline_statistics_prolog(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P fragment pipeline-statistics prolog");
+
+   nir_push_if(&b, nir_inot(&b, nir_load_helper_invocation(&b, 1)));
+   nir_def *samples = nir_bit_count(&b, nir_load_sample_mask_in(&b));
+
+   nir_def *root =
+      nir_load_preamble(&b, 1, 64, .base = AGX_ABI_FUNI_ROOT);
+   /* Current hk_root_descriptor_table ABI: draw.pipeline_stats at +368 and
+    * draw.pipeline_stats_flags at +376. hk_nir_lower_descriptors.c pins the
+    * same offsets against the actual structure. */
+   nir_def *base = nir_load_global_constant(
+      &b, 1, 64, nir_iadd_imm(&b, root, 368), .align_mul = 8,
+      .access = ACCESS_CAN_SPECULATE);
+   nir_def *flags = nir_load_global_constant(
+      &b, 1, 32, nir_iadd_imm(&b, root, 376), .align_mul = 4,
+      .access = ACCESS_CAN_SPECULATE);
+
+   /* VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT. */
+   const unsigned statistic = 1u << 7;
+   nir_def *index = nir_bit_count(&b, nir_iand_imm(&b, flags, statistic - 1));
+   nir_def *address = nir_iadd(
+      &b, base,
+      nir_amul_imm(&b, nir_u2u64(&b, index), sizeof(uint64_t)));
+   nir_def *present =
+      nir_ine_imm(&b, nir_iand_imm(&b, flags, statistic), 0);
+   address = nir_bcsel(&b, present, address,
+                       nir_imm_int64(&b, AGX_SCRATCH_PAGE_ADDRESS));
+   nir_global_atomic(&b, 32, address, samples,
+                     .atomic_op = nir_atomic_op_iadd);
+   nir_pop_if(&b, NULL);
+
+   b.shader->info.io_lowered = true;
+   return b.shader;
+}
+
+static uint64_t
+fnv1a64(const uint8_t *bytes, size_t size)
+{
+   uint64_t hash = UINT64_C(14695981039346656037);
+   for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= UINT64_C(1099511628211);
+   }
+   return hash;
+}
+
+static bool
+test_g17p_pipeline_statistics_fs_prolog(void)
+{
+   nir_shader *nir = build_fs_pipeline_statistics_prolog();
+   unsigned helper_loads = 0, sample_mask_loads = 0, root_loads = 0;
+   unsigned constant_loads = 0, atomic_adds = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            switch (intr->intrinsic) {
+            case nir_intrinsic_load_helper_invocation:
+               helper_loads++;
+               break;
+            case nir_intrinsic_load_sample_mask_in:
+               sample_mask_loads++;
+               break;
+            case nir_intrinsic_load_preamble:
+               root_loads++;
+               break;
+            case nir_intrinsic_load_global_constant:
+               constant_loads++;
+               break;
+            case nir_intrinsic_global_atomic:
+               atomic_adds +=
+                  nir_intrinsic_atomic_op(intr) == nir_atomic_op_iadd;
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
+
+   const bool semantic = helper_loads == 1 && sample_mask_loads == 1 &&
+                         root_loads == 1 && constant_loads == 2 &&
+                         atomic_adds == 1;
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_stop = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(nir, &key, &part);
+   const uint64_t hash =
+      compiled ? fnv1a64(part.binary, part.info.binary_size) : 0;
+   const bool ok = semantic && compiled && part.binary &&
+                   part.info.main_offset == 0 && part.info.main_size == 224 &&
+                   part.info.binary_size == 224 && part.info.nr_gprs == 16 &&
+                   !part.info.has_preamble && part.info.push_count == 0 &&
+                   part.info.agx3_staging_known &&
+                   part.info.agx3_staging_halfs == 0 &&
+                   hash == UINT64_C(0x6414c9cb47e44c7a) &&
+                   g17p_sample_mask_input_protocol(&part);
+
+   if (!ok || getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr,
+              "G17P FS statistic prolog: semantic=%u compiled=%u size=%u "
+              "gprs=%u push=%u hash=%016llx bytes=",
+              semantic, compiled, part.info.binary_size, part.info.nr_gprs,
+              part.info.push_count, (unsigned long long)hash);
+      if (compiled) {
+         for (unsigned i = 0; i < part.info.binary_size; ++i)
+            fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
+      }
+      fputc('\n', stderr);
+   }
+
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
 }
 
 /* A two-sided material choosing a value from gl_FrontFacing. */
@@ -4644,6 +4779,8 @@ main(int argc, char **argv)
    if (!test_g17p_half_norm8_epilog())
       all_ok = false;
    if (!test_g17p_fragment_io_matrix())
+      all_ok = false;
+   if (!test_g17p_pipeline_statistics_fs_prolog())
       all_ok = false;
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {
