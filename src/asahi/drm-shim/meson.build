@@ -217,6 +217,20 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_release_rollback_env = environment(
+    g17p_acquire_rollback_environment)
+  g17p_release_rollback_env.set(
+    'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'release-failure')
+  test(
+    'hk_g17p_release_rollback',
+    g17p_acquire_rollback,
+    args : ['--release-failure'],
+    env : g17p_release_rollback_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-release-rollback'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

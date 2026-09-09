@@ -10,6 +10,8 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#include "vulkan/wsi/wsi_common_private.h"
+
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,6 +49,27 @@ VK_FN(vkAcquireNextImageKHR);
 VK_FN(vkQueueSubmit);
 VK_FN(vkQueuePresentKHR);
 VK_FN(vkQueueWaitIdle);
+VK_FN(vkReleaseSwapchainImagesKHR);
+
+static VkResult (*backend_release_images)(struct wsi_swapchain *, uint32_t,
+                                          const uint32_t *);
+static struct wsi_swapchain *expected_release_chain;
+static uint32_t expected_release_index;
+static unsigned release_calls;
+static bool release_shape_valid;
+
+static VkResult
+fail_first_release(struct wsi_swapchain *chain, uint32_t count,
+                   const uint32_t *indices)
+{
+   release_calls++;
+   release_shape_valid &= chain == expected_release_chain && count == 1 &&
+                          indices && indices[0] == expected_release_index;
+   if (release_calls == 1)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   return backend_release_images(chain, count, indices);
+}
 
 static void
 die(const char *what)
@@ -133,21 +156,25 @@ main(int argc, char **argv)
                      strcmp(argv[1], "--present-import-failure") &&
                      strcmp(argv[1], "--present-export-failure") &&
                      strcmp(argv[1], "--present-submit-failure") &&
-                     strcmp(argv[1], "--empty-submit-failure")))
+                     strcmp(argv[1], "--empty-submit-failure") &&
+                     strcmp(argv[1], "--release-failure")))
       die("usage: " TEST_NAME " <--semaphore-failure|--fence-failure|"
            "--present-import-failure|--present-export-failure|"
-           "--present-submit-failure|--empty-submit-failure>");
+           "--present-submit-failure|--empty-submit-failure|"
+           "--release-failure>");
 
    const char *test_case = argv[1] + 2;
    const bool empty_submit_failure =
       !strcmp(test_case, "empty-submit-failure");
+   const bool release_failure = !strcmp(test_case, "release-failure");
    const bool present_submit_failure =
       !strcmp(test_case, "present-submit-failure");
    const bool present_failure =
       !strcmp(test_case, "present-import-failure") ||
       !strcmp(test_case, "present-export-failure") ||
       present_submit_failure;
-   const char *configured = getenv((present_failure || empty_submit_failure)
+   const char *configured = getenv((present_failure || empty_submit_failure ||
+                                     release_failure)
       ? "ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK"
       : "ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
    if (!configured || strcmp(configured, test_case))
@@ -282,12 +309,19 @@ main(int argc, char **argv)
    };
    const char *const device_extensions[] = {
       VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+      VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+   };
+   const VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR maintenance1 = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR,
+      .swapchainMaintenance1 = VK_TRUE,
    };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = release_failure ? &maintenance1 : NULL,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-      .enabledExtensionCount = 1,
+      .enabledExtensionCount = release_failure ? 2 : 1,
       .ppEnabledExtensionNames = device_extensions,
    };
    VkDevice device;
@@ -306,6 +340,8 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkQueueSubmit);
    LOAD_DEVICE(device, vkQueuePresentKHR);
    LOAD_DEVICE(device, vkQueueWaitIdle);
+   if (release_failure)
+      LOAD_DEVICE(device, vkReleaseSwapchainImagesKHR);
 
    VkQueue queue;
    vkGetDeviceQueue(device, queue_family, 0, &queue);
@@ -340,6 +376,79 @@ main(int argc, char **argv)
    if (present_failure) {
       check(vkCreateSemaphore(device, &semaphore_info, NULL, &held_acquired),
             "vkCreateSemaphore(held acquired)");
+   }
+
+   if (release_failure) {
+      uint32_t image_index = UINT32_MAX;
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
+                                  VK_NULL_HANDLE, &image_index),
+            "vkAcquireNextImageKHR(release)");
+      if (image_index != 0)
+         die("first release acquire did not select image zero");
+
+      struct wsi_swapchain *internal_chain =
+         wsi_swapchain_from_handle(swapchain);
+      struct wsi_image *internal_image =
+         internal_chain->get_wsi_image(internal_chain, image_index);
+      if (!internal_image->acquired)
+         die("acquired image is not owned by the application");
+
+      backend_release_images = internal_chain->release_images;
+      expected_release_chain = internal_chain;
+      expected_release_index = image_index;
+      release_shape_valid = true;
+      internal_chain->release_images = fail_first_release;
+
+      const VkReleaseSwapchainImagesInfoKHR release_info = {
+         .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR,
+         .swapchain = swapchain,
+         .imageIndexCount = 1,
+         .pImageIndices = &image_index,
+      };
+      VkResult result = vkReleaseSwapchainImagesKHR(device, &release_info);
+      if (result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+         fprintf(stderr,
+                 TEST_NAME ": injected image release returned %d, expected %d\n",
+                 result, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return EXIT_FAILURE;
+      }
+      if (!internal_image->acquired)
+         die("failed backend release discarded common image ownership");
+
+      check(vkReleaseSwapchainImagesKHR(device, &release_info),
+            "vkReleaseSwapchainImagesKHR(retry)");
+      if (internal_image->acquired)
+         die("successful release retained common image ownership");
+      if (release_calls != 2 || !release_shape_valid)
+         die("release backend did not receive two exact image-zero requests");
+      internal_chain->release_images = backend_release_images;
+
+      uint32_t reacquired_index = UINT32_MAX;
+      check(vkAcquireNextImageKHR(device, swapchain, 0, render_done,
+                                  VK_NULL_HANDLE, &reacquired_index),
+            "vkAcquireNextImageKHR(released image)");
+      if (reacquired_index != image_index)
+         die("released image was not returned to the available pool");
+
+      const VkReleaseSwapchainImagesInfoKHR final_release_info = {
+         .sType = VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_KHR,
+         .swapchain = swapchain,
+         .imageIndexCount = 1,
+         .pImageIndices = &reacquired_index,
+      };
+      check(vkReleaseSwapchainImagesKHR(device, &final_release_info),
+            "vkReleaseSwapchainImagesKHR(final)");
+
+      vkDestroySemaphore(device, render_done, NULL);
+      vkDestroySemaphore(device, acquired, NULL);
+      vkDestroySwapchainKHR(device, swapchain, NULL);
+      vkDestroyDevice(device, NULL);
+      vkDestroySurfaceKHR(instance, surface, NULL);
+      vkDestroyInstance(instance, NULL);
+      dlclose(loader);
+      printf(TEST_NAME ": PASS — failed image release preserved ownership; "
+                       "retry released and reacquired image zero\n");
+      return EXIT_SUCCESS;
    }
 
    if (empty_submit_failure) {

@@ -1380,7 +1380,6 @@ wsi_ReleaseSwapchainImagesKHR(VkDevice _device,
       assert(index < swapchain->image_count);
       struct wsi_image *image = swapchain->get_wsi_image(swapchain, index);
       assert(image->acquired);
-      image->acquired = false;
    }
 
    VkResult result = swapchain->release_images(swapchain,
@@ -1389,6 +1388,15 @@ wsi_ReleaseSwapchainImagesKHR(VkDevice _device,
 
    if (result != VK_SUCCESS)
       return result;
+
+   /* The backend may reject the whole release before changing its image
+    * state.  Commit common ownership only after that transition succeeds. */
+   for (uint32_t i = 0; i < pReleaseInfo->imageIndexCount; i++) {
+      uint32_t image_index = pReleaseInfo->pImageIndices[i];
+      struct wsi_image *image =
+         swapchain->get_wsi_image(swapchain, image_index);
+      image->acquired = false;
+   }
 
    if (swapchain->wsi->set_memory_ownership) {
       for (uint32_t i = 0; i < pReleaseInfo->imageIndexCount; i++) {

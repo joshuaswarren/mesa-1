@@ -1949,8 +1949,13 @@ if with_tests
     g17p_acquire_rollback = executable(
       'g17p-vulkan-acquire-rollback',
       files('tests/g17p_vulkan_acquire_rollback.c'),
-      include_directories : [inc_include],
-      dependencies : [dep_dl],
+      include_directories : [inc_include, inc_src],
+      dependencies : [
+        dep_dl,
+        idep_vulkan_runtime_headers,
+        idep_vulkan_util_headers,
+        idep_vulkan_wsi_headers,
+      ],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     )
