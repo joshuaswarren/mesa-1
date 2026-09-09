@@ -1306,7 +1306,7 @@ test_g17p_rt0_eot_program(void)
       !hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17S, &desc, &program));
 
    struct hk_agx3_g17p_rt0_eot_program_desc mrt = desc;
-   mrt.shader_binary_size = 120;
+   mrt.shader_binary_size = 238;
    mrt.nr_gprs = 8;
    mrt.staging_halfs = 16;
    mrt.attachment_count = 2;
@@ -1314,7 +1314,34 @@ test_g17p_rt0_eot_program(void)
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
                                                 &relocated));
    CHECK(relocated.length <= AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE);
+   /* Exact CProg contract for the 238-byte text: two PBE-table dwords, both
+    * kind5 imageblock offsets (0 and8), a 256-byte LDSHDR fetch span, and the
+    * five uniform publications required by the native three-dword kind0
+    * range. The fourth COPY deliberately publishes the zero RT0 offset into
+    * the reserved middle dword before RT1's offset. */
+   static const uint8_t expected_wboit_mrt_program[] = {
+      0x2c,0xa0,0x02,0x00,0x08,0x00,0x10,0x00,0x3c,0x80,0x02,0x00,
+      0x04,0x00,0x00,0x00,0x4c,0x00,0x5c,0x08,0x77,0x00,0x2a,0x43,
+      0x4b,0x00,0x00,0x00,0x77,0x01,0xaa,0x02,0x00,0x00,0x00,0x02,
+      0x02,0x00,0xf7,0x00,0x2a,0x00,0x02,0x00,0x00,0x00,0x00,0x00,
+      0x1c,0x80,0x02,0x00,0x00,0x00,0x00,0x00,0x14,0x81,0x11,0x06,
+      0x00,0x00,0x00,0x00,0x0c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
+      0x9f,0x11,0x54,0x00,0x02,0x00,0x08,0xa8,0x10,0x05,0x1c,0x80,
+      0x02,0x00,0x04,0x00,0x00,0x00,0x0f,0x12,0x54,0x00,0x4c,0x00,
+      0x0b,0x04,0x01,0x04,0x1b,0x06,0x01,0x04,0x2b,0x08,0x01,0x04,
+      0x3b,0x08,0x01,0x04,0x4b,0x0a,0x01,0x04,0x03,0x00,0x07,0x00,
+      0x02,0x00,0x00,0x00,0x60,0x00,0x0e,0x00,0x00,0x00,
+   };
+   CHECK(relocated.length == sizeof(expected_wboit_mrt_program));
+   CHECK(memcmp(relocated.bytes, expected_wboit_mrt_program,
+                sizeof(expected_wboit_mrt_program)) == 0);
+   struct hk_agx3_g17p_rt0_eot_program_desc wrong_partition_text = mrt;
+   wrong_partition_text.shader_binary_size = 120;
+   CHECK(!hk_agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &wrong_partition_text, &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
    struct hk_agx3_g17p_rt0_eot_program rgba8_mrt_program;
+   mrt.shader_binary_size = 120;
    mrt.imageblock_offset1_B = 4;
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(
       AGX_CHIP_G17P, &mrt, &rgba8_mrt_program));
@@ -1322,6 +1349,11 @@ test_g17p_rt0_eot_program(void)
    CHECK(rgba8_mrt_program.length == relocated.length);
    CHECK(memcmp(rgba8_mrt_program.bytes, relocated.bytes,
                 rgba8_mrt_program.length) != 0);
+   wrong_partition_text = mrt;
+   wrong_partition_text.shader_binary_size = 238;
+   CHECK(!hk_agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &wrong_partition_text, &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
    mrt.attachment_count = 1;
    CHECK(!hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
                                                  &program));

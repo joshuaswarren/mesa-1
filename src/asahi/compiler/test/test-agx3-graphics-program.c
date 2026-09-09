@@ -163,6 +163,15 @@ main(void)
    eot.imageblock_offset1_B = 4;
    CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                             &eot_program));
+   eot.imageblock_offset1_B = 8;
+   CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
+                                             &eot_program));
+   eot.shader_binary_size = 238;
+   CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
+                                            &eot_program));
+   eot.imageblock_offset1_B = 4;
+   CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
+                                             &eot_program));
    eot.imageblock_offset1_B = 12;
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));

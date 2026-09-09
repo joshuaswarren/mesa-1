@@ -3,8 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 #include "agx_compile.h"
+#include "agx3_graphics_program.h"
 #include "agx3_pixel_core.h"
 #include "agx_linker.h"
+#include "agx_nir.h"
+#include "agx_tilebuffer.h"
 #include "nir_builder.h"
 #include "util/format/u_formats.h"
 #include <stdio.h>
@@ -129,9 +132,86 @@ compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
    return ok;
 }
 
+static bool
+test_wboit_background_clear(void)
+{
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R8_UNORM,
+   };
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(formats, 2, 1, false);
+   if (agx_g17p_classify_mrt(&tib) != AGX_G17P_MRT_WBOIT ||
+       agx_tilebuffer_offset_B(&tib, 0) != 0 ||
+       agx_tilebuffer_offset_B(&tib, 1) != 8)
+      return false;
+
+   /* Follow the production background-clear path from logical output stores
+    * through the real tilebuffer lowering, rather than constructing backend
+    * intrinsics directly. RT1 has its own preamble value at halves12..13. */
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P WBOIT background clear");
+   b.shader->info.fs.untyped_color_outputs = true;
+   nir_store_output(
+      &b, nir_load_preamble(&b, 4, 32, .base = 4), nir_imm_int(&b, 0),
+      .write_mask = 0xf, .src_type = nir_type_uint32,
+      .io_semantics.location = FRAG_RESULT_DATA0,
+      .io_semantics.num_slots = 1);
+   nir_store_output(
+      &b, nir_load_preamble(&b, 1, 32, .base = 12), nir_imm_int(&b, 0),
+      .write_mask = 0x1, .src_type = nir_type_uint32,
+      .io_semantics.location = FRAG_RESULT_DATA1,
+      .io_semantics.num_slots = 1);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0) |
+                                     BITFIELD64_BIT(FRAG_RESULT_DATA1);
+
+   agx_preprocess_nir(b.shader);
+   unsigned bindless_base = 0;
+   NIR_PASS(_, b.shader, agx_nir_lower_tilebuffer, &tib, NULL,
+            &bindless_base, NULL, NULL, false, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_monolithic_msaa, tib.nr_samples);
+   NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
+   NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, tib.nr_samples);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .fs.ignore_tib_dependencies = true,
+      .reserved_preamble = AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   static const uint8_t expected[] = {
+      0x0b,0x04,0x01,0x08,0x01,0x01,0x1c,0x81,0x00,0x02,
+      0x1b,0x06,0x01,0x08,0x01,0x03,0x1c,0x81,0x04,0x02,
+      0x1b,0x08,0x01,0x08,0x11,0x03,0x1c,0x81,0x00,0x02,
+      0x2b,0x0a,0x01,0x08,0x11,0x05,0x1c,0x81,0x04,0x02,
+      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x0e,0x00,0x00,0x00,0x00,
+      0x97,0x04,0x54,0x00,0x02,0x18,0x00,0x90,0x04,0xc0,
+      0xe7,0x06,0x54,0x00,0x00,0x04,0x01,0x42,0x00,0x00,0x00,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+   const bool ok = compiled && part.binary &&
+                   part.info.binary_size == sizeof(expected) &&
+                   part.info.main_offset == 0 &&
+                   part.info.main_size == sizeof(expected) &&
+                   part.info.push_count ==
+                      AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+                   !memcmp(part.binary, expected, sizeof(expected));
+
+   if (!ok)
+      fprintf(stderr, "G17P WBOIT background clear lost its RT1 tile store\n");
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
+   if (!test_wboit_background_clear())
+      return 1;
+
    nir_builder mb = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P MRT main");
    nir_store_output(&mb, nir_imm_vec4(&mb, 0.75f, 0.5f, 0.25f, 1.0f),

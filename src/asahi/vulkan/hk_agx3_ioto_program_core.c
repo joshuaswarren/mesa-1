@@ -476,13 +476,19 @@ hk_agx3_g17p_rt0_eot_program_generate(
                             desc->nr_gprs == 16 &&
                             desc->staging_halfs == 8 &&
                             desc->attachment_count == 1;
-   const bool dual_mrt = desc && desc->shader_binary_size == 120 &&
-                         desc->nr_gprs == 8 &&
-                         desc->staging_halfs == 16 &&
-                         desc->attachment_count == 2 &&
-                         desc->imageblock_offset_B == 0 &&
-                          (desc->imageblock_offset1_B == 4 ||
-                           desc->imageblock_offset1_B == 8);
+   const bool rgba8_mrt = desc && desc->shader_binary_size == 120 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 4;
+   const bool wboit_mrt = desc && desc->shader_binary_size == 238 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 8;
+   const bool dual_mrt = rgba8_mrt || wboit_mrt;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
        (!rt0 && !layered_rt0 && !dual_mrt) ||
        !desc->pbe_argument_va ||
@@ -561,8 +567,9 @@ hk_agx3_g17p_rt0_eot_program_generate(
       memcpy(copies + 4 * i, bytes, length);
    }
 
-   /* Keep the existing174-byte allocation capacity. The zero RT0 offset
-    * uses a compact LDIMM (at most120 bytes); offsets128..255 need126.
+   /* Keep the existing190-byte allocation capacity. A single target with a
+    * zero offset needs at most120 bytes; the second LDIMM/COPY pair keeps the
+    * admitted dual-target forms at130 bytes. Offsets128..255 grow by six.
     */
    struct hk_agx3_g17p_rt0_eot_program staged = {0};
    size_t written = 0;

@@ -353,13 +353,19 @@ agx3_g17p_rt0_eot_program_generate(
                             desc->nr_gprs == 16 &&
                             desc->staging_halfs == 8 &&
                             desc->attachment_count == 1;
-   const bool dual_mrt = desc && desc->shader_binary_size == 120 &&
-                         desc->nr_gprs == 8 &&
-                         desc->staging_halfs == 16 &&
-                         desc->attachment_count == 2 &&
-                         desc->imageblock_offset_B == 0 &&
-                          (desc->imageblock_offset1_B == 4 ||
-                           desc->imageblock_offset1_B == 8);
+   const bool rgba8_mrt = desc && desc->shader_binary_size == 120 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 4;
+   const bool wboit_mrt = desc && desc->shader_binary_size == 238 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 8;
+   const bool dual_mrt = rgba8_mrt || wboit_mrt;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
        (!rt0 && !layered_rt0 && !dual_mrt) ||
        !desc->pbe_argument_va ||
