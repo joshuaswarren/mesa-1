@@ -281,6 +281,100 @@ make_buffer(struct pipe_screen *screen, unsigned size)
    return screen->resource_create(screen, &templ);
 }
 
+static bool
+check_direct_resolve_shapes(void)
+{
+   struct pipe_resource src = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .width0 = 8,
+      .height0 = 8,
+      .depth0 = 1,
+      .array_size = 1,
+      .nr_samples = 2,
+      .nr_storage_samples = 2,
+      .bind = PIPE_BIND_RENDER_TARGET,
+   };
+   struct pipe_resource dst = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .width0 = 8,
+      .height0 = 8,
+      .depth0 = 1,
+      .array_size = 1,
+      .nr_samples = 1,
+      .nr_storage_samples = 1,
+      .bind = PIPE_BIND_RENDER_TARGET,
+   };
+   struct pipe_blit_info info = {
+      .src = {
+         .resource = &src,
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+         .box = {.width = 8, .height = 8, .depth = 1},
+      },
+      .dst = {
+         .resource = &dst,
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+         .box = {.width = 8, .height = 8, .depth = 1},
+      },
+      .mask = PIPE_MASK_RGBA,
+      .filter = PIPE_TEX_FILTER_NEAREST,
+   };
+
+   if (!agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "exact offscreen 2x resolve shape was rejected\n");
+      return false;
+   }
+
+   src.nr_samples = src.nr_storage_samples = 4;
+   if (!agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "exact offscreen 4x resolve shape was rejected\n");
+      return false;
+   }
+   src.nr_samples = src.nr_storage_samples = 2;
+
+   info.src.box.width = info.dst.box.width = 4;
+   if (agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "partial offscreen resolve was accepted\n");
+      return false;
+   }
+   info.src.box.width = info.dst.box.width = 8;
+   info.dst.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   if (agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "format-changing offscreen resolve was accepted\n");
+      return false;
+   }
+   info.dst.format = PIPE_FORMAT_R8G8B8A8_UNORM;
+   dst.target = PIPE_TEXTURE_2D_ARRAY;
+   dst.array_size = 2;
+   if (agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "array offscreen resolve was accepted\n");
+      return false;
+   }
+
+   dst.target = PIPE_TEXTURE_2D;
+   dst.array_size = 1;
+   src.nr_samples = src.nr_storage_samples = 1;
+   dst.nr_samples = dst.nr_storage_samples = 2;
+   src.bind |= PIPE_BIND_SHARED;
+   if (!agx_g17p_direct_resolve_blit_shape(&info, false)) {
+      fprintf(stderr, "exact reverse WSI seed shape was rejected\n");
+      return false;
+   }
+   src.bind &= ~PIPE_BIND_SHARED;
+   if (agx_g17p_direct_resolve_blit_shape(&info, false)) {
+      fprintf(stderr, "offscreen reverse seed shape was accepted\n");
+      return false;
+   }
+   info.src.resource = NULL;
+   if (agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "resolve without a source was accepted\n");
+      return false;
+   }
+
+   return true;
+}
+
 int
 main(void)
 {
@@ -317,6 +411,9 @@ main(void)
    }
 
    if (!check_g17p_sampler_bias_record())
+      return 1;
+
+   if (!check_direct_resolve_shapes())
       return 1;
 
    if (!check_es3_compile_contract(pctx))

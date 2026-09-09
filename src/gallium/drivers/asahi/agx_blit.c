@@ -522,30 +522,42 @@ agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
    }
 }
 
-/* DRI's multisample window drawable is a private render target. At swap it
- * emits a full-resource resolve into the loader's display/shared image. The
- * native Gen9 path performs that resolve directly at EOT, so attach the WSI
- * image to the still-active source batch instead of first storing an
- * unwitnessed multisample PBE image and sampling it in a second render.
+/* G17P stores a multisample colour tile by resolving it directly into a
+ * matching single-sample PBE target at EOT. Attach exact full-resource API
+ * resolves to the still-active source batch instead of first requesting the
+ * unwitnessed multisample PBE store needed by a second render pass.
+ *
+ * DRI additionally seeds its private multisample window drawable from the WSI
+ * image. Keep that reverse copy restricted to the original WSI binding shape;
+ * its later swap is the operation that supplies the direct resolve target.
  */
-static bool
-agx_g17p_wsi_resolve_shape(const struct pipe_blit_info *info,
-                           bool source_multisampled)
+bool
+agx_g17p_direct_resolve_blit_shape(const struct pipe_blit_info *info,
+                                   bool source_multisampled)
 {
    struct pipe_resource *src = info->src.resource;
    struct pipe_resource *dst = info->dst.resource;
+   if (!src || !dst)
+      return false;
+
    struct pipe_resource *msaa = source_multisampled ? src : dst;
-   struct pipe_resource *wsi = source_multisampled ? dst : src;
+   struct pipe_resource *single = source_multisampled ? dst : src;
    const unsigned wsi_bind =
       PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT | PIPE_BIND_SHARED;
+   const bool wsi_seed = !source_multisampled &&
+                         !(msaa->bind & wsi_bind) &&
+                         (single->bind & wsi_bind);
 
-   return src && dst &&
-          (util_res_sample_count(msaa) == 2 ||
+   return (util_res_sample_count(msaa) == 2 ||
            util_res_sample_count(msaa) == 4) &&
-          util_res_sample_count(wsi) == 1 && src->format == dst->format &&
+          util_res_sample_count(single) == 1 && src->format == dst->format &&
           (src->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
            src->format == PIPE_FORMAT_B8G8R8A8_UNORM) &&
-          !(msaa->bind & wsi_bind) && (wsi->bind & wsi_bind) &&
+          (source_multisampled || wsi_seed) &&
+          (single->target == PIPE_TEXTURE_2D ||
+           single->target == PIPE_TEXTURE_RECT) &&
+          single->last_level == 0 && single->array_size == 1 &&
+          single->depth0 == 1 &&
           !info->src.level && !info->dst.level && !info->src.box.x &&
           !info->src.box.y && !info->src.box.z && !info->dst.box.x &&
           !info->dst.box.y && !info->dst.box.z &&
@@ -563,15 +575,15 @@ agx_g17p_wsi_resolve_shape(const struct pipe_blit_info *info,
 }
 
 static bool
-agx_g17p_attach_wsi_direct_resolve(struct agx_context *ctx,
-                                   struct pipe_resource *msaa,
-                                   struct pipe_resource *wsi)
+agx_g17p_attach_direct_resolve(struct agx_context *ctx,
+                               struct pipe_resource *msaa,
+                               struct pipe_resource *single)
 {
    struct agx_batch *batch =
       agx_writer_get(ctx, agx_resource(msaa)->bo->handle);
 
    if (!batch || !agx_batch_is_active(batch) || !batch->initialized ||
-       (batch->key.resolve && batch->key.resolve != wsi) ||
+       (batch->key.resolve && batch->key.resolve != single) ||
        batch->key.nr_cbufs != 1 ||
        batch->key.cbufs[0].texture != msaa ||
        batch->key.cbufs[0].level != 0 ||
@@ -580,8 +592,8 @@ agx_g17p_attach_wsi_direct_resolve(struct agx_context *ctx,
       return false;
 
    if (!batch->key.resolve) {
-      pipe_resource_reference(&batch->key.resolve, wsi);
-      agx_batch_writes(batch, agx_resource(wsi), 0);
+      pipe_resource_reference(&batch->key.resolve, single);
+      agx_batch_writes(batch, agx_resource(single), 0);
    }
    return true;
 }
@@ -646,9 +658,9 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
                             info->src.format);
 
    if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
-       agx_g17p_wsi_resolve_shape(info, true) &&
-       agx_g17p_attach_wsi_direct_resolve(ctx, info->src.resource,
-                                          info->dst.resource))
+       agx_g17p_direct_resolve_blit_shape(info, true) &&
+       agx_g17p_attach_direct_resolve(ctx, info->src.resource,
+                                      info->dst.resource))
       return;
 
    if (asahi_compute_blit_supported(agx_device(ctx->base.screen)->chip,
@@ -678,9 +690,9 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
     * the tile directly back to the WSI image when the swap resolve arrives.
     */
    if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
-       agx_g17p_wsi_resolve_shape(info, false))
-      (void)agx_g17p_attach_wsi_direct_resolve(ctx, info->dst.resource,
-                                               info->src.resource);
+       agx_g17p_direct_resolve_blit_shape(info, false))
+      (void)agx_g17p_attach_direct_resolve(ctx, info->dst.resource,
+                                          info->src.resource);
 }
 
 static bool

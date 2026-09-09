@@ -1196,6 +1196,9 @@ void agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
 
 void agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info);
 
+bool agx_g17p_direct_resolve_blit_shape(const struct pipe_blit_info *info,
+                                        bool source_multisampled);
+
 void agx_resource_copy_region(struct pipe_context *pctx,
                               struct pipe_resource *dst, unsigned dst_level,
                               unsigned dstx, unsigned dsty, unsigned dstz,

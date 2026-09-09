@@ -100,11 +100,11 @@ draw_masked(GLuint program, unsigned samples, bool clear)
    glDisable(GL_SAMPLE_COVERAGE);
 }
 
-/* The software control uses ordinary GLES multisample FBOs so it can prove
- * the exact average-resolve colour independently of any WSI implementation.
+/* Ordinary GLES multisample FBOs exercise the API resolve independently of
+ * WSI. The software control additionally proves the exact averaged colour.
  */
 static bool
-run_software_sample_count(GLuint program, unsigned samples)
+run_offscreen_sample_count(GLuint program, unsigned samples, bool noop)
 {
    GLuint source, target, source_fb, target_fb;
    glGenRenderbuffers(1, &source);
@@ -143,7 +143,7 @@ run_software_sample_count(GLuint program, unsigned samples)
    const uint8_t expected2[4] = {128, 64, 32, 128};
    const uint8_t expected4[4] = {64, 32, 16, 64};
    const uint8_t *expected = samples == 2 ? expected2 : expected4;
-   const bool exact = !memcmp(pixel, expected, sizeof(pixel));
+   const bool exact = noop || !memcmp(pixel, expected, sizeof(pixel));
    if (!exact)
       fprintf(stderr,
               "%ux MSAA pixel {%u,%u,%u,%u}, expected {%u,%u,%u,%u}\n",
@@ -234,6 +234,8 @@ run_shim_sample_count(EGLDisplay display, struct gbm_device *device,
       if (front)
          gbm_surface_release_buffer(gbm, front);
    }
+   if (ok)
+      ok = run_offscreen_sample_count(program, samples, true);
 
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
@@ -245,7 +247,7 @@ run_shim_sample_count(EGLDisplay display, struct gbm_device *device,
 }
 
 static bool
-run_software(EGLDisplay display)
+run_offscreen(EGLDisplay display, bool noop)
 {
    EGLConfig config = choose_config(display, EGL_PBUFFER_BIT, 0, false);
    const EGLint surface_attributes[] = {
@@ -262,14 +264,17 @@ run_software(EGLDisplay display)
                                                    context_attributes)
                                : EGL_NO_CONTEXT;
    if (!config || surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
-       !eglMakeCurrent(display, surface, surface, context))
+       !eglMakeCurrent(display, surface, surface, context)) {
+      fprintf(stderr, "offscreen EGL context creation failed: %#x\n",
+              eglGetError());
       return false;
+   }
 
    GLuint vao, program = make_program();
    glGenVertexArrays(1, &vao);
    glBindVertexArray(vao);
-   const bool exact = program && run_software_sample_count(program, 2) &&
-                      run_software_sample_count(program, 4);
+   const bool exact = program && run_offscreen_sample_count(program, 2, noop) &&
+                      run_offscreen_sample_count(program, 4, noop);
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -306,7 +311,7 @@ main(void)
 
    const bool exact = noop ? run_shim_sample_count(display, device, 2) &&
                                 run_shim_sample_count(display, device, 4)
-                           : run_software(display);
+                           : run_offscreen(display, false);
    eglTerminate(display);
    if (device)
       gbm_device_destroy(device);
@@ -315,6 +320,7 @@ main(void)
    if (!exact)
       return EXIT_FAILURE;
    printf("g17p-gl-msaa: PASS — 2x/4x %s\n",
-          noop ? "GBM default resolves submitted" : "resolve pixels exact");
+          noop ? "GBM and offscreen resolves submitted"
+               : "resolve pixels exact");
    return EXIT_SUCCESS;
 }
