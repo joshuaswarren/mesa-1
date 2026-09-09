@@ -4467,8 +4467,6 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * zero-offset final release.  Three partitions are the complete native class
  * corpus (the third uses 128/64/192); anything wider stays fail-closed.
  */
-#define AGX3_G17P_MAX_COLOUR_PARTITIONS 3
-
 struct agx3_g17p_mrt_protocol {
    bool valid;
    uint8_t count;
@@ -5103,6 +5101,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          : NULL;
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
+   ctx->agx3_colour_link.colour_partitions =
+      g17p_mrt.valid ? g17p_mrt.count
+                     : (g17p_colour_protocol || g17p_blend_protocol ? 1 : 0);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
       if (agx3_is_cf_op(entry_I) ||

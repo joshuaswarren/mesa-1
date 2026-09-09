@@ -257,6 +257,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    size_t size = 0;
    unsigned nr_gprs = 0, scratch_size = 0;
    unsigned staging_halfs = 0;
+   unsigned colour_partitions = 0;
    bool staging_known = true;
    bool reads_tib = false, writes_sample_mask = false,
         disable_tri_merging = false, tag_write_disable = true;
@@ -291,6 +292,12 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       linked->uses_txf |= part->info.uses_txf;
       sampled_fragment |= part->info.g17p_sampled_fragment;
       tag_write_disable &= part->info.tag_write_disable;
+      if (part->info.agx3_colour_link.colour_partitions >
+          AGX3_G17P_MAX_COLOUR_PARTITIONS)
+         return false;
+      colour_partitions = MAX2(
+         colour_partitions,
+         part->info.agx3_colour_link.colour_partitions);
    }
 
    if (colour_fused)
@@ -420,6 +427,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    linked->scratch_size = scratch_size;
    linked->nr_gprs = nr_gprs;
+   linked->g17p_colour_partitions = colour_partitions;
 
    if (agx_bo_sync_for_device(linked->bo, 0, alloc_size)) {
       agx_bo_unreference(dev, linked->bo);

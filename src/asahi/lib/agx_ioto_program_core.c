@@ -63,13 +63,39 @@ static const uint8_t
       0x03, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00, 0x00, 0x60, 0x00,
 };
 
-/* Valid EXP-G1a ordinary fragment programs, from vary0 through vary8, all
- * place this exact AGX3b PIXREL after the default profile prefix.  The
- * no-resource vary0 form then stops immediately; it does not carry the
- * compute/vertex SETPROFILECTL suffix above. */
-static const uint8_t g17p_fragment_pixrel[] = {
-   0x07, 0x02, 0x54, 0xf3, 0x02, 0x00,
+enum {
+   G17P_FRAGMENT_PIXREL_SIZE = 6,
+   G17P_MAX_COLOUR_PARTITIONS = 3,
 };
+
+/* Fragment __GPU_METADATA_2 root field 1 is a release mask for pixel classes
+ * which the shader does not consume.  Fresh applegpu_g17p one-target programs
+ * carry 0x2f3, while both the two-RGBA8 and mixed RGBA16F+R8 native programs
+ * carry 0x2c3: active partition 1's combined class 0x30 is no longer released
+ * by the loader.  Partition 2 analogously owns class 0xc0.  Coverage shaders
+ * additionally keep class 0 acquired, producing the witnessed 0x2f2 form for
+ * one partition. */
+static bool
+g17p_fragment_pixrel_compose(unsigned colour_partitions,
+                             bool writes_sample_mask,
+                             uint8_t out[G17P_FRAGMENT_PIXREL_SIZE])
+{
+   if (!out || colour_partitions == 0 ||
+       colour_partitions > G17P_MAX_COLOUR_PARTITIONS)
+      return false;
+
+   uint16_t descriptor = UINT16_C(0x2f3);
+   for (unsigned partition = 1; partition < colour_partitions; ++partition)
+      descriptor &= ~(UINT16_C(12) << (2 * partition));
+   if (writes_sample_mask)
+      descriptor &= ~UINT16_C(1);
+
+   const uint8_t staged[G17P_FRAGMENT_PIXREL_SIZE] = {
+      0x07, 0x02, 0x54, descriptor, descriptor >> 8, 0x00,
+   };
+   memcpy(out, staged, sizeof(staged));
+   return true;
+}
 
 /* Background programs do not inherit the ordinary fragment release mask.
  * Valid 20260904-194053 doorbell 1 BG and partial-BG Ioto both emit this
@@ -93,7 +119,7 @@ _Static_assert(AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
 
 _Static_assert(AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
                      sizeof(g17p_default_profile_prefix) +
-                     sizeof(g17p_fragment_pixrel) +
+                     G17P_FRAGMENT_PIXREL_SIZE +
                      AGX_IOTO_PROGRAM_TERMINATE_SIZE ==
                   AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE,
                "G17P fragment no-resource Ioto size must remain 86 bytes");
@@ -534,9 +560,11 @@ agx_ioto_g17p_no_resource_program_compose(
 bool
 agx_ioto_g17p_fragment_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
-   void *output, size_t capacity, size_t *written)
+   unsigned colour_partitions, void *output, size_t capacity, size_t *written)
 {
-   if (!output || !written || !g17p_type0_tail_valid(packed_tail) ||
+   uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
+   if (!g17p_fragment_pixrel_compose(colour_partitions, false, pixrel) ||
+       !output || !written || !g17p_type0_tail_valid(packed_tail) ||
        program_va == 0 || program_va > UINT64_C(0xffffffffffff) ||
        (program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
        capacity < AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE)
@@ -549,9 +577,8 @@ agx_ioto_g17p_fragment_no_resource_program_compose(
    memcpy(staged + offset, g17p_default_profile_prefix,
           sizeof(g17p_default_profile_prefix));
    offset += sizeof(g17p_default_profile_prefix);
-   memcpy(staged + offset, g17p_fragment_pixrel,
-          sizeof(g17p_fragment_pixrel));
-   offset += sizeof(g17p_fragment_pixrel);
+   memcpy(staged + offset, pixrel, sizeof(pixrel));
+   offset += sizeof(pixrel);
    memset(staged + offset, 0, AGX_IOTO_PROGRAM_TERMINATE_SIZE);
    staged[offset] = UINT8_C(0x0e);
    offset += AGX_IOTO_PROGRAM_TERMINATE_SIZE;
@@ -642,30 +669,32 @@ bool
 agx_ioto_g17p_fragment_resource_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail, void *output,
-   size_t capacity, size_t *written)
+   const struct agx_ioto_state_tail_output *packed_tail,
+   unsigned colour_partitions, void *output, size_t capacity, size_t *written)
 {
+   uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
+   if (!g17p_fragment_pixrel_compose(colour_partitions, false, pixrel))
+      return false;
+
    return g17p_resource_program_compose(
       program_va, pre_copy_body, pre_copy_body_size, copies, copies_size,
-      packed_tail, output, capacity, written, g17p_fragment_pixrel,
-      sizeof(g17p_fragment_pixrel));
+      packed_tail, output, capacity, written, pixrel, sizeof(pixrel));
 }
 
 bool
 agx_ioto_g17p_coverage_fragment_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
-   const struct agx_ioto_state_tail_output *packed_tail, void *output,
-   size_t capacity, size_t *written)
+   const struct agx_ioto_state_tail_output *packed_tail,
+   unsigned colour_partitions, void *output, size_t capacity, size_t *written)
 {
-   /* Complete native keep, conditional-discard and early-test fragments all
-    * name this mask in __GPU_METADATA_2 root.field1. Releasing class0 here
-    * prematurely allows partial coverage even with the original Apple body. */
-   static const uint8_t coverage_pixrel[] = {0x07,0x02,0x54,0xf2,0x02,0x00};
+   uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
+   if (!g17p_fragment_pixrel_compose(colour_partitions, true, pixrel))
+      return false;
+
    return g17p_resource_program_compose(
       program_va, pre_copy_body, pre_copy_body_size, copies, copies_size,
-      packed_tail, output, capacity, written, coverage_pixrel,
-      sizeof(coverage_pixrel));
+      packed_tail, output, capacity, written, pixrel, sizeof(pixrel));
 }
 
 bool

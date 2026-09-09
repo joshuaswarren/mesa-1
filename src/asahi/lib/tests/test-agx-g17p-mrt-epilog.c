@@ -265,6 +265,7 @@ main(void)
       vkquake_part.info.main_size == vkquake_part.info.binary_size &&
       vkquake_part.info.agx3_colour_link.entry_emitted &&
       vkquake_part.info.agx3_colour_link.straight_line &&
+      vkquake_part.info.agx3_colour_link.colour_partitions == 2 &&
       vkquake_part.info.agx3_colour_link.entry_offset == 0;
    if (!vkquake_ok) {
       fprintf(stderr,
@@ -323,6 +324,7 @@ main(void)
                                   true, &part) &&
                    part.info.agx3_colour_link.entry_emitted &&
                    part.info.agx3_colour_link.straight_line &&
+                   part.info.agx3_colour_link.colour_partitions == 2 &&
                    part.info.agx3_colour_link.entry_offset == 0 &&
                    part.info.main_offset == 0 &&
                    part.info.main_size == part.info.binary_size;
@@ -408,6 +410,7 @@ main(void)
               sizeof(expected_rgba8_mrt)) ||
        !part.info.agx3_colour_link.entry_emitted ||
        !part.info.agx3_colour_link.straight_line ||
+       part.info.agx3_colour_link.colour_partitions != 2 ||
        part.info.agx3_colour_link.entry_offset != 40 ||
        memcmp(rgba8_code + 40, apple_transaction,
               sizeof(apple_transaction))) {

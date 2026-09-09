@@ -1489,16 +1489,18 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          .writes_sample_mask = s->info.stage == MESA_SHADER_FRAGMENT &&
             ((linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH ||
              (linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
+         .colour_partitions = linked->b.g17p_colour_partitions,
       };
       struct hk_agx3_g17p_graphics_program program;
       if (!hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,
                                                         &program)) {
          mesa_loge_once(
             "G17P graphics program generation refused: stage=%u ranges=%zu "
-            "binary=%u scratch=%u gprs=%u compiler_d=%u/%u sample_mask=%u",
+            "binary=%u scratch=%u gprs=%u compiler_d=%u/%u sample_mask=%u "
+            "colour_partitions=%u",
             (unsigned)s->info.stage, range_count, desc.shader_binary_size,
             desc.scratch_size, desc.nr_gprs, desc.compiler_d_valid,
-            desc.compiler_d, desc.writes_sample_mask);
+            desc.compiler_d, desc.writes_sample_mask, desc.colour_partitions);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
       }

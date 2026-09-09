@@ -6,6 +6,7 @@
 #include "agx3_graphics_program.h"
 
 #include "agx3_binder.h"
+#include "agx3_pixel_core.h"
 #include "asahi/lib/agx_ioto_state_core.h"
 #include "util/macros.h"
 
@@ -87,9 +88,16 @@ agx3_g17p_graphics_program_generate(
 {
    if (!program || chip != AGX_CHIP_G17P || !desc ||
        (desc->writes_sample_mask && !desc->fragment) ||
+       (!desc->fragment && desc->colour_partitions) ||
+       desc->colour_partitions > AGX3_G17P_MAX_COLOUR_PARTITIONS ||
        desc->uniform_range_count > AGX3_G17P_GRAPHICS_MAX_RANGES ||
        (desc->uniform_range_count && !desc->uniform_ranges))
       return false;
+
+   /* Zero remains the conservative no-colour/default-fragment spelling.  It
+    * has the same loader release mask as one active colour partition. */
+   const unsigned colour_partitions =
+      desc->fragment ? MAX2(desc->colour_partitions, 1) : 0;
 
    struct agx_ioto_state_tail_output tail;
    if (!graphics_state_tail(desc, &tail))
@@ -101,12 +109,13 @@ agx3_g17p_graphics_program_generate(
       const bool composed =
          desc->fragment && desc->writes_sample_mask
             ? agx_ioto_g17p_coverage_fragment_program_compose(
-                 desc->program_va, NULL, 0, NULL, 0, &tail, staged.bytes,
-                 sizeof(staged.bytes), &written)
+                 desc->program_va, NULL, 0, NULL, 0, &tail,
+                 colour_partitions, staged.bytes, sizeof(staged.bytes),
+                 &written)
             : desc->fragment
             ? agx_ioto_g17p_fragment_no_resource_program_compose(
-                 desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-                 &written)
+                 desc->program_va, &tail, colour_partitions, staged.bytes,
+                 sizeof(staged.bytes), &written)
             : agx_ioto_g17p_no_resource_program_compose(
                  desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
                  &written);
@@ -147,13 +156,13 @@ agx3_g17p_graphics_program_generate(
           !(desc->fragment && desc->writes_sample_mask
                ? agx_ioto_g17p_coverage_fragment_program_compose(
                     desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)
+                    body_size - copy_offset, &tail, colour_partitions,
+                    staged.bytes, sizeof(staged.bytes), &written)
                : desc->fragment
                ? agx_ioto_g17p_fragment_resource_program_compose(
                     desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)
+                    body_size - copy_offset, &tail, colour_partitions,
+                    staged.bytes, sizeof(staged.bytes), &written)
                : agx_ioto_g17p_resource_program_compose(
                     desc->program_va, body, copy_offset, body + copy_offset,
                     body_size - copy_offset, &tail, staged.bytes,

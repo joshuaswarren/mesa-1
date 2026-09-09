@@ -216,6 +216,12 @@ struct agx3_colour_link_info {
    bool entry_emitted;
    bool straight_line;
    uint32_t entry_offset;
+
+   /* Number of colour-tile partitions whose pixel classes are consumed by
+    * this part.  The linked fragment state loader must keep every active
+    * partition acquired until the shader's terminal ST_TILE releases it. */
+   uint8_t colour_partitions;
+
    bool copy_only;
    uint8_t copy_count;
    struct { uint16_t reg, uniform; } copies[4];

@@ -2302,30 +2302,59 @@ static int
 test_coverage_initial_pixel_dependencies(void)
 {
    const struct agx3_ioto_uniform_range root = {
-      .start_halfs=12, .size_halfs=4, .address=0x2000,
+      .start_halfs = 12,
+      .size_halfs = 4,
+      .address = 0x2000,
    };
    struct hk_agx3_g17p_graphics_program_desc desc = {
-      .program_va=0x10000040000, .shader_va=0x10000000080,
-      .shader_binary_size=280, .nr_gprs=15, .compiler_d_valid=true,
-      .compiler_d=4, .fragment=true, .uniform_ranges=&root,
+      .program_va = UINT64_C(0x10000040000),
+      .shader_va = UINT64_C(0x10000000080),
+      .shader_binary_size = 280,
+      .nr_gprs = 15,
+      .compiler_d_valid = true,
+      .compiler_d = 4,
+      .fragment = true,
+      .uniform_ranges = &root,
    };
-   for(unsigned resources=0;resources<=1;resources++) {
-      desc.uniform_range_count=resources;
-      struct hk_agx3_g17p_graphics_program opaque,coverage;
-      desc.writes_sample_mask=false;
-      CHECK(hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,&desc,&opaque));
-      desc.writes_sample_mask=true;
-      CHECK(hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,&desc,&coverage));
-      CHECK(coverage.length==opaque.length);
-      const uint8_t native_tail[]={0x07,0x02,0x54,0xf2,0x02,0x00,0x0e,0,0,0};
-      CHECK(!memcmp(coverage.bytes+coverage.length-sizeof(native_tail),native_tail,sizeof(native_tail)));
-      CHECK(opaque.bytes[opaque.length-7]==0xf3);
-      opaque.bytes[opaque.length-7]=0xf2;
-      CHECK(!memcmp(opaque.bytes,coverage.bytes,coverage.length));
+   static const uint8_t ordinary_low[3] = {0xf3, 0xc3, 0x03};
+   static const uint8_t coverage_low[3] = {0xf2, 0xc2, 0x02};
+   for (unsigned resources = 0; resources <= 1; resources++) {
+      desc.uniform_range_count = resources;
+      for (unsigned partitions = 1; partitions <= 3; ++partitions) {
+         struct hk_agx3_g17p_graphics_program opaque, coverage;
+         desc.colour_partitions = partitions;
+         desc.writes_sample_mask = false;
+         CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &opaque));
+         desc.writes_sample_mask = true;
+         CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &coverage));
+         CHECK(coverage.length == opaque.length);
+         const uint8_t native_tail[] = {
+            0x07, 0x02, 0x54, coverage_low[partitions - 1], 0x02,
+            0x00, 0x0e, 0x00, 0x00, 0x00,
+         };
+         CHECK(!memcmp(coverage.bytes + coverage.length - sizeof(native_tail),
+                       native_tail, sizeof(native_tail)));
+         CHECK(opaque.bytes[opaque.length - 7] ==
+               ordinary_low[partitions - 1]);
+         opaque.bytes[opaque.length - 7] = coverage_low[partitions - 1];
+         CHECK(!memcmp(opaque.bytes, coverage.bytes, coverage.length));
+      }
    }
-   desc.fragment=false;
+
    struct hk_agx3_g17p_graphics_program invalid;
-   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,&desc,&invalid));
+   desc.colour_partitions = 4;
+   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &desc, &invalid));
+   desc.colour_partitions = 0;
+   desc.fragment = false;
+   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &desc, &invalid));
+   desc.writes_sample_mask = false;
+   desc.colour_partitions = 1;
+   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &desc, &invalid));
    return 0;
 }
 
