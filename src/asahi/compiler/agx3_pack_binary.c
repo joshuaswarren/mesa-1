@@ -1279,12 +1279,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
       !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
       !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
-   /* Array and 3D coordinates are copied to the fixed staging bank before SMP.
+   /* AGX3B coordinates are copied to the fixed staging bank before SMP.
     * Ordinary array layers are named directly by the sample's 8-bit register
     * field. A 2D shadow-array layer has its own packed producer, while a cube
     * shadow-array combines the layer with CEM's face. The third scalar must
-    * not wrap any form. Plain 2D samples name the coordinate directly in SMP
-    * and retain its narrower bound. */
+    * not wrap any form. Plain 2D sources retain their narrower GPR bound even
+    * though their staging destination is fixed. */
    /* CEM's three recovered GPR source fields are seven bits. */
    const unsigned max_coord = (array || cube) ? 120 : three_d ? 248 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
@@ -1370,9 +1370,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                  ? native_coord_slot
                                  : (array || cube) && register_operands ? 6
                                                                         : slot;
-   /* Every native array witness names coordinate bank 0 in SMP, including
-    * register-indexed shaders whose physical coordinates live elsewhere. */
-   const uint16_t coord = (native_staged_coords || explicit_lod ||
+   /* Every native G17P witness using AGX3B names coordinate bank 0 in SMP,
+    * including ordinary implicit 2D samples whose materialized coordinates
+    * live in unrelated GPRs.  For example, the attachment-only f_retain_coords
+    * witness copies r4/r5 to staging[0]/[2], reports ShaderInfo D=8, and
+    * samples bank 0.  The staging address is an ABI location, not the source
+    * GPR number.  AGX3c retains its independently decoded coordinate field. */
+   const uint16_t coord = (enc == AGX_ISA_ENCODING_AGX3B ||
+                           native_staged_coords || explicit_lod ||
                            register_bias || array || three_d || cube ||
                            gradient_lod || shadow)
                              ? 0
@@ -5665,19 +5670,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset -= initial_size;
                g17p_colour_open = true;
             }
-            /* ShaderInfo fields 38/42 describe the sampler-private staging
-             * extent in bytes, not the highest GPR supplying an operand.
-             * Apple's one-cube fragments report 24 bytes for direct,
-             * argument-buffer, retained-coordinate, and explicit-level
-             * forms alike, even when CEM reads coordinates as high as r20
-             * and when its producer transaction uses slot 6.  CEM publishes
-             * two normalized coordinates plus the selected face, so account
-             * for the exact six-dword/twelve-half private extent independent
-             * of post-RA source placement. */
+            /* ShaderInfo fields 38/42 describe the staging-file extent in
+             * bytes, not the highest GPR supplying an operand.  Fresh
+             * attachment-only applegpu_g17p programs report D=8 for plain,
+             * retained, buffer-derived, and the complete vkcube instruction
+             * family.  All of those 2D samples publish into staging[0]/[2]
+             * even when the GPR coordinates are r4/r5 or later. */
             const bool staged_scalar =
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
+            const bool staged_compare = I->shadow;
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
                     (I->dim == AGX_DIM_CUBE ||
@@ -5686,7 +5689,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                     : I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
                     : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
                        I->dim == AGX_DIM_3D)
-                       ? 8 : I->src[0].value + 4);
+                       ? 8
+                    : staged_compare ? 6
+                    : enc == AGX_ISA_ENCODING_AGX3B ? 4
+                                                   : I->src[0].value + 4);
             continue;
          }
 

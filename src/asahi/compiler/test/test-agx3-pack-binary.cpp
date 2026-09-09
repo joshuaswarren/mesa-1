@@ -3595,17 +3595,17 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
    std::vector<uint8_t> want;
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 4, 4, 1, 0, false, true,
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 1, 0, false, true,
                                          bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 6, 1, 0, false, true,
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 1, 0, false, true,
                                          bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
 
    const struct agx3_tex_sample_desc sample = {
-      .dest = 8, .coord = 4, .width = AGX3_TEX_W16, .mask = 15,
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
       .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
       .final = true, .offset = true, .offset_xy = 0xf1,
    };
@@ -3617,6 +3617,8 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
    EXPECT_EQ(b->shader->agx3_colour_link.entry_offset, 8);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
 TEST_F(AGX3PackBinary, TextureSampleOffsetRefusesRegisterAndAGX3C)
@@ -3807,6 +3809,64 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       append(want, wait, len);
       EXPECT_EQ(pack(b), want);
    }
+}
+
+TEST_F(AGX3PackBinary, Implicit2DRebasesMaterializedCoordinates)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_instr *tex = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE,
+      false);
+   tex->mask = 15;
+   for (unsigned channel = 0; channel < 4; ++channel)
+      agx_export(b, agx_register(8 + 2 * channel, AGX_SIZE_32),
+                 8 + 2 * channel);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 20, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 8,
+      .coord = 0,
+      .width = AGX3_TEX_W32,
+      .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO,
+      .slot = 1,
+      .wait_mask = 1,
+      .coord_kill = false,
+      .final = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+
+   EXPECT_EQ(pack(b), want);
+   /* Fresh attachment-only applegpu_g17p f_retain_coords uses this exact
+    * fixed staging bank for materialized r4/r5 coordinates and reports
+    * ProgramVariant fields38/42 = 8 bytes. */
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
 TEST_F(AGX3PackBinary, FragmentImplicit2DStagesNativeCoordinates)
@@ -8898,8 +8958,7 @@ TEST_F(AGX3PackBinary, GradientSampleRefusesUnwitnessedShapes)
 }
 
 /* A zero bias is the plain implicit sample, byte for byte, exactly as Apple's
- * own compiler folds it. Nothing extra is staged and the coordinate keeps its
- * own bank. */
+ * own compiler folds it. Nothing extra is staged and both use fixed bank 0. */
 TEST_F(AGX3PackBinary, ZeroBiasFoldsIntoTheImplicitSample)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -9027,17 +9086,17 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
 
       std::vector<uint8_t> want;
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 20, 20, 1, 0, false, false,
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 20, 1, 0, false, false,
                                             bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 22, 22, 1, 0, false, false,
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
                                             bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
       append(want, bytes, len);
       struct agx3_tex_sample_desc d = {};
       d.dest = 8;
-      d.coord = 20;
+      d.coord = 0;
       d.width = AGX3_TEX_W32;
       d.mask = 15;
       d.lod = AGX3_TEX_LOD_AUTO;
@@ -9051,6 +9110,7 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
                                    1, bytes, &len));
       append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
    }
 }
 
