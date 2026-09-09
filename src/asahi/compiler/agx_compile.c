@@ -5497,6 +5497,25 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    if (!nir)
       return;
 
+   /* G17P has one native helper-capable fragment entry protocol: the first
+    * coefficient load leaves its input-start marker clear and the linked
+    * program disables triangle merging. Fresh applegpu_g17p derivatives and
+    * quad shuffles use that same protocol and carry otherwise identical
+    * ProgramVariant metadata.
+    *
+    * nir_shader_gather_info derives these flags from individual operations,
+    * but the quad-control execution modes are independently meaningful. In
+    * particular, RequireFullQuadsKHR promises a full quad even when no quad
+    * intrinsic survives optimization, and QuadDerivativesKHR requires the
+    * derivative group to be the full quad. Preserve those source-level modes
+    * explicitly instead of making the hardware protocol depend on whichever
+    * intrinsics happen to remain at this point in lowering. */
+   if (g17p && nir->info.stage == MESA_SHADER_FRAGMENT &&
+       (nir->info.fs.require_full_quads || nir->info.fs.quad_derivatives)) {
+      nir->info.fs.needs_coarse_quad_helper_invocations = true;
+      nir->info.fs.needs_full_quad_helper_invocations = true;
+   }
+
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    /* Lower large arrays to scratch and small arrays to csel */

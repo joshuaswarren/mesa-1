@@ -344,6 +344,10 @@
 #define G17P_MULTI_VIEWPORT 0
 #endif
 
+#ifndef G17P_SHADER_QUAD_CONTROL
+#define G17P_SHADER_QUAD_CONTROL 0
+#endif
+
 #if G17P_MULTI_VIEWPORT < 0 || G17P_MULTI_VIEWPORT > 4
 #error "select a valid static/dynamic multi-viewport oracle"
 #endif
@@ -426,7 +430,7 @@
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
      G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
      G17P_SAMPLE_RATE_SHADING + (G17P_MSAA_COVERAGE != 0) +                \
-     G17P_TEXTURE_ALPHA_COMPOSITE) > 1
+     G17P_TEXTURE_ALPHA_COMPOSITE + G17P_SHADER_QUAD_CONTROL) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -700,6 +704,11 @@
 #include "g17p_wsi_triangle_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_viewport_index_vert_spv
 #define G17P_FRAG_SPV g17p_wsi_triangle_frag_spv
+#elif G17P_SHADER_QUAD_CONTROL
+#include "g17p_vulkan_shader_quad_control_frag.h"
+#include "g17p_vulkan_implicit_lod_vert.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_shader_quad_control_frag_spv
 #elif G17P_LAYER_OUTPUT
 #include "g17p_vulkan_layer_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -1387,6 +1396,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SHADER_QUAD_CONTROL
+#define PROBE_NAME "g17p-vulkan-shader-quad-control"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_LAYER_OUTPUT
 #define PROBE_NAME "g17p-vulkan-layer-output"
 #define READBACK_IMAGE_USAGE 0
@@ -1480,10 +1494,10 @@ VK_FN(vkEnumeratePhysicalDevices);
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
-#if G17P_INDIRECT_DRAW
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
 VK_FN(vkEnumerateDeviceExtensionProperties);
 #endif
 VK_FN(vkGetPhysicalDeviceProperties);
@@ -1644,7 +1658,7 @@ fnv1a64(const uint8_t *bytes, size_t size)
    return hash;
 }
 
-#if G17P_INDIRECT_DRAW
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
 static bool
 has_device_extension(VkPhysicalDevice physical, const char *name)
 {
@@ -1964,6 +1978,13 @@ verify_readback(const uint8_t *map)
    };
 #elif G17P_RASTER_DISCARD
    static const uint8_t expected[4] = {0, 0, 0, 255};
+#elif G17P_SHADER_QUAD_CONTROL
+   /* Both horizontal lanes require the inactive partner's value on the
+    * odd-only second iteration. Blue also records lane parity. */
+   static const uint8_t expected[2][4] = {
+      {255, 255, 0, 255},
+      {255, 255, 255, 255},
+   };
 #else
    static const uint8_t expected[4] = {255, 71, 13, 255};
 #endif
@@ -2002,6 +2023,8 @@ verify_readback(const uint8_t *map)
 #elif G17P_MSAA_COVERAGE == 2
       const uint8_t *expected_pixel =
          expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
+#elif G17P_SHADER_QUAD_CONTROL
+      const uint8_t *expected_pixel = expected[(pixel % IMAGE_WIDTH) & 1];
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
       const unsigned x = pixel % IMAGE_WIDTH;
       const unsigned y = pixel / IMAGE_WIDTH;
@@ -2107,6 +2130,8 @@ main(void)
        getenv("G17P_LAYER_OUTPUT_RECORD_ONLY") != NULL) ||
       (G17P_MULTI_VIEWPORT &&
        getenv("G17P_MULTI_VIEWPORT_RECORD_ONLY") != NULL) ||
+      (G17P_SHADER_QUAD_CONTROL &&
+       getenv("G17P_SHADER_QUAD_CONTROL_RECORD_ONLY") != NULL) ||
       (G17P_A2R10G10B10_UNORM &&
        getenv("G17P_A2R10G10B10_UNORM_RECORD_ONLY") != NULL) ||
       (G17P_RGBA32_SFLOAT &&
@@ -2191,6 +2216,7 @@ main(void)
       .pEngineName = "none",
       .engineVersion = 1,
       .apiVersion =
+         G17P_SHADER_QUAD_CONTROL ? VK_API_VERSION_1_3 :
          (G17P_INDIRECT_DRAW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT)
                        ? VK_API_VERSION_1_2
                        : VK_API_VERSION_1_1,
@@ -2209,11 +2235,11 @@ main(void)
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
-#if G17P_INDIRECT_DRAW
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
    LOAD_INSTANCE(instance, vkEnumerateDeviceExtensionProperties);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
@@ -2385,6 +2411,30 @@ main(void)
        !viewport_available12.shaderOutputViewportIndex ||
        properties.limits.maxViewports < 4)
       die("T8140/G17P does not advertise shader-selected multi-viewport");
+#endif
+
+#if G17P_SHADER_QUAD_CONTROL
+   VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_available = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR,
+   };
+   VkPhysicalDeviceShaderQuadControlFeaturesKHR quad_available = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR,
+      .pNext = &maximal_available,
+   };
+   VkPhysicalDeviceFeatures2 quad_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &quad_available,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &quad_features);
+   if (!quad_available.shaderQuadControl ||
+       !maximal_available.shaderMaximalReconvergence ||
+       !has_device_extension(physical,
+                             VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME) ||
+       !has_device_extension(
+          physical, VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME))
+      die("T8140/G17P does not advertise divergent shader quad control");
 #endif
 
 #if G17P_INDIRECT_DRAW
@@ -2573,9 +2623,28 @@ main(void)
       VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME,
    };
 #endif
+#if G17P_SHADER_QUAD_CONTROL
+   VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_enabled = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR,
+      .shaderMaximalReconvergence = VK_TRUE,
+   };
+   VkPhysicalDeviceShaderQuadControlFeaturesKHR quad_enabled = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR,
+      .pNext = &maximal_enabled,
+      .shaderQuadControl = VK_TRUE,
+   };
+   const char *quad_device_extensions[] = {
+      VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME,
+      VK_KHR_SHADER_QUAD_CONTROL_EXTENSION_NAME,
+   };
+#endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-#if G17P_F16_IO || G17P_MULTIVIEW
+#if G17P_SHADER_QUAD_CONTROL
+      .pNext = &quad_enabled,
+#elif G17P_F16_IO || G17P_MULTIVIEW
       .pNext = &enabled11,
 #elif G17P_BRESENHAM_LINES
       .pNext = &enabled_lines,
@@ -2622,6 +2691,9 @@ main(void)
 #elif G17P_ADVANCED_BLEND
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = advanced_device_extensions,
+#elif G17P_SHADER_QUAD_CONTROL
+      .enabledExtensionCount = 2,
+      .ppEnabledExtensionNames = quad_device_extensions,
 #endif
    };
    VkDevice device;
@@ -4852,7 +4924,7 @@ main(void)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only && !G17P_MULTIVIEW && !G17P_LAYER_OUTPUT &&
-       !G17P_MULTI_VIEWPORT) {
+       !G17P_MULTI_VIEWPORT && !G17P_SHADER_QUAD_CONTROL) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "vkEndCommandBuffer succeeded\n");
       return EXIT_SUCCESS;
@@ -4875,7 +4947,7 @@ main(void)
    G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
    G17P_RGBA8_MRT || G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND ||      \
-   G17P_RASTER_DISCARD ||                                               \
+   G17P_RASTER_DISCARD || G17P_SHADER_QUAD_CONTROL ||                   \
    G17P_RG16_UNORM ||                                                    \
    G17P_RGBA16_UNORM ||                                                \
    G17P_RG16_SNORM || G17P_R32_UINT || G17P_R32_SFLOAT ||             \
@@ -4923,6 +4995,12 @@ main(void)
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, shaders compiled, "
                         "and two-view command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_SHADER_QUAD_CONTROL
+   if (record_only) {
+      printf(PROBE_NAME ": PASS — feature advertised, divergent quad shader "
+                        "compiled, and command stream submitted\n");
       return EXIT_SUCCESS;
    }
 #endif
@@ -5005,7 +5083,7 @@ main(void)
    G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
    G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT || G17P_RGBA8_MRT ||        \
    G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND || G17P_RASTER_DISCARD || \
-   G17P_RG16_UNORM ||                                                     \
+   G17P_SHADER_QUAD_CONTROL || G17P_RG16_UNORM ||                         \
    G17P_RGBA16_UNORM || G17P_RG16_SNORM || G17P_R32_UINT ||             \
    G17P_R32_SFLOAT || G17P_R32_SINT || G17P_RG16_UINT ||                \
    G17P_RG16_SINT || G17P_RG32_SINT || G17P_RG32_SFLOAT ||            \
@@ -5091,6 +5169,12 @@ main(void)
    printf(PROBE_NAME ": PASS — two instances selected exact layers 0 and 1 "
                      "immediately/3s; all readback guards unchanged, "
                      "checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_SHADER_QUAD_CONTROL
+   printf(PROBE_NAME ": PASS — divergent odd-lane loop retained exact "
+                     "horizontal-quad partner values and quad derivatives "
+                     "immediately/3s; guards unchanged, checksum %016" PRIx64
+                     "\n",
           checksum);
 #elif G17P_MULTIVIEW
    printf(PROBE_NAME ": PASS — both view 0/layer 0 and view 1/layer 1 "

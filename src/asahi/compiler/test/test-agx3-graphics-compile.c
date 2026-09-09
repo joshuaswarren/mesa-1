@@ -922,6 +922,202 @@ build_fs_interpolated(void)
    return fs_finish(&b);
 }
 
+static nir_shader *
+build_fs_quad_control_mode(bool require_full_quads, bool quad_derivatives)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P quad-control mode FS");
+
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+
+   fs_store_colour(&b, colour);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.fs.require_full_quads = require_full_quads;
+   b.shader->info.fs.quad_derivatives = quad_derivatives;
+   agx_preprocess_nir_g17p(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+/* Quad-control execution modes must select the helper-capable G17P fragment
+ * protocol even after optimization removes every explicit quad instruction.
+ * Native derivative and quad-shuffle fragments both start with the exact
+ * unmarked F32INTERP below and otherwise have identical ProgramVariant
+ * metadata. A plain interpolation is the marked negative control. */
+static bool
+test_g17p_quad_control_modes(void)
+{
+   struct agx_shader_part part[3] = {0};
+   const bool full[] = {false, true, false};
+   const bool derivative[] = {false, false, true};
+   bool semantic[3] = {false};
+   bool ok = true;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(part); ++i) {
+      nir_shader *nir = build_fs_quad_control_mode(full[i], derivative[i]);
+      semantic[i] = nir->info.fs.needs_coarse_quad_helper_invocations &&
+                    nir->info.fs.needs_full_quad_helper_invocations;
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+      };
+      ok &= agx_compile_shader_nir(nir, &key, &part[i]) && part[i].binary;
+      ralloc_free(nir);
+   }
+
+   static const uint8_t marked_interp[] = {
+      0x2f, 0x0d, 0x54, 0x00, 0x03, 0x00, 0x04, 0x02, 0x10, 0x00,
+   };
+   static const uint8_t helper_interp[] = {
+      0x2f, 0x05, 0x54, 0x00, 0x03, 0x00, 0x04, 0x02, 0x10, 0x00,
+   };
+
+   if (ok) {
+      ok &= !semantic[0] && semantic[1] && semantic[2] &&
+            !part[0].info.disable_tri_merging &&
+            part[1].info.disable_tri_merging &&
+            part[2].info.disable_tri_merging &&
+            part[0].info.binary_size == part[1].info.binary_size &&
+            part[1].info.binary_size == part[2].info.binary_size &&
+            part[0].info.binary_size >= sizeof(marked_interp) &&
+            !memcmp(part[0].binary, marked_interp, sizeof(marked_interp)) &&
+            !memcmp(part[1].binary, helper_interp, sizeof(helper_interp)) &&
+            !memcmp(part[2].binary, helper_interp, sizeof(helper_interp)) &&
+            !memcmp(part[1].binary, part[2].binary,
+                    part[1].info.binary_size);
+
+      /* The entry marker is the only shader-text difference from the plain
+       * control. No undocumented quad-control opcode or metadata surrogate is
+       * permitted to creep into this protocol. */
+      for (unsigned byte = 0; ok && byte < part[0].info.binary_size; ++byte) {
+         const uint8_t plain = ((const uint8_t *)part[0].binary)[byte];
+         const uint8_t helper = ((const uint8_t *)part[1].binary)[byte];
+         ok &= (byte == 1 ? plain == (uint8_t)(helper | 0x08)
+                          : plain == helper);
+      }
+   }
+
+   if (!ok)
+      fputs("G17P quad-control helper protocol mismatch\n", stderr);
+   for (unsigned i = 0; i < ARRAY_SIZE(part); ++i)
+      free(part[i].binary);
+   return ok;
+}
+
+static nir_shader *
+build_fs_divergent_quad_loop(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P divergent quad-control loop FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *varying = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *pixel = nir_u2u32(&b, nir_load_pixel_coord(&b));
+   nir_def *x = nir_channel(&b, pixel, 0);
+   nir_def *count = nir_iadd_imm(&b, nir_iand_imm(&b, x, 1), 1);
+
+   nir_variable *counter =
+      nir_local_variable_create(b.impl, glsl_uint_type(), "counter");
+   nir_variable *quad_sum =
+      nir_local_variable_create(b.impl, glsl_uint_type(), "quad_sum");
+   nir_variable *derivative_sum =
+      nir_local_variable_create(b.impl, glsl_float_type(), "derivative_sum");
+   nir_store_var(&b, counter, nir_imm_int(&b, 0), 0x1);
+   nir_store_var(&b, quad_sum, nir_imm_int(&b, 0), 0x1);
+   nir_store_var(&b, derivative_sum, nir_imm_float(&b, 0.0f), 0x1);
+
+   nir_loop *loop = nir_push_loop(&b);
+   nir_def *i = nir_load_var(&b, counter);
+   nir_break_if(&b, nir_uge(&b, i, count));
+   nir_store_var(&b, quad_sum,
+                 nir_iadd(&b, nir_load_var(&b, quad_sum),
+                          nir_quad_swap_horizontal(&b, x)),
+                 0x1);
+   nir_store_var(&b, derivative_sum,
+                 nir_fadd(&b, nir_load_var(&b, derivative_sum),
+                          nir_ddx(&b, varying)),
+                 0x1);
+   nir_store_var(&b, counter, nir_iadd_imm(&b, i, 1), 0x1);
+   nir_pop_loop(&b, loop);
+
+   nir_def *q = nir_u2f32(&b, nir_load_var(&b, quad_sum));
+   nir_def *d = nir_load_var(&b, derivative_sum);
+   fs_store_colour(&b, nir_vec4(&b, q, d, nir_u2f32(&b, count),
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.fs.require_full_quads = true;
+   b.shader->info.fs.quad_derivatives = true;
+   agx_preprocess_nir_g17p(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+static bool
+test_g17p_divergent_quad_loop(void)
+{
+   /* Complete post-RA G17P shader. Its unmarked F32INTERP entry, immediate
+    * QUADBFLY, DFDX, ICMP+CNDLT, backward B and CNDEND(2) forms match the
+    * fresh applegpu_g17p loop witnesses byte-for-byte at each corresponding
+    * instruction family. Keep the compiler's surrounding lifetimes exact. */
+   static const uint8_t expected[] = {
+      0x2f,0x05,0x54,0x02,0x03,0x00,0x04,0x02,0x10,0x00,
+      0xaf,0x00,0x54,0x02,0x03,0x04,0x00,0x48,0x20,0x01,
+      0x2f,0x05,0x54,0x04,0x03,0x02,0x00,0x02,0x10,0x00,
+      0x19,0x05,0x3f,0x03,0x00,0x01,0x00,0x00,0x2c,0xa0,0x10,0x06,
+      0x23,0x04,0x29,0x20,0x23,0x00,0x00,0x01,0x3c,0x01,
+      0x4b,0x05,0x17,0x07,0x00,0x00,0x00,0x00,0x00,0x00,
+      0x9f,0x01,0x54,0x06,0x02,0x02,0x20,0x88,0x15,0x04,
+      0x4b,0x00,0x00,0x00,0x5b,0x00,0x00,0x00,0x6b,0x00,0x00,0x00,
+      0x0a,0x0d,0x23,0x07,0x02,0x00,0x05,0x00,0x00,0x00,
+      0x8f,0x04,0x54,0x02,
+      0xc7,0x00,0x54,0x0e,0x03,0x08,0x02,0x2c,0x02,0x00,
+      0x9f,0x01,0x54,0x0a,0x02,0x14,0x38,0xa8,0x11,0x05,
+      0x37,0x05,0x54,0x0e,0x03,0x04,0x92,0x40,0x00,0x00,
+      0x49,0x0f,0x00,0x09,
+      0x9f,0x01,0x54,0x0c,0x02,0x02,0x30,0x88,0x11,0x04,
+      0x0f,0x00,0x54,0xc6,0xff,0xff,0xff,0xff,0xff,0x00,
+      0x0f,0x06,0x04,0x02,0x00,0x00,
+      0xa7,0x07,0x54,0x02,0x02,0x14,0x8c,0x20,
+      0xa7,0x07,0x54,0x04,0x02,0x0c,0x8c,0x20,
+      0x87,0x02,0x54,0x00,0x06,0x00,0x87,0x02,0x54,0x0c,0x08,0x00,
+      0x97,0x04,0x54,0x02,0x02,0x04,0x22,0x54,0x44,0xc2,
+      0x97,0x04,0x54,0x03,0x02,0x08,0xc2,0x50,0x44,0xc8,
+      0xe7,0x06,0x54,0x02,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
+      0x07,0x02,0x54,0x0c,0x02,0x00,0x0e,0x00,0x00,0x00,
+   };
+   nir_shader *nir = build_fs_divergent_quad_loop();
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part) && part.binary &&
+             part.info.disable_tri_merging &&
+             part.info.binary_size == sizeof(expected) &&
+             !memcmp(part.binary, expected, sizeof(expected));
+   if (getenv("AGX3_DUMP_BINARY") && part.binary) {
+      fprintf(stderr, "G17P divergent quad loop: %u bytes:",
+              part.info.binary_size);
+      for (unsigned i = 0; i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   if (!ok)
+      fputs("G17P divergent quad loop compiler mismatch\n", stderr);
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
 /* A real post-lowering interpolateAtSample shape. Deriving the runtime sample
  * index from the pixel coordinate keeps it dynamic without leaving an
  * unlowered load_sample_id intrinsic for the backend. */
@@ -4635,6 +4831,13 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--quad-control-only")) {
+      const bool ok = test_g17p_quad_control_modes() &&
+                      test_g17p_divergent_quad_loop();
+      fprintf(stderr, "G17P shader quad-control protocol: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--gallium-vp-abi-only")) {
       const bool ok = test_g17p_gallium_vertex_param_abi();
       fprintf(stderr, "G17P Gallium vertex-parameter ABI alignment: %s\n",
@@ -4763,6 +4966,11 @@ main(int argc, char **argv)
                  test_custom_border_samplers(true, 0) &&
                  test_custom_border_samplers(true, 1) &&
                  test_custom_border_samplers(true, 2);
+
+   if (!test_g17p_quad_control_modes())
+      all_ok = false;
+   if (!test_g17p_divergent_quad_loop())
+      all_ok = false;
 
    if (!test_g17p_vkcube_fragment_main())
       all_ok = false;

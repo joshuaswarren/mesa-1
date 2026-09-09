@@ -657,6 +657,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Divergent-loop quad operations and derivatives. This records against
+    # drm-shim when G17P_SHADER_QUAD_CONTROL_RECORD_ONLY is set.
+    executable(
+      'g17p-vulkan-shader-quad-control',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_SHADER_QUAD_CONTROL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-implicit-lod',
       files('tests/g17p_offscreen_triangle.c'),
