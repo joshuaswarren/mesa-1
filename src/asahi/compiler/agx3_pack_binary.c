@@ -7990,8 +7990,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx3_src_is_register(I->dest[0]) &&
              I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1) {
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            /* The exact G17P LDIMM16 form has no witnessed scoreboard field.
+             * A materialized half constant can nevertheless be scheduled
+             * directly after an async producer, so retire its dependency
+             * through the established native no-op before loading it. */
             if (I->imm > 0xffff ||
-                !agx3_alu_mov16(enc, I->dest[0].value, I->imm, wait, bytes, &len) ||
+                (wait && !agx3_retire_slots_noop(emission, enc, wait)) ||
+                !agx3_alu_mov16(enc, I->dest[0].value, I->imm, 0, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

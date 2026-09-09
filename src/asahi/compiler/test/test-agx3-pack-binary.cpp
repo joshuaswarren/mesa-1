@@ -1100,6 +1100,40 @@ TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, G17PHalfImmediateRetiresOverwriteWait)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+
+   /* The 32-bit async result owns halves 14 and 15. Loading a constant into
+    * its upper half therefore needs a wait, but native LDIMM16 has no wait
+    * field. The packer must retire slot 1 before issuing the exact load. */
+   agx_get_sr_to(b, agx_register(14, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_X);
+   agx_mov_imm_to(b, agx_register(15, AGX_SIZE_16), 0x1972);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   struct agx3_sr_desc sr = {};
+   sr.dest = 14;
+   sr.width = AGX3_SR_W32;
+   sr.sr = 23;
+   sr.slot = 1;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_mov16(enc, 15, 0x1972, 0, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, U16ToF32RejectsRemainingUnwitnessedDomains)
 {
    for (unsigned variant = 0; variant < 6; ++variant) {

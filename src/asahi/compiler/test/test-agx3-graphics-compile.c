@@ -3757,6 +3757,28 @@ build_fs_glmark2_control(void)
    return fs_finish(&b);
 }
 
+/* glmark2's desktop blur offsets a retained mediump coordinate by a negative
+ * minifloat. The general half add must materialize that constant without
+ * disturbing the two independently grounded immediate-special cases. */
+static nir_shader *
+build_fs_glmark2_desktop(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 desktop FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *v = nir_f2f16(&b, v32);
+   nir_def *offset =
+      nir_fadd(&b, v, nir_imm_floatN_t(&b, -0.15625, 16));
+   fs_store_colour(&b, nir_vec4(&b, v, offset, offset, offset));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -4118,6 +4140,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
     .g17p_only = true},
    {"fs-glmark2-control", build_fs_glmark2_control, true,
+    .g17p_only = true},
+   {"fs-glmark2-desktop", build_fs_glmark2_desktop, true,
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},

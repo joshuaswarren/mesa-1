@@ -2658,6 +2658,35 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          I->nr_srcs = 3;
       }
 
+      /* Only saturation through -0.0h and 1.0h - x have grounded immediate
+       * half-add forms. Materialize every other minifloat operand so general
+       * mediump offsets use the exact register-register add encoding. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_HADD && I->nr_srcs == 2) {
+         const bool saturate_negzero =
+            I->saturate && I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value == UINT8_C(0x80);
+         const bool one_minus =
+            !I->saturate && I->src[0].type != AGX_INDEX_IMMEDIATE &&
+            I->src[0].neg && I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value == UINT8_C(0x30);
+
+         if (!saturate_negzero && !one_minus) {
+            for (unsigned s = 0; s < 2; ++s) {
+               if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+                  continue;
+
+               float value = agx_minifloat_decode(I->src[s].value);
+               if (I->src[s].abs)
+                  value = fabsf(value);
+               if (I->src[s].neg)
+                  value = -value;
+               I->src[s] =
+                  agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+            }
+         }
+      }
+
       /* A half comparison against a minifloat selecting two half registers
        * has no separately grounded immediate form. Materialize the compare
        * constant so it uses the general four-register half select whose
