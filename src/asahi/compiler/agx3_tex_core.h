@@ -151,10 +151,11 @@ bool agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  * Filtered 2D sample (`texture_sample` -> smp with f78=2), immediate texture
  * and sampler state, in the LOD shapes Apple's corpus witnesses:
  *
- *  - AGX3_TEX_LOD_AUTO: the implicit-LOD fragment form (f156=1, no LOD
- *    operand). Witnessed in fragment render pipelines only; fragment
- *    shaders are the only place Mesa emits it, matching the hardware's
- *    quad-derivative requirement.
+ *  - AGX3_TEX_LOD_AUTO: the implicit-LOD fragment form (no LOD operand).
+ *    Witnessed in fragment render pipelines only; fragment shaders are the
+ *    only place Mesa emits it, matching the hardware's quad-derivative
+ *    requirement. f156 terminates the complete fragment sample group, not
+ *    each individual implicit sample; see sample_group_end below.
  *  - AGX3_TEX_LOD_LEVEL: explicit immediate level (f37=1, f139=2), the
  *    `level(x)` kernel form; `lod_x64` is the level in 1/64 steps exactly as
  *    the corpus quantizes it (level(2.0) = 128, level(7.25) = 464).
@@ -271,6 +272,14 @@ struct agx3_tex_sample_desc {
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
    bool coord_kill;
    bool final;          /* witnessed final texture-op marker */
+   /* f156 terminates a fragment sample group. Fresh G17P two/three-sample
+    * pipelines clear it on every earlier SMP and set it only on the final
+    * ordinary sample. Explicit-gradient samples sit outside the group and
+    * reject both flags. These explicit aggregate-group flags are G17P-only;
+    * leaving both clear preserves the independently witnessed per-op encoding
+    * in every other stage/ISA. */
+   bool sample_group_nonterminal;
+   bool sample_group_end;
    bool array;           /* array sample; shadow layers use PACK_SMPIR */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */

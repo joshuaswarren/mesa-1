@@ -8732,6 +8732,8 @@ TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
       d.wait_mask = 1u << i;
       d.coord_kill = true;
       d.final = i == 1;
+      d.sample_group_nonterminal = i == 0;
+      d.sample_group_end = i == 1;
       d.cube = true;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);

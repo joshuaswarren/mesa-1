@@ -1259,6 +1259,7 @@ static bool
 agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint8_t slot, uint16_t wait_mask, bool final,
+                         bool sample_group_nonterminal, bool sample_group_end,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
                          uint8_t native_coord_slot,
                          const uint16_t cem_scratch[3])
@@ -1655,6 +1656,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                               ? true
                               : I->src[0].kill,
       .final = final,
+      .sample_group_nonterminal = sample_group_nonterminal,
+      .sample_group_end = sample_group_end,
       .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
@@ -4878,6 +4881,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned image_loads_left = 0;
    unsigned image_writes_left = 0;
    unsigned texture_samples_left = 0;
+   unsigned sample_group_members_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    bool has_zs_emit = false;
@@ -4920,8 +4924,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             image_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_WRITE)
             image_writes_left++;
-         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE)
+         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
             texture_samples_left++;
+            /* Explicit gradients carry their own staged derivatives and sit
+             * outside f156 sample groups. Native AUTO/GRAD/AUTO groups the
+             * two AUTO samples across the gradient without marking it. */
+            if (scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD)
+               sample_group_members_left++;
+         }
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (scan_I->dim == AGX_DIM_CUBE ||
               scan_I->dim == AGX_DIM_CUBE_ARRAY) &&
@@ -4964,6 +4974,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
       }
    }
+
+   /* Fresh G17P fragment witnesses with two/three ordinary SMPs clear f156 on
+    * every earlier group member and set it only on the final member, including
+    * an all-explicit-LEVEL group. Explicit gradients are outside the group.
+    * Other stages and AGX3C keep their existing per-op encodings. */
+   const bool g17p_sample_group = enc == AGX_ISA_ENCODING_AGX3B &&
+                                  ctx->stage == MESA_SHADER_FRAGMENT &&
+                                  sample_group_members_left > 1;
 
    /* CEM has three real 32-bit destinations. They used to be hardcoded to
     * r0/r7/r2 after RA, which could overwrite live control-flow state or a
@@ -5077,6 +5095,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
    unsigned g17p_link_packs_seen = 0;
    bool g17p_colour_open = false;
+   unsigned texture_samples_remaining = texture_samples_left;
+   unsigned sample_group_members_remaining = sample_group_members_left;
    const agx_instr *g17p_deferred_zs_wait = NULL;
    const bool g17p_position_protocol =
       agx3_is_g17p_float2_position_vs(ctx, enc);
@@ -5691,6 +5711,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
+            assert(texture_samples_remaining > 0);
+            texture_samples_remaining--;
+            const bool sample_group_member =
+               I->lod_mode != AGX_LOD_MODE_LOD_GRAD;
+            const bool sample_group_nonterminal =
+               g17p_sample_group && sample_group_member &&
+               sample_group_members_remaining > 1;
+            bool sample_group_end = false;
+            if (sample_group_member) {
+               assert(sample_group_members_remaining > 0);
+               sample_group_end = --sample_group_members_remaining == 0 &&
+                                  g17p_sample_group;
+            }
             /* Apple's implicit-derivative fragment programs enter the pixel
              * transaction immediately before their first SMP, after their
              * coefficient interpolation.  Opening it only in the colour
@@ -5769,7 +5802,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 /* Keep the pixel-entry gate after all native coordinate
                  * staging and immediately before SMP, matching Apple. */
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
-                                          final, open_pixel,
+                                          final, sample_group_nonterminal,
+                                          sample_group_end, open_pixel,
                                           &ctx->agx3_colour_link.entry_offset,
                                           native_coord_slot, cem_scratch))
                AGX3_REFUSE(I);

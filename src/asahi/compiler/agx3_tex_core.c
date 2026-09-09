@@ -206,6 +206,12 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         enc != AGX_ISA_ENCODING_AGX3B))
       return false;
 
+   if ((d->sample_group_nonterminal || d->sample_group_end) &&
+       (enc != AGX_ISA_ENCODING_AGX3B ||
+        d->lod == AGX3_TEX_LOD_GRADIENT ||
+        (d->sample_group_nonterminal && d->sample_group_end)))
+      return false;
+
    if ((d->width != AGX3_TEX_W16 && d->width != AGX3_TEX_W32) ||
        d->dest >= 128 || (d->width == AGX3_TEX_W32 && (d->dest & 1)) ||
        (d->coord & 3) || d->coord > 60 || !mask_witnessed(d->mask) ||
@@ -406,6 +412,21 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
    ov[n++] = (struct agx3_field_kv)KV(76, d->cube ? 4 : d->three_d ? 3 : 1);
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
+
+   /* f156 is a group terminator, not a per-instruction implicit-LOD bit.
+    * A lone AUTO/BIAS, staged register LOD, array, or cube sample forms a
+    * one-op group and keeps the historical encoding. The stream packer marks
+    * nonterminal members to suppress that default and supplies
+    * sample_group_end when a multi-op group ends on a shape (including an
+    * immediate LEVEL) that would not infer it in isolation. Explicit-gradient
+    * samples are outside these groups. */
+   const bool intrinsic_group =
+      d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
+      d->lod == AGX3_TEX_LOD_REGISTER || d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
+      (d->lod != AGX3_TEX_LOD_GRADIENT && (d->array || d->cube));
+   if (d->sample_group_end ||
+       (intrinsic_group && !d->sample_group_nonterminal))
+      ov[n++] = (struct agx3_field_kv)KV(156, 1);
    if (d->array) {
       if (shadow_array) {
          ov[n++] = (struct agx3_field_kv)KV(77, 2);
@@ -422,9 +443,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    if (d->sampler_kill)
       ov[n++] = (struct agx3_field_kv)KV(136, 1);
    if (d->lod == AGX3_TEX_LOD_AUTO) {
-      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* implicit-LOD marker */
+      /* AUTO has no explicit LOD operand. Its group marker is emitted above. */
    } else if (d->lod == AGX3_TEX_LOD_BIAS) {
-      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* still implicit LOD */
       if (d->array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
@@ -436,18 +456,14 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    } else if (d->lod == AGX3_TEX_LOD_REGISTER) {
       ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed level bank */
       ov[n++] = (struct agx3_field_kv)KV(139, 4);
-      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* native fragment form */
    } else if (d->lod == AGX3_TEX_LOD_BIAS_REGISTER) {
       ov[n++] = (struct agx3_field_kv)KV(28, 0); /* packed bias bank */
       ov[n++] = (struct agx3_field_kv)KV(139, 3);
-      ov[n++] = (struct agx3_field_kv)KV(156, 1); /* native fragment form */
    } else if (d->lod == AGX3_TEX_LOD_GRADIENT) {
       /* The gradient form clears the implicit-derivative marker: the four
        * staged scalars are the derivative. */
       ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
-      if (d->array || d->cube)
-         ov[n++] = (struct agx3_field_kv)KV(156, 1);
       if (d->array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);

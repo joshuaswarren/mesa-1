@@ -349,6 +349,83 @@ test_sample_witnesses(void)
         .wait_mask = 1u << 2, .coord_kill = true, .final = true},
        "058e0cb8b0490900800010000100",
        "0f04120c5190686b0100010000000000008000000000"},
+      /* Metal 32023.917 / applegpu_g17p fragment pipelines with two SMPs.
+       * Pair the first AUTO with final AUTO for AUTO/AUTO, first AUTO with
+       * final LEVEL for AUTO/LEVEL, and the two LEVEL rows for LEVEL/LEVEL.
+       * f156 is absent from the first sample and terminates each group on the
+       * second. The all-LEVEL pair proves this is a group property rather
+       * than an implicit-derivative bit; t_base above is the single-LEVEL
+       * control and has no f156. */
+      {"fragment group first AUTO",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 2, .wait_mask = 1,
+        .sample_group_nonterminal = true},
+       "05800c18b0240000000010000100", NULL},
+      {"fragment group final AUTO",
+       {.dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 1, .sampler = 1, .lod = AGX3_TEX_LOD_AUTO, .slot = 2,
+        .coord_kill = true, .final = true, .sample_group_end = true},
+       "25800cb830240000810110000100", NULL},
+      {"fragment group first LEVEL",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .slot = 2, .wait_mask = 1,
+        .sample_group_nonterminal = true},
+       "05800c18b0240900000010000100", NULL},
+      {"fragment group final LEVEL",
+       {.dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 1, .sampler = 1, .lod = AGX3_TEX_LOD_LEVEL, .slot = 2,
+        .coord_kill = true, .final = true, .sample_group_end = true},
+       "25800cb830240900810110000100", NULL},
+      /* Explicit gradients are outside the aggregate group. In native
+       * AUTO/GRADIENT the lone AUTO retains its own f156 while the terminal
+       * gradient carries f139=5 and no f156. */
+      {"AUTO before terminal GRADIENT",
+       {.dest = 0, .coord = 16, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 2, .wait_mask = 2,
+        .coord_kill = true},
+       "05800c3930250000010010000100", NULL},
+      {"terminal GRADIENT outside group",
+       {.dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 1, .sampler = 1, .lod = AGX3_TEX_LOD_GRADIENT, .slot = 2,
+        .wait_mask = 1, .coord_kill = true, .final = true},
+       "25800cb8b0240401800110000100", NULL},
+      /* AUTO/GRADIENT/AUTO proves the gradient is transparent rather than a
+       * group boundary: the two AUTO samples still form one group around it. */
+      {"AUTO group before transparent GRADIENT",
+       {.dest = 8, .coord = 16, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 3, .wait_mask = 2,
+        .sample_group_nonterminal = true},
+       "25800c1930490000000010000100", NULL},
+      {"transparent middle GRADIENT",
+       {.dest = 16, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 1, .sampler = 1, .lod = AGX3_TEX_LOD_GRADIENT, .slot = 3,
+        .wait_mask = 1, .coord_kill = true},
+       "45800c38b0480401800110000100", NULL},
+      {"AUTO group after transparent GRADIENT",
+       {.dest = 0, .coord = 16, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 2, .sampler = 2, .lod = AGX3_TEX_LOD_AUTO, .slot = 1,
+        .coord_kill = true, .final = true, .sample_group_end = true},
+       "05880cb931000000010010000100", NULL},
+      /* The native three-branch fragment lays its three SMPs out in CFG
+       * order. Both possible nonterminal arms clear f156; only the globally
+       * final arm carries f156 together with f147. */
+      {"branched group first AUTO",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .sample_group_nonterminal = true},
+       "05800c38b0000000000010000100", NULL},
+      {"branched group middle AUTO",
+       {.dest = 14, .coord = 4, .width = AGX3_TEX_W32, .mask = 15,
+        .texture = 1, .sampler = 1, .lod = AGX3_TEX_LOD_AUTO, .slot = 1,
+        .wait_mask = 2, .coord_kill = true,
+        .sample_group_nonterminal = true},
+       "3d820c3830010000800110000100", NULL},
+      {"branched group final AUTO",
+       {.dest = 10, .coord = 4, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 2, .sampler = 2, .lod = AGX3_TEX_LOD_AUTO, .slot = 1,
+        .wait_mask = 2, .coord_kill = true, .final = true,
+        .sample_group_end = true},
+       "2d8a0ca011010000010010000100", NULL},
       {"ts_auto implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -1047,6 +1124,18 @@ test_sample_fail_closed(void)
    d.array_layer = 0;
    d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = good;
+   d.sample_group_end = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d = good;
+   d.sample_group_nonterminal = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d.sample_group_end = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = good;
+   d.lod = AGX3_TEX_LOD_GRADIENT;
+   d.sample_group_end = true;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
    d.offset_xy = 0xf1;

@@ -3121,6 +3121,50 @@ build_fs_texture_imm(void)
    return build_fs_texture_index_abi(false);
 }
 
+/* Hyprland's ordinary surface path may sample the client texture and then a
+ * second atlas/decoration texture with the same interpolated UV. Keep that
+ * real two-AUTO fragment shape in the compiler oracle: native G17P clears the
+ * sample-group marker on the first SMP and emits it only on the final SMP. */
+static nir_shader *
+build_fs_two_texture_samples(void)
+{
+   nir_builder b =
+      nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
+                                     "AGX3 Hyprland two-texture surface FS");
+   nir_def *bary =
+      nir_load_barycentric_pixel(&b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *uv = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *colour[2];
+
+   for (unsigned i = 0; i < 2; ++i) {
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+      tex->op = nir_texop_tex;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = i;
+      tex->sampler_index = i;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, uv);
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      colour[i] = &tex->def;
+   }
+
+   fs_store_colour(&b, nir_fadd(&b, colour[0], colour[1]));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.fs.needs_coarse_quad_helper_invocations = true;
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   return b.shader;
+}
+
 /* A18 Pro's v_texture vertex pipeline samples texture0/sampler0 at explicit
  * level zero and emits the same 14-byte SMP as the shared t_base witness:
  *
@@ -3672,7 +3716,69 @@ struct agx3_graphics_case {
    bool expected_g17p_sample_mask_input;
    bool expected_g17p_front_facing;
    bool expected_g17p_explicit_sample;
+   bool expected_g17p_sample_group;
 };
+
+static bool
+binary_contains(const struct agx_shader_part *part, const uint8_t *needle,
+                unsigned length)
+{
+   for (unsigned off = 0; off + length <= part->info.binary_size; ++off) {
+      if (!memcmp((const uint8_t *)part->binary + off, needle, length))
+         return true;
+   }
+
+   return false;
+}
+
+static bool
+g17p_sample_group_protocol(const struct agx_shader_part *part)
+{
+   bool first = false, incorrectly_terminated_first = false, final = false;
+   uint8_t candidate[AGX3_TEX_MAX_LENGTH], length;
+
+   for (unsigned dest = 0; dest < 128; dest += 2) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         for (unsigned wait_case = 0; wait_case <= 6; ++wait_case) {
+            for (unsigned kill = 0; kill < 2; ++kill) {
+               struct agx3_tex_sample_desc d = {
+                  .dest = dest,
+                  .coord = 0,
+                  .width = AGX3_TEX_W32,
+                  .mask = 15,
+                  .lod = AGX3_TEX_LOD_AUTO,
+                  .slot = slot,
+                  .wait_mask = wait_case ? 1u << (wait_case - 1) : 0,
+                  .coord_kill = kill,
+                  .sample_group_nonterminal = true,
+               };
+               if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
+                                           candidate, &length))
+                  return false;
+               first |= binary_contains(part, candidate, length);
+
+               d.sample_group_nonterminal = false;
+               if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
+                                           candidate, &length))
+                  return false;
+               incorrectly_terminated_first |=
+                  binary_contains(part, candidate, length);
+
+               d.texture = 1;
+               d.sampler = 1;
+               d.final = true;
+               d.sample_group_end = true;
+               if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
+                                           candidate, &length))
+                  return false;
+               final |= binary_contains(part, candidate, length);
+            }
+         }
+      }
+   }
+
+   return first && final && !incorrectly_terminated_first;
+}
 
 static bool
 g17p_implicit_coord_group(const struct agx_shader_part *part)
@@ -3933,6 +4039,9 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
    {"fs-textured-triangle", build_fs_texture_imm, true,
     .expected_g17p_sampled_fragment = true},
+   {"fs-two-texture-sample-group", build_fs_two_texture_samples, true,
+    .g17p_only = true, .expected_g17p_sampled_fragment = true,
+    .expected_g17p_sample_group = true},
    {"fs-vkcube-combined-sampler", build_fs_texture, true, true,
     .expected_g17p_implicit_coord_group = true,
     .expected_g17p_sampled_fragment = true},
@@ -4123,6 +4232,16 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             fprintf(stderr,
                     "%s %s: missing native ITRCOORDS/f32interp "
                     "sample token chain\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_sample_group) {
+         result = g17p_sample_group_protocol(&part);
+         if (!result)
+            fprintf(stderr,
+                    "%s %s: fragment SMP group did not terminate only on "
+                    "its final sample\n",
                     enc_name(enc), c->name);
       }
 
