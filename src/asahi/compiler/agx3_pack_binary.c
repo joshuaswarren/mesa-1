@@ -4354,12 +4354,14 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
 
 /* The native WBOIT layout is one RGBA16F target followed by one R8 target in
  * the same tilebuffer. Both colour stores belong to one pixel transaction, so
- * enter once before the first class-12 wait and release only after the second
- * store. Keep this exact until another MRT layout is captured. */
+ * enter once before the first pixel wait and release only after the second
+ * store. The accumulation target may also carry its raw I16 reload when
+ * additive blending is enabled, as in vkQuake's MBOIT pass. */
 static bool
 agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
 {
-   unsigned blocks = 0, f16 = 0, r8 = 0, r8_loads = 0;
+   unsigned blocks = 0, f16 = 0, r8 = 0;
+   unsigned f16_loads = 0, r8_loads = 0;
 
    agx_foreach_block(ctx, block) {
       if (++blocks != 1)
@@ -4367,10 +4369,16 @@ agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
 
       agx_foreach_instr_in_block(block, I) {
          if (I->op == AGX_OPCODE_LD_TILE) {
-            if (I->format != AGX_FORMAT_U8NORM || I->mask != 1 ||
-                I->pixel_offset != 8 || I->explicit_coords)
+            if (I->explicit_coords)
                return false;
-            r8_loads++;
+            if (I->format == AGX_FORMAT_I16 && I->mask == 15 &&
+                I->pixel_offset == 0)
+               f16_loads++;
+            else if (I->format == AGX_FORMAT_U8NORM && I->mask == 1 &&
+                     I->pixel_offset == 8)
+               r8_loads++;
+            else
+               return false;
          } else if (I->op == AGX_OPCODE_ST_TILE) {
             if (I->explicit_coords)
                return false;
@@ -4386,7 +4394,8 @@ agx3_is_g17p_wboit_mrt_colour(agx_context *ctx)
       }
    }
 
-   return blocks == 1 && r8_loads == 1 && f16 == 1 && r8 == 1;
+   return blocks == 1 && f16_loads <= 1 && r8_loads == 1 && f16 == 1 &&
+          r8 == 1;
 }
 
 /* Fresh MetalToolchain v27.1.5194.15 G17P evidence for two opaque RGBA8
@@ -5682,9 +5691,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                continue;
             }
+            const bool colour_entry_wait =
+               I->writeout == 1 ||
+               I->writeout ==
+                  ((g17p_blend_protocol || g17p_wboit_mrt_colour) ? 8
+                                                                  : 0xc) ||
+               (g17p_wboit_mrt_colour && I->writeout == 0xc);
             if (g17p_pixel_protocol && I->op == AGX_OPCODE_WAIT_PIX &&
-                (I->writeout == 1 ||
-                 I->writeout == (g17p_blend_protocol ? 8 : 0xc)) &&
+                colour_entry_wait &&
                 !g17p_colour_open) {
                uint8_t entry[AGX3_PIXEL_MAX_LENGTH];
                uint8_t entry_len = 0;

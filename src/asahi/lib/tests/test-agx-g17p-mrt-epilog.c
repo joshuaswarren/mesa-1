@@ -89,6 +89,46 @@ compile_rgba8_mrt_epilog(const struct agx_fs_epilog_link_info *link,
    return ok;
 }
 
+static bool
+compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
+                             struct agx_shader_part *part)
+{
+   struct agx_fs_epilog_key key = {
+      .link = *link,
+      .nr_samples = 1,
+      .lower_srgb = true,
+      .preserve_zero_mask = true,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.remap[1] = 1;
+   key.rt_formats[0] = PIPE_FORMAT_R16G16B16A16_FLOAT;
+   key.rt_formats[1] = PIPE_FORMAT_R8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE,
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE);
+   key.blend.rt[1].colormask = 0x1;
+   key.blend.rt[1].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO,
+      PIPE_BLENDFACTOR_INV_SRC_COLOR, PIPE_BLEND_ADD,
+      PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_INV_SRC_ALPHA);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P vkQuake MBOIT epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_1x_tile_samples(b.shader);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+   };
+   const bool ok = agx_compile_shader_nir(b.shader, &backend_key, part);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -124,6 +164,21 @@ main(void)
       fprintf(stderr, "G17P MRT main did not preserve the full export ABI\n");
       return 1;
    }
+
+   struct agx_shader_part vkquake_part = {0};
+   const bool vkquake_ok =
+      compile_vkquake_mboit_epilog(&actual_link, &vkquake_part) &&
+      vkquake_part.binary && vkquake_part.info.main_offset == 0 &&
+      vkquake_part.info.main_size == vkquake_part.info.binary_size &&
+      vkquake_part.info.agx3_colour_link.entry_emitted &&
+      vkquake_part.info.agx3_colour_link.straight_line &&
+      vkquake_part.info.agx3_colour_link.entry_offset == 0;
+   if (!vkquake_ok) {
+      fprintf(stderr,
+              "G17P vkQuake MBOIT epilog did not preserve one transaction\n");
+      return 1;
+   }
+   free(vkquake_part.binary);
 
    static const uint8_t expected_main[] = {
       0x4b,0x06,0x01,0x08,0x5b,0x00,0x01,0x08,0x6b,0x04,
