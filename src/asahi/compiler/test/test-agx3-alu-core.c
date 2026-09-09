@@ -1420,6 +1420,33 @@ static void test_native_u16_arithmetic(void)
    exact(out,len,"9f21540a032040001605");
    assert(agx3_alu_shift_add16(AGX_ISA_ENCODING_AGX3B,10,n,dead,4,true,0,out,&len));
    exact(out,len,"9f01540a031628001605");
+   const uint16_t sll_dead_src[] = {0, 1};
+   const bool sll_half_src[] = {true, true};
+   assert(agx3_alu_sll_reg(AGX_ISA_ENCODING_AGX3B, 0, true, true,
+                           sll_dead_src, sll_half_src, dead, 2, out, &len));
+   exact(out, len, "272054000300040080130500");
+   const uint16_t sll_mixed_src[] = {2, 0};
+   const bool sll_mixed_width[] = {true, false};
+   const enum agx3_alu_hint sll_mixed_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD,
+   };
+   assert(agx3_alu_sll_reg(AGX_ISA_ENCODING_AGX3B, 0, false, true,
+                           sll_mixed_src, sll_mixed_width, sll_mixed_hints,
+                           2, out, &len));
+   exact(out, len, "2720540003040200d0120500");
+   const enum agx3_alu_hint sll_bad_hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+   };
+   assert(!agx3_alu_sll_reg(AGX_ISA_ENCODING_AGX3B, 0, true, false,
+                            sll_mixed_src, sll_mixed_width, sll_bad_hints,
+                            0, out, &len));
+   assert(agx3_alu_srl_reg(AGX_ISA_ENCODING_AGX3B, 0, false, false,
+                           sll_mixed_src, sll_mixed_width, sll_mixed_hints,
+                           2, out, &len));
+   exact(out, len, "a720540002040200d0120500");
+   assert(!agx3_alu_srl_reg(AGX_ISA_ENCODING_AGX3B, 0, true, false,
+                            sll_mixed_src, sll_mixed_width, sll_bad_hints,
+                            0, out, &len));
    const uint16_t mixed_src[] = {2, 4};
    const bool mixed_width[] = {false, true};
    assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B,2,mixed_src,mixed_width,dead,1,255,0,true,false,32,out,&len));

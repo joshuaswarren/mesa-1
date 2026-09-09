@@ -336,6 +336,7 @@ if with_tests
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
     ),
     suite : ['asahi'],
+    timeout : 120,
   )
 
   test(

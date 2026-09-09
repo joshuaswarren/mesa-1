@@ -225,15 +225,18 @@ struct sa_v {
    const char *n, *hex;
    uint16_t dest; bool hint;
    bool imm; uint16_t src0; bool src0_kill;
-   uint16_t src1; uint8_t shift; uint16_t wait;
+   uint16_t src1; bool src1_kill; uint8_t shift; uint16_t wait;
 };
 static const struct sa_v sa_vs[] = {
-   {"fdiscard iadd h4=h4+(h4<<4)", "9f115404030810001605", 4, true, false, 4, false, 4, 4, 1},
-   {"fdiscard iadd h4=h5+(h4<<4)", "9f015404030a10001605", 4, true, false, 5, false, 4, 4, 0},
-   {"fdepth iadd h10=h16+(h16<<4)","9f11540a022040001605", 10,false,false, 16,false,16, 4, 1},
-   {"fdepth iadd h0=15+(h10<<4)",  "9f015400031e28001404", 0, true, true, 15, false, 10, 4, 0},
-   {"c_sha16 h2=h2+(h2<<4)",       "9f015602030408001605", 2, true, false, 2, false, 2, 4, 0x20},
-   {"c_sha16 h2=15+(h2<<4)",       "9f015402021e08001404", 2, false, true, 15, false, 2, 4, 0},
+   {"fdiscard iadd h4=h4+(h4<<4)", "9f115404030810001605", 4, true, false, 4, false, 4, true, 4, 1},
+   {"fdiscard iadd h4=h5+(h4<<4)", "9f015404030a10001605", 4, true, false, 5, false, 4, true, 4, 0},
+   {"fdepth iadd h10=h16+(h16<<4)","9f11540a022040001605", 10,false,false, 16,false,16, true, 4, 1},
+   {"fdepth iadd h0=15+(h10<<4)",  "9f015400031e28001404", 0, true, true, 15, false, 10, true, 4, 0},
+   {"c_sha16 h2=h2+(h2<<4)",       "9f015602030408001605", 2, true, false, 2, false, 2, true, 4, 0x20},
+   {"c_sha16 h2=15+(h2<<4)",       "9f015402021e08001404", 2, false, true, 15, false, 2, true, 4, 0},
+   {"shl7 first, dead source",      "9f115400030000401414", 0, true, true, 0, false, 0, true, 3, 1},
+   {"shl7 first, live source",      "9f115401030000401014", 1, true, true, 0, false, 0, false, 3, 1},
+   {"shl7 second",                  "9f015400030000001404", 0, true, true, 0, false, 0, true, 4, 0},
 };
 
 static void
@@ -250,6 +253,7 @@ test_writeout(void)
          .src0 = v->src0,
          .src0_kill = v->src0_kill,
          .src1 = v->src1,
+         .src1_kill = v->src1_kill,
          .shift = v->shift,
          .wait_mask = v->wait,
       };

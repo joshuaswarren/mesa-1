@@ -69,6 +69,7 @@ struct agx3_shift_add_desc {
    uint16_t src0;        /* half-register index, or the immediate value */
    bool src0_kill;       /* register src0 only */
    uint16_t src1;        /* half-register index of the shifted operand */
+   bool src1_kill;       /* f42: last read of the shifted operand */
    uint8_t shift;        /* 0..4, witnessed range */
    uint16_t wait_mask;
 };

@@ -1219,12 +1219,98 @@ TEST_F(AGX3PackBinary, G17PNarrowImmediateMADMatchesNative)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
+   /* Alpha-to-coverage lowers its sample-index calculation to this exact
+    * narrow register multiply.  It must reach the grounded imadd form rather
+    * than fail closing the separately compiled fragment epilog. */
+   agx_builder *mul = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dst = agx_register(0, AGX_SIZE_16);
+   agx_index a = agx_register(0, AGX_SIZE_16);
+   agx_index m = agx_register(4, AGX_SIZE_16);
+   dst.cache = true;
+   a.discard = true;
+   m.discard = true;
+   agx_imad_to(mul, dst, a, m, agx_zero(), 0);
+   agx_stop(mul);
+
+   static const uint8_t native_mul[] = {
+      /* Apple witness with its independent slot-1 wait cleared. */
+      0x9f,0x00,0x54,0x00,0x03,0x00,0x10,0x00,0x00,0x26,0x0a,0x00,
+   };
+   std::vector<uint8_t> want_mul(std::begin(native_mul),
+                                 std::end(native_mul));
+   append(want_mul, end.bytes, end.length);
+   EXPECT_EQ(pack(mul), want_mul);
+}
+
+TEST_F(AGX3PackBinary, G17PNarrowShiftSevenMatchesNativePair)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(0, AGX_SIZE_16);
+   agx_index value = agx_register(0, AGX_SIZE_16);
+   dest.cache = true;
+   value.discard = true;
+   agx_bfi_to(b, dest, agx_immediate(0), value, agx_immediate(7), 0);
+   agx_stop(b);
+
+   /* Apple's first instruction also waits on its input load. The builder has
+    * no async producer, so only that independently grounded wait bit clears. */
+   static const uint8_t native[] = {
+      0x9f,0x01,0x54,0x00,0x03,0x00,0x00,0x40,0x14,0x14,
+      0x9f,0x01,0x54,0x00,0x03,0x00,0x00,0x00,0x14,0x04,
+   };
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
    agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
-   agx_imad_to(bad, agx_register(0, AGX_SIZE_16),
-               agx_register(2, AGX_SIZE_16),
-               agx_register(4, AGX_SIZE_16), agx_immediate(3), 0);
+   agx_bfi_to(bad, agx_register(0, AGX_SIZE_16), agx_immediate(0),
+              agx_register(2, AGX_SIZE_16), agx_immediate(9), 0);
    agx_stop(bad);
    pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, G17PNarrowDynamicShiftsMatchNativeFields)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+
+   agx_builder *left = builder(enc);
+   agx_index left_dest = agx_register(3, AGX_SIZE_16);
+   agx_index left_value = agx_register(2, AGX_SIZE_16);
+   agx_index left_shift = agx_register(12, AGX_SIZE_32);
+   left_dest.cache = true;
+   left_value.cache = true;
+   left_shift.discard = true;
+   agx_bfi_to(left, left_dest, agx_immediate(0), left_value, left_shift, 0);
+   agx_stop(left);
+   static const uint8_t native_left[] = {
+      0x27,0x00,0x54,0x03,0x03,0x04,0x32,0x00,0xc0,0x12,0x05,0x00,
+   };
+   std::vector<uint8_t> want_left(std::begin(native_left),
+                                  std::end(native_left));
+   append(want_left, end.bytes, end.length);
+   EXPECT_EQ(pack(left), want_left);
+
+   agx_builder *right = builder(enc);
+   agx_index right_dest = agx_register(6, AGX_SIZE_16);
+   agx_index right_value = agx_register(2, AGX_SIZE_16);
+   agx_index right_shift = agx_register(4, AGX_SIZE_32);
+   right_dest.cache = true;
+   right_value.discard = true;
+   right_shift.discard = true;
+   agx_bfeil_to(right, right_dest, agx_immediate(0), right_value,
+                right_shift, 0);
+   agx_stop(right);
+   static const uint8_t native_right[] = {
+      0xa7,0x00,0x54,0x06,0x03,0x04,0x10,0x00,0xc0,0x13,0x05,0x00,
+   };
+   std::vector<uint8_t> want_right(std::begin(native_right),
+                                   std::end(native_right));
+   append(want_right, end.bytes, end.length);
+   EXPECT_EQ(pack(right), want_right);
 }
 
 TEST_F(AGX3PackBinary, G17PRegisterMADImmediateAddendUsesNativeEndpoint)

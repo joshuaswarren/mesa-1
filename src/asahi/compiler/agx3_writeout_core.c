@@ -38,10 +38,10 @@ agx3_shift_add16_encode(enum agx_isa_encoding enc,
    if ((d->wait_mask & ~(uint16_t)0x3f) != 0)
       return false;
 
-   /* 16-bit everywhere; f42 = 1 is the 16-bit shifted-operand marker Apple
-    * sets in every witness of this form. */
+   /* 16-bit everywhere. Fresh live/dead shift witnesses pin f42 as the
+    * shifted operand's last-read hint, independently of its width selector. */
    const struct agx3_field_kv base[] = {
-      KV(9, 2), KV(10, 1), KV(24, 1), KV(38, 2), KV(39, 1), KV(42, 1),
+      KV(9, 2), KV(10, 1), KV(24, 1), KV(38, 2), KV(39, 1),
    };
 
    struct agx3_field_kv ov[16];
@@ -49,6 +49,7 @@ agx3_shift_add16_encode(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(31, d->src1);
+   ov[n++] = (struct agx3_field_kv)KV(42, d->src1_kill ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(54, d->shift);
    if (d->src0_immediate) {
       ov[n++] = (struct agx3_field_kv)KV(23, 1);
@@ -65,7 +66,7 @@ agx3_shift_add16_encode(enum agx_isa_encoding enc,
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(45 + i, 1);
 
-   if (agx3_bind_compose(enc, "iadd", 0, base, 6, ov, n, out, len))
+   if (agx3_bind_compose(enc, "iadd", 0, base, 5, ov, n, out, len))
       return true;
 
    memset(out, 0, AGX3_WRITEOUT_MAX_LENGTH);
@@ -110,6 +111,7 @@ agx3_coverage_word(enum agx_isa_encoding enc,
       .dest_hint = d->mid_hint,
       .src0 = d->sr_temp,
       .src1 = d->sr_temp,
+      .src1_kill = true,
       .shift = 4,
       .wait_mask = (uint16_t)(1u << (d->sr_slot - 1)),
    };
@@ -126,6 +128,7 @@ agx3_coverage_word(enum agx_isa_encoding enc,
       .src0 = d->nibble,
       .src0_kill = d->nibble_kill,
       .src1 = d->mid,
+      .src1_kill = true,
       .shift = 4,
    };
    if (d->nibble_immediate ? d->nibble > 15 : (d->nibble >= 256))

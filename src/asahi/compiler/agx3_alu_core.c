@@ -1350,6 +1350,64 @@ agx3_alu_shift_add16(enum agx_isa_encoding enc, uint16_t dest,
    return agx3_bind_compose(enc, "iadd", 0, base, 6, fields, n, out, len);
 }
 
+static bool
+agx3_alu_shift_reg(const char *mnemonic, enum agx_isa_encoding enc,
+                   uint16_t dest, bool dest_16, bool dest_cache,
+                   const uint16_t src[2], const bool src_16[2],
+                   const enum agx3_alu_hint hints[2], uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !src_16 || !hints || !out ||
+       !len || (dest_16 ? dest >= 256 : (dest >= 256 || (dest & 1))) ||
+       (src_16[0] ? src[0] >= 256 : (src[0] >= 256 || (src[0] & 1))) ||
+       (src_16[1] ? src[1] >= 256 : (src[1] >= 256 || (src[1] & 1))) ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_DISCARD || (wait_mask & ~0x3fu))
+      return false;
+
+   /* Fresh applegpu_g17p Metal vectors pin the independent result/source
+    * widths, value cache/discard (f25/f27), shift discard (f42), and slot-2
+    * wait. In particular, a uint shift count remains width 2 even when the
+    * value is ushort. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, dest_16 ? 1 : 2}, {23, 2}, {24, src_16[0] ? 1 : 2},
+      {38, 2}, {39, src_16[1] ? 1 : 2}, {52, 1}, {53, 2},
+   };
+   struct agx3_field_kv fields[15] = {
+      {2, dest}, {11, dest_cache}, {16, src[0]},
+      {25, hints[0] == AGX3_ALU_HINT_CACHE},
+      {27, hints[0] == AGX3_ALU_HINT_DISCARD}, {31, src[1]},
+      {40, 0}, {42, hints[1] == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 8;
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){60 + i, 1};
+   return agx3_bind_compose(enc, mnemonic, 0, base, 8, fields, n, out, len);
+}
+
+bool
+agx3_alu_sll_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
+                 bool dest_cache, const uint16_t src[2],
+                 const bool src_16[2], const enum agx3_alu_hint hints[2],
+                 uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                 uint8_t *len)
+{
+   return agx3_alu_shift_reg("sll", enc, dest, dest_16, dest_cache, src,
+                             src_16, hints, wait_mask, out, len);
+}
+
+bool
+agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
+                 bool dest_cache, const uint16_t src[2],
+                 const bool src_16[2], const enum agx3_alu_hint hints[2],
+                 uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                 uint8_t *len)
+{
+   return agx3_alu_shift_reg("srl", enc, dest, dest_16, dest_cache, src,
+                             src_16, hints, wait_mask, out, len);
+}
+
 bool
 agx3_alu_extract_imm32(enum agx_isa_encoding enc, uint16_t dest,
                        const uint16_t low_high[2], unsigned shift,

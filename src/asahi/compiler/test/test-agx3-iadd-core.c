@@ -375,16 +375,40 @@ test_native_imad_immediate_addend(void)
         .src_a_kill=true, .multiplier=11, .addend_is_immediate=true,
         .addend_immediate=9},
        {0x9f,0x00,0x54,0x03,0x02,0x06,0x2c,0x48,0x00,0x22,0x02,0x00}},
+      /* Fresh applegpu_g17p Metal witnesses.  mul_u16 and mul_s16 are
+       * byte-identical because only the low 16 product is retained. */
+      {{.dest=0, .dest_16=true, .dest_cache=true,
+        .src_a=0, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=4,
+        .multiplier_16=true, .multiplier_kill=true,
+        .no_addend=true, .wait_mask=1},
+       {0x9f,0x10,0x54,0x00,0x03,0x00,0x10,0x00,0x00,0x26,0x0a,0x00}},
+      {{.dest=5, .dest_16=true, .dest_cache=true,
+        .src_a=0, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=4,
+        .multiplier_16=true, .no_addend=true, .wait_mask=1},
+       {0x9f,0x10,0x54,0x05,0x03,0x00,0x10,0x00,0x00,0x22,0x0a,0x00}},
+      {{.dest=0, .dest_16=true, .dest_cache=true,
+        .src_a=0, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=4,
+        .multiplier_16=true, .multiplier_kill=true,
+        .addend_is_immediate=true, .addend_immediate=1, .wait_mask=1},
+       {0x9f,0x10,0x54,0x00,0x03,0x00,0x10,0x08,0x00,0x26,0x0a,0x00}},
    };
    for (unsigned i=0; i<sizeof(narrow)/sizeof(narrow[0]); ++i) {
       CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow[i].d,out,&len));
       CHECK(len==12 && !memcmp(out,narrow[i].bytes,12));
    }
-   struct agx3_imad_desc narrow_bad = narrow[0].d;
-   narrow_bad.multiplier_is_register = true;
+   struct agx3_imad_desc narrow_bad = narrow[3].d;
+   narrow_bad.multiplier_16 = false;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
    narrow_bad = narrow[0].d;
    narrow_bad.dest_64 = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[3].d;
+   narrow_bad.no_addend = false;
+   narrow_bad.src_c = 2;
+   narrow_bad.src_c_16 = true;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
 }
 

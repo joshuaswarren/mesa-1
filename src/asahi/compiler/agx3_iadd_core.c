@@ -205,10 +205,16 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       return false;
    if (!d->multiplier_is_register && d->multiplier_16)
       return false;
-   /* Fresh G17P ushort witnesses ground the narrow immediate MAD only. */
+   /*
+    * Fresh G17P ushort witnesses ground both narrow source-B classes.  The
+    * register form is a low-half multiply, so signed and unsigned MSL produce
+    * the same instruction.  Keep register C and every widening bit closed:
+    * neither has a meaning for a 16-bit result in the witnessed domain.
+    */
    if (d->dest_16 &&
-       (!d->src_a_16 || d->multiplier_is_register ||
-        !d->addend_is_immediate || d->no_addend ||
+       (!d->src_a_16 ||
+        (d->multiplier_is_register ? !d->multiplier_16 : d->no_addend) ||
+        (!d->addend_is_immediate && !d->no_addend) ||
         d->src_a_sign_extend || d->multiplier_sign_extend ||
         d->src_c_sign_extend))
       return false;

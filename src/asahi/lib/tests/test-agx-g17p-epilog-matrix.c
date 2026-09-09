@@ -5,8 +5,9 @@
  * time, and its refusal does not carry the "cannot encode fragment shader"
  * message the pipeline path prints -- so an epilog gap looks like a silent
  * missing draw rather than a failed pipeline. This walks formats, blend
- * modes, sRGB lowering and the link flags, reports which opcode each refusal
- * names, and fails only if the number of refusals grows.
+ * modes, sRGB lowering, alpha-to-coverage/one and the link flags. Each alpha
+ * mode has its own refusal ceiling so losing the whole coverage path cannot
+ * hide behind an improvement elsewhere in the matrix.
  *
  * It is a ratchet, not a specification: lower the ceiling whenever a gap is
  * closed. As measured, the refusals are zs_emit (depth/stencil writes from
@@ -57,12 +58,14 @@ static const struct {
 int
 main(void)
 {
+   const bool verbose = getenv("AGX_G17P_EPILOG_VERBOSE") != NULL;
    unsigned refused = 0, total = 0;
+   unsigned refused_alpha[2][2] = {{0}}, total_alpha[2][2] = {{0}};
    for (unsigned f = 0; f < ARRAY_SIZE(formats); ++f) {
       for (unsigned bl = 0; bl < ARRAY_SIZE(blends); ++bl) {
          for (unsigned srgb = 0; srgb < 2; ++srgb) {
             for (unsigned s32 = 1; s32 < 2; ++s32) {
-               for (unsigned w1 = 0; w1 < 256; ++w1) {
+               for (unsigned w1 = 0; w1 < 1024; ++w1) {
                   struct agx_fs_epilog_key key = {
                      .link.loc_written = BITFIELD_BIT(0),
                      .link.size_32 = s32 ? BITFIELD_BIT(0) : 0,
@@ -74,6 +77,8 @@ main(void)
                      .nr_samples = (w1 >> 5) & 1 ? 4 : 1,
                      .force_small_tile = (w1 >> 6) & 1,
                      .preserve_zero_mask = (w1 >> 7) & 1,
+                     .blend.alpha_to_coverage = (w1 >> 8) & 1,
+                     .blend.alpha_to_one = (w1 >> 9) & 1,
                      .lower_srgb = srgb != 0,
                   };
                   memset(key.remap, -1, sizeof(key.remap));
@@ -104,23 +109,30 @@ main(void)
                   };
                   struct agx_shader_part part = {0};
                   ++total;
-                  char label[160];
-                  snprintf(label, sizeof(label),
-                           "%s blend=%s srgb=%u size32=%u flags=0x%02x "
-                           "(w1=%u z=%u s=%u ranzs=%u sampsh=%u samples=%u "
-                           "smalltile=%u zeromask=%u)",
-                           formats[f].name, blends[bl].name, srgb, s32, w1,
-                           w1 & 1, (w1 >> 1) & 1, (w1 >> 2) & 1,
-                           (w1 >> 3) & 1, (w1 >> 4) & 1,
-                           (w1 >> 5) & 1 ? 4 : 1, (w1 >> 6) & 1,
-                           (w1 >> 7) & 1);
-                  printf("### %s\n", label);
-                  fflush(stdout);
+                  ++total_alpha[key.blend.alpha_to_coverage]
+                               [key.blend.alpha_to_one];
+                  if (verbose) {
+                     printf("### %s blend=%s srgb=%u size32=%u flags=0x%03x "
+                            "(w1=%u z=%u s=%u ranzs=%u sampsh=%u "
+                            "samples=%u smalltile=%u zeromask=%u atoc=%u "
+                            "ato1=%u)\n",
+                            formats[f].name, blends[bl].name, srgb, s32, w1,
+                            w1 & 1, (w1 >> 1) & 1, (w1 >> 2) & 1,
+                            (w1 >> 3) & 1, (w1 >> 4) & 1,
+                            (w1 >> 5) & 1 ? 4 : 1, (w1 >> 6) & 1,
+                            (w1 >> 7) & 1, (w1 >> 8) & 1,
+                            (w1 >> 9) & 1);
+                     fflush(stdout);
+                  }
                   if (!agx_compile_shader_nir(b.shader, &bk, &part)) {
                      ++refused;
-                     printf("    REFUSED\n");
+                     ++refused_alpha[key.blend.alpha_to_coverage]
+                                    [key.blend.alpha_to_one];
+                     if (verbose)
+                        printf("    REFUSED\n");
                   }
-                  fflush(stdout);
+                  if (verbose)
+                     fflush(stdout);
                   free(part.binary);
                   ralloc_free(b.shader);
                }
@@ -129,17 +141,44 @@ main(void)
       }
    }
    printf("total=%u refused=%u\n", total, refused);
+   for (unsigned atoc = 0; atoc < 2; ++atoc) {
+      for (unsigned ato1 = 0; ato1 < 2; ++ato1) {
+         printf("atoc=%u ato1=%u total=%u refused=%u accepted=%u\n", atoc,
+                ato1, total_alpha[atoc][ato1], refused_alpha[atoc][ato1],
+                total_alpha[atoc][ato1] - refused_alpha[atoc][ato1]);
+      }
+   }
 
    /* Keeping G17P fsat as its native standalone f32add.ep2 closes 416
     * producer shapes without inventing saturated forms for those producers. */
-   /* Multisample selectors are now sample-count tagged before the backend.
-    * This deliberately rejects 1904 matrix combinations which previously
-    * fell through the single-sample tile form and encoded the wrong access. */
-   const unsigned ceiling = 32384;
+   /* Multisample selectors are now sample-count tagged before the backend,
+    * keeping combinations which once encoded the wrong access refused. */
+   const unsigned ceiling = 113024;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",
               refused, ceiling);
+      return 1;
+   }
+   const unsigned alpha_ceiling[2][2] = {
+      {28288, 28224},
+      {28288, 28224},
+   };
+   for (unsigned atoc = 0; atoc < 2; ++atoc) {
+      for (unsigned ato1 = 0; ato1 < 2; ++ato1) {
+         if (refused_alpha[atoc][ato1] > alpha_ceiling[atoc][ato1]) {
+            fprintf(stderr,
+                    "G17P epilog alpha mode %u/%u regressed: %u refusals, "
+                    "ceiling %u\n",
+                    atoc, ato1, refused_alpha[atoc][ato1],
+                    alpha_ceiling[atoc][ato1]);
+            return 1;
+         }
+      }
+   }
+   if (refused_alpha[1][0] == total_alpha[1][0] ||
+       refused_alpha[1][1] == total_alpha[1][1]) {
+      fprintf(stderr, "G17P alpha-to-coverage epilogs all refused\n");
       return 1;
    }
    return 0;

@@ -6383,13 +6383,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool narrow = I->dest[0].size == AGX_SIZE_16;
             const bool wide = I->dest[0].size == AGX_SIZE_64;
 
-            /* The multiplier is either an 8-bit immediate or a 32-bit
-             * register; both are witnessed (test-agx3-iadd-core.c). */
+            /* The multiplier is either an 8-bit immediate or a register of
+             * the result width.  Both 16-bit and 32-bit register forms are
+             * witnessed byte-exactly (test-agx3-iadd-core.c). */
             const bool mult_imm = m.type == AGX_INDEX_IMMEDIATE && !m.abs &&
                                   !m.neg && m.value <= 0xff;
             const bool mult_reg = agx3_src_is_register(m) && !m.memory &&
                                   (wide || !m.abs) && !m.neg &&
-                                  m.size == AGX_SIZE_32 &&
+                                  m.size == (narrow ? AGX_SIZE_16
+                                                   : AGX_SIZE_32) &&
                                   agx_channels(m) == 1;
 
             /* An immediate-zero addend is the pure-multiply form, whose
@@ -6427,6 +6429,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
+                  .multiplier_16 = mult_reg && narrow,
                   .multiplier_kill = mult_reg && m.discard,
                   .multiplier_cache = mult_reg && m.cache,
                   .multiplier_sign_extend = wide && mult_reg && !m.abs,
@@ -7123,6 +7126,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                .src0_immediate = true,
                .src0 = I->src[0].value,
                .src1 = I->src[1].value,
+               .src1_kill = I->src[1].discard,
                .shift = 4,
                .wait_mask = wait,
             };
@@ -8488,6 +8492,104 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A register-count ushort shift is one native `sll`. The shift
+          * operand remains uint in NIR; Apple's mixed-width witness pins
+          * source A at width 1 and source B at width 2. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFI &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             agx3_src_is_register(I->src[2]) &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16 &&
+             I->src[2].size == AGX_SIZE_32) {
+            const agx_index dest = I->dest[0], value = I->src[1];
+            const agx_index shift = I->src[2];
+            const agx_index base = I->src[0];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                !agx3_src_is_register(value) || value.memory ||
+                value.size != AGX_SIZE_16 || agx_channels(value) != 1 ||
+                !agx3_src_is_register(shift) || shift.memory ||
+                shift.size != AGX_SIZE_32 || agx_channels(shift) != 1 ||
+                value.abs || value.neg || value.kill ||
+                shift.abs || shift.neg || shift.kill ||
+                (value.cache && value.discard) ||
+                (shift.cache && shift.discard) || shift.cache)
+               AGX3_REFUSE(I);
+            const uint16_t src[2] = {value.value, shift.value};
+            const bool src_16[2] = {true, false};
+            const enum agx3_alu_hint hints[2] = {
+               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
+            };
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_sll_reg(enc, dest.value, true, dest.cache, src,
+                                  src_16, hints, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /*
+          * G17P has no single 16-bit shift-left form beyond four bits. Apple
+          * lowers ushort << {5,6,7,8} to two witnessed shift-adds: first
+          * 0 + (value << (amount - 4)), then 0 + (temporary << 4). The
+          * destination itself is the temporary, so this remains post-RA and
+          * needs no invented register. Alpha-to-coverage uses shift 7 here.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFI &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             I->src[2].type == AGX_INDEX_IMMEDIATE &&
+             I->src[2].value <= 8 && !I->src[2].memory &&
+             !I->src[2].abs && !I->src[2].neg && !I->src[2].kill &&
+             !I->src[2].cache && !I->src[2].discard) {
+            const agx_index dest = I->dest[0], value = I->src[1];
+            const agx_index base = I->src[0];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                !agx3_src_is_register(value) || value.memory ||
+                value.size != AGX_SIZE_16 || agx_channels(value) != 1 ||
+                value.abs || value.neg || value.kill || value.cache)
+               AGX3_REFUSE(I);
+
+            const bool split = I->src[2].value > 4;
+            const struct agx3_shift_add_desc first = {
+               .dest = dest.value,
+               .dest_hint = split || dest.cache,
+               .src0_immediate = true,
+               .src0 = 0,
+               .src1 = value.value,
+               .src1_kill = value.discard,
+               .shift = split ? I->src[2].value - 4 : I->src[2].value,
+               .wait_mask = wait,
+            };
+            uint8_t bytes[AGX3_WRITEOUT_MAX_LENGTH];
+            uint8_t len = 0;
+            if (!agx3_shift_add16_encode(enc, &first, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+
+            if (split) {
+               const struct agx3_shift_add_desc second = {
+                  .dest = dest.value,
+                  .dest_hint = dest.cache,
+                  .src0_immediate = true,
+                  .src0 = 0,
+                  .src1 = dest.value,
+                  .src1_kill = true,
+                  .shift = 4,
+               };
+               if (!agx3_shift_add16_encode(enc, &second, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+            }
+            continue;
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_EXTR &&
              I->nr_dests==1 && I->nr_srcs==3 && I->bfi_mask==0 &&
              I->src[2].type==AGX_INDEX_IMMEDIATE &&
@@ -8504,6 +8606,44 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_alu_extract_imm32(enc,dst.value,src,I->src[2].value,hints,
                                          dst.cache,wait,bytes,&length) ||
                 !agx3_append(emission,bytes,length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* Dynamic ushort right-shifts use the same mixed-width register
+          * domain as SLL. agx_emit_alu has already changed the ordinary NIR
+          * count into G17P's signed bitfield boundary. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFEIL &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             agx3_src_is_register(I->src[2]) &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16 &&
+             I->src[2].size == AGX_SIZE_32) {
+            const agx_index dest = I->dest[0], value = I->src[1];
+            const agx_index shift = I->src[2];
+            const agx_index base = I->src[0];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
+                !agx3_src_is_register(value) || value.memory ||
+                value.size != AGX_SIZE_16 || agx_channels(value) != 1 ||
+                shift.memory || shift.size != AGX_SIZE_32 ||
+                agx_channels(shift) != 1 || value.abs || value.neg ||
+                value.kill || shift.abs || shift.neg || shift.kill ||
+                (value.cache && value.discard) ||
+                (shift.cache && shift.discard) || shift.cache)
+               AGX3_REFUSE(I);
+            const uint16_t src[2] = {value.value, shift.value};
+            const bool src_16[2] = {true, false};
+            const enum agx3_alu_hint hints[2] = {
+               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
+            };
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_srl_reg(enc, dest.value, true, dest.cache, src,
+                                  src_16, hints, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }
