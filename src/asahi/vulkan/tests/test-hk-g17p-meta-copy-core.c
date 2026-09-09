@@ -78,6 +78,8 @@ main(void)
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
    bad.format = VK_FORMAT_R8_UNORM;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
+   bad.format = VK_FORMAT_R8G8B8A8_UINT;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
    bad.format = VK_FORMAT_R16G16B16A16_SFLOAT;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad));
    bad = vkcube;

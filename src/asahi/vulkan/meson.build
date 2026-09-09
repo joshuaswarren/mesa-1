@@ -63,6 +63,8 @@ hk_files = files(
   'hk_instance.c',
   'hk_instance.h',
   'hk_nir_lower_descriptors.c',
+  'hk_nir_lower_robust_image.c',
+  'hk_nir_lower_robust_image.h',
   'hk_nir_passthrough_gs.c',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
@@ -87,6 +89,20 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_nir_robust_image',
+    executable(
+      'hk_nir_robust_image_test',
+      files('tests/test-hk-nir-robust-image.c',
+            'hk_nir_lower_robust_image.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
   test(
     'hk_cs_root_size',
     executable(
@@ -1813,6 +1829,15 @@ if with_tests
     executable(
       'g17p-vulkan-robust-buffer2',
       files('tests/g17p_vulkan_robust_buffer2.c'),
+      include_directories : [inc_include],
+      dependencies : [cc.find_library('vulkan')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-robust-image2',
+      files('tests/g17p_vulkan_robust_image2.c'),
       include_directories : [inc_include],
       dependencies : [cc.find_library('vulkan')],
       c_args : [c_msvc_compat_args],

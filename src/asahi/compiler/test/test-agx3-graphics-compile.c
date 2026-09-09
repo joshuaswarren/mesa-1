@@ -2143,19 +2143,30 @@ build_cs_storage_image(unsigned mode)
       coord = nir_vec4(&b, nir_iand(&b, nir_channel(&b, gid, 0), width),
                        nir_channel(&b, gid, 1), zero, zero);
    }
+   if (mode == 5)
+      nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, gid, 0), 4));
    nir_def *value = nir_bindless_image_load(
       &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
       .image_array = false, .format = format, .access = ACCESS_RESTRICT);
-   nir_bindless_image_store(&b, pbe, coord, zero, value, zero,
-                            .image_dim = dim, .image_array = false,
-                            .format = format, .access = ACCESS_RESTRICT);
+   if (mode == 5) {
+      nir_store_scratch(&b, value, zero, .write_mask = 0xf, .align_mul = 16);
+      nir_pop_if(&b, NULL);
+      nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, gid, 1), 4));
+   }
+   nir_bindless_image_store(
+      &b, pbe, coord, zero,
+      mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
+      .image_dim = dim, .image_array = false, .format = format,
+      .access = ACCESS_RESTRICT);
+   if (mode == 5)
+      nir_pop_if(&b, NULL);
    return b.shader;
 }
 
 static bool
 test_storage_image_lowering(void)
 {
-   for (unsigned mode = 0; mode < 5; ++mode) {
+   for (unsigned mode = 0; mode < 6; ++mode) {
       nir_shader *nir = build_cs_storage_image(mode);
       struct agx_g17p_storage_image_binding binding = {
          .texture_offset_B = UINT32_MAX,
@@ -2180,7 +2191,7 @@ test_storage_image_lowering(void)
          }
       }
 
-      const bool ok = mode == 0 || mode == 4
+      const bool ok = mode == 0 || mode == 4 || mode == 5
          ? lowered && binding.texture_offset_B == 64 &&
               binding.pbe_offset_B == 96 &&
               bindless_handles == (mode == 4 ? 1 : 0) &&

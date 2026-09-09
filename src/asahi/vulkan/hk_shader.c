@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "hk_nir_lower_robust_image.h"
 
 #include "poly/nir/poly_nir.h"
 #include "agx_debug.h"
@@ -772,17 +773,6 @@ lower_subpass_dim(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
    return true;
 }
 
-static bool
-should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
-{
-   /* The hardware is robust, but our software image atomics are not. Unlike the
-    * GL driver, we don't use the common buffer image lowering, using the
-    * agx_nir_lower_texture lowering for robustImageAccess2 semantics.
-    */
-   return intr->intrinsic == nir_intrinsic_image_deref_atomic ||
-          intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
-}
-
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -835,7 +825,16 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
 
-   NIR_PASS(_, nir, nir_lower_robust_access, should_lower_robust, NULL);
+   /* G17P's texture/PBE accesses stay inside mapped memory, but native 2D
+    * image accesses outside the Vulkan view can alias another texel in the
+    * same image. Use the common NIR image-size predicate when the selected
+    * pipeline robustness mode requires view-bounds semantics. Older Apple
+    * generations already return the specified value in hardware. */
+   const bool lower_g17p_robust_images =
+      dev->dev.chip == AGX_CHIP_G17P &&
+      rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
+   NIR_PASS(_, nir, hk_nir_lower_robust_image_access,
+            lower_g17p_robust_images);
 
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.
@@ -852,8 +851,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool support_lod_bias =
       agx_chip_sampler_generation(dev->dev.chip) == AGX_SAMPLER_GENERATION_GEN4;
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_early_with_2d_robustness,
-            support_lod_bias, dev->dev.chip == AGX_CHIP_G17P);
+   NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);

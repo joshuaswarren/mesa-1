@@ -45,6 +45,7 @@ hk_g17p_buffer_to_image_copy_supported(
        (copy->format != VK_FORMAT_R8_UNORM &&
         copy->format != VK_FORMAT_B8G8R8A8_UNORM &&
         copy->format != VK_FORMAT_R8G8B8A8_UNORM &&
+        copy->format != VK_FORMAT_R8G8B8A8_UINT &&
         copy->format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) ||
        !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
        copy->image_type != VK_IMAGE_TYPE_2D ||
