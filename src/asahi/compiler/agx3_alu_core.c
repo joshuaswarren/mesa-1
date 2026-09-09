@@ -220,7 +220,8 @@ agx3_alu_fmul_half_minifloat_to_f32(
 
 bool
 agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       uint16_t immediate, enum agx3_alu_hint hint, uint16_t wait_mask,
+                       uint16_t immediate, bool dest_cache,
+                       enum agx3_alu_hint hint, uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
@@ -231,6 +232,7 @@ agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 
    /* Apple add_half: 09a1140180c0 (f32 register + minifloat0x20, wait6).
     * add_reuse: 09a1040380c0 keeps its half2 source for a later store.
+    * pair: 09a12c8580c0 independently retains its result and loaded source.
     * Fragment position uses the same add without a wait. f25=1 selects the
     * minifloat; f42=2 selects the GPR. The register is field35, not field18.
     */
@@ -239,9 +241,9 @@ agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    };
    struct agx3_field_kv fields[11] = {
       {2, dest}, {35, src}, {17, immediate}, {46, hint == AGX3_ALU_HINT_DISCARD},
-      {44, hint == AGX3_ALU_HINT_CACHE},
+      {44, hint == AGX3_ALU_HINT_CACHE}, {11, dest_cache},
    };
-   unsigned n = 5;
+   unsigned n = 6;
    for (unsigned slot = 0; slot < 6; ++slot)
       if (wait_mask & (1u << slot))
          fields[n++] = (struct agx3_field_kv){52 + slot, 1};

@@ -474,8 +474,12 @@ check_minifloat_bits(bool multiply, unsigned dest, unsigned src, unsigned imm,
 {
    static const unsigned wait_decode[8] = {0, 1, 2, 4, 8, 16, 32, 3};
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
-   assert((multiply ? agx3_alu_fmul_minifloat : agx3_alu_fadd_minifloat)(
-      AGX_ISA_ENCODING_AGX3B, dest, src, imm, kill, wait, bytes, &len));
+   const bool encoded = multiply
+      ? agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX3B, dest, src, imm,
+                               kill, wait, bytes, &len)
+      : agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, dest, src, imm,
+                               false, kill, wait, bytes, &len);
+   assert(encoded);
    assert(len == 6);
    uint64_t bits = 0;
    for (unsigned i = 0; i < len; ++i)
@@ -505,22 +509,36 @@ test_fadd_minifloat(void)
     * neighboring immediates, negative immediate, and positively reused input.
     */
    static const struct {
-      unsigned dest, src, imm, kill, wait;
+      unsigned dest, src, imm, dest_cache, hint, wait;
       uint8_t bytes[6];
    } witness[] = {
-      {0, 0, 0x20, 1, 0,  {0x09, 0xa1, 0x14, 0x01, 0x80, 0x00}},
-      {2, 2, 0x20, 1, 0,  {0x19, 0xa1, 0x14, 0x03, 0x80, 0x00}},
-      {0, 0, 0x20, 1, 32, {0x09, 0xa1, 0x14, 0x01, 0x80, 0xc0}},
-      {0, 0, 0x1f, 1, 32, {0x09, 0x9f, 0x14, 0x01, 0x88, 0xc0}},
-      {0, 0, 0x21, 1, 32, {0x09, 0xa1, 0x14, 0x01, 0x88, 0xc0}},
-      {0, 0, 0xa0, 1, 32, {0x09, 0xa1, 0x1c, 0x01, 0x80, 0xc0}},
-      {0, 2, 0x20, 0, 32, {0x09, 0xa1, 0x04, 0x03, 0x80, 0xc0}},
+      {0, 0, 0x20, 0, AGX3_ALU_HINT_DISCARD, 0,
+       {0x09, 0xa1, 0x14, 0x01, 0x80, 0x00}},
+      {2, 2, 0x20, 0, AGX3_ALU_HINT_DISCARD, 0,
+       {0x19, 0xa1, 0x14, 0x03, 0x80, 0x00}},
+      {0, 0, 0x20, 0, AGX3_ALU_HINT_DISCARD, 32,
+       {0x09, 0xa1, 0x14, 0x01, 0x80, 0xc0}},
+      {0, 0, 0x1f, 0, AGX3_ALU_HINT_DISCARD, 32,
+       {0x09, 0x9f, 0x14, 0x01, 0x88, 0xc0}},
+      {0, 0, 0x21, 0, AGX3_ALU_HINT_DISCARD, 32,
+       {0x09, 0xa1, 0x14, 0x01, 0x88, 0xc0}},
+      {0, 0, 0xa0, 0, AGX3_ALU_HINT_DISCARD, 32,
+       {0x09, 0xa1, 0x1c, 0x01, 0x80, 0xc0}},
+      {0, 2, 0x20, 0, AGX3_ALU_HINT_NONE, 32,
+       {0x09, 0xa1, 0x04, 0x03, 0x80, 0xc0}},
+      /* applegpu_g17p pair.fragment.bin SHA256
+       * d38342dd219c2e9b5d9ee2ffc44beb185929fdaf994ac67a64099127ab3fc428:
+       * a loaded float is retained across x - 0.5, and the result is reused.
+       * Apple keeps both lifetimes and the producer wait on this one ADD. */
+      {0, 4, 0xa0, 1, AGX3_ALU_HINT_CACHE, 32,
+       {0x09, 0xa1, 0x2c, 0x85, 0x80, 0xc0}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
    for (unsigned i = 0; i < sizeof(witness) / sizeof(witness[0]); ++i) {
       assert(agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B,
                                     witness[i].dest, witness[i].src,
-                                    witness[i].imm, witness[i].kill,
+                                    witness[i].imm, witness[i].dest_cache,
+                                    witness[i].hint,
                                     witness[i].wait, bytes, &len));
       assert(len == 6 && !memcmp(bytes, witness[i].bytes, 6));
    }
@@ -573,29 +591,30 @@ test_fadd_minifloat(void)
       memset(bytes, 0xa5, sizeof(bytes));
       len = 99;
       assert(agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 2, 0x20,
-                                    true, wait, bytes, &len) == supported);
+                                    false, AGX3_ALU_HINT_DISCARD, wait,
+                                    bytes, &len) == supported);
       if (!supported)
          assert(len == 99 && bytes[0] == 0xa5);
    }
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 0, 32, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 1, 0, 32, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 1, 32, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 256, 0, 32, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 256, 32, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 256, 0,
-                                  0, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32, 0,
-                                  64, bytes, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32, 0,
-                                  0, NULL, &len));
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32, 0,
-                                  0, bytes, NULL));
-   puts("G17P fadd minifloat: 7 Apple witnesses, register/wait/liveness bits,"
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 1, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 1, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 256, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 256, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 256,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 64, bytes, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, NULL, &len));
+   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 0, 32,
+                                  false, AGX3_ALU_HINT_NONE, 0, bytes, NULL));
+   puts("G17P fadd minifloat: 8 Apple witnesses, register/wait/liveness bits,"
         " all256 immediates, all65536 pixel centres and adjacent values PASS");
 }
 

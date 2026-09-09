@@ -1143,17 +1143,53 @@ TEST_F(AGX3PackBinary, FaddMinifloatPreservesWaitLivenessAndCommutativity)
       std::vector<uint8_t> want;
       ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_fadd_minifloat(enc, 4, 0, 0x20, AGX3_ALU_HINT_NONE, 1,
-                                         bytes, &len));
+      ASSERT_TRUE(agx3_alu_fadd_minifloat(enc, 4, 0, 0x20, false,
+                                         AGX3_ALU_HINT_NONE, 1, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_fadd_minifloat(enc, 6, 0, 0x21, AGX3_ALU_HINT_DISCARD, 0,
-                                         bytes, &len));
+      ASSERT_TRUE(agx3_alu_fadd_minifloat(enc, 6, 0, 0x21, false,
+                                         AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
       append(want, bytes, len);
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(enc, &end));
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
    }
+}
+
+TEST_F(AGX3PackBinary, FaddMinifloatRetiresExcessWaitAndKeepsBothCaches)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+
+   /* Advance the round-robin timeline so the retained destination is an
+    * outstanding slot-4 result and the retained source is on slot 5.  The
+    * ADD therefore needs both a WAW wait and its source producer wait, the
+    * exact 0x18 shape reached by vkQuake's sky_cube fragment after RA. */
+   for (unsigned r : {20u, 22u, 24u, 14u, 2u})
+      agx_get_sr_to(b, agx_register(r, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_X);
+
+   agx_index dest = agx_register(14, AGX_SIZE_32);
+   agx_index source = agx_register(2, AGX_SIZE_32);
+   dest.cache = source.cache = true;
+   agx_fadd_to(b, dest, source, agx_immediate(0xa0));
+   agx_stop(b);
+
+   const auto code = pack(b);
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> expected;
+   /* Slot 5 is retired first by the byte-grounded x&x identity. Slot 4 stays
+    * fused on the ADD, which preserves both source and destination CACHE. */
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                1u << 4, bytes, &len));
+   append(expected, bytes, len);
+   ASSERT_TRUE(agx3_alu_fadd_minifloat(
+      enc, 14, 2, 0xa0, true, AGX3_ALU_HINT_CACHE, 1u << 3, bytes, &len));
+   append(expected, bytes, len);
+
+   EXPECT_NE(std::search(code.begin(), code.end(), expected.begin(),
+                         expected.end()),
+             code.end());
 }
 
 TEST_F(AGX3PackBinary, FaddTwoMinifloatsFoldsToLdimm)

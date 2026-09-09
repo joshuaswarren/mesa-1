@@ -245,12 +245,13 @@ bool agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      uint8_t *len);
 
 /* Native G17P f32 GPR + 8-bit minifloat, normal rounding, no modifiers.
+ * Destination retention and the GPR's cache/discard state are independent.
  * The six-byte form carries no wait, one of six waits, or slots1+2 together.
  * Other wait combinations, operand files/widths and AGX3c are not admitted.
  */
 bool agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest,
-                            uint16_t src, uint16_t immediate, enum agx3_alu_hint hint,
-                            uint16_t wait_mask,
+                            uint16_t src, uint16_t immediate, bool dest_cache,
+                            enum agx3_alu_hint hint, uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Same f32/minifloat inputs with GPR negation and/or output saturation.

@@ -8332,9 +8332,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   I->dest[0].cache, reg.neg, I->saturate,
                   agx3_post_ra_hint(reg), wait, bytes, &len);
             } else {
+               uint16_t encoded_wait = wait;
+               /* The compact minifloat ADD carries one arbitrary wait or
+                * the native slots1+2 pair.  A real sky shader reaches this
+                * operation with one source dependency and an independent
+                * write-after-write dependency on its retained destination.
+                * Retire only the excess generations through the grounded
+                * identity prelude and keep one wait fused on the ADD. */
+               if (encoded_wait != 3 &&
+                   (encoded_wait & (encoded_wait - 1))) {
+                  const uint16_t fused_wait = encoded_wait & -encoded_wait;
+                  if (!agx3_retire_slots_noop(
+                         emission, enc, encoded_wait & ~fused_wait))
+                     AGX3_REFUSE(I);
+                  encoded_wait = fused_wait;
+               }
                encoded = agx3_alu_fadd_minifloat(
                   enc, I->dest[0].value, reg.value, imm.value,
-                  agx3_post_ra_hint(reg), wait, bytes, &len);
+                  I->dest[0].cache, agx3_post_ra_hint(reg), encoded_wait,
+                  bytes, &len);
             }
             if (!encoded || !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
