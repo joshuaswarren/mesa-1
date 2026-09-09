@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "g17p_vulkan_transform_feedback_vert.h"
+#include "g17p_wsi_triangle_vert.h"
 #include "g17p_wsi_triangle_frag.h"
 
 #define T8140_DEVICE_ID 0x8140
@@ -82,6 +83,7 @@ VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdBindTransformFeedbackBuffersEXT);
 VK_FN(vkCmdBeginTransformFeedbackEXT);
 VK_FN(vkCmdEndTransformFeedbackEXT);
+VK_FN(vkCmdDrawIndirectByteCountEXT);
 VK_FN(vkCmdDraw);
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCreateFence);
@@ -368,7 +370,8 @@ main(int argc, char **argv)
    vkGetPhysicalDeviceProperties2(physical, &properties2);
    if (xfb_properties.maxTransformFeedbackBuffers < 1 ||
        xfb_properties.maxTransformFeedbackBufferSize < XFB_BYTES ||
-       xfb_properties.maxTransformFeedbackBufferDataStride < XFB_STRIDE)
+       xfb_properties.maxTransformFeedbackBufferDataStride < XFB_STRIDE ||
+       !xfb_properties.transformFeedbackDraw)
       die("transform-feedback properties cannot represent the oracle");
 
    const float priority = 1.0f;
@@ -413,6 +416,7 @@ main(int argc, char **argv)
    LOAD(vkCmdBindPipeline); LOAD(vkCmdBindVertexBuffers);
    LOAD(vkCmdBindTransformFeedbackBuffersEXT);
    LOAD(vkCmdBeginTransformFeedbackEXT); LOAD(vkCmdEndTransformFeedbackEXT);
+   LOAD(vkCmdDrawIndirectByteCountEXT);
    LOAD(vkCmdDraw); LOAD(vkCmdPipelineBarrier); LOAD(vkCreateFence);
    LOAD(vkDestroyFence); LOAD(vkQueueSubmit); LOAD(vkWaitForFences);
 #undef LOAD
@@ -542,6 +546,15 @@ main(int argc, char **argv)
    check(vkCreateShaderModule(device, &fragment_module_info, NULL,
                               &fragment_module),
          "vkCreateShaderModule(fragment)");
+   const VkShaderModuleCreateInfo draw_vertex_module_info = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(g17p_wsi_triangle_vert_spv),
+      .pCode = g17p_wsi_triangle_vert_spv,
+   };
+   VkShaderModule draw_vertex_module;
+   check(vkCreateShaderModule(device, &draw_vertex_module_info, NULL,
+                              &draw_vertex_module),
+         "vkCreateShaderModule(draw vertex)");
 
    const VkPipelineShaderStageCreateInfo stages[2] = {
       {
@@ -609,6 +622,29 @@ main(int argc, char **argv)
                                    NULL, &pipeline),
          "vkCreateGraphicsPipelines");
 
+   /* Consume the XFB counter with a plain rasterizer-discard pipeline. The
+    * source stream remains the transform-feedback pipeline above; using a
+    * separate consumer is the normal draw-auto shape and keeps this oracle
+    * focused on byte-count conversion rather than indirect geometry lowering.
+    */
+   const VkPipelineShaderStageCreateInfo draw_stage = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_VERTEX_BIT,
+      .module = draw_vertex_module,
+      .pName = "main",
+   };
+   const VkPipelineVertexInputStateCreateInfo draw_vertex_input = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+   };
+   VkGraphicsPipelineCreateInfo draw_pipeline_info = pipeline_info;
+   draw_pipeline_info.stageCount = 1;
+   draw_pipeline_info.pStages = &draw_stage;
+   draw_pipeline_info.pVertexInputState = &draw_vertex_input;
+   VkPipeline draw_pipeline;
+   check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                   &draw_pipeline_info, NULL, &draw_pipeline),
+         "vkCreateGraphicsPipelines(draw byte count)");
+
    const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .queueFamilyIndex = queue_family,
@@ -655,6 +691,30 @@ main(int argc, char **argv)
    vkCmdEndTransformFeedbackEXT(command, 0, 1, &counter.buffer,
                                 &counter_offset);
    vkCmdEndRenderPass(command);
+
+   const VkBufferMemoryBarrier counter_barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT,
+      .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer = counter.buffer,
+      .offset = counter_offset,
+      .size = sizeof(uint32_t),
+   };
+   vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT,
+                        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 0, NULL, 1,
+                        &counter_barrier, 0, NULL);
+
+   /* The final counter is six XFB records. Subtract the first round's bytes,
+    * then divide by the nontrivial XFB stride: the generated draw must contain
+    * exactly three vertices without reading the counter on the CPU. */
+   vkCmdBeginRenderPass(command, &begin_render, VK_SUBPASS_CONTENTS_INLINE);
+   vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw_pipeline);
+   vkCmdDrawIndirectByteCountEXT(command, 1, 0, counter.buffer,
+                                 counter_offset, VERTICES * XFB_STRIDE,
+                                 XFB_STRIDE);
+   vkCmdEndRenderPass(command);
    const VkMemoryBarrier host_barrier = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
       .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
@@ -689,8 +749,10 @@ main(int argc, char **argv)
    }
 
    vkDestroyCommandPool(device, pool, NULL);
+   vkDestroyPipeline(device, draw_pipeline, NULL);
    vkDestroyPipeline(device, pipeline, NULL);
    vkDestroyShaderModule(device, fragment_module, NULL);
+   vkDestroyShaderModule(device, draw_vertex_module, NULL);
    vkDestroyShaderModule(device, vertex_module, NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
    vkDestroyFramebuffer(device, framebuffer, NULL);

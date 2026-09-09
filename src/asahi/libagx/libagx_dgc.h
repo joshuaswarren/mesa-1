@@ -65,6 +65,19 @@ agx_workgroup_threads(struct agx_workgroup wg)
    return wg.x * wg.y * wg.z;
 }
 
+/* VK_EXT_transform_feedback converts the byte counter written by streamout
+ * into a non-indexed indirect draw count.  Keep the arithmetic shared by the
+ * GPU helper and host oracle, including the saturating subtraction required
+ * when counterOffset is larger than the captured byte count. */
+static inline uint32_t
+agx_xfb_vertex_count(uint32_t byte_count, uint32_t counter_offset,
+                     uint32_t vertex_stride)
+{
+   return vertex_stride && byte_count > counter_offset
+             ? (byte_count - counter_offset) / vertex_stride
+             : 0;
+}
+
 struct agx_grid {
    enum agx_cdm_mode mode;
    union {

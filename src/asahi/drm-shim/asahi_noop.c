@@ -554,21 +554,26 @@ check_xfb_coverage(void)
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_XFB"))
       return;
 
-   /* The public oracle records two triangle-list draws. XFB lowers each to a
-    * synthetic indexed geometry draw and brackets it with five libagx counter
-    * launches. This catches a silently dropped passthrough GS, a duplicate
-    * restart state, or counter-copy work that never reaches the UAPI. */
-   if (matrix_stats.draws != 2 || matrix_stats.indexed_draws != 2 ||
-       matrix_stats.state_updates != 2 || !matrix_stats.restart_enabled ||
-       !matrix_stats.rasterizer_discard || compute_stats.launches != 10 ||
-       compute_stats.barriers != 10 || !compute_stats.terminated) {
+   /* The public oracle records two XFB triangle-list draws, then consumes the
+    * final byte counter through vkCmdDrawIndirectByteCountEXT. XFB lowers each
+    * producer to a synthetic indexed geometry draw and brackets it with five
+    * libagx counter launches; the consumer adds one GPU-side patch launch and
+    * one native non-indexed indirect draw. This catches a CPU-readback path,
+    * silently dropped passthrough GS, duplicate restart state, or counter work
+    * that never reaches the UAPI. */
+   if (matrix_stats.draws != 3 || matrix_stats.indexed_draws != 2 ||
+       matrix_stats.state_updates != 3 || !matrix_stats.restart_enabled ||
+       !matrix_stats.rasterizer_discard || !matrix_stats.indirect_nonindexed ||
+       compute_stats.launches != 11 || compute_stats.barriers != 11 ||
+       !compute_stats.terminated) {
       fprintf(stderr,
               "shim: incomplete G17P XFB coverage: draws=%u indexed=%u "
-              "state=%u restart-on=%u discard=%u launches=%u barriers=%u "
-              "terminated=%u\n",
+              "state=%u restart-on=%u discard=%u indirect=%u launches=%u "
+              "barriers=%u terminated=%u\n",
               matrix_stats.draws, matrix_stats.indexed_draws,
               matrix_stats.state_updates, matrix_stats.restart_enabled,
-              matrix_stats.rasterizer_discard, compute_stats.launches,
+              matrix_stats.rasterizer_discard,
+              matrix_stats.indirect_nonindexed, compute_stats.launches,
               compute_stats.barriers, compute_stats.terminated);
       _Exit(EXIT_FAILURE);
    }

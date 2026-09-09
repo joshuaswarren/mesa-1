@@ -949,6 +949,23 @@ test_agx3_cdm_stream_terminate(void)
    CHECK_EQ(agx3_cdm_stream_terminate_pack(AGX_CHIP_G17S, NULL), false);
 }
 
+static void
+test_xfb_vertex_count(void)
+{
+   CHECK_EQ(agx_xfb_vertex_count(0, 0, 32), 0);
+   CHECK_EQ(agx_xfb_vertex_count(31, 0, 32), 0);
+   CHECK_EQ(agx_xfb_vertex_count(32, 0, 32), 1);
+   CHECK_EQ(agx_xfb_vertex_count(95, 0, 32), 2);
+   CHECK_EQ(agx_xfb_vertex_count(96, 0, 32), 3);
+   CHECK_EQ(agx_xfb_vertex_count(96, 32, 32), 2);
+   CHECK_EQ(agx_xfb_vertex_count(32, 32, 32), 0);
+   CHECK_EQ(agx_xfb_vertex_count(16, 32, 32), 0);
+   CHECK_EQ(agx_xfb_vertex_count(UINT32_MAX, UINT32_MAX - 15, 16), 0);
+   CHECK_EQ(agx_xfb_vertex_count(UINT32_MAX, UINT32_MAX - 16, 16), 1);
+   CHECK_EQ(agx_xfb_vertex_count(UINT32_MAX, 0, 1), UINT32_MAX);
+   CHECK_EQ(agx_xfb_vertex_count(UINT32_MAX, 0, 0), 0);
+}
+
 int
 main(void)
 {
@@ -971,6 +988,7 @@ main(void)
    test_agx3_cdm_substream_barrier();
    test_agx3_cdm_secondary_barrier();
    test_agx3_cdm_stream_terminate();
+   test_xfb_vertex_count();
 
    printf("agx3 packing: all %u checks passed\n", checks);
    return 0;

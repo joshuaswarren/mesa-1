@@ -1204,7 +1204,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .transformFeedbackQueries = true,
       .transformFeedbackStreamsLinesTriangles = true,
       .transformFeedbackRasterizationStreamSelect = true,
-      .transformFeedbackDraw = false,
+      .transformFeedbackDraw = true,
 
       /* VK_KHR_vertex_attribute_divisor */
       .maxVertexAttribDivisor = UINT32_MAX,

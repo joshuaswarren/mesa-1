@@ -60,6 +60,18 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
+  g17p_xfb_draw_env.set('ASAHI_SHIM_G17P_EXPECT_XFB', '1')
+  test(
+    'hk_g17p_transform_feedback_draw_byte_count',
+    g17p_transform_feedback,
+    args : ['--submit-only'],
+    env : g17p_xfb_draw_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-transform-feedback'],
+    timeout : 30,
+  )
+
   g17p_queue_progress_init_failure_env = environment(
     g17p_queue_progress_environment)
   g17p_queue_progress_init_failure_env.set(

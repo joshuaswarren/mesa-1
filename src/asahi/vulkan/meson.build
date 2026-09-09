@@ -1868,7 +1868,7 @@ if with_tests
     # Offline proof that transform feedback records on G17P through the native
     # geometry path and G17P-compiled libagx counter-copy kernel.  --execute is
     # the hardware mode with exact buffer, counter, and guard checks.
-    executable(
+    g17p_transform_feedback = executable(
       'g17p-vulkan-transform-feedback',
       files('tests/g17p_vulkan_transform_feedback.c'),
       include_directories : [inc_include],

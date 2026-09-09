@@ -30,6 +30,26 @@ libagx_predicate_indirect(global uint32_t *out, constant uint32_t *in,
    }
 }
 
+/* VK_EXT_transform_feedback exposes the byte count written by streamout as a
+ * draw source.  Generate the complete VkDrawIndirectCommand on the GPU so a
+ * producer earlier in this command buffer never needs CPU readback. */
+KERNEL(1)
+libagx_draw_indirect_byte_count(global VkDrawIndirectCommand *out,
+                                constant uint32_t *byte_count,
+                                uint32_t counter_offset,
+                                uint32_t vertex_stride,
+                                uint32_t instance_count,
+                                uint32_t first_instance)
+{
+   *out = (VkDrawIndirectCommand){
+      .vertexCount =
+         agx_xfb_vertex_count(*byte_count, counter_offset, vertex_stride),
+      .instanceCount = instance_count,
+      .firstVertex = 0,
+      .firstInstance = first_instance,
+   };
+}
+
 /*
  * VK_EXT_conditional_rendering predicates both graphics and compute commands
  * with one 32-bit value.  Honeykrisp lowers each affected command to an
