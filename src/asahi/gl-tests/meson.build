@@ -125,7 +125,10 @@ test(
     libgallium_dri,
     gl_msaa,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_MSAA_DRAWS=12',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 

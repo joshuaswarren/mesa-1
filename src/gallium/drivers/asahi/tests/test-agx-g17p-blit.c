@@ -422,6 +422,89 @@ check_stencil_blit_shapes(void)
    return true;
 }
 
+static bool
+check_staged_resolve_shapes(void)
+{
+   struct pipe_resource src = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .width0 = 8,
+      .height0 = 8,
+      .depth0 = 1,
+      .array_size = 1,
+      .nr_samples = 2,
+      .nr_storage_samples = 2,
+   };
+   struct pipe_resource dst = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .width0 = 8,
+      .height0 = 8,
+      .depth0 = 1,
+      .array_size = 1,
+      .nr_samples = 1,
+      .nr_storage_samples = 1,
+   };
+   struct pipe_blit_info info = {
+      .src = {
+         .resource = &src,
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+         .box = {.width = 4, .height = 4, .depth = 1},
+      },
+      .dst = {
+         .resource = &dst,
+         .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+         .box = {.width = 4, .height = 4, .depth = 1},
+      },
+      .mask = PIPE_MASK_RGBA,
+      .filter = PIPE_TEX_FILTER_NEAREST,
+   };
+
+   if (!agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "partial 2x resolve staging shape was rejected\n");
+      return false;
+   }
+   src.nr_samples = src.nr_storage_samples = 4;
+   if (!agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "partial 4x resolve staging shape was rejected\n");
+      return false;
+   }
+
+   info.sample0_only = true;
+   if (agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "sample-zero copy was accepted as an average resolve\n");
+      return false;
+   }
+   info.sample0_only = false;
+   src.target = PIPE_TEXTURE_2D_ARRAY;
+   src.array_size = 2;
+   if (agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "array resolve was accepted by 2D staging\n");
+      return false;
+   }
+   src.target = PIPE_TEXTURE_2D;
+   src.array_size = 1;
+   src.format = info.src.format = PIPE_FORMAT_R8G8B8A8_SRGB;
+   if (agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "sRGB resolve was accepted before linear averaging\n");
+      return false;
+   }
+   src.format = info.src.format = PIPE_FORMAT_R8G8B8A8_UNORM;
+   dst.nr_samples = dst.nr_storage_samples = 2;
+   if (agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "multisample destination was accepted as resolved\n");
+      return false;
+   }
+   dst.nr_samples = dst.nr_storage_samples = 1;
+   info.mask = PIPE_MASK_Z;
+   if (agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "depth resolve was accepted by colour staging\n");
+      return false;
+   }
+
+   return true;
+}
+
 int
 main(void)
 {
@@ -464,6 +547,9 @@ main(void)
       return 1;
 
    if (!check_stencil_blit_shapes())
+      return 1;
+
+   if (!check_staged_resolve_shapes())
       return 1;
 
    if (!check_es3_compile_contract(pctx))

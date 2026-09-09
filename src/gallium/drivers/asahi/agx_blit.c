@@ -599,6 +599,72 @@ agx_g17p_attach_direct_resolve(struct agx_context *ctx,
 }
 
 bool
+agx_g17p_staged_resolve_blit_shape(const struct pipe_blit_info *info)
+{
+   if (!info || !info->src.resource || !info->dst.resource)
+      return false;
+
+   const struct pipe_resource *src = info->src.resource;
+   const struct pipe_resource *dst = info->dst.resource;
+   return (util_res_sample_count(src) == 2 ||
+           util_res_sample_count(src) == 4) &&
+          util_res_sample_count(dst) == 1 &&
+          (src->target == PIPE_TEXTURE_2D ||
+           src->target == PIPE_TEXTURE_RECT) &&
+          src->last_level == 0 && src->array_size == 1 && src->depth0 == 1 &&
+          (src->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+           src->format == PIPE_FORMAT_B8G8R8A8_UNORM) &&
+          info->src.level == 0 && info->src.box.z == 0 &&
+          info->src.box.depth == 1 && info->src.format == src->format &&
+          !(info->mask & ~PIPE_MASK_RGBA) && (info->mask & PIPE_MASK_RGBA) &&
+          !info->sample0_only;
+}
+
+/* A partial or converting resolve cannot write its final destination directly
+ * at EOT, while storing the multisample image for a later shader pass has no
+ * grounded G17P PBE encoding. Resolve the complete live tile into a temporary
+ * single-sample image first; the ordinary render blitter can then apply the
+ * caller's rectangle, mask, scale, swizzle, and destination format exactly. */
+static bool
+agx_g17p_staged_resolve_blit(struct agx_context *ctx,
+                             const struct pipe_blit_info *info)
+{
+   struct pipe_resource *src = info->src.resource;
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = src->format,
+      .width0 = src->width0,
+      .height0 = src->height0,
+      .depth0 = 1,
+      .array_size = 1,
+      .last_level = 0,
+      .nr_samples = 1,
+      .nr_storage_samples = 1,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW,
+   };
+   struct pipe_resource *resolved =
+      ctx->base.screen->resource_create(ctx->base.screen, &templ);
+   if (!resolved)
+      return false;
+
+   if (!agx_g17p_attach_direct_resolve(ctx, src, resolved)) {
+      pipe_resource_reference(&resolved, NULL);
+      return false;
+   }
+
+   struct pipe_blit_info staged = *info;
+   staged.src.resource = resolved;
+   staged.src.level = 0;
+   staged.src.format = src->format;
+   staged.src.box.z = 0;
+   staged.src.box.depth = 1;
+   agx_blit(&ctx->base, &staged);
+   pipe_resource_reference(&resolved, NULL);
+   return true;
+}
+
+bool
 agx_g17p_stencil_plane_blit_shape(const struct pipe_blit_info *info)
 {
    if (!info || !info->src.resource || !info->dst.resource ||
@@ -684,6 +750,11 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
        agx_g17p_direct_resolve_blit_shape(info, true) &&
        agx_g17p_attach_direct_resolve(ctx, info->src.resource,
                                       info->dst.resource))
+      return;
+
+   if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
+       agx_g17p_staged_resolve_blit_shape(info) &&
+       agx_g17p_staged_resolve_blit(ctx, info))
       return;
 
    if (asahi_compute_blit_supported(agx_device(ctx->base.screen)->chip,

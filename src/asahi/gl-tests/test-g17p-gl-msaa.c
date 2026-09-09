@@ -104,7 +104,8 @@ draw_masked(GLuint program, unsigned samples, bool clear)
  * WSI. The software control additionally proves the exact averaged colour.
  */
 static bool
-run_offscreen_sample_count(GLuint program, unsigned samples, bool noop)
+run_offscreen_sample_count(GLuint program, unsigned samples, bool partial,
+                           bool noop)
 {
    GLuint source, target, source_fb, target_fb;
    glGenRenderbuffers(1, &source);
@@ -116,6 +117,18 @@ run_offscreen_sample_count(GLuint program, unsigned samples, bool noop)
    glBindTexture(GL_TEXTURE_2D, target);
    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, WIDTH, HEIGHT);
 
+   glGenFramebuffers(1, &target_fb);
+   glBindFramebuffer(GL_FRAMEBUFFER, target_fb);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                          GL_TEXTURE_2D, target, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      return false;
+   if (partial) {
+      glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glFinish();
+   }
+
    glGenFramebuffers(1, &source_fb);
    glBindFramebuffer(GL_FRAMEBUFFER, source_fb);
    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -124,22 +137,17 @@ run_offscreen_sample_count(GLuint program, unsigned samples, bool noop)
       return false;
    draw_masked(program, samples, true);
 
-   glGenFramebuffers(1, &target_fb);
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target_fb);
-   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                          GL_TEXTURE_2D, target, 0);
-   if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
-       GL_FRAMEBUFFER_COMPLETE)
-      return false;
    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fb);
-   glBlitFramebuffer(0, 0, WIDTH, HEIGHT, 0, 0, WIDTH, HEIGHT,
+   const unsigned extent = partial ? WIDTH / 2 : WIDTH;
+   glBlitFramebuffer(0, 0, extent, extent, 0, 0, extent, extent,
                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
    glBindFramebuffer(GL_READ_FRAMEBUFFER, target_fb);
    glFinish();
 
    uint8_t pixel[4] = {0};
-   glReadPixels(WIDTH / 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
-                pixel);
+   const unsigned observed = partial ? 1 : WIDTH / 2;
+   glReadPixels(observed, observed, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
    const uint8_t expected2[4] = {128, 64, 32, 128};
    const uint8_t expected4[4] = {64, 32, 16, 64};
    const uint8_t *expected = samples == 2 ? expected2 : expected4;
@@ -149,6 +157,19 @@ run_offscreen_sample_count(GLuint program, unsigned samples, bool noop)
               "%ux MSAA pixel {%u,%u,%u,%u}, expected {%u,%u,%u,%u}\n",
               samples, pixel[0], pixel[1], pixel[2], pixel[3], expected[0],
               expected[1], expected[2], expected[3]);
+
+   uint8_t preserved[4] = {0};
+   if (partial) {
+      glReadPixels(WIDTH - 1, HEIGHT - 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                   preserved);
+      static const uint8_t blue[4] = {0, 0, 255, 255};
+      if (!noop && memcmp(preserved, blue, sizeof(blue))) {
+         fprintf(stderr, "%ux partial MSAA overwrote {%u,%u,%u,%u}\n",
+                 samples, preserved[0], preserved[1], preserved[2],
+                 preserved[3]);
+         return false;
+      }
+   }
 
    glDeleteFramebuffers(1, &target_fb);
    glDeleteFramebuffers(1, &source_fb);
@@ -235,7 +256,8 @@ run_shim_sample_count(EGLDisplay display, struct gbm_device *device,
          gbm_surface_release_buffer(gbm, front);
    }
    if (ok)
-      ok = run_offscreen_sample_count(program, samples, true);
+      ok = run_offscreen_sample_count(program, samples, false, true) &&
+           run_offscreen_sample_count(program, samples, true, true);
 
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
@@ -273,8 +295,11 @@ run_offscreen(EGLDisplay display, bool noop)
    GLuint vao, program = make_program();
    glGenVertexArrays(1, &vao);
    glBindVertexArray(vao);
-   const bool exact = program && run_offscreen_sample_count(program, 2, noop) &&
-                      run_offscreen_sample_count(program, 4, noop);
+   const bool exact =
+      program && run_offscreen_sample_count(program, 2, false, noop) &&
+      run_offscreen_sample_count(program, 4, false, noop) &&
+      run_offscreen_sample_count(program, 2, true, noop) &&
+      run_offscreen_sample_count(program, 4, true, noop);
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -320,7 +345,7 @@ main(void)
    if (!exact)
       return EXIT_FAILURE;
    printf("g17p-gl-msaa: PASS — 2x/4x %s\n",
-          noop ? "GBM and offscreen resolves submitted"
+          noop ? "GBM, full, and partial offscreen resolves submitted"
                : "resolve pixels exact");
    return EXIT_SUCCESS;
 }
