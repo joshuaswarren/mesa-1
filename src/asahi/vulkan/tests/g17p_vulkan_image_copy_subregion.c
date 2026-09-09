@@ -40,6 +40,8 @@
 #define TEST_NAME "g17p-vulkan-blit-image-nearest-flip"
 #elif G17P_BLIT_IMAGE == 2
 #define TEST_NAME "g17p-vulkan-blit-image-linear-flip"
+#elif G17P_BLIT_IMAGE == 3
+#define TEST_NAME "g17p-vulkan-blit-cube-layers-mip"
 #elif G17P_RESOLVE_IMAGE
 #define TEST_NAME "g17p-vulkan-resolve-image4"
 #elif G17P_COPY_IMAGE_3D
@@ -49,11 +51,37 @@
 #endif
 #define T8140_DEVICE_ID 0x8140
 #define WIDTH 32u
+#if G17P_BLIT_IMAGE == 3
+#define HEIGHT 32u
+#define IMAGE_BASE_WIDTH 64u
+#define IMAGE_BASE_HEIGHT 64u
+#define IMAGE_DEPTH 1u
+#define IMAGE_LAYERS 12u
+#define IMAGE_MIP_LEVELS 2u
+#define OUTPUT_SLICES 6u
+#define TEST_LAYER_COUNT OUTPUT_SLICES
+#define SOURCE_BASE_LAYER 6u
+#define DESTINATION_BASE_LAYER 0u
+#define SOURCE_MIP_LEVEL 0u
+#define DESTINATION_MIP_LEVEL 1u
+#else
 #define HEIGHT 24u
+#define IMAGE_BASE_WIDTH WIDTH
+#define IMAGE_BASE_HEIGHT HEIGHT
 #if G17P_COPY_IMAGE_3D
 #define IMAGE_DEPTH 5u
+#define OUTPUT_SLICES IMAGE_DEPTH
 #else
 #define IMAGE_DEPTH 1u
+#define OUTPUT_SLICES 1u
+#endif
+#define TEST_LAYER_COUNT 1u
+#define IMAGE_LAYERS 1u
+#define IMAGE_MIP_LEVELS 1u
+#define SOURCE_BASE_LAYER 0u
+#define DESTINATION_BASE_LAYER 0u
+#define SOURCE_MIP_LEVEL 0u
+#define DESTINATION_MIP_LEVEL 0u
 #endif
 #define ROW_LENGTH 40u
 #define GUARD_BYTES 64u
@@ -66,9 +94,9 @@
 #define IMAGE_ASPECT VK_IMAGE_ASPECT_COLOR_BIT
 #define PIXEL_BYTES 4u
 #endif
-#define IMAGE_BYTES (WIDTH * HEIGHT * IMAGE_DEPTH * PIXEL_BYTES)
-#define UPLOAD_BYTES                                                        \
-   (GUARD_BYTES + ROW_LENGTH * HEIGHT * IMAGE_DEPTH * PIXEL_BYTES +        \
+#define IMAGE_BYTES (WIDTH * HEIGHT * OUTPUT_SLICES * PIXEL_BYTES)
+#define UPLOAD_BYTES                                                          \
+   (GUARD_BYTES + ROW_LENGTH * HEIGHT * OUTPUT_SLICES * PIXEL_BYTES +        \
     GUARD_BYTES)
 #define DESTINATION_UPLOAD_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 #define READBACK_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
@@ -216,12 +244,13 @@ create_image(VkDevice device,
 {
    const VkImageCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .flags = G17P_BLIT_IMAGE == 3 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
       .imageType = G17P_COPY_IMAGE_3D ? VK_IMAGE_TYPE_3D
                                       : VK_IMAGE_TYPE_2D,
       .format = IMAGE_FORMAT,
-      .extent = {WIDTH, HEIGHT, IMAGE_DEPTH},
-      .mipLevels = 1,
-      .arrayLayers = 1,
+      .extent = {IMAGE_BASE_WIDTH, IMAGE_BASE_HEIGHT, IMAGE_DEPTH},
+      .mipLevels = IMAGE_MIP_LEVELS,
+      .arrayLayers = IMAGE_LAYERS,
       .samples = samples,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
@@ -296,7 +325,7 @@ verify(const struct mapped_buffer *upload,
    }
 
    const uint8_t *pixels = readback->map + GUARD_BYTES;
-   for (uint32_t z = 0; z < IMAGE_DEPTH; ++z) {
+   for (uint32_t z = 0; z < OUTPUT_SLICES; ++z) {
       for (uint32_t y = 0; y < HEIGHT; ++y) {
          for (uint32_t x = 0; x < WIDTH; ++x) {
             uint8_t expected[4] = {0};
@@ -315,7 +344,9 @@ verify(const struct mapped_buffer *upload,
                      expected[2] = 255;
                   }
                } else if (!copy_3d && blit_image) {
-                  source_pixel(23 - (x - 11), 18 - (y - 4), 0, expected);
+                  source_pixel(23 - (x - 11), 18 - (y - 4),
+                               G17P_BLIT_IMAGE == 3 ? SOURCE_BASE_LAYER + z : 0,
+                               expected);
                } else if (!copy_3d) {
                   source_pixel(5 + x - 11, 3 + y - 4, 0, expected);
                }
@@ -352,6 +383,7 @@ main(int argc, char **argv)
 #endif
    const bool blit_image = G17P_BLIT_IMAGE != 0 || G17P_STENCIL_BLIT;
    const bool linear_blit = G17P_BLIT_IMAGE == 2;
+   const bool layered_mip_blit = G17P_BLIT_IMAGE == 3;
    const bool resolve_image = G17P_RESOLVE_IMAGE != 0;
    const bool copy_3d = G17P_COPY_IMAGE_3D != 0;
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
@@ -457,6 +489,22 @@ main(int argc, char **argv)
           image_properties.maxExtent.depth < IMAGE_DEPTH)
          die("RGBA8 optimal transfer images do not advertise the test volume");
    }
+   if (layered_mip_blit) {
+      VkImageFormatProperties image_properties;
+      check(vkGetPhysicalDeviceImageFormatProperties(
+               physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+               VK_IMAGE_TILING_OPTIMAL,
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                  VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+               VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, &image_properties),
+            "vkGetPhysicalDeviceImageFormatProperties(cube mip blit)");
+      if (image_properties.maxExtent.width < IMAGE_BASE_WIDTH ||
+          image_properties.maxExtent.height < IMAGE_BASE_HEIGHT ||
+          image_properties.maxMipLevels < IMAGE_MIP_LEVELS ||
+          image_properties.maxArrayLayers < IMAGE_LAYERS)
+         die("RGBA8 cube-compatible transfer images do not advertise the "
+             "test geometry");
+   }
 
    uint32_t family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, NULL);
@@ -541,11 +589,11 @@ main(int argc, char **argv)
       VK_BUFFER_USAGE_TRANSFER_DST_BIT);
    uint8_t upload_expected[UPLOAD_BYTES];
    memset(upload_expected, 0xa5, sizeof(upload_expected));
-   for (uint32_t z = 0; z < IMAGE_DEPTH; ++z) {
+   for (uint32_t z = 0; z < OUTPUT_SLICES; ++z) {
       for (uint32_t y = 0; y < HEIGHT; ++y) {
          for (uint32_t x = 0; x < WIDTH; ++x) {
             source_pixel(
-               x, y, z,
+               x, y, layered_mip_blit ? SOURCE_BASE_LAYER + z : z,
                upload_expected + GUARD_BYTES +
                   ((z * HEIGHT + y) * ROW_LENGTH + x) * PIXEL_BYTES);
          }
@@ -591,6 +639,20 @@ main(int argc, char **argv)
    };
    check(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer");
 
+   const VkImageSubresourceRange source_range = {
+      .aspectMask = IMAGE_ASPECT,
+      .baseMipLevel = SOURCE_MIP_LEVEL,
+      .levelCount = 1,
+      .baseArrayLayer = SOURCE_BASE_LAYER,
+      .layerCount = TEST_LAYER_COUNT,
+   };
+   const VkImageSubresourceRange destination_range = {
+      .aspectMask = IMAGE_ASPECT,
+      .baseMipLevel = DESTINATION_MIP_LEVEL,
+      .levelCount = 1,
+      .baseArrayLayer = DESTINATION_BASE_LAYER,
+      .layerCount = TEST_LAYER_COUNT,
+   };
    VkImageMemoryBarrier initial[2];
    memset(initial, 0, sizeof(initial));
    for (uint32_t i = 0; i < 2; ++i) {
@@ -602,11 +664,7 @@ main(int argc, char **argv)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = i ? destination.image : source.image,
-         .subresourceRange = {
-            .aspectMask = IMAGE_ASPECT,
-            .levelCount = 1,
-            .layerCount = 1,
-         },
+         .subresourceRange = i ? destination_range : source_range,
       };
    }
    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -619,7 +677,9 @@ main(int argc, char **argv)
       .bufferImageHeight = HEIGHT,
       .imageSubresource = {
          .aspectMask = IMAGE_ASPECT,
-         .layerCount = 1,
+         .mipLevel = SOURCE_MIP_LEVEL,
+         .baseArrayLayer = SOURCE_BASE_LAYER,
+         .layerCount = TEST_LAYER_COUNT,
       },
       .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
    };
@@ -647,11 +707,6 @@ main(int argc, char **argv)
       const VkClearColorValue magenta = {
          .float32 = {1.0f, 0.0f, 1.0f, 1.0f},
       };
-      const VkImageSubresourceRange source_range = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-         .levelCount = 1,
-         .layerCount = 1,
-      };
       vkCmdClearColorImage(command, source.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
                            &source_range);
@@ -660,16 +715,13 @@ main(int argc, char **argv)
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                              &upload_region);
    }
-   const VkImageSubresourceRange range = {
-      .aspectMask = IMAGE_ASPECT,
-      .levelCount = 1,
-      .layerCount = 1,
-   };
    const VkBufferImageCopy destination_upload_region = {
       .bufferOffset = GUARD_BYTES,
       .imageSubresource = {
          .aspectMask = IMAGE_ASPECT,
-         .layerCount = 1,
+         .mipLevel = DESTINATION_MIP_LEVEL,
+         .baseArrayLayer = DESTINATION_BASE_LAYER,
+         .layerCount = TEST_LAYER_COUNT,
       },
       .imageExtent = {WIDTH, HEIGHT, 1},
    };
@@ -679,7 +731,7 @@ main(int argc, char **argv)
       };
       vkCmdClearColorImage(command, destination.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
-                           &range);
+                           &destination_range);
    } else if (!G17P_STENCIL_BLIT) {
       vkCmdCopyBufferToImage(command, destination_upload.buffer,
                              destination.image,
@@ -697,7 +749,7 @@ main(int argc, char **argv)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = source.image,
-         .subresourceRange = range,
+         .subresourceRange = source_range,
       },
       {
          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -708,7 +760,7 @@ main(int argc, char **argv)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = destination.image,
-         .subresourceRange = range,
+         .subresourceRange = destination_range,
       },
    };
    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -717,7 +769,9 @@ main(int argc, char **argv)
    const VkImageCopy image_copy = {
       .srcSubresource = {
          .aspectMask = IMAGE_ASPECT,
-         .layerCount = 1,
+         .mipLevel = SOURCE_MIP_LEVEL,
+         .baseArrayLayer = SOURCE_BASE_LAYER,
+         .layerCount = TEST_LAYER_COUNT,
       },
 #if G17P_COPY_IMAGE_3D
       .srcOffset = {5, 3, 1},
@@ -726,7 +780,9 @@ main(int argc, char **argv)
 #endif
       .dstSubresource = {
          .aspectMask = IMAGE_ASPECT,
-         .layerCount = 1,
+         .mipLevel = DESTINATION_MIP_LEVEL,
+         .baseArrayLayer = DESTINATION_BASE_LAYER,
+         .layerCount = TEST_LAYER_COUNT,
       },
 #if G17P_COPY_IMAGE_3D
       .dstOffset = {11, 4, 2},
@@ -742,17 +798,21 @@ main(int argc, char **argv)
       };
       vkCmdClearColorImage(command, destination.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
-                           &range);
+                           &destination_range);
    } else if (resolve_image) {
       const VkImageResolve image_resolve = {
          .srcSubresource = {
             .aspectMask = IMAGE_ASPECT,
-            .layerCount = 1,
+            .mipLevel = SOURCE_MIP_LEVEL,
+            .baseArrayLayer = SOURCE_BASE_LAYER,
+            .layerCount = TEST_LAYER_COUNT,
          },
          .srcOffset = {5, 3, 0},
          .dstSubresource = {
             .aspectMask = IMAGE_ASPECT,
-            .layerCount = 1,
+            .mipLevel = DESTINATION_MIP_LEVEL,
+            .baseArrayLayer = DESTINATION_BASE_LAYER,
+            .layerCount = TEST_LAYER_COUNT,
          },
          .dstOffset = {11, 4, 0},
          .extent = {13, 15, 1},
@@ -766,12 +826,16 @@ main(int argc, char **argv)
       const VkImageBlit image_blit = {
          .srcSubresource = {
             .aspectMask = IMAGE_ASPECT,
-            .layerCount = 1,
+            .mipLevel = SOURCE_MIP_LEVEL,
+            .baseArrayLayer = SOURCE_BASE_LAYER,
+            .layerCount = TEST_LAYER_COUNT,
          },
          .srcOffsets = {{24, 19, 0}, {11, 4, 1}},
          .dstSubresource = {
             .aspectMask = IMAGE_ASPECT,
-            .layerCount = 1,
+            .mipLevel = DESTINATION_MIP_LEVEL,
+            .baseArrayLayer = DESTINATION_BASE_LAYER,
+            .layerCount = TEST_LAYER_COUNT,
          },
          .dstOffsets = {{11, 4, 0}, {24, 19, 1}},
       };
@@ -794,7 +858,7 @@ main(int argc, char **argv)
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .image = destination.image,
-      .subresourceRange = range,
+      .subresourceRange = destination_range,
    };
    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
@@ -803,7 +867,9 @@ main(int argc, char **argv)
       .bufferOffset = GUARD_BYTES,
       .imageSubresource = {
          .aspectMask = IMAGE_ASPECT,
-         .layerCount = 1,
+         .mipLevel = DESTINATION_MIP_LEVEL,
+         .baseArrayLayer = DESTINATION_BASE_LAYER,
+         .layerCount = TEST_LAYER_COUNT,
       },
       .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
    };
@@ -834,9 +900,11 @@ main(int argc, char **argv)
          printf(TEST_NAME ": RECORD PASS — reversed 13x15 S8 image blit "
                           "and guarded readback recorded\n");
       else if (blit_image)
-         printf(TEST_NAME ": RECORD PASS — reversed 13x15 %s RGBA8 image "
+         printf(TEST_NAME ": RECORD PASS — reversed 13x15 %s RGBA8 %s"
                           "blit and guarded readback recorded\n",
-                linear_blit ? "linear" : "nearest");
+                linear_blit ? "linear" : "nearest",
+                layered_mip_blit ? "six-layer cube mip0-to-mip1 "
+                                 : "image ");
       else if (resolve_image)
          printf(TEST_NAME ": RECORD PASS — 13x15 offset RGBA8 4x-to-1x "
                           "image resolve and guarded readback recorded\n");
@@ -905,11 +973,13 @@ main(int argc, char **argv)
                        "and 384 guard bytes unchanged, checksum %016" PRIx64
                        "\n", checksum);
    else if (blit_image)
-      printf(TEST_NAME ": PASS — reversed 13x15 %s blit into "
+      printf(TEST_NAME ": PASS — reversed 13x15 %s %sblit into "
                        "destination(11,4) exact immediately/3s; both uploads "
                        "and 384 guard bytes unchanged, checksum %016" PRIx64
                        "\n",
-             linear_blit ? "linear" : "nearest", checksum);
+             linear_blit ? "linear" : "nearest",
+             layered_mip_blit ? "six-layer cube mip0-to-mip1 " : "",
+             checksum);
    else if (resolve_image)
       printf(TEST_NAME ": PASS — exact magenta 13x15 RGBA8 4x-to-1x resolve "
                        "into destination(11,4) immediately/3s; both uploads "

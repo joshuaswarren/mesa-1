@@ -2066,6 +2066,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    g17p_vulkan_layered_mip_blit = executable(
+      'g17p-vulkan-blit-cube-layers-mip',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BLIT_IMAGE=3'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-resolve-image4',
       files('tests/g17p_vulkan_image_copy_subregion.c'),

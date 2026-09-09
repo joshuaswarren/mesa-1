@@ -303,9 +303,43 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
       env : g17p_wayland_ownership_env,
       depends : _dev_icd,
       suite : ['asahi', 'g17p-wayland-swapchain-ownership'],
-     timeout : 30,
+      timeout : 30,
     )
   endif
+
+  g17p_layered_mip_blit_environment = {
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  }
+  g17p_layered_mip_blit_env = environment(
+    g17p_layered_mip_blit_environment)
+  g17p_layered_mip_blit_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '18')
+  test(
+    'hk_g17p_layered_mip_blit',
+    g17p_vulkan_layered_mip_blit,
+    args : ['--submit-only'],
+    env : g17p_layered_mip_blit_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-layered-mip-blit'],
+    timeout : 30,
+  )
+
+  g17p_layered_mip_blit_fail_env = environment(
+    g17p_layered_mip_blit_environment)
+  g17p_layered_mip_blit_fail_env.set('ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')
+  test(
+    'hk_g17p_layered_mip_blit_submit_failure',
+    g17p_vulkan_layered_mip_blit,
+    args : ['--expect-submit-failure'],
+    env : g17p_layered_mip_blit_fail_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-layered-mip-blit'],
+    timeout : 30,
+  )
 
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',

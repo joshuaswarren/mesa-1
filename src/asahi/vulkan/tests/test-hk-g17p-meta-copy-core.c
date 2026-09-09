@@ -646,6 +646,36 @@ main(void)
       CHECK(one.srcOffsets[0].x == 7 && one.srcOffsets[1].x == 26);
       CHECK(one.dstOffsets[0].y == 13 && one.dstOffsets[1].y == 42);
    }
+
+   /* A cube-compatible image is still a 2D array for transfer commands.
+    * Exercise the exact public fixture: cube 1 at mip 0 is blitted to cube 0
+    * at mip 1 through six independent one-layer views. The sampled coordinate
+    * in each source view is layer zero, independent of unequal API bases. */
+   VkImageBlit2 cube_mip = blit;
+   cube_mip.srcSubresource.mipLevel = 0;
+   cube_mip.srcSubresource.baseArrayLayer = 6;
+   cube_mip.srcSubresource.layerCount = 6;
+   cube_mip.dstSubresource.mipLevel = 1;
+   cube_mip.dstSubresource.baseArrayLayer = 0;
+   cube_mip.dstSubresource.layerCount = 6;
+   for (uint32_t face = 0; face < 6; ++face) {
+      VkImageBlit2 one;
+      CHECK(hk_g17p_image_blit_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
+         &cube_mip, face, &one));
+      CHECK(one.srcSubresource.mipLevel == 0 &&
+            one.srcSubresource.baseArrayLayer == 6 + face &&
+            one.srcSubresource.layerCount == 1);
+      CHECK(one.dstSubresource.mipLevel == 1 &&
+            one.dstSubresource.baseArrayLayer == face &&
+            one.dstSubresource.layerCount == 1);
+      const int64_t legacy_layer =
+         (int64_t)one.dstSubresource.baseArrayLayer -
+         (int64_t)one.srcSubresource.baseArrayLayer;
+      CHECK(legacy_layer == -6 &&
+            (legacy_layer < 0 ||
+             legacy_layer >= one.srcSubresource.layerCount));
+   }
    VkImageBlit2 bad_blit = blit;
    bad_blit.dstOffsets[1].z = 2;
    VkImageBlit2 no_blit = {.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
@@ -659,6 +689,19 @@ main(void)
    CHECK(!hk_g17p_image_blit_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
       &blit, 0, &no_blit));
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
+      &cube_mip, 6, &no_blit));
+   bad_blit = cube_mip;
+   bad_blit.srcSubresource.baseArrayLayer = UINT32_MAX;
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
+      &bad_blit, 1, &no_blit));
+   bad_blit = cube_mip;
+   bad_blit.srcOffsets[0].z = 1;
+   CHECK(!hk_g17p_image_blit_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
+      &bad_blit, 0, &no_blit));
    printf("Honeykrisp G17P meta copy region/mip/layer checks passed (%u exhaustive layer cases)\n", tested);
    return 0;
 }
