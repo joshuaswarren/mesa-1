@@ -8500,6 +8500,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_FMUL && I->nr_dests == 1 &&
              I->nr_srcs == 2 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) &&
+             !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_32 && agx_channels(I->dest[0]) == 1 &&
              (I->src[0].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_16) &&
              agx3_src_is_register(I->src[0]) && agx3_src_is_register(I->src[1])) {
@@ -8509,12 +8510,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             if (f32.size != AGX_SIZE_32 || f16.size != AGX_SIZE_16 ||
                 agx_channels(f32) != 1 || agx_channels(f16) != 1 ||
-                f32.abs || f32.neg || f16.abs || f16.neg ||
+                f32.memory || f16.memory ||
+                f32.neg || f16.abs || f16.neg ||
                 f32.kill || f16.kill || (f32.cache && f32.discard) ||
                 (f16.cache && f16.discard) ||
-                !agx3_alu_fmul_mixed(enc, I->dest[0].value, f32.value,
-                    f16.value, agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
-                    wait, bytes, &len) || !agx3_append(emission, bytes, len))
+                !(f32.abs
+                     ? agx3_alu_fmul_abs_mixed(
+                          enc, I->dest[0].value, f32.value, f16.value,
+                          agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
+                          I->dest[0].cache, wait, bytes, &len)
+                     : agx3_alu_fmul_mixed(
+                          enc, I->dest[0].value, f32.value, f16.value,
+                          agx3_post_ra_hint(f32), agx3_post_ra_hint(f16),
+                          I->dest[0].cache, wait, bytes, &len)) ||
+                !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }

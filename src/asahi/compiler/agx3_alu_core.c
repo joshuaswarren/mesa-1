@@ -705,8 +705,8 @@ bool
 agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
                     uint16_t f32, uint16_t f16,
                     enum agx3_alu_hint hint32, enum agx3_alu_hint hint16,
-                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                    uint8_t *len)
+                    bool dest_cache, uint16_t wait_mask,
+                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
        f32 >= 256 || f16 >= 256 || ((dest | f32) & 1) ||
@@ -716,19 +716,58 @@ agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, 2}, {26, 2}, {42, 2}, {43, 1}, {60, 2}, {74, 2},
    };
-   struct agx3_field_kv fields[13] = {
-      {2, dest}, {18, f32}, {35, f16},
+   struct agx3_field_kv fields[14] = {
+      {2, dest}, {11, dest_cache}, {18, f32}, {35, f16},
       {27, hint32 == AGX3_ALU_HINT_CACHE},
       {29, hint32 == AGX3_ALU_HINT_DISCARD},
       {44, hint16 == AGX3_ALU_HINT_CACHE},
       {46, hint16 == AGX3_ALU_HINT_DISCARD},
    };
-   unsigned n = 7;
+   unsigned n = 8;
    for (unsigned bit = 0; bit < 6; ++bit)
       if (wait_mask & (1u << bit))
          fields[n++] = (struct agx3_field_kv){80 + bit, 1};
    return agx3_bind_compose(enc, "f32mul", 0, base, 8, fields, n, out, len) ||
           agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, out, len);
+}
+
+bool
+agx3_alu_fmul_abs_mixed(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t f32, uint16_t f16,
+   enum agx3_alu_hint hint32, enum agx3_alu_hint hint16, bool dest_cache,
+   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       f32 >= 256 || f16 >= 256 || ((dest | f32) & 1) ||
+       (unsigned)hint32 > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hint16 > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Fresh applegpu_g17p kernels use the long f32mul.ep3 form. f30 carries
+    * ABS on the full source while f43 keeps the other source in its assigned
+    * scalar half. The two source lifetimes, destination cache bit, and six
+    * producer slots remain independent on this endpoint. */
+   const struct agx3_field_kv base[] = {
+      {9, 2},  {10, 2}, {25, 2}, {26, 2}, {30, 1},
+      {42, 2}, {43, 1}, {60, 2}, {74, 2},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest},
+      {11, dest_cache},
+      {18, f32},
+      {35, f16},
+      {27, hint32 == AGX3_ALU_HINT_CACHE},
+      {29, hint32 == AGX3_ALU_HINT_DISCARD},
+      {44, hint16 == AGX3_ALU_HINT_CACHE},
+      {46, hint16 == AGX3_ALU_HINT_DISCARD},
+   };
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[8 + slot] = (struct agx3_field_kv){80 + slot,
+                                               !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "f32mul", 3, base, 9, fields, 14, out,
+                            len);
 }
 
 bool

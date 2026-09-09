@@ -1055,37 +1055,126 @@ static void test_half_uv(void)
       assert(agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,moves[i].d,moves[i].bits,0,out,&size));
       exact(out,size,moves[i].hex);
    }
-   const struct {unsigned d,f,h; enum agx3_alu_hint a,b; unsigned wait; const char *hex;} muls[] = {
-      {0,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,32,"09011d0400c0"},
-      {0,2,0,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_DISCARD,1,"090315000020"},
-      {0,0,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,32,"09011d0a00c0"},
-      {2,2,11,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,0,"19031d0a1000"},
-      {0,0,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_CACHE,32,"09010d8a00c0"},
-      {2,2,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,0,"1903190a"},
+   const struct {unsigned d,f,h; enum agx3_alu_hint a,b; bool cache; unsigned wait; const char *hex;} muls[] = {
+      {0,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,32,"09011d0400c0"},
+      {0,2,0,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_DISCARD,false,1,"090315000020"},
+      {0,0,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,32,"09011d0a00c0"},
+      {2,2,11,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,"19031d0a1000"},
+      {0,0,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_CACHE,false,32,"09010d8a00c0"},
+      {2,2,10,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,"1903190a"},
+      {0,0,2,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,true,32,"09013d0200c0"},
    };
    for (unsigned i=0;i<sizeof(muls)/sizeof(muls[0]);++i) {
       assert(agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,muls[i].d,muls[i].f,muls[i].h,muls[i].a,muls[i].b,
-                   muls[i].wait,out,&size));
+                   muls[i].cache,muls[i].wait,out,&size));
       exact(out,size,muls[i].hex);
    }
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,256,0x1800,0,out,&size));
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,2,0x10000,0,out,&size));
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,2,0x1800,1,out,&size));
-   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,1,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,0,out,&size));
-   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,1,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,0,out,&size));
-   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,0,256,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,0,out,&size));
-   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,64,out,&size));
+   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,1,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
+   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,1,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
+   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,0,256,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
+   assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,64,out,&size));
    unsigned shapes=0;
    for (unsigned d=0;d<256;d+=2)
       for (unsigned h=0;h<256;++h)
          for (unsigned wait=0;wait<=32;wait=wait ? wait*2 : 1) {
             assert(agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,d,(d+2)%256,h,AGX3_ALU_HINT_DISCARD, h&1 ? AGX3_ALU_HINT_DISCARD : AGX3_ALU_HINT_CACHE,
-                         wait,out,&size));
+                         !!(h & 2),wait,out,&size));
             assert(size==4 || size==6);
             ++shapes;
          }
-   puts("Half UV native candidate PASS:5 LDIMM16 +6 mixed-multiply byte-exact Apple witnesses; odd halves, cache/discard and wait6/no-wait/compact variants; invalid widths/ranges/waits rejected");
+   puts("Half UV native candidate PASS:5 LDIMM16 +7 mixed-multiply byte-exact Apple witnesses; odd halves, source/result lifetimes and wait6/no-wait/compact variants; invalid widths/ranges/waits rejected");
    printf("Validated%u register/half/wait shapes through actual composer; offline production encoder coverage\n",shapes);
+}
+
+static void
+test_native_fmul_abs_mixed(void)
+{
+   static const struct {
+      uint16_t dest, f32, f16, wait;
+      enum agx3_alu_hint hint32, hint16;
+      bool dest_cache;
+      const char *bytes;
+   } vectors[] = {
+      /* Both loaded inputs die, waiting on their producer slot. */
+      {0, 0, 4, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011d040200008001000000"},
+      /* The same native operation without a producer wait. */
+      {0, 0, 4, 0, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011d040200000001000000"},
+      /* Retain the f32 input for a later store. */
+      {0, 2, 0, 32, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD, false,
+       "090315000200008001000000"},
+      /* Cache the f32 input shared by two channel multiplies. */
+      {0, 2, 6, 32, AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD, false,
+       "098315060200008001000000"},
+      /* The second channel proves that scalar-half register 7 stays odd. */
+      {2, 2, 7, 0, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "19031d061200000001000000"},
+      /* Reuse both the result and scalar-half source. */
+      {0, 0, 2, 32, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_CACHE, true,
+       "09012d820200008001000000"},
+      /* A separately scheduled conversion pins producer slot 0. */
+      {0, 0, 8, 1, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false,
+       "09011d080220000001000000"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fmul_abs_mixed(
+         AGX_ISA_ENCODING_AGX3B, vectors[i].dest, vectors[i].f32,
+         vectors[i].f16, vectors[i].hint32, vectors[i].hint16,
+         vectors[i].dest_cache, vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   /* Every lifetime and producer-slot combination is an independent field on
+    * this Apple endpoint. Exercise the full cross-product at the high bank
+    * boundary, including a retained (non-cache, non-discard) half source. */
+   for (unsigned hint32 = 0; hint32 <= AGX3_ALU_HINT_CACHE; ++hint32) {
+      for (unsigned hint16 = 0; hint16 <= AGX3_ALU_HINT_CACHE; ++hint16) {
+         for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
+            for (unsigned wait = 0; wait < 64; ++wait) {
+               assert(agx3_alu_fmul_abs_mixed(
+                  AGX_ISA_ENCODING_AGX3B, 254, 252, 255,
+                  (enum agx3_alu_hint)hint32, (enum agx3_alu_hint)hint16,
+                  dest_cache, wait, bytes, &len));
+               assert(len == 12);
+            }
+         }
+      }
+   }
+
+   memset(bytes, 0xa5, sizeof(bytes));
+   len = 0xa5;
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3C, 0, 0, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 1, 0, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 256, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 4, (enum agx3_alu_hint)3,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 4, AGX3_ALU_HINT_DISCARD,
+      (enum agx3_alu_hint)3, false, 0, bytes, &len));
+   assert(!agx3_alu_fmul_abs_mixed(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 4, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, false, 64, bytes, &len));
+   assert(len == 0xa5);
+   for (unsigned i = 0; i < sizeof(bytes); ++i)
+      assert(bytes[i] == 0xa5);
+
+   puts("Native abs-f32 times scalar-half: seven exact Apple vectors, "
+        "1152 lifetime/wait forms and strict bounds PASS");
 }
 
 static void
@@ -3041,6 +3130,7 @@ int main(void){
    test_bitwise_lifetimes();
    test_modified_minifloat_add();
    test_half_uv();
+   test_native_fmul_abs_mixed();
    test_fmul_minifloat();
    test_fmul_minifloat_modifiers();
    test_fmul_half_minifloat_to_f32();

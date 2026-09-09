@@ -884,6 +884,76 @@ TEST_F(AGX3PackBinary, HalfUVRefusesUngroundedModes)
    }
 }
 
+TEST_F(AGX3PackBinary, WebGLAbsScaleMixedWidthMatchesNative)
+{
+   for (bool half_first : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index wide = agx_register(0, AGX_SIZE_32);
+      agx_index half = agx_register(8, AGX_SIZE_16);
+      wide.abs = wide.discard = true;
+      half.cache = true;
+      agx_fmul_to(b, agx_register(0, AGX_SIZE_32),
+                  half_first ? half : wide, half_first ? wide : half);
+      agx_stop(b);
+
+      /* Reduced post-RA form of Skia's `abs(testInputs) * 100.0`. */
+      const std::vector<uint8_t> native = {
+         0x09, 0x01, 0x0d, 0x88, 0x02, 0x00, 0x00, 0x00,
+         0x01, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+      };
+      EXPECT_EQ(pack(b), native) << "half_first=" << half_first;
+   }
+}
+
+TEST_F(AGX3PackBinary, WebGLAbsScaleMixedWidthRefusesUngroundedModes)
+{
+   for (unsigned mode = 0; mode < 16; ++mode) {
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      agx_index wide = agx_register(0, AGX_SIZE_32);
+      agx_index half = agx_register(8, AGX_SIZE_16);
+      wide.abs = wide.discard = true;
+      half.cache = true;
+
+      if (mode == 1)
+         dest.size = AGX_SIZE_16;
+      if (mode == 2)
+         wide.neg = true;
+      if (mode == 3) {
+         wide.abs = false;
+         half.abs = true;
+      }
+      if (mode == 4)
+         half.neg = true;
+      if (mode == 5)
+         wide.cache = true;
+      if (mode == 6)
+         half.discard = true;
+      if (mode == 7)
+         wide.kill = true;
+      if (mode == 8)
+         half.kill = true;
+      if (mode == 9)
+         dest.value = 1;
+      if (mode == 10)
+         wide.value = 1;
+      if (mode == 11)
+         dest.channels_m1 = 1;
+      if (mode == 13)
+         wide.memory = true;
+      if (mode == 14)
+         half.memory = true;
+      if (mode == 15)
+         dest.memory = true;
+
+      agx_instr *mul = agx_fmul_to(b, dest, wide, half);
+      mul->saturate = mode == 12;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+   }
+}
+
 TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
 {
    for (unsigned i = 0; i < 2; ++i) {

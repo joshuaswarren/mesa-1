@@ -209,8 +209,14 @@ bool agx3_alu_mov16(enum agx_isa_encoding enc, uint16_t dest, uint32_t bits,
 bool agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t f32, uint16_t f16,
                           enum agx3_alu_hint hint32, enum agx3_alu_hint hint16,
-                          uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                          uint8_t *len);
+                          bool dest_cache, uint16_t wait_mask,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native ABS(f32)-by-scalar-half multiply with an f32 result. */
+bool agx3_alu_fmul_abs_mixed(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t f32, uint16_t f16,
+   enum agx3_alu_hint hint32, enum agx3_alu_hint hint16, bool dest_cache,
+   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native unmodified f32 plus scalar-half register. */
 bool agx3_alu_fadd_mixed_half(
