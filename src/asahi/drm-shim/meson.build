@@ -350,6 +350,21 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
       suite : ['asahi', 'g17p-wayland-present-wrapper-retry'],
       timeout : 30,
     )
+
+    g17p_wayland_present_queue_env = environment(
+      g17p_acquire_rollback_environment)
+    g17p_wayland_present_queue_env.set('MESA_VK_WSI_DEBUG', 'sw')
+    g17p_wayland_present_queue_env.set(
+      'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'wayland-present-queue-retry')
+    test(
+      'hk_g17p_wayland_present_queue_retry',
+      g17p_wayland_swapchain_ownership,
+      args : ['--present-queue-retry'],
+      env : g17p_wayland_present_queue_env,
+      depends : _dev_icd,
+      suite : ['asahi', 'g17p-wayland-present-queue-retry'],
+      timeout : 30,
+    )
   endif
 
   g17p_layered_mip_blit_environment = {

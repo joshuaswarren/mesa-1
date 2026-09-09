@@ -277,6 +277,8 @@ check_wsi_rollback_lifecycle(void)
       !strcmp(test_case, "wayland-surface-init-retry");
    const bool wayland_present_wrapper_retry =
       !strcmp(test_case, "wayland-present-wrapper-retry");
+   const bool wayland_present_queue_retry =
+      !strcmp(test_case, "wayland-present-queue-retry");
    const unsigned expected_imports = semaphore_failure ? 3 : 4;
    const unsigned expected_syncobjs = semaphore_failure ? 12 : 13;
    const uint64_t expected_handles =
@@ -425,7 +427,7 @@ check_wsi_rollback_lifecycle(void)
       !wsi_rollback_stale_fence_wait_rejected;
    const bool exact_wayland_ownership =
       (wayland_ownership || wayland_surface_init_retry ||
-       wayland_present_wrapper_retry) &&
+       wayland_present_wrapper_retry || wayland_present_queue_retry) &&
       wsi_rollback_syncobj_creates == 2 &&
       wsi_rollback_syncobj_destroys == 2 &&
       wsi_rollback_created_handles == UINT64_C(0x6) &&

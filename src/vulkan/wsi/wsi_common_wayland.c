@@ -3906,6 +3906,10 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       wl_display_create_queue_with_name(chain->wsi_wl_surface->display->wl_display,
                                         queue_name);
    vk_free(pAllocator, queue_name);
+   if (!chain->present_ids.queue) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_free_wl_chain;
+   }
 
    if (chain->wsi_wl_surface->display->wp_presentation_notwrapped) {
       chain->present_ids.frame_fallback = false;

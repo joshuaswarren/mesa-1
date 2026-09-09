@@ -83,10 +83,20 @@ struct wrapper_control {
    void *fail_proxy;
 };
 
+struct queue_control {
+   atomic_bool fail_enabled;
+   atomic_uint matching_calls;
+   atomic_uint injected_failures;
+};
+
 static struct wrapper_control wrapper_control;
+static struct queue_control queue_control;
 static once_flag wrapper_symbols_once = ONCE_FLAG_INIT;
+static once_flag queue_symbol_once = ONCE_FLAG_INIT;
 static void *(*real_wl_proxy_create_wrapper)(void *);
 static void (*real_wl_proxy_wrapper_destroy)(void *);
+static struct wl_event_queue *(*real_wl_display_create_queue_with_name)(
+   struct wl_display *, const char *);
 
 static void
 load_wrapper_symbols(void)
@@ -99,6 +109,34 @@ load_wrapper_symbols(void)
       fprintf(stderr, TEST_NAME ": failed to resolve Wayland wrapper symbols\n");
       _Exit(EXIT_FAILURE);
    }
+}
+
+static void
+load_queue_symbol(void)
+{
+   real_wl_display_create_queue_with_name =
+      (struct wl_event_queue *(*)(struct wl_display *, const char *))dlsym(
+         RTLD_NEXT, "wl_display_create_queue_with_name");
+}
+
+__attribute__((visibility("default"))) struct wl_event_queue *
+wl_display_create_queue_with_name(struct wl_display *display, const char *name)
+{
+   static const char target_prefix[] = "mesa vk surface ";
+
+   call_once(&queue_symbol_once, load_queue_symbol);
+   if (atomic_load(&queue_control.fail_enabled) && name &&
+       !strncmp(name, target_prefix, sizeof(target_prefix) - 1)) {
+      atomic_fetch_add(&queue_control.matching_calls, 1);
+      if (atomic_exchange(&queue_control.fail_enabled, false)) {
+         atomic_fetch_add(&queue_control.injected_failures, 1);
+         return NULL;
+      }
+   }
+
+   if (real_wl_display_create_queue_with_name)
+      return real_wl_display_create_queue_with_name(display, name);
+   return wl_display_create_queue(display);
 }
 
 __attribute__((visibility("default"))) void *
@@ -538,12 +576,16 @@ main(int argc, char **argv)
       argc == 2 && !strcmp(argv[1], "--surface-init-retry");
    const bool present_wrapper_retry =
       argc == 2 && !strcmp(argv[1], "--present-wrapper-retry");
+   const bool present_queue_retry =
+      argc == 2 && !strcmp(argv[1], "--present-queue-retry");
+   const bool wrapper_retry = surface_init_retry || present_wrapper_retry;
+   const bool create_retry = wrapper_retry || present_queue_retry;
    if (argc > 2 ||
        (argc == 2 && !present_allocation_failure && !surface_init_retry &&
-        !present_wrapper_retry))
+        !present_wrapper_retry && !present_queue_retry))
       die("usage: " TEST_NAME
           " [--present-allocation-failure|--surface-init-retry|"
-          "--present-wrapper-retry]");
+          "--present-wrapper-retry|--present-queue-retry]");
 
    struct mock_server server = {0};
    server.display = wl_display_create();
@@ -588,8 +630,7 @@ main(int argc, char **argv)
    LOAD_GLOBAL(vkCreateInstance);
 
    struct allocation_control allocation_control = {0};
-   atomic_store(&allocation_control.poison_frees,
-                surface_init_retry || present_wrapper_retry);
+   atomic_store(&allocation_control.poison_frees, wrapper_retry);
    const VkAllocationCallbacks allocation_callbacks = {
       .pUserData = &allocation_control,
       .pfnAllocation = test_alloc,
@@ -597,8 +638,7 @@ main(int argc, char **argv)
       .pfnFree = test_free,
    };
    const VkAllocationCallbacks *instance_allocator =
-      (present_allocation_failure || surface_init_retry ||
-       present_wrapper_retry) ? &allocation_callbacks : NULL;
+      (present_allocation_failure || wrapper_retry) ? &allocation_callbacks : NULL;
 
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -763,11 +803,16 @@ main(int argc, char **argv)
    };
 
    uint32_t expected_buffers = 0;
-   if (surface_init_retry || present_wrapper_retry) {
-      atomic_store(&wrapper_control.calls_since_arm, 0);
-      wrapper_control.fail_on_call = surface_init_retry ? 1 : 2;
-      wrapper_control.fail_proxy = wl_surface;
-      atomic_store(&wrapper_control.fail_enabled, true);
+   if (create_retry) {
+      if (present_queue_retry) {
+         atomic_store(&queue_control.matching_calls, 0);
+         atomic_store(&queue_control.fail_enabled, true);
+      } else {
+         atomic_store(&wrapper_control.calls_since_arm, 0);
+         wrapper_control.fail_on_call = surface_init_retry ? 1 : 2;
+         wrapper_control.fail_proxy = wl_surface;
+         atomic_store(&wrapper_control.fail_enabled, true);
+      }
 
       VkSwapchainKHR failed = VK_NULL_HANDLE;
       VkResult result =
@@ -776,15 +821,21 @@ main(int argc, char **argv)
          if (result == VK_SUCCESS)
             vkDestroySwapchainKHR(device, failed, NULL);
          fprintf(stderr,
-                 TEST_NAME ": targeted wrapper failure returned %d, expected "
-                           "%d\n",
+                 TEST_NAME ": targeted Wayland allocation failure returned "
+                           "%d, expected %d\n",
                  result, VK_ERROR_OUT_OF_HOST_MEMORY);
          return EXIT_FAILURE;
       }
-      if (atomic_load(&wrapper_control.injected_failures) != 1 ||
-          atomic_load(&wrapper_control.calls_since_arm) !=
-             wrapper_control.fail_on_call)
-         die("target wrapper creation did not fail exactly once");
+      if (present_queue_retry) {
+         if (atomic_load(&queue_control.injected_failures) != 1 ||
+             atomic_load(&queue_control.matching_calls) != 1)
+            die("present queue creation did not fail exactly once");
+      } else {
+         if (atomic_load(&wrapper_control.injected_failures) != 1 ||
+             atomic_load(&wrapper_control.calls_since_arm) !=
+                wrapper_control.fail_on_call)
+            die("target wrapper creation did not fail exactly once");
+      }
    }
 
    VkSwapchainKHR first;
@@ -871,7 +922,7 @@ main(int argc, char **argv)
       vkDestroySemaphore(device, render_done, NULL);
       vkDestroySemaphore(device, acquired, NULL);
       vkDestroySwapchainKHR(device, first, NULL);
-   } else if (surface_init_retry || present_wrapper_retry) {
+   } else if (create_retry) {
       vkDestroySwapchainKHR(device, first, NULL);
 
       VkSwapchainKHR second;
@@ -922,8 +973,7 @@ main(int argc, char **argv)
    const unsigned wrappers_created = atomic_load(&wrapper_control.created);
    const unsigned wrappers_destroyed = atomic_load(&wrapper_control.destroyed);
    const unsigned exact_buffers =
-      present_allocation_failure ? 4 :
-      (surface_init_retry || present_wrapper_retry) ? 8 : 12;
+      present_allocation_failure ? 4 : create_retry ? 8 : 12;
    if (expected_buffers != exact_buffers || surfaces_created != 1 ||
        surfaces_destroyed != 1 ||
        pools_created != expected_buffers || pools_destroyed != expected_buffers ||
@@ -961,6 +1011,12 @@ main(int argc, char **argv)
    } else if (present_wrapper_retry) {
       printf(TEST_NAME ": PASS — present wrapper allocation failed once, "
                        "then retry and reuse succeeded; Wayland objects=%u/%u "
+                       "wrappers=%u/%u\n",
+             buffers_created, buffers_destroyed, wrappers_created,
+             wrappers_destroyed);
+   } else if (present_queue_retry) {
+      printf(TEST_NAME ": PASS — present queue allocation failed once, then "
+                       "retry and reuse succeeded; Wayland objects=%u/%u "
                        "wrappers=%u/%u\n",
              buffers_created, buffers_destroyed, wrappers_created,
              wrappers_destroyed);
