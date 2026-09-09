@@ -11,8 +11,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef G17P_BLIT_IMAGE
+#define G17P_BLIT_IMAGE 0
+#endif
+
 #ifdef G17P_CLEAR_IMAGE
 #define TEST_NAME "g17p-vulkan-clear-image"
+#elif G17P_BLIT_IMAGE == 1
+#define TEST_NAME "g17p-vulkan-blit-image-nearest-flip"
+#elif G17P_BLIT_IMAGE == 2
+#define TEST_NAME "g17p-vulkan-blit-image-linear-flip"
 #else
 #define TEST_NAME "g17p-vulkan-image-copy-subregion"
 #endif
@@ -59,6 +67,7 @@ VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyBufferToImage);
 VK_FN(vkCmdClearColorImage);
 VK_FN(vkCmdCopyImage);
+VK_FN(vkCmdBlitImage);
 VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
@@ -207,7 +216,7 @@ verify(const struct mapped_buffer *upload,
        const uint8_t upload_expected[UPLOAD_BYTES],
        const struct mapped_buffer *destination_upload,
        const uint8_t destination_upload_expected[DESTINATION_UPLOAD_BYTES],
-       const struct mapped_buffer *readback, bool clear_image)
+       const struct mapped_buffer *readback, bool clear_image, bool blit_image)
 {
    if (memcmp(upload->map, upload_expected, UPLOAD_BYTES) != 0) {
       for (size_t i = 0; i < UPLOAD_BYTES; ++i) {
@@ -245,7 +254,10 @@ verify(const struct mapped_buffer *upload,
             expected[0] = 255;
             expected[2] = 255;
          } else if (x >= 11 && x < 24 && y >= 4 && y < 19) {
-            source_pixel(5 + x - 11, 3 + y - 4, expected);
+            if (blit_image)
+               source_pixel(23 - (x - 11), 18 - (y - 4), expected);
+            else
+               source_pixel(5 + x - 11, 3 + y - 4, expected);
          }
          const uint8_t *actual = pixels + (y * WIDTH + x) * 4u;
          if (memcmp(actual, expected, 4) != 0) {
@@ -269,6 +281,8 @@ main(int argc, char **argv)
 #else
    const bool clear_image = false;
 #endif
+   const bool blit_image = G17P_BLIT_IMAGE != 0;
+   const bool linear_blit = G17P_BLIT_IMAGE == 2;
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
    if (argc > 2 || (argc == 2 && !record_only))
       die("usage: " TEST_NAME " [--record-only]");
@@ -331,10 +345,15 @@ main(int argc, char **argv)
    VkFormatProperties format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
                                        &format_properties);
-   const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-                                         VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+   const VkFormatFeatureFlags required =
+      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+      (blit_image ? VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                       VK_FORMAT_FEATURE_BLIT_DST_BIT
+                  : 0) |
+      (linear_blit ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
    if ((format_properties.optimalTilingFeatures & required) != required)
-      die("RGBA8 optimal transfer support is not advertised");
+      die("required RGBA8 optimal transfer/blit support is not advertised");
 
    uint32_t family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, NULL);
@@ -394,6 +413,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
    LOAD_DEVICE(device, vkCmdClearColorImage);
    LOAD_DEVICE(device, vkCmdCopyImage);
+   LOAD_DEVICE(device, vkCmdBlitImage);
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
@@ -557,6 +577,23 @@ main(int argc, char **argv)
       vkCmdClearColorImage(command, destination.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
                            &range);
+   } else if (blit_image) {
+      const VkImageBlit image_blit = {
+         .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+         },
+         .srcOffsets = {{24, 19, 0}, {11, 4, 1}},
+         .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+         },
+         .dstOffsets = {{11, 4, 0}, {24, 19, 1}},
+      };
+      vkCmdBlitImage(command, source.image,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination.image,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_blit,
+                     linear_blit ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
    } else {
       vkCmdCopyImage(command, source.image,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination.image,
@@ -608,6 +645,10 @@ main(int argc, char **argv)
       if (clear_image)
          printf(TEST_NAME ": RECORD PASS — RGBA8 optimal image clear and "
                           "guarded readback recorded\n");
+      else if (blit_image)
+         printf(TEST_NAME ": RECORD PASS — reversed 13x15 %s RGBA8 image "
+                          "blit and guarded readback recorded\n",
+                linear_blit ? "linear" : "nearest");
       else
          printf(TEST_NAME ": RECORD PASS — padded upload, nonzero image "
                           "subregion copy and guarded readback recorded\n");
@@ -630,11 +671,13 @@ main(int argc, char **argv)
       die("vkWaitForFences timed out after three seconds");
    check(waited, "vkWaitForFences");
    if (!verify(&upload, upload_expected, &destination_upload,
-               destination_upload_expected, &readback, clear_image))
+               destination_upload_expected, &readback, clear_image,
+               blit_image))
       return EXIT_FAILURE;
    sleep(3);
    if (!verify(&upload, upload_expected, &destination_upload,
-               destination_upload_expected, &readback, clear_image))
+               destination_upload_expected, &readback, clear_image,
+               blit_image))
       return EXIT_FAILURE;
 
    uint64_t checksum = UINT64_C(1469598103934665603);
@@ -647,6 +690,12 @@ main(int argc, char **argv)
                        "both uploads and 384 guard bytes unchanged, checksum "
                        "%016" PRIx64 "\n",
              checksum);
+   else if (blit_image)
+      printf(TEST_NAME ": PASS — reversed 13x15 %s blit into "
+                       "destination(11,4) exact immediately/3s; both uploads "
+                       "and 384 guard bytes unchanged, checksum %016" PRIx64
+                       "\n",
+             linear_blit ? "linear" : "nearest", checksum);
    else
       printf(TEST_NAME ": PASS — 13x15 source(5,3) to destination(11,4) "
                        "exact immediately/3s; both uploads and 384 guard "

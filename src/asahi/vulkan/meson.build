@@ -1898,6 +1898,24 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-blit-image-nearest-flip',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BLIT_IMAGE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-blit-image-linear-flip',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_BLIT_IMAGE=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-null-descriptor',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],
