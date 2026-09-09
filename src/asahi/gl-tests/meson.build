@@ -256,6 +256,16 @@ gl_multi_viewport = executable(
   build_by_default : false,
 )
 
+gl_rgb32_fbo = executable(
+  'asahi-g17p-gl-rgb32-fbo',
+  files('test-g17p-gl-rgb32-fbo.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
 test(
   'asahi-g17p-gl-multi-viewport-software-control',
   gl_multi_viewport,
@@ -290,6 +300,34 @@ test(
     gl_multi_viewport,
   ],
   env : ['ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1'],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-rgb32-fbo-software-control',
+  gl_rgb32_fbo,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-rgb32-fbo-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_rgb32_fbo,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_RGB32_FBO_DRAWS=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
