@@ -56,6 +56,8 @@ hk_files = files(
   'hk_agx3_vdm_decode.h',
   'hk_image.c',
   'hk_image.h',
+  'hk_image_layout_core.c',
+  'hk_image_layout_core.h',
   'hk_image_view.c',
   'hk_image_view.h',
   'hk_instance.c',
@@ -427,6 +429,19 @@ if with_tests
     ),
     suite : ['asahi'],
   )
+  test(
+    'hk_image_layout_core',
+    executable(
+      'hk_image_layout_core_test',
+      files('tests/test-hk-image-layout-core.c',
+            'hk_image_layout_core.c'),
+      include_directories : [include_directories('.')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
   test(
     'hk_native_descriptor',
     executable(

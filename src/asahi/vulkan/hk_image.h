@@ -51,6 +51,9 @@ hk_get_image_format_features(struct hk_physical_device *pdevice,
 
 struct hk_image_plane {
    struct ail_layout layout;
+
+   /* Byte offset of this DRM memory plane from the image memory binding. */
+   uint64_t offset_B;
    uint64_t addr;
    struct agx_va *va;
 

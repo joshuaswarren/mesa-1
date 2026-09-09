@@ -21,15 +21,12 @@
 #include "hk_device_memory.h"
 #include "hk_entrypoints.h"
 #include "hk_g17p_meta_copy_core.h"
+#include "hk_image_layout_core.h"
 #include "hk_physical_device.h"
 
 #include "vk_format.h"
 
-/* Minimum alignment encodable for our descriptors. The hardware texture/PBE
- * descriptors require 16-byte alignment. Our software PBE atomic descriptor
- * requires 128-byte alignment, but we could relax that one if we wanted.
- */
-#define HK_PLANE_ALIGN_B 128
+#include <inttypes.h>
 
 /* However, exposing the standard sparse block sizes requires using the standard
  * alignment 65k.
@@ -911,8 +908,18 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       image->vk.drm_format_mod = modifier;
    }
 
+   if (mod_explicit_info &&
+       (mod_explicit_info->drmFormatModifierPlaneCount != image->plane_count ||
+        !mod_explicit_info->pPlaneLayouts)) {
+      return vk_errorf(
+         dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+         "DRM modifier provides %u planes for a %u-plane image",
+         mod_explicit_info->drmFormatModifierPlaneCount, image->plane_count);
+   }
+
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(pCreateInfo->format);
+   uint64_t implicit_plane_cursor_B = 0;
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       VkFormat format =
          ycbcr_info ? ycbcr_info->planes[plane].format : pCreateInfo->format;
@@ -926,10 +933,21 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       const uint8_t height_scale =
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
 
+      const enum pipe_format p_format = hk_format_to_pipe_format(format);
       uint32_t linear_stride_B = 0;
       if (mod_explicit_info &&
-          image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR)
-         linear_stride_B = mod_explicit_info->pPlaneLayouts[plane].rowPitch;
+          image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR) {
+         const uint64_t minimum_stride_B = util_format_get_stride(
+            p_format, DIV_ROUND_UP(pCreateInfo->extent.width, width_scale));
+         if (!hk_image_explicit_linear_stride(
+                mod_explicit_info->pPlaneLayouts[plane].rowPitch,
+                minimum_stride_B, &linear_stride_B)) {
+            return vk_errorf(
+               dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+               "invalid linear DRM plane %u row pitch 0x%" PRIx64, plane,
+               mod_explicit_info->pPlaneLayouts[plane].rowPitch);
+         }
+      }
 
       bool compressed =
          hk_map_compression(dev, pCreateInfo, plane, image->vk.drm_format_mod);
@@ -940,7 +958,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          .tiling = hk_map_tiling(dev, pCreateInfo, image->vk.drm_format_mod),
          .compressed = compressed,
          .mipmapped_z = pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
-         .format = hk_format_to_pipe_format(format),
+         .format = p_format,
 
          .linear_stride_B = linear_stride_B,
 
@@ -957,6 +975,42 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       };
 
       ail_make_miptree(&image->planes[plane].layout);
+
+      uint64_t plane_end_B;
+      if (mod_explicit_info) {
+         const uint64_t plane_offset_B =
+            mod_explicit_info->pPlaneLayouts[plane].offset;
+         if (!hk_image_explicit_plane_range(plane_offset_B,
+                                            image->planes[plane].layout.size_B,
+                                            &plane_end_B)) {
+            return vk_errorf(
+               dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+               "invalid DRM plane %u range at 0x%" PRIx64, plane,
+               plane_offset_B);
+         }
+         image->planes[plane].offset_B = plane_offset_B;
+
+         for (uint8_t prior = 0; prior < plane; prior++) {
+            if (hk_image_plane_ranges_overlap(
+                   plane_offset_B, image->planes[plane].layout.size_B,
+                   image->planes[prior].offset_B,
+                   image->planes[prior].layout.size_B)) {
+               return vk_errorf(
+                  dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+                  "DRM plane %u overlaps plane %u", plane, prior);
+            }
+         }
+      } else if (image->disjoint) {
+         image->planes[plane].offset_B = 0;
+      } else if (!hk_image_implicit_plane_range(
+                    implicit_plane_cursor_B, image->planes[plane].layout.size_B,
+                    &image->planes[plane].offset_B, &plane_end_B)) {
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                          "image plane layout exceeds the address space");
+      }
+
+      if (!image->disjoint)
+         implicit_plane_cursor_B = MAX2(implicit_plane_cursor_B, plane_end_B);
    }
 
    return VK_SUCCESS;
@@ -1064,6 +1118,7 @@ hk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
 
    result = hk_image_init(dev, image, pCreateInfo);
    if (result != VK_SUCCESS) {
+      hk_image_finish(dev, image, pAllocator);
       vk_free2(&dev->vk.alloc, pAllocator, image);
       return result;
    }
@@ -1101,13 +1156,13 @@ static void
 hk_image_plane_add_req(struct hk_image_plane *plane, bool sparse,
                        uint64_t *size_B, uint32_t *align_B)
 {
-   unsigned plane_align_B = sparse ? HK_SPARSE_ALIGN_B : HK_PLANE_ALIGN_B;
+   unsigned plane_align_B = sparse ? HK_SPARSE_ALIGN_B : HK_IMAGE_PLANE_ALIGN_B;
    assert(util_is_power_of_two_or_zero64(*align_B));
    assert(util_is_power_of_two_or_zero64(plane_align_B));
 
    *align_B = MAX2(*align_B, plane_align_B);
-   *size_B = align64(*size_B, plane_align_B);
-   *size_B += plane->layout.size_B;
+   assert(plane->offset_B <= UINT64_MAX - plane->layout.size_B);
+   *size_B = MAX2(*size_B, plane->offset_B + plane->layout.size_B);
 }
 
 static void
@@ -1314,14 +1369,7 @@ hk_get_image_subresource_layout(UNUSED struct hk_device *dev,
    const uint8_t p = hk_image_aspects_to_plane(image, isr->aspectMask);
    const struct hk_image_plane *plane = &image->planes[p];
 
-   uint64_t offset_B = 0;
-   if (!image->disjoint) {
-      uint32_t align_B = 0;
-      /* TODO: sparse? */
-      for (unsigned plane = 0; plane < p; plane++)
-         hk_image_plane_add_req(&image->planes[plane], false, &offset_B,
-                                &align_B);
-   }
+   uint64_t offset_B = plane->offset_B;
    offset_B +=
       ail_get_layer_level_B(&plane->layout, isr->arrayLayer, isr->mipLevel);
 
@@ -1382,12 +1430,10 @@ hk_GetDeviceImageSubresourceLayoutKHR(
    hk_image_finish(dev, &image, NULL);
 }
 
-static void
+static bool
 hk_image_plane_bind(struct hk_device *dev, struct hk_image_plane *plane,
-                    struct hk_device_memory *mem, uint64_t *offset_B)
+                    struct hk_device_memory *mem, uint64_t memory_offset_B)
 {
-   *offset_B = align64(*offset_B, HK_PLANE_ALIGN_B);
-
    if (plane->va) {
 #if 0
       agx_bo_bind_vma(dev->ws_dev,
@@ -1399,12 +1445,17 @@ hk_image_plane_bind(struct hk_device *dev, struct hk_image_plane *plane,
 #endif
       UNREACHABLE("todo");
    } else {
-      plane->addr = mem->bo->va->addr + *offset_B;
-      plane->map = agx_bo_map(mem->bo) + *offset_B;
-      plane->rem = mem->bo->size - (*offset_B);
+      uint64_t bo_offset_B;
+      if (!hk_image_plane_binding(
+             mem->bo->va->addr, mem->bo->size, memory_offset_B, plane->offset_B,
+             plane->layout.size_B, &plane->addr, &bo_offset_B))
+         return false;
+
+      plane->map = agx_bo_map(mem->bo) + bo_offset_B;
+      plane->rem = mem->bo->size - bo_offset_B;
    }
 
-   *offset_B += plane->layout.size_B;
+   return true;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -1430,16 +1481,20 @@ hk_BindImageMemory2(VkDevice device, uint32_t bindInfoCount,
 #endif
 
       assert(mem);
-      uint64_t offset_B = pBindInfos[i].memoryOffset;
+      const uint64_t offset_B = pBindInfos[i].memoryOffset;
       if (image->disjoint) {
          const VkBindImagePlaneMemoryInfo *plane_info = vk_find_struct_const(
             pBindInfos[i].pNext, BIND_IMAGE_PLANE_MEMORY_INFO);
          uint8_t plane =
             hk_image_aspects_to_plane(image, plane_info->planeAspect);
-         hk_image_plane_bind(dev, &image->planes[plane], mem, &offset_B);
+         if (!hk_image_plane_bind(dev, &image->planes[plane], mem, offset_B))
+            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "image plane %u exceeds bound memory", plane);
       } else {
          for (unsigned plane = 0; plane < image->plane_count; plane++) {
-            hk_image_plane_bind(dev, &image->planes[plane], mem, &offset_B);
+            if (!hk_image_plane_bind(dev, &image->planes[plane], mem, offset_B))
+               return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                "image plane %u exceeds bound memory", plane);
          }
       }
 
