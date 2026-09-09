@@ -338,7 +338,7 @@ if with_tests
         'agx3_binder.c',
         'test/test-agx3-alu-core.c',
       ),
-      c_args : [c_msvc_compat_args, no_override_init_args],
+      c_args : [c_msvc_compat_args, no_override_init_args, '-UNDEBUG'],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src],
     ),
@@ -805,7 +805,14 @@ if with_tests
     'agx_register_bank',
     executable(
       'agx_register_bank_test',
-      files('test/test-register-bank.c'),
+      files(
+        'test/test-register-bank.c',
+        # The fixture deliberately undefines NDEBUG so the production
+        # allocator keeps its internal validation calls.  A release-built
+        # libasahi_compiler omits agx_validate_ra(), so compile that validator
+        # into this assertion-enabled test target as well.
+        'agx_validate_ra.c',
+      ),
       c_args : [c_msvc_compat_args, no_override_init_args, '-UNDEBUG'],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],

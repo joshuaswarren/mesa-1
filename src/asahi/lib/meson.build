@@ -399,6 +399,7 @@ if with_tests
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_mesautil],
+      c_args : ['-UNDEBUG'],
     ),
     suite : ['asahi'],
   )
