@@ -5,6 +5,7 @@
 
 #include "agx3_tex_core.h"
 
+#include "agx3_alu_core.h"
 #include "agx3_binder.h"
 
 #include <string.h>
@@ -292,7 +293,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
       return false;
 
-   if (d->cube && (tk != 1 || sk != 1))
+   /* Cube operand pairs are witnessed as immediate/immediate,
+    * uniform/uniform and register/register. */
+   if (d->cube && tk != sk)
       return false;
 
    /* Apple's G17P offset witnesses are immediate-descriptor, implicit-LOD
@@ -365,12 +368,16 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
+   /* Register/uniform cube operands have their own native EP4 profile. Both
+    * fresh argument-buffer cube witnesses keep f83/f112 at 0/4, while the
+    * immediate cube and every qualified array form use 4/8. */
+   const bool dimension_profile = d->array || (d->cube && immediate);
    if ((operand_profile & 1) ||
-       ((d->array || d->cube) && !d->shadow))
+       (dimension_profile && !d->shadow))
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
       112, ((operand_profile & 2) ||
-            ((d->array || d->cube) && !d->shadow))
+            (dimension_profile && !d->shadow))
               ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
@@ -859,16 +866,17 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
  *   axis 2  1701540203040c50502f9208
  */
 bool
-agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
-                       uint16_t z, uint8_t axis, bool discard,
-                       uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_cube_cem_calc_to(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
+                          uint16_t z, uint16_t dest, uint8_t axis,
+                          bool discard,
+                          uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || x >= 128 || y >= 128 || z >= 128 ||
-       axis > 2 || discard != (axis == 2))
+       (dest & 1) || dest > 190 || axis > 2 || discard != (axis == 2))
       return false;
 
    const struct agx3_field_kv base[] = {
@@ -881,8 +889,7 @@ agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
    ov[n++] = (struct agx3_field_kv)KV(33, y);
    ov[n++] = (struct agx3_field_kv)KV(50, z);
    ov[n++] = (struct agx3_field_kv)KV(75, axis);
-   if (axis)
-      ov[n++] = (struct agx3_field_kv)KV(2, axis == 1 ? 14 : 4);
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
    if (discard) {
       ov[n++] = (struct agx3_field_kv)KV(27, 1);
       ov[n++] = (struct agx3_field_kv)KV(44, 1);
@@ -897,62 +904,93 @@ agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
                             sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
-/* CEM axis 0 leaves the major-axis magnitude in its private operand state.
- * Apple's cube shaders apply this exact reciprocal before calculating the two
- * normalized face coordinates.  It has no GPR operands to allocate. */
 bool
-agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
-                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
+                       uint16_t z, uint8_t axis, bool discard,
+                       uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
-   static const uint8_t native[] = {
-      0xaf, 0x00, 0x54, 0x00, 0x03, 0x00, 0x10, 0x48, 0x20, 0x00,
-   };
+   const uint16_t dest[3] = {0, 14, 4};
+   if (axis > 2)
+      return false;
+   return agx3_tex_cube_cem_calc_to(enc, x, y, z, dest[axis], axis, discard,
+                                    out, len);
+}
 
+/* CEM axis 0 leaves the major-axis magnitude in its destination. Apple's cube
+ * shaders apply an in-place reciprocal before calculating the two normalized
+ * face coordinates. */
+bool
+agx3_tex_cube_cem_rcp_to(enum agx_isa_encoding enc, uint16_t value,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B)
-      return false;
-
-   memcpy(out, native, sizeof(native));
-   *len = sizeof(native);
-   return true;
+   return agx3_alu_f32rcp(enc, value, value, AGX3_ALU_HINT_DISCARD, true, 0,
+                          out, len);
 }
 
-/* CEM and its reciprocal leave the signed face coordinates in private
- * operands. Apple's native cube shaders finish those coordinates with these
- * two fixed f32fma records, writing sampler coordinate bank 0. The second
- * record's f107 is the last-use bit; the common interpolated-coordinate path
- * sets it because SMP is the sole remaining consumer.
- *
- *   component 0  090f2e8123a0420000020200
- *   component 1  19053e0123a0420000026200  (discard)
- */
 bool
-agx3_tex_cube_cem_finalize(enum agx_isa_encoding enc, uint8_t component,
-                           bool discard,
-                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
+                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
-   static const uint8_t native[2][12] = {
-      {0x09, 0x0f, 0x2e, 0x81, 0x23, 0xa0,
-       0x42, 0x00, 0x00, 0x02, 0x02, 0x00},
-      {0x19, 0x05, 0x3e, 0x01, 0x23, 0xa0,
-       0x42, 0x00, 0x00, 0x02, 0x02, 0x00},
-   };
+   return agx3_tex_cube_cem_rcp_to(enc, 0, out, len);
+}
 
+/* CEM leaves the signed face coordinates in its axis destinations. Apple's
+ * native cube shaders finish them with this special FMA form: f35 names the
+ * reciprocal major axis, f18 names the selected axis value and f12 groups the
+ * result with the face PACK_SMPIR transaction. */
+bool
+agx3_tex_cube_cem_finalize_to(enum agx_isa_encoding enc, uint8_t component,
+                              uint16_t reciprocal, uint16_t axis_value,
+                              uint8_t slot,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || component > 1 ||
-       (component == 0 && discard))
+       (reciprocal & 1) || reciprocal > 190 || (axis_value & 1) ||
+       axis_value > 190 || slot < 1 || slot > 6)
       return false;
 
-   memcpy(out, native[component], sizeof(native[component]));
+   const struct agx3_field_kv base0[] = {
+      KV(9, 5),   KV(10, 2), KV(14, 1), KV(25, 2), KV(26, 2),
+      KV(29, 1),  KV(42, 2), KV(43, 2), KV(44, 1), KV(47, 1),
+      KV(51, 32), KV(59, 1), KV(60, 2), KV(77, 2), KV(91, 2),
+   };
+   const struct agx3_field_kv base1[] = {
+      KV(5, 2),  KV(9, 5),   KV(10, 2), KV(14, 1), KV(25, 2),
+      KV(26, 2), KV(29, 1),  KV(42, 2), KV(43, 2), KV(46, 1),
+      KV(47, 1), KV(51, 32), KV(59, 1), KV(60, 2), KV(77, 2),
+      KV(91, 2),
+   };
+   const struct agx3_field_kv ov[] = {
+      KV(12, slot), KV(18, axis_value), KV(35, reciprocal),
+   };
+   return agx3_bind_compose(
+      enc, "f32fma", 5, component ? base1 : base0,
+      component ? sizeof(base1) / sizeof(base1[0])
+                : sizeof(base0) / sizeof(base0[0]),
+      ov, sizeof(ov) / sizeof(ov[0]), out, len);
+}
+
+bool
+agx3_tex_cube_cem_finalize(enum agx_isa_encoding enc, uint8_t component,
+                           bool discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (component > 1 || (component == 0 && discard))
+      return false;
+   const uint16_t axis_value[2] = {14, 4};
+   if (!agx3_tex_cube_cem_finalize_to(enc, component, 0,
+                                      axis_value[component], 1, out, len))
+      return false;
    if (discard)
       out[10] |= 0x60;
-   *len = sizeof(native[component]);
    return true;
 }
 

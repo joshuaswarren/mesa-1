@@ -8279,6 +8279,77 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(32, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   agx_index texture = agx_register(4, AGX_SIZE_64);
+   agx_index sampler = agx_register(24, AGX_SIZE_64);
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), texture, sampler,
+      agx_null(), AGX_DIM_CUBE, AGX_LOD_MODE_AUTO_LOD, 0, false, false,
+      false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   /* The ordinary operands occupy through half37, so the reusable three-GPR
+    * CEM bank is halves38/40/42. In particular, it cannot overwrite the
+    * texture handle at r2:r3 as the old fixed-r2 axis destination did. */
+   const uint16_t scratch[3] = {38, 40, 42};
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      ASSERT_TRUE(agx3_tex_cube_cem_calc_to(
+         enc, 32, 34, 36, scratch[axis], axis, axis == 2, bytes, &len));
+      append(want, bytes, len);
+      if (axis == 0) {
+         ASSERT_TRUE(agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes, &len));
+         append(want, bytes, len);
+      }
+   }
+   for (unsigned component = 0; component < 2; ++component) {
+      ASSERT_TRUE(agx3_tex_cube_cem_finalize_to(
+         enc, component, scratch[0], scratch[component + 1], 6, bytes, &len));
+      append(want, bytes, len);
+   }
+   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 6, 0, false, true, bytes,
+                                     &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
+
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 8,
+      .coord = 0,
+      .width = AGX3_TEX_W32,
+      .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO,
+      .slot = 1,
+      .wait_mask = 1u << 5,
+      .coord_kill = true,
+      .final = true,
+      .cube = true,
+      .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+      .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+      .texture_value = 4,
+      .sampler_value = 24,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->max_reg, 43u);
+}
+
 TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;

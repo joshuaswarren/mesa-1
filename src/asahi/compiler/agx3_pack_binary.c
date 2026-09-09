@@ -1168,7 +1168,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint8_t slot, uint16_t wait_mask, bool final,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
-                         uint8_t native_coord_slot)
+                         uint8_t native_coord_slot,
+                         const uint16_t cem_scratch[3])
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
@@ -1313,8 +1314,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (!valid_immediate_lod && !implicit_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
-         (!implicit_lod && !explicit_lod) ||
-         (!cube_array && !immediate))) ||
+         (!implicit_lod && !explicit_lod))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
        (offset &&
@@ -1327,23 +1327,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
-   /* CEM axis 0 overwrites r0 before axes 1/2 reread XYZ, and axis 1
-    * overwrites r7 before axis 2. These fixed destinations are part of the
-    * native CEM ABI rather than explicit AGX IR destinations. Reject a
-    * manually constructed/corrupt post-RA stream that aliases either early
-    * scratch register. Production RA reserves their containing r0..r7 bank
-    * whenever a cube sample is present. r2 may overlap because its CEM write
-    * happens only after the final XYZ read. */
-   if (cube) {
-      const unsigned coord_first = I->src[0].value;
-      const unsigned coord_last = coord_first + (cube_array ? 8 : 6);
-      const bool aliases_r0 = coord_first < 2;
-      const bool aliases_r7 = coord_first < 16 && coord_last > 14;
-
-      if (aliases_r0 || aliases_r7)
-         return false;
-   }
-
    /* The witnessed copy form carries at most one producer dependency. */
    if (wait_mask & (wait_mask - 1))
       return false;
@@ -1352,15 +1335,29 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       (I->src[3].type == AGX_INDEX_REGISTER ||
        I->src[4].type == AGX_INDEX_REGISTER);
 
-   /* Native register-indexed array samples publish their coordinate/layer
-    * operand bank on slot 6 and wait slot 6 in SMP, independently of SMP's
-    * own result slot. Uniform/immediate array samples use the ordinary result
-    * slot. Keeping these two timelines distinct is required by the witnessed
-    * ep4 register-descriptor form. */
+   /* The immediate cube corpus uses fixed r0/r7/r2 CEM destinations. Dynamic
+    * descriptor forms use the allocator-owned bank supplied below. */
+   if (cube && immediate) {
+      const unsigned coord_first = I->src[0].value;
+      const unsigned coord_last = coord_first + (cube_array ? 8 : 6);
+      if (coord_first < 2 || (coord_first < 16 && coord_last > 14))
+         return false;
+   } else if (cube &&
+              (cem_scratch == NULL || (cem_scratch[0] & 1) ||
+               cem_scratch[2] > 190)) {
+      return false;
+   }
+
+   /* Native register-indexed array and cube samples publish their coordinate /
+    * face operand bank on slot 6 and wait slot 6 in SMP, independently of the
+    * sample result slot. The dynamic cube witness groups both descriptor
+    * loads and face publication on that transaction. Uniform/immediate
+    * operands use the ordinary result slot. */
    const bool native_staged_coords = native_coord_slot != 0;
    const uint8_t stage_slot = native_staged_coords
                                  ? native_coord_slot
-                                 : array && register_operands ? 6 : slot;
+                                 : (array || cube) && register_operands ? 6
+                                                                        : slot;
    /* Every native array witness names coordinate bank 0 in SMP, including
     * register-indexed shaders whose physical coordinates live elsewhere. */
    const uint16_t coord = (native_staged_coords || explicit_lod ||
@@ -1394,27 +1391,44 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
 
    if (cube) {
       /* Native cube sampling consumes CEM's normalized coordinates and face,
-       * not the raw XYZ vector.  CEM has no witnessed scoreboard-wait form;
-       * register LOD staging above already drained its producer. */
-      if (wait_mask)
+       * not the raw XYZ vector. CEM has no wait fields. A register-descriptor
+       * witness may leave only slot 6 active: the finalizers/face producer
+       * join that transaction and SMP waits for the complete group. */
+      const uint16_t staged_wait = (uint16_t)(1u << (stage_slot - 1));
+      if (wait_mask && (!register_operands || wait_mask != staged_wait))
          return false;
 
+      const uint16_t fixed_scratch[3] = {0, 14, 4};
+      const uint16_t *scratch = immediate ? fixed_scratch : cem_scratch;
       for (unsigned axis = 0; axis < 3; ++axis) {
-         if (!agx3_tex_cube_cem_calc(
-                enc, I->src[0].value, I->src[0].value + 2,
-                I->src[0].value + 4, axis, axis == 2, bytes, &len) ||
+         const bool packed = immediate
+            ? agx3_tex_cube_cem_calc(
+                 enc, I->src[0].value, I->src[0].value + 2,
+                 I->src[0].value + 4, axis, axis == 2, bytes, &len)
+            : agx3_tex_cube_cem_calc_to(
+                 enc, I->src[0].value, I->src[0].value + 2,
+                 I->src[0].value + 4, scratch[axis], axis, axis == 2, bytes,
+                 &len);
+         if (!packed ||
              !agx3_append(emission, bytes, len))
             return false;
 
          if (axis == 0 &&
-             (!agx3_tex_cube_cem_rcp(enc, bytes, &len) ||
+             (!(immediate
+                   ? agx3_tex_cube_cem_rcp(enc, bytes, &len)
+                   : agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes, &len)) ||
               !agx3_append(emission, bytes, len)))
             return false;
       }
 
       for (unsigned component = 0; component < 2; ++component) {
-         if (!agx3_tex_cube_cem_finalize(enc, component,
-                                         component == 1, bytes, &len) ||
+         const bool packed = immediate
+            ? agx3_tex_cube_cem_finalize(enc, component, component == 1,
+                                         bytes, &len)
+            : agx3_tex_cube_cem_finalize_to(
+                 enc, component, scratch[0], scratch[component + 1],
+                 stage_slot, bytes, &len);
+         if (!packed ||
              !agx3_append(emission, bytes, len))
             return false;
       }
@@ -4749,6 +4763,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       (ctx->nir->info.fs.needs_coarse_quad_helper_invocations ||
        ctx->nir->info.fs.needs_full_quad_helper_invocations);
    bool uniform_half_used[512] = {false};
+   bool has_dynamic_cube_sample = false;
+   unsigned observed_max_reg = ctx->max_reg;
    unsigned count = 0;
 
    assert(enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
@@ -4782,6 +4798,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             image_writes_left++;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE)
             texture_samples_left++;
+         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             (scan_I->dim == AGX_DIM_CUBE ||
+              scan_I->dim == AGX_DIM_CUBE_ARRAY) &&
+             (scan_I->src[3].type != AGX_INDEX_IMMEDIATE ||
+              scan_I->src[4].type != AGX_INDEX_IMMEDIATE))
+            has_dynamic_cube_sample = true;
+         agx_foreach_reg_dest(scan_I, d) {
+            observed_max_reg = MAX2(
+               observed_max_reg,
+               scan_I->dest[d].value +
+                  agx_index_size_16(scan_I->dest[d]) - 1);
+         }
+         agx_foreach_reg_src(scan_I, s) {
+            observed_max_reg = MAX2(
+               observed_max_reg,
+               scan_I->src[s].value + agx_index_size_16(scan_I->src[s]) - 1);
+         }
          /* Native keeps the fragment-input start marker clear in every
           * sampled or derivative fragment in the corpus, including explicit
           * LOD samples.  This conservatively preserves helper-capable lanes;
@@ -4805,6 +4838,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
       }
+   }
+
+   /* CEM has three real 32-bit destinations. They used to be hardcoded to
+    * r0/r7/r2 after RA, which could overwrite live control-flow state or a
+    * register descriptor (vkQuake's sky shader puts its texture handle in
+    * r2:r3). Reserve one reusable bank immediately above RA's allocation and
+    * publish those exact registers through every CEM/reciprocal/finalizer
+    * field. The CEM destination field reaches half190. */
+   uint16_t cem_scratch[3] = {0};
+   if (has_dynamic_cube_sample) {
+      const unsigned base = (observed_max_reg + 2) & ~1u;
+      if (base + 4 > 190)
+         goto fail;
+      for (unsigned i = 0; i < 3; ++i)
+         cem_scratch[i] = (uint16_t)(base + 2 * i);
+      ctx->max_reg = base + 5;
    }
 
    /* Apple's sampled G17P fragment objects use a distinct constant program
@@ -5057,8 +5106,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             e->src[ns++] = AGX3_SLOT_TEX_COORD_TOKEN;
 
          /* CEM is a compound cube-coordinate pipeline, not a single opaque
-          * sampler operation.  Its three witnessed calculations write fixed
-          * GPR halves 0, 14, and 4 before SMP consumes the staged result.
+          * sampler operation. Its three calculations write the dedicated
+          * CEM scratch bank before SMP consumes the staged result.
           * Keep those writes owned by the sample's scoreboard generation so
           * a following cube pipeline cannot clobber them while the first SMP
           * is still in flight.  Apple's two-cube G17P fragment does the
@@ -5071,10 +5120,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (I->dim == AGX_DIM_CUBE ||
               I->dim == AGX_DIM_CUBE_ARRAY)) {
+            const bool dynamic_cem =
+               I->src[3].type != AGX_INDEX_IMMEDIATE ||
+               I->src[4].type != AGX_INDEX_IMMEDIATE;
+            const uint16_t fixed_scratch[3] = {0, 14, 4};
+            const uint16_t *scratch = dynamic_cem ? cem_scratch
+                                                   : fixed_scratch;
             assert(nd + 3 <= AGX3_SLOT_MAX_REGS);
-            e->dst[nd++] = 0;
-            e->dst[nd++] = 14;
-            e->dst[nd++] = 4;
+            e->dst[nd++] = scratch[0];
+            e->dst[nd++] = scratch[1];
+            e->dst[nd++] = scratch[2];
          }
          e->nr_dsts = (uint8_t)nd;
          e->nr_srcs = (uint8_t)ns;
@@ -5557,16 +5612,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                sample_wait = coord_wait;
             }
-            /* CEM has no scoreboard-wait fields.  The slot planner includes
-             * its fixed scratch writes above, so materialize that dependency
-             * immediately before the compound pipeline and let its own
-             * PACK_SMPIR/SMP pair use the newly assigned result slot. */
+            /* CEM has no scoreboard-wait fields. Keep a register-descriptor
+             * producer already assigned slot 6 active so CEM's finalizers and
+             * face publication join its native transaction. Retire every
+             * other producer before entering the compound pipeline. */
             if ((I->dim == AGX_DIM_CUBE ||
                  I->dim == AGX_DIM_CUBE_ARRAY) &&
                 sample_wait != 0) {
-               if (!agx3_retire_slots_noop(emission, enc, sample_wait))
+               const bool register_operands =
+                  I->src[3].type == AGX_INDEX_REGISTER ||
+                  I->src[4].type == AGX_INDEX_REGISTER;
+               const uint16_t native_wait =
+                  register_operands ? (sample_wait & (1u << 5)) : 0;
+               const uint16_t retire = sample_wait & ~native_wait;
+               if (retire && !agx3_retire_slots_noop(emission, enc, retire))
                   AGX3_REFUSE(I);
-               sample_wait = 0;
+               sample_wait = native_wait;
             }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
                  !compute_gradient) ||
@@ -5575,7 +5636,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final, open_pixel,
                                           &ctx->agx3_colour_link.entry_offset,
-                                          native_coord_slot))
+                                          native_coord_slot, cem_scratch))
                AGX3_REFUSE(I);
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
