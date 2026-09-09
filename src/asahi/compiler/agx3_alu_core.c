@@ -1179,8 +1179,11 @@ agx3_alu_fcmp_minifloat_select_mixed(
    if (enc != AGX_ISA_ENCODING_AGX3B || !selected ||
        !selected_immediate || !hints || !out || !len || dest >= 256 ||
        compare >= 256 || (compare & 1) || (!dest_16 && (dest & 1)) ||
-       (condition != 0 && condition != 1 && condition != 5) ||
-       (wait_mask != 0 && wait_mask != 32) ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
+       (dest_16 ? (wait_mask > UINT16_C(0x20) ||
+                    (wait_mask && (wait_mask & (wait_mask - 1))))
+                : (wait_mask != 0 && wait_mask != 32)) ||
        (unsigned)hints[0] > AGX3_ALU_HINT_CACHE)
       return false;
 
@@ -1190,13 +1193,9 @@ agx3_alu_fcmp_minifloat_select_mixed(
                : (selected_immediate[0] == selected_immediate[1]))
       return false;
 
-   /* The measured GE family has a full result and selects a full register or
-    * zero. The compare immediate is the ordinary AGX minifloat: fresh native
-    * witnesses cover 0.25 through 16.0, including the alpha-to-coverage
-    * boundary 15.5. */
-   if (condition == 5 &&
-       (dest_16 || selected_immediate[0] || !selected_immediate[1] ||
-        selected[1] != 0))
+   /* A full result's immediate alternative is floating zero. Fresh native
+    * sweeps cover both placements and all five ordered conditions. */
+   if (!dest_16 && selected[selected_immediate[0] ? 0 : 1] != 0)
       return false;
 
    for (unsigned i = 0; i < 2; ++i) {
@@ -1228,7 +1227,7 @@ agx3_alu_fcmp_minifloat_select_mixed(
    base[nbase++] = (struct agx3_field_kv){93,
                                           selected_immediate[1] ? 1 : 2};
    base[nbase++] = (struct agx3_field_kv){94, dest_16 ? 1 : 2};
-   struct agx3_field_kv fields[16] = {
+   struct agx3_field_kv fields[20] = {
       {dest_16 ? 3 : 17, dest},
       {dest_16 ? 12 : 26, dest_cache},
       {35, compare},
@@ -1237,10 +1236,9 @@ agx3_alu_fcmp_minifloat_select_mixed(
       {selected_immediate[1] ? 85 : 86, selected[1]},
       {44, hints[0] == AGX3_ALU_HINT_CACHE},
       {46, hints[0] == AGX3_ALU_HINT_DISCARD},
-      {107, wait_mask == 32},
       {110, condition},
    };
-   unsigned n = 10;
+   unsigned n = 9;
    const unsigned cache[] = {78, 95}, discard[] = {80, 97};
    for (unsigned i = 0; i < 2; ++i) {
       if (!selected_immediate[i]) {
@@ -1250,6 +1248,9 @@ agx3_alu_fcmp_minifloat_select_mixed(
                                               hints[i + 1] == AGX3_ALU_HINT_DISCARD};
       }
    }
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){102 + slot,
+                                           !!(wait_mask & (1u << slot))};
 
    /* Apple's witnessed GE/minifloat vectors use the eight-byte ep10 form when
     * the physical destination permits it. The older EQ/LT corpus uses

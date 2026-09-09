@@ -157,7 +157,8 @@ bool agx3_alu_fcmp_minifloat_select_half(
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Compare f32 against a minifloat and select the observed mixed register /
- * byte-immediate result shapes used by Hyprland shaders. */
+ * byte-immediate result shapes used by Hyprland and GTK shaders. The
+ * half-result form carries any one of the six native scoreboard waits. */
 bool agx3_alu_fcmp_minifloat_select_mixed(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t compare,
    uint8_t minifloat, const uint16_t selected[2],

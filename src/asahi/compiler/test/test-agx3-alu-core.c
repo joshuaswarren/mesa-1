@@ -1968,6 +1968,231 @@ static void test_native_minifloat_mixed_select(void)
       exact(bytes, len, "1a030db1a6ff00c22080");
    }
 
+   /* Fresh applegpu_g17p GTK box-shadow witnesses. Apple canonicalizes
+    * `-x < -0` to `x > +0`; the latter is byte-identical to a source written
+    * directly as `x > 0`. The remaining vectors independently cover every
+    * ordered condition, signed minifloats, both lifetime hints, both half
+    * destination endpoints, arbitrary selected bytes and texture/load waits.
+    */
+   {
+      static const struct {
+         uint16_t dest, compare;
+         uint8_t threshold, if_true, if_false, condition;
+         enum agx3_alu_hint hint;
+         bool dest_cache;
+         uint16_t wait;
+         const char *bytes;
+      } native[] = {
+         {2, 2, 0x00, 1, 0, 0, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81268100c22080"},
+         {2, 2, 0x00, 1, 0, 1, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81228103c22080"},
+         {2, 2, 0x00, 1, 0, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81228102c22080"},
+         {2, 2, 0x00, 1, 0, 5, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81268102c22080"},
+         {2, 2, 0x00, 1, 0, 6, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81268103c22080"},
+         {2, 2, 0xb0, 1, 0, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12031db1228102c22080"},
+         {2, 2, 0x20, 1, 0, 6, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030da1268103c22080"},
+         {2, 2, 0x30, 1, 0, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030db1228102c22080"},
+         {2, 2, 0xb0, 1, 0, 1, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12031db1228103c22080"},
+         {4, 0, 0x00, 1, 0, 2, AGX3_ALU_HINT_NONE, false, 32,
+          "22010581228102c22080"},
+         {2, 4, 0x00, 1, 0, 2, AGX3_ALU_HINT_CACHE, false, 32,
+          "12850581228102c22080"},
+         {4, 0, 0x00, 1, 0, 2, AGX3_ALU_HINT_CACHE, false, 0,
+          "22810581228102022080"},
+         {3, 2, 0x00, 1, 0, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+          "1a030d81228102c22080"},
+         {2, 2, 0x00, 5, 7, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+          "12030d81228502c22087"},
+         {2, 2, 0x00, 1, 0, 2, AGX3_ALU_HINT_DISCARD, false, 1,
+          "12030d81228102222080"},
+      };
+      const bool immediate[] = {true, true};
+      for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
+         const uint16_t selected[] = {
+            native[i].if_true, native[i].if_false};
+         const enum agx3_alu_hint hints[] = {
+            native[i].hint, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         assert(agx3_alu_fcmp_minifloat_select_mixed(
+            AGX_ISA_ENCODING_AGX3B, native[i].dest, native[i].compare,
+            native[i].threshold, selected, immediate, hints,
+            native[i].condition, true, native[i].dest_cache, native[i].wait,
+            bytes, &len));
+         exact(bytes, len, native[i].bytes);
+      }
+
+      /* Apple canonicalizes `1 < -x ? 0 : y` to `x < -1 ? 0 : y`. */
+      const uint16_t signed_selected[] = {0, 4};
+      const bool signed_immediate[] = {true, false};
+      const enum agx3_alu_hint signed_hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+         AGX3_ALU_HINT_DISCARD};
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0xb0, signed_selected,
+         signed_immediate, signed_hints, 1, false, false, 32, bytes, &len));
+      exact(bytes, len, "02011bb1228003c28004");
+   }
+
+   /* Fresh full-result sweep from the same Apple build. Each condition is
+    * pinned with floating zero on either side of the selected register. */
+   {
+      static const struct {
+         uint8_t condition;
+         bool zero_true;
+         const char *bytes;
+      } native[] = {
+         {0, true,  "02010bb1268000c28004"},
+         {1, true,  "02010bb1228003c28004"},
+         {2, true,  "02010bb1228002c28004"},
+         {5, true,  "02010bb1268002c28004"},
+         {6, true,  "02010bb1268003c28004"},
+         {0, false, "02010bb1860400c22080"},
+         {1, false, "02010bb1820403c22080"},
+         {2, false, "02010bb1820402c22080"},
+         {5, false, "02010bb1860402c22080"},
+         {6, false, "02010bb1860403c22080"},
+      };
+      for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
+         const uint16_t selected[] = {
+            native[i].zero_true ? 0 : 4,
+            native[i].zero_true ? 4 : 0,
+         };
+         const bool immediate[] = {
+            native[i].zero_true, !native[i].zero_true,
+         };
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_DISCARD,
+            native[i].zero_true ? AGX3_ALU_HINT_NONE
+                                : AGX3_ALU_HINT_DISCARD,
+            native[i].zero_true ? AGX3_ALU_HINT_DISCARD
+                                : AGX3_ALU_HINT_NONE,
+         };
+         assert(agx3_alu_fcmp_minifloat_select_mixed(
+            AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, selected, immediate,
+            hints, native[i].condition, false, false, 32, bytes, &len));
+         exact(bytes, len, native[i].bytes);
+      }
+   }
+
+   /* Complete admitted half-result field product. */
+   {
+      static const unsigned conditions[] = {0, 1, 2, 5, 6};
+      static const unsigned waits[] = {0, 1, 2, 4, 8, 16, 32};
+      const bool immediate[] = {true, true};
+      const uint16_t selected[] = {255, 7};
+      for (unsigned c = 0; c < sizeof(conditions) / sizeof(conditions[0]); ++c)
+         for (unsigned hint = 0; hint <= AGX3_ALU_HINT_CACHE; ++hint)
+            for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache)
+               for (unsigned dest_odd = 0; dest_odd < 2; ++dest_odd)
+                  for (unsigned w = 0; w < sizeof(waits) / sizeof(waits[0]);
+                       ++w) {
+                     const enum agx3_alu_hint hints[] = {
+                        (enum agx3_alu_hint)hint, AGX3_ALU_HINT_NONE,
+                        AGX3_ALU_HINT_NONE};
+                     assert(agx3_alu_fcmp_minifloat_select_mixed(
+                        AGX_ISA_ENCODING_AGX3B, dest_odd ? 255 : 254, 254,
+                        0x80, selected, immediate, hints, conditions[c], true,
+                        dest_cache, waits[w], bytes, &len));
+                     assert(len == 10);
+                  }
+
+      const enum agx3_alu_hint dead[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      for (unsigned value = 0; value < 256; ++value) {
+         const uint16_t span[] = {value, 255 - value};
+         assert(agx3_alu_fcmp_minifloat_select_mixed(
+            AGX_ISA_ENCODING_AGX3B, value, value & 0xfe, value, span,
+            immediate, dead, 2, true, value & 1, 1u << (value % 6),
+            bytes, &len));
+      }
+   }
+
+   /* Complete full-result condition/orientation/lifetime/wait product. */
+   {
+      static const unsigned conditions[] = {0, 1, 2, 5, 6};
+      static const unsigned waits[] = {0, 32};
+      for (unsigned c = 0; c < sizeof(conditions) / sizeof(conditions[0]); ++c)
+         for (unsigned zero_true = 0; zero_true < 2; ++zero_true)
+            for (unsigned compare_hint = 0;
+                 compare_hint <= AGX3_ALU_HINT_CACHE; ++compare_hint)
+               for (unsigned selected_hint = 0;
+                    selected_hint <= AGX3_ALU_HINT_CACHE; ++selected_hint)
+                  for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache)
+                     for (unsigned w = 0;
+                          w < sizeof(waits) / sizeof(waits[0]); ++w) {
+                        const uint16_t selected[] = {
+                           zero_true ? 0 : 252,
+                           zero_true ? 252 : 0,
+                        };
+                        const bool immediate[] = {
+                           (bool)zero_true, !zero_true,
+                        };
+                        const enum agx3_alu_hint hints[] = {
+                           (enum agx3_alu_hint)compare_hint,
+                           zero_true
+                              ? AGX3_ALU_HINT_NONE
+                              : (enum agx3_alu_hint)selected_hint,
+                           zero_true
+                              ? (enum agx3_alu_hint)selected_hint
+                              : AGX3_ALU_HINT_NONE,
+                        };
+                        assert(agx3_alu_fcmp_minifloat_select_mixed(
+                           AGX_ISA_ENCODING_AGX3B, 254, 254, 0x80,
+                           selected, immediate, hints, conditions[c], false,
+                           dest_cache, waits[w], bytes, &len));
+                     }
+   }
+
+   {
+      const uint16_t gtk_selected[] = {1, 0};
+      const bool gtk_immediate[] = {true, true};
+      const enum agx3_alu_hint gtk_hints[] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 44, 44, 0, gtk_selected, gtk_immediate,
+         gtk_hints, 2, true, false, 0, bytes, &len));
+      exact(bytes, len, "622d4581228102022080");
+   }
+   {
+      const uint16_t full_selected[] = {0, 0};
+      const bool full_immediate[] = {false, true};
+      const enum agx3_alu_hint full_hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_NONE};
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 14, 2, 0xef, full_selected,
+         full_immediate, full_hints, 6, false, false, 0, bytes, &len));
+      exact(bytes, len, "72031bef860013022080");
+   }
+   {
+      const uint16_t linear_selected[] = {0, 10};
+      const bool linear_immediate[] = {true, false};
+      const enum agx3_alu_hint linear_hints[] = {
+         AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 10, 22, 0x30, linear_selected,
+         linear_immediate, linear_hints, 5, false, false, 0, bytes, &len));
+      exact(bytes, len, "529703b126800202000a");
+   }
+   {
+      const uint16_t conic_selected[] = {0, 24};
+      const bool conic_immediate[] = {true, false};
+      const enum agx3_alu_hint conic_hints[] = {
+         AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE,
+         AGX3_ALU_HINT_DISCARD};
+      assert(agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 24, 12, 0x30, conic_selected,
+         conic_immediate, conic_hints, 6, false, false, 0, bytes, &len));
+      exact(bytes, len, "c28d03b1268003028018");
+   }
+
    const uint16_t selected[] = {2, 0};
    const bool immediate[] = {false, true};
    const enum agx3_alu_hint hints[] = {
@@ -1976,9 +2201,43 @@ static void test_native_minifloat_mixed_select(void)
    assert(!agx3_alu_fcmp_minifloat_select_mixed(
       AGX_ISA_ENCODING_AGX3C, 0, 0, 0x30, selected, immediate, hints, 1,
       false, false, 0, bytes, &len));
-   assert(!agx3_alu_fcmp_minifloat_select_mixed(
+   assert(agx3_alu_fcmp_minifloat_select_mixed(
       AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, selected, immediate, hints, 2,
       false, false, 0, bytes, &len));
+   {
+      const uint16_t nonzero[] = {7, 2};
+      const bool zero_first[] = {true, false};
+      assert(!agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0x30, nonzero, zero_first, hints, 2,
+         false, false, 0, bytes, &len));
+   }
+   {
+      const uint16_t selected_half[] = {1, 0};
+      const bool immediate_half[] = {true, true};
+      const enum agx3_alu_hint half_hints[] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      for (unsigned condition = 3; condition <= 7; ++condition) {
+         if (condition == 5 || condition == 6)
+            continue;
+         assert(!agx3_alu_fcmp_minifloat_select_mixed(
+            AGX_ISA_ENCODING_AGX3B, 0, 0, 0, selected_half,
+            immediate_half, half_hints, condition, true, false, 0, bytes,
+            &len));
+      }
+      assert(!agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0, selected_half, immediate_half,
+         half_hints, 2, true, false, 3, bytes, &len));
+      assert(!agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 0, selected_half, immediate_half,
+         half_hints, 2, true, false, 64, bytes, &len));
+      assert(!agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 0, 1, 0, selected_half, immediate_half,
+         half_hints, 2, true, false, 0, bytes, &len));
+      assert(!agx3_alu_fcmp_minifloat_select_mixed(
+         AGX_ISA_ENCODING_AGX3B, 256, 0, 0, selected_half,
+         immediate_half, half_hints, 2, true, false, 0, bytes,
+         &len));
+   }
    /* The three measured Hyprland post-RA physical-register shapes. */
    {
       const uint16_t blur_selected[] = {24, 0};
@@ -2010,7 +2269,8 @@ static void test_native_minifloat_mixed_select(void)
          AGX_ISA_ENCODING_AGX3B, 2, 22, 0x40, glitch_selected,
          glitch_immediate, glitch_hints, 1, false, true, 0, bytes, &len));
    }
-   puts("Native minifloat mixed select: eight exact Apple vectors and bounds PASS");
+   puts("Native minifloat mixed select: 34 exact Apple vectors, 676 half + "
+        "360 full legal forms and strict bounds PASS");
 }
 
 static void test_native_half_minifloat_select_f32(void)

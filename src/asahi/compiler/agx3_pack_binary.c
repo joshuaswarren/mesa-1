@@ -6991,21 +6991,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Hyprland's blur/mask paths compare f32 against a minifloat and
-          * select either one full register plus zero, or two half-width byte
-          * constants. Both shapes are direct native FSEL forms. */
+         /* Hyprland and GTK compare f32 against a minifloat and select either
+          * one full register plus zero, or two half-width byte constants.
+          * Both shapes are direct native FSEL forms. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
-             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
-             !I->saturate &&
-             (I->fcond == AGX_FCOND_EQ || I->fcond == AGX_FCOND_LT ||
-              I->fcond == AGX_FCOND_GE) &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_fcond_witnessed_select(I->fcond) &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              (I->dest[0].size == AGX_SIZE_16 ||
               I->dest[0].size == AGX_SIZE_32) &&
              agx_channels(I->dest[0]) == 1 &&
-             agx3_vary_reg32(I->src[0]) &&
-             I->src[1].type == AGX_INDEX_IMMEDIATE &&
-             I->src[1].value <= UINT8_MAX &&
+             ((agx3_mod_src_ok(I->src[0]) &&
+               I->src[1].type == AGX_INDEX_IMMEDIATE) ||
+              (I->src[0].type == AGX_INDEX_IMMEDIATE &&
+               agx3_mod_src_ok(I->src[1]))) &&
              ((I->dest[0].size == AGX_SIZE_16 &&
                I->src[2].type == AGX_INDEX_IMMEDIATE &&
                I->src[3].type == AGX_INDEX_IMMEDIATE) ||
@@ -7013,24 +7012,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ((I->src[2].type == AGX_INDEX_IMMEDIATE) !=
                 (I->src[3].type == AGX_INDEX_IMMEDIATE))))) {
             const bool dest_16 = I->dest[0].size == AGX_SIZE_16;
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index compare = I->src[immediate_first ? 1 : 0];
+            const agx_index threshold = I->src[immediate_first ? 0 : 1];
+            const unsigned selected_index[2] = {
+               I->invert_cond ? 3u : 2u, I->invert_cond ? 2u : 3u};
             bool selected_immediate[2];
             uint16_t selected[2];
             enum agx3_alu_hint hints[3] = {
-               agx3_post_ra_hint(I->src[0]),
+               agx3_post_ra_hint(compare),
                AGX3_ALU_HINT_NONE,
                AGX3_ALU_HINT_NONE,
             };
-            bool invalid = false;
+            const bool compare_neg = compare.neg;
+            bool invalid = threshold.value > UINT8_MAX || threshold.abs ||
+                           threshold.neg || compare.abs || compare.kill ||
+                           threshold.cache || threshold.discard;
             for (unsigned i = 0; i < 4; ++i)
-               invalid |= I->src[i].memory || I->src[i].abs ||
-                          I->src[i].neg || I->src[i].kill ||
+               invalid |= I->src[i].memory || I->src[i].kill ||
                           (I->src[i].cache && I->src[i].discard) ||
                           agx_channels(I->src[i]) != 1;
+            for (unsigned i = 2; i < 4; ++i)
+               invalid |= I->src[i].abs || I->src[i].neg;
             for (unsigned i = 0; i < 2; ++i) {
-               const agx_index value = I->src[i + 2];
+               const agx_index value = I->src[selected_index[i]];
                selected_immediate[i] = value.type == AGX_INDEX_IMMEDIATE;
                invalid |= selected_immediate[i]
-                             ? value.value > UINT8_MAX
+                             ? (value.value > UINT8_MAX || value.cache ||
+                                value.discard)
                              : (!agx3_src_is_register(value) ||
                                 value.size != I->dest[0].size);
                selected[i] = value.value;
@@ -7038,19 +7048,36 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   hints[i + 1] = agx3_post_ra_hint(value);
             }
 
-            uint16_t fsel_wait = wait;
-            if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
-                  AGX3_REFUSE(I);
-               fsel_wait = 0;
+            unsigned condition = immediate_first
+                                    ? agx3_fcond_reverse(I->fcond)
+                                    : I->fcond;
+            uint8_t minifloat = threshold.value;
+            if (compare_neg) {
+               /* Ordered IEEE comparisons preserve their NaN result when
+                * both operands are negated, while their direction reverses.
+                * Apple's -x < -0 and -x < 1 kernels use exactly this
+                * canonical x > +0 / x > -1 form. */
+               condition = agx3_fcond_reverse(condition);
+               minifloat ^= 0x80;
             }
+
+            uint16_t fsel_wait = wait;
+            const bool retire_wait =
+               dest_16 ? (fsel_wait > 32 ||
+                          (fsel_wait && (fsel_wait & (fsel_wait - 1))))
+                       : (fsel_wait != 0 && fsel_wait != 32);
+            if (retire_wait)
+               fsel_wait = 0;
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!invalid &&
                 agx3_alu_fcmp_minifloat_select_mixed(
-                   enc, I->dest[0].value, I->src[0].value,
-                   I->src[1].value, selected, selected_immediate, hints,
-                   I->fcond, dest_16, I->dest[0].cache, fsel_wait, bytes,
+                   enc, I->dest[0].value, compare.value,
+                   minifloat, selected, selected_immediate, hints,
+                   condition, dest_16, I->dest[0].cache, fsel_wait, bytes,
                    &len)) {
+               if (retire_wait &&
+                   !agx3_retire_slots_noop(emission, enc, wait))
+                  AGX3_REFUSE(I);
                if (!agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                continue;

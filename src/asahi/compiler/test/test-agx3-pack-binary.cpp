@@ -1036,6 +1036,212 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectCanonicalizesExactly)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+
+   /* Exact post-RA shape from current GTK gskgpuboxshadow.frag. Apple emits
+    * the byte-identical x > +0 form for source -x < -0. */
+   agx_builder *b = builder(enc);
+   agx_index compare = agx_register(44, AGX_SIZE_32);
+   compare.neg = true;
+   agx_fcmpsel_to(b, agx_register(44, AGX_SIZE_16), compare,
+                  agx_immediate(0x80), agx_immediate(1), agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> gtk = {
+      0x62, 0x2d, 0x45, 0x81, 0x22, 0x81, 0x02, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), gtk);
+
+   /* Sign-flipping the threshold and reversing the relation are independent
+    * of zero. These are the no-wait forms of fresh Apple -x < +1 and
+    * -x >= -0.5 witnesses. */
+   b = builder(enc);
+   compare = agx_register(2, AGX_SIZE_32);
+   compare.neg = true;
+   compare.discard = true;
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), compare,
+                  agx_immediate(0x30), agx_immediate(1), agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> minus_one = {
+      0x12, 0x03, 0x1d, 0xb1, 0x22, 0x81, 0x02, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), minus_one);
+
+   b = builder(enc);
+   compare = agx_register(2, AGX_SIZE_32);
+   compare.neg = true;
+   compare.discard = true;
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), compare,
+                  agx_immediate(0xa0), agx_immediate(1), agx_immediate(0),
+                  AGX_FCOND_GE);
+   agx_stop(b);
+   const std::vector<uint8_t> plus_half = {
+      0x12, 0x03, 0x0d, 0xa1, 0x26, 0x81, 0x03, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), plus_half);
+
+   /* Current gskgpulineargradient has the minifloat in the first compare
+    * slot. Fresh Apple kernels normalize 1 < x to x > 1, and 1 < -x to
+    * x < -1. */
+   b = builder(enc);
+   compare = agx_register(2, AGX_SIZE_32);
+   compare.discard = true;
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), agx_immediate(0x30),
+                  compare, agx_immediate(1), agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> immediate_first = {
+      0x12, 0x03, 0x0d, 0xb1, 0x22, 0x81, 0x02, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), immediate_first);
+
+   b = builder(enc);
+   compare = agx_register(2, AGX_SIZE_32);
+   compare.neg = true;
+   compare.discard = true;
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), agx_immediate(0x30),
+                  compare, agx_immediate(1), agx_immediate(0),
+                  AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> immediate_first_negated = {
+      0x12, 0x03, 0x1d, 0xb1, 0x22, 0x81, 0x03, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), immediate_first_negated);
+
+   /* Exact full-result post-RA forms reached later in current GTK's linear
+    * and conic gradient shaders. */
+   b = builder(enc);
+   compare = agx_register(22, AGX_SIZE_32);
+   compare.cache = true;
+   agx_fcmpsel_to(b, agx_register(10, AGX_SIZE_32), compare,
+                  agx_immediate(0x30), agx_immediate(0),
+                  agx_register(10, AGX_SIZE_32), AGX_FCOND_GE);
+   agx_stop(b);
+   const std::vector<uint8_t> linear_full = {
+      0x52, 0x97, 0x03, 0xb1, 0x26, 0x80, 0x02, 0x02, 0x00, 0x0a,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), linear_full);
+
+   b = builder(enc);
+   compare = agx_register(12, AGX_SIZE_32);
+   compare.cache = true;
+   agx_index fallback = agx_register(24, AGX_SIZE_32);
+   fallback.discard = true;
+   agx_fcmpsel_to(b, agx_register(24, AGX_SIZE_32), agx_immediate(0x30),
+                  compare, agx_immediate(0), fallback, AGX_FCOND_GE);
+   agx_stop(b);
+   const std::vector<uint8_t> conic_full = {
+      0xc2, 0x8d, 0x03, 0xb1, 0x26, 0x80, 0x03, 0x02, 0x80, 0x18,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), conic_full);
+
+   /* Inverting the predicate swaps the selected bytes without changing the
+    * compare canonicalization. */
+   b = builder(enc);
+   compare = agx_register(44, AGX_SIZE_32);
+   compare.neg = true;
+   agx_instr *fsel = agx_fcmpsel_to(
+      b, agx_register(44, AGX_SIZE_16), compare, agx_immediate(0x80),
+      agx_immediate(1), agx_immediate(0), AGX_FCOND_LT);
+   fsel->invert_cond = true;
+   agx_stop(b);
+   const std::vector<uint8_t> inverted = {
+      0x62, 0x2d, 0x45, 0x81, 0x22, 0x80, 0x02, 0x02, 0x20, 0x81,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), inverted);
+}
+
+TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectRefusesUngroundedForms)
+{
+   enum bad_form {
+      WRONG_ARCH,
+      FULL_DEST,
+      DEST_VECTOR,
+      DEST_MEMORY,
+      COMPARE_HALF,
+      COMPARE_ODD,
+      COMPARE_ABS,
+      COMPARE_ABS_NEG,
+      COMPARE_KILL,
+      COMPARE_HINT_CONFLICT,
+      THRESHOLD_OVERFLOW,
+      THRESHOLD_ABS,
+      THRESHOLD_NEG,
+      THRESHOLD_KILL,
+      THRESHOLD_CACHE,
+      TRUE_OVERFLOW,
+      FALSE_OVERFLOW,
+      TRUE_ABS,
+      FALSE_NEG,
+      TRUE_KILL,
+      FALSE_MEMORY,
+      TRUE_CACHE,
+      NAN_CONDITION_LT,
+      NAN_CONDITION_GT,
+      SATURATE,
+   };
+
+   for (unsigned form = WRONG_ARCH; form <= SATURATE; ++form) {
+      SCOPED_TRACE(form);
+      agx_builder *b = builder(form == WRONG_ARCH ? AGX_ISA_ENCODING_AGX3C
+                                                  : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(44, AGX_SIZE_16);
+      agx_index compare = agx_register(44, AGX_SIZE_32);
+      agx_index threshold = agx_immediate(0x80);
+      agx_index if_true = agx_immediate(1);
+      agx_index if_false = agx_immediate(0);
+      compare.neg = true;
+      enum agx_fcond condition = AGX_FCOND_LT;
+
+      switch ((enum bad_form)form) {
+      case WRONG_ARCH: break;
+      case FULL_DEST: dest.size = AGX_SIZE_32; break;
+      case DEST_VECTOR: dest.channels_m1 = 1; break;
+      case DEST_MEMORY: dest.memory = true; break;
+      case COMPARE_HALF: compare.size = AGX_SIZE_16; break;
+      case COMPARE_ODD: compare.value = 45; break;
+      case COMPARE_ABS: compare.abs = true; compare.neg = false; break;
+      case COMPARE_ABS_NEG: compare.abs = true; break;
+      case COMPARE_KILL: compare.kill = true; break;
+      case COMPARE_HINT_CONFLICT:
+         compare.cache = compare.discard = true;
+         break;
+      case THRESHOLD_OVERFLOW: threshold.value = 256; break;
+      case THRESHOLD_ABS: threshold.abs = true; break;
+      case THRESHOLD_NEG: threshold.neg = true; break;
+      case THRESHOLD_KILL: threshold.kill = true; break;
+      case THRESHOLD_CACHE: threshold.cache = true; break;
+      case TRUE_OVERFLOW: if_true.value = 256; break;
+      case FALSE_OVERFLOW: if_false.value = 256; break;
+      case TRUE_ABS: if_true.abs = true; break;
+      case FALSE_NEG: if_false.neg = true; break;
+      case TRUE_KILL: if_true.kill = true; break;
+      case FALSE_MEMORY: if_false.memory = true; break;
+      case TRUE_CACHE: if_true.cache = true; break;
+      case NAN_CONDITION_LT: condition = AGX_FCOND_LTN; break;
+      case NAN_CONDITION_GT: condition = AGX_FCOND_GTN; break;
+      case SATURATE: break;
+      }
+
+      agx_instr *I = agx_fcmpsel_to(b, dest, compare, threshold, if_true,
+                                     if_false, condition);
+      I->saturate = form == SATURATE;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, AlphaCoverageBoundarySelectMatchesNative)
 {
    enum modifier {
@@ -1088,7 +1294,18 @@ TEST_F(AGX3PackBinary, AlphaCoverageBoundarySelectMatchesNative)
    EXPECT_EQ(build(NONE, false),
              std::vector<uint8_t>(expected, expected + sizeof(expected)));
 
+   /* A fresh full-result Apple witness grounds the same negate
+    * canonicalization. */
+   const uint8_t negated[] = {
+      0x72, 0x03, 0x1b, 0xef, 0x86, 0x00, 0x13, 0x02, 0x20, 0x80,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(build(COMPARE_NEG, false),
+             std::vector<uint8_t>(negated, negated + sizeof(negated)));
+
    for (unsigned bad = COMPARE_ABS; bad <= SATURATE; ++bad) {
+      if (bad == COMPARE_NEG)
+         continue;
       SCOPED_TRACE(bad);
       EXPECT_TRUE(build((enum modifier)bad, true).empty());
    }
