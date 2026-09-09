@@ -60,7 +60,28 @@ agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind)
       return;
 
    if (unbind) {
-      agx_bo_bind(dev, NULL, va->addr, va->size_B, 0, DRM_ASAHI_BIND_UNBIND);
+      /* Sparse/capture-replay VAs are always installed as a lower read-write
+       * mapping plus the corresponding upper read-only shadow.  Remove both
+       * in one VM_BIND transaction so neither half can survive VA reuse. */
+      assert(!(va->flags & AGX_VA_USC));
+      assert(va->size_B >= dev->guard_size);
+      const uint64_t bound_size_B = va->size_B - dev->guard_size;
+      struct drm_asahi_gem_bind_op ops[2] = {
+         {
+            .flags = DRM_ASAHI_BIND_UNBIND,
+            .range = bound_size_B,
+            .addr = va->addr,
+         },
+         {
+            .flags = DRM_ASAHI_BIND_UNBIND,
+            .range = bound_size_B,
+            .addr = agx_rw_addr_to_ro(dev, va->addr),
+         },
+      };
+
+      /* Do not recycle an address if either stale mapping could remain. */
+      if (dev->ops.bo_bind(dev, ops, ARRAY_SIZE(ops)))
+         return;
    }
 
    if (dev->ops.va_free != NULL) {

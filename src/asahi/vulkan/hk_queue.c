@@ -803,52 +803,6 @@ hk_flush_bind(struct hk_bind_builder *b)
 
    uint64_t va_addr = b->va->addr + b->resourceOffset;
 
-   /* If we have an image with sparse residency, we have a userspace-managed
-    * sparse page table map, which we need to keep in sync with the real
-    * kernel-managed page table.  This ensures textures get strict residency
-    * semantics, using the hardware sparse support.
-    */
-   if (b->image && b->image->planes[0].sparse_map != NULL) {
-      assert(b->image->plane_count == 1 && "multiplane sparse not supported");
-
-      uint32_t *map = agx_bo_map(b->image->planes[0].sparse_map);
-      uint64_t size_page = ail_bytes_to_pages(b->size);
-
-      struct ail_layout *layout = &b->image->planes[0].layout;
-      uint64_t layer_stride_page = ail_bytes_to_pages(layout->layer_stride_B);
-
-      for (unsigned offs_page = 0; offs_page < size_page; offs_page++) {
-         /* Determine the target page to bind */
-         uint64_t target_page =
-            ail_bytes_to_pages(b->resourceOffset) + offs_page;
-
-         /* The page table is per-layer. Fortunately, layers are page-aligned,
-          * so we can divide to find the layer & the page relative to the start
-          * of the layer, which give us the index into the sparse map.
-          *
-          * Note that we can end up out-of-bounds since the hardware page size
-          * (16k) is smaller than the Vulkan standard sparse block size (65k).
-          * Just clamp out-of-bounds maps - there is sufficient VA space for
-          * them but not sufficient sparse map space for them.
-          */
-         uint64_t z = target_page / layer_stride_page;
-         if (z >= layout->depth_px)
-            break;
-
-         uint64_t page_in_layer = target_page % layer_stride_page;
-         unsigned idx = ail_page_to_sparse_index_el(layout, z, page_in_layer);
-
-         agx_pack(map + idx, SPARSE_BLOCK, cfg) {
-            cfg.enabled = b->mem != NULL;
-            cfg.unknown = cfg.enabled;
-
-            if (cfg.enabled) {
-               cfg.address = va_addr + (offs_page * AIL_PAGESIZE);
-            }
-         }
-      }
-   }
-
    /* When the app wants to unbind, replace the bound pages with scratch pages
     * so we don't leave a gap.
     */
@@ -886,16 +840,73 @@ hk_flush_bind(struct hk_bind_builder *b)
    return VK_SUCCESS;
 }
 
-static int
+static void
+hk_sparse_image_map_commit(struct hk_bind_builder *b)
+{
+   if (!b->image || !b->image->planes[0].sparse_map)
+      return;
+
+   assert(b->image->plane_count == 1 && "multiplane sparse not supported");
+
+   uint32_t *map = agx_bo_map(b->image->planes[0].sparse_map);
+   struct ail_layout *layout = &b->image->planes[0].layout;
+   const uint64_t layer_stride_page =
+      ail_bytes_to_pages(layout->layer_stride_B);
+   struct drm_asahi_gem_bind_op *ops = b->binds.data;
+   const unsigned count = util_dynarray_num_elements(
+      &b->binds, struct drm_asahi_gem_bind_op);
+   assert((count % 2) == 0);
+
+   /* Each logical sparse bind is followed by its read-only shadow.  Publish
+    * residency metadata only after the atomic kernel batch succeeded. */
+   for (unsigned i = 0; i < count; i += 2) {
+      const struct drm_asahi_gem_bind_op *op = &ops[i];
+      assert(op->addr >= b->va->addr);
+      const uint64_t resource_offset = op->addr - b->va->addr;
+      const uint64_t size_page = ail_bytes_to_pages(op->range);
+      const bool enabled =
+         op->handle != b->dev->dev.scratch_bo->uapi_handle;
+
+      for (uint64_t offs_page = 0; offs_page < size_page; ++offs_page) {
+         const uint64_t target_page =
+            ail_bytes_to_pages(resource_offset) + offs_page;
+         const uint64_t z = target_page / layer_stride_page;
+         if (z >= layout->depth_px)
+            break;
+
+         const uint64_t page_in_layer = target_page % layer_stride_page;
+         const unsigned idx =
+            ail_page_to_sparse_index_el(layout, z, page_in_layer);
+
+         agx_pack(map + idx, SPARSE_BLOCK, cfg) {
+            cfg.enabled = enabled;
+            cfg.unknown = enabled;
+            if (enabled)
+               cfg.address = op->addr + (offs_page * AIL_PAGESIZE);
+         }
+      }
+   }
+}
+
+static VkResult
 hk_bind_builder_finish(struct hk_bind_builder *b)
 {
-   hk_flush_bind(b);
+   b->result = hk_flush_bind(b);
 
    /* Submit everything to the kernel at once */
-   if (b->binds.size > 0) {
-      b->dev->dev.ops.bo_bind(
+   if (b->result == VK_SUCCESS && b->binds.size > 0) {
+      int ret = b->dev->dev.ops.bo_bind(
          &b->dev->dev, b->binds.data,
          util_dynarray_num_elements(&b->binds, struct drm_asahi_gem_bind_op));
+      if (ret) {
+         const int error = errno ? errno : EIO;
+         b->result = vk_errorf(
+            b->dev,
+            error == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN,
+            "Sparse VM_BIND batch failed: %s", strerror(error));
+      } else {
+         hk_sparse_image_map_commit(b);
+      }
    }
 
    util_dynarray_fini(&b->binds);

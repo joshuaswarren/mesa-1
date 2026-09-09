@@ -147,7 +147,13 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       buffer->vk.device_address = buffer->va->addr;
 
       /* Bind scratch pages to make read/write across the VA valid */
-      hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+      VkResult result = hk_bind_scratch(dev, buffer->va, 0, vma_size_B);
+      if (result != VK_SUCCESS) {
+         agx_va_free(&dev->dev, buffer->va, true);
+         buffer->va = NULL;
+         vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         return result;
+      }
    }
 
    *pBuffer = hk_buffer_to_handle(buffer);
