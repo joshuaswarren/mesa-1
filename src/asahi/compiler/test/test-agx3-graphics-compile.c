@@ -1005,6 +1005,9 @@ test_g17p_fragment_io_matrix(void)
       {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x92,0x02,0x00,0x00,0x00},
       {0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xb2,0x02,0x00,0x00,0x00},
    };
+   static const uint8_t rgb565_load[] = {
+      0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x9a,0x02,0x00,0x00,0x00,
+   };
    static const struct {
       enum pipe_format format;
       uint8_t components;
@@ -1018,6 +1021,7 @@ test_g17p_fragment_io_matrix(void)
       {PIPE_FORMAT_R8_SNORM, 4, true},
       {PIPE_FORMAT_R16_FLOAT, 1, true},
       {PIPE_FORMAT_R16_FLOAT, 2, true},
+      {PIPE_FORMAT_R16_FLOAT, 3, true},
       {PIPE_FORMAT_R16_FLOAT, 4, true},
       {PIPE_FORMAT_R16_UNORM, 1, true},
       {PIPE_FORMAT_R16_UNORM, 2, true},
@@ -1075,6 +1079,19 @@ test_g17p_fragment_io_matrix(void)
               ++offset) {
             if (!memcmp((const uint8_t *)part.binary + offset,
                         pair_loads[width], sizeof(pair_loads[width]))) {
+               exact_pair_load = true;
+               break;
+            }
+         }
+      }
+      if (compiled && cases[i].format == PIPE_FORMAT_R16_FLOAT &&
+          cases[i].components == 3) {
+         exact_pair_load = false;
+         for (unsigned offset = 0;
+              offset + sizeof(rgb565_load) <= part.info.binary_size;
+              ++offset) {
+            if (!memcmp((const uint8_t *)part.binary + offset, rgb565_load,
+                        sizeof(rgb565_load))) {
                exact_pair_load = true;
                break;
             }

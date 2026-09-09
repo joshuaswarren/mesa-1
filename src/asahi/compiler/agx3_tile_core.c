@@ -137,13 +137,20 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    memset(out, 0, AGX3_TILE_MAX_LENGTH);
    *len = 0;
 
-   /* Full-component loads, plus the G17P scalar and pair forms. Fresh
-    * applegpu_g17p RG8, RG16{Float,Unorm,Snorm,Uint,Sint}, and
+   /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.
+    * Fresh applegpu_g17p RG8, RG16{Float,Unorm,Snorm,Uint,Sint}, and
     * RG32{Float,Uint,Sint} render-pipeline witnesses isolate mask3 in f26 at
-    * every width. None carries an incoming wait. */
+    * every width. A B5G6R5Unorm framebuffer-fetch witness independently
+    * isolates mask7 in f26 for W16:
+    *
+    *    670e54000000019a02000000
+    *
+    * None carries an incoming wait. */
    if (!common_ok(dest, width, chan_mask, cov, enc, wait_mask, tile_off) ||
        (chan_mask != 15 &&
-        !(is_b(enc) && (chan_mask == 1 || chan_mask == 3))) ||
+        !(is_b(enc) &&
+          (chan_mask == 1 || chan_mask == 3 ||
+           (chan_mask == 7 && width == AGX3_TILE_W16)))) ||
        wait_mask != 0 || slot < 1 ||
        slot > (is_b(enc) ? 6 : 8))
       return false;

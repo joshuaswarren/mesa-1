@@ -58,6 +58,20 @@ int main(void){
       }
    }
    {
+      /* Fresh Apple B5G6R5Unorm framebuffer-fetch witness. */
+      static const uint8_t rgb565[] = {
+         0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x9a,0x02,0x00,0x00,0x00,
+      };
+      uint8_t out[AGX3_TILE_MAX_LENGTH], len = 0;
+      if (!agx3_tile_load(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W16, 6,
+                          7, 0, AGX3_TILE_COV_1X, 0, true, true, out,
+                          &len) ||
+          len != sizeof(rgb565) || memcmp(out, rgb565, len))
+         fail++;
+      else
+         pass++;
+   }
+   {
       static const struct {
          enum agx3_tile_coverage cov;
          uint8_t bytes[12];
@@ -115,7 +129,9 @@ int main(void){
                         AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,3,0,
                         AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
-      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W16,1,7,0,
+      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W16,1,5,0,
+                        AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
+      if(agx3_tile_load(AGX_ISA_ENCODING_AGX3B,0,AGX3_TILE_W8,1,7,0,
                         AGX3_TILE_COV_1X,0,true,true,out,&len)) fail++; else pass++;
       if(agx3_tile_load(AGX_ISA_ENCODING_AGX3C,0,AGX3_TILE_W32,1,15,0,
                         AGX3_TILE_COV_2X_SAMPLE_0,0,true,true,out,&len)) fail++; else pass++;

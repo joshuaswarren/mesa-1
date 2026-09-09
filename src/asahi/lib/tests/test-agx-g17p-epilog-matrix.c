@@ -55,9 +55,106 @@ static const struct {
    {"max", PIPE_BLEND_MAX, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE},
 };
 
+static bool
+check_rgb565_blend(void)
+{
+   struct agx_fs_epilog_key key = {
+      .link.loc_written = BITFIELD_BIT(0),
+      .link.size_32 = BITFIELD_BIT(0),
+      .nr_samples = 1,
+   };
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &key);
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_B5G6R5_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_SRC_ALPHA,
+      PIPE_BLENDFACTOR_INV_SRC_ALPHA, PIPE_BLEND_ADD,
+      PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P RGB565 source-alpha epilog");
+   agx_nir_fs_epilog(&b, &key);
+
+   unsigned loads = 0, stores = 0;
+   unsigned load_components = 0, load_bits = 0, load_format = 0;
+   unsigned store_mask = 0, store_format = 0;
+   bool lowering_ok = true;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_load_local_pixel_agx) {
+               loads++;
+               load_components = intr->def.num_components;
+               load_bits = intr->def.bit_size;
+               load_format = nir_intrinsic_format(intr);
+               lowering_ok &= intr->def.num_components == 3 &&
+                              intr->def.bit_size == 16 &&
+                              nir_intrinsic_format(intr) ==
+                                 PIPE_FORMAT_R16_UINT;
+            } else if (intr->intrinsic ==
+                       nir_intrinsic_store_local_pixel_agx) {
+               stores++;
+               store_mask = nir_intrinsic_write_mask(intr);
+               store_format = nir_intrinsic_format(intr);
+               lowering_ok &= nir_intrinsic_write_mask(intr) == 0x7 &&
+                              nir_intrinsic_format(intr) ==
+                                 PIPE_FORMAT_R16_FLOAT;
+            }
+         }
+      }
+   }
+   lowering_ok &= loads == 1 && stores == 1;
+
+   agx_nir_lower_g17p_1x_tile_samples(b.shader);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &backend_key, &part);
+   static const uint8_t apple_rgb565_load[] = {
+      0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0x9a,0x02,0x00,0x00,0x00,
+   };
+   bool exact_load = false;
+   for (unsigned offset = 0;
+        part.binary && offset + sizeof(apple_rgb565_load) <=
+                          part.info.binary_size;
+        ++offset) {
+      if (!memcmp((const uint8_t *)part.binary + offset, apple_rgb565_load,
+                  sizeof(apple_rgb565_load))) {
+         exact_load = true;
+         break;
+      }
+   }
+
+   const bool ok = lowering_ok && compiled && exact_load;
+   if (!ok) {
+      fprintf(stderr,
+              "G17P RGB565 source-alpha epilog failed: lowering=%u "
+              "loads=%u(%u/%u/%u) stores=%u(%u/%u) compiled=%u "
+              "exact_load=%u\n",
+              lowering_ok, loads, load_components, load_bits, load_format,
+              stores, store_mask, store_format, compiled, exact_load);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
+   if (!check_rgb565_blend())
+      return 1;
+
    const bool verbose = getenv("AGX_G17P_EPILOG_VERBOSE") != NULL;
    unsigned refused = 0, total = 0;
    unsigned refused_alpha[2][2] = {{0}}, total_alpha[2][2] = {{0}};
@@ -153,7 +250,9 @@ main(void)
     * producer shapes without inventing saturated forms for those producers. */
    /* Multisample selectors are now sample-count tagged before the backend,
     * keeping combinations which once encoded the wrong access refused. */
-   const unsigned ceiling = 113024;
+   /* Apple's RGB565 framebuffer-fetch form grounds the W16 mask7 tile load,
+    * closing the corresponding single-sample blend epilogs. */
+   const unsigned ceiling = 110848;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",
@@ -161,8 +260,8 @@ main(void)
       return 1;
    }
    const unsigned alpha_ceiling[2][2] = {
-      {28288, 28224},
-      {28288, 28224},
+      {27712, 27712},
+      {27712, 27712},
    };
    for (unsigned atoc = 0; atoc < 2; ++atoc) {
       for (unsigned ato1 = 0; ato1 < 2; ++ato1) {
