@@ -504,6 +504,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .nr_gprs = shader->info.nr_gprs,
          .staging_halfs = shader->info.agx3_staging_known
                             ? shader->info.agx3_staging_halfs : 0,
+         .imageblock = {
+            .sample_size_B = key->tib.sample_size_B,
+            .nr_samples = key->tib.nr_samples,
+            .tile_size_px = key->tib.tile_size,
+         },
       };
       struct agx3_g17p_rt0_eot_program program;
       if (!agx3_g17p_rt0_eot_program_generate(dev->dev.chip, &desc,
@@ -537,6 +542,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .compiler_d_valid = shader->info.agx3_staging_known,
          .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
          .fragment = true,
+         .imageblock = {
+            .sample_size_B = key->tib.sample_size_B,
+            .nr_samples = key->tib.nr_samples,
+            .tile_size_px = key->tib.tile_size,
+         },
       };
       struct hk_agx3_g17p_graphics_program program;
       if (!hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,
@@ -585,6 +595,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .staging_known = shader->info.agx3_staging_known,
          .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
                                   : AGX3_G17P_RT0_BG_RELOAD,
+         .imageblock = {
+            .sample_size_B = key->tib.sample_size_B,
+            .nr_samples = key->tib.nr_samples,
+            .tile_size_px = key->tib.tile_size,
+         },
       };
 
       if (op == AGX_BG_CLEAR) {

@@ -65,6 +65,27 @@ struct agx_ioto_state_tail_output {
    uint8_t bytes[AGX_IOTO_STATE_TAIL_MAX_SIZE];
 };
 
+/* Physical imageblock geometry consumed by HAL200's fragment LoadShader
+ * transform.  tile_size_px is one of Mesa's three rectangular tile areas;
+ * 32x16 is the only 512-pixel spelling. */
+struct agx_ioto_g17p_imageblock {
+   uint8_t sample_size_B;
+   uint8_t nr_samples;
+   uint16_t tile_size_px;
+};
+
+#define AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32                                \
+   { .sample_size_B = 8, .nr_samples = 1, .tile_size_px = 32 * 32 }
+
+/* Build the exact fragment SPECLM record emitted by HAL200's
+ * LdShdrTransformFragment for the supplied physical imageblock.  Unlike the
+ * generic anonymous-field packer, this retains the recovered dimension bits
+ * which are still opaque to the field graph.  `output` is unchanged on every
+ * failure. */
+bool agx_ioto_g17p_fragment_speclm_build(
+   const struct agx_ioto_g17p_imageblock *imageblock, void *output,
+   size_t capacity);
+
 /*
  * Type 0 packs SPECLM, LDSHDR, SPECTPR in that order.  Type 1 packs only
  * LDSHDR and SPECTPR and requires every SPECLM field to be zero.  Other type

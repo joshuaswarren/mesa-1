@@ -1490,6 +1490,11 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             ((linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH ||
              (linked->b.fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
          .colour_partitions = linked->b.g17p_colour_partitions,
+         .imageblock = {
+            .sample_size_B = cmd->state.gfx.render.tilebuffer.sample_size_B,
+            .nr_samples = cmd->state.gfx.render.tilebuffer.nr_samples,
+            .tile_size_px = cmd->state.gfx.render.tilebuffer.tile_size,
+         },
       };
       struct hk_agx3_g17p_graphics_program program;
       if (!hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,

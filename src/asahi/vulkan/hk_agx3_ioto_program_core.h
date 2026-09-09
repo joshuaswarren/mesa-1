@@ -69,6 +69,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    bool fragment;
    bool writes_sample_mask;
    uint8_t colour_partitions;
+   struct agx_ioto_g17p_imageblock imageblock;
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
@@ -178,6 +179,7 @@ struct hk_agx3_g17p_rt0_bg_program_desc {
    uint16_t clear_push_halfs;
    bool staging_known;
    enum hk_agx3_g17p_rt0_bg_op op;
+   struct agx_ioto_g17p_imageblock imageblock;
 };
 
 struct hk_agx3_g17p_rt0_bg_program {
@@ -210,6 +212,7 @@ struct hk_agx3_g17p_rt0_eot_program_desc {
    uint32_t scratch_size;
    uint16_t nr_gprs;
    uint16_t staging_halfs;
+   struct agx_ioto_g17p_imageblock imageblock;
 };
 
 struct hk_agx3_g17p_rt0_eot_program {

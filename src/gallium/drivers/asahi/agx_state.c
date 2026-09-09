@@ -3613,6 +3613,12 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       .fragment = cs->stage == MESA_SHADER_FRAGMENT,
       .writes_sample_mask = pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
                             pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
+      .colour_partitions = linked->g17p_colour_partitions,
+      .imageblock = {
+         .sample_size_B = batch->tilebuffer_layout.sample_size_B,
+         .nr_samples = batch->tilebuffer_layout.nr_samples,
+         .tile_size_px = batch->tilebuffer_layout.tile_size,
+      },
    };
    struct agx3_g17p_graphics_program program;
    if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &program) ||
@@ -4199,6 +4205,11 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .staging_halfs = shader->info.agx3_staging_known
                                 ? shader->info.agx3_staging_halfs
                                 : 0,
+            .imageblock = {
+               .sample_size_B = key.tib.sample_size_B,
+               .nr_samples = key.tib.nr_samples,
+               .tile_size_px = key.tib.tile_size,
+            },
          };
          struct agx3_g17p_rt0_eot_program native;
          if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &native) ||
@@ -4217,6 +4228,11 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .compiler_d_valid = shader->info.agx3_staging_known,
             .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
             .fragment = true,
+            .imageblock = {
+               .sample_size_B = key.tib.sample_size_B,
+               .nr_samples = key.tib.nr_samples,
+               .tile_size_px = key.tib.tile_size,
+            },
          };
          struct agx3_g17p_graphics_program native;
          if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &native) ||
@@ -4249,6 +4265,11 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .staging_known = shader->info.agx3_staging_known,
             .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
                                      : AGX3_G17P_RT0_BG_RELOAD,
+            .imageblock = {
+               .sample_size_B = key.tib.sample_size_B,
+               .nr_samples = key.tib.nr_samples,
+               .tile_size_px = key.tib.tile_size,
+            },
          };
 
          if (op == AGX_BG_CLEAR) {

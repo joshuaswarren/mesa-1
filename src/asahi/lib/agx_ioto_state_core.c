@@ -376,6 +376,73 @@ agx_ioto_state_pack_spectpr(enum agx_chip chip,
 }
 
 bool
+agx_ioto_g17p_fragment_speclm_build(
+   const struct agx_ioto_g17p_imageblock *imageblock, void *output,
+   size_t capacity)
+{
+   if (!imageblock || !output || capacity < AGX_IOTO_SPECLM_SIZE)
+      return false;
+
+   const uint32_t samples = imageblock->nr_samples;
+   const uint32_t sample_size_B = imageblock->sample_size_B;
+   if ((imageblock->tile_size_px != 32 * 32 &&
+        imageblock->tile_size_px != 32 * 16 &&
+        imageblock->tile_size_px != 16 * 16) ||
+       (!sample_size_B && samples != 0 && samples != 1 && samples != 2 &&
+        samples != 4) ||
+       (sample_size_B &&
+        ((samples != 1 && samples != 2 && samples != 4) ||
+         (sample_size_B & 7) || sample_size_B > 64 ||
+         sample_size_B * samples * imageblock->tile_size_px >= 32768)))
+      return false;
+
+   /* Fresh HAL200 LdShdrTransformFragment witnesses recover three complete
+    * one-sample, eight-byte geometry records.  The low six bits of word 2
+    * distinguish the native 32x32, 32x16 and 16x16 layouts but remain opaque
+    * to the anonymous semantic map, so keep the exact records as seeds.
+    *
+    * SpecLM::encodeImageBlockData then places the byte stride in f22 (eight
+    * byte granularity) and log2(samples) in f21.  Patch only those named bit
+    * slices, retaining every opaque geometry and fragment-profile bit.
+    */
+   static const uint8_t imageblock_32x32[AGX_IOTO_SPECLM_SIZE] = {
+      0x77, 0x00, 0x2a, 0x43, 0x4b, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t imageblock_32x16[AGX_IOTO_SPECLM_SIZE] = {
+      0x77, 0x00, 0x2a, 0x03, 0x43, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t imageblock_16x16[AGX_IOTO_SPECLM_SIZE] = {
+      0x77, 0x00, 0x2a, 0x03, 0x41, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t no_imageblock[AGX_IOTO_SPECLM_SIZE] = {
+      0x77, 0x00, 0x2a, 0x41, 0x00, 0x00, 0x00, 0x00,
+   };
+
+   uint8_t staged[AGX_IOTO_SPECLM_SIZE];
+   if (!sample_size_B) {
+      memcpy(staged, no_imageblock, sizeof(staged));
+   } else {
+      const uint8_t *seed =
+         imageblock->tile_size_px == 32 * 32 ? imageblock_32x32
+         : imageblock->tile_size_px == 32 * 16 ? imageblock_32x16
+                                                : imageblock_16x16;
+      memcpy(staged, seed, sizeof(staged));
+
+      uint16_t word1;
+      memcpy(&word1, staged + 2, sizeof(word1));
+      word1 &= ~UINT16_C(0x3f80);
+      word1 |= (uint16_t)((sample_size_B >> 3) << 9);
+      word1 |= samples == 1 ? UINT16_C(0x0100)
+               : samples == 4 ? UINT16_C(0x0080)
+                              : UINT16_C(0x0000);
+      memcpy(staged + 2, &word1, sizeof(word1));
+   }
+
+   memcpy(output, staged, sizeof(staged));
+   return true;
+}
+
+bool
 agx_ioto_state_tail_pack(enum agx_chip chip,
                          const struct agx_ioto_state_tail *tail,
                          struct agx_ioto_state_tail_output *output)

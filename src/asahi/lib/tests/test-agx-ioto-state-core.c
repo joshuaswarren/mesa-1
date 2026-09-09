@@ -890,6 +890,57 @@ test_g17p_compiler_spectpr(void)
    return 0;
 }
 
+static int
+test_g17p_fragment_imageblock_speclm(void)
+{
+   static const struct {
+      struct agx_ioto_g17p_imageblock imageblock;
+      uint8_t expected[AGX_IOTO_SPECLM_SIZE];
+   } cases[] = {
+      {{0, 0, 32 * 32}, {0x77, 0x00, 0x2a, 0x41, 0x00, 0, 0, 0}},
+      {{0, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x41, 0x00, 0, 0, 0}},
+      {{8, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x43, 0x4b, 0, 0, 0}},
+      {{16, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x45, 0x4b, 0, 0, 0}},
+      {{24, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x47, 0x4b, 0, 0, 0}},
+      {{32, 1, 32 * 16}, {0x77, 0x00, 0x2a, 0x09, 0x43, 0, 0, 0}},
+      {{64, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x11, 0x41, 0, 0, 0}},
+      {{8, 2, 32 * 32}, {0x77, 0x00, 0x2a, 0x42, 0x4b, 0, 0, 0}},
+      {{16, 2, 32 * 16}, {0x77, 0x00, 0x2a, 0x04, 0x43, 0, 0, 0}},
+      {{8, 4, 32 * 16}, {0x77, 0x00, 0xaa, 0x02, 0x43, 0, 0, 0}},
+      {{24, 4, 16 * 16}, {0x77, 0x00, 0xaa, 0x06, 0x41, 0, 0, 0}},
+   };
+   uint8_t output[AGX_IOTO_SPECLM_SIZE];
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      memset(output, 0xa5, sizeof(output));
+      CHECK(agx_ioto_g17p_fragment_speclm_build(
+         &cases[i].imageblock, output, sizeof(output)));
+      CHECK(memcmp(output, cases[i].expected, sizeof(output)) == 0);
+   }
+
+   const uint8_t before[AGX_IOTO_SPECLM_SIZE] = {
+      0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+   };
+   static const struct agx_ioto_g17p_imageblock invalid[] = {
+      {0, 3, 32 * 32},   {8, 0, 32 * 32}, {8, 3, 32 * 32},
+      {8, 8, 32 * 32},
+      {4, 1, 32 * 32},   {9, 1, 32 * 32}, {72, 1, 16 * 16},
+      {8, 1, 8 * 8},     {8, 1, 64 * 64}, {64, 4, 16 * 16},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
+      memcpy(output, before, sizeof(output));
+      CHECK(!agx_ioto_g17p_fragment_speclm_build(
+         &invalid[i], output, sizeof(output)));
+      CHECK(memcmp(output, before, sizeof(output)) == 0);
+   }
+   CHECK(!agx_ioto_g17p_fragment_speclm_build(NULL, output,
+                                               sizeof(output)));
+   CHECK(!agx_ioto_g17p_fragment_speclm_build(
+      &cases[0].imageblock, NULL, sizeof(output)));
+   CHECK(!agx_ioto_g17p_fragment_speclm_build(
+      &cases[0].imageblock, output, sizeof(output) - 1));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -903,6 +954,7 @@ main(void)
    CHECK(test_g17p_runtime_compute_tail() == 0);
    CHECK(test_g17p_runtime_compute_shared_tail() == 0);
    CHECK(test_g17p_compiler_spectpr() == 0);
+   CHECK(test_g17p_fragment_imageblock_speclm() == 0);
 
    printf("agx_ioto_state_core: %llu checks passed\n",
           (unsigned long long)checks);

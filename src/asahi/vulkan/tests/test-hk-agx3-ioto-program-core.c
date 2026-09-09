@@ -827,6 +827,7 @@ test_g17p_basic_graphics_program(void)
       .scratch_size = 0,
       .nr_gprs = 8,
       .fragment = true,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct hk_agx3_g17p_graphics_program program;
    CHECK(hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P, &fragment,
@@ -1131,6 +1132,7 @@ test_g17p_rt0_eot_program(void)
       .scratch_size = 0,
       .nr_gprs = 8,
       .staging_halfs = 8,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct hk_agx3_g17p_rt0_eot_program program;
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &desc,
@@ -1311,6 +1313,7 @@ test_g17p_rt0_eot_program(void)
    mrt.staging_halfs = 16;
    mrt.attachment_count = 2;
    mrt.imageblock_offset1_B = 8;
+   mrt.imageblock.sample_size_B = 16;
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mrt,
                                                 &relocated));
    CHECK(relocated.length <= AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE);
@@ -1321,7 +1324,7 @@ test_g17p_rt0_eot_program(void)
     * the reserved middle dword before RT1's offset. */
    static const uint8_t expected_wboit_mrt_program[] = {
       0x2c,0xa0,0x02,0x00,0x08,0x00,0x10,0x00,0x3c,0x80,0x02,0x00,
-      0x04,0x00,0x00,0x00,0x4c,0x00,0x5c,0x08,0x77,0x00,0x2a,0x43,
+      0x04,0x00,0x00,0x00,0x4c,0x00,0x5c,0x08,0x77,0x00,0x2a,0x45,
       0x4b,0x00,0x00,0x00,0x77,0x01,0xaa,0x02,0x00,0x00,0x00,0x02,
       0x02,0x00,0xf7,0x00,0x2a,0x00,0x02,0x00,0x00,0x00,0x00,0x00,
       0x1c,0x80,0x02,0x00,0x00,0x00,0x00,0x00,0x14,0x81,0x11,0x06,
@@ -1343,6 +1346,7 @@ test_g17p_rt0_eot_program(void)
    struct hk_agx3_g17p_rt0_eot_program rgba8_mrt_program;
    mrt.shader_binary_size = 120;
    mrt.imageblock_offset1_B = 4;
+   mrt.imageblock.sample_size_B = 8;
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(
       AGX_CHIP_G17P, &mrt, &rgba8_mrt_program));
    CHECK(rgba8_mrt_program.length <= AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE);
@@ -1404,6 +1408,7 @@ test_g17p_combined_sampler_pointers(void)
       .shader_binary_size = 54,
       .nr_gprs = 8,
       .fragment = true,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct hk_agx3_g17p_graphics_program program;
    CHECK(hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P, &desc,
@@ -1577,6 +1582,7 @@ test_g17p_rt0_background_programs(void)
       .scratch_size = 0,
       .nr_gprs = 8,
       .op = HK_AGX3_G17P_RT0_BG_CLEAR,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct hk_agx3_g17p_rt0_bg_program program;
    CHECK(hk_agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &clear, &program));
@@ -1584,11 +1590,18 @@ test_g17p_rt0_background_programs(void)
 
    struct hk_agx3_g17p_rt0_bg_program_desc mrt_clear = clear;
    mrt_clear.clear_push_halfs = HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS;
+   mrt_clear.imageblock.sample_size_B = 16;
    struct hk_agx3_g17p_rt0_bg_program mrt_clear_program;
    CHECK(hk_agx3_g17p_rt0_bg_program_generate(
       AGX_CHIP_G17P, &mrt_clear, &mrt_clear_program));
    CHECK(mrt_clear_program.length ==
          AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE);
+   static const uint8_t wboit_fragment_speclm[] = {
+      0x77, 0x00, 0x2a, 0x45, 0x4b, 0x00, 0x00, 0x00,
+   };
+   CHECK(find_unique_bytes(mrt_clear_program.bytes, mrt_clear_program.length,
+                           wboit_fragment_speclm,
+                           sizeof(wboit_fragment_speclm)) != SIZE_MAX);
 
    struct hk_agx3_g17p_rt0_bg_program_desc rgba8_mrt_clear = clear;
    rgba8_mrt_clear.clear_push_halfs =
@@ -1642,6 +1655,7 @@ test_g17p_rt0_background_programs(void)
       .scratch_size = 0,
       .nr_gprs = 12,
       .op = HK_AGX3_G17P_RT0_BG_RELOAD,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    CHECK(
       hk_agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &reload, &program));
@@ -1716,6 +1730,7 @@ test_g17p_rt0_background_staging(void)
       .shader_binary_size = 52,
       .nr_gprs = 6,
       .op = HK_AGX3_G17P_RT0_BG_CLEAR,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    const struct {
       bool known;
@@ -2315,6 +2330,7 @@ test_coverage_initial_pixel_dependencies(void)
       .compiler_d = 4,
       .fragment = true,
       .uniform_ranges = &root,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    static const uint8_t ordinary_low[3] = {0xf3, 0xc3, 0x03};
    static const uint8_t coverage_low[3] = {0xf2, 0xc2, 0x02};

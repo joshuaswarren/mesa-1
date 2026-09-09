@@ -63,6 +63,7 @@ main(void)
       .shader_binary_size = 128,
       .nr_gprs = 16,
       .fragment = true,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct agx3_g17p_graphics_program compositor_program;
    CHECK(agx3_g17p_graphics_program_generate(
@@ -71,6 +72,21 @@ main(void)
          AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE);
    const struct agx3_g17p_graphics_program compositor_baseline =
       compositor_program;
+   struct agx3_g17p_graphics_program_desc mixed_desc = compositor_desc;
+   mixed_desc.imageblock.sample_size_B = 16;
+   struct agx3_g17p_graphics_program mixed_program;
+   CHECK(agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &mixed_desc,
+                                              &mixed_program));
+   CHECK(mixed_program.length == compositor_baseline.length);
+   unsigned imageblock_differences = 0;
+   for (unsigned i = 0; i < mixed_program.length; ++i) {
+      if (mixed_program.bytes[i] != compositor_baseline.bytes[i]) {
+         CHECK(compositor_baseline.bytes[i] == 0x43);
+         CHECK(mixed_program.bytes[i] == 0x45);
+         imageblock_differences++;
+      }
+   }
+   CHECK(imageblock_differences == 1);
    for (unsigned i = 0; i < compositor_range_count; ++i) {
       compositor_ranges[i].address += 0x40;
       CHECK(agx3_g17p_graphics_program_generate(
@@ -110,6 +126,7 @@ main(void)
       .staging_known = true,
       .clear_push_halfs = AGX3_G17P_RT0_CLEAR_PUSH_HALFS,
       .op = AGX3_G17P_RT0_BG_CLEAR,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct agx3_g17p_rt0_bg_program bg_program;
    memset(&bg_program, 0xa5, sizeof(bg_program));
@@ -147,6 +164,7 @@ main(void)
       .shader_binary_size = 84,
       .nr_gprs = 8,
       .staging_halfs = 8,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
    };
    struct agx3_g17p_rt0_eot_program eot_program;
    CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
@@ -167,6 +185,7 @@ main(void)
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
    eot.shader_binary_size = 238;
+   eot.imageblock.sample_size_B = 16;
    CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                             &eot_program));
    eot.imageblock_offset1_B = 4;
@@ -181,6 +200,7 @@ main(void)
     * same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch span. */
    eot.pbe_argument_va = UINT64_C(0x4000030000);
    eot.shader_binary_size = 110;
+   eot.imageblock.sample_size_B = 8;
    eot.nr_gprs = 16;
    eot.staging_halfs = 8;
    eot.attachment_count = 1;

@@ -22,9 +22,6 @@ graphics_state_tail(const struct agx3_g17p_graphics_program_desc *desc,
    static const uint8_t vertex_speclm[AGX_IOTO_SPECLM_SIZE] = {
       0x77, 0x00, 0x2a, 0x41, 0x00, 0x00, 0x00, 0x00,
    };
-   static const uint8_t fragment_speclm[AGX_IOTO_SPECLM_SIZE] = {
-      0x77, 0x00, 0x2a, 0x43, 0x4b, 0x00, 0x00, 0x00,
-   };
 
    struct agx_ioto_state ldshdr = {0};
    ldshdr.f[0] = desc->shader_va;
@@ -47,8 +44,13 @@ graphics_state_tail(const struct agx3_g17p_graphics_program_desc *desc,
    struct agx_ioto_state_tail_output staged = {
       .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
    };
-   memcpy(staged.bytes, desc->fragment ? fragment_speclm : vertex_speclm,
-          AGX_IOTO_SPECLM_SIZE);
+   if (desc->fragment) {
+      if (!agx_ioto_g17p_fragment_speclm_build(
+             &desc->imageblock, staged.bytes, AGX_IOTO_SPECLM_SIZE))
+         return false;
+   } else {
+      memcpy(staged.bytes, vertex_speclm, AGX_IOTO_SPECLM_SIZE);
+   }
    if (!agx_ioto_state_pack_ldshdr(
           AGX_CHIP_G17P, &ldshdr, staged.bytes + AGX_IOTO_SPECLM_SIZE,
           AGX_IOTO_LDSHDR_SIZE) ||
@@ -295,6 +297,7 @@ agx3_g17p_rt0_bg_program_generate(
       .compiler_d_valid = desc->staging_known,
       .compiler_d = (uint32_t)desc->staging_halfs * 2,
       .fragment = true,
+      .imageblock = desc->imageblock,
    };
    struct agx_ioto_state_tail_output tail;
    if (!graphics_state_tail(&shader, &tail))
@@ -392,6 +395,7 @@ agx3_g17p_rt0_eot_program_generate(
       .compiler_d_valid = true,
       .compiler_d = desc->staging_halfs * 2,
       .fragment = true,
+      .imageblock = desc->imageblock,
    };
    struct agx_ioto_state_tail_output tail;
    if (!graphics_state_tail(&shader, &tail))
