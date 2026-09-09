@@ -778,10 +778,9 @@ hk_get_device_features(
       features->drawIndirectCount =
          hk_g17p_unverified_feature("draw_indirect_count");
       /* G17P's native layer output occupies the high half of the shared
-       * layer/viewport UVS scalar. Keep the public bit paired with the exact
+       * layer/viewport UVS scalar.  The public bit is backed by the exact
        * two-instance/two-layer image qualification. */
-      features->shaderOutputLayer =
-         hk_g17p_unverified_feature("shader_output_layer");
+      features->shaderOutputLayer = true;
       /* The HAL300 bind tail now emits the complete viewport/region-clip and
        * consecutive scissor/depth arrays, and the vertex compiler writes the
        * native packed layer/viewport UVS sysval. Keep public exposure opt-in
