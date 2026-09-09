@@ -577,6 +577,22 @@ test_g17p_dynamic_compute_program(void)
    CHECK(memcmp(dispatch, expected_dispatch, sizeof(expected_dispatch)) == 0);
    CHECK(dispatch[sink.length] == 0xb6);
 
+   uint8_t strong_dispatch[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE + 1];
+   memset(strong_dispatch, 0xb6, sizeof(strong_dispatch));
+   struct agx3_compute_dispatch_sink strong_sink = {
+      .data = strong_dispatch,
+      .capacity = sizeof(strong_dispatch),
+   };
+   CHECK(hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
+      &program.launch, &grid, 0x5, &strong_sink));
+   CHECK(strong_sink.length == sizeof(expected_dispatch));
+   CHECK(memcmp(strong_dispatch, expected_dispatch,
+                AGX3_CDM_DIRECT_LAUNCH_SIZE) == 0);
+   static const uint8_t strong_barrier[] = {0x60, 0x15, 0x00, 0x60};
+   CHECK(memcmp(strong_dispatch + AGX3_CDM_DIRECT_LAUNCH_SIZE,
+                strong_barrier, sizeof(strong_barrier)) == 0);
+   CHECK(strong_dispatch[strong_sink.length] == 0xb6);
+
    const struct hk_agx3_g17p_compute_program before = program;
    struct hk_agx3_g17p_compute_program_desc invalid = desc;
    invalid.scratch_size = 16;

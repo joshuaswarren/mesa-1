@@ -4774,7 +4774,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 }
 
 static bool
-hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw)
+hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw,
+                          const struct agx_draw *conditional_direct)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -4802,8 +4803,13 @@ hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw)
          dev->vk.enabled_features.pipelineRobustness))
       return false;
 
+   /* A conditionally lowered direct draw has an immutable indirect record:
+    * apply the direct draw's exact range test instead of conservatively
+    * treating it as application-authored indirect data. */
    if (agx_is_indirect(draw->b))
-      return true;
+      return conditional_direct
+                ? agx_direct_draw_overreads_indices(*conditional_direct)
+                : true;
 
    return agx_direct_draw_overreads_indices(*draw);
 }
@@ -4865,7 +4871,8 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 static struct hk_cs *
 hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                    struct agx_draw *draw, bool *needs_idx_robust,
-                   bool *g17p_native_bind_tail_emitted)
+                   bool *g17p_native_bind_tail_emitted,
+                   const struct agx_draw *conditional_direct)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -4969,7 +4976,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    bool adj = mesa_prim_has_adjacency(
       vk_topology_to_mesa(dyn->ia.primitive_topology));
    adj &= !geom;
-   *needs_idx_robust = hk_needs_index_robustness(cmd, draw);
+   *needs_idx_robust =
+      hk_needs_index_robustness(cmd, draw, conditional_direct);
    const bool ordinary_draw_path =
       !geom && !tess && !adj && !*needs_idx_robust;
    const bool xfb_passthrough_path =
@@ -5139,6 +5147,42 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
+   const struct agx_draw api_draw = draw_;
+   bool conditional_direct_indexed = false;
+
+   /* There is no native conditional-render packet on AGX. Lower the command
+    * to the API's indirect record and let an ordered compute kernel either
+    * copy it or zero its counts from the execution-time predicate. This also
+    * predicates IA/pipeline-stat accounting and every later geometry lowering
+    * because they all consume the patched record. */
+   if (hk_conditional_render_is_active(&cmd->state.conditional, cmd->in_meta,
+                                        cmd->conditional_meta)) {
+      uint64_t source = draw_.b.ptr;
+      const uint32_t words = draw_.indexed ? 5 : 4;
+      conditional_direct_indexed =
+         draw_.indexed && !agx_is_indirect(draw_.b);
+
+      if (!agx_is_indirect(draw_.b)) {
+         uint32_t record[HK_CONDITIONAL_RENDER_MAX_WORDS];
+         const uint32_t built = hk_conditional_render_direct_draw_record(
+            record, draw_.indexed, draw_.b.count[0], draw_.b.count[1],
+            draw_.start, (int32_t)draw_.index_bias, draw_.start_instance);
+         assert(built == words);
+         source = hk_pool_upload(cmd, record, words * sizeof(uint32_t), 4);
+      }
+
+      const uint64_t patched = hk_apply_conditional_rendering(
+         cmd, source, words, AGX_BARRIER_ALL | AGX_PREGFX);
+      if (!patched)
+         return;
+
+      draw_ = draw_.indexed
+                 ? agx_draw_indexed_indirect(
+                      patched, draw_.index_buffer,
+                      draw_.index_buffer_range_B, draw_.index_size,
+                      draw_.restart)
+                 : agx_draw_indirect(patched);
+   }
 
    uint64_t stat_ia_verts = hk_pipeline_stat_addr(
       cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
@@ -5168,20 +5212,31 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
       uint64_t address;
       uint32_t size_word;
+      const bool valid_index_size =
+         draw_.index_size == AGX_INDEX_SIZE_U8 ||
+         draw_.index_size == AGX_INDEX_SIZE_U16 ||
+         draw_.index_size == AGX_INDEX_SIZE_U32;
+      const bool conditional_direct_in_bounds =
+         !conditional_direct_indexed ||
+         (valid_index_size &&
+          agx_vdm_hal200_index_range(
+             api_draw.index_buffer, api_draw.index_buffer_range_B,
+             api_draw.start, api_draw.b.count[0],
+             agx_index_size_to_B(api_draw.index_size), &address, &size_word));
       const bool robust_indirect =
          agx_is_indirect(draw_.b) &&
          (dev->vk.enabled_features.robustBufferAccess ||
           dev->vk.enabled_features.robustBufferAccess2 ||
-          dev->vk.enabled_features.pipelineRobustness);
-      if ((draw_.index_size != AGX_INDEX_SIZE_U8 &&
-           draw_.index_size != AGX_INDEX_SIZE_U16 &&
-           draw_.index_size != AGX_INDEX_SIZE_U32) ||
+          dev->vk.enabled_features.pipelineRobustness) &&
+         !conditional_direct_indexed;
+      if (!valid_index_size ||
           robust_indirect ||
           cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] ||
           (agx_is_indirect(draw_.b)
               ? (!draw_.b.ptr || !draw_.index_buffer ||
-                 draw_.index_buffer_range_B == 0)
+                 draw_.index_buffer_range_B == 0 ||
+                 !conditional_direct_in_bounds)
               : !agx_vdm_hal200_index_range(
                    draw_.index_buffer, draw_.index_buffer_range_B, draw_.start,
                    draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
@@ -5200,7 +5255,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       bool g17p_native_bind_tail_emitted = false;
       struct hk_cs *cs =
          hk_flush_gfx_state(cmd, draw_id, &draw, &needs_idx_robust,
-                            &g17p_native_bind_tail_emitted);
+                            &g17p_native_bind_tail_emitted,
+                            conditional_direct_indexed ? &api_draw : NULL);
       /* If we failed to allocate a control stream, we've already lost the
        * device. Just drop the draw so we don't crash.
        */
@@ -5801,11 +5857,33 @@ hk_CmdBeginConditionalRenderingEXT(
    VkCommandBuffer commandBuffer,
    const VkConditionalRenderingBeginInfoEXT *pConditionalRenderingBegin)
 {
-   UNREACHABLE("stub");
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(hk_buffer, buffer, pConditionalRenderingBegin->buffer);
+   struct hk_conditional_render_state *conditional =
+      &cmd->state.conditional;
+
+   assert(!conditional->active);
+   conditional->address =
+      hk_buffer_address_ro(buffer, pConditionalRenderingBegin->offset);
+   conditional->active = true;
+   conditional->inverted =
+      pConditionalRenderingBegin->flags &
+      VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT;
+
+   if (!conditional->address)
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
 }
 
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
 {
-   UNREACHABLE("stub");
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_conditional_render_state *conditional =
+      &cmd->state.conditional;
+
+   assert(conditional->active);
+   const bool inherited = conditional->inherited;
+   *conditional = (struct hk_conditional_render_state){
+      .inherited = inherited,
+   };
 }

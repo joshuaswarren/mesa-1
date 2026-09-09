@@ -301,6 +301,11 @@ bool hk_agx3_g17p_native_compute_dispatch_append(
    const struct agx3_compute_direct_grid *grid,
    struct agx3_compute_dispatch_sink *sink);
 
+bool hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
+
 /* Byte bridge for the native main/grid-helper indirect record pair.  Helper
  * program and resource construction remain caller-owned. */
 bool hk_agx3_g17p_native_indirect_compute_dispatch_append(

@@ -608,8 +608,13 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       .data = (uint8_t *)cs->current,
       .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
    };
-   if (!hk_agx3_g17p_native_compute_dispatch_append(&program.launch, &direct,
-                                                     &sink)) {
+   /* Internal helpers communicate through memory with their consumer. Match
+    * the AGX2 flush-after-launch contract when the caller requests the common
+    * all-memory barrier; HAL200 encodes Apple's witnessed strong value 5 in
+    * the four-byte tail of this dispatch. */
+   const uint8_t barrier_flags = (barrier & AGX_BARRIER_ALL) ? 0x5 : 0;
+   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &program.launch, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -1142,6 +1147,23 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
    struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
    if (agx_is_shader_empty(&s->b))
       return;
+
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   if (hk_conditional_render_is_active(&cmd->state.conditional, cmd->in_meta,
+                                        cmd->conditional_meta)) {
+      const uint64_t patched = hk_apply_conditional_rendering(
+         cmd, desc->root.cs.group_count_addr, 3, AGX_BARRIER_ALL);
+      if (!patched)
+         return;
+
+      /* All API dispatch forms already publish their three group counts in
+       * the root. Point both the shader-visible count and the command-stream
+       * indirect launch at the predicated copy, so skipped commands also
+       * contribute zero pipeline-stat invocations. */
+      desc->root.cs.group_count_addr = patched;
+      desc->root_dirty = true;
+      grid = agx_grid_indirect(patched);
+   }
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true /* compute */);
    if (!cs)

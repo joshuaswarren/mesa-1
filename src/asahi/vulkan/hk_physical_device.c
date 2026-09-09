@@ -173,7 +173,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_border_color_swizzle = true,
       .EXT_buffer_device_address = true,
       .EXT_calibrated_timestamps = true,
-      .EXT_conditional_rendering = false,
+      .EXT_conditional_rendering = true,
       .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
       .EXT_depth_bias_control = true,
@@ -551,8 +551,9 @@ hk_get_device_features(
       .colorWriteEnable = true,
 
       /* VK_EXT_conditional_rendering */
-      .conditionalRendering = false,
-      .inheritedConditionalRendering = false,
+      .conditionalRendering = supported_extensions->EXT_conditional_rendering,
+      .inheritedConditionalRendering =
+         supported_extensions->EXT_conditional_rendering,
 
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
@@ -1496,6 +1497,12 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
 
+      /* The common implementation GPU-patches every affected draw, dispatch,
+       * and clear-attachments record and has strict host recording/result
+       * oracles. Keep G17P's public promise opt-in until the bounded direct,
+       * indirect, inverted and inherited execution fixture passes on Neo. */
+      if (!hk_g17p_unverified_feature("conditional_rendering"))
+         supported_extensions.EXT_conditional_rendering = false;
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
       if (!hk_g17p_unverified_feature("shader_quad_control"))

@@ -21,6 +21,7 @@
 #include "shader_enums.h"
 
 #include "hk_private.h"
+#include "hk_conditional_render_core.h"
 #include "hk_shader.h"
 
 #include "hk_cmd_pool.h"
@@ -506,6 +507,7 @@ struct hk_cmd_buffer {
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
+      struct hk_conditional_render_state conditional;
    } state;
 
    struct {
@@ -541,6 +543,10 @@ struct hk_cmd_buffer {
     * behaviour.
     */
    bool in_meta;
+
+   /* CmdClearAttachments is the sole vk_meta operation affected by
+    * conditional rendering. */
+   bool conditional_meta;
 
    /* XXX: move me?
     *
@@ -1001,6 +1007,13 @@ void hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                               enum agx_barrier barrier,
                               enum libagx_program idx, const void *data,
                               size_t data_size);
+
+/* Turn a three/four/five-word indirect argument record into an execution-time
+ * conditional record. `barrier` selects the ordered compute stream which must
+ * precede its consumer. */
+uint64_t hk_apply_conditional_rendering(struct hk_cmd_buffer *cmd,
+                                        uint64_t source, uint32_t words,
+                                        enum agx_barrier barrier);
 
 #define MESA_DISPATCH_PRECOMP hk_dispatch_precomp
 

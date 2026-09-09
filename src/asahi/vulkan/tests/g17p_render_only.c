@@ -75,6 +75,9 @@ VK_FN(vkGetPhysicalDeviceProperties);
 #if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
 VK_FN(vkGetPhysicalDeviceFeatures);
 #endif
+#ifdef G17P_CONDITIONAL_RENDERING
+VK_FN(vkGetPhysicalDeviceFeatures2);
+#endif
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 VK_FN(vkGetPhysicalDeviceFormatProperties);
@@ -106,10 +109,19 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
+#ifdef G17P_CONDITIONAL_RENDERING
+VK_FN(vkCmdBindIndexBuffer);
+#endif
 #ifdef G17P_GRAPHICS_SIDE_EFFECTS
 VK_FN(vkCmdBindDescriptorSets);
 #endif
 VK_FN(vkCmdDraw);
+#ifdef G17P_CONDITIONAL_RENDERING
+VK_FN(vkCmdBeginConditionalRenderingEXT);
+VK_FN(vkCmdClearAttachments);
+VK_FN(vkCmdDrawIndexed);
+VK_FN(vkCmdEndConditionalRenderingEXT);
+#endif
 VK_FN(vkCmdEndRenderPass);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
@@ -192,8 +204,38 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 
 
 int
-main(void)
+main(
+#ifdef G17P_CONDITIONAL_RENDERING
+   int argc, char **argv
+#else
+   void
+#endif
+)
 {
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (argc != 3 || (strcmp(argv[1], "--record-only") &&
+                     strcmp(argv[1], "--execute")) ||
+       (strcmp(argv[2], "execute") && strcmp(argv[2], "discard") &&
+        strcmp(argv[2], "indexed-execute") &&
+        strcmp(argv[2], "indexed-discard") &&
+        strcmp(argv[2], "clear-execute") &&
+        strcmp(argv[2], "clear-discard")))
+      die("usage: g17p-vulkan-conditional-rendering-graphics "
+          "<--record-only|--execute> "
+          "<execute|discard|indexed-execute|indexed-discard|"
+          "clear-execute|clear-discard>");
+   const bool record_only = !strcmp(argv[1], "--record-only");
+   const bool clear_attachment = !strncmp(argv[2], "clear-", 6);
+   const bool indexed_draw = !strncmp(argv[2], "indexed-", 8);
+   const bool expect_execute =
+      !strcmp(argv[2], "execute") || !strcmp(argv[2], "indexed-execute") ||
+      !strcmp(argv[2], "clear-execute");
+   if (!record_only) {
+      const char *ack = getenv("G17P_CONDITIONAL_EXECUTION_ACK");
+      if (!ack || strcmp(ack, "YES"))
+         die("execution requires G17P_CONDITIONAL_EXECUTION_ACK=YES");
+   }
+#endif
 #ifdef G17P_TINY_RENDER_RECORD
    const bool clear_only = getenv("G17P_TINY_CLEAR_ONLY") != NULL;
 #endif
@@ -234,6 +276,9 @@ main(void)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
 #if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
+#endif
+#ifdef G17P_CONDITIONAL_RENDERING
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceQueueFamilyProperties);
@@ -334,6 +379,31 @@ main(void)
       die("G17P graphics shader side effects were not explicitly enabled");
 #endif
 
+#ifdef G17P_CONDITIONAL_RENDERING
+   VkPhysicalDeviceConditionalRenderingFeaturesEXT available_conditional = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 available_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_conditional,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available_features);
+   if (!available_conditional.conditionalRendering ||
+       !available_conditional.inheritedConditionalRendering)
+      die("conditional rendering features are not exposed");
+   if (!available_features.features.robustBufferAccess)
+      die("robustBufferAccess is required by the indexed conditional oracle");
+   const VkPhysicalDeviceConditionalRenderingFeaturesEXT enabled_conditional = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+      .conditionalRendering = VK_TRUE,
+      .inheritedConditionalRendering = VK_TRUE,
+   };
+   const char *const conditional_extension =
+      VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME;
+#endif
+
    const float queue_priority = 1.0f;
    const VkDeviceQueueCreateInfo queue_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -343,11 +413,19 @@ main(void)
    };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+#ifdef G17P_CONDITIONAL_RENDERING
+      .pNext = &enabled_conditional,
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = &conditional_extension,
+#endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
 #ifdef G17P_OCCLUSION_QUERY
       .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
          .occlusionQueryPrecise = VK_TRUE,
+#ifdef G17P_CONDITIONAL_RENDERING
+         .robustBufferAccess = VK_TRUE,
+#endif
       },
 #elif defined(G17P_GRAPHICS_SIDE_EFFECTS)
       .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
@@ -387,10 +465,19 @@ main(void)
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
+#ifdef G17P_CONDITIONAL_RENDERING
+   LOAD_DEVICE(device, vkCmdBindIndexBuffer);
+#endif
 #ifdef G17P_GRAPHICS_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
 #endif
    LOAD_DEVICE(device, vkCmdDraw);
+#ifdef G17P_CONDITIONAL_RENDERING
+   LOAD_DEVICE(device, vkCmdBeginConditionalRenderingEXT);
+   LOAD_DEVICE(device, vkCmdClearAttachments);
+   LOAD_DEVICE(device, vkCmdDrawIndexed);
+   LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
+#endif
    LOAD_DEVICE(device, vkCmdEndRenderPass);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
@@ -446,6 +533,50 @@ main(void)
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+
+#ifdef G17P_CONDITIONAL_RENDERING
+   const VkBufferCreateInfo conditional_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 32,
+      .usage = VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT |
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   VkBuffer conditional_buffer;
+   check(vkCreateBuffer(device, &conditional_info, NULL, &conditional_buffer),
+         "vkCreateBuffer(conditional)");
+   VkMemoryRequirements conditional_requirements;
+   vkGetBufferMemoryRequirements(device, conditional_buffer,
+                                 &conditional_requirements);
+   const uint32_t conditional_memory_type = find_memory_type(
+      &memory_properties, conditional_requirements.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+   const VkMemoryAllocateInfo conditional_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = conditional_requirements.size,
+      .memoryTypeIndex = conditional_memory_type,
+   };
+   VkDeviceMemory conditional_memory;
+   check(vkAllocateMemory(device, &conditional_memory_info, NULL,
+                          &conditional_memory),
+         "vkAllocateMemory(conditional)");
+   check(vkBindBufferMemory(device, conditional_buffer, conditional_memory,
+                            0),
+         "vkBindBufferMemory(conditional)");
+   uint32_t *conditional_map;
+   check(vkMapMemory(device, conditional_memory, 0, 32, 0,
+                     (void **)&conditional_map),
+         "vkMapMemory(conditional)");
+   const uint32_t expected_conditional[8] = {
+      expect_execute ? 1 : 0, UINT32_C(0xbaadf00d),
+      UINT32_C(0xc09bcafe),   UINT32_C(0x5eed1234),
+      0,                      1,
+      2,                      UINT32_C(0xdecafbad),
+   };
+   memcpy(conditional_map, expected_conditional,
+          sizeof(expected_conditional));
+#endif
 
 #ifdef G17P_GRAPHICS_SIDE_EFFECTS
    const VkBufferCreateInfo side_info = {
@@ -860,11 +991,45 @@ main(void)
    const VkDeviceSize vertex_offset = 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (indexed_draw)
+      vkCmdBindIndexBuffer(command_buffer, conditional_buffer, 16,
+                           VK_INDEX_TYPE_UINT32);
+#endif
 #ifdef G17P_OCCLUSION_QUERY
    vkCmdBeginQuery(command_buffer, occlusion_pool, 0,
                    VK_QUERY_CONTROL_PRECISE_BIT);
 #endif
+#ifdef G17P_CONDITIONAL_RENDERING
+   const VkConditionalRenderingBeginInfoEXT conditional_begin = {
+      .sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT,
+      .buffer = conditional_buffer,
+      .offset = 0,
+   };
+   vkCmdBeginConditionalRenderingEXT(command_buffer, &conditional_begin);
+   if (clear_attachment) {
+      const VkClearAttachment attachment = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .colorAttachment = 0,
+         .clearValue.color = {
+            .float32 = {1.0f, 71.0f / 255.0f, 13.0f / 255.0f, 1.0f},
+         },
+      };
+      const VkClearRect rect = {
+         .rect = {.extent = {IMAGE_WIDTH, IMAGE_HEIGHT}},
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      };
+      vkCmdClearAttachments(command_buffer, 1, &attachment, 1, &rect);
+   } else if (indexed_draw) {
+      vkCmdDrawIndexed(command_buffer, 3, 1, 0, 0, 0);
+   } else {
+      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   }
+   vkCmdEndConditionalRenderingEXT(command_buffer);
+#else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#endif
 #if defined(G17P_TINY_RENDER_RECORD)
    }
 #endif
@@ -900,6 +1065,18 @@ main(void)
    fprintf(stderr, "g17p-render-only: command buffer recorded\n");
 #endif
 
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (record_only) {
+      printf("g17p-vulkan-conditional-rendering-graphics: RECORD PASS — "
+             "%s predicate=%u expected=%s\n",
+             clear_attachment ? "clear attachments"
+                              : indexed_draw ? "direct indexed draw"
+                                             : "direct draw",
+             conditional_map[0],
+             expect_execute ? "execute" : "discard");
+      return EXIT_SUCCESS;
+   }
+#endif
 #ifdef G17P_OCCLUSION_QUERY
    if (getenv("G17P_QUERY_RECORD_ONLY")) {
       puts("g17p-occlusion-query: record-only PASS");
@@ -930,7 +1107,12 @@ main(void)
    /* Five seconds: long enough for any real 3D kick, short enough that a
     * launch which never signals is reported rather than hanging the box. */
    const VkResult waited =
-      vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000));
+      vkWaitForFences(device, 1, &fence, true,
+#ifdef G17P_CONDITIONAL_RENDERING
+                      UINT64_C(2000000000));
+#else
+                      UINT64_C(5000000000));
+#endif
    if (waited == VK_TIMEOUT) {
       fprintf(stderr, "g17p-render-only: TIMEOUT - fence never signalled\n");
       return EXIT_FAILURE;
@@ -940,6 +1122,12 @@ main(void)
               waited);
       return EXIT_FAILURE;
    }
+
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (memcmp(conditional_map, expected_conditional,
+              sizeof(expected_conditional)) != 0)
+      die("conditional predicate or guards changed");
+#endif
 
 #ifdef G17P_GRAPHICS_SIDE_EFFECTS
    for (unsigned i = 0; i < 4; ++i) {
@@ -975,14 +1163,21 @@ main(void)
                                   VK_QUERY_RESULT_WAIT_BIT |
                                   VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
          "vkGetQueryPoolResults(occlusion)");
+#ifdef G17P_CONDITIONAL_RENDERING
+   const uint64_t expected_samples =
+      !clear_attachment && expect_execute ? IMAGE_WIDTH * IMAGE_HEIGHT : 0;
+#else
+   const uint64_t expected_samples = IMAGE_WIDTH * IMAGE_HEIGHT;
+#endif
    fprintf(stderr,
            "g17p-render-only: occlusion samples=[%" PRIu64 ",%" PRIu64
-           "] available=[%" PRIu64 ",%" PRIu64 "] expected=[%u,0]\n",
+           "] available=[%" PRIu64 ",%" PRIu64 "] expected=[%" PRIu64
+           ",0]\n",
            query_results[0].samples, query_results[1].samples,
            query_results[0].available, query_results[1].available,
-           IMAGE_WIDTH * IMAGE_HEIGHT);
+           expected_samples);
    if (query_results[0].available != 1 || query_results[1].available != 1 ||
-       query_results[0].samples != IMAGE_WIDTH * IMAGE_HEIGHT ||
+       query_results[0].samples != expected_samples ||
        query_results[1].samples != 0)
       die("precise occlusion results differ from full and empty intervals");
 
@@ -1029,7 +1224,15 @@ main(void)
       if (i == 0)
          first = ((uint32_t)r << 24) | ((uint32_t)g << 16) |
                  ((uint32_t)b << 8) | a;
+#ifdef G17P_CONDITIONAL_RENDERING
+      const bool pixel_matches =
+         expect_execute
+            ? (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
+            : (r == 0 && g == 0 && b == 0 && a == 0xff);
+      if (pixel_matches)
+#else
       if (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
+#endif
          exact++;
    }
    fprintf(stderr,
@@ -1045,7 +1248,7 @@ main(void)
       fprintf(stderr, "g17p-render-only: |%s|\n", row);
    }
    if (exact != IMAGE_WIDTH * IMAGE_HEIGHT)
-      die("render target differs from exact RGBA8 draw colour");
+      die("render target differs from exact conditional result");
    if (memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
       die("vertex source changed during query render");
 
@@ -1068,15 +1271,38 @@ main(void)
    if (memcmp(stable_queries, query_results, sizeof(query_results)) != 0 ||
        memcmp(stable_timestamps, timestamp_results,
               sizeof(timestamp_results)) != 0 ||
-       memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
+       memcmp(vertex_map, vertices, sizeof(vertices)) != 0
+#ifdef G17P_CONDITIONAL_RENDERING
+       || memcmp(conditional_map, expected_conditional,
+                 sizeof(expected_conditional)) != 0
+#endif
+   )
       die("query results or source changed after three seconds");
    for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; ++i) {
       const uint8_t *p = &pixels[i * 4];
+#ifdef G17P_CONDITIONAL_RENDERING
+      const bool stable_pixel =
+         expect_execute
+            ? (p[0] == 0xff && p[1] == 0x47 && p[2] == 0x0d &&
+               p[3] == 0xff)
+            : (p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 0xff);
+      if (!stable_pixel)
+#else
       if (p[0] != 0xff || p[1] != 0x47 || p[2] != 0x0d || p[3] != 0xff)
+#endif
          die("render target changed after three seconds");
    }
 #endif
 
+#ifdef G17P_CONDITIONAL_RENDERING
+   printf("g17p-vulkan-conditional-rendering-graphics: PASS — %s %s, "
+          "exact pixels=%u/%u, occlusion=%" PRIu64 "\n",
+          clear_attachment ? "clear attachments"
+                           : indexed_draw ? "direct indexed draw"
+                                          : "direct draw",
+          expect_execute ? "executed" : "discarded", exact,
+          IMAGE_WIDTH * IMAGE_HEIGHT, expected_samples);
+#else
    printf("g17p-render-only: PASS - %ux%u RGBA8, %u/%u exact pixels%s\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, exact, IMAGE_WIDTH * IMAGE_HEIGHT,
 #ifdef G17P_OCCLUSION_QUERY
@@ -1085,5 +1311,6 @@ main(void)
           ""
 #endif
    );
+#endif
    return EXIT_SUCCESS;
 }

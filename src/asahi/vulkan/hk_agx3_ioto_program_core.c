@@ -663,6 +663,16 @@ hk_agx3_g17p_native_compute_dispatch_append(
 }
 
 bool
+hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   return agx3_g17p_native_compute_dispatch_append_with_barrier(
+      program, grid, barrier_flags, sink);
+}
+
+bool
 hk_agx3_g17s_minimal_compute_program_prepare(
    enum agx_chip chip,
    const struct agx3_g17s_minimal_compute_program_desc *desc, void *output,

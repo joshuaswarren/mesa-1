@@ -240,6 +240,7 @@ target_supports_program(const char *target, const nir_function *func)
    return strcmp(target, "g17p") ||
           !strcmp(func->name, "libagx_fill_uint4") ||
           !strcmp(func->name, "libagx_predicate_indirect") ||
+          !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
           !strcmp(func->name, "libagx_increment_ia") ||
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
@@ -420,6 +421,8 @@ main(int argc, char **argv)
                  "libagx_predicate_indirect_0_g17p,\n"
                  "    [LIBAGX_PREDICATE_INDIRECT_1] = "
                  "libagx_predicate_indirect_1_g17p,\n"
+                 "    [LIBAGX_CONDITIONAL_RENDER] = "
+                 "libagx_conditional_render_0_g17p,\n"
                  "    [LIBAGX_COPY_XFB_COUNTERS] = "
                  "libagx_copy_xfb_counters_0_g17p,\n"
                  "    [LIBAGX_INCREMENT_IA] = "

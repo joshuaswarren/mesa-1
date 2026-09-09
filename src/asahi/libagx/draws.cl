@@ -31,6 +31,25 @@ libagx_predicate_indirect(global uint32_t *out, constant uint32_t *in,
 }
 
 /*
+ * VK_EXT_conditional_rendering predicates both graphics and compute commands
+ * with one 32-bit value.  Honeykrisp lowers each affected command to an
+ * indirect argument record and runs this kernel immediately before the
+ * consumer.  This is deliberately separate from predicate_indirect: Vulkan
+ * requires a 32-bit load (D3D12 uses 64-bit predication), permits inversion,
+ * and compute dispatch records contain three rather than four/five words.
+ */
+KERNEL(1)
+libagx_conditional_render(global uint32_t *out, constant uint32_t *in,
+                          constant uint32_t *predicate, uint32_t words,
+                          uint32_t inverted)
+{
+   bool execute = ((*predicate != 0) != (inverted != 0));
+
+   for (uint i = 0; i < words; ++i)
+      out[i] = execute ? in[i] : 0;
+}
+
+/*
  * D3D12 ExecuteIndirect may source both its terminal draw record and root
  * constants from buffers written earlier on the GPU. Patch one bounded
  * argument slice in the pre-graphics stream so the draw observes those

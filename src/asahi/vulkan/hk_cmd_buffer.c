@@ -25,6 +25,7 @@
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_shader.h"
+#include "libagx_shaders.h"
 
 #include "util/log.h"
 #include "util/u_debug.h"
@@ -242,6 +243,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->current_cs.pre_gfx = NULL;
 
    assert(!cmd->in_meta);
+   assert(!cmd->conditional_meta);
    cmd->geom_index_buffer = 0;
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
@@ -263,6 +265,11 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
+   const struct vk_device_dispatch_table *disp =
+      cmd->vk.base.device->command_dispatch_table;
+   const struct hk_conditional_render_state primary_conditional =
+      cmd->state.conditional;
+
    /* Secondary command buffers are materialized by replaying their common
     * command queues into the primary.  Their last bound state is therefore
     * also the driver's cached state in the primary after replay.  Vulkan
@@ -270,8 +277,20 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
     * application is required to bind it again.  Invalidate here so binding
     * the same object used by the secondary cannot be incorrectly elided.
     */
-   vk_common_CmdExecuteCommands(commandBuffer, commandBufferCount,
-                                pCommandBuffers);
+   for (uint32_t i = 0; i < commandBufferCount; ++i) {
+      VK_FROM_HANDLE(hk_cmd_buffer, secondary, pCommandBuffers[i]);
+
+      /* The queued commands replay into `cmd`, so establish the conditional
+       * state promised by the secondary's inheritance declaration. Explicit
+       * begin/end scopes recorded inside the secondary may change this state
+       * during replay; always restore the primary at the command-buffer
+       * boundary. */
+      cmd->state.conditional = hk_conditional_render_replay_state(
+         &primary_conditional, secondary->state.conditional.inherited);
+      vk_cmd_queue_execute(&secondary->vk.cmd_queue, commandBuffer, disp);
+      cmd->state.conditional = primary_conditional;
+   }
+
    hk_cmd_invalidate_graphics_state(cmd);
    hk_cmd_invalidate_compute_state(cmd);
 }
@@ -617,6 +636,17 @@ hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    hk_reset_cmd_buffer(&cmd->vk, 0);
+
+   if (cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
+       pBeginInfo->pInheritanceInfo) {
+      const VkCommandBufferInheritanceConditionalRenderingInfoEXT *conditional =
+         vk_find_struct_const(
+            pBeginInfo->pInheritanceInfo->pNext,
+            COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT);
+
+      cmd->state.conditional.inherited =
+         conditional && conditional->conditionalRenderingEnable;
+   }
 
    perf_debug(cmd, "Begin command buffer");
    hk_cmd_buffer_begin_compute(cmd, pBeginInfo);
@@ -1648,6 +1678,36 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
                                prog->b.workgroup);
+}
+
+uint64_t
+hk_apply_conditional_rendering(struct hk_cmd_buffer *cmd, uint64_t source,
+                               uint32_t words, enum agx_barrier barrier)
+{
+   const struct hk_conditional_render_state *conditional =
+      &cmd->state.conditional;
+
+   if (!hk_conditional_render_is_active(conditional, cmd->in_meta,
+                                         cmd->conditional_meta))
+      return source;
+
+   if (!source || !conditional->address || words == 0 ||
+       words > HK_CONDITIONAL_RENDER_MAX_WORDS) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return 0;
+   }
+
+   const struct agx_ptr output =
+      hk_pool_alloc(cmd, words * sizeof(uint32_t), 4);
+   if (!output.gpu) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return 0;
+   }
+
+   libagx_conditional_render(cmd, agx_1d(1), barrier, output.gpu, source,
+                             conditional->address, words,
+                             conditional->inverted);
+   return vk_command_buffer_has_error(&cmd->vk) ? 0 : output.gpu;
 }
 
 bool

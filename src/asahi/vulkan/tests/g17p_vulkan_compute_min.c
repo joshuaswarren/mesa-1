@@ -22,6 +22,10 @@
 #include "g17p_vulkan_compute_atomic2d_spv.h"
 #define COMPUTE_SPV g17p_vulkan_compute_atomic2d_spv
 #define TEST_NAME "g17p-vulkan-compute-atomic2d"
+#elif defined(G17P_CONDITIONAL_RENDERING)
+#include "g17p_vulkan_compute_min_spv.h"
+#define COMPUTE_SPV g17p_vulkan_compute_min_spv
+#define TEST_NAME "g17p-vulkan-conditional-rendering"
 #elif defined(G17P_WORKGROUP_SHARED)
 #include "g17p_vulkan_workgroup_shared_spv.h"
 #define COMPUTE_SPV g17p_vulkan_workgroup_shared_spv
@@ -57,6 +61,11 @@
 #define PREFIX_COUNT 0
 #define GUARD_COUNT 32
 #define EXPECTED(i) (UINT32_C(0x6d000000) + (i))
+#elif defined(G17P_CONDITIONAL_RENDERING)
+#define ELEMENT_COUNT 32
+#define PREFIX_COUNT 16
+#define GUARD_COUNT 16
+#define EXPECTED(i) (UINT32_C(0x12340000) + (i))
 #else
 #define ELEMENT_COUNT 32
 #define PREFIX_COUNT 0
@@ -109,6 +118,12 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdDispatch);
+#ifdef G17P_CONDITIONAL_RENDERING
+VK_FN(vkCmdDispatchIndirect);
+VK_FN(vkCmdBeginConditionalRenderingEXT);
+VK_FN(vkCmdEndConditionalRenderingEXT);
+VK_FN(vkCmdExecuteCommands);
+#endif
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
@@ -170,9 +185,52 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 int
 main(int argc, char **argv)
 {
+#ifdef G17P_CONDITIONAL_RENDERING
+   struct conditional_case {
+      const char *name;
+      uint32_t predicate;
+      bool inverted;
+      bool indirect;
+      bool inherited;
+   };
+   static const struct conditional_case cases[] = {
+      {"direct-zero", 0, false, false, false},
+      {"direct-nonzero", 7, false, false, false},
+      {"inverted-zero", 0, true, false, false},
+      {"inverted-nonzero", UINT32_MAX, true, false, false},
+      {"indirect-zero", 0, false, true, false},
+      {"indirect-nonzero", 1, false, true, false},
+      {"inherited-zero", 0, false, false, true},
+      {"inherited-nonzero", 9, false, false, true},
+   };
+   if (argc != 3 || (strcmp(argv[1], "--record-only") &&
+                     strcmp(argv[1], "--execute")))
+      die("usage: " TEST_NAME
+          " <--record-only|--execute> <direct-zero|direct-nonzero|"
+          "inverted-zero|inverted-nonzero|indirect-zero|indirect-nonzero|"
+          "inherited-zero|inherited-nonzero>");
+   const bool record_only = !strcmp(argv[1], "--record-only");
+   const struct conditional_case *test_case = NULL;
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      if (!strcmp(argv[2], cases[i].name)) {
+         test_case = &cases[i];
+         break;
+      }
+   }
+   if (!test_case)
+      die("unknown conditional-rendering case");
+   if (!record_only) {
+      const char *ack = getenv("G17P_CONDITIONAL_EXECUTION_ACK");
+      if (!ack || strcmp(ack, "YES"))
+         die("execution requires G17P_CONDITIONAL_EXECUTION_ACK=YES");
+   }
+   const bool expect_execute =
+      (test_case->predicate != 0) != test_case->inverted;
+#else
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
    if (argc > 2 || (argc == 2 && !record_only))
       die("usage: " TEST_NAME " [--record-only]");
+#endif
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -297,11 +355,38 @@ main(int argc, char **argv)
    const char *const enabled_extensions[] = {
       VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
    };
+#elif defined(G17P_CONDITIONAL_RENDERING)
+   VkPhysicalDeviceConditionalRenderingFeaturesEXT available_conditional = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 available_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_conditional,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available_features);
+   if (!available_conditional.conditionalRendering ||
+       !available_conditional.inheritedConditionalRendering)
+      die("conditional and inherited conditional rendering are not exposed");
+
+   const VkPhysicalDeviceConditionalRenderingFeaturesEXT enabled_conditional = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+      .conditionalRendering = VK_TRUE,
+      .inheritedConditionalRendering = VK_TRUE,
+   };
+   const char *const enabled_extensions[] = {
+      VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME,
+   };
 #endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #ifdef G17P_NULL_DESCRIPTOR
       .pNext = &enabled_robustness2,
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = enabled_extensions,
+#elif defined(G17P_CONDITIONAL_RENDERING)
+      .pNext = &enabled_conditional,
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = enabled_extensions,
 #endif
@@ -341,6 +426,12 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
    LOAD_DEVICE(device, vkCmdDispatch);
+#ifdef G17P_CONDITIONAL_RENDERING
+   LOAD_DEVICE(device, vkCmdDispatchIndirect);
+   LOAD_DEVICE(device, vkCmdBeginConditionalRenderingEXT);
+   LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
+   LOAD_DEVICE(device, vkCmdExecuteCommands);
+#endif
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
@@ -398,6 +489,53 @@ main(int argc, char **argv)
 #ifdef G17P_COMPUTE_ATOMIC_2D
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
       payload[i] = ATOMIC_SEED(i);
+#endif
+
+#ifdef G17P_CONDITIONAL_RENDERING
+   /* Keep the 32-bit predicate and indirect dispatch record in one guarded,
+    * coherent allocation. The predicate is intentionally followed by poison,
+    * proving that the implementation reads exactly 32 rather than 64 bits. */
+   const VkDeviceSize control_size = 64;
+   const VkBufferCreateInfo control_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = control_size,
+      .usage = VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   VkBuffer control_buffer;
+   check(vkCreateBuffer(device, &control_info, NULL, &control_buffer),
+         "vkCreateBuffer(control)");
+   VkMemoryRequirements control_requirements;
+   vkGetBufferMemoryRequirements(device, control_buffer,
+                                 &control_requirements);
+   const uint32_t control_memory_type = find_memory_type(
+      &memory_properties, control_requirements.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+   const VkMemoryAllocateInfo control_memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = control_requirements.size,
+      .memoryTypeIndex = control_memory_type,
+   };
+   VkDeviceMemory control_memory;
+   check(vkAllocateMemory(device, &control_memory_info, NULL,
+                          &control_memory),
+         "vkAllocateMemory(control)");
+   check(vkBindBufferMemory(device, control_buffer, control_memory, 0),
+         "vkBindBufferMemory(control)");
+   uint32_t *control;
+   check(vkMapMemory(device, control_memory, 0, control_size, 0,
+                     (void **)&control),
+         "vkMapMemory(control)");
+   uint32_t expected_control[16];
+   for (unsigned i = 0; i < 16; ++i)
+      expected_control[i] = UINT32_C(0xbaad0000) + i;
+   expected_control[0] = test_case->predicate;
+   expected_control[4] = 1;
+   expected_control[5] = 1;
+   expected_control[6] = 1;
+   memcpy(control, expected_control, sizeof(expected_control));
 #endif
 
    const VkDescriptorSetLayoutBinding bindings[] = {
@@ -560,6 +698,38 @@ main(int argc, char **argv)
    check(vkAllocateCommandBuffers(device, &command_buffer_info,
                                   &command_buffer),
          "vkAllocateCommandBuffers");
+#ifdef G17P_CONDITIONAL_RENDERING
+   VkCommandBuffer secondary = VK_NULL_HANDLE;
+   if (test_case->inherited) {
+      VkCommandBufferAllocateInfo secondary_info = command_buffer_info;
+      secondary_info.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+      check(vkAllocateCommandBuffers(device, &secondary_info, &secondary),
+            "vkAllocateCommandBuffers(secondary)");
+
+      const VkCommandBufferInheritanceConditionalRenderingInfoEXT
+         conditional_inheritance = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT,
+            .conditionalRenderingEnable = VK_TRUE,
+         };
+      const VkCommandBufferInheritanceInfo inheritance = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+         .pNext = &conditional_inheritance,
+      };
+      const VkCommandBufferBeginInfo secondary_begin = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+         .pInheritanceInfo = &inheritance,
+      };
+      check(vkBeginCommandBuffer(secondary, &secondary_begin),
+            "vkBeginCommandBuffer(secondary)");
+      vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+      vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              pipeline_layout, 0, 1, &descriptor_set, 0,
+                              NULL);
+      vkCmdDispatch(secondary, 1, 1, 1);
+      check(vkEndCommandBuffer(secondary),
+            "vkEndCommandBuffer(secondary)");
+   }
+#endif
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -569,7 +739,26 @@ main(int argc, char **argv)
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
-#ifdef G17P_COMPUTE_ATOMIC_2D
+#ifdef G17P_CONDITIONAL_RENDERING
+   const VkConditionalRenderingBeginInfoEXT conditional_begin = {
+      .sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT,
+      .buffer = control_buffer,
+      .offset = 0,
+      .flags = test_case->inverted
+                  ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT
+                  : 0,
+   };
+   vkCmdBeginConditionalRenderingEXT(command_buffer, &conditional_begin);
+   if (test_case->inherited) {
+      vkCmdExecuteCommands(command_buffer, 1, &secondary);
+   } else if (test_case->indirect) {
+      vkCmdDispatchIndirect(command_buffer, control_buffer,
+                            4 * sizeof(uint32_t));
+   } else {
+      vkCmdDispatch(command_buffer, 1, 1, 1);
+   }
+   vkCmdEndConditionalRenderingEXT(command_buffer);
+#elif defined(G17P_COMPUTE_ATOMIC_2D)
    vkCmdDispatch(command_buffer, 3, 2, 1);
 #else
    vkCmdDispatch(command_buffer, 1, 1, 1);
@@ -590,7 +779,15 @@ main(int argc, char **argv)
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
-#ifdef G17P_COMPUTE_ATOMIC_2D
+#ifdef G17P_CONDITIONAL_RENDERING
+      printf(TEST_NAME ": RECORD PASS — %s predicate=%#x inverted=%u "
+                       "indirect=%u inherited=%u expected=%s on queue %u "
+                       "(flags %#x)\n",
+             test_case->name, test_case->predicate, test_case->inverted,
+             test_case->indirect, test_case->inherited,
+             expect_execute ? "execute" : "discard", queue_family,
+             queue_flags);
+#elif defined(G17P_COMPUTE_ATOMIC_2D)
       printf(TEST_NAME ": RECORD PASS — 3x2 grid, six storage-buffer atomic "
                        "counters, dispatch and EndCB accepted on queue %u "
                        "(flags %#x)\n",
@@ -620,11 +817,12 @@ main(int argc, char **argv)
       .pCommandBuffers = &command_buffer,
    };
    check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
-#if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED)
+#if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED) || \
+   defined(G17P_CONDITIONAL_RENDERING)
    const VkResult waited =
-      vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
+      vkWaitForFences(device, 1, &fence, true, UINT64_C(2000000000));
    if (waited == VK_TIMEOUT)
-      die("vkWaitForFences timed out after three seconds");
+      die("vkWaitForFences timed out after two seconds");
    check(waited, "vkWaitForFences");
 #else
    check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
@@ -633,7 +831,13 @@ main(int argc, char **argv)
 
    unsigned untouched = 0, zeroed = 0, wrong = 0, first_bad = UINT32_MAX;
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
+#ifdef G17P_CONDITIONAL_RENDERING
+      const uint32_t expected = expect_execute
+                                   ? EXPECTED(i)
+                                   : SENTINEL(PREFIX_COUNT + i);
+#else
       const uint32_t expected = EXPECTED(i);
+#endif
       if (payload[i] == expected)
          continue;
       if (first_bad == UINT32_MAX)
@@ -652,7 +856,13 @@ main(int argc, char **argv)
               TEST_NAME ":   value[%u] is %#x, expected %#x "
               "(sentinel would be %#x)\n",
               untouched, zeroed, wrong, ELEMENT_COUNT, first_bad,
-              payload[first_bad], EXPECTED(first_bad),
+              payload[first_bad],
+#ifdef G17P_CONDITIONAL_RENDERING
+              expect_execute ? EXPECTED(first_bad)
+                             : SENTINEL(PREFIX_COUNT + first_bad),
+#else
+              EXPECTED(first_bad),
+#endif
               SENTINEL(PREFIX_COUNT + first_bad));
       /* The classification is the whole point, so spell it out. */
       if (untouched == ELEMENT_COUNT)
@@ -685,7 +895,7 @@ main(int argc, char **argv)
    }
 
 #if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED) || \
-   defined(G17P_NULL_DESCRIPTOR)
+   defined(G17P_NULL_DESCRIPTOR) || defined(G17P_CONDITIONAL_RENDERING)
    for (uint32_t i = 0; i < PREFIX_COUNT; ++i) {
       if (mapped[i] != SENTINEL(i))
          die("output prefix guard changed");
@@ -695,10 +905,21 @@ main(int argc, char **argv)
       if (mapped[i] != SENTINEL(i))
          die("output suffix guard changed");
    }
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (memcmp(control, expected_control, sizeof(expected_control)) != 0)
+      die("conditional predicate, poison, or indirect record changed");
+#endif
 
    sleep(3);
    for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
-      if (payload[i] != EXPECTED(i))
+#ifdef G17P_CONDITIONAL_RENDERING
+      const uint32_t expected = expect_execute
+                                   ? EXPECTED(i)
+                                   : SENTINEL(PREFIX_COUNT + i);
+#else
+      const uint32_t expected = EXPECTED(i);
+#endif
+      if (payload[i] != expected)
          die("result changed after three seconds");
    }
    for (uint32_t i = 0; i < PREFIX_COUNT; ++i) {
@@ -710,6 +931,10 @@ main(int argc, char **argv)
       if (mapped[i] != SENTINEL(i))
          die("output suffix guard changed after three seconds");
    }
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (memcmp(control, expected_control, sizeof(expected_control)) != 0)
+      die("conditional control memory changed after three seconds");
+#endif
 
 #ifdef G17P_COMPUTE_ATOMIC_2D
    printf(TEST_NAME ": PASS — 3x2 workgroup grid produced six exact "
@@ -718,6 +943,11 @@ main(int argc, char **argv)
 #elif defined(G17P_WORKGROUP_SHARED)
    printf(TEST_NAME ": PASS — 64 exact cross-subgroup shared-memory results "
                     "and 32 guards stable for three seconds\n");
+#elif defined(G17P_CONDITIONAL_RENDERING)
+   printf(TEST_NAME ": PASS — %s predicate=%#x produced exact %s result, "
+                    "32 guards stable for three seconds\n",
+          test_case->name, test_case->predicate,
+          expect_execute ? "executed" : "discarded");
 #else
    printf(TEST_NAME ": PASS — 32 null SSBO/UBO loads returned zero, null "
                     "SSBO stores were discarded, exact output and 32 guards "
@@ -740,6 +970,11 @@ cleanup:
    vkUnmapMemory(device, memory);
    vkDestroyBuffer(device, buffer, NULL);
    vkFreeMemory(device, memory, NULL);
+#ifdef G17P_CONDITIONAL_RENDERING
+   vkUnmapMemory(device, control_memory);
+   vkDestroyBuffer(device, control_buffer, NULL);
+   vkFreeMemory(device, control_memory, NULL);
+#endif
    vkDestroyDevice(device, NULL);
    vkDestroyInstance(instance, NULL);
    dlclose(loader);

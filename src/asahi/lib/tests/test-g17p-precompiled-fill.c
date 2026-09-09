@@ -57,7 +57,8 @@ main(void)
           i == LIBAGX_COPY_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
-          i == LIBAGX_PREDICATE_INDIRECT_1)
+          i == LIBAGX_PREDICATE_INDIRECT_1 ||
+          i == LIBAGX_CONDITIONAL_RENDER)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -247,6 +248,41 @@ main(void)
                       sizeof(end),
                    end, sizeof(end)) == 0);
    }
+
+   /* Vulkan conditional rendering has no Metal API witness and no native VDM
+    * predicate packet. Its required G17P implementation is this exact
+    * compiler-produced 32-bit predicate/copy kernel followed by an already-
+    * qualified native indirect draw or dispatch. Pin the complete generated
+    * shader and launch ABI so it can never fall back to an AGX2 binary. */
+   const uint32_t *conditional_blob =
+      libagx_g17p[LIBAGX_CONDITIONAL_RENDER];
+   CHECK(conditional_blob != NULL);
+   if (!conditional_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *conditional_info =
+      (const void *)conditional_blob;
+   const uint8_t *conditional_binary =
+      (const uint8_t *)conditional_blob + sizeof(*conditional_info);
+   CHECK(conditional_info->preamble_offset == 0);
+   CHECK(conditional_info->main_offset == 0);
+   CHECK(conditional_info->main_size == 170);
+   CHECK(conditional_info->binary_size == 170);
+   CHECK(conditional_info->nr_gprs == 6);
+   CHECK(conditional_info->nr_preamble_gprs == 0);
+   CHECK(conditional_info->push_count == 16);
+   CHECK(conditional_info->workgroup_size[0] == 1);
+   CHECK(conditional_info->workgroup_size[1] == 1);
+   CHECK(conditional_info->workgroup_size[2] == 1);
+   CHECK(conditional_info->local_size == 0);
+   CHECK(conditional_info->imageblock_stride == 0);
+   CHECK(!conditional_info->uses_txf);
+   CHECK(conditional_info->agx3_staging_known);
+   CHECK(conditional_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
+         UINT64_C(0xdd78584e246b702d));
+   CHECK(memcmp(conditional_binary + conditional_info->binary_size -
+                   sizeof(end),
+                end, sizeof(end)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

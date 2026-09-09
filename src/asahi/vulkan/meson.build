@@ -7,6 +7,7 @@ hk_files = files(
   'hk_buffer_view.h',
   'hk_cmd_buffer.c',
   'hk_cmd_buffer.h',
+  'hk_conditional_render_core.h',
   'hk_cmd_lifetime.c',
   'hk_cs_root_size.h',
   'hk_cmd_clear.c',
@@ -99,6 +100,18 @@ if with_tests
             'hk_nir_lower_robust_image.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_conditional_render_core',
+    executable(
+      'hk_conditional_render_core_test',
+      files('tests/test-hk-conditional-render-core.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),
@@ -1858,6 +1871,32 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # One bounded conditional-rendering case per process. Record-only mode
+    # proves direct, indirect, inverted and inherited command encoding under
+    # the drm-shim; execution checks every payload word and both guards.
+    executable(
+      'g17p-vulkan-conditional-rendering',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_CONDITIONAL_RENDERING=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Graphics half of the same qualification: direct, robust indexed and
+    # clear-attachments paths are checked by exact RGBA8 pixels and precise
+    # occlusion counts.
+    executable(
+      'g17p-vulkan-conditional-rendering-graphics',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args,
+                '-DG17P_OCCLUSION_QUERY=1',
+                '-DG17P_CONDITIONAL_RENDERING=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
