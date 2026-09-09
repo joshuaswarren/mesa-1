@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "asahi/compiler/agx_compile.h"
+#include "agx_bg_eot_key.h"
 #include "util/simple_mtx.h"
 #include "agx_tilebuffer.h"
 #include "libagx_dgc.h"

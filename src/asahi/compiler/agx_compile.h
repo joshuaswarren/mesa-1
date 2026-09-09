@@ -356,6 +356,11 @@ struct agx_shader_key {
     * logical layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
 
+   /* Select the native R5G6B5 imgwblk tail (0x35). RGB565 has three logical
+    * F16 imageblock lanes spanning two words and lowers to a raw I16 block
+    * store, but it does not share RGBA16F's selector. */
+   bool g17p_rt0_eot_rgb565;
+
    /* Select the native normalized-16 imgwblk tail (0x95). Scalar R16 and
     * RG16 are both one imageblock word, so word count alone is insufficient. */
    bool g17p_rt0_eot_norm16_selector_95;

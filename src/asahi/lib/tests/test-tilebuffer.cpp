@@ -5,6 +5,7 @@
 
 #include "util/format/u_format.h"
 #include "agx_tilebuffer.h"
+#include "agx_bg_eot_key.h"
 
 #include <gtest/gtest.h>
 
@@ -227,4 +228,36 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 
    EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
+}
+
+TEST(Tilebuffer, G17PRGB565EOTKey)
+{
+   struct agx_shader_key key = {};
+
+   /* Seed an unrelated format first: configuring a new EOT format must clear
+    * mutually exclusive selectors rather than inheriting a stale cache key. */
+   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R32G32_UINT, &key);
+   EXPECT_EQ(key.g17p_rt0_eot_words, 2);
+   EXPECT_TRUE(key.g17p_rt0_eot_i32);
+   EXPECT_TRUE(key.g17p_rt0_eot_i32_selector_75);
+
+   for (enum pipe_format format : {PIPE_FORMAT_R5G6B5_UNORM,
+                                   PIPE_FORMAT_B5G6R5_UNORM}) {
+      agx_g17p_configure_rt0_eot_key(format, &key);
+      EXPECT_EQ(key.g17p_rt0_eot_words, 2);
+      EXPECT_TRUE(key.g17p_rt0_eot_rgb565);
+      EXPECT_FALSE(key.g17p_rt0_eot_i32);
+      EXPECT_FALSE(key.g17p_rt0_eot_i32_selector_75);
+      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
+   }
+
+   /* RGBA16F has the same physical format and word count, but Apple's native
+    * builtin gives it selector 0x15 rather than RGB565's selector 0x35. */
+   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R16G16B16A16_FLOAT, &key);
+   EXPECT_EQ(key.g17p_rt0_eot_words, 2);
+   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
+
+   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R8G8B8A8_UNORM, &key);
+   EXPECT_EQ(key.g17p_rt0_eot_words, 0);
+   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 }

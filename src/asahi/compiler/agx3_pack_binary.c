@@ -3790,6 +3790,9 @@ agx3_vertex_outputs_share_source(agx_context *ctx)
  * the grounded selector-15 program; wider signed variants remain distinct.
  * R16_SFLOAT, R16G16_SFLOAT and R16G16B16A16_SFLOAT format12 with one,
  * two or four components use that same grounded program.
+ * R5G6B5_UNORM key0x0c020b00 has three F16 lanes spanning two imageblock
+ * words, but uses selector 0x35. Its fresh 68-byte applegpu_g17p text has
+ * SHA-256 60beeb253d8f81af993e93617ed3fca4559e0f614c8465f4cd2bb42c0f1f5fb6.
  * A2B10G10R10_UINT_PACK32 key0x10021200 uses one I16 word and selector0x15.
  * Recognize the exact post-RA semantic graph and replace it atomically, so no
  * partially grounded imgwblk ever escapes for a different format or shape. */
@@ -3797,7 +3800,7 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_NONE,
    AGX3_G17P_RT0_EOT_SELECTOR_75,
    AGX3_G17P_RT0_EOT_SELECTOR_15,
-   AGX3_G17P_RT0_EOT_I32,
+   AGX3_G17P_RT0_EOT_SELECTOR_35,
    AGX3_G17P_RT0_EOT_SELECTOR_55,
    AGX3_G17P_RT0_EOT_NORM16,
    AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS,
@@ -3898,6 +3901,21 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
         ctx->key->g17p_rt0_eot_words != 4))
       return AGX3_G17P_RT0_EOT_NONE;
 
+   if (ctx->key->g17p_rt0_eot_rgb565) {
+      if (store_format != AGX_FORMAT_I16 ||
+          ctx->key->g17p_rt0_eot_words != 2 ||
+          ctx->key->g17p_rt0_eot_norm16_selector_95 ||
+          ctx->key->g17p_rt0_eot_i16_signed_two_words ||
+          ctx->key->g17p_rt0_eot_i32 ||
+          ctx->key->g17p_rt0_eot_i32_four_words ||
+          ctx->key->g17p_rt0_eot_i32_signed_four_words ||
+          ctx->key->g17p_rt0_eot_i32_selector_15 ||
+          ctx->key->g17p_rt0_eot_i32_selector_75)
+         return AGX3_G17P_RT0_EOT_NONE;
+
+      return AGX3_G17P_RT0_EOT_SELECTOR_35;
+   }
+
    if (store_format == AGX_FORMAT_S16NORM) {
       if (ctx->key->g17p_rt0_eot_norm16_selector_95 &&
           (ctx->key->g17p_rt0_eot_words == 1 ||
@@ -3940,7 +3958,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 
       if (ctx->key->g17p_rt0_eot_i32_four_words)
          return ctx->key->g17p_rt0_eot_words == 4
-                   ? AGX3_G17P_RT0_EOT_I32
+                   ? AGX3_G17P_RT0_EOT_SELECTOR_35
                    : AGX3_G17P_RT0_EOT_NONE;
 
       if (ctx->key->g17p_rt0_eot_i32_selector_15) {
@@ -3961,7 +3979,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 
       return (ctx->key->g17p_rt0_eot_words == 1 ||
               ctx->key->g17p_rt0_eot_words == 2)
-                ? AGX3_G17P_RT0_EOT_I32
+                ? AGX3_G17P_RT0_EOT_SELECTOR_35
                 : AGX3_G17P_RT0_EOT_NONE;
    }
 

@@ -398,85 +398,11 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       .dev = agx_gather_device_key(cache->dev),
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
-      .g17p_rt0_eot_i32 =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         (key->tib.logical_format[0] == PIPE_FORMAT_R32_FLOAT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_FLOAT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32_UINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32_SINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_SINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32_UINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT),
-      .g17p_rt0_eot_i32_four_words =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         (key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT),
-      .g17p_rt0_eot_i32_signed_four_words =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         key->tib.logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT,
-      .g17p_rt0_eot_i32_selector_15 =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         key->tib.logical_format[0] == PIPE_FORMAT_R32G32_SINT,
-      .g17p_rt0_eot_i32_selector_75 =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         key->tib.logical_format[0] == PIPE_FORMAT_R32G32_UINT,
-      .g17p_rt0_eot_norm16_selector_95 =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         (key->tib.logical_format[0] == PIPE_FORMAT_R16_UNORM ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R16_SNORM ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
-          key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM),
-      .g17p_rt0_eot_i16_signed_two_words =
-         cache->dev->chip == AGX_CHIP_G17P &&
-         key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT,
    };
 
-   if (cache->dev->chip == AGX_CHIP_G17P) {
-      switch (key->tib.logical_format[0]) {
-      case PIPE_FORMAT_R32_FLOAT:
-      case PIPE_FORMAT_R32_UINT:
-      case PIPE_FORMAT_R32_SINT:
-      case PIPE_FORMAT_R8_UINT:
-      case PIPE_FORMAT_R8_SINT:
-      case PIPE_FORMAT_R8G8_UINT:
-      case PIPE_FORMAT_R8G8_SINT:
-      case PIPE_FORMAT_R8G8B8A8_UINT:
-      case PIPE_FORMAT_R8G8B8A8_SINT:
-      case PIPE_FORMAT_R16_FLOAT:
-      case PIPE_FORMAT_R16_UNORM:
-      case PIPE_FORMAT_R16_SNORM:
-      case PIPE_FORMAT_R16_UINT:
-      case PIPE_FORMAT_R16_SINT:
-      case PIPE_FORMAT_R16G16_FLOAT:
-      case PIPE_FORMAT_R16G16_UNORM:
-      case PIPE_FORMAT_R16G16_SNORM:
-      case PIPE_FORMAT_R16G16_UINT:
-      case PIPE_FORMAT_R16G16_SINT:
-      case PIPE_FORMAT_R10G10B10A2_UINT:
-         compiler_key.g17p_rt0_eot_words = 1;
-         break;
-      case PIPE_FORMAT_R32G32_FLOAT:
-      case PIPE_FORMAT_R16G16B16A16_FLOAT:
-      case PIPE_FORMAT_R16G16B16A16_UNORM:
-      case PIPE_FORMAT_R16G16B16A16_SNORM:
-      case PIPE_FORMAT_R16G16B16A16_UINT:
-      case PIPE_FORMAT_R16G16B16A16_SINT:
-      case PIPE_FORMAT_R32G32_SINT:
-      case PIPE_FORMAT_R32G32_UINT:
-         compiler_key.g17p_rt0_eot_words = 2;
-         break;
-      case PIPE_FORMAT_R32G32B32A32_UINT:
-      case PIPE_FORMAT_R32G32B32A32_SINT:
-      case PIPE_FORMAT_R32G32B32A32_FLOAT:
-         compiler_key.g17p_rt0_eot_words = 4;
-         break;
-      default:
-         break;
-      }
-   }
+   if (cache->dev->chip == AGX_CHIP_G17P)
+      agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
+                                    &compiler_key);
 
    return agx_compile_bg_eot_shader(cache, b.shader, &compiler_key, NULL);
 }
