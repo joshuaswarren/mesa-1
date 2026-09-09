@@ -37,6 +37,15 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
 
+  g17p_compressed_3d_environment = {
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
+    'G17P_COMPRESSED_DECODE_SUBMIT_ONLY' : '1',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  }
+
   g17p_queue_progress_env = environment(g17p_queue_progress_environment)
   g17p_queue_progress_env.set(
     'ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE', 'success')
@@ -106,6 +115,27 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
       timeout : 30,
     )
   endforeach
+
+  g17p_compressed_3d_env = environment(g17p_compressed_3d_environment)
+  test(
+    'hk_g17p_compressed_3d_upload',
+    g17p_vulkan_bc1_3d_decode,
+    env : g17p_compressed_3d_env,
+    suite : ['asahi', 'g17p-compressed-textures'],
+    timeout : 30,
+  )
+
+  g17p_compressed_3d_fail_env = environment(g17p_compressed_3d_environment)
+  g17p_compressed_3d_fail_env.set('ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')
+  g17p_compressed_3d_fail_env.set(
+    'G17P_COMPRESSED_DECODE_EXPECT_SUBMIT_FAILURE', '1')
+  test(
+    'hk_g17p_compressed_3d_submit_failure',
+    g17p_vulkan_bc1_3d_decode,
+    env : g17p_compressed_3d_fail_env,
+    suite : ['asahi', 'g17p-compressed-textures'],
+    timeout : 30,
+  )
 
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',

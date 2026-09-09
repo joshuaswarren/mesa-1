@@ -49,6 +49,188 @@ main(void)
    CHECK(hk_g17p_block_format_family(VK_FORMAT_R8G8B8A8_UNORM) ==
          HK_G17P_BLOCK_FORMAT_NONE);
 
+   const struct hk_g17p_buffer_to_image_copy volume = {
+      .chip = AGX_CHIP_G17P,
+      .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+      .layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .image_type = VK_IMAGE_TYPE_3D,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .plane_count = 1,
+      .mip_levels = 4,
+      .array_layers = 1,
+      .image_extent = {16, 12, 8},
+      .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+      .mip_level = 1,
+      .layer_count = 1,
+      .image_offset = {4, 0, 1},
+      .copy_extent = {4, 6, 2},
+      .buffer_row_length = 12,
+      .buffer_image_height = 8,
+   };
+   struct hk_g17p_compressed_copy_plan plan;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &volume, 64, 144, &plan));
+   CHECK(plan.block_width == 4 && plan.block_height == 4 &&
+         plan.block_size_B == 8);
+   CHECK(plan.base_x_el == 1 && plan.base_y_el == 0 &&
+         plan.blocks_x == 1 && plan.blocks_y == 2);
+   CHECK(plan.first_slice == 1 && plan.slice_count == 2);
+   CHECK(plan.src_row_stride_B == 24 && plan.src_slice_stride_B == 48 &&
+         plan.source_span_B == 80);
+
+   struct hk_g17p_buffer_to_image_copy etc2 = volume;
+   etc2.format = VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &etc2, 64, 144, &plan));
+   CHECK(plan.block_size_B == 8 && plan.src_row_stride_B == 24 &&
+         plan.src_slice_stride_B == 48 && plan.source_span_B == 80);
+
+   struct hk_g17p_buffer_to_image_copy block16 = volume;
+   block16.format = VK_FORMAT_BC3_UNORM_BLOCK;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &block16, 64, 224, &plan));
+   CHECK(plan.block_size_B == 16 && plan.src_row_stride_B == 48 &&
+         plan.src_slice_stride_B == 96 && plan.source_span_B == 160);
+   block16.format = VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &block16, 64, 224, &plan));
+   CHECK(plan.block_size_B == 16 && plan.source_span_B == 160);
+
+   struct hk_g17p_buffer_to_image_copy astc = volume;
+   astc.format = VK_FORMAT_ASTC_5x4_UNORM_BLOCK;
+   astc.mip_levels = 1;
+   astc.mip_level = 0;
+   astc.image_extent = (VkExtent3D){13, 9, 4};
+   astc.image_offset = (VkOffset3D){5, 4, 1};
+   astc.copy_extent = (VkExtent3D){8, 5, 2};
+   astc.buffer_row_length = 15;
+   astc.buffer_image_height = 12;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &astc, 32, 256, &plan));
+   CHECK(plan.block_width == 5 && plan.block_height == 4 &&
+         plan.block_size_B == 16);
+   CHECK(plan.base_x_el == 1 && plan.base_y_el == 1 &&
+         plan.blocks_x == 2 && plan.blocks_y == 2);
+   CHECK(plan.first_slice == 1 && plan.slice_count == 2 &&
+         plan.src_row_stride_B == 48 && plan.src_slice_stride_B == 144 &&
+         plan.source_span_B == 224);
+
+   struct hk_g17p_buffer_to_image_copy line = volume;
+   line.image_type = VK_IMAGE_TYPE_1D;
+   line.mip_levels = 1;
+   line.mip_level = 0;
+   line.array_layers = 3;
+   line.image_extent = (VkExtent3D){7, 1, 1};
+   line.base_array_layer = 1;
+   line.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   line.image_offset = (VkOffset3D){4, 0, 0};
+   line.copy_extent = (VkExtent3D){3, 1, 1};
+   line.buffer_row_length = 8;
+   line.buffer_image_height = 0;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &line, 8, 32, &plan));
+   CHECK(plan.base_x_el == 1 && plan.blocks_x == 1 && plan.blocks_y == 1);
+   CHECK(plan.first_slice == 1 && plan.slice_count == 2 &&
+         plan.src_row_stride_B == 16 && plan.src_slice_stride_B == 16 &&
+         plan.source_span_B == 24);
+
+   struct hk_g17p_buffer_to_image_copy array = block16;
+   array.image_type = VK_IMAGE_TYPE_2D;
+   array.mip_levels = 1;
+   array.mip_level = 0;
+   array.array_layers = 4;
+   array.image_extent = (VkExtent3D){8, 8, 1};
+   array.base_array_layer = 1;
+   array.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   array.image_offset = (VkOffset3D){0, 0, 0};
+   array.copy_extent = (VkExtent3D){8, 8, 1};
+   array.buffer_row_length = 0;
+   array.buffer_image_height = 0;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &array, 16, 208, &plan));
+   CHECK(plan.first_slice == 1 && plan.slice_count == 3 &&
+         plan.src_row_stride_B == 32 && plan.src_slice_stride_B == 64 &&
+         plan.source_span_B == 192);
+
+   struct hk_g17p_buffer_to_image_copy malformed = volume;
+   malformed.chip = AGX_CHIP_G17G;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   CHECK(plan.source_span_B == 0);
+   malformed = volume;
+   malformed.format = VK_FORMAT_R8G8B8A8_UNORM;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.samples = VK_SAMPLE_COUNT_2_BIT;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.image_offset.z = 3;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.image_offset.x = 2;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.copy_extent.width = 3;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.buffer_row_length = 10;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = volume;
+   malformed.buffer_image_height = 7;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = array;
+   malformed.image_offset.z = 1;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 16, 208, &plan));
+   malformed = line;
+   malformed.copy_extent.height = 2;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 8, 32, &plan));
+   malformed = astc;
+   malformed.buffer_row_length = 14;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 32, 256, &plan));
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &volume, 65, 145, &plan));
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &volume, 64, 143, &plan));
+
+   struct hk_g17p_buffer_to_image_copy huge = volume;
+   huge.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+   huge.mip_levels = 1;
+   huge.mip_level = 0;
+   huge.image_extent =
+      (VkExtent3D){UINT32_C(1073741820), UINT32_C(4294967292), 9};
+   huge.image_offset = (VkOffset3D){0, 0, 0};
+   huge.copy_extent = huge.image_extent;
+   huge.buffer_row_length = UINT32_C(1073741820);
+   huge.buffer_image_height = UINT32_C(4294967292);
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &huge, 0, UINT64_MAX, &plan));
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      NULL, 0, 0, &plan));
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &volume, 0, 0, NULL));
+
    const struct hk_g17p_buffer_to_image_copy vkcube = {
       .chip = AGX_CHIP_G17P,
       .format = VK_FORMAT_R8G8B8A8_UNORM,

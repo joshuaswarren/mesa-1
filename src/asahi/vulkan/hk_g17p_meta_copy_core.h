@@ -32,6 +32,21 @@ struct hk_g17p_buffer_to_image_copy {
    uint32_t buffer_image_height;
 };
 
+struct hk_g17p_compressed_copy_plan {
+   uint32_t block_width;
+   uint32_t block_height;
+   uint32_t block_size_B;
+   uint32_t base_x_el;
+   uint32_t base_y_el;
+   uint32_t blocks_x;
+   uint32_t blocks_y;
+   uint32_t first_slice;
+   uint32_t slice_count;
+   uint64_t src_row_stride_B;
+   uint64_t src_slice_stride_B;
+   uint64_t source_span_B;
+};
+
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
  * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so
@@ -65,6 +80,16 @@ hk_g17p_block_format_family(VkFormat format);
  * multi-planar YCbCr uploads use the same per-plane R8/RG8 render path. */
 bool hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy);
+
+/* Resolve one block-compressed buffer upload into source strides and AIL
+ * layer/slice coordinates. This is shared by BC, ETC2/EAC and ASTC LDR: only
+ * their Vulkan block geometry differs. The returned byte span reaches the
+ * final source byte read and therefore covers padding gaps between rows and
+ * slices. */
+bool hk_g17p_compressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_compressed_copy_plan *plan);
 
 /* HAL200's qualified tile programs are single-layer.  Convert one layer of a
  * valid 2D-array image copy without changing its rectangle or mip levels.

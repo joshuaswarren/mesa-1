@@ -4,7 +4,11 @@
  */
 
 #include "hk_g17p_meta_copy_core.h"
+#include "util/compiler.h"
 #include "vk_format.h"
+
+#include <limits.h>
+#include <string.h>
 
 bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
@@ -36,6 +40,168 @@ hk_g17p_block_format_family(VkFormat format)
       return HK_G17P_BLOCK_FORMAT_ASTC_LDR;
 
    return HK_G17P_BLOCK_FORMAT_NONE;
+}
+
+static bool
+hk_u64_mul(uint64_t a, uint64_t b, uint64_t *out)
+{
+   if (a && b > UINT64_MAX / a)
+      return false;
+
+   *out = a * b;
+   return true;
+}
+
+static bool
+hk_u64_add(uint64_t a, uint64_t b, uint64_t *out)
+{
+   if (b > UINT64_MAX - a)
+      return false;
+
+   *out = a + b;
+   return true;
+}
+
+static uint32_t
+hk_minify(uint32_t value, uint32_t level)
+{
+   const uint32_t minified = value >> level;
+   return minified ? minified : 1;
+}
+
+bool
+hk_g17p_compressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_compressed_copy_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   if (!copy || !plan || copy->chip != AGX_CHIP_G17P ||
+       hk_g17p_block_format_family(copy->format) ==
+          HK_G17P_BLOCK_FORMAT_NONE ||
+       !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
+       copy->samples != VK_SAMPLE_COUNT_1_BIT || copy->plane_count != 1 ||
+       copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+       copy->mip_levels == 0 || copy->mip_level >= copy->mip_levels ||
+       copy->mip_level >= 32 || copy->array_layers == 0 ||
+       copy->image_extent.width == 0 || copy->image_extent.height == 0 ||
+       copy->image_extent.depth == 0 || copy->copy_extent.width == 0 ||
+       copy->copy_extent.height == 0 || copy->copy_extent.depth == 0 ||
+       copy->image_offset.x < 0 || copy->image_offset.y < 0 ||
+       copy->image_offset.z < 0)
+      return false;
+
+   const uint32_t block_w = vk_format_get_blockwidth(copy->format);
+   const uint32_t block_h = vk_format_get_blockheight(copy->format);
+   const uint32_t block_B = vk_format_get_blocksize(copy->format);
+   if (!block_w || !block_h || (block_B != 8 && block_B != 16))
+      return false;
+
+   const uint32_t mip_w =
+      hk_minify(copy->image_extent.width, copy->mip_level);
+   const uint32_t mip_h =
+      hk_minify(copy->image_extent.height, copy->mip_level);
+   const uint32_t mip_d =
+      hk_minify(copy->image_extent.depth, copy->mip_level);
+   const uint32_t x = copy->image_offset.x;
+   const uint32_t y = copy->image_offset.y;
+   const uint32_t z = copy->image_offset.z;
+   const uint32_t width = copy->copy_extent.width;
+   const uint32_t height = copy->copy_extent.height;
+
+   uint32_t first_slice, slice_count;
+   switch (copy->image_type) {
+   case VK_IMAGE_TYPE_1D:
+      if (copy->image_extent.height != 1 || copy->image_extent.depth != 1 ||
+          y != 0 || z != 0 || height != 1 || copy->copy_extent.depth != 1)
+         return false;
+      FALLTHROUGH;
+   case VK_IMAGE_TYPE_2D:
+      if (copy->image_extent.depth != 1 || z != 0 ||
+          copy->copy_extent.depth != 1 ||
+          copy->base_array_layer >= copy->array_layers ||
+          copy->layer_count == 0)
+         return false;
+
+      first_slice = copy->base_array_layer;
+      slice_count = copy->layer_count == VK_REMAINING_ARRAY_LAYERS
+                       ? copy->array_layers - copy->base_array_layer
+                       : copy->layer_count;
+      if (slice_count > copy->array_layers - copy->base_array_layer)
+         return false;
+      break;
+
+   case VK_IMAGE_TYPE_3D:
+      if (copy->array_layers != 1 || copy->base_array_layer != 0 ||
+          copy->layer_count != 1 || z >= mip_d ||
+          copy->copy_extent.depth > mip_d - z)
+         return false;
+
+      first_slice = z;
+      slice_count = copy->copy_extent.depth;
+      break;
+
+   default:
+      return false;
+   }
+
+   if (x >= mip_w || y >= mip_h || width > mip_w - x ||
+       height > mip_h - y || (x % block_w) || (y % block_h) ||
+       ((width % block_w) && x + width != mip_w) ||
+       ((height % block_h) && y + height != mip_h) ||
+       (copy->buffer_row_length &&
+        (copy->buffer_row_length < width ||
+         copy->buffer_row_length % block_w)) ||
+       (copy->buffer_image_height &&
+        (copy->buffer_image_height < height ||
+         copy->buffer_image_height % block_h)) ||
+       buffer_offset % block_B)
+      return false;
+
+   const uint32_t row_px =
+      copy->buffer_row_length ? copy->buffer_row_length : width;
+   const uint32_t image_h_px =
+      copy->buffer_image_height ? copy->buffer_image_height : height;
+   const uint32_t blocks_x =
+      ((uint64_t)width + block_w - 1) / block_w;
+   const uint32_t blocks_y =
+      ((uint64_t)height + block_h - 1) / block_h;
+   const uint64_t src_row_blocks =
+      ((uint64_t)row_px + block_w - 1) / block_w;
+   const uint64_t src_image_rows =
+      ((uint64_t)image_h_px + block_h - 1) / block_h;
+   uint64_t src_row_B, src_slice_B;
+   if (!hk_u64_mul(src_row_blocks, block_B, &src_row_B) ||
+       src_row_B > INT32_MAX ||
+       !hk_u64_mul(src_image_rows, src_row_B, &src_slice_B))
+      return false;
+
+   uint64_t span = 0, term;
+   if (!hk_u64_mul(slice_count - 1, src_slice_B, &span) ||
+       !hk_u64_mul(blocks_y - 1, src_row_B, &term) ||
+       !hk_u64_add(span, term, &span) ||
+       !hk_u64_mul(blocks_x, block_B, &term) ||
+       !hk_u64_add(span, term, &span) || buffer_offset > buffer_size ||
+       span > buffer_size - buffer_offset)
+      return false;
+
+   *plan = (struct hk_g17p_compressed_copy_plan){
+      .block_width = block_w,
+      .block_height = block_h,
+      .block_size_B = block_B,
+      .base_x_el = x / block_w,
+      .base_y_el = y / block_h,
+      .blocks_x = blocks_x,
+      .blocks_y = blocks_y,
+      .first_slice = first_slice,
+      .slice_count = slice_count,
+      .src_row_stride_B = src_row_B,
+      .src_slice_stride_B = src_slice_B,
+      .source_span_B = span,
+   };
+   return true;
 }
 
 bool

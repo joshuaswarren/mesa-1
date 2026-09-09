@@ -15,7 +15,11 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef G17P_COMPRESSED_3D
+#include "g17p_vulkan_bc1_decode_3d_spv.h"
+#else
 #include "g17p_vulkan_bc1_decode_spv.h"
+#endif
 
 #define WIDTH 8
 #define HEIGHT 8
@@ -96,9 +100,32 @@
 #define BLOCK_BYTES 8
 #define BLOCK_DATA_BYTES 32
 #define TEST_FORMAT VK_FORMAT_BC1_RGBA_UNORM_BLOCK
+#ifdef G17P_COMPRESSED_3D
+#define NAME "g17p-vulkan-bc1-3d-decode"
+#else
 #define NAME "g17p-vulkan-bc1-decode"
 #endif
+#endif
+#ifdef G17P_COMPRESSED_3D
+#undef BLOCK_DATA_BYTES
+#define BLOCK_DATA_BYTES 112
+#define COPY_DEPTH 2
+#define IMAGE_DEPTH 4
+#define BUFFER_ROW_LENGTH 12
+#define BUFFER_IMAGE_HEIGHT 12
+#define SOURCE_ROW_BYTES 24
+#define SOURCE_SLICE_BYTES 72
+#else
+#define COPY_DEPTH 1
+#define IMAGE_DEPTH 1
+#define BUFFER_ROW_LENGTH 0
+#define BUFFER_IMAGE_HEIGHT 0
+#endif
 #define PIXEL_BYTES (WIDTH * HEIGHT * 4)
+#if COPY_DEPTH > 1
+#undef PIXEL_BYTES
+#define PIXEL_BYTES (WIDTH * HEIGHT * COPY_DEPTH * 4)
+#endif
 #define GUARD_BYTES 64
 #define DEVICE_ID 0x8140
 
@@ -114,6 +141,7 @@ FN(vkGetPhysicalDeviceProperties);
 FN(vkGetPhysicalDeviceMemoryProperties);
 FN(vkGetPhysicalDeviceQueueFamilyProperties);
 FN(vkGetPhysicalDeviceFormatProperties);
+FN(vkGetPhysicalDeviceImageFormatProperties);
 FN(vkCreateDevice);
 FN(vkGetDeviceQueue);
 FN(vkCreateBuffer);
@@ -291,11 +319,24 @@ put_bc1_payload(uint8_t *out, uint16_t c0, uint16_t c1, uint32_t indices)
 }
 #endif
 
+static size_t
+block_offset(unsigned block)
+{
+#ifdef G17P_COMPRESSED_3D
+   const unsigned z = block / 4;
+   const unsigned in_slice = block % 4;
+   return z * SOURCE_SLICE_BYTES + (in_slice / 2) * SOURCE_ROW_BYTES +
+          (in_slice % 2) * BLOCK_BYTES;
+#else
+   return block * BLOCK_BYTES;
+#endif
+}
+
 static void
 put_block(uint8_t *data, unsigned block, uint16_t c0, uint16_t c1,
           uint32_t indices)
 {
-   uint8_t *out = data + block * BLOCK_BYTES;
+   uint8_t *out = data + block_offset(block);
 #if defined(G17P_BC4_SNORM_DECODE) || defined(G17P_BC5_SNORM_DECODE)
    static const int8_t rg[4][2] = {
       {-127, 127}, {127, -127}, {-128, 0}, {0, 127},
@@ -496,9 +537,9 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
       }
    }
 #else
-   uint8_t decoded[4][16][4];
-   for (unsigned block = 0; block < 4; ++block) {
-      const uint8_t *encoded = blocks + block * BLOCK_BYTES;
+   uint8_t decoded[4 * COPY_DEPTH][16][4];
+   for (unsigned block = 0; block < 4 * COPY_DEPTH; ++block) {
+      const uint8_t *encoded = blocks + block_offset(block);
 #if defined(G17P_BC2_DECODE)
       decode_bc1(encoded + 8, decoded[block]);
       for (unsigned texel = 0; texel < 16; ++texel)
@@ -512,11 +553,14 @@ build_reference(const uint8_t *blocks, uint8_t *reference)
 #endif
    }
 
-   for (unsigned y = 0; y < HEIGHT; ++y) {
-      for (unsigned x = 0; x < WIDTH; ++x) {
-         const unsigned block = (y / 4) * 2 + x / 4;
-         const unsigned texel = (y % 4) * 4 + x % 4;
-         memcpy(reference + (y * WIDTH + x) * 4, decoded[block][texel], 4);
+   for (unsigned z = 0; z < COPY_DEPTH; ++z) {
+      for (unsigned y = 0; y < HEIGHT; ++y) {
+         for (unsigned x = 0; x < WIDTH; ++x) {
+            const unsigned block = z * 4 + (y / 4) * 2 + x / 4;
+            const unsigned texel = (y % 4) * 4 + x % 4;
+            const unsigned pixel = z * WIDTH * HEIGHT + y * WIDTH + x;
+            memcpy(reference + pixel * 4, decoded[block][texel], 4);
+         }
       }
    }
 #endif
@@ -749,7 +793,7 @@ build_blocks_and_reference(uint8_t *blocks, uint8_t *reference,
 
 static void
 verify(const uint8_t *upload, const uint8_t *output,
-       const uint8_t *reference, const char *when)
+       const uint8_t *reference, uint64_t upload_hash, const char *when)
 {
    for (size_t i = 0; i < GUARD_BYTES; ++i) {
       if (upload[i] != 0xa5 ||
@@ -758,6 +802,9 @@ verify(const uint8_t *upload, const uint8_t *output,
       if (output[i] != 0xa5 || output[GUARD_BYTES + PIXEL_BYTES + i] != 0xa5)
          die("output guard changed");
    }
+
+   if (fnv1a64(upload + GUARD_BYTES, BLOCK_DATA_BYTES) != upload_hash)
+      die("upload payload or internal padding changed");
 
    const uint8_t *actual = output + GUARD_BYTES;
    if (memcmp(actual, reference, PIXEL_BYTES) != 0) {
@@ -788,6 +835,28 @@ main(void)
    const bool record_only =
       getenv("G17P_COMPRESSED_DECODE_RECORD_ONLY") != NULL ||
       getenv("G17P_BC1_DECODE_RECORD_ONLY") != NULL;
+   const bool submit_only =
+      getenv("G17P_COMPRESSED_DECODE_SUBMIT_ONLY") != NULL;
+   const bool expect_submit_failure =
+      getenv("G17P_COMPRESSED_DECODE_EXPECT_SUBMIT_FAILURE") != NULL;
+   if (record_only && submit_only)
+      die("record-only and submit-only modes are mutually exclusive");
+   if (expect_submit_failure &&
+       (!submit_only ||
+        getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") == NULL))
+      die("negative submit mode requires submit-only plus an injected shim "
+          "submission failure");
+   if (submit_only) {
+      const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
+      if (!validate || !strcmp(validate, "0"))
+         die("submit-only mode requires the G17P DRM-shim stream validator");
+      if (!expect_submit_failure) {
+         if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE", "1", 1))
+            die("failed to enable exact G17P compute-stream validation");
+         if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "9,9,0,0", 1))
+            die("failed to select exact compressed 3D stream counts");
+      }
+   }
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -816,6 +885,7 @@ main(void)
    I(vkGetPhysicalDeviceMemoryProperties);
    I(vkGetPhysicalDeviceQueueFamilyProperties);
    I(vkGetPhysicalDeviceFormatProperties);
+   I(vkGetPhysicalDeviceImageFormatProperties);
    I(vkCreateDevice);
 #undef I
 
@@ -906,6 +976,19 @@ main(void)
    vkGetPhysicalDeviceFormatProperties(physical, test_format, &target_props);
    if ((target_props.optimalTilingFeatures & required) != required)
       die("target compressed format lacks sampled/upload support");
+#ifdef G17P_COMPRESSED_3D
+   VkImageFormatProperties image_props;
+   check(vkGetPhysicalDeviceImageFormatProperties(
+            physical, test_format, VK_IMAGE_TYPE_3D,
+            VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0,
+            &image_props),
+         "vkGetPhysicalDeviceImageFormatProperties(3D compressed)");
+   if (image_props.maxExtent.width < WIDTH ||
+       image_props.maxExtent.height < HEIGHT ||
+       image_props.maxExtent.depth < IMAGE_DEPTH)
+      die("3D compressed image extent was advertised too small");
+#endif
 
    uint32_t qcount = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &qcount, NULL);
@@ -1043,16 +1126,27 @@ main(void)
     * only black, white and transparent black. */
    put_block(blocks, 3, 0x0000, 0xffff, UINT32_C(0x74747474));
 #endif
+#ifdef G17P_COMPRESSED_3D
+   put_block(blocks, 4, 0x07ff, 0x0000, 0);
+   put_block(blocks, 5, 0xf81f, 0x0000, 0);
+   put_block(blocks, 6, 0xffe0, 0x0000, 0);
+   put_block(blocks, 7, 0x0000, 0x0000, 0);
+#endif
 #endif
    uint8_t reference[PIXEL_BYTES];
    build_reference(blocks, reference);
 #endif
+   const uint64_t upload_hash = fnv1a64(blocks, BLOCK_DATA_BYTES);
 
    const VkImageCreateInfo imci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+#ifdef G17P_COMPRESSED_3D
+      .imageType = VK_IMAGE_TYPE_3D,
+#else
       .imageType = VK_IMAGE_TYPE_2D,
+#endif
       .format = test_format,
-      .extent = {WIDTH, HEIGHT, 1},
+      .extent = {WIDTH, HEIGHT, IMAGE_DEPTH},
       .mipLevels = 1,
       .arrayLayers = 1,
       .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -1079,7 +1173,11 @@ main(void)
    const VkImageViewCreateInfo ivci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
+#ifdef G17P_COMPRESSED_3D
+      .viewType = VK_IMAGE_VIEW_TYPE_3D,
+#else
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
+#endif
       .format = test_format,
       .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
    };
@@ -1124,8 +1222,13 @@ main(void)
 
    const VkShaderModuleCreateInfo smci = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+#ifdef G17P_COMPRESSED_3D
+      .codeSize = sizeof(g17p_vulkan_bc1_decode_3d_spv),
+      .pCode = g17p_vulkan_bc1_decode_3d_spv,
+#else
       .codeSize = sizeof(g17p_vulkan_bc1_decode_spv),
       .pCode = g17p_vulkan_bc1_decode_spv,
+#endif
    };
    VkShaderModule shader;
    check(vkCreateShaderModule(device, &smci, NULL, &shader),
@@ -1234,8 +1337,13 @@ main(void)
                         1, &image_barrier);
    const VkBufferImageCopy copy = {
       .bufferOffset = GUARD_BYTES,
+      .bufferRowLength = BUFFER_ROW_LENGTH,
+      .bufferImageHeight = BUFFER_IMAGE_HEIGHT,
       .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-      .imageExtent = {WIDTH, HEIGHT, 1},
+#ifdef G17P_COMPRESSED_3D
+      .imageOffset = {0, 0, 1},
+#endif
+      .imageExtent = {WIDTH, HEIGHT, COPY_DEPTH},
    };
    vkCmdCopyBufferToImage(command_buffer, buffers[0], image,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
@@ -1250,7 +1358,7 @@ main(void)
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
-   vkCmdDispatch(command_buffer, 1, 1, 1);
+   vkCmdDispatch(command_buffer, 1, 1, COPY_DEPTH);
 
    const VkBufferMemoryBarrier output_barrier = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -1281,20 +1389,36 @@ main(void)
       .commandBufferCount = 1,
       .pCommandBuffers = &command_buffer,
    };
-   check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
+   const VkResult submitted = vkQueueSubmit(queue, 1, &submit, fence);
+   if (expect_submit_failure) {
+      if (submitted == VK_SUCCESS)
+         die("injected compressed 3D submission failure was ignored");
+      printf("%s: PASS - compressed 3D submission failed closed (%d)\n",
+             test_name, submitted);
+      return EXIT_SUCCESS;
+   }
+   check(submitted, "vkQueueSubmit");
    VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
       die("fence timed out after three seconds");
    check(waited, "vkWaitForFences");
 
-   verify(maps[0], maps[1], reference, "immediate");
+   if (submit_only) {
+      printf("%s: PASS - compressed 3D upload/sample stream submitted to "
+             "the strict G17P DRM-shim validator\n",
+             test_name);
+      return EXIT_SUCCESS;
+   }
+
+   verify(maps[0], maps[1], reference, upload_hash, "immediate");
    const struct timespec stable = {.tv_sec = 3};
    if (nanosleep(&stable, NULL))
       die("stability sleep interrupted");
-   verify(maps[0], maps[1], reference, "after three seconds");
-   printf("%s: PASS - 64 decoded pixels exact immediately/3s, "
+   verify(maps[0], maps[1], reference, upload_hash, "after three seconds");
+   printf("%s: PASS - %u decoded pixels exact immediately/3s, "
           "256 guard bytes unchanged, checksum %016" PRIx64 "\n",
-          test_name, fnv1a64(maps[1] + GUARD_BYTES, PIXEL_BYTES));
+          test_name, WIDTH * HEIGHT * COPY_DEPTH,
+          fnv1a64(maps[1] + GUARD_BYTES, PIXEL_BYTES));
    return EXIT_SUCCESS;
 }

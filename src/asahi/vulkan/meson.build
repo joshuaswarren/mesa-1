@@ -971,6 +971,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Exact 3D compressed upload/sampling oracle: two BC1 slices are copied
+    # into a four-slice image at z=1 through padded source rows/slices.
+    g17p_vulkan_bc1_3d_decode = executable(
+      'g17p-vulkan-bc1-3d-decode',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_COMPRESSED_3D=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-bc1-srgb-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),
