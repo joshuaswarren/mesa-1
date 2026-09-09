@@ -1096,7 +1096,7 @@ get_image_copy_pipeline(struct vk_device *device, struct vk_meta_device *meta,
        * The existing NIR pack/unpack path retains a single aligned raw store.
        * Meta pipelines are cached per device, so no extra key is needed. */
       .nir = build_image_copy_shader(key,
-         container_of(device, struct hk_device, vk)->dev.chip != AGX_CHIP_G17P),
+         !agx_native_graphics(&container_of(device, struct hk_device, vk)->dev)),
    };
    const VkPipelineShaderStageCreateInfo cs_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
