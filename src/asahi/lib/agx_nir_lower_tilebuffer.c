@@ -480,8 +480,11 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
        * output at all (for example, a depth-only meta clear). The explicit
        * zero-mask path above cannot see such an attachment. Preserve it with
        * the same load/store pair, otherwise EOT publishes undefined color.
+       * G17P's partial-MRT shaders already acquire/release only the classes
+       * they write. Keep that native subset protocol unchanged.
        */
-      if (preserve_zero_mask && exists && !written && !tib->spilled[i]) {
+      if (preserve_zero_mask && ctx.outputs_written == 0 && exists &&
+          !tib->spilled[i]) {
          nir_function_impl *impl = nir_shader_get_entrypoint(shader);
          nir_builder b = nir_builder_at(nir_after_impl(impl));
          enum pipe_format logical = tib->logical_format[i];
