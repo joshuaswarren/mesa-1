@@ -1285,7 +1285,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        agx_channels(I->src[0]) != (cube_array ? 4 :
                                     (array || three_d || cube) ? 3 : 2) ||
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
-       (cube && !I->src[0].discard) ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
        (texture_immediate
            ? I->src[3].value > 15
@@ -1404,11 +1403,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          const bool packed = immediate
             ? agx3_tex_cube_cem_calc(
                  enc, I->src[0].value, I->src[0].value + 2,
-                 I->src[0].value + 4, axis, axis == 2, bytes, &len)
+                 I->src[0].value + 4, axis,
+                 axis == 2 && I->src[0].discard, bytes, &len)
             : agx3_tex_cube_cem_calc_to(
                  enc, I->src[0].value, I->src[0].value + 2,
-                 I->src[0].value + 4, scratch[axis], axis, axis == 2, bytes,
-                 &len);
+                 I->src[0].value + 4, scratch[axis], axis,
+                 axis == 2 && I->src[0].discard, bytes, &len);
          if (!packed ||
              !agx3_append(emission, bytes, len))
             return false;
@@ -1553,7 +1553,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        * sampler reads CEM's private coordinate bank rather than the original
        * AGX IR source. Ordinary dimensions retain their existing last-use
        * mapping. */
-      .coord_kill = cube ? I->src[0].discard
+      .coord_kill = cube ? true
                          : native_staged_coords
                               ? true
                               : I->src[0].kill,

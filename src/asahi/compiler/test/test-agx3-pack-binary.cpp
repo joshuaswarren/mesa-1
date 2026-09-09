@@ -8288,7 +8288,6 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
    dest.channels_m1 = 3;
    agx_index coord = agx_register(32, AGX_SIZE_32);
    coord.channels_m1 = 2;
-   coord.discard = true;
    agx_index texture = agx_register(4, AGX_SIZE_64);
    agx_index sampler = agx_register(24, AGX_SIZE_64);
    auto *I = agx_texture_sample_to(
@@ -8306,7 +8305,7 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    for (unsigned axis = 0; axis < 3; ++axis) {
       ASSERT_TRUE(agx3_tex_cube_cem_calc_to(
-         enc, 32, 34, 36, scratch[axis], axis, axis == 2, bytes, &len));
+         enc, 32, 34, 36, scratch[axis], axis, false, bytes, &len));
       append(want, bytes, len);
       if (axis == 0) {
          ASSERT_TRUE(agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes, &len));
@@ -8581,7 +8580,7 @@ TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, TextureCubeRefusesUnwitnessedModes)
+TEST_F(AGX3PackBinary, TextureCubeRefusesModesButAcceptsRetainedCoordinates)
 {
    for (unsigned shape = 0; shape < 3; ++shape) {
       const auto enc = shape == 1 ? AGX_ISA_ENCODING_AGX3C
@@ -8605,7 +8604,7 @@ TEST_F(AGX3PackBinary, TextureCubeRefusesUnwitnessedModes)
          false, AGX_GATHER_NONE, false);
       I->mask = 15;
       agx_stop(b);
-      pack(b, /*expect_ok=*/false);
+      pack(b, /*expect_ok=*/shape == 2);
    }
 }
 

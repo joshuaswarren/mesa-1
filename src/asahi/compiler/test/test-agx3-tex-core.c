@@ -1829,6 +1829,15 @@ test_cube_coordinate_stage(void)
       CHECK(len == sizeof(dynamic_finalize[component]) &&
             !memcmp(bytes, dynamic_finalize[component], len));
    }
+   /* In the application shape XYZ remains live after sampling. Apple's
+    * terminal CEM axis then carries neither cache nor discard hints. */
+   static const uint8_t retained_axis2[12] = {
+      0x17,0x01,0x54,0x09,0x03,0x0e,0x20,0x30,0x50,0x21,0x92,0x08,
+   };
+   CHECK(agx3_tex_cube_cem_calc_to(AGX_ISA_ENCODING_AGX3B, 14, 16, 12,
+                                    18, 2, false, bytes, &len));
+   CHECK(len == sizeof(retained_axis2) &&
+         !memcmp(bytes, retained_axis2, len));
    CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));

@@ -876,7 +876,7 @@ agx3_tex_cube_cem_calc_to(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || x >= 128 || y >= 128 || z >= 128 ||
-       (dest & 1) || dest > 190 || axis > 2 || discard != (axis == 2))
+       (dest & 1) || dest > 190 || axis > 2 || (discard && axis != 2))
       return false;
 
    const struct agx3_field_kv base[] = {
@@ -894,7 +894,7 @@ agx3_tex_cube_cem_calc_to(enum agx_isa_encoding enc, uint16_t x, uint16_t y,
       ov[n++] = (struct agx3_field_kv)KV(27, 1);
       ov[n++] = (struct agx3_field_kv)KV(44, 1);
       ov[n++] = (struct agx3_field_kv)KV(61, 1);
-   } else {
+   } else if (axis != 2) {
       ov[n++] = (struct agx3_field_kv)KV(25, 1);
       ov[n++] = (struct agx3_field_kv)KV(42, 1);
       ov[n++] = (struct agx3_field_kv)KV(59, 1);
