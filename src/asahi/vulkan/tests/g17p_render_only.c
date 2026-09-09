@@ -211,7 +211,13 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = "g17p-render-only",
       .applicationVersion = 1,
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+      /* Exercise the production profile that enables vertex pipeline stores
+       * for DXVK/vkd3d, rather than silently testing only fragment stores. */
+      .pEngineName = "DXVK",
+#else
       .pEngineName = "none",
+#endif
       .engineVersion = 1,
       .apiVersion = VK_API_VERSION_1_1,
    };
@@ -953,6 +959,8 @@ main(void)
    sleep(3);
    if (memcmp(side_map, &stable_side, sizeof(stable_side)) != 0)
       die("graphics side effects changed after three seconds");
+   puts("g17p-graphics-side-effects: vertex/fragment stores, atomics, guards "
+        "and three-second stability exact");
 #endif
 
 #ifdef G17P_OCCLUSION_QUERY
