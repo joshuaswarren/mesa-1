@@ -1453,6 +1453,48 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_f16_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      bool is_signed, enum agx3_alu_hint hint,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 128 ||
+       src >= 128 || (dest & 1) ||
+       (hint != AGX3_ALU_HINT_NONE && hint != AGX3_ALU_HINT_DISCARD) ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Fresh applegpu_g17p kernels establish the flt2int width/sign axes:
+    *
+    *   270756000200ac480300  f16 -> i32, dead, wait5
+    *   270756000200ac080200  f16 -> u32, dead, wait5
+    * Matching f32 controls change only f24 from 1 to 2, proving that this is
+    * the native half source selector rather than an unrelated instruction.
+    *
+    * Separate live-source, live-result, odd-half and texture-produced probes
+    * correlate f16 with the source, f2 with the even i32 destination, f11
+    * with destination cache, f27 with source discard and f33..f38 with the
+    * six producer waits. The fresh retained-source probes use the zero hint;
+    * no witness establishes a source-cache form, so that state is refused.
+    * Apple materializes abs and neg as separate half operations, so modifiers
+    * stay outside this helper.
+   */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {23, 2}, {24, 1}, {41, is_signed ? 5 : 4}, {42, 1},
+   };
+   struct agx3_field_kv fields[10] = {
+      {2, dest}, {11, dest_cache}, {16, src},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 4;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){33 + slot,
+                                           !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "flt2int", 0, base, 6, fields, n, out, len);
+}
+
+bool
 agx3_alu_bfeil(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
                uint16_t shift, bool shift_is_register, uint8_t width,
                const enum agx3_alu_hint hints[2], uint16_t wait_mask,

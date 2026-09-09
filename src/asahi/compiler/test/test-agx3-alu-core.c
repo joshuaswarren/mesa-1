@@ -1435,6 +1435,94 @@ static void test_i32_to_f16(void)
 }
 
 static void
+test_f16_to_int32(void)
+{
+   static const struct {
+      bool sign, cache;
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      uint8_t bytes[10];
+   } native[] = {
+      {true, false, 0, 0, 32, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x07, 0x56, 0x00, 0x02, 0x00, 0xac, 0x48, 0x03, 0x00}},
+      {false, false, 0, 0, 32, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x07, 0x56, 0x00, 0x02, 0x00, 0xac, 0x08, 0x02, 0x00}},
+      {true, false, 0, 0, 0, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x07, 0x54, 0x00, 0x02, 0x00, 0xac, 0x48, 0x03, 0x00}},
+      {true, false, 2, 4, 32, AGX3_ALU_HINT_NONE,
+       {0x27, 0x07, 0x56, 0x02, 0x02, 0x08, 0x8c, 0x48, 0x03, 0x00}},
+      {true, true, 0, 0, 32, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x07, 0x56, 0x00, 0x03, 0x00, 0xac, 0x48, 0x03, 0x00}},
+      {true, true, 0, 6, 32, AGX3_ALU_HINT_NONE,
+       {0x27, 0x07, 0x56, 0x00, 0x03, 0x0c, 0x8c, 0x48, 0x03, 0x00}},
+      {true, false, 4, 1, 32, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x07, 0x56, 0x04, 0x02, 0x02, 0xac, 0x48, 0x03, 0x00}},
+      {true, false, 0, 0, 1, AGX3_ALU_HINT_DISCARD,
+       {0x27, 0x17, 0x54, 0x00, 0x02, 0x00, 0xac, 0x48, 0x03, 0x00}},
+   };
+
+   uint8_t out[AGX3_ALU_MAX_LENGTH];
+   uint8_t len = 0;
+   for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
+      assert(agx3_alu_f16_to_int32(
+         AGX_ISA_ENCODING_AGX3B, native[i].dest, native[i].src,
+         native[i].sign, native[i].hint, native[i].cache,
+         native[i].wait, out, &len));
+      assert(len == sizeof(native[i].bytes));
+      assert(!memcmp(out, native[i].bytes, len));
+   }
+
+   /* Exercise the complete admitted Cartesian product, including the upper
+    * register boundary and every producer wait combination. */
+   for (unsigned sign = 0; sign < 2; ++sign)
+      for (unsigned hint = AGX3_ALU_HINT_NONE;
+           hint <= AGX3_ALU_HINT_DISCARD; ++hint)
+         for (unsigned cache = 0; cache < 2; ++cache)
+            for (unsigned wait = 0; wait < 64; ++wait) {
+               assert(agx3_alu_f16_to_int32(
+                  AGX_ISA_ENCODING_AGX3B, 126, 127, sign, hint, cache,
+                  wait, out, &len));
+               assert(len == 10);
+            }
+
+   const uint8_t sentinel[AGX3_ALU_MAX_LENGTH] = {
+      0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+      0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+   };
+#define REJECT(...)                                                            \
+   do {                                                                        \
+      memcpy(out, sentinel, sizeof(out));                                      \
+      len = 0x5a;                                                              \
+      assert(!agx3_alu_f16_to_int32(__VA_ARGS__));                             \
+      assert(!memcmp(out, sentinel, sizeof(out)) && len == 0x5a);              \
+   } while (0)
+   REJECT(AGX_ISA_ENCODING_AGX3C, 0, 0, true,
+          AGX3_ALU_HINT_NONE, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 128, 0, true,
+          AGX3_ALU_HINT_NONE, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 0, 128, true,
+          AGX3_ALU_HINT_NONE, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 1, 0, true,
+          AGX3_ALU_HINT_NONE, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 0, 0, true,
+          AGX3_ALU_HINT_CACHE, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 0, 0, true,
+          (enum agx3_alu_hint)3, false, 0, out, &len);
+   REJECT(AGX_ISA_ENCODING_AGX3B, 0, 0, true,
+          AGX3_ALU_HINT_NONE, false, 64, out, &len);
+   assert(!agx3_alu_f16_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, AGX3_ALU_HINT_NONE,
+      false, 0, NULL, &len));
+   assert(!agx3_alu_f16_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, true, AGX3_ALU_HINT_NONE,
+      false, 0, out, NULL));
+#undef REJECT
+
+   puts("F16-to-int32: eight exact native vectors, 512 legal forms and "
+        "strict refusals PASS");
+}
+
+static void
 test_native_fma_minifloat(void)
 {
    {
@@ -3224,6 +3312,7 @@ int main(void){
    test_native_fma_minifloat();
    test_int_to_float_liveness();
    test_i32_to_f16();
+   test_f16_to_int32();
    test_float_compare_select();
    test_float_compare_zero();
    test_integer_lifetimes();

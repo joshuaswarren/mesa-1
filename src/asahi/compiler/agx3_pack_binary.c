@@ -8616,6 +8616,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* GTK's turbulence fragment keeps its octave arithmetic in scalar
+          * halves, then indexes the permutation table with a direct f16-to-
+         * i32 cast. flt2int has a native half-source selector; widening the
+         * value would change both register pressure and rounding. Preserve
+         * the signed/unsigned mode, post-RA lifetime/cache state and all six
+         * producer dependencies in the native conversion itself. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
+             I->nr_srcs == 2 &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             (I->src[0].value == AGX_CONVERT_F_TO_S32 ||
+              I->src[0].value == AGX_CONVERT_F_TO_U32) &&
+             I->src[1].size == AGX_SIZE_16) {
+            if (I->nr_dests != 1 || I->saturate ||
+                I->round != AGX_ROUND_RTZ ||
+                I->src[0].abs || I->src[0].neg || I->src[0].memory ||
+                I->src[0].kill || I->src[0].cache || I->src[0].discard ||
+                !agx3_vary_reg32(I->dest[0]) ||
+                agx_channels(I->dest[0]) != 1 ||
+                !agx3_src_is_register(I->src[1]) || I->src[1].memory ||
+                agx_channels(I->src[1]) != 1 || I->src[1].abs ||
+                I->src[1].neg || I->src[1].kill ||
+                (I->src[1].cache && I->src[1].discard))
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_f16_to_int32(
+                   enc, I->dest[0].value, I->src[1].value,
+                   I->src[0].value == AGX_CONVERT_F_TO_S32,
+                   agx3_post_ra_hint(I->src[1]), I->dest[0].cache, wait,
+                   bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Coordinates and loop counters use16-bit halves. Apple has a direct
           * signed/unsigned half int2flt form, distinct from the32-bit form.
           * Preserve liveness and async producer waits; do not reinterpret the

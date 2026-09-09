@@ -2667,6 +2667,92 @@ TEST_F(AGX3PackBinary, G17PI32ToHalfMatchesNative)
    pack(bad, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, GTKHalfToInt32UsesNativeWidthAndPostRAState)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+
+   /* Exact first refusal from GTK 4's current gskgputurbulence.frag after
+    * register allocation: `$r17 = convert #F_TO_S32, r17l, RTZ`. */
+   agx_builder *gtk = builder(enc);
+   agx_index dest = agx_register(34, AGX_SIZE_32);
+   dest.cache = true;
+   agx_convert_to(gtk, dest, agx_immediate(AGX_CONVERT_F_TO_S32),
+                  agx_register(34, AGX_SIZE_16), AGX_ROUND_RTZ);
+   agx_stop(gtk);
+   const uint8_t gtk_native[] = {
+      0x27, 0x07, 0x54, 0x22, 0x03, 0x44, 0x8c,
+      0x48, 0x03, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(gtk), std::vector<uint8_t>(std::begin(gtk_native),
+                                              std::end(gtk_native)));
+
+   /* A half selected from an async system-register result remains a half;
+    * its native conversion consumes that producer's slot in-place. */
+   agx_builder *dependent = builder(enc);
+   agx_get_sr_to(dependent, agx_register(0, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_X);
+   agx_index half = agx_register(0, AGX_SIZE_16);
+   half.discard = true;
+   agx_convert_to(dependent, agx_register(4, AGX_SIZE_32),
+                  agx_immediate(AGX_CONVERT_F_TO_U32), half,
+                  AGX_ROUND_RTZ);
+   agx_stop(dependent);
+
+   std::vector<uint8_t> want;
+   struct agx3_sr_desc sr = {};
+   sr.dest = 0;
+   sr.width = AGX3_SR_W32;
+   sr.sr = 23;
+   sr.slot = 1;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_f16_to_int32(enc, 4, 0, false,
+                                      AGX3_ALU_HINT_DISCARD, false, 1, bytes,
+                                      &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(dependent), want);
+}
+
+TEST_F(AGX3PackBinary, G17PHalfToInt32RejectsUngroundedShapes)
+{
+   for (unsigned mode = 0; mode < 22; ++mode) {
+      SCOPED_TRACE(mode);
+      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
+                                         : AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(mode == 17 ? 128 :
+                                    mode == 15 ? 1 : 4,
+                                    mode == 14 ? AGX_SIZE_16 : AGX_SIZE_32);
+      agx_index src = agx_register(mode == 18 ? 128 : 0,
+                                   mode == 11 ? AGX_SIZE_64 : AGX_SIZE_16);
+      if (mode == 9)
+         src = agx_uniform(0, AGX_SIZE_16);
+      else if (mode == 10)
+         src = agx_immediate(0);
+      src.abs = mode == 3;
+      src.neg = mode == 4;
+      src.kill = mode == 5;
+      src.cache = mode == 6 || mode == 7;
+      src.discard = mode == 7;
+      src.memory = mode == 8;
+      src.channels_m1 = mode == 12;
+      dest.channels_m1 = mode == 13;
+      dest.abs = mode == 16;
+      dest.memory = mode == 19;
+      agx_instr *I = agx_convert_to(
+         b, dest, agx_immediate(AGX_CONVERT_F_TO_S32), src,
+         mode == 1 ? AGX_ROUND_RTE : AGX_ROUND_RTZ);
+      I->saturate = mode == 2;
+      I->src[0].neg = mode == 20;
+      I->src[0].cache = mode == 21;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PHalfTimesMinifloatWidensToF32)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
