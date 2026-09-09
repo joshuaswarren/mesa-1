@@ -310,6 +310,33 @@ build_vs_g17p_div3_mul_high(void)
    return b.shader;
 }
 
+/* glmark2's ideas vertex shader computes its point size with a constant-first
+ * comparison: 100.0 < size ? scaled_size : 0.0. Keep the minifloat compare
+ * order and mixed register/immediate selection in an end-to-end shader. */
+static nir_shader *
+build_vs_glmark2_ideas(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "AGX3 glmark2 ideas VS");
+
+   nir_def *size = nir_u2f32(&b, nir_load_vertex_id(&b));
+   nir_def *scaled = nir_fmul_imm(&b, nir_fadd_imm(&b, size, -10.0f), 0.5f);
+   nir_def *point_size = nir_bcsel(
+      &b, nir_flt(&b, nir_imm_float(&b, 100.0f), size), scaled,
+      nir_imm_float(&b, 0.0f));
+   nir_def *outputs[] = {
+      size, nir_imm_float(&b, 0.0f), nir_imm_float(&b, 0.0f),
+      nir_imm_float(&b, 1.0f), point_size,
+   };
+
+   for (unsigned c = 0; c < ARRAY_SIZE(outputs); ++c)
+      nir_store_uvs_agx(&b, outputs[c], nir_imm_intN_t(&b, c, 16));
+
+   b.shader->info.outputs_written = VARYING_BIT_POS | VARYING_BIT_PSIZ;
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 /* Instance ID uses its own G17P special register. Keep a complete shader case
  * so the end-to-end compiler, not only the standalone rld encoder, proves the
  * hardware-vertex lowering. */
@@ -3946,6 +3973,29 @@ build_fs_glmark2_bump(void)
    return fs_finish(&b);
 }
 
+/* ideas' logo fragment converts a mediump equality test into a half 1/0
+ * value. This exercises the explicit half-to-f32 comparator normalization
+ * feeding G17P's byte-constant boolean FSEL. */
+static nir_shader *
+build_fs_glmark2_ideas(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 ideas FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *v = nir_f2f16(&b, v32);
+   nir_def *mask = nir_bcsel(
+      &b, nir_feq(&b, v, nir_imm_floatN_t(&b, 0.0, 16)),
+      nir_imm_floatN_t(&b, 1.0, 16), nir_imm_floatN_t(&b, 0.0, 16));
+   fs_store_colour(&b, nir_vec4(&b, v, mask, mask, mask));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -4251,6 +4301,8 @@ static const struct agx3_graphics_case cases[] = {
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
    {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
     .expected_leading_sr = 0xdd, .g17p_only = true},
+   {"vs-glmark2-ideas", build_vs_glmark2_ideas, true,
+    .g17p_only = true},
    {"vs-instance-id", build_vs_instance_id, true,
     .expected_leading_sr = 0xd8},
    {"vs-attribute-fetch", build_vs_attribute, true,
@@ -4311,6 +4363,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-glmark2-desktop", build_fs_glmark2_desktop, true,
     .g17p_only = true},
    {"fs-glmark2-bump", build_fs_glmark2_bump, true,
+    .g17p_only = true},
+   {"fs-glmark2-ideas", build_fs_glmark2_ideas, true,
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
