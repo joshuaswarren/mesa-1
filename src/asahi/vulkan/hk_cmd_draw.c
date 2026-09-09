@@ -334,12 +334,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       return (struct hk_bg_eot){0};
    }
 
-   const bool wboit_mrt =
-      key->tib.logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
-      key->tib.logical_format[1] == PIPE_FORMAT_R8_UNORM;
-   const bool rgba8_mrt =
-      key->tib.logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-      key->tib.logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM;
+   const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
+   const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
+   const bool rgba8_mrt = mrt == AGX_G17P_MRT_RGBA8;
    const bool dual_mrt = wboit_mrt || rgba8_mrt;
    if (rgba8_mrt && !hk_g17p_unverified_feature("mrt")) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

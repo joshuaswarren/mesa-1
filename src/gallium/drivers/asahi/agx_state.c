@@ -4041,23 +4041,23 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
 
    if (dev->chip == AGX_CHIP_G17P) {
       /* The exact HAL200 background/EOT programs cover ordinary RT0 and the
-       * hardware-witnessed pair of single-sample RGBA8 attachments. */
+       * two hardware-witnessed dual-target layouts shared with Honeykrisp. */
       if (!agx_gallium_g17p_tile_layout_supported(
              &batch->tilebuffer_layout))
          agx_native_descriptor_rejected(dev, "background tile layout");
 
+      const enum agx_g17p_mrt_layout mrt =
+         agx_g17p_classify_mrt(&key.tib);
+      const bool wboit_mrt =
+         !key.tib.layered && mrt == AGX_G17P_MRT_WBOIT;
       const bool rgba8_mrt =
-         key.tib.nr_samples == 1 && !key.tib.layered &&
-         key.tib.logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-         key.tib.logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-         !key.tib.spilled[0] && !key.tib.spilled[1] &&
-         agx_tilebuffer_offset_B(&key.tib, 0) == 0 &&
-         agx_tilebuffer_offset_B(&key.tib, 1) == 4;
+         !key.tib.layered && mrt == AGX_G17P_MRT_RGBA8;
+      const bool dual_mrt = wboit_mrt || rgba8_mrt;
 
       for (unsigned rt = 1; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
          const enum agx_bg_eot_op rt_op = key.op[rt];
          const bool rt1_supported =
-            rt == 1 && rgba8_mrt &&
+            rt == 1 && dual_mrt &&
             (store ? rt_op == AGX_EOT_STORE
                    : (rt_op == AGX_BG_CLEAR || rt_op == AGX_BG_LOAD));
          if (rt_op != AGX_BG_EOT_NONE && !rt1_supported)
@@ -4065,7 +4065,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       }
 
       const enum agx_bg_eot_op op = key.op[0];
-      const bool dual_mrt_active = rgba8_mrt &&
+      const bool dual_mrt_active = dual_mrt &&
                                    key.op[1] != AGX_BG_EOT_NONE;
       if (dual_mrt_active && key.op[1] != op)
          agx_native_descriptor_rejected(dev, "mixed background MRT operation");
@@ -4076,8 +4076,11 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
 
       if (!store && op == AGX_BG_CLEAR)
          key.reserved_preamble =
-            dual_mrt_active ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
-                            : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+            rgba8_mrt && dual_mrt_active
+               ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+            : wboit_mrt && dual_mrt_active
+               ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
+               : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
       struct agx_bg_eot_shader *shader =
          agx_get_bg_eot_shader(&ctx->bg_eot, &key);
@@ -4108,8 +4111,10 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       else if (store)
          capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
       else if (op == AGX_BG_CLEAR)
-         capacity = dual_mrt_active
+         capacity = rgba8_mrt && dual_mrt_active
                        ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+                    : wboit_mrt && dual_mrt_active
+                       ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
                        : AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE;
       else
          capacity = AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
@@ -4140,8 +4145,11 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             agx_native_descriptor_rejected(dev, "end-of-tile attachment");
 
          const size_t pbe_size =
-            dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
-                            : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
+            rgba8_mrt && dual_mrt_active
+               ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
+            : wboit_mrt && dual_mrt_active
+               ? AGX_IOTO_G17P_WBOIT_MRT_PBE_ARGUMENT_SIZE
+               : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
          struct agx_ptr pbe =
             agx_pool_alloc_aligned(&batch->pool, pbe_size, 32);
          for (unsigned rt = 0; rt < (dual_mrt_active ? 2 : 1); ++rt) {
@@ -4235,8 +4243,10 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
                union pipe_color_union clear_values[2] = {
                   batch->clear_color[0], batch->clear_color[1],
                };
+               const size_t clear_size =
+                  wboit_mrt ? 20 : sizeof(clear_values);
                desc.clear_value_va = agx_pool_upload_aligned(
-                  &batch->pool, clear_values, sizeof(clear_values), 16);
+                  &batch->pool, clear_values, clear_size, 16);
                if (!desc.clear_value_va)
                   agx_native_descriptor_rejected(dev,
                                                  "background MRT clear upload");

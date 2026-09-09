@@ -181,3 +181,50 @@ TEST(Tilebuffer, Layouts)
       }
    }
 }
+
+TEST(Tilebuffer, G17PDualRenderTargets)
+{
+   enum pipe_format wboit[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R8_UNORM,
+   };
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(wboit, 2, 1, false);
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_WBOIT);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 0), 0u);
+   EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 8u);
+
+   enum pipe_format rgba8[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(rgba8, 2, 1, false);
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_RGBA8);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 4u);
+
+   tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   tib = agx_build_tilebuffer_layout(wboit, 2, 1, false);
+   tib._offset_B[1] = 4;
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
+
+   tib = agx_build_tilebuffer_layout(wboit, 2, 1, false);
+   tib.spilled[1] = true;
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   enum pipe_format three_targets[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R8_UNORM,
+      PIPE_FORMAT_R8_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(three_targets, 3, 1, false);
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
+}

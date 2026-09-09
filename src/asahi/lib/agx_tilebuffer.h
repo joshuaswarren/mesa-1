@@ -123,6 +123,18 @@ void agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib);
 
 bool agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib);
 
+enum agx_g17p_mrt_layout {
+   AGX_G17P_MRT_NONE,
+   AGX_G17P_MRT_WBOIT,
+   AGX_G17P_MRT_RGBA8,
+};
+
+/* Classify the two byte-grounded G17P dual-render-target layouts.  The
+ * background/EOT frontends use this common result to select their matching
+ * shader, clear-uniform, and PBE-table contracts. */
+enum agx_g17p_mrt_layout
+agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib);
+
 #ifdef __cplusplus
 } /* extern C */
 #endif

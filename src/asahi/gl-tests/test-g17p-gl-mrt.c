@@ -15,6 +15,13 @@
 #define WIDTH  8
 #define HEIGHT 8
 
+typedef void (*enable_i_proc)(GLenum cap, GLuint index);
+typedef void (*blend_func_separate_i_proc)(GLuint buf, GLenum src_rgb,
+                                           GLenum dst_rgb, GLenum src_alpha,
+                                           GLenum dst_alpha);
+typedef void (*color_mask_i_proc)(GLuint buf, GLboolean red, GLboolean green,
+                                  GLboolean blue, GLboolean alpha);
+
 static bool
 gl_ok(const char *where)
 {
@@ -108,9 +115,34 @@ check_pixel(const char *phase, GLenum attachment, unsigned x, unsigned y,
    return false;
 }
 
-int
-main(void)
+static bool
+check_float_pixel(const char *phase, GLenum attachment, unsigned x, unsigned y,
+                  const float expected[4], bool noop)
 {
+   float actual[4] = {0};
+   glReadBuffer(attachment);
+   glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, actual);
+   if (!gl_ok(phase))
+      return false;
+   if (noop || !memcmp(actual, expected, sizeof(actual)))
+      return true;
+
+   fprintf(stderr,
+           "%s attachment %#x pixel {%g,%g,%g,%g}, expected "
+           "{%g,%g,%g,%g}\n",
+           phase, attachment, actual[0], actual[1], actual[2], actual[3],
+           expected[0], expected[1], expected[2], expected[3]);
+   return false;
+}
+
+int
+main(int argc, char **argv)
+{
+   const bool wboit = argc == 2 && !strcmp(argv[1], "--wboit");
+   if (argc > 2 || (argc == 2 && !wboit)) {
+      fprintf(stderr, "usage: %s [--wboit]\n", argv[0]);
+      return EXIT_FAILURE;
+   }
    const bool noop = getenv("ASAHI_GL_NOOP_SHIM") != NULL;
    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major, minor;
@@ -155,7 +187,9 @@ main(void)
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
    for (unsigned i = 0; i < 2; ++i) {
       glBindTexture(GL_TEXTURE_2D, textures[i]);
-      glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, WIDTH, HEIGHT);
+      const GLenum format =
+         wboit ? (i == 0 ? GL_RGBA16F : GL_R8) : GL_RGBA8;
+      glTexStorage2D(GL_TEXTURE_2D, 1, format, WIDTH, HEIGHT);
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i,
                              GL_TEXTURE_2D, textures[i], 0);
    }
@@ -176,11 +210,19 @@ main(void)
    glFinish();
    static const uint8_t clear0_pixel[4] = {16, 32, 48, 64};
    static const uint8_t clear1_pixel[4] = {80, 96, 112, 128};
-   if (!check_pixel("dual clear RT0", GL_COLOR_ATTACHMENT0, WIDTH - 1,
-                    HEIGHT / 2, clear0_pixel, noop) ||
-       !check_pixel("dual clear RT1", GL_COLOR_ATTACHMENT1, WIDTH - 1,
-                    HEIGHT / 2, clear1_pixel, noop))
+   static const uint8_t wboit_clear1_pixel[4] = {80, 0, 0, 255};
+   if (wboit) {
+      if (!check_float_pixel("WBOIT clear RT0", GL_COLOR_ATTACHMENT0,
+                             WIDTH - 1, HEIGHT / 2, clear0, noop) ||
+          !check_pixel("WBOIT clear RT1", GL_COLOR_ATTACHMENT1, WIDTH - 1,
+                       HEIGHT / 2, wboit_clear1_pixel, noop))
+         return EXIT_FAILURE;
+   } else if (!check_pixel("dual clear RT0", GL_COLOR_ATTACHMENT0, WIDTH - 1,
+                           HEIGHT / 2, clear0_pixel, noop) ||
+              !check_pixel("dual clear RT1", GL_COLOR_ATTACHMENT1, WIDTH - 1,
+                           HEIGHT / 2, clear1_pixel, noop)) {
       return EXIT_FAILURE;
+   }
 
    /* A scissored two-output draw requires both attachments to reload the
     * clear outside the scissor and stores both distinct packed results inside
@@ -191,21 +233,55 @@ main(void)
    glViewport(0, 0, WIDTH, HEIGHT);
    glEnable(GL_SCISSOR_TEST);
    glScissor(0, 0, WIDTH / 2, HEIGHT);
+   if (wboit) {
+      enable_i_proc enable_i =
+         (enable_i_proc)eglGetProcAddress("glEnableiEXT");
+      blend_func_separate_i_proc blend_func_separate_i =
+         (blend_func_separate_i_proc)eglGetProcAddress(
+            "glBlendFuncSeparateiEXT");
+      color_mask_i_proc color_mask_i =
+         (color_mask_i_proc)eglGetProcAddress("glColorMaskiEXT");
+      if (!enable_i || !blend_func_separate_i || !color_mask_i) {
+         fprintf(stderr, "GL_EXT_draw_buffers_indexed is unavailable\n");
+         return EXIT_FAILURE;
+      }
+
+      /* The captured mixed-width compositor transaction keeps RT0 opaque and
+       * additively blends scalar RT1. This exact independent blend/mask shape
+       * is also the compiler's fail-closed WBOIT ratchet. */
+      enable_i(GL_BLEND, 1);
+      blend_func_separate_i(1, GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+      color_mask_i(1, GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
+   }
    glUseProgram(program);
    glDrawArrays(GL_TRIANGLES, 0, 3);
    glFinish();
 
    static const uint8_t drawn0[4] = {64, 32, 128, 64};
    static const uint8_t drawn1[4] = {32, 64, 16, 128};
-   const bool exact =
-      check_pixel("MRT draw RT0", GL_COLOR_ATTACHMENT0, 1, HEIGHT / 2,
-                  drawn0, noop) &&
-      check_pixel("MRT draw RT1", GL_COLOR_ATTACHMENT1, 1, HEIGHT / 2,
-                  drawn1, noop) &&
-      check_pixel("MRT preserve RT0", GL_COLOR_ATTACHMENT0, WIDTH - 1,
-                  HEIGHT / 2, clear0_pixel, noop) &&
-      check_pixel("MRT preserve RT1", GL_COLOR_ATTACHMENT1, WIDTH - 1,
-                  HEIGHT / 2, clear1_pixel, noop);
+   static const float wboit_drawn0[4] = {0.25f, 0.125f, 0.5f, 0.25f};
+   static const uint8_t wboit_drawn1[4] = {112, 0, 0, 255};
+   bool exact;
+   if (wboit) {
+      exact =
+         check_float_pixel("WBOIT draw RT0", GL_COLOR_ATTACHMENT0, 1,
+                           HEIGHT / 2, wboit_drawn0, noop) &&
+         check_pixel("WBOIT draw RT1", GL_COLOR_ATTACHMENT1, 1, HEIGHT / 2,
+                     wboit_drawn1, noop) &&
+         check_float_pixel("WBOIT preserve RT0", GL_COLOR_ATTACHMENT0,
+                           WIDTH - 1, HEIGHT / 2, clear0, noop) &&
+         check_pixel("WBOIT preserve RT1", GL_COLOR_ATTACHMENT1, WIDTH - 1,
+                     HEIGHT / 2, wboit_clear1_pixel, noop);
+   } else {
+      exact = check_pixel("MRT draw RT0", GL_COLOR_ATTACHMENT0, 1,
+                          HEIGHT / 2, drawn0, noop) &&
+              check_pixel("MRT draw RT1", GL_COLOR_ATTACHMENT1, 1,
+                          HEIGHT / 2, drawn1, noop) &&
+              check_pixel("MRT preserve RT0", GL_COLOR_ATTACHMENT0,
+                          WIDTH - 1, HEIGHT / 2, clear0_pixel, noop) &&
+              check_pixel("MRT preserve RT1", GL_COLOR_ATTACHMENT1,
+                          WIDTH - 1, HEIGHT / 2, clear1_pixel, noop);
+   }
 
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
@@ -218,7 +294,8 @@ main(void)
 
    if (!exact)
       return EXIT_FAILURE;
-   printf("g17p-gl-mrt: PASS — dual RGBA8 clear/reload/store %s\n",
+   printf("g17p-gl-mrt: PASS — %s clear/reload/store %s\n",
+          wboit ? "RGBA16F+R8 WBOIT blend" : "dual RGBA8",
           noop ? "submitted" : "pixels exact");
    return EXIT_SUCCESS;
 }

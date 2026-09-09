@@ -66,6 +66,32 @@ test(
   suite : ['asahi'],
 )
 
+test(
+  'asahi-g17p-gl-wboit-software-control',
+  gl_mrt,
+  args : ['--wboit'],
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-wboit-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_mrt,
+    '--wboit',
+  ],
+  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  suite : ['asahi'],
+)
+
 gl_msaa = executable(
   'asahi-g17p-gl-msaa',
   files('test-g17p-gl-msaa.c'),

@@ -198,20 +198,9 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM)
       return false;
 
-   const bool mixed_mrt =
-      tib->nr_samples == 1 &&
-      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
-      tib->logical_format[1] == PIPE_FORMAT_R8_UNORM && !tib->spilled[1] &&
-      tib->_offset_B[0] == 0 && tib->_offset_B[1] == 8 &&
-      tib->sample_size_B == 16;
-   const bool rgba8_mrt =
-      tib->nr_samples == 1 &&
-      tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-      tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-      !tib->spilled[1] && tib->_offset_B[0] == 0 &&
-      tib->_offset_B[1] == 4 && tib->sample_size_B == 8;
+   const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
 
-   for (unsigned rt = (mixed_mrt || rgba8_mrt) ? 2 : 1;
+   for (unsigned rt = mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
          return false;
@@ -251,7 +240,7 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
 
-   return mixed_mrt || rgba8_mrt || rgba32u || rgba32i || rgba32f ||
+   return mrt != AGX_G17P_MRT_NONE || rgba32u || rgba32i || rgba32f ||
           rgb10a2u ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
@@ -284,4 +273,29 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
             scalar_r32f || scalar_r32i || pair_r32f || pair_r32i ||
             pair_r32u || scalar_r8u || scalar_r8i || rgba16u || rgba16i));
+}
+
+enum agx_g17p_mrt_layout
+agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
+{
+   if (!tib || tib->nr_samples != 1 || tib->spilled[0] || tib->spilled[1] ||
+       tib->_offset_B[0] != 0)
+      return AGX_G17P_MRT_NONE;
+
+   for (unsigned rt = 2; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
+         return AGX_G17P_MRT_NONE;
+   }
+
+   if (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
+       tib->logical_format[1] == PIPE_FORMAT_R8_UNORM &&
+       tib->_offset_B[1] == 8 && tib->sample_size_B == 16)
+      return AGX_G17P_MRT_WBOIT;
+
+   if (tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+       tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+       tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
+      return AGX_G17P_MRT_RGBA8;
+
+   return AGX_G17P_MRT_NONE;
 }
