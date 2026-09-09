@@ -362,7 +362,7 @@ static const struct wp_presentation_feedback_listener
    presentation_handle_discarded,
 };
 
-void
+bool
 loader_wayland_wrap_presentation(struct loader_wayland_presentation *lpf,
                                  struct wp_presentation *wp_presentation,
                                  struct wl_event_queue *queue,
@@ -374,6 +374,9 @@ loader_wayland_wrap_presentation(struct loader_wayland_presentation *lpf,
 
 {
    lpf->presentation = wl_proxy_create_wrapper(wp_presentation);
+   if (!lpf->presentation)
+      return false;
+
    wl_proxy_set_queue((void *)lpf->presentation, queue);
    lpf->clock_id = presentation_clock_id;
    lpf->wayland_surface = lws;
@@ -381,6 +384,8 @@ loader_wayland_wrap_presentation(struct loader_wayland_presentation *lpf,
    lpf->discarded_callback = discarded_callback;
    lpf->teardown_callback = teardown_callback;
    list_inithead(&lpf->outstanding_list);
+
+   return true;
 }
 
 void

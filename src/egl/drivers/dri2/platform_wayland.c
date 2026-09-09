@@ -794,12 +794,16 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    }
 
    if (dri2_dpy->wp_presentation) {
-      loader_wayland_wrap_presentation(&dri2_surf->wayland_presentation,
-                                       dri2_dpy->wp_presentation,
-                                       dri2_surf->wl_queue,
-                                       dri2_dpy->presentation_clock_id,
-                                       &dri2_surf->wayland_surface,
-                                       NULL, NULL, NULL);
+      if (!loader_wayland_wrap_presentation(
+             &dri2_surf->wayland_presentation,
+             dri2_dpy->wp_presentation,
+             dri2_surf->wl_queue,
+             dri2_dpy->presentation_clock_id,
+             &dri2_surf->wayland_surface,
+             NULL, NULL, NULL)) {
+         _eglError(EGL_BAD_ALLOC, "dri2_create_surface");
+         goto cleanup_surf_wrapper;
+      }
    }
 
    if (dri2_dpy->wl_dmabuf &&
@@ -854,6 +858,7 @@ cleanup_dmabuf_feedback:
       dmabuf_feedback_fini(&dri2_surf->pending_dmabuf_feedback);
    }
 cleanup_surf_wrapper:
+   loader_wayland_presentation_destroy(&dri2_surf->wayland_presentation);
    loader_wayland_surface_destroy(&dri2_surf->wayland_surface);
 cleanup_dpy_wrapper:
    wl_proxy_wrapper_destroy(dri2_surf->wl_dpy_wrapper);

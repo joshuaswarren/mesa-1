@@ -547,6 +547,12 @@ if with_tests
       mod_wl.find_protocol('xdg-shell'),
       include_core_only : false,
     )
+    g17p_presentation_time_server = mod_wl.scan_xml(
+      mod_wl.find_protocol('presentation-time'),
+      client : false,
+      server : true,
+      include_core_only : false,
+    )
     executable(
       'g17p-wsi-wayland-triangle',
       files('tests/g17p_wsi_triangle.c'),
@@ -559,6 +565,7 @@ if with_tests
     g17p_wayland_swapchain_ownership = executable(
       'g17p-vulkan-wayland-ownership',
       files('tests/g17p_vulkan_wayland_ownership.c'),
+      g17p_presentation_time_server,
       include_directories : [inc_include],
       dependencies : [dep_dl, dep_thread, dep_wayland_client, dep_wayland_server],
       c_args : [c_msvc_compat_args],

@@ -3913,14 +3913,18 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    if (chain->wsi_wl_surface->display->wp_presentation_notwrapped) {
       chain->present_ids.frame_fallback = false;
-      loader_wayland_wrap_presentation(&chain->present_ids.wayland_presentation,
-                                       chain->wsi_wl_surface->display->wp_presentation_notwrapped,
-                                       chain->present_ids.queue,
-                                       chain->wsi_wl_surface->display->presentation_clock_id,
-                                       &chain->wsi_wl_surface->wayland_surface,
-                                       presentation_handle_presented,
-                                       presentation_handle_discarded,
-                                       presentation_handle_teardown);
+      if (!loader_wayland_wrap_presentation(
+             &chain->present_ids.wayland_presentation,
+             chain->wsi_wl_surface->display->wp_presentation_notwrapped,
+             chain->present_ids.queue,
+             chain->wsi_wl_surface->display->presentation_clock_id,
+             &chain->wsi_wl_surface->wayland_surface,
+             presentation_handle_presented,
+             presentation_handle_discarded,
+             presentation_handle_teardown)) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_free_wl_chain;
+      }
    } else {
       /* Fallback to frame callbacks when presentation protocol is not available.
        * We already have a proxy for the surface, but need another since

@@ -20,10 +20,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <threads.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-server-core.h>
 #include <wayland-server-protocol.h>
+
+#include "presentation-time-server-protocol.h"
 
 #define TEST_NAME "g17p-vulkan-wayland-ownership"
 #define T8140_DEVICE_ID 0x8140
@@ -64,6 +67,10 @@ struct mock_server {
    atomic_uint pools_destroyed;
    atomic_uint buffers_created;
    atomic_uint buffers_destroyed;
+   atomic_uint presentations_created;
+   atomic_uint presentations_destroyed;
+   atomic_uint feedback_created;
+   atomic_uint feedback_destroyed;
    struct wl_resource *pending_buffer;
 };
 
@@ -80,6 +87,7 @@ struct wrapper_control {
    atomic_uint created;
    atomic_uint destroyed;
    unsigned fail_on_call;
+   const char *fail_class;
    void *fail_proxy;
 };
 
@@ -144,8 +152,15 @@ wl_proxy_create_wrapper(void *proxy)
 {
    call_once(&wrapper_symbols_once, load_wrapper_symbols);
 
+   bool target = wrapper_control.fail_proxy &&
+                 proxy == wrapper_control.fail_proxy;
    if (atomic_load(&wrapper_control.fail_enabled) &&
-       proxy == wrapper_control.fail_proxy) {
+       !target && wrapper_control.fail_class && proxy) {
+      const char *proxy_class = wl_proxy_get_class((struct wl_proxy *)proxy);
+      target = proxy_class && !strcmp(proxy_class, wrapper_control.fail_class);
+   }
+
+   if (atomic_load(&wrapper_control.fail_enabled) && target) {
       const unsigned call =
          atomic_fetch_add(&wrapper_control.calls_since_arm, 1) + 1;
       if (call == wrapper_control.fail_on_call &&
@@ -472,6 +487,71 @@ bind_shm(struct wl_client *client, void *data, uint32_t version, uint32_t id)
    wl_shm_send_format(resource, WL_SHM_FORMAT_XRGB8888);
 }
 
+static void
+presentation_resource_destroyed(struct wl_resource *resource)
+{
+   struct mock_server *server = wl_resource_get_user_data(resource);
+   atomic_fetch_add(&server->presentations_destroyed, 1);
+}
+
+static void
+feedback_resource_destroyed(struct wl_resource *resource)
+{
+   struct mock_server *server = wl_resource_get_user_data(resource);
+   atomic_fetch_add(&server->feedback_destroyed, 1);
+}
+
+static void
+presentation_destroy(struct wl_client *client, struct wl_resource *resource)
+{
+   (void)client;
+   wl_resource_destroy(resource);
+}
+
+static void
+presentation_feedback(struct wl_client *client, struct wl_resource *resource,
+                      struct wl_resource *surface, uint32_t id)
+{
+   (void)surface;
+   struct mock_server *server = wl_resource_get_user_data(resource);
+   struct wl_resource *feedback = wl_resource_create(
+      client, &wp_presentation_feedback_interface,
+      wl_resource_get_version(resource), id);
+   if (!feedback) {
+      wl_client_post_no_memory(client);
+      return;
+   }
+
+   atomic_fetch_add(&server->feedback_created, 1);
+   wl_resource_set_implementation(feedback, NULL, server,
+                                  feedback_resource_destroyed);
+   wp_presentation_feedback_send_discarded(feedback);
+   wl_resource_destroy(feedback);
+}
+
+static const struct wp_presentation_interface presentation_implementation = {
+   .destroy = presentation_destroy,
+   .feedback = presentation_feedback,
+};
+
+static void
+bind_presentation(struct wl_client *client, void *data, uint32_t version,
+                  uint32_t id)
+{
+   struct mock_server *server = data;
+   struct wl_resource *resource = wl_resource_create(
+      client, &wp_presentation_interface, version < 1 ? version : 1, id);
+   if (!resource) {
+      wl_client_post_no_memory(client);
+      return;
+   }
+
+   atomic_fetch_add(&server->presentations_created, 1);
+   wl_resource_set_implementation(resource, &presentation_implementation,
+                                  server, presentation_resource_destroyed);
+   wp_presentation_send_clock_id(resource, CLOCK_MONOTONIC);
+}
+
 static int
 run_server(void *data)
 {
@@ -578,14 +658,19 @@ main(int argc, char **argv)
       argc == 2 && !strcmp(argv[1], "--present-wrapper-retry");
    const bool present_queue_retry =
       argc == 2 && !strcmp(argv[1], "--present-queue-retry");
-   const bool wrapper_retry = surface_init_retry || present_wrapper_retry;
+   const bool presentation_wrapper_retry =
+      argc == 2 && !strcmp(argv[1], "--presentation-wrapper-retry");
+   const bool poisoned_retry = surface_init_retry || present_wrapper_retry;
+   const bool wrapper_retry = poisoned_retry || presentation_wrapper_retry;
    const bool create_retry = wrapper_retry || present_queue_retry;
    if (argc > 2 ||
        (argc == 2 && !present_allocation_failure && !surface_init_retry &&
-        !present_wrapper_retry && !present_queue_retry))
+        !present_wrapper_retry && !present_queue_retry &&
+        !presentation_wrapper_retry))
       die("usage: " TEST_NAME
           " [--present-allocation-failure|--surface-init-retry|"
-          "--present-wrapper-retry|--present-queue-retry]");
+          "--present-wrapper-retry|--present-queue-retry|"
+          "--presentation-wrapper-retry]");
 
    struct mock_server server = {0};
    server.display = wl_display_create();
@@ -596,6 +681,10 @@ main(int argc, char **argv)
        !wl_global_create(server.display, &wl_shm_interface, 1, &server,
                          bind_shm))
       die("wl_global_create failed");
+   if (presentation_wrapper_retry &&
+       !wl_global_create(server.display, &wp_presentation_interface, 1,
+                         &server, bind_presentation))
+      die("wp_presentation global creation failed");
 
    int sockets[2];
    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) < 0)
@@ -630,7 +719,7 @@ main(int argc, char **argv)
    LOAD_GLOBAL(vkCreateInstance);
 
    struct allocation_control allocation_control = {0};
-   atomic_store(&allocation_control.poison_frees, wrapper_retry);
+   atomic_store(&allocation_control.poison_frees, poisoned_retry);
    const VkAllocationCallbacks allocation_callbacks = {
       .pUserData = &allocation_control,
       .pfnAllocation = test_alloc,
@@ -638,7 +727,7 @@ main(int argc, char **argv)
       .pfnFree = test_free,
    };
    const VkAllocationCallbacks *instance_allocator =
-      (present_allocation_failure || wrapper_retry) ? &allocation_callbacks : NULL;
+      (present_allocation_failure || poisoned_retry) ? &allocation_callbacks : NULL;
 
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -809,8 +898,12 @@ main(int argc, char **argv)
          atomic_store(&queue_control.fail_enabled, true);
       } else {
          atomic_store(&wrapper_control.calls_since_arm, 0);
-         wrapper_control.fail_on_call = surface_init_retry ? 1 : 2;
-         wrapper_control.fail_proxy = wl_surface;
+         wrapper_control.fail_on_call =
+            present_wrapper_retry ? 2 : 1;
+         wrapper_control.fail_class =
+            presentation_wrapper_retry ? "wp_presentation" : NULL;
+         wrapper_control.fail_proxy =
+            presentation_wrapper_retry ? NULL : wl_surface;
          atomic_store(&wrapper_control.fail_enabled, true);
       }
 
@@ -970,22 +1063,35 @@ main(int argc, char **argv)
    const unsigned pools_destroyed = atomic_load(&server.pools_destroyed);
    const unsigned buffers_created = atomic_load(&server.buffers_created);
    const unsigned buffers_destroyed = atomic_load(&server.buffers_destroyed);
+   const unsigned presentations_created =
+      atomic_load(&server.presentations_created);
+   const unsigned presentations_destroyed =
+      atomic_load(&server.presentations_destroyed);
+   const unsigned feedback_created = atomic_load(&server.feedback_created);
+   const unsigned feedback_destroyed = atomic_load(&server.feedback_destroyed);
    const unsigned wrappers_created = atomic_load(&wrapper_control.created);
    const unsigned wrappers_destroyed = atomic_load(&wrapper_control.destroyed);
    const unsigned exact_buffers =
       present_allocation_failure ? 4 : create_retry ? 8 : 12;
+   const bool exact_presentation_lifetime =
+      !presentation_wrapper_retry ||
+      (presentations_created == 4 && presentations_destroyed == 4 &&
+       feedback_created == 0 && feedback_destroyed == 0);
    if (expected_buffers != exact_buffers || surfaces_created != 1 ||
        surfaces_destroyed != 1 ||
        pools_created != expected_buffers || pools_destroyed != expected_buffers ||
        buffers_created != expected_buffers ||
        buffers_destroyed != expected_buffers ||
-       wrappers_created != wrappers_destroyed) {
+       wrappers_created != wrappers_destroyed || !exact_presentation_lifetime) {
       fprintf(stderr,
               TEST_NAME ": bad Wayland lifetime: surfaces=%u/%u pools=%u/%u "
-                        "buffers=%u/%u wrappers=%u/%u expected=%u\n",
+                        "buffers=%u/%u wrappers=%u/%u presentation=%u/%u "
+                        "feedback=%u/%u expected=%u\n",
               surfaces_created, surfaces_destroyed, pools_created,
               pools_destroyed, buffers_created, buffers_destroyed,
-              wrappers_created, wrappers_destroyed, expected_buffers);
+              wrappers_created, wrappers_destroyed, presentations_created,
+              presentations_destroyed, feedback_created, feedback_destroyed,
+              expected_buffers);
       return EXIT_FAILURE;
    }
 
@@ -1020,6 +1126,13 @@ main(int argc, char **argv)
                        "wrappers=%u/%u\n",
              buffers_created, buffers_destroyed, wrappers_created,
              wrappers_destroyed);
+   } else if (presentation_wrapper_retry) {
+      printf(TEST_NAME ": PASS — presentation protocol wrapper allocation "
+                       "failed once, then retry and reuse succeeded; Wayland "
+                       "objects=%u/%u wrappers=%u/%u presentation=%u/%u\n",
+             buffers_created, buffers_destroyed, wrappers_created,
+             wrappers_destroyed, presentations_created,
+             presentations_destroyed);
    } else {
       printf(TEST_NAME ": PASS — rejected creates preserved the active "
                        "swapchain through replacement and destruction; "

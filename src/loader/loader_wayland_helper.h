@@ -98,7 +98,7 @@ loader_wayland_wrap_surface(struct loader_wayland_surface *lws,
 void
 loader_wayland_surface_destroy(struct loader_wayland_surface *lws);
 
-void
+bool
 loader_wayland_wrap_presentation(struct loader_wayland_presentation *lwp,
                                  struct wp_presentation *wp_presentation,
                                  struct wl_event_queue *queue,
