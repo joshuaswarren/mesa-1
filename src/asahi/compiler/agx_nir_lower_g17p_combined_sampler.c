@@ -345,6 +345,7 @@ agx_nir_lower_g17p_combined_sampler(
 static bool
 g17p_indexed_fetch_shape(const nir_tex_instr *tex)
 {
+   const bool multisample = tex->op == nir_texop_txf_ms;
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
    if (coord < 0)
       coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -359,7 +360,9 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
       tex->coord_components == 1 && coord >= 0 &&
       tex->src[coord].src.ssa->num_components == 2;
 
-   if (tex->op != nir_texop_txf || tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+   if ((tex->op != nir_texop_txf && !multisample) ||
+       tex->sampler_dim !=
+          (multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D) ||
        tex->is_shadow || tex->is_sparse || tex->texture_index ||
        tex->sampler_index || tex->def.bit_size != 32 ||
        tex->def.num_components != 4 ||
@@ -371,15 +374,25 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
       return false;
    const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
    const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
-   return handle >= 0 && lod >= 0 && coord >= 0 && tex->num_srcs == 3 &&
-      nir_src_is_const(tex->src[lod].src) &&
-      /* PACK_SMPIR stages this integer into the native level bank.  Its
-       * captured field is 12-bit x64, so whole Vulkan mip levels 0..63 fit
-       * exactly and larger constants remain refused. */
-      nir_src_as_uint(tex->src[lod].src) <= 63 &&
+   const int sample =
+      nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   const unsigned lowered_coord_components =
+      coord >= 0 ? nir_src_num_components(tex->src[coord].src) : 0;
+   return handle >= 0 && coord >= 0 &&
+      (multisample
+          ? (tex->num_srcs == 2 && sample < 0 && lod < 0 &&
+             /* agx_nir_lower_texture packs sample and optional array layer
+              * into the third 32-bit backend coordinate. */
+             lowered_coord_components == 3)
+          : (tex->num_srcs == 3 && lod >= 0 && sample < 0 &&
+             nir_src_is_const(tex->src[lod].src) &&
+             /* PACK_SMPIR stages this integer into the native level bank.
+              * Its captured field is 12-bit x64, so whole Vulkan mip levels
+              * 0..63 fit exactly and larger constants remain refused. */
+             nir_src_as_uint(tex->src[lod].src) <= 63)) &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
-      nir_src_num_components(tex->src[coord].src) ==
-         (lowered_buffer ? 2 : tex->coord_components);
+      (multisample || lowered_coord_components ==
+                         (lowered_buffer ? 2 : tex->coord_components));
 }
 
 /* Descriptor lowering normally wraps the software heap index in a bindless
@@ -521,7 +534,8 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             b.cursor = nir_before_instr(instr);
             nir_intrinsic_instr *image = nir_src_as_intrinsic(
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);
-            const bool fetch = tex->op == nir_texop_txf;
+            const bool fetch = tex->op == nir_texop_txf ||
+                               tex->op == nir_texop_txf_ms;
             nir_def *sampler = fetch ? NULL : g17p_sample_heap_index(tex);
 
             /* texture2d::read takes a uint level on AGX3.  The shared AGX2
@@ -530,7 +544,7 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
              * Leaving the upper half unwritten makes the native sampler see
              * an indeterminate, usually out-of-range level and return zero.
              * Restore the API integer width before AIR is formed. */
-            if (fetch) {
+            if (tex->op == nir_texop_txf) {
                const int lod =
                   nir_tex_instr_src_index(tex, nir_tex_src_lod);
                assert(lod >= 0);

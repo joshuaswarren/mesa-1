@@ -2317,6 +2317,65 @@ test_indexed_fetch_sets(void)
    return ok;
 }
 
+/* vkCmdResolveImage lowers each multisample read to txf_ms after packing the
+ * sample and array layer into backend coordinate 2. It has no API sampler;
+ * native sampler zero is the device-wide texel-fetch sampler. */
+static bool
+test_indexed_multisample_fetch(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "indexed multisample resolve fetch");
+   nir_def *image =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 144), .desc_set = 2);
+   nir_def *coord = nir_imm_ivec3(&b, 5, 7, (1u << 16) | 2u);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_txf_ms;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_MS;
+   tex->is_array = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, coord);
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .write_mask = 15,
+                    .src_type = nir_type_float32);
+
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+   const int texture =
+      nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+   ok &= texture >= 0 &&
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 &&
+         nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0 &&
+         nir_tex_instr_src_index(tex, nir_tex_src_ms_index) < 0;
+   if (texture >= 0)
+      ok &= nir_src_bit_size(tex->src[texture].src) == 64;
+
+   unsigned bindless = 0, heap_indices = 0, set_mask = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         bindless += intr->intrinsic == nir_intrinsic_bindless_image_agx ||
+                     intr->intrinsic == nir_intrinsic_bindless_sampler_agx;
+         if (intr->intrinsic == nir_intrinsic_load_descriptor_set_agx)
+            set_mask |= 1u << nir_intrinsic_desc_set(intr);
+         heap_indices += intr->intrinsic ==
+                            nir_intrinsic_load_global_constant &&
+                         intr->def.num_components == 1 &&
+                         intr->def.bit_size == 32;
+      }
+   }
+
+   ok &= bindless == 0 && heap_indices == 1 && set_mask == (1u << 2);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_shader *
 build_fs_texture(void)
 {
@@ -4942,8 +5001,9 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-fetch-only")) {
       const bool ok=test_indexed_fetch_sets() &&
+                    test_indexed_multisample_fetch() &&
                     test_g17p_nonzero_fetch_lod_compile();
-      printf("mixed indexed texture reads, sample, sets and arrays: %s\n",ok?"PASS":"FAIL");
+      printf("mixed indexed texture reads, multisample resolve, sets and arrays: %s\n",ok?"PASS":"FAIL");
       return ok?0:1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-samplers-only")) {
@@ -5081,6 +5141,11 @@ main(int argc, char **argv)
 
    if (!test_txf_offset_lowering()) {
       fputs("texelFetchOffset coordinate lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_indexed_multisample_fetch()) {
+      fputs("indexed multisample resolve lowering mismatch\n", stderr);
       all_ok = false;
    }
 

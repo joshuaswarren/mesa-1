@@ -15,12 +15,22 @@
 #define G17P_BLIT_IMAGE 0
 #endif
 
+#ifndef G17P_RESOLVE_IMAGE
+#define G17P_RESOLVE_IMAGE 0
+#endif
+
+#if G17P_BLIT_IMAGE && G17P_RESOLVE_IMAGE
+#error "select either the image blit or resolve oracle"
+#endif
+
 #ifdef G17P_CLEAR_IMAGE
 #define TEST_NAME "g17p-vulkan-clear-image"
 #elif G17P_BLIT_IMAGE == 1
 #define TEST_NAME "g17p-vulkan-blit-image-nearest-flip"
 #elif G17P_BLIT_IMAGE == 2
 #define TEST_NAME "g17p-vulkan-blit-image-linear-flip"
+#elif G17P_RESOLVE_IMAGE
+#define TEST_NAME "g17p-vulkan-resolve-image4"
 #else
 #define TEST_NAME "g17p-vulkan-image-copy-subregion"
 #endif
@@ -44,6 +54,7 @@ VK_FN(vkGetPhysicalDeviceProperties);
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
 VK_FN(vkGetPhysicalDeviceQueueFamilyProperties);
 VK_FN(vkGetPhysicalDeviceFormatProperties);
+VK_FN(vkGetPhysicalDeviceImageFormatProperties);
 VK_FN(vkCreateDevice);
 VK_FN(vkDestroyDevice);
 VK_FN(vkGetDeviceQueue);
@@ -68,6 +79,7 @@ VK_FN(vkCmdCopyBufferToImage);
 VK_FN(vkCmdClearColorImage);
 VK_FN(vkCmdCopyImage);
 VK_FN(vkCmdBlitImage);
+VK_FN(vkCmdResolveImage);
 VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
@@ -169,7 +181,8 @@ struct image {
 
 static struct image
 create_image(VkDevice device,
-             const VkPhysicalDeviceMemoryProperties *memory_properties)
+             const VkPhysicalDeviceMemoryProperties *memory_properties,
+             VkSampleCountFlagBits samples)
 {
    const VkImageCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -178,7 +191,7 @@ create_image(VkDevice device,
       .extent = {WIDTH, HEIGHT, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
-      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .samples = samples,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -254,10 +267,14 @@ verify(const struct mapped_buffer *upload,
             expected[0] = 255;
             expected[2] = 255;
          } else if (x >= 11 && x < 24 && y >= 4 && y < 19) {
-            if (blit_image)
+            if (G17P_RESOLVE_IMAGE) {
+               expected[0] = 255;
+               expected[2] = 255;
+            } else if (blit_image) {
                source_pixel(23 - (x - 11), 18 - (y - 4), expected);
-            else
+            } else {
                source_pixel(5 + x - 11, 3 + y - 4, expected);
+            }
          }
          const uint8_t *actual = pixels + (y * WIDTH + x) * 4u;
          if (memcmp(actual, expected, 4) != 0) {
@@ -283,6 +300,7 @@ main(int argc, char **argv)
 #endif
    const bool blit_image = G17P_BLIT_IMAGE != 0;
    const bool linear_blit = G17P_BLIT_IMAGE == 2;
+   const bool resolve_image = G17P_RESOLVE_IMAGE != 0;
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
    if (argc > 2 || (argc == 2 && !record_only))
       die("usage: " TEST_NAME " [--record-only]");
@@ -315,6 +333,7 @@ main(int argc, char **argv)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceQueueFamilyProperties);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFormatProperties);
+   LOAD_INSTANCE(instance, vkGetPhysicalDeviceImageFormatProperties);
    LOAD_INSTANCE(instance, vkCreateDevice);
 
    uint32_t physical_count = 0;
@@ -354,6 +373,18 @@ main(int argc, char **argv)
       (linear_blit ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
    if ((format_properties.optimalTilingFeatures & required) != required)
       die("required RGBA8 optimal transfer/blit support is not advertised");
+   if (resolve_image) {
+      VkImageFormatProperties image_properties;
+      check(vkGetPhysicalDeviceImageFormatProperties(
+               physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+               VK_IMAGE_TILING_OPTIMAL,
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                  VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+               0, &image_properties),
+            "vkGetPhysicalDeviceImageFormatProperties(4x resolve source)");
+      if (!(image_properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT))
+         die("RGBA8 optimal transfer images do not advertise four samples");
+   }
 
    uint32_t family_count = 0;
    vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, NULL);
@@ -414,6 +445,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdClearColorImage);
    LOAD_DEVICE(device, vkCmdCopyImage);
    LOAD_DEVICE(device, vkCmdBlitImage);
+   LOAD_DEVICE(device, vkCmdResolveImage);
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
@@ -452,8 +484,11 @@ main(int argc, char **argv)
    memcpy(destination_upload.map, destination_upload_expected,
           sizeof(destination_upload_expected));
    memset(readback.map, 0xa5, READBACK_BYTES);
-   struct image source = create_image(device, &memory_properties);
-   struct image destination = create_image(device, &memory_properties);
+   struct image source = create_image(
+      device, &memory_properties,
+      resolve_image ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT);
+   struct image destination = create_image(
+      device, &memory_properties, VK_SAMPLE_COUNT_1_BIT);
 
    const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -509,9 +544,23 @@ main(int argc, char **argv)
       },
       .imageExtent = {WIDTH, HEIGHT, 1},
    };
-   vkCmdCopyBufferToImage(command, upload.buffer, source.image,
-                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                          &upload_region);
+   if (resolve_image) {
+      const VkClearColorValue magenta = {
+         .float32 = {1.0f, 0.0f, 1.0f, 1.0f},
+      };
+      const VkImageSubresourceRange source_range = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .levelCount = 1,
+         .layerCount = 1,
+      };
+      vkCmdClearColorImage(command, source.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
+                           &source_range);
+   } else {
+      vkCmdCopyBufferToImage(command, upload.buffer, source.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                             &upload_region);
+   }
    const VkImageSubresourceRange range = {
       .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
       .levelCount = 1,
@@ -577,6 +626,25 @@ main(int argc, char **argv)
       vkCmdClearColorImage(command, destination.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1,
                            &range);
+   } else if (resolve_image) {
+      const VkImageResolve image_resolve = {
+         .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+         },
+         .srcOffset = {5, 3, 0},
+         .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .layerCount = 1,
+         },
+         .dstOffset = {11, 4, 0},
+         .extent = {13, 15, 1},
+      };
+      vkCmdResolveImage(command, source.image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        destination.image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                        &image_resolve);
    } else if (blit_image) {
       const VkImageBlit image_blit = {
          .srcSubresource = {
@@ -649,6 +717,9 @@ main(int argc, char **argv)
          printf(TEST_NAME ": RECORD PASS — reversed 13x15 %s RGBA8 image "
                           "blit and guarded readback recorded\n",
                 linear_blit ? "linear" : "nearest");
+      else if (resolve_image)
+         printf(TEST_NAME ": RECORD PASS — 13x15 offset RGBA8 4x-to-1x "
+                          "image resolve and guarded readback recorded\n");
       else
          printf(TEST_NAME ": RECORD PASS — padded upload, nonzero image "
                           "subregion copy and guarded readback recorded\n");
@@ -696,6 +767,11 @@ main(int argc, char **argv)
                        "and 384 guard bytes unchanged, checksum %016" PRIx64
                        "\n",
              linear_blit ? "linear" : "nearest", checksum);
+   else if (resolve_image)
+      printf(TEST_NAME ": PASS — exact magenta 13x15 RGBA8 4x-to-1x resolve "
+                       "into destination(11,4) immediately/3s; both uploads "
+                       "and 384 guard bytes unchanged, checksum %016" PRIx64
+                       "\n", checksum);
    else
       printf(TEST_NAME ": PASS — 13x15 source(5,3) to destination(11,4) "
                        "exact immediately/3s; both uploads and 384 guard "
