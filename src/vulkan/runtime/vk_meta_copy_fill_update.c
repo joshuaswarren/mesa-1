@@ -1056,6 +1056,19 @@ build_buffer_to_image_fs(const struct vk_meta_device *meta,
 
    coords = nir_isub(b, coords, img_offs);
 
+   /* Helper invocations just outside an unaligned rectangle can have negative
+    * copy-relative coordinates. The unsigned byte offset would then wrap and
+    * fault on hardware without soft faults. This shader has no derivatives;
+    * helpers may safely read the first source texel instead. Keep the address
+    * itself valid, even if the backend speculates the load.
+    */
+   nir_def *extent = nir_vec3(b,
+      load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.x),
+      load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.y),
+      load_info(b, struct vk_meta_copy_buffer_image_info, copy_id_range.end.z));
+   nir_def *in_bounds = nir_ball(b, nir_ult(b, coords, extent));
+   coords = nir_bcsel(b, in_bounds, coords, nir_imm_ivec3(b, 0, 0, 0));
+
    nir_def *texel = nir_load_global(
       b, comp_count, comp_sz, copy_img_buf_addr(b, buf_pfmt, coords),
       .align_mul = 1 << (ffs(blk_sz) - 1));
@@ -1250,6 +1263,16 @@ copy_buffer_image_prepare_gfx_push_const(
          .z = source_offset.z,
       },
    };
+
+   /* Bounds are copy-relative, like the shader's source coordinates. A
+    * graphics view may flatten 3D slices or array layers into its layer ID. */
+   const uint32_t layers = MAX2(region->imageExtent.depth,
+      vk_image_subresource_layer_count(img, &region->imageSubresource));
+   info.copy_id_range.end.x = region->imageExtent.width;
+   info.copy_id_range.end.y = key->img.view.type == VK_IMAGE_VIEW_TYPE_1D_ARRAY
+      ? layers : region->imageExtent.height;
+   info.copy_id_range.end.z = key->img.view.type == VK_IMAGE_VIEW_TYPE_1D_ARRAY
+      ? 1 : layers;
 
    disp->CmdPushConstants(vk_command_buffer_to_handle(cmd), pipeline_layout,
                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(info), &info);
