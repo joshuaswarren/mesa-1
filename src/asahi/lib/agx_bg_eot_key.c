@@ -4,6 +4,18 @@
  */
 
 #include "agx_bg_eot_key.h"
+#include "util/format/u_format.h"
+
+enum pipe_format
+agx_g17p_rt0_pbe_format(enum pipe_format format)
+{
+   /* R11G11B10 is packed explicitly into one tile word on G17P. Store that
+    * word without another format conversion. Other formats retain the
+    * existing raw-sRGB rule. */
+   return format == PIPE_FORMAT_R11G11B10_FLOAT
+             ? PIPE_FORMAT_R32_UINT
+             : util_format_linear(format);
+}
 
 void
 agx_g17p_configure_rt0_eot_key(enum pipe_format format,
@@ -29,6 +41,7 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       format == PIPE_FORMAT_R32G32_FLOAT || format == PIPE_FORMAT_R32_UINT ||
       format == PIPE_FORMAT_R32_SINT || format == PIPE_FORMAT_R32G32_SINT ||
       format == PIPE_FORMAT_R32G32_UINT ||
+      format == PIPE_FORMAT_R11G11B10_FLOAT ||
       format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
       format == PIPE_FORMAT_R32G32B32A32_UINT ||
       format == PIPE_FORMAT_R32G32B32A32_SINT;
@@ -54,6 +67,7 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    case PIPE_FORMAT_R32_FLOAT:
    case PIPE_FORMAT_R32_UINT:
    case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
    case PIPE_FORMAT_R8_UINT:
    case PIPE_FORMAT_R8_SINT:
    case PIPE_FORMAT_R8G8_UINT:

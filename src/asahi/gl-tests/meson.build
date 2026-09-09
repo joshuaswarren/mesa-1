@@ -496,6 +496,7 @@ test(
   ],
   env : [
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_16BIT_FBO_DRAWS=4',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
   suite : ['asahi'],

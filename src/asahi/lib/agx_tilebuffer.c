@@ -241,9 +241,13 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
+   const bool r11g11b10f = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
+      tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
+      agx_tilebuffer_physical_format(tib, 0) ==
+         PIPE_FORMAT_R11G11B10_FLOAT;
 
    return mrt != AGX_G17P_MRT_NONE || rgba32u || rgba32i || rgba32f ||
-          rgb10a2u ||
+          rgb10a2u || r11g11b10f ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
             agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_FLOAT ||

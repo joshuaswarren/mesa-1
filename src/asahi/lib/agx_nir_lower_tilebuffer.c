@@ -27,7 +27,7 @@ struct ctx {
    uint8_t outputs_written;
    nir_def *write_samples;
    bool preserve_zero_mask;
-   bool lower_srgb;
+   bool lower_g17p_formats;
 };
 
 static nir_def *
@@ -300,6 +300,15 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    enum pipe_format logical_format = tib->logical_format[rt];
    enum pipe_format format = agx_tilebuffer_physical_format(tib, rt);
    unsigned comps = util_format_get_nr_components(logical_format);
+   const bool lower_r11g11b10 =
+      ctx->lower_g17p_formats &&
+      logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
+   const bool lower_srgb =
+      ctx->lower_g17p_formats && util_format_is_srgb(logical_format);
+   const enum pipe_format lowered_format =
+      lower_r11g11b10
+         ? PIPE_FORMAT_R32_UINT
+         : lower_srgb ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM : format;
 
    if (intr->intrinsic == nir_intrinsic_store_output) {
       ctx->outputs_written |= BITFIELD_BIT(rt);
@@ -342,18 +351,16 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
        * a real load/store pair so fragment and query side effects still run. */
       if (!write_mask) {
          if (ctx->preserve_zero_mask && !tib->spilled[rt]) {
-            const enum pipe_format preserve_format =
-               ctx->lower_srgb && util_format_is_srgb(logical_format)
-                  ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
-                  : format;
             nir_def *value = load_tilebuffer(
-               b, tib, comps,
-               ctx->lower_srgb && util_format_is_srgb(logical_format)
-                  ? 32 : intr->src[0].ssa->bit_size,
-               rt, preserve_format,
+               b, tib, lower_r11g11b10 ? 1 : comps,
+               (lower_r11g11b10 || lower_srgb)
+                  ? 32
+                  : intr->src[0].ssa->bit_size,
+               rt, lowered_format,
                logical_format);
-            store_tilebuffer(b, tib, preserve_format, logical_format, rt, value,
-                             ctx->write_samples, BITFIELD_MASK(comps));
+            store_tilebuffer(b, tib, lowered_format, logical_format, rt, value,
+                             ctx->write_samples,
+                             lower_r11g11b10 ? 1 : BITFIELD_MASK(comps));
          }
          return true;
       }
@@ -368,9 +375,13 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                       rt, value, ctx->write_samples);
          ctx->any_memory_stores = true;
       } else {
-         if (ctx->lower_srgb && util_format_is_srgb(logical_format)) {
+         if (lower_r11g11b10) {
+            value = nir_format_pack_rgba(b, logical_format, value);
+            format = lowered_format;
+            write_mask = 1;
+         } else if (lower_srgb) {
             value = convert_srgb(b, value, comps, true);
-            format = (enum pipe_format)AIL_ISA_FORMAT_U8NORM;
+            format = lowered_format;
          }
 
          store_tilebuffer(b, tib, format, logical_format, rt, value,
@@ -391,16 +402,18 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          def = load_memory(b, ctx->bindless_base, tib->nr_samples,
                            intr->num_components, bit_size, rt, logical_format);
       } else {
-         const bool lower_srgb =
-            ctx->lower_srgb && util_format_is_srgb(logical_format);
-         def = load_tilebuffer(b, tib, intr->num_components,
-                               lower_srgb ? 32 : bit_size, rt,
-                               lower_srgb
-                                  ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
-                                  : format,
-                               logical_format);
+         def = load_tilebuffer(
+            b, tib, lower_r11g11b10 ? 1 : intr->num_components,
+            (lower_r11g11b10 || lower_srgb) ? 32 : bit_size, rt,
+            lowered_format, logical_format);
 
-         if (lower_srgb) {
+         if (lower_r11g11b10) {
+            def = nir_trim_vector(
+               b, nir_format_unpack_rgba(b, def, logical_format),
+               intr->num_components);
+            if (bit_size != 32)
+               def = nir_f2f16(b, def);
+         } else if (lower_srgb) {
             def = convert_srgb(b, def, intr->num_components, false);
             if (bit_size != 32)
                def = nir_f2f16(b, def);
@@ -417,7 +430,7 @@ bool
 agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
                          uint8_t *colormasks, unsigned *bindless_base,
                          nir_def *write_samples, bool *translucent,
-                         bool preserve_zero_mask, bool lower_srgb)
+                         bool preserve_zero_mask, bool lower_g17p_formats)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -427,7 +440,7 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
       .translucent = translucent,
       .write_samples = write_samples,
       .preserve_zero_mask = preserve_zero_mask,
-      .lower_srgb = lower_srgb,
+      .lower_g17p_formats = lower_g17p_formats,
    };
 
    /* Allocate 1 texture + 1 PBE descriptor for each spilled descriptor */

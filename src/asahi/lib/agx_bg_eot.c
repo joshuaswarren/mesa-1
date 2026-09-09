@@ -380,6 +380,11 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       enum pipe_format physical =
          agx_tilebuffer_physical_format(&key->tib, rt);
       if (cache->dev->chip == AGX_CHIP_G17P &&
+          key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT) {
+         /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
+          * PBE descriptor also uses R32_UINT to preserve those exact bits. */
+         physical = PIPE_FORMAT_R32_UINT;
+      } else if (cache->dev->chip == AGX_CHIP_G17P &&
           util_format_is_srgb(key->tib.logical_format[rt])) {
          /* G17P lowers the sRGB transfer explicitly before ST_TILE and stores
           * the resulting bytes in a U8NORM imageblock.  EOT is a raw transfer

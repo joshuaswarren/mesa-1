@@ -293,7 +293,7 @@ TEST(Tilebuffer, G17PPacked16EOTKey)
    }
 }
 
-TEST(Tilebuffer, G17PX16EOTKey)
+TEST(Tilebuffer, G17PSpecialFormatEOTKey)
 {
    static const struct {
       enum pipe_format logical;
@@ -323,8 +323,39 @@ TEST(Tilebuffer, G17PX16EOTKey)
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
 
-   /* Packed float uses a different, still-unwitnessed imageblock format. */
+   enum pipe_format packed_float[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R11G11B10_FLOAT,
+   };
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(packed_float, 1, 1, false);
+   EXPECT_EQ(tib.sample_size_B, 8);
+   EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0),
+             PIPE_FORMAT_R11G11B10_FLOAT);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+
    struct agx_shader_key key = {};
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R11G11B10_FLOAT, &key);
+   EXPECT_EQ(key.g17p_rt0_eot_words, 1);
+   EXPECT_TRUE(key.g17p_rt0_eot_i32);
+   EXPECT_EQ(agx_g17p_rt0_pbe_format(PIPE_FORMAT_R11G11B10_FLOAT),
+             PIPE_FORMAT_R32_UINT);
+   EXPECT_EQ(agx_g17p_rt0_pbe_format(PIPE_FORMAT_R8G8B8A8_SRGB),
+             PIPE_FORMAT_R8G8B8A8_UNORM);
+   EXPECT_EQ(agx_g17p_rt0_pbe_format(PIPE_FORMAT_R10G10B10A2_UNORM),
+             PIPE_FORMAT_R10G10B10A2_UNORM);
+
+   tib = agx_build_tilebuffer_layout(packed_float, 1, 2, false);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   tib = agx_build_tilebuffer_layout(packed_float, 1, 1, true);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   /* RGB9E5 needs shared-exponent conversion and stays fail-closed. */
+   enum pipe_format rgb9e5[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R9G9B9E5_FLOAT,
+   };
+   tib = agx_build_tilebuffer_layout(rgb9e5, 1, 1, false);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R9G9B9E5_FLOAT, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
+   EXPECT_FALSE(key.g17p_rt0_eot_i32);
 }

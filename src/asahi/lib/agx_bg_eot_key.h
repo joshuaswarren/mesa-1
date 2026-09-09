@@ -16,6 +16,8 @@ extern "C" {
 void agx_g17p_configure_rt0_eot_key(enum pipe_format format,
                                     struct agx_shader_key *key);
 
+enum pipe_format agx_g17p_rt0_pbe_format(enum pipe_format format);
+
 #ifdef __cplusplus
 }
 #endif

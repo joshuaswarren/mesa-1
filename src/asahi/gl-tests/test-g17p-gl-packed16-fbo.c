@@ -90,8 +90,13 @@ near_pixel(const uint8_t actual[4], const uint8_t expected[4])
 static bool
 exercise_format(GLenum internal_format, const char *name, GLuint program,
                 GLint colour, const uint8_t expected_drawn[4],
-                const uint8_t expected_preserved[4], bool floating, bool noop)
+                const uint8_t expected_preserved[4],
+                const float expected_drawn_float[4],
+                const float expected_preserved_float[4], float tolerance,
+                bool noop)
 {
+   const bool floating = expected_drawn_float != NULL;
+   const bool blend = internal_format == GL_R11F_G11F_B10F;
    GLuint texture = 0, fbo = 0;
    glGenTextures(1, &texture);
    glBindTexture(GL_TEXTURE_2D, texture);
@@ -112,14 +117,19 @@ exercise_format(GLenum internal_format, const char *name, GLuint program,
    glClear(GL_COLOR_BUFFER_BIT);
    glFinish();
 
-   /* A second batch must reload the packed target before the scissored draw
-    * and store all four F16 tile lanes back through the packed PBE. */
+   /* A second batch must reload the target before the scissored draw and
+    * return its physical tile representation through the format-aware PBE. */
    glEnable(GL_SCISSOR_TEST);
    glScissor(0, 0, WIDTH / 2, HEIGHT);
    glUseProgram(program);
-   glUniform4f(colour, 0.8f, 0.6f, 0.4f, 0.0f);
+   glUniform4f(colour, 0.8f, 0.6f, 0.4f, blend ? 0.5f : 0.0f);
+   if (blend) {
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glEnable(GL_BLEND);
+   }
    glDrawArrays(GL_TRIANGLES, 0, 3);
    glFinish();
+   glDisable(GL_BLEND);
    glDisable(GL_SCISSOR_TEST);
 
    uint8_t drawn[4] = {0}, preserved[4] = {0};
@@ -134,13 +144,11 @@ exercise_format(GLenum internal_format, const char *name, GLuint program,
 
    bool pixels;
    if (floating) {
-      const float expected_drawn_float[4] = {0.8f, 0.6f, 0.4f, 1.0f};
-      const float expected_preserved_float[4] = {0.2f, 0.4f, 0.6f, 1.0f};
       pixels = true;
       for (unsigned c = 0; c < 4; ++c) {
-         pixels &= fabsf(drawn_float[c] - expected_drawn_float[c]) < 0.001f;
+         pixels &= fabsf(drawn_float[c] - expected_drawn_float[c]) < tolerance;
          pixels &= fabsf(preserved_float[c] - expected_preserved_float[c]) <
-                   0.001f;
+                   tolerance;
       }
    } else {
       pixels = near_pixel(drawn, expected_drawn) &&
@@ -216,15 +224,29 @@ main(void)
    static const uint8_t rgb5a1_preserved[4] = {49, 99, 156, 255};
    static const uint8_t rgb16f_drawn[4] = {204, 153, 102, 255};
    static const uint8_t rgb16f_preserved[4] = {51, 102, 153, 255};
+   static const float rgb16f_drawn_float[4] = {0.8f, 0.6f, 0.4f, 1.0f};
+   static const float rgb16f_preserved_float[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+   static const float r11g11b10_drawn_float[4] = {
+      0.49609375f, 0.49609375f, 0.4921875f, 1.0f,
+   };
+   static const float r11g11b10_preserved_float[4] = {
+      0.19921875f, 0.3984375f, 0.59375f, 1.0f,
+   };
    const bool rgba4 = exercise_format(GL_RGBA4, "RGBA4", program, colour,
-                                      rgba4_drawn, rgba4_preserved, false,
-                                      noop);
+                                      rgba4_drawn, rgba4_preserved, NULL, NULL,
+                                      0.0f, noop);
    const bool rgb5a1 = exercise_format(GL_RGB5_A1, "RGB5_A1", program,
                                        colour, rgb5a1_drawn,
-                                       rgb5a1_preserved, false, noop);
-   const bool rgb16f = exercise_format(GL_RGB16F, "RGB16F", program, colour,
-                                       rgb16f_drawn, rgb16f_preserved, true,
+                                       rgb5a1_preserved, NULL, NULL, 0.0f,
                                        noop);
+   const bool rgb16f = exercise_format(GL_RGB16F, "RGB16F", program, colour,
+                                       rgb16f_drawn, rgb16f_preserved,
+                                       rgb16f_drawn_float,
+                                       rgb16f_preserved_float, 0.001f, noop);
+   const bool r11g11b10 = exercise_format(
+      GL_R11F_G11F_B10F, "R11F_G11F_B10F", program, colour, rgb16f_drawn,
+      rgb16f_preserved, r11g11b10_drawn_float, r11g11b10_preserved_float,
+      0.0001f, noop);
 
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
@@ -233,7 +255,7 @@ main(void)
    eglDestroySurface(display, surface);
    eglTerminate(display);
 
-   if (!rgba4 || !rgb5a1 || !rgb16f)
+   if (!rgba4 || !rgb5a1 || !rgb16f || !r11g11b10)
       return EXIT_FAILURE;
 
    printf("GL 16-bit FBO clear, reload, draw, and store exact%s\n",

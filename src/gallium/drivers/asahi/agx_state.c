@@ -4181,7 +4181,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             const struct pipe_surface *attachment =
                rt == 0 ? surf : &batch->key.cbufs[rt];
             struct pipe_image_view view = image_view_for_surface(attachment);
-            view.format = util_format_linear(view.format);
+            view.format = agx_g17p_rt0_pbe_format(view.format);
             const bool no_compress =
                batch->feedback & (PIPE_CLEAR_COLOR0 << rt);
             struct agx_gallium_pbe_descriptor *argument =
