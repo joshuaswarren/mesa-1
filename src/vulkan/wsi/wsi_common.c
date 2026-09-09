@@ -2520,6 +2520,24 @@ wsi_common_queue_present(const struct wsi_device *wsi,
 #ifdef HAVE_LIBDRM
          assert(!swapchain->image_info.explicit_sync);
          results[i] = wsi_signal_dma_buf_from_semaphore(swapchain, image);
+         if (results[i] != VK_SUCCESS &&
+             results[i] != VK_ERROR_DEVICE_LOST) {
+            /* The per-image fence was submitted with the dma-buf semaphore.
+             * If exporting or attaching its sync file fails, wait for the
+             * same work on the CPU before handing the image to the backend.
+             * Then reset the internal binary semaphore in case export did
+             * not consume it.  Returning here would leave the image
+             * unacquired in common WSI but permanently busy in the backend. */
+            results[i] = wsi->WaitForFences(vk_device_to_handle(dev), 1,
+                                            &swapchain->fences[image_index],
+                                            true, ~0ull);
+            if (results[i] == VK_SUCCESS) {
+               struct vk_semaphore *semaphore = vk_semaphore_from_handle(
+                  swapchain->dma_buf_semaphore);
+               assert(semaphore->temporary == NULL);
+               results[i] = vk_sync_reset(dev, &semaphore->permanent);
+            }
+         }
          if (results[i] != VK_SUCCESS)
             continue;
 #else

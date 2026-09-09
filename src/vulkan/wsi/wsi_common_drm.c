@@ -201,8 +201,11 @@ wsi_signal_dma_buf_from_semaphore(const struct wsi_swapchain *chain,
    int sync_file_fd = -1;
    result = chain->wsi->GetSemaphoreFdKHR(chain->device, &get_fd_info,
                                           &sync_file_fd);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      if (sync_file_fd >= 0)
+         close(sync_file_fd);
       return result;
+   }
 
    result = wsi_dma_buf_import_sync_file(image->dma_buf_fd, sync_file_fd);
    close(sync_file_fd);

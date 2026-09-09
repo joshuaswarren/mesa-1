@@ -2,9 +2,9 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Public Vulkan oracle for acquire synchronization failure rollback.  A
- * headless swapchain keeps this runnable under the G17P DRM shim while still
- * exercising the common acquire, queue submit, present, and teardown paths.
+ * Public Vulkan oracle for WSI synchronization failure recovery.  A headless
+ * swapchain keeps this runnable under the G17P DRM shim while still exercising
+ * the common acquire, queue submit, present, and teardown paths.
  */
 
 #define VK_NO_PROTOTYPES
@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TEST_NAME "g17p-vulkan-acquire-rollback"
+#define TEST_NAME "g17p-vulkan-wsi-rollback"
 #define T8140_DEVICE_ID 0x8140
 
 #define VK_FN(name) static PFN_##name name
@@ -85,18 +85,56 @@ check(VkResult result, const char *what)
          die("device is missing " #name);                                     \
    } while (0)
 
+static VkResult
+submit_and_present(VkQueue queue, VkSwapchainKHR swapchain,
+                   VkSemaphore acquired, VkSemaphore render_done,
+                   uint32_t image_index, VkResult *per_swapchain)
+{
+   const VkPipelineStageFlags wait_stage =
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+   const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &acquired,
+      .pWaitDstStageMask = &wait_stage,
+      .signalSemaphoreCount = 1,
+      .pSignalSemaphores = &render_done,
+   };
+   check(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
+         "vkQueueSubmit");
+
+   *per_swapchain = VK_SUCCESS;
+   const VkPresentInfoKHR present_info = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &render_done,
+      .swapchainCount = 1,
+      .pSwapchains = &swapchain,
+      .pImageIndices = &image_index,
+      .pResults = per_swapchain,
+   };
+   return vkQueuePresentKHR(queue, &present_info);
+}
+
 int
 main(int argc, char **argv)
 {
    if (argc != 2 || (strcmp(argv[1], "--semaphore-failure") &&
-                     strcmp(argv[1], "--fence-failure")))
-      die("usage: " TEST_NAME " <--semaphore-failure|--fence-failure>");
+                     strcmp(argv[1], "--fence-failure") &&
+                     strcmp(argv[1], "--present-import-failure") &&
+                     strcmp(argv[1], "--present-export-failure")))
+      die("usage: " TEST_NAME " <--semaphore-failure|--fence-failure|"
+           "--present-import-failure|--present-export-failure>");
 
    const char *test_case = argv[1] + 2;
-   const char *configured =
-      getenv("ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
+   const bool present_failure =
+      !strcmp(test_case, "present-import-failure") ||
+      !strcmp(test_case, "present-export-failure");
+   const char *configured = getenv(present_failure
+      ? "ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK"
+      : "ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
    if (!configured || strcmp(configured, test_case))
-      die("DRM-shim acquire rollback oracle is not configured for this case");
+      die("DRM-shim WSI rollback oracle is not configured for this case");
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -277,83 +315,115 @@ main(int argc, char **argv)
    const VkSemaphoreCreateInfo semaphore_info = {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
    };
-   VkSemaphore acquired, render_done;
+   VkSemaphore acquired, render_done, held_acquired = VK_NULL_HANDLE;
    check(vkCreateSemaphore(device, &semaphore_info, NULL, &acquired),
          "vkCreateSemaphore(acquired)");
    check(vkCreateSemaphore(device, &semaphore_info, NULL, &render_done),
          "vkCreateSemaphore(render_done)");
+   if (present_failure) {
+      check(vkCreateSemaphore(device, &semaphore_info, NULL, &held_acquired),
+            "vkCreateSemaphore(held acquired)");
+   }
    const VkFenceCreateInfo fence_info = {
       .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
    };
-   VkFence acquired_fence;
-   check(vkCreateFence(device, &fence_info, NULL, &acquired_fence),
-         "vkCreateFence(acquired)");
+   VkFence acquired_fence = VK_NULL_HANDLE;
+   if (!present_failure) {
+      check(vkCreateFence(device, &fence_info, NULL, &acquired_fence),
+            "vkCreateFence(acquired)");
 
-   uint32_t ignored_index = UINT32_MAX;
-   VkResult result =
-      vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
-                            acquired_fence, &ignored_index);
-   if (result != VK_ERROR_UNKNOWN) {
-      fprintf(stderr,
-              TEST_NAME ": injected acquire returned %d, expected %d\n",
-              result, VK_ERROR_UNKNOWN);
-      return EXIT_FAILURE;
+      uint32_t ignored_index = UINT32_MAX;
+      VkResult result =
+         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
+                               acquired_fence, &ignored_index);
+      if (result != VK_ERROR_UNKNOWN) {
+         fprintf(stderr,
+                 TEST_NAME ": injected acquire returned %d, expected %d\n",
+                 result, VK_ERROR_UNKNOWN);
+         return EXIT_FAILURE;
+      }
+
+      /* This creates a new syncobj immediately after AcquireNextImage
+       * returns.  The shim uses it as a marker and requires every temporary
+       * payload from the failed acquire to have been destroyed first. */
+      VkFence marker_fence;
+      check(vkCreateFence(device, &fence_info, NULL, &marker_fence),
+            "vkCreateFence(cleanup marker)");
+      vkDestroyFence(device, marker_fence, NULL);
+   } else {
+      uint32_t first_image = UINT32_MAX;
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
+                                  VK_NULL_HANDLE, &first_image),
+            "vkAcquireNextImageKHR(first present)");
+      if (first_image != 0)
+         die("first acquire did not select image zero");
+
+      VkResult per_swapchain = VK_SUCCESS;
+      VkResult result = submit_and_present(queue, swapchain, acquired,
+                                           render_done, first_image,
+                                           &per_swapchain);
+      if (result != VK_SUCCESS || per_swapchain != VK_SUCCESS) {
+         fprintf(stderr,
+                 TEST_NAME ": dma-buf sync-file fallback returned %d/%d\n",
+                 result, per_swapchain);
+         return EXIT_FAILURE;
+      }
    }
 
-   /* This creates a new syncobj immediately after AcquireNextImage returns.
-    * The shim uses it as a marker and requires every temporary payload from
-    * the failed acquire to have been destroyed before this point. */
-   VkFence marker_fence;
-   check(vkCreateFence(device, &fence_info, NULL, &marker_fence),
-         "vkCreateFence(cleanup marker)");
-   vkDestroyFence(device, marker_fence, NULL);
-
+   uint32_t held_image = UINT32_MAX;
    uint32_t image_index = UINT32_MAX;
-   check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
-                               acquired_fence, &image_index),
-         "vkAcquireNextImageKHR(retry)");
+   if (present_failure) {
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, held_acquired,
+                                  VK_NULL_HANDLE, &held_image),
+            "vkAcquireNextImageKHR(held image)");
+      if (held_image == 0)
+         die("headless present did not defer its just-presented image");
+
+      check(vkAcquireNextImageKHR(device, swapchain, 0, acquired,
+                                  VK_NULL_HANDLE, &image_index),
+            "vkAcquireNextImageKHR(reacquire presented image)");
+   } else {
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquired,
+                                  acquired_fence, &image_index),
+            "vkAcquireNextImageKHR(retry)");
+   }
    if (image_index != 0)
       die("failed acquire leaked image zero from the available pool");
 
-   const VkPipelineStageFlags wait_stage =
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-   const VkSubmitInfo submit_info = {
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &acquired,
-      .pWaitDstStageMask = &wait_stage,
-      .signalSemaphoreCount = 1,
-      .pSignalSemaphores = &render_done,
-   };
-   check(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
-         "vkQueueSubmit(recovered image)");
-
    VkResult per_swapchain = VK_SUCCESS;
-   const VkPresentInfoKHR present_info = {
-      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-      .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &render_done,
-      .swapchainCount = 1,
-      .pSwapchains = &swapchain,
-      .pImageIndices = &image_index,
-      .pResults = &per_swapchain,
-   };
-   check(vkQueuePresentKHR(queue, &present_info),
+   check(submit_and_present(queue, swapchain, acquired, render_done,
+                            image_index, &per_swapchain),
          "vkQueuePresentKHR(recovered image)");
    check(per_swapchain, "VkPresentInfoKHR::pResults[0]");
+
+   if (present_failure) {
+      check(submit_and_present(queue, swapchain, held_acquired, render_done,
+                               held_image, &per_swapchain),
+            "vkQueuePresentKHR(held image)");
+      check(per_swapchain, "held VkPresentInfoKHR::pResults[0]");
+   }
    check(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
 
-   vkDestroyFence(device, acquired_fence, NULL);
+   if (acquired_fence != VK_NULL_HANDLE)
+      vkDestroyFence(device, acquired_fence, NULL);
    vkDestroySemaphore(device, render_done, NULL);
    vkDestroySemaphore(device, acquired, NULL);
+   if (held_acquired != VK_NULL_HANDLE)
+      vkDestroySemaphore(device, held_acquired, NULL);
    vkDestroySwapchainKHR(device, swapchain, NULL);
    vkDestroyDevice(device, NULL);
    vkDestroySurfaceKHR(instance, surface, NULL);
    vkDestroyInstance(instance, NULL);
    dlclose(loader);
 
-   printf(TEST_NAME ": PASS — %s rolled back image zero and temporary "
-                    "payloads; retry submit/present/teardown completed\n",
-          test_case);
+   if (present_failure) {
+      printf(TEST_NAME ": PASS — dma-buf sync-file %s failure fell back to "
+                       "a CPU wait; image zero was presented and reacquired\n",
+             strstr(test_case, "import") ? "import" : "export");
+   } else {
+      printf(TEST_NAME ": PASS — %s rolled back image zero and temporary "
+                       "payloads; retry submit/present/teardown completed\n",
+             test_case);
+   }
    return EXIT_SUCCESS;
 }

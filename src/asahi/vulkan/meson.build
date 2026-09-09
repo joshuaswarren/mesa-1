@@ -1932,9 +1932,9 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    # Public Vulkan WSI oracle.  The drm-shim injects temporary sync payload
-    # import failures and checks that AcquireNextImage rolls the image and all
-    # partial payloads back before returning to the application.
+    # Public Vulkan WSI oracle.  The drm-shim injects acquire payload and
+    # present sync-file failures, then checks exact rollback/fallback ordering,
+    # image reuse, and complete lifetime balance.
     g17p_acquire_rollback = executable(
       'g17p-vulkan-acquire-rollback',
       files('tests/g17p_vulkan_acquire_rollback.c'),
