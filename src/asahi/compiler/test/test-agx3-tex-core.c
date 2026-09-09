@@ -403,17 +403,17 @@ test_sample_witnesses(void)
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
-       "05800cb8b0001000010010001200", NULL},
+       "05800cb8b0001000010010000100", NULL},
       {"native cube level(2.0)",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1,
         .wait_mask = 1, .coord_kill = true, .final = true, .cube = true},
-       "05800cb8b0001300010010081200", NULL},
+       "05800cb8b0001300010010080100", NULL},
       {"native cube register level",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
-       "05800cb8b0000003010010001200", NULL},
+       "05800cb8b0000003010010000100", NULL},
       {"native cube-array dynamic layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -517,6 +517,22 @@ test_sample_witnesses(void)
          hex_eq(bytes, length, "05800cb8b0000000010010001200"));
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &abi_sample,
                                  bytes, &length));
+
+   /* The same hardware differential applies to cube dimensions.  The
+    * production driver ABI must keep 0/4; selecting Apple's unrelated full
+    * fragment profile 4/8 produces the fixed half-gray failure. */
+   abi_sample.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+   abi_sample.cube = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &abi_sample,
+                                bytes, &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0001000010010000100"));
+   abi_sample.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &abi_sample,
+                                bytes, &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800cb8b0001000010010001200"));
+   abi_sample.cube = false;
 
    /* Fresh Metal 32023.917 argument-buffer witness: uniform halves20/24
     * carry the texture/sampler pair under the same complete Apple ABI. */

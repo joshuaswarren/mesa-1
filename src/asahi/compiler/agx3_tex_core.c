@@ -368,10 +368,14 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   /* Register/uniform cube operands have their own native EP4 profile. Both
-    * fresh argument-buffer cube witnesses keep f83/f112 at 0/4, while the
-    * immediate cube and every qualified array form use 4/8. */
-   const bool dimension_profile = d->array || (d->cube && immediate);
+   /* The driver descriptor ABI uses f83/f112=0/4 for cubes regardless of
+    * whether their descriptor indices are immediate or indirect.  Fresh
+    * attachment-only Metal 32023.917 cube fragments (native SHA256
+    * d80b059f5843e1b425820e87cffd533d826650c11c2624dd1b949a3d7c555b71)
+    * confirm that exact profile, and the hardware differential returns fixed
+    * half-gray for 4/8.  Array samples retain their separately witnessed
+    * dimension profile. */
+   const bool dimension_profile = d->array;
    if ((operand_profile & 1) ||
        (dimension_profile && !d->shadow))
       base[nb++] = (struct agx3_field_kv)KV(83, 4);

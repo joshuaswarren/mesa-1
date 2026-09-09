@@ -5760,12 +5760,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset -= initial_size;
                g17p_colour_open = true;
             }
-            /* ShaderInfo fields 38/42 describe the staging-file extent in
-             * bytes, not the highest GPR supplying an operand.  Fresh
-             * attachment-only applegpu_g17p programs report D=8 for plain,
-             * retained, buffer-derived, and the complete vkcube instruction
-             * family.  All of those 2D samples publish into staging[0]/[2]
-             * even when the GPR coordinates are r4/r5 or later. */
+            /* ShaderInfo fields 38/42 describe the sampler-private staging
+             * extent in bytes, not the highest GPR supplying an operand.
+             * Fresh attachment-only 2D families report 8 bytes and publish
+             * into staging[0]/[2], while cube, cube-array and cube-shadow
+             * families report 16 bytes.  Earlier 24-byte cube witnesses also
+             * wrote a device buffer whose independent staging requirement
+             * dominated.  Keep the extents dimension-specific and independent
+             * of post-RA source placement and scoreboard slot. */
             const bool staged_scalar =
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
@@ -5774,7 +5776,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
                     (I->dim == AGX_DIM_CUBE ||
-                     I->dim == AGX_DIM_CUBE_ARRAY) ? 12
+                     I->dim == AGX_DIM_CUBE_ARRAY) ? 8
                     : native_staged_coords ? 4
                     : I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
                     : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||

@@ -8422,7 +8422,7 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0xb8,0xb0,0x00,0x10,
-      0x00,0x01,0x00,0x10,0x00,0x12,0x00,
+      0x00,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,
@@ -8432,9 +8432,9 @@ TEST_F(AGX3PackBinary, TextureCubeUsesNativeDimensionAndThirdCoordinate)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
-   /* applegpu_g17p ShaderInfo fields 38/42 are 24 bytes for this exact
-    * one-cube shape. They are sampler-private staging, not coord GPR 4..8. */
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+   /* Attachment-only applegpu_g17p cube fragments report fields38/42 = 16.
+    * They describe sampler-private staging, not coordinate GPRs 4..8. */
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
@@ -8505,9 +8505,8 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
 
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->max_reg, 43u);
-   /* The lane-indexed Apple argument-buffer cube uses slot 6 and still
-    * reports fields38/42 = 24: scoreboard slot does not resize staging. */
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+   /* The lane-indexed cube uses slot 6 without resizing the private extent. */
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
@@ -8592,7 +8591,7 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
 TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
@@ -8655,11 +8654,11 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       static const uint8_t native_immediate[] = {
          0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x13,
-         0x00, 0x01, 0x00, 0x10, 0x08, 0x12, 0x00,
+         0x00, 0x01, 0x00, 0x10, 0x08, 0x01, 0x00,
       };
       static const uint8_t native_register[] = {
          0x25, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00,
-         0x03, 0x01, 0x00, 0x10, 0x00, 0x12, 0x00,
+         0x03, 0x01, 0x00, 0x10, 0x00, 0x01, 0x00,
       };
       const uint8_t *native = dynamic ? native_register : native_immediate;
       EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
@@ -8669,7 +8668,7 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       ASSERT_TRUE(agx3_pack_end(enc, &end));
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
-      EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
    }
 }
 
@@ -9298,7 +9297,7 @@ TEST_F(AGX3PackBinary, ShadowCubeStagesCompareBeforeCEM)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
 TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
@@ -9366,7 +9365,7 @@ TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 12);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
 TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
