@@ -8798,6 +8798,8 @@ TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 4, 2, 1, 0, false, true,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
    d.dest = 0;
    d.width = AGX3_TEX_W32;
@@ -8861,6 +8863,8 @@ TEST_F(AGX3PackBinary, ShadowCubeStagesCompareBeforeCEM)
    }
    ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true, bytes,
                                     &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    const struct agx3_tex_sample_desc sample = {
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
@@ -8926,6 +8930,8 @@ TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
    }
    ASSERT_TRUE(agx3_tex_stage_cube_array_shadow(
       enc, 22, 1, 0, false, true, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    const struct agx3_tex_sample_desc sample = {
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
