@@ -79,6 +79,7 @@ struct wrapper_control {
    atomic_uint injected_failures;
    atomic_uint created;
    atomic_uint destroyed;
+   unsigned fail_on_call;
    void *fail_proxy;
 };
 
@@ -109,7 +110,7 @@ wl_proxy_create_wrapper(void *proxy)
        proxy == wrapper_control.fail_proxy) {
       const unsigned call =
          atomic_fetch_add(&wrapper_control.calls_since_arm, 1) + 1;
-      if (call == 1 &&
+      if (call == wrapper_control.fail_on_call &&
           atomic_exchange(&wrapper_control.fail_enabled, false)) {
          atomic_fetch_add(&wrapper_control.injected_failures, 1);
          return NULL;
@@ -535,10 +536,14 @@ main(int argc, char **argv)
       argc == 2 && !strcmp(argv[1], "--present-allocation-failure");
    const bool surface_init_retry =
       argc == 2 && !strcmp(argv[1], "--surface-init-retry");
+   const bool present_wrapper_retry =
+      argc == 2 && !strcmp(argv[1], "--present-wrapper-retry");
    if (argc > 2 ||
-       (argc == 2 && !present_allocation_failure && !surface_init_retry))
+       (argc == 2 && !present_allocation_failure && !surface_init_retry &&
+        !present_wrapper_retry))
       die("usage: " TEST_NAME
-          " [--present-allocation-failure|--surface-init-retry]");
+          " [--present-allocation-failure|--surface-init-retry|"
+          "--present-wrapper-retry]");
 
    struct mock_server server = {0};
    server.display = wl_display_create();
@@ -583,7 +588,8 @@ main(int argc, char **argv)
    LOAD_GLOBAL(vkCreateInstance);
 
    struct allocation_control allocation_control = {0};
-   atomic_store(&allocation_control.poison_frees, surface_init_retry);
+   atomic_store(&allocation_control.poison_frees,
+                surface_init_retry || present_wrapper_retry);
    const VkAllocationCallbacks allocation_callbacks = {
       .pUserData = &allocation_control,
       .pfnAllocation = test_alloc,
@@ -591,7 +597,8 @@ main(int argc, char **argv)
       .pfnFree = test_free,
    };
    const VkAllocationCallbacks *instance_allocator =
-      (present_allocation_failure || surface_init_retry) ? &allocation_callbacks : NULL;
+      (present_allocation_failure || surface_init_retry ||
+       present_wrapper_retry) ? &allocation_callbacks : NULL;
 
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -756,8 +763,9 @@ main(int argc, char **argv)
    };
 
    uint32_t expected_buffers = 0;
-   if (surface_init_retry) {
+   if (surface_init_retry || present_wrapper_retry) {
       atomic_store(&wrapper_control.calls_since_arm, 0);
+      wrapper_control.fail_on_call = surface_init_retry ? 1 : 2;
       wrapper_control.fail_proxy = wl_surface;
       atomic_store(&wrapper_control.fail_enabled, true);
 
@@ -768,14 +776,15 @@ main(int argc, char **argv)
          if (result == VK_SUCCESS)
             vkDestroySwapchainKHR(device, failed, NULL);
          fprintf(stderr,
-                 TEST_NAME ": surface wrapper failure returned %d, expected "
+                 TEST_NAME ": targeted wrapper failure returned %d, expected "
                            "%d\n",
                  result, VK_ERROR_OUT_OF_HOST_MEMORY);
          return EXIT_FAILURE;
       }
       if (atomic_load(&wrapper_control.injected_failures) != 1 ||
-          atomic_load(&wrapper_control.calls_since_arm) != 1)
-         die("surface wrapper creation did not fail exactly once");
+          atomic_load(&wrapper_control.calls_since_arm) !=
+             wrapper_control.fail_on_call)
+         die("target wrapper creation did not fail exactly once");
    }
 
    VkSwapchainKHR first;
@@ -862,7 +871,7 @@ main(int argc, char **argv)
       vkDestroySemaphore(device, render_done, NULL);
       vkDestroySemaphore(device, acquired, NULL);
       vkDestroySwapchainKHR(device, first, NULL);
-   } else if (surface_init_retry) {
+   } else if (surface_init_retry || present_wrapper_retry) {
       vkDestroySwapchainKHR(device, first, NULL);
 
       VkSwapchainKHR second;
@@ -913,7 +922,8 @@ main(int argc, char **argv)
    const unsigned wrappers_created = atomic_load(&wrapper_control.created);
    const unsigned wrappers_destroyed = atomic_load(&wrapper_control.destroyed);
    const unsigned exact_buffers =
-      present_allocation_failure ? 4 : surface_init_retry ? 8 : 12;
+      present_allocation_failure ? 4 :
+      (surface_init_retry || present_wrapper_retry) ? 8 : 12;
    if (expected_buffers != exact_buffers || surfaces_created != 1 ||
        surfaces_destroyed != 1 ||
        pools_created != expected_buffers || pools_destroyed != expected_buffers ||
@@ -944,6 +954,12 @@ main(int argc, char **argv)
              buffers_created, buffers_destroyed);
    } else if (surface_init_retry) {
       printf(TEST_NAME ": PASS — surface wrapper allocation failed once, "
+                       "then retry and reuse succeeded; Wayland objects=%u/%u "
+                       "wrappers=%u/%u\n",
+             buffers_created, buffers_destroyed, wrappers_created,
+             wrappers_destroyed);
+   } else if (present_wrapper_retry) {
+      printf(TEST_NAME ": PASS — present wrapper allocation failed once, "
                        "then retry and reuse succeeded; Wayland objects=%u/%u "
                        "wrappers=%u/%u\n",
              buffers_created, buffers_destroyed, wrappers_created,

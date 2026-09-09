@@ -3924,6 +3924,10 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
        * QueuePresentKHR frame callback's queue. */
       chain->present_ids.frame_fallback = true;
       chain->present_ids.surface = wl_proxy_create_wrapper(wsi_wl_surface->base.surface);
+      if (!chain->present_ids.surface) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_free_wl_chain;
+      }
       wl_proxy_set_queue((struct wl_proxy *) chain->present_ids.surface,
                          chain->present_ids.queue);
    }
