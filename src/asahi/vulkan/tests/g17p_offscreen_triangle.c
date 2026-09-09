@@ -336,6 +336,10 @@
 #define G17P_TEXTURE_3D 0
 #endif
 
+#ifndef G17P_YCBCR
+#define G17P_YCBCR 0
+#endif
+
 #ifndef G17P_MULTIVIEW
 #define G17P_MULTIVIEW 0
 #endif
@@ -365,9 +369,14 @@
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_ALPHA_COMPOSITE ||                     \
     G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE || G17P_SHADOW_COMPARE || \
-    G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE || G17P_TEXTURE_3D)
+    G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE || G17P_TEXTURE_3D ||          \
+    G17P_YCBCR)
 
-#if G17P_SHADOW_COMPARE
+#if G17P_YCBCR
+#define TEXTURE_FORMAT VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
+#define TEXTURE_ASPECT VK_IMAGE_ASPECT_COLOR_BIT
+#define TEXTURE_PIXEL_BYTES 1
+#elif G17P_SHADOW_COMPARE
 #define TEXTURE_FORMAT VK_FORMAT_D16_UNORM
 #define TEXTURE_ASPECT VK_IMAGE_ASPECT_DEPTH_BIT
 #define TEXTURE_PIXEL_BYTES 2
@@ -434,7 +443,8 @@
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
      G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
      G17P_SAMPLE_RATE_SHADING + (G17P_MSAA_COVERAGE != 0) +                \
-     G17P_TEXTURE_ALPHA_COMPOSITE + G17P_SHADER_QUAD_CONTROL) > 1
+     G17P_TEXTURE_ALPHA_COMPOSITE + G17P_YCBCR +                            \
+     G17P_SHADER_QUAD_CONTROL) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
@@ -528,6 +538,11 @@
 #include "g17p_vulkan_texture_3d_frag.h"
 #define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texture_3d_frag_spv
+#elif G17P_YCBCR
+#include "g17p_vulkan_implicit_lod_frag.h"
+#include "g17p_vulkan_implicit_lod_vert.h"
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_implicit_lod_frag_spv
 #elif G17P_INSTANCE_RATE
 #include "g17p_vulkan_instance_rate_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -1440,6 +1455,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_YCBCR
+#define PROBE_NAME "g17p-vulkan-ycbcr-420"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_BRESENHAM_LINES
 #define PROBE_NAME "g17p-vulkan-bresenham-lines"
 #define READBACK_IMAGE_USAGE 0
@@ -1503,7 +1523,7 @@ VK_FN(vkEnumeratePhysicalDevices);
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
@@ -1526,6 +1546,9 @@ VK_FN(vkMapMemory);
 VK_FN(vkCreateImageView);
 #if G17P_TEXTURE_ORACLE
 VK_FN(vkCreateSampler);
+#if G17P_YCBCR
+VK_FN(vkCreateSamplerYcbcrConversion);
+#endif
 VK_FN(vkCreateDescriptorSetLayout);
 VK_FN(vkCreateDescriptorPool);
 VK_FN(vkAllocateDescriptorSets);
@@ -1829,6 +1852,10 @@ verify_readback(const uint8_t *map)
    /* LOD1 is 32x32x2; z=0.75 addresses its blue slice 1.  Its red slice 0
     * catches dropped or 2D-reinterpreted Z. */
    static const uint8_t expected[4] = {0, 0, 255, 255};
+#elif G17P_YCBCR
+   /* RGB_IDENTITY exposes the conversion's raw Cr-Y-Cb order. Distinct
+    * constants in both planes catch a missing plane or swapped RG chroma. */
+   static const uint8_t expected[4] = {204, 51, 102, 255};
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
    /* Descriptor 1 mip 1 is a transparent/green checker. A quarter-texel
     * offset makes linear filtering produce 0, 2/8, 3/8, 5/8 or 6/8
@@ -2128,6 +2155,7 @@ main(void)
        getenv("G17P_CUBE_SAMPLE_RECORD_ONLY") != NULL) ||
       (G17P_TEXTURE_3D &&
        getenv("G17P_TEXTURE_3D_RECORD_ONLY") != NULL) ||
+      (G17P_YCBCR && getenv("G17P_YCBCR_RECORD_ONLY") != NULL) ||
       (G17P_VERTEX_FORMAT &&
        getenv("G17P_VERTEX_FORMAT_RECORD_ONLY") != NULL) ||
       (G17P_INSTANCE_RATE &&
@@ -2249,7 +2277,7 @@ main(void)
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2553,7 +2581,7 @@ main(void)
    };
 #endif
 #endif
-#if G17P_F16_IO || G17P_MULTIVIEW
+#if G17P_F16_IO || G17P_MULTIVIEW || G17P_YCBCR
    const VkPhysicalDeviceVulkan11Features enabled11 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
 #if G17P_F16_IO
@@ -2561,6 +2589,9 @@ main(void)
 #endif
 #if G17P_MULTIVIEW
       .multiview = VK_TRUE,
+#endif
+#if G17P_YCBCR
+      .samplerYcbcrConversion = VK_TRUE,
 #endif
    };
 #endif
@@ -2658,7 +2689,7 @@ main(void)
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 #if G17P_SHADER_QUAD_CONTROL
       .pNext = &quad_enabled,
-#elif G17P_F16_IO || G17P_MULTIVIEW
+#elif G17P_F16_IO || G17P_MULTIVIEW || G17P_YCBCR
       .pNext = &enabled11,
 #elif G17P_BRESENHAM_LINES
       .pNext = &enabled_lines,
@@ -2726,6 +2757,9 @@ main(void)
    LOAD_DEVICE(device, vkCreateImageView);
 #if G17P_TEXTURE_ORACLE
    LOAD_DEVICE(device, vkCreateSampler);
+#if G17P_YCBCR
+   LOAD_DEVICE(device, vkCreateSamplerYcbcrConversion);
+#endif
    LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
    LOAD_DEVICE(device, vkCreateDescriptorPool);
    LOAD_DEVICE(device, vkAllocateDescriptorSets);
@@ -3272,7 +3306,10 @@ main(void)
    enum {
       TEXTURE_WIDTH = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_WIDTH * 2 : 64,
       TEXTURE_HEIGHT = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_HEIGHT * 2 : 64,
-#if G17P_CUBE_SAMPLE
+#if G17P_YCBCR
+      TEXTURE_LEVELS = 1,
+      TEXTURE_LAYERS = 1,
+#elif G17P_CUBE_SAMPLE
       TEXTURE_LEVELS = 1,
       TEXTURE_LAYERS = 6,
 #elif G17P_TEXTURE_3D
@@ -3287,6 +3324,11 @@ main(void)
 #endif
       TEXTURE_DEPTH = G17P_TEXTURE_3D ? 4 : 1,
       TEXTURE_GUARD_BYTES = 64,
+#if G17P_YCBCR
+      TEXTURE_LEVEL0_BYTES = TEXTURE_WIDTH * TEXTURE_HEIGHT,
+      TEXTURE_LEVEL1_BYTES = (TEXTURE_WIDTH / 2) * (TEXTURE_HEIGHT / 2) * 2,
+      TEXTURE_LEVEL2_BYTES = 0,
+#else
       TEXTURE_LEVEL0_BYTES =
          TEXTURE_WIDTH * TEXTURE_HEIGHT * TEXTURE_PIXEL_BYTES *
             TEXTURE_LAYERS * TEXTURE_DEPTH,
@@ -3299,6 +3341,7 @@ main(void)
             ? 0
             : (TEXTURE_WIDTH / 4) * (TEXTURE_HEIGHT / 4) *
                  TEXTURE_PIXEL_BYTES * TEXTURE_LAYERS,
+#endif
       TEXTURE_DATA_BYTES = TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES +
                            TEXTURE_LEVEL2_BYTES,
       TEXTURE_UPLOAD_BYTES = TEXTURE_DATA_BYTES + 2 * TEXTURE_GUARD_BYTES,
@@ -3306,7 +3349,19 @@ main(void)
 #if !G17P_SHADOW_COMPARE
    uint8_t texture_upload_expected[TEXTURE_UPLOAD_BYTES];
    memset(texture_upload_expected, 0xa5, sizeof(texture_upload_expected));
-#if G17P_CUBE_SAMPLE
+#if G17P_YCBCR
+   /* Plane 0 is Y=51. Plane 1 stores interleaved Cb=102, Cr=204. The
+    * conversion uses RGB_IDENTITY so the exact shader result is Cr,Y,Cb. */
+   memset(texture_upload_expected + TEXTURE_GUARD_BYTES, 51,
+          TEXTURE_LEVEL0_BYTES);
+   uint8_t *chroma = texture_upload_expected + TEXTURE_GUARD_BYTES +
+                     TEXTURE_LEVEL0_BYTES;
+   for (size_t texel = 0; texel < (TEXTURE_WIDTH / 2) * (TEXTURE_HEIGHT / 2);
+        ++texel) {
+      chroma[texel * 2 + 0] = 102;
+      chroma[texel * 2 + 1] = 204;
+   }
+#elif G17P_CUBE_SAMPLE
    static const uint8_t face_colours[TEXTURE_LAYERS][4] = {
       {0xff, 0x00, 0x00, 0xff}, {0x00, 0xff, 0x00, 0xff},
       {0x00, 0x00, 0xff, 0xff}, {0xff, 0xff, 0x00, 0xff},
@@ -3668,8 +3723,37 @@ main(void)
 #endif
 
 #if G17P_TEXTURE_ORACLE
+#if G17P_YCBCR
+   const VkSamplerYcbcrConversionCreateInfo ycbcr_info = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+      .format = TEXTURE_FORMAT,
+      .ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY,
+      .ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL,
+      .components = {
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+      },
+      .xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
+      .yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
+      .chromaFilter = VK_FILTER_NEAREST,
+      .forceExplicitReconstruction = VK_FALSE,
+   };
+   VkSamplerYcbcrConversion ycbcr_conversion;
+   check(vkCreateSamplerYcbcrConversion(device, &ycbcr_info, NULL,
+                                         &ycbcr_conversion),
+         "vkCreateSamplerYcbcrConversion");
+   const VkSamplerYcbcrConversionInfo sampler_ycbcr_info = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+      .conversion = ycbcr_conversion,
+   };
+#endif
    const VkImageViewCreateInfo texture_view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+#if G17P_YCBCR
+      .pNext = &sampler_ycbcr_info,
+#endif
       .image = texture,
       .viewType = G17P_CUBE_SAMPLE ? VK_IMAGE_VIEW_TYPE_CUBE
                   : G17P_TEXTURE_3D ? VK_IMAGE_VIEW_TYPE_3D
@@ -3698,6 +3782,9 @@ main(void)
 #endif
    const VkSamplerCreateInfo sampler_info = {
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+#if G17P_YCBCR
+      .pNext = &sampler_ycbcr_info,
+#endif
       .magFilter = G17P_TEXTURE_ALPHA_COMPOSITE ? VK_FILTER_LINEAR
                                                 : VK_FILTER_NEAREST,
       .minFilter = G17P_TEXTURE_ALPHA_COMPOSITE ? VK_FILTER_LINEAR
@@ -3737,6 +3824,9 @@ main(void)
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+#if G17P_YCBCR
+      .pImmutableSamplers = &sampler,
+#endif
    }};
 #endif
    const VkDescriptorSetLayoutCreateInfo set_layout_info = {
@@ -4574,6 +4664,22 @@ main(void)
 #elif G17P_TEXTURE_3D
    /* Host-populated optimal storage avoids conflating 3D sampling with the
     * separate, not-yet-witnessed G17P 3D storage-image meta-copy path. */
+#elif G17P_YCBCR
+   const VkBufferImageCopy texture_copies[2] = {
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES,
+         .imageSubresource = {VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1},
+         .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
+      },
+      {
+         .bufferOffset = TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
+         .imageSubresource = {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1},
+         .imageExtent = {TEXTURE_WIDTH / 2, TEXTURE_HEIGHT / 2, 1},
+      },
+   };
+   vkCmdCopyBufferToImage(command_buffer, texture_upload.buffer, texture,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 2,
+                          texture_copies);
 #else
    const VkBufferImageCopy texture_copies[TEXTURE_LEVELS] = {
       {
@@ -5301,6 +5407,11 @@ main(void)
                      "blue slice 1 from two distinct mip slices immediately/3s; "
                      "all source/readback guards unchanged, checksum %016" PRIx64
                      "\n", checksum);
+#elif G17P_YCBCR
+   printf(PROBE_NAME ": PASS — two-plane 4:2:0 upload and immutable "
+                     "RGB-identity conversion produced exact Cr/Y/Cb output "
+                     "immediately/3s; all source/readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #elif G17P_VERTEX_FORMAT == 1
    printf(PROBE_NAME ": PASS — RGBA8 UNORM vertex conversion exact "
                      "immediately/3s, binding 3, offset 64, stride 13, "

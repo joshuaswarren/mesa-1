@@ -1488,8 +1488,14 @@ static inline struct vk_meta_copy_image_properties
 hk_meta_copy_get_image_properties(struct hk_image *img)
 {
    struct vk_meta_copy_image_properties props = {.tile_size = {16, 16, 1}};
+   const struct vk_format_ycbcr_info *ycbcr =
+      vk_format_get_ycbcr_info(img->vk.format);
 
-   if (!vk_format_is_depth_or_stencil(img->vk.format)) {
+   if (ycbcr && ycbcr->n_planes > 1) {
+      assert(ycbcr->n_planes <= ARRAY_SIZE(props.plane));
+      for (uint32_t plane = 0; plane < ycbcr->n_planes; ++plane)
+         props.plane[plane].view_format = ycbcr->planes[plane].format;
+   } else if (!vk_format_is_depth_or_stencil(img->vk.format)) {
       props.color.view_format = img->vk.format;
    } else {
       switch (img->vk.format) {
@@ -1858,7 +1864,9 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
                                      region.bufferImageHeight : region.imageExtent.height;
             const uint64_t columns = region.bufferRowLength ?
                                         region.bufferRowLength : region.imageExtent.width;
-            const uint64_t pixel_size = vk_format_get_blocksize(dst_image->vk.format);
+            const VkFormat copy_format = aspect_format(
+               dst_image->vk.format, region.imageSubresource.aspectMask);
+            const uint64_t pixel_size = vk_format_get_blocksize(copy_format);
             if (columns > UINT64_MAX / rows ||
                 columns * rows > UINT64_MAX / pixel_size) {
                vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);

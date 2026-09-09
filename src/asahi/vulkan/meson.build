@@ -239,6 +239,7 @@ if with_tests
       files('tests/test-hk-g17p-meta-copy-core.c',
             'hk_g17p_meta_copy_core.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_vulkan_util],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),
@@ -696,6 +697,18 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_IMPLICIT_LOD=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Exact two-plane 4:2:0 upload and immutable sampler-conversion oracle.
+    # Record-only mode covers both native per-plane meta uploads plus the
+    # G17P fragment shader's two indexed texture fetches under drm-shim.
+    executable(
+      'g17p-vulkan-ycbcr-420',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_YCBCR=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

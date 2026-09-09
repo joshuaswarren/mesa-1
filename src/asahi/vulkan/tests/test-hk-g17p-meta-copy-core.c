@@ -112,6 +112,54 @@ main(void)
    bad.layout = VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
 
+   /* Multi-planar copies address one plane at a time. The chroma extent is
+    * expressed in plane texels, so 4:2:0 has a 32x32 RG8 plane beneath this
+    * 64x64 image while 4:2:2 retains the full 64-pixel height. */
+   struct hk_g17p_buffer_to_image_copy ycbcr = vkcube;
+   ycbcr.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+   ycbcr.plane_count = 2;
+   ycbcr.image_extent = (VkExtent3D){64, 64, 1};
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+   ycbcr.copy_extent = (VkExtent3D){64, 64, 1};
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+   ycbcr.copy_extent = (VkExtent3D){32, 32, 1};
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.copy_extent.width = 33;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.copy_extent = (VkExtent3D){32, 32, 1};
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+   ycbcr.plane_count = 1;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.plane_count = 2;
+   ycbcr.mip_levels = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.mip_levels = 1;
+   ycbcr.image_extent.width = 63;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+
+   ycbcr.image_extent = (VkExtent3D){64, 64, 1};
+   ycbcr.format = VK_FORMAT_G8_B8R8_2PLANE_422_UNORM;
+   ycbcr.copy_extent = (VkExtent3D){32, 64, 1};
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.copy_extent.height = 65;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+
+   ycbcr.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+   ycbcr.plane_count = 3;
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_2_BIT;
+   ycbcr.copy_extent = (VkExtent3D){32, 32, 1};
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+
+   ycbcr.format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+   ycbcr.plane_count = 2;
+   ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+
    /* Exactly the layouts vkCmdCopyBufferToImage accepts as dstImageLayout.
     * VK_IMAGE_LAYOUT_GENERAL is what a VK_KHR_unified_image_layouts client
     * (Zink with driver_workarounds.general_layout) passes for every copy, so

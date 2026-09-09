@@ -61,7 +61,8 @@ hk_g17p_block_format_family(VkFormat format);
 
 /* Native uncompressed color uploads preserve rectangles and mip/layer
  * subresources. Multi-layer regions are split into native single-layer
- * passes without changing source layout or copying index/pixel data. */
+ * passes without changing source layout or copying index/pixel data. 8-bit
+ * multi-planar YCbCr uploads use the same per-plane R8/RG8 render path. */
 bool hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy);
 

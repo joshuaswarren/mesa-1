@@ -4,6 +4,7 @@
  */
 
 #include "hk_g17p_meta_copy_core.h"
+#include "vk_format.h"
 
 bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
@@ -42,16 +43,10 @@ hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)
 {
    if (!copy || copy->chip != AGX_CHIP_G17P ||
-       (copy->format != VK_FORMAT_R8_UNORM &&
-        copy->format != VK_FORMAT_B8G8R8A8_UNORM &&
-        copy->format != VK_FORMAT_R8G8B8A8_UNORM &&
-        copy->format != VK_FORMAT_R8G8B8A8_UINT &&
-        copy->format != VK_FORMAT_A2B10G10R10_UNORM_PACK32) ||
        !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
        copy->image_type != VK_IMAGE_TYPE_2D ||
-       copy->samples != VK_SAMPLE_COUNT_1_BIT || copy->plane_count != 1 ||
+       copy->samples != VK_SAMPLE_COUNT_1_BIT ||
        copy->mip_levels == 0 || copy->array_layers == 0 ||
-       copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
        copy->mip_level >= copy->mip_levels || copy->mip_level >= 32 ||
        copy->base_array_layer >= copy->array_layers ||
        copy->layer_count == 0 ||
@@ -64,8 +59,59 @@ hk_g17p_buffer_to_image_copy_supported(
        copy->copy_extent.width == 0 || copy->copy_extent.height == 0)
       return false;
 
-   const uint32_t width = copy->image_extent.width >> copy->mip_level;
-   const uint32_t height = copy->image_extent.height >> copy->mip_level;
+   VkFormat plane_format = copy->format;
+   uint32_t width_scale = 1, height_scale = 1;
+   const struct vk_format_ycbcr_info *ycbcr =
+      vk_format_get_ycbcr_info(copy->format);
+
+   if (ycbcr && ycbcr->n_planes > 1) {
+      uint32_t plane;
+      switch (copy->aspect) {
+      case VK_IMAGE_ASPECT_PLANE_0_BIT:
+         plane = 0;
+         break;
+      case VK_IMAGE_ASPECT_PLANE_1_BIT:
+         plane = 1;
+         break;
+      case VK_IMAGE_ASPECT_PLANE_2_BIT:
+         plane = 2;
+         break;
+      default:
+         return false;
+      }
+
+      if (copy->plane_count != ycbcr->n_planes || plane >= ycbcr->n_planes ||
+          copy->mip_levels != 1)
+         return false;
+
+      plane_format = ycbcr->planes[plane].format;
+      width_scale = ycbcr->planes[plane].denominator_scales[0];
+      height_scale = ycbcr->planes[plane].denominator_scales[1];
+      if (!width_scale || !height_scale ||
+          copy->image_extent.width % width_scale ||
+          copy->image_extent.height % height_scale)
+         return false;
+   } else if (copy->plane_count != 1 ||
+              copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
+      return false;
+   }
+
+   switch (plane_format) {
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8G8_UNORM:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_UINT:
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      break;
+   default:
+      return false;
+   }
+
+   const uint32_t width =
+      (copy->image_extent.width / width_scale) >> copy->mip_level;
+   const uint32_t height =
+      (copy->image_extent.height / height_scale) >> copy->mip_level;
    const uint32_t mip_width = width ? width : 1;
    const uint32_t mip_height = height ? height : 1;
    const uint32_t x = copy->image_offset.x, y = copy->image_offset.y;
