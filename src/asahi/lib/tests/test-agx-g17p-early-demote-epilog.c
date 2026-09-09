@@ -75,6 +75,19 @@ build_early_demote_fs(void)
    return b.shader;
 }
 
+static nir_shader *
+build_alpha_one_fs(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P alpha-one split FS");
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   nir_store_output(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f),
+                    nir_imm_int(&b, 0), .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0,
+                    .src_type = nir_type_float32);
+   return b.shader;
+}
+
 static bool
 has_lstcol(const struct agx_shader_part *part)
 {
@@ -121,14 +134,43 @@ main(void)
       return 1;
    }
 
+   nir_shader *legacy = build_early_demote_fs();
+   struct agx_fs_epilog_link_info legacy_link = {0};
+   if (!agx_nir_lower_fs_output_to_epilog_for_device(
+          legacy, AGX_CHIP_G13G, &legacy_link) ||
+       !legacy_link.sample_mask_after_force_early ||
+       count_intrinsic(legacy, nir_intrinsic_demote_samples) != 0) {
+      fprintf(stderr, "legacy split did not retain its epilog sample mask\n");
+      return 1;
+   }
+   ralloc_free(legacy);
+
    nir_shader *main = build_early_demote_fs();
    struct agx_fs_epilog_link_info link = {0};
-   if (!agx_nir_lower_fs_output_to_epilog_g17p(main, &link) ||
+   if (!agx_nir_lower_fs_output_to_epilog_for_device(
+          main, AGX_CHIP_G17P, &link) ||
        link.sample_mask_after_force_early ||
        count_intrinsic(main, nir_intrinsic_demote_samples) != 1) {
       fprintf(stderr, "G17P split moved the early demote into LSTCOL\n");
       return 1;
    }
+
+   nir_shader *legacy_alpha = build_alpha_one_fs();
+   legacy_link = (struct agx_fs_epilog_link_info){0};
+   agx_nir_lower_fs_output_to_epilog_for_device(
+      legacy_alpha, AGX_CHIP_G13G, &legacy_link);
+   nir_shader *g17p_alpha = build_alpha_one_fs();
+   struct agx_fs_epilog_link_info g17p_alpha_link = {0};
+   agx_nir_lower_fs_output_to_epilog_for_device(
+      g17p_alpha, AGX_CHIP_G17P, &g17p_alpha_link);
+   if (!legacy_link.loc0_w_1 || g17p_alpha_link.loc0_w_1 ||
+       g17p_alpha_link.loc_written != BITFIELD_BIT(0) ||
+       g17p_alpha_link.size_32 != BITFIELD_BIT(0)) {
+      fprintf(stderr, "G17P split did not preserve its native alpha export\n");
+      return 1;
+   }
+   ralloc_free(legacy_alpha);
+   ralloc_free(g17p_alpha);
 
    agx_nir_lower_sample_mask(main);
    if (count_intrinsic(main, nir_intrinsic_demote_samples) != 0 ||

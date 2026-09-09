@@ -1856,7 +1856,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
-      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog, &epilog_key);
+      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
+               dev->chip, &epilog_key);
 
       if (nir->info.fs.uses_fbfetch_output) {
          struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(

@@ -786,6 +786,13 @@ agx_nir_lower_fs_output_to_epilog_g17p(
    return lower_fs_output_to_epilog(s, out, true);
 }
 
+bool
+agx_nir_lower_fs_output_to_epilog_for_device(
+   nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out)
+{
+   return lower_fs_output_to_epilog(s, out, chip == AGX_CHIP_G17P);
+}
+
 static bool
 lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {

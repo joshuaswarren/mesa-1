@@ -1300,13 +1300,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
-      if (dev->dev.chip == AGX_CHIP_G17P) {
-         NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_g17p,
-                  &shader->info.fs.epilog_key);
-      } else {
-         NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog,
-                  &shader->info.fs.epilog_key);
-      }
+      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
+               dev->dev.chip, &shader->info.fs.epilog_key);
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
 
       if (nir->info.fs.uses_sample_shading) {
