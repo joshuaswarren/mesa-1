@@ -982,6 +982,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Raw-copy round trip for the same padded, nonzero-z compressed volume.
+    g17p_vulkan_bc1_3d_roundtrip = executable(
+      'g17p-vulkan-bc1-3d-roundtrip',
+      files('tests/g17p_vulkan_bc1_decode.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_COMPRESSED_3D=1',
+                '-DG17P_COMPRESSED_READBACK=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-bc1-srgb-decode',
       files('tests/g17p_vulkan_bc1_decode.c'),

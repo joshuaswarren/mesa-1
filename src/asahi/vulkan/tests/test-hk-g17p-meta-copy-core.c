@@ -75,26 +75,48 @@ main(void)
    CHECK(plan.base_x_el == 1 && plan.base_y_el == 0 &&
          plan.blocks_x == 1 && plan.blocks_y == 2);
    CHECK(plan.first_slice == 1 && plan.slice_count == 2);
-   CHECK(plan.src_row_stride_B == 24 && plan.src_slice_stride_B == 48 &&
-         plan.source_span_B == 80);
+   CHECK(plan.buffer_row_stride_B == 24 &&
+         plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
+
+   struct hk_g17p_buffer_to_image_copy readback = volume;
+   readback.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &readback, 64, 144, &plan));
+   CHECK(hk_g17p_compressed_image_to_buffer_copy_plan(
+      &readback, 64, 144, &plan));
+   CHECK(plan.base_x_el == 1 && plan.blocks_x == 1 && plan.blocks_y == 2);
+   CHECK(plan.first_slice == 1 && plan.slice_count == 2);
+   CHECK(plan.buffer_row_stride_B == 24 &&
+         plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
+   CHECK(!hk_g17p_compressed_image_to_buffer_copy_plan(
+      &readback, 64, 143, &plan));
+   readback.layout = VK_IMAGE_LAYOUT_GENERAL;
+   CHECK(hk_g17p_compressed_image_to_buffer_copy_plan(
+      &readback, 64, 144, &plan));
+   readback.layout = VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR;
+   CHECK(hk_g17p_compressed_image_to_buffer_copy_plan(
+      &readback, 64, 144, &plan));
+   readback.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+   CHECK(!hk_g17p_compressed_image_to_buffer_copy_plan(
+      &readback, 64, 144, &plan));
 
    struct hk_g17p_buffer_to_image_copy etc2 = volume;
    etc2.format = VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
    CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
       &etc2, 64, 144, &plan));
-   CHECK(plan.block_size_B == 8 && plan.src_row_stride_B == 24 &&
-         plan.src_slice_stride_B == 48 && plan.source_span_B == 80);
+   CHECK(plan.block_size_B == 8 && plan.buffer_row_stride_B == 24 &&
+         plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
 
    struct hk_g17p_buffer_to_image_copy block16 = volume;
    block16.format = VK_FORMAT_BC3_UNORM_BLOCK;
    CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
       &block16, 64, 224, &plan));
-   CHECK(plan.block_size_B == 16 && plan.src_row_stride_B == 48 &&
-         plan.src_slice_stride_B == 96 && plan.source_span_B == 160);
+   CHECK(plan.block_size_B == 16 && plan.buffer_row_stride_B == 48 &&
+         plan.buffer_slice_stride_B == 96 && plan.buffer_span_B == 160);
    block16.format = VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
    CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
       &block16, 64, 224, &plan));
-   CHECK(plan.block_size_B == 16 && plan.source_span_B == 160);
+   CHECK(plan.block_size_B == 16 && plan.buffer_span_B == 160);
 
    struct hk_g17p_buffer_to_image_copy astc = volume;
    astc.format = VK_FORMAT_ASTC_5x4_UNORM_BLOCK;
@@ -112,8 +134,8 @@ main(void)
    CHECK(plan.base_x_el == 1 && plan.base_y_el == 1 &&
          plan.blocks_x == 2 && plan.blocks_y == 2);
    CHECK(plan.first_slice == 1 && plan.slice_count == 2 &&
-         plan.src_row_stride_B == 48 && plan.src_slice_stride_B == 144 &&
-         plan.source_span_B == 224);
+         plan.buffer_row_stride_B == 48 &&
+         plan.buffer_slice_stride_B == 144 && plan.buffer_span_B == 224);
 
    struct hk_g17p_buffer_to_image_copy line = volume;
    line.image_type = VK_IMAGE_TYPE_1D;
@@ -131,8 +153,8 @@ main(void)
       &line, 8, 32, &plan));
    CHECK(plan.base_x_el == 1 && plan.blocks_x == 1 && plan.blocks_y == 1);
    CHECK(plan.first_slice == 1 && plan.slice_count == 2 &&
-         plan.src_row_stride_B == 16 && plan.src_slice_stride_B == 16 &&
-         plan.source_span_B == 24);
+         plan.buffer_row_stride_B == 16 &&
+         plan.buffer_slice_stride_B == 16 && plan.buffer_span_B == 24);
 
    struct hk_g17p_buffer_to_image_copy array = block16;
    array.image_type = VK_IMAGE_TYPE_2D;
@@ -149,14 +171,20 @@ main(void)
    CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
       &array, 16, 208, &plan));
    CHECK(plan.first_slice == 1 && plan.slice_count == 3 &&
-         plan.src_row_stride_B == 32 && plan.src_slice_stride_B == 64 &&
-         plan.source_span_B == 192);
+         plan.buffer_row_stride_B == 32 &&
+         plan.buffer_slice_stride_B == 64 && plan.buffer_span_B == 192);
+   array.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   CHECK(hk_g17p_compressed_image_to_buffer_copy_plan(
+      &array, 16, 208, &plan));
+   CHECK(plan.first_slice == 1 && plan.slice_count == 3 &&
+         plan.buffer_row_stride_B == 32 &&
+         plan.buffer_slice_stride_B == 64 && plan.buffer_span_B == 192);
 
    struct hk_g17p_buffer_to_image_copy malformed = volume;
    malformed.chip = AGX_CHIP_G17G;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
-   CHECK(plan.source_span_B == 0);
+   CHECK(plan.buffer_span_B == 0);
    malformed = volume;
    malformed.format = VK_FORMAT_R8G8B8A8_UNORM;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
@@ -172,6 +200,10 @@ main(void)
    malformed = volume;
    malformed.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
+      &malformed, 64, 144, &plan));
+   malformed = readback;
+   malformed.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   CHECK(!hk_g17p_compressed_image_to_buffer_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
    malformed.layer_count = VK_REMAINING_ARRAY_LAYERS;
@@ -361,6 +393,15 @@ main(void)
       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
    CHECK(!hk_g17p_transfer_dst_layout_supported(
       VK_IMAGE_LAYOUT_PRESENT_SRC_KHR));
+   CHECK(hk_g17p_transfer_src_layout_supported(
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+   CHECK(hk_g17p_transfer_src_layout_supported(VK_IMAGE_LAYOUT_GENERAL));
+   CHECK(hk_g17p_transfer_src_layout_supported(
+      VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR));
+   CHECK(!hk_g17p_transfer_src_layout_supported(
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL));
+   CHECK(!hk_g17p_transfer_src_layout_supported(
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
 
    /* Atlas uploads must preserve arbitrary offsets and padded source rows. */
    struct hk_g17p_buffer_to_image_copy atlas = vkcube;

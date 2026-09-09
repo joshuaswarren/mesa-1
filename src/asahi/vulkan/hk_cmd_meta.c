@@ -1706,7 +1706,7 @@ hk_g17p_copy_buffer_to_image_supported(
 }
 
 static bool
-hk_g17p_block_upload_format(struct hk_device *dev, VkFormat format)
+hk_g17p_block_copy_format(struct hk_device *dev, VkFormat format)
 {
    if (!dev || dev->dev.chip != AGX_CHIP_G17P)
       return false;
@@ -1727,7 +1727,7 @@ hk_g17p_copy_compressed_buffer_to_image(
    const VkCopyBufferToImageInfo2 *info)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!hk_g17p_block_upload_format(dev, image->vk.format) ||
+   if (!hk_g17p_block_copy_format(dev, image->vk.format) ||
        image->plane_count != 1 ||
        image->planes[0].layout.tiling != AIL_TILING_GPU ||
        !hk_g17p_transfer_dst_layout_supported(info->dstImageLayout))
@@ -1772,12 +1772,81 @@ hk_g17p_copy_compressed_buffer_to_image(
          for (uint32_t by = 0; by < plan.blocks_y; ++by) {
             for (uint32_t bx = 0; bx < plan.blocks_x; ++bx) {
                const uint64_t src = base_src +
-                                    slice * plan.src_slice_stride_B +
-                                    by * plan.src_row_stride_B +
+                                    slice * plan.buffer_slice_stride_B +
+                                    by * plan.buffer_row_stride_B +
                                     bx * plan.block_size_B;
                const uint64_t dst = base_dst + ail_get_tiled_element_B(
                   &image->planes[0].layout, level, plan.base_x_el + bx,
                   plan.base_y_el + by, dst_slice);
+               vk_meta_copy_buffer_addresses(&cmd->vk, &dev->meta, src, dst,
+                                             plan.block_size_B);
+               if (vk_command_buffer_has_error(&cmd->vk))
+                  return true;
+            }
+         }
+      }
+   }
+
+   return true;
+}
+
+static bool
+hk_g17p_copy_compressed_image_to_buffer(
+   struct hk_cmd_buffer *cmd, struct hk_image *image,
+   const VkCopyImageToBufferInfo2 *info)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (!hk_g17p_block_copy_format(dev, image->vk.format) ||
+       image->plane_count != 1 ||
+       image->planes[0].layout.tiling != AIL_TILING_GPU ||
+       !hk_g17p_transfer_src_layout_supported(info->srcImageLayout))
+      return false;
+
+   VK_FROM_HANDLE(hk_buffer, buffer, info->dstBuffer);
+
+   for (unsigned r = 0; r < info->regionCount; ++r) {
+      const VkBufferImageCopy2 *region = &info->pRegions[r];
+      const uint32_t level = region->imageSubresource.mipLevel;
+      struct hk_g17p_compressed_copy_plan plan;
+      if (!hk_g17p_compressed_image_to_buffer_copy_plan(
+             &(const struct hk_g17p_buffer_to_image_copy){
+                .chip = dev->dev.chip,
+                .format = image->vk.format,
+                .layout = info->srcImageLayout,
+                .image_type = image->vk.image_type,
+                .samples = image->vk.samples,
+                .plane_count = image->plane_count,
+                .mip_levels = image->vk.mip_levels,
+                .array_layers = image->vk.array_layers,
+                .image_extent = image->vk.extent,
+                .aspect = region->imageSubresource.aspectMask,
+                .mip_level = level,
+                .base_array_layer =
+                   region->imageSubresource.baseArrayLayer,
+                .layer_count = region->imageSubresource.layerCount,
+                .image_offset = region->imageOffset,
+                .copy_extent = region->imageExtent,
+                .buffer_row_length = region->bufferRowLength,
+                .buffer_image_height = region->bufferImageHeight,
+             },
+             region->bufferOffset, buffer->vk.size, &plan))
+         return false;
+
+      const uint64_t base_src = hk_image_base_address(image, 0);
+      const uint64_t base_dst =
+         hk_buffer_address_rw(buffer, region->bufferOffset);
+
+      for (uint32_t slice = 0; slice < plan.slice_count; ++slice) {
+         const uint32_t src_slice = plan.first_slice + slice;
+         for (uint32_t by = 0; by < plan.blocks_y; ++by) {
+            for (uint32_t bx = 0; bx < plan.blocks_x; ++bx) {
+               const uint64_t src = base_src + ail_get_tiled_element_B(
+                  &image->planes[0].layout, level, plan.base_x_el + bx,
+                  plan.base_y_el + by, src_slice);
+               const uint64_t dst = base_dst +
+                                    slice * plan.buffer_slice_stride_B +
+                                    by * plan.buffer_row_stride_B +
+                                    bx * plan.block_size_B;
                vk_meta_copy_buffer_addresses(&cmd->vk, &dev->meta, src, dst,
                                              plan.block_size_B);
                if (vk_command_buffer_has_error(&cmd->vk))
@@ -1807,7 +1876,7 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      if (hk_g17p_block_upload_format(dev, dst_image->vk.format)) {
+      if (hk_g17p_block_copy_format(dev, dst_image->vk.format)) {
          struct hk_meta_save save;
          hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
          if (!hk_g17p_copy_compressed_buffer_to_image(
@@ -1893,11 +1962,23 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
                          const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(hk_image, src_image, pCopyImageToBufferInfo->srcImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   hk_meta_copy_image_to_buffer2(&cmd->vk, &dev->meta, pCopyImageToBufferInfo);
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       hk_g17p_block_copy_format(dev, src_image->vk.format)) {
+      /* A compressed Vulkan copy preserves the encoded block bytes.  The
+       * common meta path samples and decodes the source, so use the symmetric
+       * raw AIL-addressed path on G17P instead. */
+      if (!hk_g17p_copy_compressed_image_to_buffer(
+             cmd, src_image, pCopyImageToBufferInfo))
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+   } else {
+      hk_meta_copy_image_to_buffer2(&cmd->vk, &dev->meta,
+                                    pCopyImageToBufferInfo);
+   }
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 

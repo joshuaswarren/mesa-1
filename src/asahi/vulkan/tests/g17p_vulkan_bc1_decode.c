@@ -100,7 +100,9 @@
 #define BLOCK_BYTES 8
 #define BLOCK_DATA_BYTES 32
 #define TEST_FORMAT VK_FORMAT_BC1_RGBA_UNORM_BLOCK
-#ifdef G17P_COMPRESSED_3D
+#if defined(G17P_COMPRESSED_READBACK)
+#define NAME "g17p-vulkan-bc1-3d-roundtrip"
+#elif defined(G17P_COMPRESSED_3D)
 #define NAME "g17p-vulkan-bc1-3d-decode"
 #else
 #define NAME "g17p-vulkan-bc1-decode"
@@ -128,6 +130,15 @@
 #endif
 #define GUARD_BYTES 64
 #define DEVICE_ID 0x8140
+#ifdef G17P_COMPRESSED_READBACK
+#define BUFFER_COUNT 3
+#define READBACK_FORMAT_FEATURE VK_FORMAT_FEATURE_TRANSFER_SRC_BIT
+#define READBACK_IMAGE_USAGE VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+#else
+#define BUFFER_COUNT 2
+#define READBACK_FORMAT_FEATURE 0
+#define READBACK_IMAGE_USAGE 0
+#endif
 
 static const char *test_name = NAME;
 
@@ -166,6 +177,7 @@ FN(vkAllocateCommandBuffers);
 FN(vkBeginCommandBuffer);
 FN(vkCmdPipelineBarrier);
 FN(vkCmdCopyBufferToImage);
+FN(vkCmdCopyImageToBuffer);
 FN(vkCmdBindPipeline);
 FN(vkCmdBindDescriptorSets);
 FN(vkCmdDispatch);
@@ -819,6 +831,23 @@ verify(const uint8_t *upload, const uint8_t *output,
    }
 }
 
+#ifdef G17P_COMPRESSED_READBACK
+static void
+verify_readback(const uint8_t *upload, const uint8_t *readback,
+                const char *when)
+{
+   if (memcmp(readback, upload, BLOCK_DATA_BYTES + 2 * GUARD_BYTES) != 0) {
+      for (size_t i = 0; i < BLOCK_DATA_BYTES + 2 * GUARD_BYTES; ++i) {
+         if (readback[i] != upload[i]) {
+            fprintf(stderr, "%s: %s raw byte %zu is %02x, expected %02x\n",
+                    test_name, when, i, readback[i], upload[i]);
+            exit(EXIT_FAILURE);
+         }
+      }
+   }
+}
+#endif
+
 int
 main(void)
 {
@@ -853,7 +882,13 @@ main(void)
       if (!expect_submit_failure) {
          if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE", "1", 1))
             die("failed to enable exact G17P compute-stream validation");
-         if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "9,9,0,0", 1))
+         if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS",
+#ifdef G17P_COMPRESSED_READBACK
+                    "17,17,0,0",
+#else
+                    "9,9,0,0",
+#endif
+                    1))
             die("failed to select exact compressed 3D stream counts");
       }
    }
@@ -925,12 +960,13 @@ main(void)
       VK_FORMAT_BC7_UNORM_BLOCK,      VK_FORMAT_BC7_SRGB_BLOCK,
    };
    const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                                         VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                                         VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                                         READBACK_FORMAT_FEATURE;
    for (unsigned i = 0; i < sizeof(bc_formats) / sizeof(bc_formats[0]); ++i) {
       VkFormatProperties props;
       vkGetPhysicalDeviceFormatProperties(physical, bc_formats[i], &props);
       if ((props.optimalTilingFeatures & required) != required)
-         die("a BC family format lacks sampled/upload support");
+         die("a BC family format lacks sampled/transfer support");
    }
    static const VkFormat etc2_formats[] = {
       VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK,
@@ -949,7 +985,7 @@ main(void)
       VkFormatProperties props;
       vkGetPhysicalDeviceFormatProperties(physical, etc2_formats[i], &props);
       if ((props.optimalTilingFeatures & required) != required)
-         die("an ETC2/EAC family format lacks sampled/upload support");
+         die("an ETC2/EAC family format lacks sampled/transfer support");
    }
    static const VkFormat astc_formats[] = {
 #define ASTC_FORMATS(w, h)                                                     \
@@ -969,19 +1005,21 @@ main(void)
       VkFormatProperties props;
       vkGetPhysicalDeviceFormatProperties(physical, astc_formats[i], &props);
       if ((props.optimalTilingFeatures & required) != required)
-         die("an ASTC LDR family format lacks sampled/upload support");
+         die("an ASTC LDR family format lacks sampled/transfer support");
    }
 
    VkFormatProperties target_props;
    vkGetPhysicalDeviceFormatProperties(physical, test_format, &target_props);
    if ((target_props.optimalTilingFeatures & required) != required)
-      die("target compressed format lacks sampled/upload support");
+      die("target compressed format lacks sampled/transfer support");
 #ifdef G17P_COMPRESSED_3D
    VkImageFormatProperties image_props;
    check(vkGetPhysicalDeviceImageFormatProperties(
             physical, test_format, VK_IMAGE_TYPE_3D,
             VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               READBACK_IMAGE_USAGE,
+            0,
             &image_props),
          "vkGetPhysicalDeviceImageFormatProperties(3D compressed)");
    if (image_props.maxExtent.width < WIDTH ||
@@ -1046,6 +1084,7 @@ main(void)
    D(vkBeginCommandBuffer);
    D(vkCmdPipelineBarrier);
    D(vkCmdCopyBufferToImage);
+   D(vkCmdCopyImageToBuffer);
    D(vkCmdBindPipeline);
    D(vkCmdBindDescriptorSets);
    D(vkCmdDispatch);
@@ -1063,16 +1102,31 @@ main(void)
    const VkDeviceSize buffer_sizes[] = {
       BLOCK_DATA_BYTES + 2 * GUARD_BYTES,
       PIXEL_BYTES + 2 * GUARD_BYTES,
+#ifdef G17P_COMPRESSED_READBACK
+      BLOCK_DATA_BYTES + 2 * GUARD_BYTES,
+#endif
    };
-   VkBuffer buffers[2];
-   VkDeviceMemory memories[2];
-   uint8_t *maps[2];
-   for (unsigned i = 0; i < 2; ++i) {
+   const VkBufferUsageFlags buffer_usages[] = {
+      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+#ifdef G17P_COMPRESSED_READBACK
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+#endif
+   };
+   _Static_assert(sizeof(buffer_sizes) / sizeof(buffer_sizes[0]) ==
+                     BUFFER_COUNT,
+                  "buffer count");
+   _Static_assert(sizeof(buffer_usages) / sizeof(buffer_usages[0]) ==
+                     BUFFER_COUNT,
+                  "buffer usage count");
+   VkBuffer buffers[BUFFER_COUNT];
+   VkDeviceMemory memories[BUFFER_COUNT];
+   uint8_t *maps[BUFFER_COUNT];
+   for (unsigned i = 0; i < BUFFER_COUNT; ++i) {
       const VkBufferCreateInfo bci = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
          .size = buffer_sizes[i],
-         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+         .usage = buffer_usages[i],
          .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
       };
       check(vkCreateBuffer(device, &bci, NULL, &buffers[i]),
@@ -1151,7 +1205,8 @@ main(void)
       .arrayLayers = 1,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
-      .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               READBACK_IMAGE_USAGE,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
    VkImage image;
@@ -1373,11 +1428,41 @@ main(void)
    vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
                         &output_barrier, 0, NULL);
+#ifdef G17P_COMPRESSED_READBACK
+   image_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+   image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+   image_barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+   image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL,
+                        1, &image_barrier);
+   vkCmdCopyImageToBuffer(command_buffer, image,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffers[2], 1,
+                          &copy);
+   const VkBufferMemoryBarrier readback_barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer = buffers[2],
+      .offset = GUARD_BYTES,
+      .size = BLOCK_DATA_BYTES,
+   };
+   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
+                        &readback_barrier, 0, NULL);
+#endif
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
    if (record_only) {
+#ifdef G17P_COMPRESSED_READBACK
+      printf("%s: PASS - compressed upload/sample/raw-readback dispatch "
+             "recorded\n", test_name);
+#else
       printf("%s: PASS - compressed upload/sample dispatch recorded\n",
              test_name);
+#endif
       return EXIT_SUCCESS;
    }
 
@@ -1405,20 +1490,40 @@ main(void)
    check(waited, "vkWaitForFences");
 
    if (submit_only) {
+#ifdef G17P_COMPRESSED_READBACK
+      printf("%s: PASS - compressed 3D upload/sample/raw-readback stream "
+             "submitted to the strict G17P DRM-shim validator\n",
+             test_name);
+#else
       printf("%s: PASS - compressed 3D upload/sample stream submitted to "
              "the strict G17P DRM-shim validator\n",
              test_name);
+#endif
       return EXIT_SUCCESS;
    }
 
    verify(maps[0], maps[1], reference, upload_hash, "immediate");
+#ifdef G17P_COMPRESSED_READBACK
+   verify_readback(maps[0], maps[2], "immediate");
+#endif
    const struct timespec stable = {.tv_sec = 3};
    if (nanosleep(&stable, NULL))
       die("stability sleep interrupted");
    verify(maps[0], maps[1], reference, upload_hash, "after three seconds");
+#ifdef G17P_COMPRESSED_READBACK
+   verify_readback(maps[0], maps[2], "after three seconds");
+#endif
    printf("%s: PASS - %u decoded pixels exact immediately/3s, "
-          "256 guard bytes unchanged, checksum %016" PRIx64 "\n",
+#ifdef G17P_COMPRESSED_READBACK
+          "%u raw compressed bytes/padding exact, 384 guard bytes unchanged, "
+#else
+          "256 guard bytes unchanged, "
+#endif
+          "checksum %016" PRIx64 "\n",
           test_name, WIDTH * HEIGHT * COPY_DEPTH,
+#ifdef G17P_COMPRESSED_READBACK
+          BLOCK_DATA_BYTES,
+#endif
           fnv1a64(maps[1] + GUARD_BYTES, PIXEL_BYTES));
    return EXIT_SUCCESS;
 }

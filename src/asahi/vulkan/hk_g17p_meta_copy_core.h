@@ -42,9 +42,9 @@ struct hk_g17p_compressed_copy_plan {
    uint32_t blocks_y;
    uint32_t first_slice;
    uint32_t slice_count;
-   uint64_t src_row_stride_B;
-   uint64_t src_slice_stride_B;
-   uint64_t source_span_B;
+   uint64_t buffer_row_stride_B;
+   uint64_t buffer_slice_stride_B;
+   uint64_t buffer_span_B;
 };
 
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
@@ -56,6 +56,9 @@ struct hk_g17p_compressed_copy_plan {
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL starts passing VK_IMAGE_LAYOUT_GENERAL
  * for every copy the moment it enables VK_KHR_unified_image_layouts. */
 bool hk_g17p_transfer_dst_layout_supported(VkImageLayout layout);
+
+/* The corresponding legal set for vkCmdCopyImageToBuffer srcImageLayout. */
+bool hk_g17p_transfer_src_layout_supported(VkImageLayout layout);
 
 /* The complete BC family has captured G17P sampled descriptors and shares the
  * hardware-validated Morton-of-4x4-blocks layout. */
@@ -87,6 +90,12 @@ bool hk_g17p_buffer_to_image_copy_supported(
  * final source byte read and therefore covers padding gaps between rows and
  * slices. */
 bool hk_g17p_compressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_compressed_copy_plan *plan);
+
+/* Resolve the same block geometry for a raw compressed image readback. */
+bool hk_g17p_compressed_image_to_buffer_copy_plan(
    const struct hk_g17p_buffer_to_image_copy *copy,
    VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
    struct hk_g17p_compressed_copy_plan *plan);

@@ -154,6 +154,29 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     )
   endforeach
 
+  g17p_compressed_roundtrip_env = environment(
+    g17p_compressed_3d_environment)
+  test(
+    'hk_g17p_compressed_3d_raw_roundtrip',
+    g17p_vulkan_bc1_3d_roundtrip,
+    env : g17p_compressed_roundtrip_env,
+    suite : ['asahi', 'g17p-compressed-textures'],
+    timeout : 30,
+  )
+
+  g17p_compressed_roundtrip_fail_env = environment(
+    g17p_compressed_3d_environment)
+  g17p_compressed_roundtrip_fail_env.set('ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')
+  g17p_compressed_roundtrip_fail_env.set(
+    'G17P_COMPRESSED_DECODE_EXPECT_SUBMIT_FAILURE', '1')
+  test(
+    'hk_g17p_compressed_3d_raw_roundtrip_submit_failure',
+    g17p_vulkan_bc1_3d_roundtrip,
+    env : g17p_compressed_roundtrip_fail_env,
+    suite : ['asahi', 'g17p-compressed-textures'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
