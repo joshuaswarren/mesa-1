@@ -33,6 +33,11 @@
 #define G17P_SAMPLE_RATE_SHADING 0
 #endif
 
+/* 1: dynamic 4x sample mask, 2: dynamic alpha-to-coverage. */
+#ifndef G17P_MSAA_COVERAGE
+#define G17P_MSAA_COVERAGE 0
+#endif
+
 #ifndef G17P_RG16_UNORM
 #define G17P_RG16_UNORM 0
 #endif
@@ -420,16 +425,21 @@
      (G17P_VERTEX_FORMAT != 0) + G17P_BRESENHAM_LINES +                   \
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
      G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
-     G17P_SAMPLE_RATE_SHADING +                                            \
+     G17P_SAMPLE_RATE_SHADING + (G17P_MSAA_COVERAGE != 0) +                \
      G17P_TEXTURE_ALPHA_COMPOSITE) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_SAMPLE_RATE_SHADING
+#if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
 #include "g17p_vulkan_sample_rate_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_sample_rate_frag_spv
+#elif G17P_MSAA_COVERAGE == 2
+#include "g17p_vulkan_alpha_to_coverage_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_alpha_to_coverage_frag_spv
 #elif G17P_VERTEX_FORMAT == 1
 #include "g17p_vulkan_vertex_unorm_vert.h"
 #include "g17p_wsi_triangle_frag.h"
@@ -875,6 +885,10 @@
 
 #if G17P_SAMPLE_RATE_SHADING && G17P_MSAA_SAMPLES != 4
 #error "the sample-rate shading oracle requires exactly four samples"
+#endif
+
+#if G17P_MSAA_COVERAGE && G17P_MSAA_SAMPLES != 4
+#error "the dynamic coverage oracles require exactly four samples"
 #endif
 
 #if G17P_MSAA_SAMPLES != 1 && G17P_MSAA_SAMPLES != 2 && \
@@ -1388,6 +1402,16 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MSAA_COVERAGE == 1
+#define PROBE_NAME "g17p-vulkan-dynamic-sample-mask4"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MSAA_COVERAGE == 2
+#define PROBE_NAME "g17p-vulkan-dynamic-alpha-to-coverage4"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MSAA_SAMPLES > 1
 #define PROBE_NAME "g17p-msaa-triangle"
 #define READBACK_IMAGE_USAGE 0
@@ -1455,7 +1479,8 @@ VK_FN(vkEnumeratePhysicalDevices);
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
-   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING
+   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
+   G17P_MSAA_COVERAGE
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 #if G17P_INDIRECT_DRAW
@@ -1507,7 +1532,7 @@ VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE == 2
 VK_FN(vkCmdSetScissor);
 #endif
 #if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
@@ -1517,6 +1542,11 @@ VK_FN(vkCmdSetViewport);
 VK_FN(vkCmdSetColorBlendEnableEXT);
 VK_FN(vkCmdSetColorBlendEquationEXT);
 VK_FN(vkCmdSetColorWriteMaskEXT);
+#endif
+#if G17P_MSAA_COVERAGE == 1
+VK_FN(vkCmdSetSampleMaskEXT);
+#elif G17P_MSAA_COVERAGE == 2
+VK_FN(vkCmdSetAlphaToCoverageEnableEXT);
 #endif
 #if G17P_INDIRECT_DRAW
 VK_FN(vkCmdDrawIndirect);
@@ -1923,6 +1953,15 @@ verify_readback(const uint8_t *map)
    /* Four independent SampleID invocations write red, green, blue and white;
     * the average resolve is exactly half intensity in every RGB channel. */
    static const uint8_t expected[4] = {128, 128, 128, 255};
+#elif G17P_MSAA_COVERAGE == 1
+   /* Dynamic mask 0b0101 retains the red and blue SampleID invocations;
+    * the other two samples retain the opaque-black clear. */
+   static const uint8_t expected[4] = {64, 0, 64, 255};
+#elif G17P_MSAA_COVERAGE == 2
+   static const uint8_t expected[2][4] = {
+      {255, 0, 0, 0},
+      {0, 0, 0, 255},
+   };
 #elif G17P_RASTER_DISCARD
    static const uint8_t expected[4] = {0, 0, 0, 255};
 #else
@@ -1958,6 +1997,9 @@ verify_readback(const uint8_t *map)
             ? expected[face]
             : clear;
 #elif G17P_DYNAMIC_BLEND
+      const uint8_t *expected_pixel =
+         expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
+#elif G17P_MSAA_COVERAGE == 2
       const uint8_t *expected_pixel =
          expected[(pixel % IMAGE_WIDTH) >= (IMAGE_WIDTH / 2)];
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
@@ -2166,7 +2208,8 @@ main(void)
 #if G17P_F16_IO || G17P_INDIRECT_DRAW || G17P_BRESENHAM_LINES ||          \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
-   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING
+   G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
+   G17P_MSAA_COVERAGE
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
@@ -2240,6 +2283,23 @@ main(void)
        !available_dynamic3.extendedDynamicState3ColorBlendEquation ||
        !available_dynamic3.extendedDynamicState3ColorWriteMask)
       die("required extended dynamic blend state is not advertised");
+#elif G17P_MSAA_COVERAGE
+   VkPhysicalDeviceExtendedDynamicState3FeaturesEXT available_dynamic3 = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 available_dynamic = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &available_dynamic3,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &available_dynamic);
+#if G17P_MSAA_COVERAGE == 1
+   if (!available_dynamic3.extendedDynamicState3SampleMask)
+      die("dynamic sample-mask state is not advertised");
+#else
+   if (!available_dynamic3.extendedDynamicState3AlphaToCoverageEnable)
+      die("dynamic alpha-to-coverage state is not advertised");
+#endif
 #endif
 
 #if G17P_ADVANCED_BLEND
@@ -2352,7 +2412,7 @@ main(void)
 #endif
 #endif
 
-#if G17P_SAMPLE_RATE_SHADING
+#if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
    VkPhysicalDeviceFeatures2 sample_rate_available = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
    };
@@ -2475,7 +2535,7 @@ main(void)
       .shaderSampledImageArrayDynamicIndexing = VK_TRUE,
    };
 #endif
-#if G17P_SAMPLE_RATE_SHADING
+#if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
    const VkPhysicalDeviceFeatures sample_rate_features = {
       .sampleRateShading = VK_TRUE,
    };
@@ -2487,6 +2547,17 @@ main(void)
       .extendedDynamicState3ColorBlendEnable = VK_TRUE,
       .extendedDynamicState3ColorBlendEquation = VK_TRUE,
       .extendedDynamicState3ColorWriteMask = VK_TRUE,
+   };
+   const char *dynamic_device_extensions[] = {
+      VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+   };
+#elif G17P_MSAA_COVERAGE
+   const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT enabled_dynamic3 = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+      .extendedDynamicState3SampleMask = G17P_MSAA_COVERAGE == 1,
+      .extendedDynamicState3AlphaToCoverageEnable =
+         G17P_MSAA_COVERAGE == 2,
    };
    const char *dynamic_device_extensions[] = {
       VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
@@ -2518,12 +2589,14 @@ main(void)
       .pNext = &indirect_enabled12,
 #elif G17P_DYNAMIC_BLEND
       .pNext = &enabled_dynamic3,
+#elif G17P_MSAA_COVERAGE
+      .pNext = &enabled_dynamic3,
 #elif G17P_ADVANCED_BLEND
       .pNext = &enabled_advanced,
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-#if G17P_SAMPLE_RATE_SHADING
+#if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
       .pEnabledFeatures = &sample_rate_features,
 #elif G17P_INDIRECT_DRAW
       .pEnabledFeatures = &indirect_enabled,
@@ -2541,6 +2614,9 @@ main(void)
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
 #elif G17P_DYNAMIC_BLEND
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = dynamic_device_extensions,
+#elif G17P_MSAA_COVERAGE
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = dynamic_device_extensions,
 #elif G17P_ADVANCED_BLEND
@@ -2593,7 +2669,7 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE == 2
    LOAD_DEVICE(device, vkCmdSetScissor);
 #endif
 #if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
@@ -2603,6 +2679,11 @@ main(void)
    LOAD_DEVICE(device, vkCmdSetColorBlendEnableEXT);
    LOAD_DEVICE(device, vkCmdSetColorBlendEquationEXT);
    LOAD_DEVICE(device, vkCmdSetColorWriteMaskEXT);
+#endif
+#if G17P_MSAA_COVERAGE == 1
+   LOAD_DEVICE(device, vkCmdSetSampleMaskEXT);
+#elif G17P_MSAA_COVERAGE == 2
+   LOAD_DEVICE(device, vkCmdSetAlphaToCoverageEnableEXT);
 #endif
 #if G17P_INDIRECT_DRAW
    LOAD_DEVICE(device, vkCmdDrawIndirect);
@@ -4090,8 +4171,10 @@ main(void)
    const VkPipelineMultisampleStateCreateInfo multisample = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
       .rasterizationSamples = (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
-      .sampleShadingEnable = G17P_SAMPLE_RATE_SHADING,
-      .minSampleShading = G17P_SAMPLE_RATE_SHADING ? 1.0f : 0.0f,
+      .sampleShadingEnable =
+         G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1,
+      .minSampleShading =
+         (G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1) ? 1.0f : 0.0f,
    };
 #if G17P_ADVANCED_BLEND
    const VkPipelineColorBlendAdvancedStateCreateInfoEXT advanced_blend = {
@@ -4153,20 +4236,26 @@ main(void)
    };
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
    G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE
    const VkDynamicState dynamic_states[] = {
 #if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
       VK_DYNAMIC_STATE_VIEWPORT,
 #endif
 #if G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
       VK_DYNAMIC_STATE_SCISSOR,
-#elif G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+#elif G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||              \
+      G17P_MSAA_COVERAGE == 2
       VK_DYNAMIC_STATE_SCISSOR,
 #endif
 #if G17P_DYNAMIC_BLEND
       VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT,
       VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
       VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT,
+#endif
+#if G17P_MSAA_COVERAGE == 1
+      VK_DYNAMIC_STATE_SAMPLE_MASK_EXT,
+#elif G17P_MSAA_COVERAGE == 2
+      VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT,
 #endif
    };
    const VkPipelineDynamicStateCreateInfo dynamic_state = {
@@ -4187,7 +4276,7 @@ main(void)
       .pColorBlendState = &blend,
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
    G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE
       .pDynamicState = &dynamic_state,
 #endif
       .layout = pipeline_layout,
@@ -4639,6 +4728,25 @@ main(void)
    }
 #elif G17P_BRESENHAM_LINES
    vkCmdDraw(command_buffer, 2, 1, 0, 0);
+#elif G17P_MSAA_COVERAGE == 1
+   const VkSampleMask dynamic_sample_mask = 0x5;
+   vkCmdSetSampleMaskEXT(command_buffer, VK_SAMPLE_COUNT_4_BIT,
+                         &dynamic_sample_mask);
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#elif G17P_MSAA_COVERAGE == 2
+   const VkRect2D alpha_scissors[2] = {
+      {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT}},
+      {
+         .offset = {IMAGE_WIDTH / 2, 0},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT},
+      },
+   };
+   vkCmdSetAlphaToCoverageEnableEXT(command_buffer, VK_FALSE);
+   vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissors[0]);
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   vkCmdSetAlphaToCoverageEnableEXT(command_buffer, VK_TRUE);
+   vkCmdSetScissor(command_buffer, 0, 1, &alpha_scissors[1]);
+   vkCmdDraw(command_buffer, 3, 1, 0, 0);
 #elif G17P_DYNAMIC_BLEND
    const VkRect2D dynamic_scissors[2] = {
       {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT}},
@@ -5169,6 +5277,15 @@ main(void)
    printf(PROBE_NAME ": PASS — four distinct SampleID colours averaged to "
                      "exact RGBA8 immediately/3s; all guards unchanged, "
                      "checksum %016" PRIx64 "\n", checksum);
+#elif G17P_MSAA_COVERAGE == 1
+   printf(PROBE_NAME ": PASS — dynamic sample mask 0b0101 retained exactly "
+                     "samples 0/2 through 4x resolve immediately/3s; all "
+                     "guards unchanged, checksum %016" PRIx64 "\n", checksum);
+#elif G17P_MSAA_COVERAGE == 2
+   printf(PROBE_NAME ": PASS — dynamic alpha-to-coverage toggled an "
+                     "alpha-zero draw from fully retained to fully rejected "
+                     "immediately/3s; all guards unchanged, checksum %016" PRIx64
+                     "\n", checksum);
 #elif G17P_ADVANCED_BLEND
    printf(PROBE_NAME ": PASS — coherent conjoint MULTIPLY produced exact "
                      "nonpremultiplied RGBA8 output immediately/3s, guards "

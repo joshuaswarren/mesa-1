@@ -591,9 +591,12 @@ hk_get_device_features(
       .extendedDynamicState3DepthClampEnable = true,
       .extendedDynamicState3PolygonMode = true,
       .extendedDynamicState3RasterizationSamples = true,
-      .extendedDynamicState3SampleMask = dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3SampleMask =
+         dev->chip != AGX_CHIP_G17P ||
+         hk_g17p_unverified_feature("dynamic_msaa_coverage"),
       .extendedDynamicState3AlphaToCoverageEnable =
-         dev->chip != AGX_CHIP_G17P,
+         dev->chip != AGX_CHIP_G17P ||
+         hk_g17p_unverified_feature("dynamic_msaa_coverage"),
       .extendedDynamicState3AlphaToOneEnable = true,
       .extendedDynamicState3LogicOpEnable = true,
       .extendedDynamicState3ColorBlendEnable = true,
