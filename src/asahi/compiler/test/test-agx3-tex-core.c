@@ -426,6 +426,17 @@ test_sample_witnesses(void)
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
        "05800cb8b00007b7010010001200", NULL},
+      {"native cube comparison",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true, .shadow = true},
+       "05800ca090003000010000000100", NULL},
+      {"native cube-array comparison",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 6, .shadow = true},
+       "05800ca090003004010000000100", NULL},
       /*
        * Implicit LOD plus a constant bias.  Apple's own fragment samples of
        * t.sample(s, uv, bias(k)) differ from its plain t.sample(s, uv) in
@@ -816,6 +827,21 @@ test_gradient_and_register_bias(void)
                                 &length));
    CHECK(length == 14 &&
          hex_eq(bytes, length, "05800ca090002004010000000100"));
+   /* applegpu-nt 32023.917: cube comparison adds the f76=4 dimension;
+    * cube-array comparison also selects the packed layer with f77=2. Both
+    * deliberately retain the driver's comparison operand profile. */
+   struct agx3_tex_sample_desc shadow_cube = shadow;
+   shadow_cube.cube = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &shadow_cube, bytes,
+                                &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800ca090003000010000000100"));
+   struct agx3_tex_sample_desc shadow_cube_array = shadow_array;
+   shadow_cube_array.cube = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,
+                                &shadow_cube_array, bytes, &length));
+   CHECK(length == 14 &&
+         hex_eq(bytes, length, "05800ca090003004010000000100"));
    bad_shadow = shadow_array;
    bad_shadow.array_layer = 3;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
@@ -1763,12 +1789,28 @@ test_cube_coordinate_stage(void)
    CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
+   /* applegpu-nt 32023.917 depthcube_array::sample_compare combines CEM's
+    * face and discarded 32-bit layer r3 in one distinct PACK_SMPIR. */
+   static const uint8_t native_shadow_array[] = {
+      0x17,0x05,0x54,0x06,0x00,0x06,
+      0x08,0x00,0xf0,0xc0,0x29,0x00,
+   };
+   CHECK(agx3_tex_stage_cube_array_shadow(
+      AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false, true, bytes, &len));
+   CHECK(len == sizeof(native_shadow_array) &&
+         !memcmp(bytes, native_shadow_array, len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3C, 2, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 3, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                 true, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_shadow(
+      AGX_ISA_ENCODING_AGX3C, 6, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_shadow(
+      AGX_ISA_ENCODING_AGX3B, 7, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_shadow(
+      AGX_ISA_ENCODING_AGX3B, 6, 1, 0, true, true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 4, 6, 20, 0,
                                  false, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20, 0,

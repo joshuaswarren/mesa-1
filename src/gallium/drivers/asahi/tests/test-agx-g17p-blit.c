@@ -149,15 +149,14 @@ build_webgl_shadow_fs(enum glsl_sampler_dim dim, bool array)
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options,
       dim == GLSL_SAMPLER_DIM_CUBE
-         ? (array ? "G17P WebGL cube-array shadow refusal fragment shader"
-                  : "G17P WebGL cube shadow refusal fragment shader")
-         : (array ? "G17P WebGL 2D-array shadow refusal fragment shader"
+         ? (array ? "G17P WebGL cube-array shadow fragment shader"
+                  : "G17P WebGL cube shadow fragment shader")
+         : (array ? "G17P WebGL 2D-array shadow fragment shader"
                   : "G17P WebGL 2D shadow fragment shader"));
    nir_def *frag = nir_load_frag_coord(&b);
 
-   /* Both sampler2DShadow and sampler2DArrayShadow are valid WebGL2 and
-    * byte-grounded on G17P. Cube comparisons remain stable API-realistic
-    * refusals until their CEM/compare composition has independent bytes. */
+   /* Keep every desktop/WebGL comparison dimension in one API-realistic
+    * family. All four forms are byte-grounded on G17P. */
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
    tex->op = nir_texop_tex;
    tex->sampler_dim = dim;
@@ -208,74 +207,37 @@ check_es3_compile_contract(struct pipe_context *pctx)
    }
    pctx->delete_fs_state(pctx, ok);
 
-   struct pipe_shader_state shadow = {
-      .type = PIPE_SHADER_IR_NIR,
-      .report_compile_error = true,
-      .ir.nir = build_webgl_shadow_fs(GLSL_SAMPLER_DIM_2D, false),
-   };
-   void *shadow_ok = pctx->create_fs_state(pctx, &shadow);
-   if (!shadow_ok || shadow.error_message) {
-      fprintf(stderr, "WebGL2 sampler2DShadow did not compile: %s\n",
-              shadow.error_message ? shadow.error_message : "no shader");
-      free(shadow.error_message);
-      if (shadow_ok)
-         pctx->delete_fs_state(pctx, shadow_ok);
-      return false;
-   }
-   pctx->delete_fs_state(pctx, shadow_ok);
-
-   struct pipe_shader_state array_shadow = {
-      .type = PIPE_SHADER_IR_NIR,
-      .report_compile_error = true,
-      .ir.nir = build_webgl_shadow_fs(GLSL_SAMPLER_DIM_2D, true),
-   };
-   void *array_shadow_ok = pctx->create_fs_state(pctx, &array_shadow);
-   if (!array_shadow_ok || array_shadow.error_message) {
-      fprintf(stderr, "WebGL2 sampler2DArrayShadow did not compile: %s\n",
-              array_shadow.error_message ? array_shadow.error_message
-                                         : "no shader");
-      free(array_shadow.error_message);
-      if (array_shadow_ok)
-         pctx->delete_fs_state(pctx, array_shadow_ok);
-      return false;
-   }
-   pctx->delete_fs_state(pctx, array_shadow_ok);
-
    static const struct {
       enum glsl_sampler_dim dim;
       bool array;
       const char *name;
-   } unwitnessed[] = {
+   } comparisons[] = {
+      {GLSL_SAMPLER_DIM_2D, false, "sampler2DShadow"},
+      {GLSL_SAMPLER_DIM_2D, true, "sampler2DArrayShadow"},
       {GLSL_SAMPLER_DIM_CUBE, false, "samplerCubeShadow"},
       {GLSL_SAMPLER_DIM_CUBE, true, "samplerCubeArrayShadow"},
    };
 
-   bool propagated = true;
-   for (unsigned i = 0; i < ARRAY_SIZE(unwitnessed); ++i) {
-      struct pipe_shader_state refused = {
+   bool compiled = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(comparisons); ++i) {
+      struct pipe_shader_state shadow = {
          .type = PIPE_SHADER_IR_NIR,
          .report_compile_error = true,
-         .ir.nir = build_webgl_shadow_fs(unwitnessed[i].dim,
-                                         unwitnessed[i].array),
+         .ir.nir = build_webgl_shadow_fs(comparisons[i].dim,
+                                         comparisons[i].array),
       };
-      void *bad = pctx->create_fs_state(pctx, &refused);
-      const bool this_propagated =
-         bad == NULL && refused.error_message != NULL &&
-         strstr(refused.error_message, "fragment") != NULL &&
-         strstr(refused.error_message, "G17P") != NULL;
-      if (!this_propagated) {
-         fprintf(stderr,
-                 "WebGL2 %s refusal was not propagated (shader=%p, "
-                 "message=%s)\n",
-                 unwitnessed[i].name, bad,
-                 refused.error_message ? refused.error_message : "none");
+      void *shader = pctx->create_fs_state(pctx, &shadow);
+      if (!shader || shadow.error_message) {
+         fprintf(stderr, "WebGL2 %s did not compile: %s\n",
+                 comparisons[i].name,
+                 shadow.error_message ? shadow.error_message : "no shader");
+         compiled = false;
       }
-      if (bad)
-         pctx->delete_fs_state(pctx, bad);
-      free(refused.error_message);
-      propagated &= this_propagated;
+      if (shader)
+         pctx->delete_fs_state(pctx, shader);
+      free(shadow.error_message);
    }
-   return propagated;
+   return compiled;
 }
 
 static struct pipe_resource *

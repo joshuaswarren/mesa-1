@@ -334,6 +334,14 @@ bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            bool src_cache, bool src_discard,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* Publish CEM's face together with a 32-bit cube-array comparison layer. */
+bool agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc,
+                                      uint16_t layer, uint8_t slot,
+                                      uint16_t wait_mask, bool layer_cache,
+                                      bool layer_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
 /* Publish a register-valued integer 2D-MS sample index into the sampler
  * operand bank. The following MS fetch uses the sample-0 instruction form;
  * the staged value selects the sample. */

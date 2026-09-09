@@ -1267,9 +1267,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
    /* Array and 3D coordinates are copied to the fixed staging bank before SMP.
     * Ordinary array layers are named directly by the sample's 8-bit register
-    * field; shadow-array layers use the packed producer witnessed below. The
-    * third scalar must not wrap either form. Plain 2D samples name the
-    * coordinate directly in SMP and retain its narrower bound. */
+    * field. A 2D shadow-array layer has its own packed producer, while a cube
+    * shadow-array combines the layer with CEM's face. The third scalar must
+    * not wrap any form. Plain 2D samples name the coordinate directly in SMP
+    * and retain its narrower bound. */
    /* CEM's three recovered GPR source fields are seven bits. */
    const unsigned max_coord = (array || cube) ? 120 : three_d ? 248 : 60;
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
@@ -1319,7 +1320,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (offset &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate ||
          array || three_d || cube || shadow || gather)) ||
-       (shadow && (three_d || cube || !implicit_lod || gather ||
+       (shadow && (three_d || !implicit_lod || gather ||
                    I->mask != 1 || enc != AGX_ISA_ENCODING_AGX3B ||
                    (array && !immediate))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d || cube ||
@@ -1375,6 +1376,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       wait_mask = 0;
    }
 
+   /* CEM uses fixed r0/r2/r7 scratch registers. Publish the comparison first
+    * so a perfectly valid allocator choice in one of those registers cannot
+    * be clobbered by the cube-coordinate calculation. Apple's cube and
+    * cube-array comparison shaders likewise publish the reference before the
+    * final CEM axes. */
+   if (shadow && cube &&
+       (!agx3_tex_stage_copy_hints(
+           enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
+           I->src[5].discard, bytes, &len) ||
+        !agx3_append(emission, bytes, len)))
+      return false;
+
    if (cube) {
       /* Native cube sampling consumes CEM's normalized coordinates and face,
        * not the raw XYZ vector.  CEM has no witnessed scoreboard-wait form;
@@ -1429,21 +1442,25 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         !agx3_append(emission, bytes, len)))
       return false;
 
-   if (array && shadow &&
+   if (array && shadow && !cube &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;
 
-   if (cube &&
-       (!agx3_tex_stage_cube_z(enc, 2, stage_slot, 0,
-                              false, true,
-                              bytes, &len) ||
-        !agx3_append(emission, bytes, len)))
-      return false;
+   if (cube) {
+      const bool packed = shadow && cube_array
+         ? agx3_tex_stage_cube_array_shadow(
+              enc, I->src[0].value + 6, stage_slot, 0,
+              I->src[0].cache, I->src[0].discard, bytes, &len)
+         : agx3_tex_stage_cube_z(enc, 2, stage_slot, 0, false, true,
+                                 bytes, &len);
+      if (!packed || !agx3_append(emission, bytes, len))
+         return false;
+   }
 
-   if (shadow &&
+   if (shadow && !cube &&
        (!agx3_tex_stage_copy_hints(
            enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            I->src[5].discard, bytes, &len) ||

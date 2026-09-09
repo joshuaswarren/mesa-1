@@ -265,13 +265,15 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    /* Native cube sampling is a distinct dimension (SMP f76=4). Apple
     * publishes its third f32 coordinate with PACK_SMPIR f74=10, then samples
     * fixed coordinate bank 0. Implicit LOD and the ordinary immediate and
-    * register explicit-LOD selectors are independently witnessed. */
+    * register explicit-LOD selectors are independently witnessed. Cube and
+    * cube-array comparisons reuse that CEM path with their own packed face /
+    * layer operands. */
    if (d->cube &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
          d->lod != AGX3_TEX_LOD_REGISTER) ||
-        d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
+        d->gather != AGX3_TEX_GATHER_NONE))
       return false;
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
@@ -283,10 +285,10 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
-   /* The packed-layer comparison witness uses fixed texture/sampler state
-    * and the driver's descriptor profile. Keep indexed/profile variants
-    * closed until they have their own native instructions. */
-   if (d->shadow && d->array &&
+   /* Dimensioned comparison witnesses use fixed texture/sampler state and
+    * the driver's descriptor profile. Keep indexed/profile variants closed
+    * until they have their own native instructions. */
+   if (d->shadow && (d->array || d->cube) &&
        (tk != AGX3_TEX_OPERAND_IMMEDIATE ||
         sk != AGX3_TEX_OPERAND_IMMEDIATE ||
         d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
@@ -314,13 +316,13 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d || d->cube))
       return false;
 
-   /* Apple's depth2d sample_compare witness is a plain 2D implicit sample
-    * with one result component and its reference value in fixed bank 4.
-    * depth2d_array uses the same comparison contract, with its layer packed
-    * separately and f77=2 selecting that array operand. */
+   /* Apple's depth sample_compare witnesses are implicit samples with one
+    * result component and their reference value in fixed bank 4. Array forms
+    * select the separately packed layer with f77=2; cube forms select the
+    * CEM dimension with f76=4. */
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO ||
-        d->three_d || d->cube || d->gather != AGX3_TEX_GATHER_NONE ||
+        d->three_d || d->gather != AGX3_TEX_GATHER_NONE ||
         d->mask != 1))
       return false;
 
@@ -377,10 +379,12 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   if ((operand_profile & 1) || (d->array && !shadow_array) || d->cube)
+   if ((operand_profile & 1) ||
+       ((d->array || d->cube) && !d->shadow))
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
-      112, ((operand_profile & 2) || (d->array && !shadow_array) || d->cube)
+      112, ((operand_profile & 2) ||
+            ((d->array || d->cube) && !d->shadow))
               ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
@@ -1003,6 +1007,49 @@ agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+/* depthcube_array::sample_compare combines CEM's selected face and the
+ * integer array layer in one PACK_SMPIR form. applegpu-nt 32023.917 emits
+ * exactly 1705540600060800f0c02900 for discarded 32-bit r3 on slot 1.
+ *
+ * Unlike the ordinary scalar PACK forms, f16 names a full 32-bit register,
+ * not a half-register. The five additional selectors below are the exact
+ * delta which selects the combined face/layer operand in Apple's table.
+ */
+bool
+agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
+                                 uint8_t slot, uint16_t wait_mask,
+                                 bool layer_cache, bool layer_discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                 uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || layer >= 256 || (layer & 1) ||
+       slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       !one_or_zero(wait_mask) || (layer_cache && layer_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6),  KV(9, 5),  KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(30, 2), KV(37, 2), KV(38, 1), KV(41, 1), KV(51, 1),
+      KV(52, 2), KV(74, 4), KV(76, 10), KV(77, 12),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, layer >> 1);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, layer_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
 /* Own-MSL texture2d_ms reads publish a variable integer sample with this
