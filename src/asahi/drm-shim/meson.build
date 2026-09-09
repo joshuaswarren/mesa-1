@@ -29,6 +29,60 @@ libasahi_noop_drm_shim = shared_library(
 )
 
 if with_tests and with_asahi_vk and host_machine.system() == 'linux'
+  g17p_queue_progress_environment = {
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  }
+
+  g17p_queue_progress_env = environment(g17p_queue_progress_environment)
+  g17p_queue_progress_env.set(
+    'ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE', 'success')
+  g17p_queue_progress_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
+  test(
+    'hk_g17p_queue_progress_first_submit_wait_idle',
+    g17p_queue_progress,
+    args : ['--shim'],
+    env : g17p_queue_progress_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-queue-progress'],
+    timeout : 30,
+  )
+
+  g17p_queue_progress_init_failure_env = environment(
+    g17p_queue_progress_environment)
+  g17p_queue_progress_init_failure_env.set(
+    'ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE', 'init-failure')
+  g17p_queue_progress_init_failure_env.set(
+    'ASAHI_SHIM_FAIL_QUEUE_TIMELINE_SIGNAL_ONCE', '1')
+  test(
+    'hk_g17p_queue_progress_init_failure',
+    g17p_queue_progress,
+    args : ['--init-failure'],
+    env : g17p_queue_progress_init_failure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-queue-progress'],
+    timeout : 30,
+  )
+
+  g17p_queue_progress_submit_failure_env = environment(
+    g17p_queue_progress_environment)
+  g17p_queue_progress_submit_failure_env.set(
+    'ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE', 'submit-failure')
+  g17p_queue_progress_submit_failure_env.set(
+    'ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')
+  test(
+    'hk_g17p_queue_progress_submit_failure',
+    g17p_queue_progress,
+    args : ['--submit-failure'],
+    env : g17p_queue_progress_submit_failure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-queue-progress'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

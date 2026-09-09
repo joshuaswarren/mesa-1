@@ -68,6 +68,28 @@ static unsigned dmabuf_fallback_sync_calls;
 static bool waited_after_dmabuf_import_failure;
 static unsigned prime_export_calls;
 static bool timed_out_sync_wait_once;
+static unsigned queue_progress_syncobj_creates;
+static unsigned queue_progress_syncobj_destroys;
+static unsigned queue_progress_timeline_signals;
+static unsigned queue_progress_transfers;
+static uint64_t queue_progress_created_handles;
+static uint64_t queue_progress_destroyed_handles;
+static uint32_t queue_progress_initial_handle;
+static uint64_t queue_progress_initial_point;
+static uint32_t queue_progress_transfer_src_handle;
+static uint32_t queue_progress_transfer_dst_handle;
+static uint64_t queue_progress_transfer_src_point;
+static uint64_t queue_progress_transfer_dst_point;
+static uint32_t queue_progress_transfer_flags;
+static bool queue_progress_signal_shape_valid;
+static bool queue_progress_transfer_shape_valid;
+static bool failed_queue_timeline_signal_once;
+
+static const char *
+queue_progress_lifecycle_case(void)
+{
+   return getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
+}
 
 static void __attribute__((destructor))
 check_injected_sync_failures(void)
@@ -112,6 +134,78 @@ check_injected_sync_failures(void)
               "shim: one concurrent BO transition made one PRIME export\n");
    if (timed_out_sync_wait_once)
       fprintf(stderr, "shim: injected syncobj wait timeout exactly once\n");
+}
+
+static void __attribute__((destructor))
+check_queue_progress_lifecycle(void)
+{
+   const char *test_case = queue_progress_lifecycle_case();
+   if (!test_case)
+      return;
+
+   const bool success = !strcmp(test_case, "success");
+   const bool init_failure = !strcmp(test_case, "init-failure");
+   const bool submit_failure = !strcmp(test_case, "submit-failure");
+   /* One create/destroy pair probes the physical-device syncobj features.
+    * The logical-device cases then add the queue timeline, plus the fence
+    * and QueueWaitIdle's temporary syncobj where those objects are reached. */
+   const unsigned expected_syncobjs = success ? 4 : init_failure ? 2 : 3;
+   const unsigned expected_transfers = success ? 1 : 0;
+   const uint64_t expected_handles =
+      (UINT64_C(1) << (expected_syncobjs + 1)) - 2;
+   const bool exact =
+      (success || init_failure || submit_failure) &&
+      queue_progress_syncobj_creates == expected_syncobjs &&
+      queue_progress_syncobj_destroys == expected_syncobjs &&
+      queue_progress_created_handles == expected_handles &&
+      queue_progress_destroyed_handles == expected_handles &&
+      queue_progress_timeline_signals == 1 &&
+      queue_progress_signal_shape_valid &&
+      queue_progress_initial_handle == 2 &&
+      queue_progress_initial_point == 1 &&
+      queue_progress_transfers == expected_transfers &&
+      failed_queue_timeline_signal_once == init_failure &&
+      (!success ||
+       (queue_progress_transfer_shape_valid &&
+        queue_progress_transfer_src_handle == 2 &&
+        queue_progress_transfer_dst_handle == 4 &&
+        queue_progress_transfer_src_point == 2 &&
+        queue_progress_transfer_dst_point == 0 &&
+        queue_progress_transfer_flags == 0));
+
+   if (!exact) {
+      fprintf(stderr,
+              "shim: bad queue progress lifecycle '%s': create=%u "
+              "destroy=%u signal=%u shape=%u initial=%llu transfer=%u "
+              "handles=%#llx/%#llx initial-handle=%u "
+              "transfer-shape=%u src=%u:%llu dst=%u:%llu flags=%#x "
+              "signal-failed=%u\n",
+              test_case, queue_progress_syncobj_creates,
+              queue_progress_syncobj_destroys,
+              queue_progress_timeline_signals,
+              queue_progress_signal_shape_valid,
+              (unsigned long long)queue_progress_initial_point,
+              queue_progress_transfers,
+              (unsigned long long)queue_progress_created_handles,
+              (unsigned long long)queue_progress_destroyed_handles,
+              queue_progress_initial_handle,
+              queue_progress_transfer_shape_valid,
+              queue_progress_transfer_src_handle,
+              (unsigned long long)queue_progress_transfer_src_point,
+              queue_progress_transfer_dst_handle,
+              (unsigned long long)queue_progress_transfer_dst_point,
+              queue_progress_transfer_flags,
+              failed_queue_timeline_signal_once);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: exact queue progress lifecycle '%s': bootstrap=1 "
+           "wait-idle-source=%llu syncobjs=%u/%u\n",
+           test_case,
+           (unsigned long long)queue_progress_transfer_src_point,
+           queue_progress_syncobj_creates,
+           queue_progress_syncobj_destroys);
 }
 
 static uint32_t
@@ -431,7 +525,76 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
 {
    struct drm_syncobj_create *create = arg;
 
-   create->handle = 1; /* 0 is invalid */
+   if (queue_progress_lifecycle_case()) {
+      queue_progress_syncobj_creates++;
+      create->handle = queue_progress_syncobj_creates;
+      if (create->handle < 64)
+         queue_progress_created_handles |= UINT64_C(1) << create->handle;
+   } else {
+      create->handle = 1; /* 0 is invalid */
+   }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_destroy(int fd, unsigned long request, void *arg)
+{
+   const struct drm_syncobj_destroy *destroy = arg;
+
+   if (queue_progress_lifecycle_case()) {
+      queue_progress_syncobj_destroys++;
+      if (destroy->handle < 64)
+         queue_progress_destroyed_handles |= UINT64_C(1) << destroy->handle;
+   }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_transfer(int fd, unsigned long request, void *arg)
+{
+   const struct drm_syncobj_transfer *transfer = arg;
+
+   if (queue_progress_lifecycle_case()) {
+      queue_progress_transfers++;
+      queue_progress_transfer_shape_valid =
+         transfer->src_handle != 0 && transfer->dst_handle != 0;
+      queue_progress_transfer_src_handle = transfer->src_handle;
+      queue_progress_transfer_dst_handle = transfer->dst_handle;
+      queue_progress_transfer_src_point = transfer->src_point;
+      queue_progress_transfer_dst_point = transfer->dst_point;
+      queue_progress_transfer_flags = transfer->flags;
+   }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_timeline_signal(int fd, unsigned long request,
+                                       void *arg)
+{
+   const struct drm_syncobj_timeline_array *signal = arg;
+
+   if (queue_progress_lifecycle_case()) {
+      const uint32_t *handles = (const void *)(uintptr_t)signal->handles;
+      const uint64_t *points = (const void *)(uintptr_t)signal->points;
+      queue_progress_timeline_signals++;
+      queue_progress_signal_shape_valid =
+         signal->count_handles == 1 && signal->flags == 0 && handles &&
+         points && handles[0] != 0;
+      if (handles && points && signal->count_handles) {
+         queue_progress_initial_handle = handles[0];
+         queue_progress_initial_point = points[0];
+      }
+   }
+
+   if (getenv("ASAHI_SHIM_FAIL_QUEUE_TIMELINE_SIGNAL_ONCE") &&
+       !failed_queue_timeline_signal_once) {
+      failed_queue_timeline_signal_once = true;
+      errno = ENOMEM;
+      return -1;
+   }
 
    return 0;
 }
@@ -536,14 +699,15 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_GET_CAP)] = drm_shim_ioctl_get_cap,
    [_IOC_NR(DRM_IOCTL_GEM_CLOSE)] = drm_shim_ioctl_gem_close,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_CREATE)] = drm_shim_ioctl_syncobj_create,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_DESTROY)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_DESTROY)] = drm_shim_ioctl_syncobj_destroy,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] =
       drm_shim_ioctl_syncobj_handle_to_fd,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_syncobj_wait,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_syncobj_transfer,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_RESET)] = drm_shim_ioctl_stub,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] =
+      drm_shim_ioctl_syncobj_timeline_signal,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_QUERY)] = drm_shim_ioctl_stub,
    [_IOC_NR(DRM_IOCTL_PRIME_HANDLE_TO_FD)] = drm_shim_ioctl_prime_handle_to_fd,

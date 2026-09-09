@@ -18,7 +18,11 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_COMPUTE_ATOMIC_2D
+#ifdef G17P_QUEUE_PROGRESS
+#include "g17p_vulkan_compute_min_spv.h"
+#define COMPUTE_SPV g17p_vulkan_compute_min_spv
+#define TEST_NAME "g17p-vulkan-queue-progress"
+#elif defined(G17P_COMPUTE_ATOMIC_2D)
 #include "g17p_vulkan_compute_atomic2d_spv.h"
 #define COMPUTE_SPV g17p_vulkan_compute_atomic2d_spv
 #define TEST_NAME "g17p-vulkan-compute-atomic2d"
@@ -130,6 +134,9 @@ VK_FN(vkCreateFence);
 VK_FN(vkDestroyFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
+#ifdef G17P_QUEUE_PROGRESS
+VK_FN(vkQueueWaitIdle);
+#endif
 
 static void
 die(const char *what)
@@ -185,7 +192,46 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 int
 main(int argc, char **argv)
 {
-#ifdef G17P_CONDITIONAL_RENDERING
+#ifdef G17P_QUEUE_PROGRESS
+   enum queue_progress_mode {
+      QUEUE_PROGRESS_SHIM,
+      QUEUE_PROGRESS_EXECUTE,
+      QUEUE_PROGRESS_INIT_FAILURE,
+      QUEUE_PROGRESS_SUBMIT_FAILURE,
+   };
+   if (argc != 2)
+      die("usage: " TEST_NAME
+          " <--shim|--execute|--init-failure|--submit-failure>");
+
+   enum queue_progress_mode progress_mode;
+   const char *expected_lifecycle = NULL;
+   if (!strcmp(argv[1], "--shim")) {
+      progress_mode = QUEUE_PROGRESS_SHIM;
+      expected_lifecycle = "success";
+   } else if (!strcmp(argv[1], "--execute")) {
+      progress_mode = QUEUE_PROGRESS_EXECUTE;
+      const char *ack = getenv("G17P_QUEUE_PROGRESS_EXECUTION_ACK");
+      if (!ack || strcmp(ack, "YES"))
+         die("execution requires G17P_QUEUE_PROGRESS_EXECUTION_ACK=YES");
+   } else if (!strcmp(argv[1], "--init-failure")) {
+      progress_mode = QUEUE_PROGRESS_INIT_FAILURE;
+      expected_lifecycle = "init-failure";
+   } else if (!strcmp(argv[1], "--submit-failure")) {
+      progress_mode = QUEUE_PROGRESS_SUBMIT_FAILURE;
+      expected_lifecycle = "submit-failure";
+   } else {
+      die("usage: " TEST_NAME
+          " <--shim|--execute|--init-failure|--submit-failure>");
+   }
+
+   if (expected_lifecycle) {
+      const char *configured =
+         getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
+      if (!configured || strcmp(configured, expected_lifecycle))
+         die("DRM-shim lifecycle oracle is not configured for this case");
+   }
+   const bool record_only = false;
+#elif defined(G17P_CONDITIONAL_RENDERING)
    struct conditional_case {
       const char *name;
       uint32_t predicate;
@@ -403,9 +449,26 @@ main(int argc, char **argv)
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
    };
-   VkDevice device;
-   check(vkCreateDevice(physical, &device_info, NULL, &device),
-         "vkCreateDevice");
+   VkDevice device = VK_NULL_HANDLE;
+   VkResult create_result =
+      vkCreateDevice(physical, &device_info, NULL, &device);
+#ifdef G17P_QUEUE_PROGRESS
+   if (progress_mode == QUEUE_PROGRESS_INIT_FAILURE) {
+      if (create_result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+         fprintf(stderr,
+                 TEST_NAME ": injected vkCreateDevice returned %d, expected %d\n",
+                 create_result, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return EXIT_FAILURE;
+      }
+
+      vkDestroyInstance(instance, NULL);
+      dlclose(loader);
+      printf(TEST_NAME ": PASS — queue bootstrap-signal failure propagated "
+                       "and unwound device lifetime\n");
+      return EXIT_SUCCESS;
+   }
+#endif
+   check(create_result, "vkCreateDevice");
 
    LOAD_DEVICE(device, vkDestroyDevice);
    LOAD_DEVICE(device, vkGetDeviceQueue);
@@ -448,6 +511,9 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkDestroyFence);
    LOAD_DEVICE(device, vkQueueSubmit);
    LOAD_DEVICE(device, vkWaitForFences);
+#ifdef G17P_QUEUE_PROGRESS
+   LOAD_DEVICE(device, vkQueueWaitIdle);
+#endif
 
    VkQueue queue;
    vkGetDeviceQueue(device, queue_family, 0, &queue);
@@ -826,7 +892,32 @@ main(int argc, char **argv)
       .commandBufferCount = 1,
       .pCommandBuffers = &command_buffer,
    };
-   check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
+   VkResult submit_result = vkQueueSubmit(queue, 1, &submit_info, fence);
+#ifdef G17P_QUEUE_PROGRESS
+   if (progress_mode == QUEUE_PROGRESS_SUBMIT_FAILURE) {
+      if (submit_result != VK_ERROR_DEVICE_LOST) {
+         fprintf(stderr,
+                 TEST_NAME ": injected vkQueueSubmit returned %d, expected %d\n",
+                 submit_result, VK_ERROR_DEVICE_LOST);
+         return EXIT_FAILURE;
+      }
+
+      printf(TEST_NAME ": PASS — first-submit failure propagated and device "
+                       "lifetime remained destructible\n");
+      vkDestroyFence(device, fence, NULL);
+      goto cleanup;
+   }
+#endif
+   check(submit_result, "vkQueueSubmit");
+#ifdef G17P_QUEUE_PROGRESS
+   check(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+   if (progress_mode == QUEUE_PROGRESS_SHIM) {
+      printf(TEST_NAME ": PASS — first work and QueueWaitIdle reached the "
+                       "strict DRM-shim timeline oracle\n");
+      vkDestroyFence(device, fence, NULL);
+      goto cleanup;
+   }
+#else
 #if defined(G17P_COMPUTE_ATOMIC_2D) || defined(G17P_WORKGROUP_SHARED) || \
    defined(G17P_CONDITIONAL_RENDERING)
    const VkResult waited =
@@ -837,6 +928,7 @@ main(int argc, char **argv)
 #else
    check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
          "vkWaitForFences");
+#endif
 #endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -973,6 +1065,9 @@ main(int argc, char **argv)
                     "SSBO stores were discarded, exact output and 32 guards "
                     "stable for three seconds\n");
 #endif
+#elif defined(G17P_QUEUE_PROGRESS)
+   printf(TEST_NAME ": PASS — QueueWaitIdle retired the first submit and all "
+                    "32 buffer writes are visible\n");
 #else
    printf("g17p-vulkan-compute-min: PASS — 32 buffer writes on queue family %u "
           "(flags %#x, private G17P compute route)\n",

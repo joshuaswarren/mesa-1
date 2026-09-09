@@ -103,11 +103,23 @@ static struct {
 
 static unsigned invalid_vm_binds;
 static bool failed_submit_once;
+static unsigned queue_progress_queue_creates;
+static unsigned queue_progress_queue_destroys;
+static unsigned queue_progress_submits;
+static uint32_t queue_progress_private_handle;
+static uint64_t queue_progress_private_point;
+static bool queue_progress_private_sync_valid;
 
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
 static bool multiview_layers_two;
 static unsigned synchronized_render_submits;
+
+static const char *
+queue_progress_lifecycle_case(void)
+{
+   return getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
+}
 
 static void __attribute__((destructor))
 check_vm_bind_lifetime(void)
@@ -122,6 +134,51 @@ check_vm_bind_lifetime(void)
    }
 
    fprintf(stderr, "shim: all VM_BIND operations had nonzero ranges\n");
+}
+
+static void __attribute__((destructor))
+check_queue_progress_lifecycle(void)
+{
+   const char *test_case = queue_progress_lifecycle_case();
+   if (!test_case)
+      return;
+
+   const bool success = !strcmp(test_case, "success");
+   const bool init_failure = !strcmp(test_case, "init-failure");
+   const bool submit_failure = !strcmp(test_case, "submit-failure");
+   const unsigned expected_submits = init_failure ? 0 : 1;
+   const bool exact =
+      (success || init_failure || submit_failure) &&
+      queue_progress_queue_creates == 1 &&
+      queue_progress_queue_destroys == 1 &&
+      queue_progress_submits == expected_submits &&
+      failed_submit_once == submit_failure &&
+      (init_failure ||
+       (queue_progress_private_sync_valid &&
+        queue_progress_private_handle == 2 &&
+        queue_progress_private_point == 2));
+
+   if (!exact) {
+      fprintf(stderr,
+              "shim: bad Asahi queue progress lifecycle '%s': queue=%u/%u "
+              "submits=%u private-shape=%u private=%u:%llu "
+              "submit-failed=%u\n",
+              test_case, queue_progress_queue_creates,
+              queue_progress_queue_destroys, queue_progress_submits,
+              queue_progress_private_sync_valid,
+              queue_progress_private_handle,
+              (unsigned long long)queue_progress_private_point,
+              failed_submit_once);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: exact Asahi queue progress lifecycle '%s': queue=%u/%u "
+           "submits=%u private=%u:%llu\n",
+           test_case, queue_progress_queue_creates,
+           queue_progress_queue_destroys, queue_progress_submits,
+           queue_progress_private_handle,
+           (unsigned long long)queue_progress_private_point);
 }
 
 static bool
@@ -607,6 +664,24 @@ asahi_ioctl_noop(int fd, unsigned long request, void *arg)
 }
 
 static int
+asahi_ioctl_queue_create(int fd, unsigned long request, void *arg)
+{
+   if (queue_progress_lifecycle_case())
+      queue_progress_queue_creates++;
+
+   return 0;
+}
+
+static int
+asahi_ioctl_queue_destroy(int fd, unsigned long request, void *arg)
+{
+   if (queue_progress_lifecycle_case())
+      queue_progress_queue_destroys++;
+
+   return 0;
+}
+
+static int
 asahi_ioctl_gem_bind_object(int fd, unsigned long request, void *arg)
 {
    struct drm_asahi_gem_bind_object *bind = arg;
@@ -779,6 +854,21 @@ static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
+   if (queue_progress_lifecycle_case()) {
+      const struct drm_asahi_sync *syncs =
+         (const void *)(uintptr_t)submit->syncs;
+      queue_progress_submits++;
+      if (syncs && submit->out_sync_count) {
+         const struct drm_asahi_sync *private_sync =
+            &syncs[submit->in_sync_count + submit->out_sync_count - 1];
+         queue_progress_private_sync_valid =
+            private_sync->sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ &&
+            private_sync->handle != 0;
+         queue_progress_private_handle = private_sync->handle;
+         queue_progress_private_point = private_sync->timeline_value;
+      }
+   }
+
    if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
       failed_submit_once = true;
       errno = EIO;
@@ -891,8 +981,8 @@ static ioctl_fn_t driver_ioctls[] = {
    [DRM_ASAHI_VM_BIND] = asahi_ioctl_vm_bind,
    [DRM_ASAHI_GEM_CREATE] = asahi_ioctl_gem_create,
    [DRM_ASAHI_GEM_MMAP_OFFSET] = asahi_ioctl_gem_mmap_offset,
-   [DRM_ASAHI_QUEUE_CREATE] = asahi_ioctl_noop,
-   [DRM_ASAHI_QUEUE_DESTROY] = asahi_ioctl_noop,
+   [DRM_ASAHI_QUEUE_CREATE] = asahi_ioctl_queue_create,
+   [DRM_ASAHI_QUEUE_DESTROY] = asahi_ioctl_queue_destroy,
    [DRM_ASAHI_GEM_BIND_OBJECT] = asahi_ioctl_gem_bind_object,
    [DRM_ASAHI_SUBMIT] = asahi_ioctl_submit,
 };

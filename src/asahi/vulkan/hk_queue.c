@@ -1400,6 +1400,12 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
                        "DRM_IOCTL_TIMELINE_SYNCOBJ_SIGNAL failed: %m");
    }
 
+   /* Point 1 is already signalled.  Keep the software cursor in lockstep so
+    * the first real submit advances to point 2 instead of reusing the
+    * completed bootstrap point.  QueueWaitIdle transfers from this cursor;
+    * reusing point 1 lets it return before the first submit has completed. */
+   queue->drm.timeline_value = initial_value;
+
    return VK_SUCCESS;
 }
 

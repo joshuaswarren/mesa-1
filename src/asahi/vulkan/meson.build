@@ -1896,6 +1896,19 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Public Vulkan queue-progress oracle.  The shim run proves that the
+    # pre-signalled bootstrap point, first real submit, and QueueWaitIdle all
+    # name distinct/correct timeline points; execution additionally proves
+    # that the first dispatch is complete when QueueWaitIdle returns.
+    g17p_queue_progress = executable(
+      'g17p-vulkan-queue-progress',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_QUEUE_PROGRESS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # One bounded conditional-rendering case per process. Submit-only mode
     # proves direct, indirect, inverted and inherited command streams under
     # the drm-shim; execution checks every payload word and both guards.
