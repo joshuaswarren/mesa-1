@@ -71,6 +71,14 @@ hk_g17p_vdm_lookup(struct hk_cmd_buffer *cmd, uint64_t primary, bool bind)
          return compact;
    }
 
+   /* The constrained G17P main heap is wholly inside the lower-root compact
+    * VDM aperture. Control-stream roots and links can therefore name their
+    * primary mapping directly. Keep the scarce +8..+32 MiB aliases above for
+    * draw-state payloads whose independent HAL200 fields are narrower. */
+   uint64_t direct = 0;
+   if (agx_g17p_vdm_payload_compact(primary, &direct))
+      return direct;
+
    {
       list_for_each_entry(struct hk_cmd_bo, bo, &cmd->uploader.main.bos, link) {
          const uint64_t start = bo->bo->va->addr;
@@ -1935,9 +1943,7 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * by the batch to simplify lifetime management for the BO.
     */
    size_t size = 65536;
-   struct agx_ptr T = vdm
-                         ? hk_pool_vdm_primary_alloc(cmd, size, 256)
-                         : hk_pool_alloc(cmd, size, 256);
+   struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
 
    /* Jump from the old control stream to the new control stream. */
    void *link_end =

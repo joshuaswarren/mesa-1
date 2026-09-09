@@ -642,11 +642,9 @@ hk_pool_usc_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 
 /*
  * Allocate a payload that a VDM record references through its 40-bit pointer.
- * G17P's ordinary main heap has bit 39 set, which selects the upper UAT root
- * in the VDM state-fetch path. Main command-pool BOs are also bound in a
- * device-global low alias aperture. Internal VDM packets and HAL200 bind pairs
- * carry that context-relative compact offset; hardware adds 0x1000000000
- * before fetching the alias. Retain the same CPU mapping and backing storage.
+ * HAL200 draw-state fields are narrower than the VDM control-stream pointer,
+ * so those payloads retain a device-global low alias. Control-stream roots
+ * themselves use the constrained main heap directly.
  */
 static inline struct agx_ptr
 hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
@@ -680,10 +678,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       /* Allocate root control stream */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       size_t initial_size = hk_cs_root_size(dev->dev.chip, compute);
-      struct agx_ptr root = compute
-                               ? hk_pool_alloc(cmd, initial_size, 1024)
-                               : hk_pool_vdm_primary_alloc(cmd, initial_size,
-                                                           1024);
+      struct agx_ptr root = hk_pool_alloc(cmd, initial_size, 1024);
       if (!root.cpu)
          return NULL;
 
