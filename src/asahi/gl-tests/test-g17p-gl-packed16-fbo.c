@@ -6,6 +6,7 @@
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -89,7 +90,7 @@ near_pixel(const uint8_t actual[4], const uint8_t expected[4])
 static bool
 exercise_format(GLenum internal_format, const char *name, GLuint program,
                 GLint colour, const uint8_t expected_drawn[4],
-                const uint8_t expected_preserved[4], bool noop)
+                const uint8_t expected_preserved[4], bool floating, bool noop)
 {
    GLuint texture = 0, fbo = 0;
    glGenTextures(1, &texture);
@@ -122,19 +123,43 @@ exercise_format(GLenum internal_format, const char *name, GLuint program,
    glDisable(GL_SCISSOR_TEST);
 
    uint8_t drawn[4] = {0}, preserved[4] = {0};
-   glReadPixels(1, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, drawn);
-   glReadPixels(WIDTH - 2, HEIGHT / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
-                preserved);
+   float drawn_float[4] = {0}, preserved_float[4] = {0};
+   glReadPixels(1, HEIGHT / 2, 1, 1, GL_RGBA,
+                floating ? GL_FLOAT : GL_UNSIGNED_BYTE,
+                floating ? (void *)drawn_float : (void *)drawn);
+   glReadPixels(WIDTH - 2, HEIGHT / 2, 1, 1, GL_RGBA,
+                floating ? GL_FLOAT : GL_UNSIGNED_BYTE,
+                floating ? (void *)preserved_float : (void *)preserved);
    const GLenum error = glGetError();
 
-   const bool ok = error == GL_NO_ERROR &&
-      (noop || (near_pixel(drawn, expected_drawn) &&
-                near_pixel(preserved, expected_preserved)));
+   bool pixels;
+   if (floating) {
+      const float expected_drawn_float[4] = {0.8f, 0.6f, 0.4f, 1.0f};
+      const float expected_preserved_float[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+      pixels = true;
+      for (unsigned c = 0; c < 4; ++c) {
+         pixels &= fabsf(drawn_float[c] - expected_drawn_float[c]) < 0.001f;
+         pixels &= fabsf(preserved_float[c] - expected_preserved_float[c]) <
+                   0.001f;
+      }
+   } else {
+      pixels = near_pixel(drawn, expected_drawn) &&
+               near_pixel(preserved, expected_preserved);
+   }
+   const bool ok = error == GL_NO_ERROR && (noop || pixels);
    if (!ok) {
-      fprintf(stderr,
-              "%s pixels {%u,%u,%u,%u} {%u,%u,%u,%u}, error %#x\n",
-              name, drawn[0], drawn[1], drawn[2], drawn[3], preserved[0],
-              preserved[1], preserved[2], preserved[3], error);
+      if (floating) {
+         fprintf(stderr,
+                 "%s pixels {%f,%f,%f,%f} {%f,%f,%f,%f}, error %#x\n",
+                 name, drawn_float[0], drawn_float[1], drawn_float[2],
+                 drawn_float[3], preserved_float[0], preserved_float[1],
+                 preserved_float[2], preserved_float[3], error);
+      } else {
+         fprintf(stderr,
+                 "%s pixels {%u,%u,%u,%u} {%u,%u,%u,%u}, error %#x\n",
+                 name, drawn[0], drawn[1], drawn[2], drawn[3], preserved[0],
+                 preserved[1], preserved[2], preserved[3], error);
+      }
    }
 
    glDeleteFramebuffers(1, &fbo);
@@ -189,11 +214,17 @@ main(void)
    static const uint8_t rgba4_preserved[4] = {51, 102, 153, 255};
    static const uint8_t rgb5a1_drawn[4] = {206, 156, 99, 0};
    static const uint8_t rgb5a1_preserved[4] = {49, 99, 156, 255};
+   static const uint8_t rgb16f_drawn[4] = {204, 153, 102, 255};
+   static const uint8_t rgb16f_preserved[4] = {51, 102, 153, 255};
    const bool rgba4 = exercise_format(GL_RGBA4, "RGBA4", program, colour,
-                                      rgba4_drawn, rgba4_preserved, noop);
+                                      rgba4_drawn, rgba4_preserved, false,
+                                      noop);
    const bool rgb5a1 = exercise_format(GL_RGB5_A1, "RGB5_A1", program,
                                        colour, rgb5a1_drawn,
-                                       rgb5a1_preserved, noop);
+                                       rgb5a1_preserved, false, noop);
+   const bool rgb16f = exercise_format(GL_RGB16F, "RGB16F", program, colour,
+                                       rgb16f_drawn, rgb16f_preserved, true,
+                                       noop);
 
    glDeleteVertexArrays(1, &vao);
    glDeleteProgram(program);
@@ -202,10 +233,10 @@ main(void)
    eglDestroySurface(display, surface);
    eglTerminate(display);
 
-   if (!rgba4 || !rgb5a1)
+   if (!rgba4 || !rgb5a1 || !rgb16f)
       return EXIT_FAILURE;
 
-   printf("GL packed16 FBO clear, reload, draw, and store exact%s\n",
+   printf("GL 16-bit FBO clear, reload, draw, and store exact%s\n",
           noop ? "; no-op pixels skipped" : "");
    return EXIT_SUCCESS;
 }

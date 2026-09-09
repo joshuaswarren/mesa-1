@@ -47,7 +47,8 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       format == PIPE_FORMAT_R16G16_SNORM ||
       format == PIPE_FORMAT_R16G16B16A16_SNORM;
    key->g17p_rt0_eot_i16_signed_two_words =
-      format == PIPE_FORMAT_R16G16B16A16_SINT;
+      format == PIPE_FORMAT_R16G16B16A16_SINT ||
+      format == PIPE_FORMAT_R16G16B16X16_SINT;
 
    switch (format) {
    case PIPE_FORMAT_R32_FLOAT:
@@ -86,11 +87,16 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    case PIPE_FORMAT_A4B4G4R4_UNORM:
    case PIPE_FORMAT_A4R4G4B4_UNORM:
    case PIPE_FORMAT_R32G32_FLOAT:
+   /* Gallium stores API RGB16 targets in the four-lane X16 physical family;
+    * the unused lane still occupies the second imageblock word. */
+   case PIPE_FORMAT_R16G16B16X16_FLOAT:
    case PIPE_FORMAT_R16G16B16A16_FLOAT:
    case PIPE_FORMAT_R16G16B16A16_UNORM:
    case PIPE_FORMAT_R16G16B16A16_SNORM:
    case PIPE_FORMAT_R16G16B16A16_UINT:
+   case PIPE_FORMAT_R16G16B16X16_UINT:
    case PIPE_FORMAT_R16G16B16A16_SINT:
+   case PIPE_FORMAT_R16G16B16X16_SINT:
    case PIPE_FORMAT_R32G32_SINT:
    case PIPE_FORMAT_R32G32_UINT:
       key->g17p_rt0_eot_words = 2;

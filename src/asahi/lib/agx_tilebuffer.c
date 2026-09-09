@@ -223,10 +223,12 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
                            tib->logical_format[0] == PIPE_FORMAT_R8_UINT;
    const bool scalar_r8i = tib->nr_samples == 1 &&
                            tib->logical_format[0] == PIPE_FORMAT_R8_SINT;
-   const bool rgba16u = tib->nr_samples == 1 &&
-      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UINT;
-   const bool rgba16i = tib->nr_samples == 1 &&
-      tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT;
+   const bool rgba16u_or_x = tib->nr_samples == 1 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_UINT);
+   const bool rgba16i_or_x = tib->nr_samples == 1 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_SINT);
    const bool rgba32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
       tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
@@ -272,7 +274,8 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
             scalar_r32f || scalar_r32i || pair_r32f || pair_r32i ||
-            pair_r32u || scalar_r8u || scalar_r8i || rgba16u || rgba16i));
+            pair_r32u || scalar_r8u || scalar_r8i || rgba16u_or_x ||
+            rgba16i_or_x));
 }
 
 enum agx_g17p_mrt_layout
