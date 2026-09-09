@@ -4534,10 +4534,24 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.offsets[0] != 0)
       return (struct agx3_g17p_mrt_protocol){0};
 
+   unsigned previous_load = p.count;
    unsigned next_store = p.count;
+   bool stores_started = false;
+   bool stopped = false;
    agx_foreach_instr_global(ctx, I) {
-      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+      if (stopped)
+         return (struct agx3_g17p_mrt_protocol){0};
+
+      if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
          continue;
+      }
+
+      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE) {
+         if (stores_started)
+            return (struct agx3_g17p_mrt_protocol){0};
+         continue;
+      }
 
       const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
       if (partition < 0 || I->nr_srcs < 2 ||
@@ -4548,9 +4562,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          return (struct agx3_g17p_mrt_protocol){0};
 
       if (I->op == AGX_OPCODE_LD_TILE) {
-         if (++p.loads[partition] > 1 || next_store != p.count)
+         if (++p.loads[partition] > 1 || next_store != p.count ||
+             (unsigned)partition >= previous_load)
             return (struct agx3_g17p_mrt_protocol){0};
+         previous_load = partition;
       } else {
+         stores_started = true;
          if (++p.stores[partition] > 1 || next_store == 0 ||
              partition != (int)--next_store)
             return (struct agx3_g17p_mrt_protocol){0};
@@ -4565,7 +4582,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          return (struct agx3_g17p_mrt_protocol){0};
    }
 
-   p.valid = next_store == 0;
+   p.valid = stopped && next_store == 0;
    return p;
 }
 
