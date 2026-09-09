@@ -231,6 +231,20 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_present_priority_env = environment(
+    g17p_acquire_rollback_environment)
+  g17p_present_priority_env.set(
+    'ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK', 'present-priority')
+  test(
+    'hk_g17p_present_priority',
+    g17p_acquire_rollback,
+    args : ['--present-priority'],
+    env : g17p_present_priority_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-present-priority'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

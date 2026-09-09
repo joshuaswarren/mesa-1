@@ -2144,6 +2144,41 @@ wsi_reset_internal_binary_semaphore(struct vk_device *device,
    return vk_sync_reset(device, &semaphore->permanent);
 }
 
+static unsigned
+wsi_present_result_priority(VkResult result)
+{
+   switch (result) {
+   case VK_ERROR_DEVICE_LOST:
+      return 8;
+   case VK_ERROR_SURFACE_LOST_KHR:
+      return 6;
+   case VK_ERROR_OUT_OF_DATE_KHR:
+      return 5;
+   case VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT:
+      return 4;
+   case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT:
+      return 3;
+   case VK_SUBOPTIMAL_KHR:
+      return 1;
+   case VK_SUCCESS:
+      return 0;
+   default:
+      /* Global enqueue failures are not ordinary per-swapchain presentation
+       * results.  If one reaches this aggregate, it has to outrank every
+       * presentation-engine status except device loss. */
+      return result < VK_SUCCESS ? 7 : 0;
+   }
+}
+
+static VkResult
+wsi_merge_present_results(VkResult current, VkResult next)
+{
+   return wsi_present_result_priority(next) >
+             wsi_present_result_priority(current)
+          ? next
+          : current;
+}
+
 VkResult
 wsi_common_queue_present(const struct wsi_device *wsi,
                          struct vk_queue *queue,
@@ -2704,14 +2739,16 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          results[i] = cleanup_result;
    }
 
+   VkResult present_result = VK_SUCCESS;
    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
       if (pPresentInfo->pResults != NULL)
          pPresentInfo->pResults[i] = results[i];
 
-      /* Let the final result be our first unsuccessful result */
-      if (final_result == VK_SUCCESS)
-         final_result = results[i];
+      present_result = wsi_merge_present_results(present_result, results[i]);
    }
+
+   if (final_result == VK_SUCCESS)
+      final_result = present_result;
 
    STACK_ARRAY_FINISH(image_signal_infos);
    STACK_ARRAY_FINISH(semaphore_wait_infos);

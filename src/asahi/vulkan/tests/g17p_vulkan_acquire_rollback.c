@@ -58,6 +58,39 @@ static uint32_t expected_release_index;
 static unsigned release_calls;
 static bool release_shape_valid;
 
+struct present_override {
+   struct wsi_swapchain *chain;
+   VkResult (*queue_present)(struct wsi_swapchain *, uint32_t, uint64_t,
+                             const VkPresentRegionKHR *);
+   VkResult result;
+   unsigned calls;
+};
+
+static struct present_override present_overrides[2];
+static bool present_shape_valid;
+
+static VkResult
+override_present_result(struct wsi_swapchain *chain, uint32_t image_index,
+                        uint64_t present_id,
+                        const VkPresentRegionKHR *damage)
+{
+   for (uint32_t i = 0; i < 2; i++) {
+      struct present_override *override = &present_overrides[i];
+      if (override->chain != chain)
+         continue;
+
+      override->calls++;
+      present_shape_valid &= image_index < chain->image_count &&
+                             present_id == 0 && damage == NULL;
+      VkResult result = override->queue_present(
+         chain, image_index, present_id, damage);
+      return result == VK_SUCCESS ? override->result : result;
+   }
+
+   present_shape_valid = false;
+   return VK_ERROR_UNKNOWN;
+}
+
 static VkResult
 fail_first_release(struct wsi_swapchain *chain, uint32_t count,
                    const uint32_t *indices)
@@ -127,6 +160,40 @@ present_waiting(VkQueue queue, VkSwapchainKHR swapchain,
 }
 
 static VkResult
+submit_and_present_pair(VkQueue queue, const VkSwapchainKHR swapchains[2],
+                        const VkSemaphore acquired[2],
+                        VkSemaphore render_done, const uint32_t image_indices[2],
+                        VkResult results[2])
+{
+   const VkPipelineStageFlags wait_stages[2] = {
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+   };
+   const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = 2,
+      .pWaitSemaphores = acquired,
+      .pWaitDstStageMask = wait_stages,
+      .signalSemaphoreCount = 1,
+      .pSignalSemaphores = &render_done,
+   };
+   check(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE),
+         "vkQueueSubmit(pair)");
+
+   results[0] = results[1] = VK_SUCCESS;
+   const VkPresentInfoKHR present_info = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &render_done,
+      .swapchainCount = 2,
+      .pSwapchains = swapchains,
+      .pImageIndices = image_indices,
+      .pResults = results,
+   };
+   return vkQueuePresentKHR(queue, &present_info);
+}
+
+static VkResult
 submit_and_present(VkQueue queue, VkSwapchainKHR swapchain,
                    VkSemaphore acquired, VkSemaphore render_done,
                    uint32_t image_index, VkResult *per_swapchain)
@@ -157,16 +224,18 @@ main(int argc, char **argv)
                      strcmp(argv[1], "--present-export-failure") &&
                      strcmp(argv[1], "--present-submit-failure") &&
                      strcmp(argv[1], "--empty-submit-failure") &&
-                     strcmp(argv[1], "--release-failure")))
+                     strcmp(argv[1], "--release-failure") &&
+                     strcmp(argv[1], "--present-priority")))
       die("usage: " TEST_NAME " <--semaphore-failure|--fence-failure|"
            "--present-import-failure|--present-export-failure|"
            "--present-submit-failure|--empty-submit-failure|"
-           "--release-failure>");
+           "--release-failure|--present-priority>");
 
    const char *test_case = argv[1] + 2;
    const bool empty_submit_failure =
       !strcmp(test_case, "empty-submit-failure");
    const bool release_failure = !strcmp(test_case, "release-failure");
+   const bool present_priority = !strcmp(test_case, "present-priority");
    const bool present_submit_failure =
       !strcmp(test_case, "present-submit-failure");
    const bool present_failure =
@@ -174,7 +243,7 @@ main(int argc, char **argv)
       !strcmp(test_case, "present-export-failure") ||
       present_submit_failure;
    const char *configured = getenv((present_failure || empty_submit_failure ||
-                                     release_failure)
+                                     release_failure || present_priority)
       ? "ASAHI_SHIM_EXPECT_PRESENT_ROLLBACK"
       : "ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
    if (!configured || strcmp(configured, test_case))
@@ -376,6 +445,141 @@ main(int argc, char **argv)
    if (present_failure) {
       check(vkCreateSemaphore(device, &semaphore_info, NULL, &held_acquired),
             "vkCreateSemaphore(held acquired)");
+   }
+
+   if (present_priority) {
+      VkHeadlessSurfaceCreateInfoEXT second_surface_info = {
+         .sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT,
+      };
+      VkSurfaceKHR second_surface;
+      check(vkCreateHeadlessSurfaceEXT(instance, &second_surface_info, NULL,
+                                       &second_surface),
+            "vkCreateHeadlessSurfaceEXT(second)");
+
+      VkSwapchainCreateInfoKHR second_swapchain_info = swapchain_info;
+      second_swapchain_info.surface = second_surface;
+      VkSwapchainKHR second_swapchain;
+      check(vkCreateSwapchainKHR(device, &second_swapchain_info, NULL,
+                                 &second_swapchain),
+            "vkCreateSwapchainKHR(second)");
+
+      VkSemaphore second_acquired;
+      check(vkCreateSemaphore(device, &semaphore_info, NULL,
+                              &second_acquired),
+            "vkCreateSemaphore(second acquired)");
+      const VkSemaphore acquire_semaphores[2] = {acquired, second_acquired};
+
+      uint32_t image_indices[2] = {UINT32_MAX, UINT32_MAX};
+      check(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+                                  acquire_semaphores[0], VK_NULL_HANDLE,
+                                  &image_indices[0]),
+            "vkAcquireNextImageKHR(priority first)");
+      check(vkAcquireNextImageKHR(device, second_swapchain, UINT64_MAX,
+                                  acquire_semaphores[1], VK_NULL_HANDLE,
+                                  &image_indices[1]),
+            "vkAcquireNextImageKHR(priority second)");
+
+      present_overrides[0] = (struct present_override) {
+         .chain = wsi_swapchain_from_handle(swapchain),
+      };
+      present_overrides[1] = (struct present_override) {
+         .chain = wsi_swapchain_from_handle(second_swapchain),
+      };
+      for (uint32_t i = 0; i < 2; i++) {
+         present_overrides[i].queue_present =
+            present_overrides[i].chain->queue_present;
+         present_overrides[i].chain->queue_present = override_present_result;
+      }
+      present_shape_valid = true;
+
+      const VkSwapchainKHR swapchains[2] = {
+         swapchain,
+         second_swapchain,
+      };
+      const VkResult priority_order[] = {
+         VK_SUCCESS,
+         VK_SUBOPTIMAL_KHR,
+         VK_ERROR_OUT_OF_DATE_KHR,
+         VK_ERROR_SURFACE_LOST_KHR,
+         VK_ERROR_DEVICE_LOST,
+      };
+      VkResult per_swapchain[2];
+      unsigned iteration = 0;
+      for (unsigned high = 1;
+           high < sizeof(priority_order) / sizeof(priority_order[0]); high++) {
+         present_overrides[0].result = priority_order[high - 1];
+         present_overrides[1].result = priority_order[high];
+
+         for (unsigned reverse = 0; reverse < 2; reverse++, iteration++) {
+            const unsigned first = reverse ? 1 : 0;
+            const unsigned second = reverse ? 0 : 1;
+            const VkSwapchainKHR ordered_swapchains[2] = {
+               swapchains[first],
+               swapchains[second],
+            };
+            const uint32_t ordered_indices[2] = {
+               image_indices[first],
+               image_indices[second],
+            };
+            const VkResult expected_results[2] = {
+               present_overrides[first].result,
+               present_overrides[second].result,
+            };
+
+            VkResult result = submit_and_present_pair(
+               queue, ordered_swapchains, acquire_semaphores, render_done,
+               ordered_indices, per_swapchain);
+            if (result != priority_order[high] ||
+                per_swapchain[0] != expected_results[0] ||
+                per_swapchain[1] != expected_results[1]) {
+               fprintf(stderr,
+                       TEST_NAME ": priority present %u returned %d [%d, %d], "
+                                 "expected %d [%d, %d]\n",
+                       iteration, result, per_swapchain[0], per_swapchain[1],
+                       priority_order[high], expected_results[0],
+                       expected_results[1]);
+               return EXIT_FAILURE;
+            }
+
+            const bool final_iteration =
+               high + 1 == sizeof(priority_order) / sizeof(priority_order[0]) &&
+               reverse == 1;
+            if (!final_iteration) {
+               check(vkAcquireNextImageKHR(
+                        device, swapchain, UINT64_MAX, acquire_semaphores[0],
+                        VK_NULL_HANDLE, &image_indices[0]),
+                     "vkAcquireNextImageKHR(priority repeat first)");
+               check(vkAcquireNextImageKHR(
+                        device, second_swapchain, UINT64_MAX,
+                        acquire_semaphores[1], VK_NULL_HANDLE,
+                        &image_indices[1]),
+                     "vkAcquireNextImageKHR(priority repeat second)");
+            }
+         }
+      }
+      if (!present_shape_valid || present_overrides[0].calls != iteration ||
+          present_overrides[1].calls != iteration)
+         die("present backends did not receive every exact request");
+
+      for (uint32_t i = 0; i < 2; i++) {
+         present_overrides[i].chain->queue_present =
+            present_overrides[i].queue_present;
+      }
+      check(vkQueueWaitIdle(queue), "vkQueueWaitIdle(priority)");
+      vkDestroySemaphore(device, second_acquired, NULL);
+      vkDestroySemaphore(device, render_done, NULL);
+      vkDestroySemaphore(device, acquired, NULL);
+      vkDestroySwapchainKHR(device, second_swapchain, NULL);
+      vkDestroySwapchainKHR(device, swapchain, NULL);
+      vkDestroySurfaceKHR(instance, second_surface, NULL);
+      vkDestroyDevice(device, NULL);
+      vkDestroySurfaceKHR(instance, surface, NULL);
+      vkDestroyInstance(instance, NULL);
+      dlclose(loader);
+      printf(TEST_NAME ": PASS — device/surface/out-of-date/suboptimal "
+                       "priorities were order-independent across two "
+                       "swapchains\n");
+      return EXIT_SUCCESS;
    }
 
    if (release_failure) {

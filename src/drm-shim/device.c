@@ -269,6 +269,7 @@ check_wsi_rollback_lifecycle(void)
    const bool empty_submit_failure =
       !strcmp(test_case, "empty-submit-failure");
    const bool release_failure = !strcmp(test_case, "release-failure");
+   const bool present_priority = !strcmp(test_case, "present-priority");
    const unsigned expected_imports = semaphore_failure ? 3 : 4;
    const unsigned expected_syncobjs = semaphore_failure ? 12 : 13;
    const uint64_t expected_handles =
@@ -394,8 +395,30 @@ check_wsi_rollback_lifecycle(void)
       !wsi_rollback_import_failed &&
       !wsi_rollback_submit_transfer_failed &&
       !wsi_rollback_stale_fence_wait_rejected;
+   const bool exact_present_priority =
+      present_priority &&
+      wsi_rollback_syncobj_creates == 32 &&
+      wsi_rollback_syncobj_destroys == 32 &&
+      wsi_rollback_created_handles == UINT64_C(0x1fffffffe) &&
+      wsi_rollback_destroyed_handles == UINT64_C(0x1fffffffe) &&
+      wsi_rollback_sync_imports == 16 &&
+      wsi_rollback_transfers == 57 &&
+      wsi_rollback_dmabuf_exports == 17 &&
+      wsi_rollback_dmabuf_imports == 17 &&
+      !wsi_rollback_dmabuf_import_failed &&
+      wsi_rollback_failed_dmabuf_import == 0 &&
+      wsi_rollback_sync_file_exports == 16 &&
+      !wsi_rollback_sync_file_export_failed &&
+      wsi_rollback_failed_sync_file_export == 0 &&
+      wsi_rollback_waits_after_sync_failure == 0 &&
+      wsi_rollback_syncobj_resets_after_failure == 0 &&
+      wsi_rollback_submit_reset_handles == 0 &&
+      !wsi_rollback_import_failed &&
+      !wsi_rollback_submit_transfer_failed &&
+      !wsi_rollback_stale_fence_wait_rejected;
    const bool exact = exact_acquire || exact_present || exact_submit ||
-                      exact_empty_submit || exact_release;
+                      exact_empty_submit || exact_release ||
+                      exact_present_priority;
 
    if (!exact) {
       fprintf(stderr,
@@ -944,7 +967,8 @@ drm_shim_ioctl_syncobj_fd_to_handle(int fd, unsigned long request, void *arg)
    wsi_rollback_sync_imports++;
    if (!strncmp(test_case, "present-", strlen("present-")) ||
        !strcmp(test_case, "empty-submit-failure") ||
-       !strcmp(test_case, "release-failure"))
+       !strcmp(test_case, "release-failure") ||
+       !strcmp(test_case, "present-priority"))
       return 0;
 
    const unsigned fail_at = !strcmp(test_case, "fence-failure") ? 2 : 1;
