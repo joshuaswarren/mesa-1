@@ -1896,10 +1896,10 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    # One bounded conditional-rendering case per process. Record-only mode
-    # proves direct, indirect, inverted and inherited command encoding under
+    # One bounded conditional-rendering case per process. Submit-only mode
+    # proves direct, indirect, inverted and inherited command streams under
     # the drm-shim; execution checks every payload word and both guards.
-    executable(
+    g17p_conditional_compute = executable(
       'g17p-vulkan-conditional-rendering',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],
@@ -1908,10 +1908,10 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    # Graphics half of the same qualification: direct, robust indexed and
-    # clear-attachments paths are checked by exact RGBA8 pixels and precise
-    # occlusion counts.
-    executable(
+    # Graphics half of the same qualification: direct, robust indexed,
+    # indirect, count and clear-attachments paths are checked by exact RGBA8
+    # pixels and precise occlusion counts.
+    g17p_conditional_graphics = executable(
       'g17p-vulkan-conditional-rendering-graphics',
       files('tests/g17p_render_only.c'),
       include_directories : [inc_include],

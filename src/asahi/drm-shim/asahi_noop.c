@@ -424,16 +424,32 @@ check_compute_coverage(void)
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE"))
       return;
 
-   if (!compute_stats.launches ||
+   bool exact = true;
+   const char *expected =
+      getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS");
+   if (expected) {
+      unsigned launches, barriers, prologues, strong;
+      char trailing;
+      exact = sscanf(expected, "%u,%u,%u,%u%c", &launches, &barriers,
+                     &prologues, &strong, &trailing) == 4 &&
+              compute_stats.launches == launches &&
+              compute_stats.barriers == barriers &&
+              compute_stats.prologue_barriers == prologues &&
+              compute_stats.strong_barriers == strong;
+   }
+
+   if (!exact || !compute_stats.launches ||
        compute_stats.launches != compute_stats.barriers ||
        !compute_stats.terminated ||
        (getenv("ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER") &&
         !compute_stats.strong_barriers)) {
       fprintf(stderr,
               "shim: incomplete G17P compute coverage: launches=%u "
-              "barriers=%u strong=%u terminated=%u\n",
+              "barriers=%u prologue=%u strong=%u terminated=%u "
+              "expected=%s\n",
               compute_stats.launches, compute_stats.barriers,
-              compute_stats.strong_barriers, compute_stats.terminated);
+              compute_stats.prologue_barriers, compute_stats.strong_barriers,
+              compute_stats.terminated, expected ? expected : "<structural>");
       _Exit(EXIT_FAILURE);
    }
 }
@@ -852,12 +868,14 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             return -EINVAL;
          compute_stats.launches += stats.launches;
          compute_stats.barriers += stats.barriers;
+         compute_stats.prologue_barriers += stats.prologue_barriers;
          compute_stats.strong_barriers += stats.strong_barriers;
          compute_stats.terminated |= stats.terminated;
          fprintf(stderr,
-                 "shim: G17P CDM validated: %u launches, %u barriers "
-                 "(%u strong)\n",
-                 stats.launches, stats.barriers, stats.strong_barriers);
+                 "shim: G17P CDM validated: %u launches, %u barriers, "
+                 "%u prologue (%u strong)\n",
+                 stats.launches, stats.barriers, stats.prologue_barriers,
+                 stats.strong_barriers);
       }
 
       cursor += command_size;

@@ -12,6 +12,7 @@
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "asahi/lib/agx3_cdm_decode_core.h"
+#include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/lib/agx_vdm_decode_core.h"
 #include "asahi/lib/agx_vdm_hal200_bind_tail_core.h"
 #include "asahi/isa/disasm.h"
@@ -66,7 +67,7 @@ load_le64(const uint8_t *p)
 static bool
 fail_at(uint64_t address, const char *reason)
 {
-   fprintf(stderr, "shim: invalid G17P VDM at %#llx: %s\n",
+   fprintf(stderr, "shim: invalid G17P command stream at %#llx: %s\n",
            (unsigned long long)address, reason);
    return false;
 }
@@ -318,6 +319,31 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
    return fail_at(cursor, "Ioto program has no bounded terminator");
 }
 
+static bool
+validate_compact_compute_helper(
+   const struct asahi_g17p_stream_memory *memory, uint64_t address,
+   const uint8_t bytes[AGX3_CDM_INDIRECT_LAUNCH_SIZE])
+{
+   struct agx3_cdm_indirect_launch_info helper;
+   if (!agx3_cdm_indirect_launch_unpack(
+          AGX_CHIP_G17P, bytes, AGX3_CDM_INDIRECT_LAUNCH_SIZE, &helper) ||
+       helper.word0_payload != UINT32_C(0x10080000) ||
+       helper.word1_payload != 0 || !helper.pipeline ||
+       (helper.pipeline & 63) ||
+       helper.opaque_word3 !=
+          (UINT32_C(0x40000000) | ((helper.pipeline >> 40) & 0xff)) ||
+       !helper.indirect_parameters || (helper.indirect_parameters & 3) ||
+       !memory->owned(memory->data, helper.indirect_parameters, 6 * 4))
+      return fail_at(address, "invalid compact indirect compute helper");
+
+   struct asahi_g17p_stream_stats shader_stats = {0};
+   if (!validate_ioto_program(memory, helper.pipeline, false, true,
+                              &shader_stats))
+      return fail_at(address, "compact compute helper Ioto program is invalid");
+
+   return true;
+}
+
 bool
 asahi_g17p_compute_validate(
    const struct asahi_g17p_stream_memory *memory,
@@ -326,6 +352,8 @@ asahi_g17p_compute_validate(
 {
    struct asahi_g17p_compute_stats local = {0};
    bool need_barrier = false;
+   bool expect_compact_helper = false;
+   bool followed_link = false;
 
    if (stats)
       memset(stats, 0, sizeof(*stats));
@@ -342,18 +370,49 @@ asahi_g17p_compute_validate(
 
    uint64_t cursor = compute->cdm_ctrl_stream_base;
    for (unsigned iteration = 0; iteration < MAX_RECORDS; ++iteration) {
-      if (cursor >= compute->cdm_ctrl_stream_end)
+      size_t span;
+      if (!memory->span(memory->data, cursor, &span) || span < 4)
+         return fail_at(cursor, "compute record is not owned");
+
+      if (!followed_link && cursor >= compute->cdm_ctrl_stream_end)
          return fail_at(cursor, "compute stream ended without terminate");
 
-      const uint64_t remaining = compute->cdm_ctrl_stream_end - cursor;
+      const size_t available = followed_link
+                                  ? span
+                                  : MIN2(span, (size_t)(
+                                                  compute->cdm_ctrl_stream_end -
+                                                  cursor));
       uint8_t bytes[G17P_CDM_DIRECT_LAUNCH_SIZE] = {0};
-      const size_t readable = MIN2((size_t)remaining, sizeof(bytes));
+      const size_t readable = MIN2(available, sizeof(bytes));
       if (!read_owned(memory, cursor, bytes, readable))
          return fail_at(cursor, "compute record is not owned");
+      if (memory->verbose) {
+         fprintf(stderr, "shim: G17P CDM %#llx:",
+                 (unsigned long long)cursor);
+         for (size_t i = 0; i < readable; ++i)
+            fprintf(stderr, " %02x", bytes[i]);
+         fprintf(stderr, "\n");
+      }
+
+      /* Native indirect dispatches are a direct-shaped 40-byte main launch,
+       * a barrier, then an explicitly delimited 24-byte compact helper and
+       * its barrier.  Type zero alone cannot distinguish the helper from the
+       * 36/40-byte launch families, so decode it only in that exact state. */
+      if (expect_compact_helper && !need_barrier) {
+         if (available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
+             !validate_compact_compute_helper(memory, cursor, bytes))
+            return false;
+
+         local.launches++;
+         need_barrier = true;
+         expect_compact_helper = false;
+         cursor += AGX3_CDM_INDIRECT_LAUNCH_SIZE;
+         continue;
+      }
 
       struct agx3_cdm_decoded_record record;
       if (!agx3_cdm_decode_one(AGX_CHIP_G17P, bytes, readable, &record) ||
-          !record.length || record.length > remaining)
+          !record.length || record.length > available)
          return fail_at(cursor, "unknown or truncated AGX3 compute record");
 
       switch (record.kind) {
@@ -379,28 +438,57 @@ asahi_g17p_compute_validate(
 
          local.launches++;
          need_barrier = true;
+         expect_compact_helper =
+            (record.data.launch.word0_payload & UINT32_C(0x00800000)) != 0;
          break;
       }
 
       case AGX3_CDM_RECORD_BARRIER:
-         if (!need_barrier || (record.data.barrier.flags != 0 &&
-                               record.data.barrier.flags != 0x5))
+         if (record.data.barrier.flags != 0 &&
+             record.data.barrier.flags != 0x5)
             return fail_at(cursor, "compute barrier is not canonical");
+
+         if (!need_barrier) {
+            /* Immediate post-graphics writes begin with the strong cache
+             * flush which makes the preceding render visible.  It is an
+             * ordered stream prologue, not a launch terminator. */
+            if (expect_compact_helper || local.launches != 0 ||
+                local.prologue_barriers != 0 ||
+                record.data.barrier.flags != 0x5)
+               return fail_at(cursor, "compute barrier is not canonical");
+
+            local.prologue_barriers++;
+            local.strong_barriers++;
+            break;
+         }
+
          local.barriers++;
          local.strong_barriers += record.data.barrier.flags == 0x5;
          need_barrier = false;
          break;
 
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || !local.launches ||
-             cursor + record.length != compute->cdm_ctrl_stream_end)
+         if (need_barrier || expect_compact_helper || !local.launches ||
+             (!followed_link &&
+              cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");
          local.terminated = true;
          if (stats)
             *stats = local;
          return true;
 
-      case AGX3_CDM_RECORD_STREAM_LINK:
+      case AGX3_CDM_RECORD_STREAM_LINK: {
+         const uint64_t target = record.data.stream_link.target;
+         if (need_barrier || expect_compact_helper ||
+             record.data.stream_link.with_return || (target & 3) ||
+             !memory->owned(memory->data, target, 4))
+            return fail_at(cursor, "compute stream link is invalid");
+
+         cursor = target;
+         followed_link = true;
+         continue;
+      }
+
       case AGX3_CDM_RECORD_LINK_PADDING:
       case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
       case AGX3_CDM_RECORD_SECONDARY_BARRIER:

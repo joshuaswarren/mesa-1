@@ -204,12 +204,15 @@ main(int argc, char **argv)
       {"inherited-nonzero", 9, false, false, true},
    };
    if (argc != 3 || (strcmp(argv[1], "--record-only") &&
+                     strcmp(argv[1], "--submit-only") &&
                      strcmp(argv[1], "--execute")))
       die("usage: " TEST_NAME
-          " <--record-only|--execute> <direct-zero|direct-nonzero|"
+          " <--record-only|--submit-only|--execute> "
+          "<direct-zero|direct-nonzero|"
           "inverted-zero|inverted-nonzero|indirect-zero|indirect-nonzero|"
           "inherited-zero|inherited-nonzero>");
    const bool record_only = !strcmp(argv[1], "--record-only");
+   const bool submit_only = !strcmp(argv[1], "--submit-only");
    const struct conditional_case *test_case = NULL;
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       if (!strcmp(argv[2], cases[i].name)) {
@@ -219,11 +222,18 @@ main(int argc, char **argv)
    }
    if (!test_case)
       die("unknown conditional-rendering case");
-   if (!record_only) {
+   if (!record_only && !submit_only) {
       const char *ack = getenv("G17P_CONDITIONAL_EXECUTION_ACK");
       if (!ack || strcmp(ack, "YES"))
          die("execution requires G17P_CONDITIONAL_EXECUTION_ACK=YES");
    }
+   const char *shim_validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
+   if (submit_only &&
+       (!shim_validate || !strcmp(shim_validate, "0")))
+      die("--submit-only requires the G17P DRM-shim stream validator");
+   if (submit_only &&
+       setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "3,3,0,1", 1))
+      die("failed to select exact G17P compute-stream counts");
    const bool expect_execute =
       (test_case->predicate != 0) != test_case->inverted;
 #else
@@ -827,6 +837,16 @@ main(int argc, char **argv)
 #else
    check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
          "vkWaitForFences");
+#endif
+
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (submit_only) {
+      printf(TEST_NAME ": SUBMIT PASS — %s predicate=%#x reached the "
+                       "G17P UAPI stream validator\n",
+             test_case->name, test_case->predicate);
+      vkDestroyFence(device, fence, NULL);
+      goto cleanup;
+   }
 #endif
 
    unsigned untouched = 0, zeroed = 0, wrong = 0, first_bad = UINT32_MAX;

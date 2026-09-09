@@ -120,6 +120,8 @@ VK_FN(vkCmdDraw);
 VK_FN(vkCmdBeginConditionalRenderingEXT);
 VK_FN(vkCmdClearAttachments);
 VK_FN(vkCmdDrawIndexed);
+VK_FN(vkCmdDrawIndirect);
+VK_FN(vkCmdDrawIndirectCount);
 VK_FN(vkCmdEndConditionalRenderingEXT);
 #endif
 VK_FN(vkCmdEndRenderPass);
@@ -214,26 +216,50 @@ main(
 {
 #ifdef G17P_CONDITIONAL_RENDERING
    if (argc != 3 || (strcmp(argv[1], "--record-only") &&
+                     strcmp(argv[1], "--submit-only") &&
                      strcmp(argv[1], "--execute")) ||
        (strcmp(argv[2], "execute") && strcmp(argv[2], "discard") &&
         strcmp(argv[2], "indexed-execute") &&
         strcmp(argv[2], "indexed-discard") &&
+        strcmp(argv[2], "indirect-execute") &&
+        strcmp(argv[2], "indirect-discard") &&
+        strcmp(argv[2], "count-execute") &&
+        strcmp(argv[2], "count-discard") &&
         strcmp(argv[2], "clear-execute") &&
         strcmp(argv[2], "clear-discard")))
       die("usage: g17p-vulkan-conditional-rendering-graphics "
-          "<--record-only|--execute> "
+          "<--record-only|--submit-only|--execute> "
           "<execute|discard|indexed-execute|indexed-discard|"
+          "indirect-execute|indirect-discard|count-execute|count-discard|"
           "clear-execute|clear-discard>");
    const bool record_only = !strcmp(argv[1], "--record-only");
+   const bool submit_only = !strcmp(argv[1], "--submit-only");
    const bool clear_attachment = !strncmp(argv[2], "clear-", 6);
    const bool indexed_draw = !strncmp(argv[2], "indexed-", 8);
+   const bool indirect_draw = !strncmp(argv[2], "indirect-", 9);
+   const bool count_draw = !strncmp(argv[2], "count-", 6);
    const bool expect_execute =
       !strcmp(argv[2], "execute") || !strcmp(argv[2], "indexed-execute") ||
+      !strcmp(argv[2], "indirect-execute") ||
+      !strcmp(argv[2], "count-execute") ||
       !strcmp(argv[2], "clear-execute");
-   if (!record_only) {
+   if (!record_only && !submit_only) {
       const char *ack = getenv("G17P_CONDITIONAL_EXECUTION_ACK");
       if (!ack || strcmp(ack, "YES"))
          die("execution requires G17P_CONDITIONAL_EXECUTION_ACK=YES");
+   }
+   const char *shim_validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
+   if (submit_only &&
+       (!shim_validate || !strcmp(shim_validate, "0")))
+      die("--submit-only requires the G17P DRM-shim stream validator");
+   if (submit_only) {
+      if (setenv("ASAHI_SHIM_G17P_CASE",
+                 indexed_draw ? "indirect indexed" : "indirect nonindexed",
+                 1))
+         die("failed to select the strict G17P stream shape");
+      if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS",
+                 count_draw ? "8,8,1,3" : "7,7,1,2", 1))
+         die("failed to select exact G17P compute-stream counts");
    }
 #endif
 #ifdef G17P_TINY_RENDER_RECORD
@@ -261,7 +287,7 @@ main(
       .pEngineName = "none",
 #endif
       .engineVersion = 1,
-      .apiVersion = VK_API_VERSION_1_1,
+      .apiVersion = VK_API_VERSION_1_2,
    };
    const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -380,9 +406,13 @@ main(
 #endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
+   VkPhysicalDeviceVulkan12Features available12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+   };
    VkPhysicalDeviceConditionalRenderingFeaturesEXT available_conditional = {
       .sType =
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+      .pNext = &available12,
    };
    VkPhysicalDeviceFeatures2 available_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -392,11 +422,18 @@ main(
    if (!available_conditional.conditionalRendering ||
        !available_conditional.inheritedConditionalRendering)
       die("conditional rendering features are not exposed");
+   if (count_draw && !available12.drawIndirectCount)
+      die("drawIndirectCount is required by the conditional count oracle");
    if (!available_features.features.robustBufferAccess)
       die("robustBufferAccess is required by the indexed conditional oracle");
+   VkPhysicalDeviceVulkan12Features enabled12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .drawIndirectCount = count_draw,
+   };
    const VkPhysicalDeviceConditionalRenderingFeaturesEXT enabled_conditional = {
       .sType =
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT,
+      .pNext = &enabled12,
       .conditionalRendering = VK_TRUE,
       .inheritedConditionalRendering = VK_TRUE,
    };
@@ -476,6 +513,8 @@ main(
    LOAD_DEVICE(device, vkCmdBeginConditionalRenderingEXT);
    LOAD_DEVICE(device, vkCmdClearAttachments);
    LOAD_DEVICE(device, vkCmdDrawIndexed);
+   LOAD_DEVICE(device, vkCmdDrawIndirect);
+   LOAD_DEVICE(device, vkCmdDrawIndirectCount);
    LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
 #endif
    LOAD_DEVICE(device, vkCmdEndRenderPass);
@@ -537,9 +576,10 @@ main(
 #ifdef G17P_CONDITIONAL_RENDERING
    const VkBufferCreateInfo conditional_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = 32,
+      .size = 128,
       .usage = VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT |
-               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
    VkBuffer conditional_buffer;
@@ -565,15 +605,21 @@ main(
                             0),
          "vkBindBufferMemory(conditional)");
    uint32_t *conditional_map;
-   check(vkMapMemory(device, conditional_memory, 0, 32, 0,
+   check(vkMapMemory(device, conditional_memory, 0, 128, 0,
                      (void **)&conditional_map),
          "vkMapMemory(conditional)");
-   const uint32_t expected_conditional[8] = {
-      expect_execute ? 1 : 0, UINT32_C(0xbaadf00d),
-      UINT32_C(0xc09bcafe),   UINT32_C(0x5eed1234),
-      0,                      1,
-      2,                      UINT32_C(0xdecafbad),
-   };
+   uint32_t expected_conditional[32];
+   for (unsigned i = 0; i < 32; ++i)
+      expected_conditional[i] = UINT32_C(0xbaad0000) + i;
+   expected_conditional[0] = expect_execute ? 1 : 0;
+   expected_conditional[4] = 0;
+   expected_conditional[5] = 1;
+   expected_conditional[6] = 2;
+   expected_conditional[8] = 3;
+   expected_conditional[9] = 1;
+   expected_conditional[10] = 0;
+   expected_conditional[11] = 0;
+   expected_conditional[12] = 1;
    memcpy(conditional_map, expected_conditional,
           sizeof(expected_conditional));
 #endif
@@ -1023,6 +1069,11 @@ main(
       vkCmdClearAttachments(command_buffer, 1, &attachment, 1, &rect);
    } else if (indexed_draw) {
       vkCmdDrawIndexed(command_buffer, 3, 1, 0, 0, 0);
+   } else if (indirect_draw) {
+      vkCmdDrawIndirect(command_buffer, conditional_buffer, 32, 1, 16);
+   } else if (count_draw) {
+      vkCmdDrawIndirectCount(command_buffer, conditional_buffer, 32,
+                             conditional_buffer, 48, 1, 16);
    } else {
       vkCmdDraw(command_buffer, 3, 1, 0, 0);
    }
@@ -1071,6 +1122,8 @@ main(
              "%s predicate=%u expected=%s\n",
              clear_attachment ? "clear attachments"
                               : indexed_draw ? "direct indexed draw"
+                              : indirect_draw ? "indirect draw"
+                              : count_draw ? "indirect-count draw"
                                              : "direct draw",
              conditional_map[0],
              expect_execute ? "execute" : "discard");
@@ -1122,6 +1175,15 @@ main(
               waited);
       return EXIT_FAILURE;
    }
+
+#ifdef G17P_CONDITIONAL_RENDERING
+   if (submit_only) {
+      printf("g17p-vulkan-conditional-rendering-graphics: SUBMIT PASS — "
+             "%s reached the G17P UAPI stream validator\n",
+             argv[2]);
+      return EXIT_SUCCESS;
+   }
+#endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
    if (memcmp(conditional_map, expected_conditional,
@@ -1299,6 +1361,8 @@ main(
           "exact pixels=%u/%u, occlusion=%" PRIu64 "\n",
           clear_attachment ? "clear attachments"
                            : indexed_draw ? "direct indexed draw"
+                           : indirect_draw ? "indirect draw"
+                           : count_draw ? "indirect-count draw"
                                           : "direct draw",
           expect_execute ? "executed" : "discarded", exact,
           IMAGE_WIDTH * IMAGE_HEIGHT, expected_samples);
