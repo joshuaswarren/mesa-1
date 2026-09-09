@@ -437,7 +437,16 @@ typedef struct {
    bool saturate : 1;
    unsigned mask : 4;
 
-   unsigned padding : 4;
+   /* G17P implicit fragment samples do not copy their coordinates into the
+    * texture staging file after the arithmetic is complete.  Apple's compiler
+    * writes the final scalar operations directly to staging so helper lanes
+    * survive an odd-aligned hardware scissor.  The pre-RA sink pass marks the
+    * two scalar producers and their consuming sample here; the packer assigns
+    * their shared scoreboard slot after physical register allocation. */
+   bool agx3_tex_coord_stage : 1;
+   bool agx3_tex_coord_component : 1;
+   bool agx3_tex_coord_start : 1;
+   bool agx3_tex_coords_staged : 1;
 } agx_instr;
 
 static inline void

@@ -3585,13 +3585,18 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
 
       std::vector<uint8_t> want;
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_tex_stage_copy_hints(enc, 0, 0, 1, 0, false,
+                                                 false, bytes, &len)
+                     : agx3_tex_stage_copy(enc, 0, 0, 1, 0, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
+                     ? agx3_tex_stage_copy_hints(enc, 2, 2, 1, 0, false,
+                                                 false, bytes, &len)
+                     : agx3_tex_stage_copy(enc, 2, 2, 1, 0, bytes, &len));
+      append(want, bytes, len);
       if (enc == AGX_ISA_ENCODING_AGX3B) {
          ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
-         append(want, bytes, len);
-      } else {
-         ASSERT_TRUE(agx3_tex_stage_copy(enc, 0, 0, 1, 0, bytes, &len));
-         append(want, bytes, len);
-         ASSERT_TRUE(agx3_tex_stage_copy(enc, 2, 2, 1, 0, bytes, &len));
          append(want, bytes, len);
       }
       struct agx3_tex_sample_desc d = {};
@@ -3600,11 +3605,9 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       d.width = AGX3_TEX_W32;
       d.mask = 15;
       d.slot = 1;
-      d.wait_mask = enc == AGX_ISA_ENCODING_AGX3B ? 0 : 1;
+      d.wait_mask = 1;
       d.final = true;
-      d.sample_abi = enc == AGX_ISA_ENCODING_AGX3B
-                        ? AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT
-                        : AGX3_TEX_SAMPLE_ABI_DRIVER;
+      d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
 
@@ -3618,11 +3621,23 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
    }
 }
 
-TEST_F(AGX3PackBinary, FragmentImplicit2DUsesNativeDirectCoordinateABI)
+TEST_F(AGX3PackBinary, FragmentImplicit2DStagesNativeCoordinates)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
    b->shader->stage = MESA_SHADER_FRAGMENT;
+
+   agx_index raw_x = agx_register(0, AGX_SIZE_32);
+   agx_index reciprocal = agx_register(2, AGX_SIZE_32);
+   agx_index raw_y = agx_register(4, AGX_SIZE_32);
+   raw_x.discard = raw_y.discard = true;
+   reciprocal.cache = true;
+   agx_instr *stage_x = agx_persp_mul_agx3_to(
+      b, agx_register(20, AGX_SIZE_32), raw_x, reciprocal, 1);
+   reciprocal.cache = false;
+   reciprocal.discard = true;
+   agx_instr *stage_y = agx_persp_mul_agx3_to(
+      b, agx_register(22, AGX_SIZE_32), raw_y, reciprocal, 2);
 
    agx_index dest = agx_register(8, AGX_SIZE_32);
    agx_index coord = agx_register(20, AGX_SIZE_32);
@@ -3635,27 +3650,54 @@ TEST_F(AGX3PackBinary, FragmentImplicit2DUsesNativeDirectCoordinateABI)
       agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0, false, false,
       false, AGX_GATHER_NONE, false);
    tex->mask = 15;
+   stage_x->agx3_tex_coord_stage = true;
+   stage_x->agx3_tex_coord_component = 0;
+   stage_x->agx3_tex_coord_start = true;
+   stage_y->agx3_tex_coord_stage = true;
+   stage_y->agx3_tex_coord_component = 1;
+   tex->agx3_tex_coords_staged = true;
    agx_stop(b);
 
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   const struct agx3_persp_mul_desc stage_x_desc = {
+      .stage_dest = true,
+      .dest = 0,
+      .slot = 6,
+      .reciprocal = 2,
+      .reciprocal_liveness = AGX3_OPERAND_LIVE,
+      .raw = 0,
+      .raw_liveness = AGX3_OPERAND_KILL,
+      .vary_index = 1,
+   };
+   ASSERT_TRUE(agx3_persp_mul_encode(enc, &stage_x_desc, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_persp_mul_desc stage_y_desc = stage_x_desc;
+   stage_y_desc.dest = 2;
+   stage_y_desc.raw = 4;
+   stage_y_desc.raw_liveness = AGX3_OPERAND_KILL;
+   stage_y_desc.reciprocal_liveness = AGX3_OPERAND_KILL;
+   stage_y_desc.vary_index = 2;
+   ASSERT_TRUE(agx3_persp_mul_encode(enc, &stage_y_desc, bytes, &len));
+   append(want, bytes, len);
+   const unsigned expected_entry_offset = want.size();
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    const struct agx3_tex_sample_desc sample = {
       .dest = 8,
-      .coord = 20,
+      .coord = 0,
       .width = AGX3_TEX_W32,
       .mask = 15,
       .lod = AGX3_TEX_LOD_AUTO,
       .slot = 1,
-      .wait_mask = 0,
+      .wait_mask = 1u << 5,
       .coord_kill = true,
       .final = true,
       .texture_kind = AGX3_TEX_OPERAND_REGISTER,
       .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
       .texture_value = 12,
       .sampler_value = 16,
-      .sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
    append(want, bytes, len);
@@ -3665,9 +3707,10 @@ TEST_F(AGX3PackBinary, FragmentImplicit2DUsesNativeDirectCoordinateABI)
 
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
-   EXPECT_EQ(b->shader->agx3_colour_link.entry_offset, 0);
+   EXPECT_EQ(b->shader->agx3_colour_link.entry_offset,
+             expected_entry_offset);
    EXPECT_TRUE(b->shader->agx3_staging_known);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 0);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
 TEST_F(AGX3PackBinary, ExportDoesNotConsumeRealReadWait)
@@ -4967,6 +5010,60 @@ TEST_F(AGX3PackBinary, ProjectiveMultiplyPreservesCoefficientAndHints)
       0x19,0x05,0x3f,0x03,0x00,0x02,0x00,0x00,0x0e,0,0,0,
    };
    EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, NativeImplicitCoordinateStagingForms)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+
+   const uint16_t add0_src[2] = {8, 0};
+   const enum agx3_alu_hint add0_hints[2] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+   const uint8_t add0_native[] = {0x09,0x01,0x3c,0x09,0x40,0xc0};
+   ASSERT_TRUE(agx3_alu_fadd_stage(enc, 0, 1, add0_src, add0_hints,
+                                   1u << 5, bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(std::begin(add0_native),
+                                  std::end(add0_native)));
+
+   const uint16_t add1_src[2] = {4, 2};
+   const enum agx3_alu_hint add1_hints[2] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+   const uint8_t add1_native[] = {0x19,0x03,0x3c,0x05,0x40,0x00};
+   ASSERT_TRUE(agx3_alu_fadd_stage(enc, 2, 1, add1_src, add1_hints, 0,
+                                   bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(std::begin(add1_native),
+                                  std::end(add1_native)));
+
+   const struct agx3_persp_mul_desc compact = {
+      .stage_dest = true,
+      .dest = 0,
+      .slot = 1,
+      .reciprocal = 0,
+      .reciprocal_liveness = AGX3_OPERAND_LIVE,
+      .raw = 4,
+      .raw_liveness = AGX3_OPERAND_KILL,
+      .vary_index = 1,
+   };
+   const uint8_t compact_native[] = {
+      0x09,0x05,0x2f,0x81,0x00,0x01,0x40,0x00};
+   ASSERT_TRUE(agx3_persp_mul_encode(enc, &compact, bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(std::begin(compact_native),
+                                  std::end(compact_native)));
+
+   struct agx3_persp_mul_desc extended = compact;
+   extended.slot = 6;
+   extended.reciprocal = 4;
+   extended.raw = 8;
+   const uint8_t extended_native[] = {
+      0x09,0x09,0x2f,0x85,0x00,0x01,0x42,0x00,0x00,0x14,0x00,0x00};
+   ASSERT_TRUE(agx3_persp_mul_encode(enc, &extended, bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(std::begin(extended_native),
+                                  std::end(extended_native)));
 }
 
 TEST_F(AGX3PackBinary, ProjectiveMultiplyRefusesUnsupportedForms)

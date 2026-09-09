@@ -462,6 +462,56 @@ agx3_alu_float_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
 }
 
 bool
+agx3_alu_fadd_stage(enum agx_isa_encoding enc, uint16_t staging_dest,
+                    uint8_t staging_slot, const uint16_t src[2],
+                    const enum agx3_alu_hint hints[2], uint16_t wait_mask,
+                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       (staging_dest & 1) || staging_dest >= 256 || staging_slot < 1 ||
+       staging_slot > 6 || (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   for (unsigned i = 0; i < 2; ++i) {
+      if ((src[i] & 1) || src[i] >= 256 ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   /* Exact native destination routing:
+    *
+    *   09 01 3c 09 40 c0   stage[0] = r4 + r0, slot1, wait6
+    *   19 03 3c 05 40 00   stage[2] = r2 + r1, slot1
+    *
+    * f9=5 changes the destination from a GPR (f2) to staging (f5), while
+    * f12 names the shared coordinate transaction.  Source operands and
+    * dependency waits retain the ordinary f32add fields. */
+   const struct agx3_field_kv base[] = {
+      {9, 5}, {10, 2}, {25, 2}, {26, 2}, {42, 2}, {43, 2},
+   };
+   struct agx3_field_kv fields[16] = {
+      {5, staging_dest}, {12, staging_slot}, {13, 0},
+      {35, src[0]}, {18, src[1]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {27, hints[1] == AGX3_ALU_HINT_CACHE},
+      {29, hints[1] == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 9;
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (wait_mask & (1u << slot))
+         fields[n++] = (struct agx3_field_kv){(uint16_t)(52 + slot), 1};
+   }
+
+   for (unsigned ep = 0; ep <= 3; ++ep) {
+      if (agx3_bind_compose(enc, "f32add", ep, base, 6, fields, n, out, len))
+         return true;
+   }
+
+   return false;
+}
+
+bool
 agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t src, uint8_t immediate, uint16_t addend,
                            bool negate_addend, enum agx3_alu_hint src_hint,

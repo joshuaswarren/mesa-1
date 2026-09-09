@@ -4720,6 +4720,126 @@ agx3_sink_g17p_rgba8_mrt_stores(agx_context *ctx)
 }
 
 static bool
+agx3_implicit_coord_stage_producer(const agx_instr *I)
+{
+   if (I == NULL || I->nr_dests != 1 || I->dest[0].type != AGX_INDEX_NORMAL ||
+       I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+       I->saturate)
+      return false;
+
+   /* These are the two native terminal-coordinate forms needed by ordinary
+    * smooth sampling and compositor UV+offset sampling. Other arithmetic
+    * stays on the established GPR plus COPY path until its staging destination
+    * form is grounded independently. */
+   return I->op == AGX_OPCODE_PERSP_MUL_AGX3 ||
+          (I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 &&
+           I->src[0].type == AGX_INDEX_NORMAL &&
+           I->src[1].type == AGX_INDEX_NORMAL &&
+           I->src[0].size == AGX_SIZE_32 &&
+           I->src[1].size == AGX_SIZE_32 &&
+           agx_channels(I->src[0]) == 1 &&
+           agx_channels(I->src[1]) == 1 && !I->src[0].abs &&
+           !I->src[0].neg && !I->src[1].abs && !I->src[1].neg);
+}
+
+/* Mark the last two scalar coordinate operations of a straight-line implicit
+ * fragment sample for direct staging destinations. Apple does not calculate
+ * the UVs in GPRs and copy them afterwards: the final perspective MUL or ADD
+ * itself publishes staging[0]/[2]. That distinction preserves helper-lane
+ * provenance at a misaligned hardware-scissor edge, which is required for the
+ * implicit derivative quad and therefore the correct mip level.
+ *
+ * Run after scheduling so the start marker names the actual first producer,
+ * but before RA while exact SSA def/use identity is still available. */
+static bool
+agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       ctx->key->fs.ignore_tib_dependencies || list_length(&ctx->blocks) != 1)
+      return false;
+
+   agx_instr **defs = rzalloc_array(ctx, agx_instr *, ctx->alloc);
+   unsigned *uses = rzalloc_array(ctx, unsigned, ctx->alloc);
+   unsigned *orders = rzalloc_array(ctx, unsigned, ctx->alloc);
+   if (defs == NULL || uses == NULL || orders == NULL)
+      return false;
+
+   unsigned order = 1;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_src(I, s) {
+         assert(I->src[s].value < ctx->alloc);
+         uses[I->src[s].value]++;
+      }
+      agx_foreach_ssa_dest(I, d) {
+         assert(I->dest[d].value < ctx->alloc);
+         defs[I->dest[d].value] = I;
+         orders[I->dest[d].value] = order;
+      }
+      order++;
+   }
+
+   bool progress = false;
+   agx_foreach_instr_global(ctx, sample) {
+      const bool plain_implicit =
+         sample->op == AGX_OPCODE_TEXTURE_SAMPLE && sample->nr_srcs == 6 &&
+         sample->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
+         sample->dim == AGX_DIM_2D && !sample->shadow && !sample->offset &&
+         !sample->query_lod && !sample->sparse &&
+         sample->gather == AGX_GATHER_NONE;
+      if (!plain_implicit || sample->src[0].type != AGX_INDEX_NORMAL ||
+          sample->src[0].size != AGX_SIZE_32 ||
+          agx_channels(sample->src[0]) != 2 ||
+          uses[sample->src[0].value] != 1)
+         continue;
+
+      agx_instr *collect = defs[sample->src[0].value];
+      if (collect == NULL || collect->op != AGX_OPCODE_COLLECT ||
+          collect->nr_srcs != 2 || collect->nr_dests != 1)
+         continue;
+
+      agx_instr *producer[2] = {NULL, NULL};
+      bool valid = true;
+      for (unsigned c = 0; c < 2; ++c) {
+         const agx_index scalar = collect->src[c];
+         if (scalar.type != AGX_INDEX_NORMAL || scalar.size != AGX_SIZE_32 ||
+             agx_channels(scalar) != 1 || uses[scalar.value] != 1) {
+            valid = false;
+            break;
+         }
+
+         producer[c] = defs[scalar.value];
+         if (!agx3_implicit_coord_stage_producer(producer[c]) ||
+             producer[c]->agx3_tex_coord_stage) {
+            valid = false;
+            break;
+         }
+      }
+
+      if (!valid || producer[0] == producer[1])
+         continue;
+
+      for (unsigned c = 0; c < 2; ++c) {
+         producer[c]->agx3_tex_coord_stage = true;
+         producer[c]->agx3_tex_coord_component = c;
+      }
+      producer[orders[producer[0]->dest[0].value] <
+                        orders[producer[1]->dest[0].value]
+                   ? 0
+                   : 1]
+         ->agx3_tex_coord_start = true;
+      sample->agx3_tex_coords_staged = true;
+      progress = true;
+      /* One synthetic staging token is modeled by the slot planner. A later
+       * sample retains the existing immediate COPY path; broad overlapping
+       * staging groups need distinct native lifetime evidence. */
+      break;
+   }
+
+   return progress;
+}
+
+static bool
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
                          struct util_dynarray *binary,
@@ -4827,6 +4947,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
    AGX_PASS(ctx, agx3_sink_g17p_rgba8_mrt_stores);
+   AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);
    agx_lower_64bit_postra(ctx);

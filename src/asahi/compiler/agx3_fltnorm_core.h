@@ -47,7 +47,7 @@
  * including when that later FLTNORM is the first uniform reader. Model only
  * this native instruction-position rule; the hardware meaning is not named.
  *
- * ## f32mul.ep4
+ * ## f32mul.ep4/ep5
  *
  * AGX3 has no fused projective iterator, so a perspective-correct varying is
  * `f32interp` of the raw value, `f32rcp` of the interpolated 1/W, and a
@@ -70,6 +70,10 @@
  *   f18 = the interpolated operand (f25 = 2, f26 = 2), liveness pair
  *         f29 last use / f27 still live
  *   f80 + (slot - 1) = wait mask
+ *
+ * The compact ep4 form can name staging slots 1..5. Apple's dynamic argument-
+ * buffer fragment path stages coordinates on slot 6 and uses the otherwise
+ * identical extended ep5 form; its extra bytes carry that upper slot bit.
  *
  * ## The sRGB conversion modes
  *
@@ -133,7 +137,7 @@ extern "C" {
 /*
  * Longest of the three forms across both encodings: AGX3b's fltnorm is 10
  * bytes and its normflt 8, while AGX3c's fltnorm is 12 and its normflt 10.
- * f32mul.ep4 is 8 on both.
+ * f32mul.ep4 is 8 on both, while the slot-6 ep5 form is 12.
  */
 #define AGX3_FLTNORM_MAX_LENGTH 12u
 

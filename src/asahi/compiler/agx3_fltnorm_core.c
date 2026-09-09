@@ -386,8 +386,14 @@ agx3_persp_mul_encode(enum agx_isa_encoding enc,
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(80 + i, 1);
 
-   if (agx3_bind_compose(enc, "f32mul", 4, base, 10, ov, n, out, len))
-      return true;
+   /* The compact ep4 carries staging slots1..5.  Apple's register-indexed
+    * fragment path puts coordinate staging on slot6 and consequently selects
+    * the extended ep5 form.  Try the canonical compact form first so all
+    * existing GPR and slot1 witnesses remain byte-identical. */
+   for (unsigned ep = 4; ep <= 5; ++ep) {
+      if (agx3_bind_compose(enc, "f32mul", ep, base, 10, ov, n, out, len))
+         return true;
+   }
 
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
    *len = 0;

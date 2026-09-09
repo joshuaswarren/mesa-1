@@ -1168,7 +1168,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint8_t slot, uint16_t wait_mask, bool final,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
-                         bool apple_fragment_abi)
+                         uint8_t native_coord_slot)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
@@ -1357,10 +1357,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * own result slot. Uniform/immediate array samples use the ordinary result
     * slot. Keeping these two timelines distinct is required by the witnessed
     * ep4 register-descriptor form. */
-   const uint8_t stage_slot = array && register_operands ? 6 : slot;
+   const bool native_staged_coords = native_coord_slot != 0;
+   const uint8_t stage_slot = native_staged_coords
+                                 ? native_coord_slot
+                                 : array && register_operands ? 6 : slot;
    /* Every native array witness names coordinate bank 0 in SMP, including
     * register-indexed shaders whose physical coordinates live elsewhere. */
-   const uint16_t coord = (explicit_lod || register_bias || array || three_d || cube ||
+   const uint16_t coord = (native_staged_coords || explicit_lod ||
+                           register_bias || array || three_d || cube ||
                            gradient_lod || shadow)
                              ? 0
                              : I->src[0].value;
@@ -1414,7 +1418,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              !agx3_append(emission, bytes, len))
             return false;
       }
-   } else if (!apple_fragment_abi) {
+   } else if (!native_staged_coords) {
       if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
                                     wait_mask,
                                     enc == AGX_ISA_ENCODING_AGX3B &&
@@ -1529,22 +1533,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .three_d = three_d,
       .cube = cube,
       .slot = slot,
-      .wait_mask = apple_fragment_abi
-         ? wait_mask
-         : (uint16_t)(1u << (stage_slot - 1)),
+      .wait_mask = (uint16_t)(1u << (stage_slot - 1)),
       /* CEM consumes and discards the source XYZ before SMP. Apple's cube
        * and cube-array samples consequently set SMP f27 even though the
        * sampler reads CEM's private coordinate bank rather than the original
        * AGX IR source. Ordinary dimensions retain their existing last-use
        * mapping. */
       .coord_kill = cube ? I->src[0].discard
-                         : apple_fragment_abi
-                              ? (I->src[0].discard || I->src[0].kill)
+                         : native_staged_coords
+                              ? true
                               : I->src[0].kill,
       .final = final,
-      .sample_abi = apple_fragment_abi
-         ? AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT
-         : AGX3_TEX_SAMPLE_ABI_DRIVER,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
           agx3_append(emission, bytes, len);
@@ -4920,8 +4920,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       rzalloc_array(ctx, struct agx3_slot_instr, count ? count : 1);
    struct agx3_slot_result *res =
       rzalloc_array(ctx, struct agx3_slot_result, count ? count : 1);
-   if (sl == NULL || res == NULL)
+   agx_instr **ordered = rzalloc_array(ctx, agx_instr *, count ? count : 1);
+   uint8_t *native_coord_slots =
+      rzalloc_array(ctx, uint8_t, count ? count : 1);
+   if (sl == NULL || res == NULL || ordered == NULL ||
+       native_coord_slots == NULL)
       goto fail;
+
+   uint8_t native_coord_preferred_slot = 0;
+   agx_foreach_instr_global(ctx, stage_scan) {
+      if (!stage_scan->agx3_tex_coords_staged)
+         continue;
+      const bool register_operands =
+         stage_scan->nr_srcs == 6 &&
+         (stage_scan->src[3].type == AGX_INDEX_REGISTER ||
+          stage_scan->src[4].type == AGX_INDEX_REGISTER);
+      native_coord_preferred_slot = register_operands ? 6 : 1;
+      break;
+   }
 
    unsigned k = 0;
    unsigned vertex_loads_scheduled = 0;
@@ -4929,6 +4945,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       agx_foreach_instr_in_block(slot_block, I) {
          if (I->op == AGX_OPCODE_STOP)
             continue;
+         ordered[k] = I;
          struct agx3_slot_instr *e = &sl[k++];
          /* EXPORT is a zero-byte register-ABI declaration after RA, not a
           * physical read. Letting it consume an async dependency marks the
@@ -4937,7 +4954,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * outstanding results are synchronized at the shader-part tail. */
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
-         e->is_async = agx3_is_async(I);
+         e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         if (I->agx3_tex_coord_start)
+            e->preferred_slot = native_coord_preferred_slot;
          /* Apple's register-LOD texel fetch has two independent scoreboard
           * generations: PACK_SMPIR/COPY publish staging on slot 2 and TEX
           * consumes it while returning the sampled vector on slot 1. Model
@@ -4978,11 +4997,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (g17p_vertex_load_policy && I->op == AGX_OPCODE_DEVICE_LOAD &&
              vertex_loads_scheduled++ == 0)
             e->preferred_slot = 6;
+         if (I->agx3_tex_coords_staged)
+            e->preferred_slot = 1;
+
          unsigned nd = 0, ns = 0;
-         for (unsigned d = 0; d < I->nr_dests; ++d)
-            nd = agx3_expand_regs(I->dest[d], e->dst, nd);
-         for (unsigned s = 0; s < I->nr_srcs; ++s)
+         if (!I->agx3_tex_coord_stage) {
+            for (unsigned d = 0; d < I->nr_dests; ++d)
+               nd = agx3_expand_regs(I->dest[d], e->dst, nd);
+         }
+         for (unsigned s = 0; s < I->nr_srcs; ++s) {
+            if (I->agx3_tex_coords_staged && s == 0)
+               continue;
             ns = agx3_expand_regs(I->src[s], e->src, ns);
+         }
+         if (I->agx3_tex_coord_start)
+            e->dst[nd++] = AGX3_SLOT_TEX_COORD_TOKEN;
+         if (I->agx3_tex_coords_staged)
+            e->src[ns++] = AGX3_SLOT_TEX_COORD_TOKEN;
 
          /* CEM is a compound cube-coordinate pipeline, not a single opaque
           * sampler operation.  Its three witnessed calculations write fixed
@@ -5022,6 +5053,32 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (!agx3_slot_assign(sl, count, nslots, res))
       goto fail;
 
+   uint8_t active_coord_slot = 0;
+   unsigned staged_components = 0;
+   for (unsigned i = 0; i < count; ++i) {
+      const agx_instr *I = ordered[i];
+      if (I->agx3_tex_coord_start) {
+         if (active_coord_slot || !res[i].slot)
+            goto fail;
+         active_coord_slot = res[i].slot;
+      }
+      if (I->agx3_tex_coord_stage) {
+         if (!active_coord_slot)
+            goto fail;
+         native_coord_slots[i] = active_coord_slot;
+         staged_components |= BITFIELD_BIT(I->agx3_tex_coord_component);
+      }
+      if (I->agx3_tex_coords_staged) {
+         if (!active_coord_slot || staged_components != 3)
+            goto fail;
+         native_coord_slots[i] = active_coord_slot;
+         active_coord_slot = 0;
+         staged_components = 0;
+      }
+   }
+   if (active_coord_slot)
+      goto fail;
+
    k = 0;
    unsigned vertex_loads_seen = 0;
    unsigned loop_depth = 1;
@@ -5056,8 +5113,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_STOP)
             continue;
 
+         const unsigned instr_index = k;
          const uint8_t slot = res[k].slot;
          const uint16_t wait = res[k].wait_mask;
+         const uint8_t native_coord_slot = native_coord_slots[instr_index];
          k++;
 
          /* A wait retires its slots before this instruction issues its own. */
@@ -5111,6 +5170,71 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           */
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
+
+         if (I->agx3_tex_coord_stage) {
+            if (enc != AGX_ISA_ENCODING_AGX3B || native_coord_slot == 0 ||
+                I->nr_dests != 1 || I->dest[0].size != AGX_SIZE_32 ||
+                agx_channels(I->dest[0]) != 1)
+               AGX3_REFUSE(I);
+
+            const uint16_t staging_dest =
+               2 * (uint16_t)I->agx3_tex_coord_component;
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+            uint8_t len = 0;
+            if (I->op == AGX_OPCODE_PERSP_MUL_AGX3) {
+               if (I->nr_srcs != 2 || I->saturate || I->imm > 0x7f ||
+                   !agx3_vary_reg32(I->src[0]) ||
+                   !agx3_vary_reg32(I->src[1]) ||
+                   agx_channels(I->src[0]) != 1 ||
+                   agx_channels(I->src[1]) != 1 || I->src[0].kill ||
+                   I->src[1].kill ||
+                   (I->src[0].cache && I->src[0].discard) ||
+                   (I->src[1].cache && I->src[1].discard))
+                  AGX3_REFUSE(I);
+               const struct agx3_persp_mul_desc desc = {
+                  .stage_dest = true,
+                  .dest = staging_dest,
+                  .slot = native_coord_slot,
+                  .raw = I->src[0].value,
+                  .reciprocal = I->src[1].value,
+                  .raw_liveness = I->src[0].discard ? AGX3_OPERAND_KILL
+                     : I->src[0].cache ? AGX3_OPERAND_LIVE
+                                       : AGX3_OPERAND_UNMARKED,
+                  .reciprocal_liveness =
+                     I->src[1].discard ? AGX3_OPERAND_KILL
+                     : I->src[1].cache ? AGX3_OPERAND_LIVE
+                                       : AGX3_OPERAND_UNMARKED,
+                  .vary_index = I->imm,
+                  .wait_mask = wait,
+               };
+               if (!agx3_persp_mul_encode(enc, &desc, bytes, &len))
+                  AGX3_REFUSE(I);
+            } else if (I->op == AGX_OPCODE_FADD) {
+               if (I->nr_srcs != 2 || I->saturate)
+                  AGX3_REFUSE(I);
+               uint16_t src[2];
+               enum agx3_alu_hint hints[2];
+               for (unsigned s = 0; s < 2; ++s) {
+                  if (!agx3_vary_reg32(I->src[s]) ||
+                      agx_channels(I->src[s]) != 1 || I->src[s].abs ||
+                      I->src[s].neg || I->src[s].kill ||
+                      (I->src[s].cache && I->src[s].discard))
+                     AGX3_REFUSE(I);
+                  src[s] = I->src[s].value;
+                  hints[s] = agx3_post_ra_hint(I->src[s]);
+               }
+               if (!agx3_alu_fadd_stage(enc, staging_dest,
+                                        native_coord_slot, src, hints, wait,
+                                        bytes, &len))
+                  AGX3_REFUSE(I);
+            } else {
+               AGX3_REFUSE(I);
+            }
+
+            if (!agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
 
          if (I->op == AGX_OPCODE_INTERP_AGX3 ||
              I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
@@ -5352,25 +5476,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool implicit_derivatives =
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS;
-            const bool zero_bias =
-               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
-               I->src[1].type == AGX_INDEX_IMMEDIATE &&
-               agx_minifloat_decode(I->src[1].value) == 0.0f;
-            const bool plain_implicit =
-               I->lod_mode == AGX_LOD_MODE_AUTO_LOD || zero_bias;
-            /* This is the complete native ABI witnessed for ordinary 2D
-             * implicit fragment sampling: coordinates stay in their GPRs,
-             * the pixel gate immediately precedes SMP, and SMP selects the
-             * Apple f83/f112 profile.  More elaborate sampling modes retain
-             * their independently qualified staging contracts. */
-            const bool apple_fragment_abi =
-               enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT &&
-               !ctx->key->fs.ignore_tib_dependencies &&
-               ctx->agx3_colour_link.straight_line &&
-               plain_implicit &&
-               I->dim == AGX_DIM_2D && !I->shadow && !I->offset &&
-               I->gather == AGX_GATHER_NONE;
+            const bool native_staged_coords = I->agx3_tex_coords_staged;
             const bool open_pixel =
                enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -5390,6 +5496,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool compute_gradient = ctx->stage == MESA_SHADER_COMPUTE &&
                I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
             uint16_t sample_wait = wait;
+            if (native_staged_coords) {
+               if (!native_coord_slot)
+                  AGX3_REFUSE(I);
+               const uint16_t coord_wait =
+                  (uint16_t)(1u << (native_coord_slot - 1));
+               if (!(sample_wait & coord_wait))
+                  AGX3_REFUSE(I);
+
+               /* The SMP has one witnessed wait generation. Coordinate
+                * staging owns it; drain independent descriptor producers
+                * first, then let SMP consume the intact helper-lane staging
+                * transaction. */
+               const uint16_t other_waits = sample_wait & ~coord_wait;
+               if (other_waits &&
+                   !agx3_retire_slots_noop(emission, enc, other_waits))
+                  AGX3_REFUSE(I);
+               sample_wait = coord_wait;
+            }
             /* CEM has no scoreboard-wait fields.  The slot planner includes
              * its fixed scratch writes above, so materialize that dependency
              * immediately before the compound pipeline and let its own
@@ -5408,7 +5532,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
                                           final, open_pixel,
                                           &ctx->agx3_colour_link.entry_offset,
-                                          apple_fragment_abi))
+                                          native_coord_slot))
                AGX3_REFUSE(I);
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -5422,14 +5546,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
-            if (!apple_fragment_abi) {
-               ctx->agx3_staging_halfs =
-                  MAX2(ctx->agx3_staging_halfs,
-                       I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
-                       : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
-                          I->dim == AGX_DIM_3D)
-                          ? 8 : I->src[0].value + 4);
-            }
+            ctx->agx3_staging_halfs =
+               MAX2(ctx->agx3_staging_halfs,
+                    native_staged_coords ? 4
+                    : I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
+                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
+                       I->dim == AGX_DIM_3D)
+                       ? 8 : I->src[0].value + 4);
             continue;
          }
 

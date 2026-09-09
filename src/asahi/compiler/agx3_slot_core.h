@@ -28,14 +28,17 @@
 extern "C" {
 #endif
 
-/* Normal register dependencies occupy tokens 0..255.  Static Mesa stack
+/* Normal register dependencies occupy tokens 0..255. Static Mesa stack
  * offsets are 16-bit byte immediates; their 32768 addressable half-registers
- * occupy a separate token range so async copy/rld ordering is exact. */
+ * occupy a separate token range so async copy/rld ordering is exact. The final
+ * token holds the one bounded implicit-coordinate staging transaction selected
+ * by the pre-RA fragment sink. */
 #define AGX3_SLOT_GPR_TOKENS 256u
 #define AGX3_SLOT_TPS_TOKEN_BASE AGX3_SLOT_GPR_TOKENS
 #define AGX3_SLOT_TPS_HALF_TOKENS 32768u
-#define AGX3_SLOT_NUM_TOKENS                                             \
+#define AGX3_SLOT_TEX_COORD_TOKEN                                        \
    (AGX3_SLOT_TPS_TOKEN_BASE + AGX3_SLOT_TPS_HALF_TOKENS)
+#define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
 
 /* Up to 16 half-register or storage-token sources/dests per instruction is far
  * more than any AGX3 form uses. */
