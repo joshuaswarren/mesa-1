@@ -338,10 +338,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
    const bool rgba8_mrt = mrt == AGX_G17P_MRT_RGBA8;
    const bool dual_mrt = wboit_mrt || rgba8_mrt;
-   if (rgba8_mrt && !hk_g17p_unverified_feature("mrt")) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return (struct hk_bg_eot){0};
-   }
 
    for (unsigned rt = 0; rt < HK_MAX_RTS; ++rt) {
       const enum agx_bg_eot_op op = key->op[rt];
