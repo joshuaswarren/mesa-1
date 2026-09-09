@@ -109,6 +109,9 @@ static unsigned queue_progress_submits;
 static uint32_t queue_progress_private_handle;
 static uint64_t queue_progress_private_point;
 static bool queue_progress_private_sync_valid;
+static unsigned acquire_rollback_queue_creates;
+static unsigned acquire_rollback_queue_destroys;
+static unsigned acquire_rollback_submits;
 
 static struct asahi_g17p_stream_stats matrix_stats;
 static struct asahi_g17p_compute_stats compute_stats;
@@ -119,6 +122,12 @@ static const char *
 queue_progress_lifecycle_case(void)
 {
    return getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
+}
+
+static const char *
+acquire_rollback_case(void)
+{
+   return getenv("ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
 }
 
 static void __attribute__((destructor))
@@ -179,6 +188,32 @@ check_queue_progress_lifecycle(void)
            queue_progress_queue_destroys, queue_progress_submits,
            queue_progress_private_handle,
            (unsigned long long)queue_progress_private_point);
+}
+
+static void __attribute__((destructor))
+check_acquire_rollback_lifecycle(void)
+{
+   const char *test_case = acquire_rollback_case();
+   if (!test_case)
+      return;
+
+   if (acquire_rollback_queue_creates != 1 ||
+       acquire_rollback_queue_destroys != 1 ||
+       acquire_rollback_submits != 0) {
+      fprintf(stderr,
+              "shim: bad Asahi acquire rollback '%s': queue=%u/%u "
+              "hardware-submits=%u\n",
+              test_case, acquire_rollback_queue_creates,
+              acquire_rollback_queue_destroys,
+              acquire_rollback_submits);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: exact Asahi acquire rollback '%s': queue=%u/%u "
+           "hardware-submits=%u\n",
+           test_case, acquire_rollback_queue_creates,
+           acquire_rollback_queue_destroys, acquire_rollback_submits);
 }
 
 static bool
@@ -668,6 +703,8 @@ asahi_ioctl_queue_create(int fd, unsigned long request, void *arg)
 {
    if (queue_progress_lifecycle_case())
       queue_progress_queue_creates++;
+   if (acquire_rollback_case())
+      acquire_rollback_queue_creates++;
 
    return 0;
 }
@@ -677,6 +714,8 @@ asahi_ioctl_queue_destroy(int fd, unsigned long request, void *arg)
 {
    if (queue_progress_lifecycle_case())
       queue_progress_queue_destroys++;
+   if (acquire_rollback_case())
+      acquire_rollback_queue_destroys++;
 
    return 0;
 }
@@ -868,6 +907,8 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          queue_progress_private_point = private_sync->timeline_value;
       }
    }
+   if (acquire_rollback_case())
+      acquire_rollback_submits++;
 
    if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
       failed_submit_once = true;

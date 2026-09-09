@@ -1909,6 +1909,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Public Vulkan WSI oracle.  The drm-shim injects temporary sync payload
+    # import failures and checks that AcquireNextImage rolls the image and all
+    # partial payloads back before returning to the application.
+    g17p_acquire_rollback = executable(
+      'g17p-vulkan-acquire-rollback',
+      files('tests/g17p_vulkan_acquire_rollback.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # One bounded conditional-rendering case per process. Submit-only mode
     # proves direct, indirect, inverted and inherited command streams under
     # the drm-shim; execution checks every payload word and both guards.

@@ -1945,22 +1945,44 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
       VkResult signal_result =
          wsi_signal_semaphore_for_image(device, swapchain, image,
                                         pAcquireInfo->semaphore);
-      if (signal_result != VK_SUCCESS)
-         return signal_result;
+      if (signal_result != VK_SUCCESS) {
+         vk_semaphore_reset_temporary(
+            device, vk_semaphore_from_handle(pAcquireInfo->semaphore));
+         result = signal_result;
+         goto fail_release_image;
+      }
    }
 
    if (pAcquireInfo->fence != VK_NULL_HANDLE) {
       VkResult signal_result =
          wsi_signal_fence_for_image(device, swapchain, image,
                                     pAcquireInfo->fence);
-      if (signal_result != VK_SUCCESS)
-         return signal_result;
+      if (signal_result != VK_SUCCESS) {
+         vk_fence_reset_temporary(
+            device, vk_fence_from_handle(pAcquireInfo->fence));
+         if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
+            vk_semaphore_reset_temporary(
+               device, vk_semaphore_from_handle(pAcquireInfo->semaphore));
+         }
+         result = signal_result;
+         goto fail_release_image;
+      }
    }
 
    if (wsi->set_memory_ownership)
       wsi->set_memory_ownership(swapchain->device, image->memory, true);
 
    return result;
+
+fail_release_image:
+   /* The backend has already removed this image from its available pool, but
+    * a failed semaphore/fence payload import means the application did not
+    * acquire it.  Restore both common and backend ownership or repeated
+    * failures permanently drain the swapchain. */
+   image->acquired = false;
+   VkResult release_result =
+      swapchain->release_images(swapchain, 1, pImageIndex);
+   return release_result == VK_SUCCESS ? result : release_result;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

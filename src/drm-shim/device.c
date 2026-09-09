@@ -84,11 +84,28 @@ static uint32_t queue_progress_transfer_flags;
 static bool queue_progress_signal_shape_valid;
 static bool queue_progress_transfer_shape_valid;
 static bool failed_queue_timeline_signal_once;
+static unsigned acquire_rollback_syncobj_creates;
+static unsigned acquire_rollback_syncobj_destroys;
+static unsigned acquire_rollback_sync_imports;
+static unsigned acquire_rollback_transfers;
+static uint64_t acquire_rollback_created_handles;
+static uint64_t acquire_rollback_destroyed_handles;
+static uint32_t acquire_rollback_success_handle;
+static uint32_t acquire_rollback_failed_handle;
+static bool acquire_rollback_import_failed;
+static bool acquire_rollback_cleanup_before_marker;
+static bool acquire_rollback_marker_seen;
 
 static const char *
 queue_progress_lifecycle_case(void)
 {
    return getenv("ASAHI_SHIM_EXPECT_QUEUE_PROGRESS_LIFECYCLE");
+}
+
+static const char *
+acquire_rollback_case(void)
+{
+   return getenv("ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK");
 }
 
 static void __attribute__((destructor))
@@ -206,6 +223,64 @@ check_queue_progress_lifecycle(void)
            (unsigned long long)queue_progress_transfer_src_point,
            queue_progress_syncobj_creates,
            queue_progress_syncobj_destroys);
+}
+
+static void __attribute__((destructor))
+check_acquire_rollback_lifecycle(void)
+{
+   const char *test_case = acquire_rollback_case();
+   if (!test_case)
+      return;
+
+   const bool semaphore_failure = !strcmp(test_case, "semaphore-failure");
+   const bool fence_failure = !strcmp(test_case, "fence-failure");
+   const unsigned expected_imports = semaphore_failure ? 3 : 4;
+   const unsigned expected_syncobjs = semaphore_failure ? 12 : 13;
+   const uint64_t expected_handles =
+      (UINT64_C(1) << (expected_syncobjs + 1)) - 2;
+   const bool exact =
+      (semaphore_failure || fence_failure) &&
+      acquire_rollback_syncobj_creates == expected_syncobjs &&
+      acquire_rollback_syncobj_destroys == expected_syncobjs &&
+      acquire_rollback_created_handles == expected_handles &&
+      acquire_rollback_destroyed_handles == expected_handles &&
+      acquire_rollback_sync_imports == expected_imports &&
+      acquire_rollback_transfers == 6 &&
+      acquire_rollback_import_failed &&
+      acquire_rollback_marker_seen &&
+      acquire_rollback_cleanup_before_marker &&
+      acquire_rollback_failed_handle != 0 &&
+      (!fence_failure ||
+       (acquire_rollback_success_handle != 0 &&
+        acquire_rollback_success_handle != acquire_rollback_failed_handle));
+
+   if (!exact) {
+      fprintf(stderr,
+              "shim: bad acquire rollback '%s': syncobjs=%u/%u "
+              "handles=%#llx/%#llx imports=%u failed=%u success-h=%u "
+              "failed-h=%u marker=%u clean-before-marker=%u transfers=%u\n",
+              test_case, acquire_rollback_syncobj_creates,
+              acquire_rollback_syncobj_destroys,
+              (unsigned long long)acquire_rollback_created_handles,
+              (unsigned long long)acquire_rollback_destroyed_handles,
+              acquire_rollback_sync_imports,
+              acquire_rollback_import_failed,
+              acquire_rollback_success_handle,
+              acquire_rollback_failed_handle,
+              acquire_rollback_marker_seen,
+              acquire_rollback_cleanup_before_marker,
+              acquire_rollback_transfers);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: exact acquire rollback '%s': syncobjs=%u/%u imports=%u "
+           "clean-before-marker=%u transfers=%u\n",
+           test_case, acquire_rollback_syncobj_creates,
+           acquire_rollback_syncobj_destroys,
+           acquire_rollback_sync_imports,
+           acquire_rollback_cleanup_before_marker,
+           acquire_rollback_transfers);
 }
 
 static uint32_t
@@ -525,7 +600,35 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
 {
    struct drm_syncobj_create *create = arg;
 
-   if (queue_progress_lifecycle_case()) {
+   if (acquire_rollback_case()) {
+      if (acquire_rollback_import_failed &&
+          !acquire_rollback_marker_seen) {
+         const bool failed_handle_valid =
+            acquire_rollback_failed_handle > 0 &&
+            acquire_rollback_failed_handle < 64;
+         const bool success_handle_valid =
+            acquire_rollback_success_handle == 0 ||
+            acquire_rollback_success_handle < 64;
+         const uint64_t failed_bit = failed_handle_valid
+            ? UINT64_C(1) << acquire_rollback_failed_handle : 0;
+         const uint64_t success_bit = acquire_rollback_success_handle > 0 &&
+                                      success_handle_valid
+            ? UINT64_C(1) << acquire_rollback_success_handle : 0;
+         acquire_rollback_cleanup_before_marker =
+            failed_handle_valid && success_handle_valid &&
+            (acquire_rollback_destroyed_handles & failed_bit) &&
+            (!success_bit ||
+             (acquire_rollback_destroyed_handles & success_bit));
+         acquire_rollback_marker_seen = true;
+      }
+
+      acquire_rollback_syncobj_creates++;
+      create->handle = acquire_rollback_syncobj_creates;
+      if (create->handle < 64) {
+         acquire_rollback_created_handles |=
+            UINT64_C(1) << create->handle;
+      }
+   } else if (queue_progress_lifecycle_case()) {
       queue_progress_syncobj_creates++;
       create->handle = queue_progress_syncobj_creates;
       if (create->handle < 64)
@@ -542,7 +645,13 @@ drm_shim_ioctl_syncobj_destroy(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_destroy *destroy = arg;
 
-   if (queue_progress_lifecycle_case()) {
+   if (acquire_rollback_case()) {
+      acquire_rollback_syncobj_destroys++;
+      if (destroy->handle < 64) {
+         acquire_rollback_destroyed_handles |=
+            UINT64_C(1) << destroy->handle;
+      }
+   } else if (queue_progress_lifecycle_case()) {
       queue_progress_syncobj_destroys++;
       if (destroy->handle < 64)
          queue_progress_destroyed_handles |= UINT64_C(1) << destroy->handle;
@@ -556,6 +665,9 @@ drm_shim_ioctl_syncobj_transfer(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_transfer *transfer = arg;
 
+   if (acquire_rollback_case())
+      acquire_rollback_transfers++;
+
    if (queue_progress_lifecycle_case()) {
       queue_progress_transfers++;
       queue_progress_transfer_shape_valid =
@@ -566,6 +678,31 @@ drm_shim_ioctl_syncobj_transfer(int fd, unsigned long request, void *arg)
       queue_progress_transfer_dst_point = transfer->dst_point;
       queue_progress_transfer_flags = transfer->flags;
    }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_fd_to_handle(int fd, unsigned long request, void *arg)
+{
+   struct drm_syncobj_handle *import = arg;
+   const char *test_case = acquire_rollback_case();
+   if (!test_case ||
+       import->flags != DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE)
+      return 0;
+
+   acquire_rollback_sync_imports++;
+   const unsigned fail_at = !strcmp(test_case, "fence-failure") ? 2 : 1;
+   if (!acquire_rollback_import_failed &&
+       acquire_rollback_sync_imports == fail_at) {
+      acquire_rollback_failed_handle = import->handle;
+      acquire_rollback_import_failed = true;
+      errno = ENOMEM;
+      return -1;
+   }
+
+   if (!acquire_rollback_import_failed)
+      acquire_rollback_success_handle = import->handle;
 
    return 0;
 }
@@ -702,7 +839,8 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_DESTROY)] = drm_shim_ioctl_syncobj_destroy,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] =
       drm_shim_ioctl_syncobj_handle_to_fd,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] =
+      drm_shim_ioctl_syncobj_fd_to_handle,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_syncobj_wait,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_syncobj_transfer,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_RESET)] = drm_shim_ioctl_stub,

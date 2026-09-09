@@ -83,6 +83,30 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_acquire_rollback_environment = {
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  }
+
+  foreach case : ['semaphore-failure', 'fence-failure']
+    g17p_acquire_rollback_env = environment(
+      g17p_acquire_rollback_environment)
+    g17p_acquire_rollback_env.set(
+      'ASAHI_SHIM_EXPECT_ACQUIRE_ROLLBACK', case)
+    test(
+      'hk_g17p_acquire_rollback_' + case,
+      g17p_acquire_rollback,
+      args : ['--' + case],
+      env : g17p_acquire_rollback_env,
+      depends : _dev_icd,
+      suite : ['asahi', 'g17p-acquire-rollback'],
+      timeout : 30,
+    )
+  endforeach
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
