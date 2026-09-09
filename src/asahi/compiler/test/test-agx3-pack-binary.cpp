@@ -3948,6 +3948,66 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, TextureFetch3DBindlessStagesThirdCoordinate)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(16, AGX_SIZE_32);
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   agx_index texture = agx_register(12, AGX_SIZE_64);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   texture.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), texture,
+      agx_immediate(0), agx_null(), AGX_DIM_3D, AGX_LOD_MODE_LOD_MIN, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   for (unsigned component = 0; component < 3; ++component) {
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(
+         enc, 2 * component, 4 + 2 * component, 1, 0, false, true,
+         bytes, &len));
+      append(want, bytes, len);
+   }
+   const struct agx3_tex_fetch_desc fetch = {
+      .dest = 16, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .three_d = true, .texture_kill = true,
+      .texture_kind = AGX3_TEX_OPERAND_REGISTER, .texture_value = 12,
+   };
+   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &fetch, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 6);
+
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   dest = agx_register(16, AGX_SIZE_32);
+   coord = agx_register(4, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_3D, AGX_LOD_MODE_LOD_MIN, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+   pack(b, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, VertexIndexedTextureFetchUsesNativeHeapIndex)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

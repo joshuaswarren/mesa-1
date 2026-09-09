@@ -43,6 +43,15 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
          (d->array && d->sample) || d->coord != (d->array ? 16 : 0))))
       return false;
 
+   /* Own-MSL texture3d::read witnesses use f76=3 with a third integer
+    * coordinate in the contiguous staging bank. The immediate and indirect
+    * texture forms are both captured on G17P; no AGX3c or combined
+    * array/multisample form is grounded. */
+   if (d->three_d &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->multisample ||
+        d->register_lod))
+      return false;
+
    const unsigned tk = d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    const unsigned sk = d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    if (tk > AGX3_TEX_OPERAND_UNIFORM || sk > AGX3_TEX_OPERAND_UNIFORM ||
@@ -53,6 +62,9 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
         (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0)))
+      return false;
+   if (d->three_d &&
+       (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
       return false;
 
    /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
@@ -128,7 +140,8 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
          ov[n++] = (struct agx3_field_kv)KV(29, d->lod_x64);
    }
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
-   ov[n++] = (struct agx3_field_kv)KV(76, d->multisample ? 2 : 1);
+   ov[n++] = (struct agx3_field_kv)KV(
+      76, d->three_d ? 3 : (d->multisample ? 2 : 1));
    if (d->array)
       ov[n++] = (struct agx3_field_kv)KV(
          77, d->multisample ? 1 : 2); /* MS array vs register-layer array */
@@ -740,13 +753,16 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
          d.texture_kind = kind;
          d.texture_kill = kind == AGX3_TEX_OPERAND_REGISTER && (p[15] & 8);
          for (unsigned array = 0; array < 2; ++array) {
-            d.array = array;
-            uint8_t canonical[AGX3_TEX_MAX_LENGTH], length;
-            if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
-                length == instruction_size &&
-                !memcmp(canonical, instruction, length)) {
-               *out = d;
-               return true;
+            for (unsigned three_d = 0; three_d < 2; ++three_d) {
+               d.array = array;
+               d.three_d = three_d;
+               uint8_t canonical[AGX3_TEX_MAX_LENGTH], length;
+               if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
+                   length == instruction_size &&
+                   !memcmp(canonical, instruction, length)) {
+                  *out = d;
+                  return true;
+               }
             }
          }
       }
@@ -762,18 +778,21 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
        !fetch_ok(enc, &d))
       return false;
 
-   /* The array axis is a single selector the hand decoders above do not
-    * extract; recover it the same way everything else here is validated, by
-    * requiring one of the two readings to repack byte-for-byte. */
+   /* The array and 3D axes are selectors the hand decoders above do not
+    * extract. Recover them the same way everything else here is validated,
+    * by requiring one reading to repack byte-for-byte. */
    for (unsigned a = 0; a < 2; ++a) {
-      uint8_t canonical[AGX3_TEX_MAX_LENGTH];
-      uint8_t length = 0;
-      d.array = a != 0;
-      if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
-          length == instruction_size &&
-          memcmp(canonical, instruction, length) == 0) {
-         *out = d;
-         return true;
+      for (unsigned three_d = 0; three_d < 2; ++three_d) {
+         uint8_t canonical[AGX3_TEX_MAX_LENGTH];
+         uint8_t length = 0;
+         d.array = a != 0;
+         d.three_d = three_d != 0;
+         if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
+             length == instruction_size &&
+             memcmp(canonical, instruction, length) == 0) {
+            *out = d;
+            return true;
+         }
       }
    }
 

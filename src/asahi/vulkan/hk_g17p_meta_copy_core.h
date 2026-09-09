@@ -77,8 +77,8 @@ enum hk_g17p_block_format_family {
 enum hk_g17p_block_format_family
 hk_g17p_block_format_family(VkFormat format);
 
-/* Native uncompressed color uploads preserve rectangles and mip/layer
- * subresources. Multi-layer regions are split into native single-layer
+/* Native uncompressed color uploads preserve rectangles and mip/layer/Z
+ * subresources. Array and 3D regions are split into native single-slice
  * passes without changing source layout or copying index/pixel data. 8-bit
  * multi-planar YCbCr uploads use the same per-plane R8/RG8 render path. */
 bool hk_g17p_buffer_to_image_copy_supported(
@@ -100,9 +100,10 @@ bool hk_g17p_compressed_image_to_buffer_copy_plan(
    VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
    struct hk_g17p_compressed_copy_plan *plan);
 
-/* HAL200's qualified tile programs are single-layer.  Convert one layer of a
- * valid 2D-array image copy without changing its rectangle or mip levels.
- * The resolved source/destination layer counts must describe the same copy. */
+/* HAL200's qualified tile programs are single-layer.  Convert one logical
+ * slice of a valid 2D array, 3D volume, or 2D-array<->3D image copy without
+ * changing its rectangle or mip levels.  The resolved source/destination
+ * slice counts must describe the same copy. */
 bool hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
                               VkImageType dst_type, uint32_t src_layers,
                               uint32_t dst_layers,

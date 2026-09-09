@@ -2013,6 +2013,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    g17p_vulkan_image_copy_3d = executable(
+      'g17p-vulkan-image-copy-3d',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_COPY_IMAGE_3D=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-clear-image',
       files('tests/g17p_vulkan_image_copy_subregion.c'),

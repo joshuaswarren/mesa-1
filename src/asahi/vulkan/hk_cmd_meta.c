@@ -1903,14 +1903,17 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
          hk_meta_copy_get_image_properties(dst_image);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
-         /* Native single-layer EOT views already select the mip and base
-          * layer. Keep source row/image strides intact while splitting only
-          * multi-layer regions; no staging copy or compute expansion. */
+         /* Native single-slice EOT views already select the mip and array
+          * layer or 3D Z slice. Keep source row/image strides intact while
+          * splitting multi-layer and volume regions; no staging copy. */
          for (unsigned r = 0; r < pCopyBufferToImageInfo->regionCount; ++r) {
             VkBufferImageCopy2 region = pCopyBufferToImageInfo->pRegions[r];
-            const uint32_t layers =
-               vk_image_subresource_layer_count(&dst_image->vk,
-                                                &region.imageSubresource);
+            const bool volume =
+               dst_image->vk.image_type == VK_IMAGE_TYPE_3D;
+            const uint32_t slices = volume
+               ? region.imageExtent.depth
+               : vk_image_subresource_layer_count(
+                    &dst_image->vk, &region.imageSubresource);
             const uint64_t rows = region.bufferImageHeight ?
                                      region.bufferImageHeight : region.imageExtent.height;
             const uint64_t columns = region.bufferRowLength ?
@@ -1925,18 +1928,24 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
             }
             const uint64_t stride = columns * rows * pixel_size;
             const uint64_t offset = region.bufferOffset;
-            if (layers > 1 && stride > (UINT64_MAX - offset) / (layers - 1)) {
+            if (slices > 1 &&
+                stride > (UINT64_MAX - offset) / (slices - 1)) {
                vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
                break;
             }
             const uint32_t base_layer = region.imageSubresource.baseArrayLayer;
+            const int32_t base_z = region.imageOffset.z;
             region.imageSubresource.layerCount = 1;
+            region.imageExtent.depth = 1;
             VkCopyBufferToImageInfo2 info = *pCopyBufferToImageInfo;
             info.regionCount = 1;
             info.pRegions = &region;
-            for (uint32_t layer = 0; layer < layers; ++layer) {
-               region.imageSubresource.baseArrayLayer = base_layer + layer;
-               region.bufferOffset = offset + layer * stride;
+            for (uint32_t slice = 0; slice < slices; ++slice) {
+               if (volume)
+                  region.imageOffset.z = base_z + (int32_t)slice;
+               else
+                  region.imageSubresource.baseArrayLayer = base_layer + slice;
+               region.bufferOffset = offset + slice * stride;
                vk_meta_copy_buffer_to_image(&cmd->vk, &dev->meta, &info,
                                             &dst_props, bind_point);
                if (vk_command_buffer_has_error(&cmd->vk))
@@ -2008,14 +2017,20 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          /* The qualified HAL200 BG/EOT contract is single-layer.  Preserve
-          * arbitrary mip and rectangle selection while expanding 2D-array
-          * regions into the same sequence of per-layer native meta draws. */
+          * arbitrary mip and rectangle selection while expanding array and
+          * 3D regions into per-slice native meta draws. */
          for (uint32_t r = 0; r < pCopyImageInfo->regionCount; ++r) {
             const VkImageCopy2 *region = &pCopyImageInfo->pRegions[r];
-            const uint32_t src_slices = vk_image_subresource_layer_count(
-               &src_image->vk, &region->srcSubresource);
-            const uint32_t dst_slices = vk_image_subresource_layer_count(
-               &dst_image->vk, &region->dstSubresource);
+            const uint32_t src_slices =
+               src_image->vk.image_type == VK_IMAGE_TYPE_3D
+                  ? region->extent.depth
+                  : vk_image_subresource_layer_count(
+                       &src_image->vk, &region->srcSubresource);
+            const uint32_t dst_slices =
+               dst_image->vk.image_type == VK_IMAGE_TYPE_3D
+                  ? region->extent.depth
+                  : vk_image_subresource_layer_count(
+                       &dst_image->vk, &region->dstSubresource);
 
             for (uint32_t slice = 0; slice < src_slices; ++slice) {
                VkImageCopy2 one;

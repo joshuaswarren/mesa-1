@@ -238,9 +238,10 @@ bool
 hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)
 {
+   const bool volume = copy && copy->image_type == VK_IMAGE_TYPE_3D;
    if (!copy || copy->chip != AGX_CHIP_G17P ||
        !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
-       copy->image_type != VK_IMAGE_TYPE_2D ||
+       (copy->image_type != VK_IMAGE_TYPE_2D && !volume) ||
        copy->samples != VK_SAMPLE_COUNT_1_BIT ||
        copy->mip_levels == 0 || copy->array_layers == 0 ||
        copy->mip_level >= copy->mip_levels || copy->mip_level >= 32 ||
@@ -248,11 +249,17 @@ hk_g17p_buffer_to_image_copy_supported(
        copy->layer_count == 0 ||
        (copy->layer_count != VK_REMAINING_ARRAY_LAYERS &&
         copy->layer_count > copy->array_layers - copy->base_array_layer) ||
+       (volume && (copy->array_layers != 1 || copy->base_array_layer != 0 ||
+                   copy->layer_count != 1)) ||
        copy->image_offset.x < 0 || copy->image_offset.y < 0 ||
-       copy->image_offset.z != 0 || copy->image_extent.depth != 1 ||
-       copy->copy_extent.depth != 1 ||
+       (volume ? copy->image_offset.z < 0 : copy->image_offset.z != 0) ||
+       (!volume && copy->image_extent.depth != 1) ||
+       (!volume && copy->copy_extent.depth != 1) ||
        copy->image_extent.width == 0 || copy->image_extent.height == 0 ||
-       copy->copy_extent.width == 0 || copy->copy_extent.height == 0)
+       copy->image_extent.depth == 0 || copy->copy_extent.width == 0 ||
+       copy->copy_extent.height == 0 || copy->copy_extent.depth == 0 ||
+       (volume && copy->copy_extent.depth - 1 >
+                     (uint32_t)(INT32_MAX - copy->image_offset.z)))
       return false;
 
    VkFormat plane_format = copy->format;
@@ -261,6 +268,8 @@ hk_g17p_buffer_to_image_copy_supported(
       vk_format_get_ycbcr_info(copy->format);
 
    if (ycbcr && ycbcr->n_planes > 1) {
+      if (volume)
+         return false;
       uint32_t plane;
       switch (copy->aspect) {
       case VK_IMAGE_ASPECT_PLANE_0_BIT:
@@ -308,12 +317,17 @@ hk_g17p_buffer_to_image_copy_supported(
       (copy->image_extent.width / width_scale) >> copy->mip_level;
    const uint32_t height =
       (copy->image_extent.height / height_scale) >> copy->mip_level;
+   const uint32_t depth = copy->image_extent.depth >> copy->mip_level;
    const uint32_t mip_width = width ? width : 1;
    const uint32_t mip_height = height ? height : 1;
-   const uint32_t x = copy->image_offset.x, y = copy->image_offset.y;
+   const uint32_t mip_depth = depth ? depth : 1;
+   const uint32_t x = copy->image_offset.x, y = copy->image_offset.y,
+                  z = copy->image_offset.z;
    if (x >= mip_width || y >= mip_height ||
        copy->copy_extent.width > mip_width - x ||
-       copy->copy_extent.height > mip_height - y)
+       copy->copy_extent.height > mip_height - y ||
+       (volume &&
+        (z >= mip_depth || copy->copy_extent.depth > mip_depth - z)))
       return false;
 
    return (copy->buffer_row_length == 0 ||
@@ -331,19 +345,44 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
    if (out)
       *out = (VkImageCopy2){0};
 
-   if (chip != AGX_CHIP_G17P || !region || !out ||
-       src_type != VK_IMAGE_TYPE_2D || dst_type != VK_IMAGE_TYPE_2D ||
-       src_layers == 0 || src_layers != dst_layers || slice >= src_layers ||
-       region->extent.depth != 1 ||
-       slice > UINT32_MAX - region->srcSubresource.baseArrayLayer ||
-       slice > UINT32_MAX - region->dstSubresource.baseArrayLayer)
+   const bool src_3d = src_type == VK_IMAGE_TYPE_3D;
+   const bool dst_3d = dst_type == VK_IMAGE_TYPE_3D;
+   const bool valid_types =
+      (src_type == VK_IMAGE_TYPE_2D || src_3d) &&
+      (dst_type == VK_IMAGE_TYPE_2D || dst_3d);
+   const bool same_type = src_type == dst_type;
+   const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
+                              (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
+       (!same_type && !two_d_three_d) || src_layers == 0 ||
+       src_layers != dst_layers || slice >= src_layers ||
+       ((src_3d || dst_3d) && region->extent.depth != src_layers) ||
+       (!src_3d && !dst_3d && region->extent.depth != 1) ||
+       (!src_3d && region->srcOffset.z != 0) ||
+       (!dst_3d && region->dstOffset.z != 0) ||
+       (src_3d &&
+        (region->srcOffset.z < 0 ||
+         slice > (uint32_t)(INT32_MAX - region->srcOffset.z))) ||
+       (!src_3d &&
+        slice > UINT32_MAX - region->srcSubresource.baseArrayLayer) ||
+       (dst_3d &&
+        (region->dstOffset.z < 0 ||
+         slice > (uint32_t)(INT32_MAX - region->dstOffset.z))) ||
+       (!dst_3d &&
+        slice > UINT32_MAX - region->dstSubresource.baseArrayLayer))
       return false;
 
    *out = *region;
    out->extent.depth = 1;
-   out->srcSubresource.baseArrayLayer += slice;
+   if (src_3d)
+      out->srcOffset.z += slice;
+   else
+      out->srcSubresource.baseArrayLayer += slice;
    out->srcSubresource.layerCount = 1;
-   out->dstSubresource.baseArrayLayer += slice;
+   if (dst_3d)
+      out->dstOffset.z += slice;
+   else
+      out->dstSubresource.baseArrayLayer += slice;
    out->dstSubresource.layerCount = 1;
    return true;
 }

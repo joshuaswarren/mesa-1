@@ -19,8 +19,13 @@
 #define G17P_RESOLVE_IMAGE 0
 #endif
 
-#if G17P_BLIT_IMAGE && G17P_RESOLVE_IMAGE
-#error "select either the image blit or resolve oracle"
+#ifndef G17P_COPY_IMAGE_3D
+#define G17P_COPY_IMAGE_3D 0
+#endif
+
+#if (G17P_BLIT_IMAGE && G17P_RESOLVE_IMAGE) ||                            \
+   (G17P_COPY_IMAGE_3D && (G17P_BLIT_IMAGE || G17P_RESOLVE_IMAGE))
+#error "select exactly one image operation oracle"
 #endif
 
 #ifdef G17P_CLEAR_IMAGE
@@ -31,16 +36,24 @@
 #define TEST_NAME "g17p-vulkan-blit-image-linear-flip"
 #elif G17P_RESOLVE_IMAGE
 #define TEST_NAME "g17p-vulkan-resolve-image4"
+#elif G17P_COPY_IMAGE_3D
+#define TEST_NAME "g17p-vulkan-image-copy-3d"
 #else
 #define TEST_NAME "g17p-vulkan-image-copy-subregion"
 #endif
 #define T8140_DEVICE_ID 0x8140
 #define WIDTH 32u
 #define HEIGHT 24u
+#if G17P_COPY_IMAGE_3D
+#define IMAGE_DEPTH 5u
+#else
+#define IMAGE_DEPTH 1u
+#endif
 #define ROW_LENGTH 40u
 #define GUARD_BYTES 64u
-#define IMAGE_BYTES (WIDTH * HEIGHT * 4u)
-#define UPLOAD_BYTES (GUARD_BYTES + ROW_LENGTH * HEIGHT * 4u + GUARD_BYTES)
+#define IMAGE_BYTES (WIDTH * HEIGHT * IMAGE_DEPTH * 4u)
+#define UPLOAD_BYTES                                                          \
+   (GUARD_BYTES + ROW_LENGTH * HEIGHT * IMAGE_DEPTH * 4u + GUARD_BYTES)
 #define DESTINATION_UPLOAD_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 #define READBACK_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 
@@ -186,9 +199,10 @@ create_image(VkDevice device,
 {
    const VkImageCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .imageType = VK_IMAGE_TYPE_2D,
+      .imageType = G17P_COPY_IMAGE_3D ? VK_IMAGE_TYPE_3D
+                                      : VK_IMAGE_TYPE_2D,
       .format = VK_FORMAT_R8G8B8A8_UNORM,
-      .extent = {WIDTH, HEIGHT, 1},
+      .extent = {WIDTH, HEIGHT, IMAGE_DEPTH},
       .mipLevels = 1,
       .arrayLayers = 1,
       .samples = samples,
@@ -216,11 +230,11 @@ create_image(VkDevice device,
 }
 
 static void
-source_pixel(uint32_t x, uint32_t y, uint8_t pixel[4])
+source_pixel(uint32_t x, uint32_t y, uint32_t z, uint8_t pixel[4])
 {
-   pixel[0] = (uint8_t)(x * 7u + 3u);
-   pixel[1] = (uint8_t)(y * 9u + 5u);
-   pixel[2] = (uint8_t)((x * 5u) ^ (y * 3u));
+   pixel[0] = (uint8_t)(x * 7u + z * 31u + 3u);
+   pixel[1] = (uint8_t)(y * 9u + z * 17u + 5u);
+   pixel[2] = (uint8_t)((x * 5u) ^ (y * 3u) ^ (z * 29u));
    pixel[3] = 255;
 }
 
@@ -229,7 +243,8 @@ verify(const struct mapped_buffer *upload,
        const uint8_t upload_expected[UPLOAD_BYTES],
        const struct mapped_buffer *destination_upload,
        const uint8_t destination_upload_expected[DESTINATION_UPLOAD_BYTES],
-       const struct mapped_buffer *readback, bool clear_image, bool blit_image)
+       const struct mapped_buffer *readback, bool clear_image, bool blit_image,
+       bool copy_3d)
 {
    if (memcmp(upload->map, upload_expected, UPLOAD_BYTES) != 0) {
       for (size_t i = 0; i < UPLOAD_BYTES; ++i) {
@@ -260,30 +275,37 @@ verify(const struct mapped_buffer *upload,
    }
 
    const uint8_t *pixels = readback->map + GUARD_BYTES;
-   for (uint32_t y = 0; y < HEIGHT; ++y) {
-      for (uint32_t x = 0; x < WIDTH; ++x) {
-         uint8_t expected[4] = {0, 0, 0, 255};
-         if (clear_image) {
-            expected[0] = 255;
-            expected[2] = 255;
-         } else if (x >= 11 && x < 24 && y >= 4 && y < 19) {
-            if (G17P_RESOLVE_IMAGE) {
+   for (uint32_t z = 0; z < IMAGE_DEPTH; ++z) {
+      for (uint32_t y = 0; y < HEIGHT; ++y) {
+         for (uint32_t x = 0; x < WIDTH; ++x) {
+            uint8_t expected[4] = {0, 0, 0, 255};
+            if (clear_image) {
                expected[0] = 255;
                expected[2] = 255;
-            } else if (blit_image) {
-               source_pixel(23 - (x - 11), 18 - (y - 4), expected);
-            } else {
-               source_pixel(5 + x - 11, 3 + y - 4, expected);
+            } else if (x >= 11 && x < 24 && y >= 4 && y < 19) {
+               if ((copy_3d && z >= 2 && z < 4) || G17P_RESOLVE_IMAGE) {
+                  if (copy_3d)
+                     source_pixel(5 + x - 11, 3 + y - 4, z - 1, expected);
+                  else {
+                     expected[0] = 255;
+                     expected[2] = 255;
+                  }
+               } else if (!copy_3d && blit_image) {
+                  source_pixel(23 - (x - 11), 18 - (y - 4), 0, expected);
+               } else if (!copy_3d) {
+                  source_pixel(5 + x - 11, 3 + y - 4, 0, expected);
+               }
             }
-         }
-         const uint8_t *actual = pixels + (y * WIDTH + x) * 4u;
-         if (memcmp(actual, expected, 4) != 0) {
-            fprintf(stderr,
-                    TEST_NAME ": pixel (%u,%u) got %02x%02x%02x%02x, "
-                              "expected %02x%02x%02x%02x\n",
-                    x, y, actual[0], actual[1], actual[2], actual[3],
-                    expected[0], expected[1], expected[2], expected[3]);
-            return false;
+            const uint8_t *actual =
+               pixels + ((z * HEIGHT + y) * WIDTH + x) * 4u;
+            if (memcmp(actual, expected, 4) != 0) {
+               fprintf(stderr,
+                       TEST_NAME ": pixel (%u,%u,%u) got %02x%02x%02x%02x, "
+                                 "expected %02x%02x%02x%02x\n",
+                       x, y, z, actual[0], actual[1], actual[2], actual[3],
+                       expected[0], expected[1], expected[2], expected[3]);
+               return false;
+            }
          }
       }
    }
@@ -301,9 +323,15 @@ main(int argc, char **argv)
    const bool blit_image = G17P_BLIT_IMAGE != 0;
    const bool linear_blit = G17P_BLIT_IMAGE == 2;
    const bool resolve_image = G17P_RESOLVE_IMAGE != 0;
+   const bool copy_3d = G17P_COPY_IMAGE_3D != 0;
    const bool record_only = argc == 2 && !strcmp(argv[1], "--record-only");
-   if (argc > 2 || (argc == 2 && !record_only))
-      die("usage: " TEST_NAME " [--record-only]");
+   const bool submit_only = argc == 2 && !strcmp(argv[1], "--submit-only");
+   const bool expect_submit_failure =
+      argc == 2 && !strcmp(argv[1], "--expect-submit-failure");
+   if (argc > 2 ||
+       (argc == 2 && !record_only && !submit_only && !expect_submit_failure))
+      die("usage: " TEST_NAME
+          " [--record-only|--submit-only|--expect-submit-failure]");
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -384,6 +412,20 @@ main(int argc, char **argv)
             "vkGetPhysicalDeviceImageFormatProperties(4x resolve source)");
       if (!(image_properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT))
          die("RGBA8 optimal transfer images do not advertise four samples");
+   }
+   if (copy_3d) {
+      VkImageFormatProperties image_properties;
+      check(vkGetPhysicalDeviceImageFormatProperties(
+               physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_3D,
+               VK_IMAGE_TILING_OPTIMAL,
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                  VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+               0, &image_properties),
+            "vkGetPhysicalDeviceImageFormatProperties(3D copy)");
+      if (image_properties.maxExtent.width < WIDTH ||
+          image_properties.maxExtent.height < HEIGHT ||
+          image_properties.maxExtent.depth < IMAGE_DEPTH)
+         die("RGBA8 optimal transfer images do not advertise the test volume");
    }
 
    uint32_t family_count = 0;
@@ -468,10 +510,14 @@ main(int argc, char **argv)
       VK_BUFFER_USAGE_TRANSFER_DST_BIT);
    uint8_t upload_expected[UPLOAD_BYTES];
    memset(upload_expected, 0xa5, sizeof(upload_expected));
-   for (uint32_t y = 0; y < HEIGHT; ++y) {
-      for (uint32_t x = 0; x < WIDTH; ++x) {
-         source_pixel(x, y, upload_expected + GUARD_BYTES +
-                                      (y * ROW_LENGTH + x) * 4u);
+   for (uint32_t z = 0; z < IMAGE_DEPTH; ++z) {
+      for (uint32_t y = 0; y < HEIGHT; ++y) {
+         for (uint32_t x = 0; x < WIDTH; ++x) {
+            source_pixel(
+               x, y, z,
+               upload_expected + GUARD_BYTES +
+                  ((z * HEIGHT + y) * ROW_LENGTH + x) * 4u);
+         }
       }
    }
    memcpy(upload.map, upload_expected, sizeof(upload_expected));
@@ -542,7 +588,7 @@ main(int argc, char **argv)
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .layerCount = 1,
       },
-      .imageExtent = {WIDTH, HEIGHT, 1},
+      .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
    };
    if (resolve_image) {
       const VkClearColorValue magenta = {
@@ -574,10 +620,19 @@ main(int argc, char **argv)
       },
       .imageExtent = {WIDTH, HEIGHT, 1},
    };
-   vkCmdCopyBufferToImage(command, destination_upload.buffer,
-                          destination.image,
-                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                          &destination_upload_region);
+   if (copy_3d) {
+      const VkClearColorValue black = {
+         .float32 = {0.0f, 0.0f, 0.0f, 1.0f},
+      };
+      vkCmdClearColorImage(command, destination.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                           &range);
+   } else {
+      vkCmdCopyBufferToImage(command, destination_upload.buffer,
+                             destination.image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                             &destination_upload_region);
+   }
 
    const VkImageMemoryBarrier uploads_ready[2] = {
       {
@@ -611,13 +666,22 @@ main(int argc, char **argv)
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .layerCount = 1,
       },
+#if G17P_COPY_IMAGE_3D
+      .srcOffset = {5, 3, 1},
+#else
       .srcOffset = {5, 3, 0},
+#endif
       .dstSubresource = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .layerCount = 1,
       },
+#if G17P_COPY_IMAGE_3D
+      .dstOffset = {11, 4, 2},
+      .extent = {13, 15, 2},
+#else
       .dstOffset = {11, 4, 0},
       .extent = {13, 15, 1},
+#endif
    };
    if (clear_image) {
       const VkClearColorValue magenta = {
@@ -688,7 +752,7 @@ main(int argc, char **argv)
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .layerCount = 1,
       },
-      .imageExtent = {WIDTH, HEIGHT, 1},
+      .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
    };
    vkCmdCopyImageToBuffer(command, destination.image,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -720,6 +784,9 @@ main(int argc, char **argv)
       else if (resolve_image)
          printf(TEST_NAME ": RECORD PASS — 13x15 offset RGBA8 4x-to-1x "
                           "image resolve and guarded readback recorded\n");
+      else if (copy_3d)
+         printf(TEST_NAME ": RECORD PASS — two 3D slices copied between "
+                          "nonzero source/destination Z offsets\n");
       else
          printf(TEST_NAME ": RECORD PASS — padded upload, nonzero image "
                           "subregion copy and guarded readback recorded\n");
@@ -735,20 +802,35 @@ main(int argc, char **argv)
       .commandBufferCount = 1,
       .pCommandBuffers = &command,
    };
-   check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
+   const VkResult submitted = vkQueueSubmit(queue, 1, &submit, fence);
+   if (expect_submit_failure) {
+      if (submitted != VK_ERROR_DEVICE_LOST) {
+         fprintf(stderr,
+                 TEST_NAME ": vkQueueSubmit returned %d, expected %d\n",
+                 submitted, VK_ERROR_DEVICE_LOST);
+         return EXIT_FAILURE;
+      }
+      printf(TEST_NAME ": EXPECTED SUBMIT FAILURE PASS\n");
+      goto cleanup;
+   }
+   check(submitted, "vkQueueSubmit");
    const VkResult waited =
       vkWaitForFences(device, 1, &fence, true, UINT64_C(3000000000));
    if (waited == VK_TIMEOUT)
       die("vkWaitForFences timed out after three seconds");
    check(waited, "vkWaitForFences");
+   if (submit_only) {
+      printf(TEST_NAME ": SUBMIT PASS — 3D copy command stream accepted\n");
+      goto cleanup;
+   }
    if (!verify(&upload, upload_expected, &destination_upload,
                destination_upload_expected, &readback, clear_image,
-               blit_image))
+               blit_image, copy_3d))
       return EXIT_FAILURE;
    sleep(3);
    if (!verify(&upload, upload_expected, &destination_upload,
                destination_upload_expected, &readback, clear_image,
-               blit_image))
+               blit_image, copy_3d))
       return EXIT_FAILURE;
 
    uint64_t checksum = UINT64_C(1469598103934665603);
@@ -771,6 +853,12 @@ main(int argc, char **argv)
       printf(TEST_NAME ": PASS — exact magenta 13x15 RGBA8 4x-to-1x resolve "
                        "into destination(11,4) immediately/3s; both uploads "
                        "and 384 guard bytes unchanged, checksum %016" PRIx64
+                       "\n", checksum);
+   else if (copy_3d)
+      printf(TEST_NAME ": PASS — two exact 13x15 RGBA8 slices copied from "
+                       "distinct source z=1,2 to destination z=2,3 "
+                       "immediately/3s; "
+                       "384 guard bytes unchanged, checksum %016" PRIx64
                        "\n", checksum);
    else
       printf(TEST_NAME ": PASS — 13x15 source(5,3) to destination(11,4) "

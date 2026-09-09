@@ -2,10 +2,10 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Strict AGX3 2D texel-fetch encoding.  This deliberately models only the
- * directly witnessed LOD0 forms with immediate texture selection and sampler
- * zero.  Unsupported texture modes are represented by the absence of an API,
- * rather than guessed selector values.
+ * Strict AGX3 texel-fetch encoding.  This models the directly witnessed 2D,
+ * 2D-array, 2D-MS, 2D-MS-array, and G17P 3D read forms. Unsupported texture
+ * modes are represented by the absence of an API, rather than guessed
+ * selector values.
  *
  * Native G17P filtered array samples select f77=1 and name a dynamic layer
  * register with f37=3/f31=<half-register>. This is distinct from the older
@@ -105,6 +105,7 @@ struct agx3_tex_fetch_desc {
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer in the register after the pair */
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
+   bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
    uint8_t sample;      /* immediate non-array sample index, values 0..3 */
    bool texture_kill;   /* Last use of an indirect texture index */
    /* Operand kinds. Zero is treated as IMMEDIATE so existing callers, which

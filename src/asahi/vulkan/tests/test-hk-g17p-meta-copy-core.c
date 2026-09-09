@@ -374,6 +374,56 @@ main(void)
    ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
 
+   /* A volume upload is split into depth-one EOT views. The buffer image
+    * stride remains the API rowLength*imageHeight product while Z advances
+    * independently inside the selected mip. */
+   struct hk_g17p_buffer_to_image_copy volume_upload = vkcube;
+   volume_upload.image_type = VK_IMAGE_TYPE_3D;
+   volume_upload.image_extent = (VkExtent3D){64, 32, 9};
+   volume_upload.image_offset = (VkOffset3D){3, 4, 2};
+   volume_upload.copy_extent = (VkExtent3D){17, 11, 4};
+   volume_upload.buffer_row_length = 24;
+   volume_upload.buffer_image_height = 16;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&volume_upload));
+
+   struct hk_g17p_buffer_to_image_copy bad_volume = volume_upload;
+   bad_volume.image_offset.z = -1;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.copy_extent.depth = 8;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.copy_extent.depth = 0;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.image_extent.depth = 0;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.image_extent.depth = UINT32_MAX;
+   bad_volume.image_offset.z = INT32_MAX;
+   bad_volume.copy_extent.depth = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.array_layers = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = volume_upload;
+   bad_volume.image_type = VK_IMAGE_TYPE_1D;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+   bad_volume = vkcube;
+   bad_volume.copy_extent.depth = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad_volume));
+
+   volume_upload.mip_levels = 2;
+   volume_upload.mip_level = 1;
+   volume_upload.image_offset = (VkOffset3D){3, 2, 1};
+   volume_upload.copy_extent = (VkExtent3D){17, 11, 3};
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&volume_upload));
+   volume_upload.image_offset.z = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&volume_upload));
+
    /* Exactly the layouts vkCmdCopyBufferToImage accepts as dstImageLayout.
     * VK_IMAGE_LAYOUT_GENERAL is what a VK_KHR_unified_image_layouts client
     * (Zink with driver_workarounds.general_layout) passes for every copy, so
@@ -493,7 +543,89 @@ main(void)
       &overflow, 1, &untouched));
    CHECK(!hk_g17p_image_copy_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+      &layered, 3, &untouched));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
       &layered, 0, &untouched));
+
+   const VkImageCopy2 volume_copy = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 0, 1},
+      .srcOffset = {7, 5, 3},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 0, 1},
+      .dstOffset = {11, 13, 5},
+      .extent = {37, 29, 3},
+   };
+   for (uint32_t slice = 0; slice < 3; ++slice) {
+      VkImageCopy2 one;
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+         &volume_copy, slice, &one));
+      CHECK(one.srcOffset.z == 3 + (int32_t)slice);
+      CHECK(one.dstOffset.z == 5 + (int32_t)slice);
+      CHECK(one.srcSubresource.baseArrayLayer == 0 &&
+            one.dstSubresource.baseArrayLayer == 0);
+      CHECK(one.srcSubresource.layerCount == 1 &&
+            one.dstSubresource.layerCount == 1 && one.extent.depth == 1);
+      CHECK(one.extent.width == 37 && one.extent.height == 29);
+   }
+
+   VkImageCopy2 volume_array = volume_copy;
+   volume_array.dstSubresource.baseArrayLayer = 7;
+   volume_array.dstOffset.z = 0;
+   for (uint32_t slice = 0; slice < 3; ++slice) {
+      VkImageCopy2 one;
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_2D, 3, 3,
+         &volume_array, slice, &one));
+      CHECK(one.srcOffset.z == 3 + (int32_t)slice);
+      CHECK(one.dstOffset.z == 0);
+      CHECK(one.dstSubresource.baseArrayLayer == 7 + slice);
+      CHECK(one.extent.depth == 1);
+   }
+
+   VkImageCopy2 array_volume = volume_copy;
+   array_volume.srcSubresource.baseArrayLayer = 7;
+   array_volume.srcOffset.z = 0;
+   for (uint32_t slice = 0; slice < 3; ++slice) {
+      VkImageCopy2 one;
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_3D, 3, 3,
+         &array_volume, slice, &one));
+      CHECK(one.srcSubresource.baseArrayLayer == 7 + slice);
+      CHECK(one.dstOffset.z == 5 + (int32_t)slice);
+      CHECK(one.extent.depth == 1);
+   }
+
+   VkImageCopy2 offset_overflow = volume_copy;
+   offset_overflow.srcOffset.z = INT32_MAX;
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+      &offset_overflow, 1, &untouched));
+   offset_overflow = volume_copy;
+   offset_overflow.dstOffset.z = -1;
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+      &offset_overflow, 0, &untouched));
+   offset_overflow = volume_array;
+   offset_overflow.dstSubresource.baseArrayLayer = UINT32_MAX;
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_2D, 3, 3,
+      &offset_overflow, 1, &untouched));
+   offset_overflow = volume_copy;
+   offset_overflow.extent.depth = 2;
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_3D, 3, 3,
+      &offset_overflow, 0, &untouched));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 3, 3,
+      &volume_copy, 0, &untouched));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_1D, 3, 3,
+      &volume_copy, 0, &untouched));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, (VkImageType)99, VK_IMAGE_TYPE_3D, 3, 3,
+      &volume_copy, 0, &untouched));
 
    const VkImageBlit2 blit = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,

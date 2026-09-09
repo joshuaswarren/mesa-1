@@ -346,6 +346,7 @@ static bool
 g17p_indexed_fetch_shape(const nir_tex_instr *tex)
 {
    const bool multisample = tex->op == nir_texop_txf_ms;
+   const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
    if (coord < 0)
       coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -362,14 +363,17 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
 
    if ((tex->op != nir_texop_txf && !multisample) ||
        tex->sampler_dim !=
-          (multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D) ||
+          (multisample ? GLSL_SAMPLER_DIM_MS
+                       : three_d ? GLSL_SAMPLER_DIM_3D
+                                 : GLSL_SAMPLER_DIM_2D) ||
+       (three_d && tex->is_array) ||
        tex->is_shadow || tex->is_sparse || tex->texture_index ||
        tex->sampler_index || tex->def.bit_size != 32 ||
        tex->def.num_components != 4 ||
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
        (!lowered_buffer &&
-        tex->coord_components != (tex->is_array ? 3 : 2)) ||
+        tex->coord_components != (tex->is_array || three_d ? 3 : 2)) ||
        (tex->backend_flags & ~AGX_TEXTURE_FLAG_NO_CLAMP))
       return false;
    const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);

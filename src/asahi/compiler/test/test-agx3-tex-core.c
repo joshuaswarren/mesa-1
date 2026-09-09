@@ -29,7 +29,8 @@ same(const struct agx3_tex_fetch_desc *a,
           a->wait_mask == b->wait_mask && a->coord_kill == b->coord_kill &&
           a->final == b->final &&
           a->array == b->array &&
-          a->multisample == b->multisample && a->sample == b->sample &&
+          a->multisample == b->multisample &&
+          a->three_d == b->three_d && a->sample == b->sample &&
           (a->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
              (b->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) &&
           (a->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
@@ -1210,6 +1211,90 @@ test_array_fetch(void)
    return 0;
 }
 
+/* G17P texture3d::read. The direct instruction is the complete HW-validated
+ * c_read_3d bundle from EXP-0016. The register-indexed level-zero and
+ * uniform-indexed level-one instructions were freshly compiled for
+ * applegpu_g17p from an own-MSL argument-buffer texture array (native SHA256
+ * bb14d01a8ef3...). The first is the production Vulkan descriptor shape
+ * (killed r3 heap index plus immediate texel-fetch sampler zero). */
+static int
+test_3d_fetch(void)
+{
+   static const uint8_t direct[14] = {
+      0x05,0x80,0x0c,0xb8,0xb0,0x00,0x79,0x00,0x00,0x00,0x00,0x00,0x01,0x00,
+   };
+   static const uint8_t indirect[20] = {
+      0x05,0xb0,0x0c,0xb8,0xb0,0x00,0x79,0x00,0x00,0x02,
+      0x80,0x00,0x01,0x00,0x00,0x28,0x00,0x00,0x00,0x00,
+   };
+   static const uint8_t uniform_lod1[20] = {
+      0x05,0xa0,0x0c,0xb8,0xb0,0x00,0x79,0x00,0x90,0x02,
+      0x80,0x04,0x01,0x00,0x00,0x20,0x00,0x00,0x00,0x00,
+   };
+   struct agx3_tex_fetch_desc d = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .texture = 0, .slot = 1, .wait_mask = 1, .coord_kill = true,
+      .final = true, .three_d = true,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length = 0;
+   struct agx3_tex_fetch_desc back;
+
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                               &length));
+   CHECK(length == sizeof(direct) &&
+         hex_eq(bytes, length, "05800cb8b0007900000000000100"));
+   CHECK(agx3_tex_decode_fetch(AGX_ISA_ENCODING_AGX3B, direct,
+                               sizeof(direct), &back));
+   CHECK(same(&d, &back));
+
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 6;
+   d.texture_kill = true;
+   d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                               &length));
+   CHECK(length == sizeof(indirect) &&
+         hex_eq(bytes, length,
+                "05b00cb8b0007900000280000100002800000000"));
+   CHECK(agx3_tex_decode_fetch(AGX_ISA_ENCODING_AGX3B, indirect,
+                               sizeof(indirect), &back));
+   CHECK(same(&d, &back));
+
+   d.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   d.texture_value = 20;
+   d.texture_kill = false;
+   d.lod_x64 = 64;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                               &length));
+   CHECK(length == sizeof(uniform_lod1) &&
+         hex_eq(bytes, length,
+                "05a00cb8b0007900900280040100002000000000"));
+
+   d.array = true;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   d.array = false;
+   d.multisample = true;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   d.multisample = false;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes,
+                                &length));
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 6;
+   d.lod_x64 = 0;
+   d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_value = 2;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.sampler_value = 0;
+   d.register_lod = true;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   return 0;
+}
+
 
 /*
  * Bindless operand kinds. The texture and sampler each select one of three
@@ -2071,7 +2156,7 @@ main(void)
        test_staging_source_lifetime() || test_exact_witnesses() ||
        test_supported_axes() || test_fail_closed() ||
        test_sample_witnesses() || test_copy_witnesses() ||
-       test_sample_fail_closed() || test_array_fetch() ||
+       test_sample_fail_closed() || test_array_fetch() || test_3d_fetch() ||
        test_bindless_operand_kinds() || test_indexed_sample_witnesses() ||
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias())
