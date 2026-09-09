@@ -4761,11 +4761,9 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
 
    agx_instr **defs = rzalloc_array(ctx, agx_instr *, ctx->alloc);
    unsigned *uses = rzalloc_array(ctx, unsigned, ctx->alloc);
-   unsigned *orders = rzalloc_array(ctx, unsigned, ctx->alloc);
-   if (defs == NULL || uses == NULL || orders == NULL)
+   if (defs == NULL || uses == NULL)
       return false;
 
-   unsigned order = 1;
    agx_foreach_instr_global(ctx, I) {
       agx_foreach_ssa_src(I, s) {
          assert(I->src[s].value < ctx->alloc);
@@ -4774,9 +4772,7 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
       agx_foreach_ssa_dest(I, d) {
          assert(I->dest[d].value < ctx->alloc);
          defs[I->dest[d].value] = I;
-         orders[I->dest[d].value] = order;
       }
-      order++;
    }
 
    bool progress = false;
@@ -4819,15 +4815,24 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
       if (!valid || producer[0] == producer[1])
          continue;
 
+      /* Apple's G17P implicit fragment emits every coefficient interpolation
+       * before it opens the coordinate-staging transaction, then publishes X
+       * and Y consecutively. Keep an unrelated interpolation out of that
+       * bounded staging transaction, exactly as in the native witness. Both
+       * terminal producers are pure, their SSA results have the single
+       * COLLECT use proven above, and sinking them to the COLLECT therefore
+       * preserves data dependencies.
+       */
+      for (unsigned c = 0; c < 2; ++c) {
+         list_del(&producer[c]->link);
+         list_addtail(&producer[c]->link, &collect->link);
+      }
+
       for (unsigned c = 0; c < 2; ++c) {
          producer[c]->agx3_tex_coord_stage = true;
          producer[c]->agx3_tex_coord_component = c;
       }
-      producer[orders[producer[0]->dest[0].value] <
-                        orders[producer[1]->dest[0].value]
-                   ? 0
-                   : 1]
-         ->agx3_tex_coord_start = true;
+      producer[0]->agx3_tex_coord_start = true;
       sample->agx3_tex_coords_staged = true;
       progress = true;
       /* One synthetic staging token is modeled by the slot planner. A later

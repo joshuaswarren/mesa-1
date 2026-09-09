@@ -3376,7 +3376,30 @@ struct agx3_graphics_case {
    uint8_t expected_g17p_loads;
    bool g17p_only;
    uint8_t expected_g17p_depth;
+   bool expected_g17p_implicit_coord_group;
 };
+
+static bool
+g17p_implicit_coord_group(const struct agx_shader_part *part)
+{
+   /* Apple's G17P implicit sample orders its front end as RHW, reciprocal,
+    * both user interpolants, both direct coordinate publications, PIXWAIT.
+    * Physical user registers are allocator-specific; this exact Mesa prefix
+    * pins the same native transaction boundary so pressure scheduling cannot
+    * interleave the first publication with the second interpolation again. */
+   static const uint8_t expected[] = {
+      0x2f,0x0d,0x54,0x00,0x03,0x00,0x04,0x02,0x10,0x00,
+      0xaf,0x00,0x54,0x00,0x03,0x00,0x00,0x48,0x20,0x01,
+      0x2f,0x05,0x54,0x02,0x03,0x02,0x00,0x02,0x10,0x00,
+      0x2f,0x05,0x54,0x04,0x03,0x04,0x00,0x02,0x10,0x00,
+      0x09,0x03,0x2f,0x01,0x00,0x01,0x40,0x00,
+      0x19,0x05,0x3f,0x01,0x00,0x02,0x40,0x00,
+      0x87,0x02,0x54,0x00,0x06,0x00,
+   };
+
+   return part->info.binary_size >= sizeof(expected) &&
+          !memcmp(part->binary, expected, sizeof(expected));
+}
 
 static bool
 g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
@@ -3450,7 +3473,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-interpolated-varying", build_fs_interpolated, true},
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
    {"fs-textured-triangle", build_fs_texture_imm, true},
-   {"fs-vkcube-combined-sampler", build_fs_texture, true, true},
+   {"fs-vkcube-combined-sampler", build_fs_texture, true, true,
+    .expected_g17p_implicit_coord_group = true},
    {"fs-texture3d-level", build_fs_texture_3d_level, true,
     .g17p_only = true},
    {"fs-texture3d-implicit", build_fs_texture_3d_implicit, true,
@@ -3590,6 +3614,14 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          result = g17p_depth_protocol(&part, c->expected_g17p_depth);
          if (!result)
             fprintf(stderr, "%s %s: depth staging protocol mismatch\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_implicit_coord_group) {
+         result = g17p_implicit_coord_group(&part);
+         if (!result)
+            fprintf(stderr, "%s %s: implicit coordinate group mismatch\n",
                     enc_name(enc), c->name);
       }
 
