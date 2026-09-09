@@ -105,7 +105,13 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_def *index = nir_iadd(b, nir_iadd_imm(b, base, component),
                              nir_imul_imm(b, nir_u2u16(b, offset), 4));
 
-   if (sem.location != VARYING_SLOT_LAYER)
+   /* LAYER is consumed only by the shared fixed-function scalar. VIEWPORT
+    * additionally needs an ordinary flat varying only when the next shader
+    * reads it. nir_opt_varyings marks the fixed-function-only case with
+    * no_varying; emitting both stores there disagrees with Apple's native UVS
+    * layout and overstates the VertexProgramVariant output size. */
+   if (sem.location != VARYING_SLOT_LAYER &&
+       (sem.location != VARYING_SLOT_VIEWPORT || !sem.no_varying))
       nir_store_uvs_agx(b, value, index);
 
    /* Insert clip distance sysval writes, and gather layer/viewport writes so we
@@ -171,6 +177,12 @@ gather_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
    unsigned component = nir_intrinsic_component(intr);
+
+   /* VIEWPORT remains a fixed-function output when it is not consumed by the
+    * next shader. In that case only the packed layer/viewport scalar below is
+    * allocated; it is not also a user varying. */
+   if (sem.location == VARYING_SLOT_VIEWPORT && sem.no_varying)
+      return false;
 
    if (nir_src_is_const(intr->src[1])) {
       unsigned loc = sem.location + nir_src_as_uint(intr->src[1]);

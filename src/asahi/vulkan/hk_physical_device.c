@@ -782,7 +782,8 @@ hk_get_device_features(
       /* The HAL300 bind tail now emits the complete viewport/region-clip and
        * consecutive scissor/depth arrays, and the vertex compiler writes the
        * native packed layer/viewport UVS sysval. Keep public exposure opt-in
-       * until a two-viewport image oracle confirms routing on hardware. */
+       * until the four-region static/dynamic image oracle confirms routing on
+       * hardware. */
       features->multiViewport =
          hk_g17p_unverified_feature("multi_viewport");
       /* VK_KHR_shader_quad_control permits quad operations and derivatives

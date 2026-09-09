@@ -205,6 +205,7 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    MERGE_FLAG(viewport_changed);
    MERGE_FLAG(multi_viewport);
    MERGE_FLAG(two_viewport);
+   MERGE_FLAG(four_viewport);
    MERGE_FLAG(scissor_changed);
    MERGE_FLAG(cull_enabled);
    MERGE_FLAG(depth_enabled);
@@ -329,20 +330,20 @@ check_vk_multi_viewport_coverage(void)
    if (!getenv("ASAHI_SHIM_G17P_EXPECT_VK_MULTI_VIEWPORT"))
       return;
 
-   if (!matrix_stats.two_viewport || matrix_stats.viewport_count != 2 ||
+   if (!matrix_stats.four_viewport || matrix_stats.viewport_count != 4 ||
        matrix_stats.draws != 1 || matrix_stats.state_updates != 1 ||
-       matrix_stats.max_instance_count != 2 || !matrix_stats.layer_output) {
+       matrix_stats.max_instance_count != 4 || !matrix_stats.layer_output) {
       fprintf(stderr,
               "shim: incomplete G17P Vulkan multi-viewport coverage: "
               "count=%u draws=%u state=%u instances=%u output=%u exact=%u\n",
               matrix_stats.viewport_count, matrix_stats.draws,
               matrix_stats.state_updates, matrix_stats.max_instance_count,
-              matrix_stats.layer_output, matrix_stats.two_viewport);
+              matrix_stats.layer_output, matrix_stats.four_viewport);
       _Exit(EXIT_FAILURE);
    }
 
    fprintf(stderr,
-           "shim: complete G17P Vulkan two-viewport output coverage\n");
+           "shim: complete G17P Vulkan four-viewport output coverage\n");
 }
 
 static void __attribute__((destructor))

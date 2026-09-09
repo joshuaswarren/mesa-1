@@ -7,6 +7,7 @@
 #include "agx_uvs.h"
 #include "nir_builder.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,7 +102,8 @@ count_native_uvsw(const struct agx_shader_part *part)
 
 static nir_shader *
 build_layer_viewport_output(bool write_layer, uint32_t layer,
-                            bool write_viewport, uint32_t viewport)
+                            bool write_viewport, uint32_t viewport,
+                            bool viewport_varying)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_VERTEX, &agx_nir_options, "layer/viewport UVS packing");
@@ -118,7 +120,8 @@ build_layer_viewport_output(bool write_layer, uint32_t layer,
       nir_store_output(&b, nir_imm_int(&b, viewport), nir_imm_int(&b, 0),
                        .write_mask = 0x1, .src_type = nir_type_uint32,
                        .io_semantics.location = VARYING_SLOT_VIEWPORT,
-                       .io_semantics.num_slots = 1);
+                       .io_semantics.num_slots = 1,
+                       .io_semantics.no_varying = !viewport_varying);
       b.shader->info.outputs_written |= VARYING_BIT_VIEWPORT;
    }
 
@@ -128,11 +131,12 @@ build_layer_viewport_output(bool write_layer, uint32_t layer,
 static bool
 lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
                              uint32_t layer, bool write_viewport,
-                             uint32_t viewport, uint32_t expected,
-                             unsigned expected_size)
+                             uint32_t viewport, bool viewport_varying,
+                             uint32_t expected, unsigned expected_size,
+                             unsigned expected_stores)
 {
    nir_shader *nir = build_layer_viewport_output(
-      write_layer, layer, write_viewport, viewport);
+      write_layer, layer, write_viewport, viewport, viewport_varying);
    struct agx_unlinked_uvs_layout layout = {0};
    bool valid = agx_nir_lower_uvs(nir, &layout, chip);
 
@@ -143,7 +147,7 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
       NIR_PASS(progress, nir, nir_opt_copy_prop);
    } while (progress);
 
-   unsigned matching_stores = 0;
+   unsigned stores = 0, matching_stores = 0, viewport_stores = 0;
    uint32_t actual = 0;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
@@ -152,29 +156,50 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
                continue;
 
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-            if (intr->intrinsic != nir_intrinsic_store_uvs_agx ||
-                !nir_src_is_const(intr->src[1]) ||
-                nir_src_as_uint(intr->src[1]) !=
-                   layout.group_offs[UVS_LAYER_VIEWPORT])
+            if (intr->intrinsic != nir_intrinsic_store_uvs_agx)
                continue;
 
-            matching_stores++;
-            if (nir_src_is_const(intr->src[0]))
-               actual = nir_src_as_uint(intr->src[0]);
-            else
+            stores++;
+            if (!nir_src_is_const(intr->src[1])) {
                valid = false;
+               continue;
+            }
+
+            const unsigned index = nir_src_as_uint(intr->src[1]);
+            if (index == layout.group_offs[UVS_LAYER_VIEWPORT]) {
+               matching_stores++;
+               if (nir_src_is_const(intr->src[0]))
+                  actual = nir_src_as_uint(intr->src[0]);
+               else
+                  valid = false;
+            } else if (viewport_varying &&
+                       index == layout.group_offs[UVS_VARYINGS]) {
+               viewport_stores++;
+               valid &= nir_src_is_const(intr->src[0]) &&
+                        nir_src_as_uint(intr->src[0]) == viewport;
+            }
          }
       }
    }
 
-   valid &= layout.size == expected_size && matching_stores == 1 &&
+   const uint64_t expected_written =
+      viewport_varying ? VARYING_BIT_VIEWPORT : 0;
+   valid &= layout.size == expected_size &&
+            layout.user_size == (viewport_varying ? 1 : 0) &&
+            layout.written == expected_written &&
+            layout.components[VARYING_SLOT_VIEWPORT] ==
+               (viewport_varying ? 1 : 0) &&
+            stores == expected_stores && matching_stores == 1 &&
+            viewport_stores == (viewport_varying ? 1 : 0) &&
             actual == expected;
    if (!valid) {
       fprintf(stderr,
               "layer/viewport packing mismatch: chip=%u layer=%#x/%u "
-              "viewport=%#x/%u actual=%#x expected=%#x stores=%u size=%u\n",
-              chip, layer, write_layer, viewport, write_viewport, actual,
-              expected, matching_stores, layout.size);
+              "viewport=%#x/%u/%u actual=%#x expected=%#x stores=%u/%u "
+              "size=%u user=%u written=%#" PRIx64 "\n",
+              chip, layer, write_layer, viewport, write_viewport,
+              viewport_varying, actual, expected, stores, matching_stores,
+              layout.size, layout.user_size, layout.written);
    }
 
    ralloc_free(nir);
@@ -184,17 +209,24 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
 int
 main(void)
 {
-   /* Fresh applegpu-nt G17P witnesses materialize layer=1 as 1 << 16 and
-    * layer=2 as 2 << 16 before the fifth UVSW. Keep the established AGX2
-    * order as an explicit negative-side regression. */
+   /* Fresh applegpu_g17p witnesses are exact on both sides of no_varying:
+    * viewport-only with an unread FS output has five UVSWs and a five-word
+    * layout, while a fragment read adds exactly one ordinary UVSW/word. Layer
+    * and viewport still share one packed scalar in both cases. */
    if (!lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, false, 0,
-                                     UINT32_C(0x00010000), 5) ||
+                                     false, UINT32_C(0x00010000), 5, 1) ||
        !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
-                                     UINT32_C(0x00000002), 6) ||
+                                     false, UINT32_C(0x00000002), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
+                                     true, UINT32_C(0x00000002), 6, 2) ||
        !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
-                                     UINT32_C(0x00010002), 6) ||
+                                     false, UINT32_C(0x00010002), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
+                                     true, UINT32_C(0x00010002), 6, 2) ||
        !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
-                                     UINT32_C(0x00020001), 6))
+                                     false, UINT32_C(0x00020001), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
+                                     true, UINT32_C(0x00020001), 6, 2))
       return 1;
 
    nir_shader *nir = build_f16_output();

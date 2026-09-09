@@ -622,6 +622,24 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
          viewport.viewports[1].scale_x == UINT32_C(0x41000000) &&
          viewport.viewports[1].translate_y == UINT32_C(0x41800000) &&
          viewport.viewports[1].scale_y == UINT32_C(0x41800000);
+      stats->four_viewport |=
+         viewport.viewport_count == 4 &&
+         viewport.viewports[0].translate_x == UINT32_C(0x41000000) &&
+         viewport.viewports[0].scale_x == UINT32_C(0x41000000) &&
+         viewport.viewports[0].translate_y == UINT32_C(0x41000000) &&
+         viewport.viewports[0].scale_y == UINT32_C(0x41000000) &&
+         viewport.viewports[1].translate_x == UINT32_C(0x41c00000) &&
+         viewport.viewports[1].scale_x == UINT32_C(0x41000000) &&
+         viewport.viewports[1].translate_y == UINT32_C(0x41000000) &&
+         viewport.viewports[1].scale_y == UINT32_C(0x41000000) &&
+         viewport.viewports[2].translate_x == UINT32_C(0x41000000) &&
+         viewport.viewports[2].scale_x == UINT32_C(0x41000000) &&
+         viewport.viewports[2].translate_y == UINT32_C(0x41c00000) &&
+         viewport.viewports[2].scale_y == UINT32_C(0x41000000) &&
+         viewport.viewports[3].translate_x == UINT32_C(0x41c00000) &&
+         viewport.viewports[3].scale_x == UINT32_C(0x41000000) &&
+         viewport.viewports[3].translate_y == UINT32_C(0x41c00000) &&
+         viewport.viewports[3].scale_y == UINT32_C(0x41000000);
       stats->viewport_changed |=
          viewport.viewports[0].translate_x == UINT32_C(0x41d80000) &&
          viewport.viewports[0].scale_x == UINT32_C(0x41c00000) &&

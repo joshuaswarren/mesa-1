@@ -607,14 +607,38 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    # Two-instance viewport-index routing oracle. Viewport 0 covers the left
-    # half and viewport 1 the right, producing one exact full-frame image.
+    # Four-instance viewport-index routing oracles. The four static/dynamic
+    # viewport/scissor combinations cover one exact quadrant apiece.
     executable(
       'g17p-vulkan-multi-viewport',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_MULTI_VIEWPORT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+    executable(
+      'g17p-vulkan-multi-viewport-dynamic-viewport',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MULTI_VIEWPORT=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+    executable(
+      'g17p-vulkan-multi-viewport-dynamic-scissor',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MULTI_VIEWPORT=3'],
+      gnu_symbol_visibility : 'hidden',
+    )
+    executable(
+      'g17p-vulkan-multi-viewport-dynamic-both',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MULTI_VIEWPORT=4'],
       gnu_symbol_visibility : 'hidden',
     )
 

@@ -335,6 +335,15 @@
 #define G17P_MULTI_VIEWPORT 0
 #endif
 
+#if G17P_MULTI_VIEWPORT < 0 || G17P_MULTI_VIEWPORT > 4
+#error "select a valid static/dynamic multi-viewport oracle"
+#endif
+
+#define G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT                              \
+   (G17P_MULTI_VIEWPORT == 2 || G17P_MULTI_VIEWPORT == 4)
+#define G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR                               \
+   (G17P_MULTI_VIEWPORT == 3 || G17P_MULTI_VIEWPORT == 4)
+
 #define G17P_LOD_ORACLE (G17P_IMPLICIT_LOD || G17P_EXPLICIT_GRADIENT)
 #define G17P_TEXTURE_ORACLE                                                \
    (G17P_LOD_ORACLE || G17P_TEXTURE_ALPHA_COMPOSITE ||                     \
@@ -1330,6 +1339,21 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MULTI_VIEWPORT == 2
+#define PROBE_NAME "g17p-vulkan-multi-viewport-dynamic-viewport"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MULTI_VIEWPORT == 3
+#define PROBE_NAME "g17p-vulkan-multi-viewport-dynamic-scissor"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_MULTI_VIEWPORT == 4
+#define PROBE_NAME "g17p-vulkan-multi-viewport-dynamic-both"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MULTI_VIEWPORT
 #define PROBE_NAME "g17p-vulkan-multi-viewport"
 #define READBACK_IMAGE_USAGE 0
@@ -1463,8 +1487,12 @@ VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
-#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
 VK_FN(vkCmdSetScissor);
+#endif
+#if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
+VK_FN(vkCmdSetViewport);
 #endif
 #if G17P_DYNAMIC_BLEND
 VK_FN(vkCmdSetColorBlendEnableEXT);
@@ -2272,7 +2300,7 @@ main(void)
    vkGetPhysicalDeviceFeatures2(physical, &viewport_available);
    if (!viewport_available.features.multiViewport ||
        !viewport_available12.shaderOutputViewportIndex ||
-       properties.limits.maxViewports < 2)
+       properties.limits.maxViewports < 4)
       die("T8140/G17P does not advertise shader-selected multi-viewport");
 #endif
 
@@ -2525,8 +2553,12 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
-#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
    LOAD_DEVICE(device, vkCmdSetScissor);
+#endif
+#if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
+   LOAD_DEVICE(device, vkCmdSetViewport);
 #endif
 #if G17P_DYNAMIC_BLEND
    LOAD_DEVICE(device, vkCmdSetColorBlendEnableEXT);
@@ -3914,26 +3946,49 @@ main(void)
       .primitiveRestartEnable = G17P_INDEX_RESTART,
    };
 #if G17P_MULTI_VIEWPORT
-   const VkViewport viewports[2] = {
+   const VkViewport viewports[4] = {
       {
          .width = IMAGE_WIDTH / 2,
-         .height = IMAGE_HEIGHT,
+         .height = IMAGE_HEIGHT / 2,
          .minDepth = 0.0f,
          .maxDepth = 1.0f,
       },
       {
          .x = IMAGE_WIDTH / 2,
          .width = IMAGE_WIDTH / 2,
-         .height = IMAGE_HEIGHT,
+         .height = IMAGE_HEIGHT / 2,
+         .minDepth = 0.0f,
+         .maxDepth = 1.0f,
+      },
+      {
+         .y = IMAGE_HEIGHT / 2,
+         .width = IMAGE_WIDTH / 2,
+         .height = IMAGE_HEIGHT / 2,
+         .minDepth = 0.0f,
+         .maxDepth = 1.0f,
+      },
+      {
+         .x = IMAGE_WIDTH / 2,
+         .y = IMAGE_HEIGHT / 2,
+         .width = IMAGE_WIDTH / 2,
+         .height = IMAGE_HEIGHT / 2,
          .minDepth = 0.0f,
          .maxDepth = 1.0f,
       },
    };
-   const VkRect2D scissors[2] = {
-      {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT}},
+   const VkRect2D scissors[4] = {
+      {.extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2}},
       {
          .offset = {IMAGE_WIDTH / 2, 0},
-         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2},
+      },
+      {
+         .offset = {0, IMAGE_HEIGHT / 2},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2},
+      },
+      {
+         .offset = {IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2},
+         .extent = {IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2},
       },
    };
 #else
@@ -3953,10 +4008,18 @@ main(void)
    const VkPipelineViewportStateCreateInfo viewport_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
 #if G17P_MULTI_VIEWPORT
-      .viewportCount = 2,
+      .viewportCount = 4,
+#if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
+      .pViewports = NULL,
+#else
       .pViewports = viewports,
-      .scissorCount = 2,
+#endif
+      .scissorCount = 4,
+#if G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+      .pScissors = NULL,
+#else
       .pScissors = scissors,
+#endif
 #else
       .viewportCount = 1,
       .pViewports = &viewport,
@@ -4047,9 +4110,18 @@ main(void)
 #endif
       .blendConstants = {0.25f, 0.5f, 0.75f, 0.125f},
    };
-#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
+   G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
    const VkDynamicState dynamic_states[] = {
+#if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
+      VK_DYNAMIC_STATE_VIEWPORT,
+#endif
+#if G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
       VK_DYNAMIC_STATE_SCISSOR,
+#elif G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+      VK_DYNAMIC_STATE_SCISSOR,
+#endif
 #if G17P_DYNAMIC_BLEND
       VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT,
       VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
@@ -4072,7 +4144,9 @@ main(void)
       .pRasterizationState = &raster,
       .pMultisampleState = &multisample,
       .pColorBlendState = &blend,
-#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
+   G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
       .pDynamicState = &dynamic_state,
 #endif
       .layout = pipeline_layout,
@@ -4384,7 +4458,13 @@ main(void)
                           &vertex_offset);
 #endif
 #if G17P_MULTI_VIEWPORT
-   vkCmdDraw(command_buffer, 3, 2, 0, 0);
+#if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
+   vkCmdSetViewport(command_buffer, 0, 4, viewports);
+#endif
+#if G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR
+   vkCmdSetScissor(command_buffer, 0, 4, scissors);
+#endif
+   vkCmdDraw(command_buffer, 3, 4, 0, 0);
 #elif G17P_LAYER_OUTPUT
    vkCmdDraw(command_buffer, 3, IMAGE_LAYERS, 0, 0);
 #elif G17P_VERTEX_FORMAT
@@ -4681,7 +4761,7 @@ main(void)
 #if G17P_MULTI_VIEWPORT
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, shader compiled, "
-                        "and two-viewport command stream submitted\n");
+                        "and four-viewport command stream submitted\n");
       return EXIT_SUCCESS;
    }
 #elif G17P_LAYER_OUTPUT
@@ -4854,8 +4934,8 @@ main(void)
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
 #if G17P_MULTI_VIEWPORT
-   printf(PROBE_NAME ": PASS — instances selected viewports 0 and 1; both "
-                     "half-frame images exact immediately/3s, all guards "
+   printf(PROBE_NAME ": PASS — four instances selected exact quadrant "
+                     "viewports 0 through 3 immediately/3s; all guards "
                      "unchanged, checksum %016" PRIx64 "\n",
           checksum);
 #elif G17P_LAYER_OUTPUT
