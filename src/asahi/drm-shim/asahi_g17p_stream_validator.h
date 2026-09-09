@@ -45,6 +45,7 @@ struct asahi_g17p_stream_stats {
    bool cull_enabled;
    bool depth_enabled;
    bool stencil_enabled;
+   unsigned stencil_state_updates;
    bool blend_enabled;
    bool rasterizer_discard;
    bool primary_tri_merge_disable;

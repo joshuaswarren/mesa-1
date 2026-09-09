@@ -23,13 +23,19 @@
 #define G17P_COPY_IMAGE_3D 0
 #endif
 
-#if (G17P_BLIT_IMAGE && G17P_RESOLVE_IMAGE) ||                            \
-   (G17P_COPY_IMAGE_3D && (G17P_BLIT_IMAGE || G17P_RESOLVE_IMAGE))
+#ifndef G17P_STENCIL_BLIT
+#define G17P_STENCIL_BLIT 0
+#endif
+
+#if ((G17P_BLIT_IMAGE != 0) + (G17P_RESOLVE_IMAGE != 0) + \
+     (G17P_COPY_IMAGE_3D != 0) + (G17P_STENCIL_BLIT != 0)) > 1
 #error "select exactly one image operation oracle"
 #endif
 
 #ifdef G17P_CLEAR_IMAGE
 #define TEST_NAME "g17p-vulkan-clear-image"
+#elif G17P_STENCIL_BLIT
+#define TEST_NAME "g17p-vulkan-stencil-blit"
 #elif G17P_BLIT_IMAGE == 1
 #define TEST_NAME "g17p-vulkan-blit-image-nearest-flip"
 #elif G17P_BLIT_IMAGE == 2
@@ -51,9 +57,19 @@
 #endif
 #define ROW_LENGTH 40u
 #define GUARD_BYTES 64u
-#define IMAGE_BYTES (WIDTH * HEIGHT * IMAGE_DEPTH * 4u)
-#define UPLOAD_BYTES                                                          \
-   (GUARD_BYTES + ROW_LENGTH * HEIGHT * IMAGE_DEPTH * 4u + GUARD_BYTES)
+#if G17P_STENCIL_BLIT
+#define IMAGE_FORMAT VK_FORMAT_S8_UINT
+#define IMAGE_ASPECT VK_IMAGE_ASPECT_STENCIL_BIT
+#define PIXEL_BYTES 1u
+#else
+#define IMAGE_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#define IMAGE_ASPECT VK_IMAGE_ASPECT_COLOR_BIT
+#define PIXEL_BYTES 4u
+#endif
+#define IMAGE_BYTES (WIDTH * HEIGHT * IMAGE_DEPTH * PIXEL_BYTES)
+#define UPLOAD_BYTES                                                        \
+   (GUARD_BYTES + ROW_LENGTH * HEIGHT * IMAGE_DEPTH * PIXEL_BYTES +        \
+    GUARD_BYTES)
 #define DESTINATION_UPLOAD_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 #define READBACK_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 
@@ -90,6 +106,7 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyBufferToImage);
 VK_FN(vkCmdClearColorImage);
+VK_FN(vkCmdClearDepthStencilImage);
 VK_FN(vkCmdCopyImage);
 VK_FN(vkCmdBlitImage);
 VK_FN(vkCmdResolveImage);
@@ -201,7 +218,7 @@ create_image(VkDevice device,
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = G17P_COPY_IMAGE_3D ? VK_IMAGE_TYPE_3D
                                       : VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = IMAGE_FORMAT,
       .extent = {WIDTH, HEIGHT, IMAGE_DEPTH},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -232,10 +249,14 @@ create_image(VkDevice device,
 static void
 source_pixel(uint32_t x, uint32_t y, uint32_t z, uint8_t pixel[4])
 {
+#if G17P_STENCIL_BLIT
+   pixel[0] = 0x5a;
+#else
    pixel[0] = (uint8_t)(x * 7u + z * 31u + 3u);
    pixel[1] = (uint8_t)(y * 9u + z * 17u + 5u);
    pixel[2] = (uint8_t)((x * 5u) ^ (y * 3u) ^ (z * 29u));
    pixel[3] = 255;
+#endif
 }
 
 static bool
@@ -278,7 +299,10 @@ verify(const struct mapped_buffer *upload,
    for (uint32_t z = 0; z < IMAGE_DEPTH; ++z) {
       for (uint32_t y = 0; y < HEIGHT; ++y) {
          for (uint32_t x = 0; x < WIDTH; ++x) {
-            uint8_t expected[4] = {0, 0, 0, 255};
+            uint8_t expected[4] = {0};
+#if !G17P_STENCIL_BLIT
+            expected[3] = 255;
+#endif
             if (clear_image) {
                expected[0] = 255;
                expected[2] = 255;
@@ -297,13 +321,19 @@ verify(const struct mapped_buffer *upload,
                }
             }
             const uint8_t *actual =
-               pixels + ((z * HEIGHT + y) * WIDTH + x) * 4u;
-            if (memcmp(actual, expected, 4) != 0) {
+               pixels + ((z * HEIGHT + y) * WIDTH + x) * PIXEL_BYTES;
+            if (memcmp(actual, expected, PIXEL_BYTES) != 0) {
+#if G17P_STENCIL_BLIT
+               fprintf(stderr,
+                       TEST_NAME ": stencil (%u,%u) got %02x, expected %02x\n",
+                       x, y, actual[0], expected[0]);
+#else
                fprintf(stderr,
                        TEST_NAME ": pixel (%u,%u,%u) got %02x%02x%02x%02x, "
                                  "expected %02x%02x%02x%02x\n",
                        x, y, z, actual[0], actual[1], actual[2], actual[3],
                        expected[0], expected[1], expected[2], expected[3]);
+#endif
                return false;
             }
          }
@@ -320,7 +350,7 @@ main(int argc, char **argv)
 #else
    const bool clear_image = false;
 #endif
-   const bool blit_image = G17P_BLIT_IMAGE != 0;
+   const bool blit_image = G17P_BLIT_IMAGE != 0 || G17P_STENCIL_BLIT;
    const bool linear_blit = G17P_BLIT_IMAGE == 2;
    const bool resolve_image = G17P_RESOLVE_IMAGE != 0;
    const bool copy_3d = G17P_COPY_IMAGE_3D != 0;
@@ -390,7 +420,7 @@ main(int argc, char **argv)
       die("T8140/G17P device was not found");
 
    VkFormatProperties format_properties;
-   vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
+   vkGetPhysicalDeviceFormatProperties(physical, IMAGE_FORMAT,
                                        &format_properties);
    const VkFormatFeatureFlags required =
       VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
@@ -400,7 +430,7 @@ main(int argc, char **argv)
                   : 0) |
       (linear_blit ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
    if ((format_properties.optimalTilingFeatures & required) != required)
-      die("required RGBA8 optimal transfer/blit support is not advertised");
+      die("required optimal transfer/blit support is not advertised");
    if (resolve_image) {
       VkImageFormatProperties image_properties;
       check(vkGetPhysicalDeviceImageFormatProperties(
@@ -485,6 +515,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
    LOAD_DEVICE(device, vkCmdClearColorImage);
+   LOAD_DEVICE(device, vkCmdClearDepthStencilImage);
    LOAD_DEVICE(device, vkCmdCopyImage);
    LOAD_DEVICE(device, vkCmdBlitImage);
    LOAD_DEVICE(device, vkCmdResolveImage);
@@ -516,7 +547,7 @@ main(int argc, char **argv)
             source_pixel(
                x, y, z,
                upload_expected + GUARD_BYTES +
-                  ((z * HEIGHT + y) * ROW_LENGTH + x) * 4u);
+                  ((z * HEIGHT + y) * ROW_LENGTH + x) * PIXEL_BYTES);
          }
       }
    }
@@ -525,8 +556,10 @@ main(int argc, char **argv)
    memset(destination_upload_expected, 0xa5,
           sizeof(destination_upload_expected));
    memset(destination_upload_expected + GUARD_BYTES, 0, IMAGE_BYTES);
+#if !G17P_STENCIL_BLIT
    for (uint32_t i = 0; i < IMAGE_BYTES; i += 4)
       destination_upload_expected[GUARD_BYTES + i + 3] = 255;
+#endif
    memcpy(destination_upload.map, destination_upload_expected,
           sizeof(destination_upload_expected));
    memset(readback.map, 0xa5, READBACK_BYTES);
@@ -570,7 +603,7 @@ main(int argc, char **argv)
          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = i ? destination.image : source.image,
          .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = IMAGE_ASPECT,
             .levelCount = 1,
             .layerCount = 1,
          },
@@ -585,12 +618,32 @@ main(int argc, char **argv)
       .bufferRowLength = ROW_LENGTH,
       .bufferImageHeight = HEIGHT,
       .imageSubresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = IMAGE_ASPECT,
          .layerCount = 1,
       },
       .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
    };
-   if (resolve_image) {
+   if (G17P_STENCIL_BLIT) {
+      const VkImageSubresourceRange stencil_range = {
+         .aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT,
+         .levelCount = 1,
+         .layerCount = 1,
+      };
+      const VkClearDepthStencilValue source_clear = {
+         .depth = 1.0f,
+         .stencil = 0x5a,
+      };
+      const VkClearDepthStencilValue destination_clear = {
+         .depth = 1.0f,
+         .stencil = 0,
+      };
+      vkCmdClearDepthStencilImage(command, source.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  &source_clear, 1, &stencil_range);
+      vkCmdClearDepthStencilImage(command, destination.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  &destination_clear, 1, &stencil_range);
+   } else if (resolve_image) {
       const VkClearColorValue magenta = {
          .float32 = {1.0f, 0.0f, 1.0f, 1.0f},
       };
@@ -608,14 +661,14 @@ main(int argc, char **argv)
                              &upload_region);
    }
    const VkImageSubresourceRange range = {
-      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .aspectMask = IMAGE_ASPECT,
       .levelCount = 1,
       .layerCount = 1,
    };
    const VkBufferImageCopy destination_upload_region = {
       .bufferOffset = GUARD_BYTES,
       .imageSubresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = IMAGE_ASPECT,
          .layerCount = 1,
       },
       .imageExtent = {WIDTH, HEIGHT, 1},
@@ -627,7 +680,7 @@ main(int argc, char **argv)
       vkCmdClearColorImage(command, destination.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
                            &range);
-   } else {
+   } else if (!G17P_STENCIL_BLIT) {
       vkCmdCopyBufferToImage(command, destination_upload.buffer,
                              destination.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
@@ -663,7 +716,7 @@ main(int argc, char **argv)
                         2, uploads_ready);
    const VkImageCopy image_copy = {
       .srcSubresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = IMAGE_ASPECT,
          .layerCount = 1,
       },
 #if G17P_COPY_IMAGE_3D
@@ -672,7 +725,7 @@ main(int argc, char **argv)
       .srcOffset = {5, 3, 0},
 #endif
       .dstSubresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = IMAGE_ASPECT,
          .layerCount = 1,
       },
 #if G17P_COPY_IMAGE_3D
@@ -693,12 +746,12 @@ main(int argc, char **argv)
    } else if (resolve_image) {
       const VkImageResolve image_resolve = {
          .srcSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = IMAGE_ASPECT,
             .layerCount = 1,
          },
          .srcOffset = {5, 3, 0},
          .dstSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = IMAGE_ASPECT,
             .layerCount = 1,
          },
          .dstOffset = {11, 4, 0},
@@ -712,12 +765,12 @@ main(int argc, char **argv)
    } else if (blit_image) {
       const VkImageBlit image_blit = {
          .srcSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = IMAGE_ASPECT,
             .layerCount = 1,
          },
          .srcOffsets = {{24, 19, 0}, {11, 4, 1}},
          .dstSubresource = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = IMAGE_ASPECT,
             .layerCount = 1,
          },
          .dstOffsets = {{11, 4, 0}, {24, 19, 1}},
@@ -749,7 +802,7 @@ main(int argc, char **argv)
    const VkBufferImageCopy readback_region = {
       .bufferOffset = GUARD_BYTES,
       .imageSubresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .aspectMask = IMAGE_ASPECT,
          .layerCount = 1,
       },
       .imageExtent = {WIDTH, HEIGHT, IMAGE_DEPTH},
@@ -777,6 +830,9 @@ main(int argc, char **argv)
       if (clear_image)
          printf(TEST_NAME ": RECORD PASS — RGBA8 optimal image clear and "
                           "guarded readback recorded\n");
+      else if (G17P_STENCIL_BLIT)
+         printf(TEST_NAME ": RECORD PASS — reversed 13x15 S8 image blit "
+                          "and guarded readback recorded\n");
       else if (blit_image)
          printf(TEST_NAME ": RECORD PASS — reversed 13x15 %s RGBA8 image "
                           "blit and guarded readback recorded\n",
@@ -820,7 +876,7 @@ main(int argc, char **argv)
       die("vkWaitForFences timed out after three seconds");
    check(waited, "vkWaitForFences");
    if (submit_only) {
-      printf(TEST_NAME ": SUBMIT PASS — 3D copy command stream accepted\n");
+      printf(TEST_NAME ": SUBMIT PASS — command stream retired\n");
       goto cleanup;
    }
    if (!verify(&upload, upload_expected, &destination_upload,
@@ -843,6 +899,11 @@ main(int argc, char **argv)
                        "both uploads and 384 guard bytes unchanged, checksum "
                        "%016" PRIx64 "\n",
              checksum);
+   else if (G17P_STENCIL_BLIT)
+      printf(TEST_NAME ": PASS — reversed 13x15 S8 blit into "
+                       "destination(11,4) exact immediately/3s; both uploads "
+                       "and 384 guard bytes unchanged, checksum %016" PRIx64
+                       "\n", checksum);
    else if (blit_image)
       printf(TEST_NAME ": PASS — reversed 13x15 %s blit into "
                        "destination(11,4) exact immediately/3s; both uploads "

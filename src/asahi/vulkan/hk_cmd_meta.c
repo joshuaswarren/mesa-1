@@ -64,7 +64,11 @@ hk_device_init_meta(struct hk_device *dev)
 
    dev->meta.use_gs_for_layer = false;
    dev->meta.use_layer_output = dev->dev.chip != AGX_CHIP_G17P;
-   dev->meta.use_stencil_export = true;
+   /* G17P has ordinary fixed-function stencil testing/updates, but its
+    * fragment stencil-export operand is not part of the grounded AGX3B ABI.
+    * Let common meta lower a stencil blit to eight bit-selective discard
+    * passes instead of compiling an unencodable stencil-export shader. */
+   dev->meta.use_stencil_export = dev->dev.chip != AGX_CHIP_G17P;
    dev->meta.use_masked_rgba8_buffer_unpack =
       dev->dev.chip == AGX_CHIP_G17P;
    dev->meta.use_rect_list_pipeline = true;

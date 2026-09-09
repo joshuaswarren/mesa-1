@@ -106,7 +106,11 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
           tiling == VK_IMAGE_TILING_LINEAR)
          return 0;
 
-      features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      /* Depth/stencil blits use the common graphics meta path, so the
+       * destination capability follows attachment support rather than the
+       * colour-PBE `renderable` table above. */
+      features |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT |
+                  VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
    }
 
    /* Our image atomic lowering doesn't bother to handle linear */

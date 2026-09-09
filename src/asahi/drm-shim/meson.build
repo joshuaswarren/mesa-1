@@ -278,6 +278,19 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  g17p_stencil_blit_env = environment(g17p_queue_progress_environment)
+  g17p_stencil_blit_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_STENCIL_BLIT', '1')
+  test(
+    'hk_g17p_stencil_blit_meta_fallback',
+    g17p_vulkan_stencil_blit,
+    args : ['--submit-only'],
+    env : g17p_stencil_blit_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-stencil-blit'],
+    timeout : 30,
+  )
+
   g17p_conditional_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

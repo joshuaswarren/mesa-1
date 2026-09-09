@@ -659,8 +659,11 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
          return fail_at(address, "invalid primary-face slot");
       stats->depth_enabled |= ((graphics.words[1] >> 24) & 7) != 7 ||
                               !(graphics.words[1] & (UINT32_C(1) << 21));
-      stats->stencil_enabled |= graphics.words[2] != UINT32_C(0x0e000000) ||
-                                graphics.words[4] != UINT32_C(0x0e000000);
+      const bool stencil_enabled =
+         graphics.words[2] != UINT32_C(0x0e000000) ||
+         graphics.words[4] != UINT32_C(0x0e000000);
+      stats->stencil_enabled |= stencil_enabled;
+      stats->stencil_state_updates += stencil_enabled;
       stats->primary_tri_merge_disable |=
          (graphics.words[0] & (UINT32_C(1) << 26)) != 0;
       return true;
@@ -675,8 +678,6 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           (graphics.words[0] & UINT32_C(0x200)) == 0)
          return fail_at(address, "secondary-face slot is non-canonical");
       stats->blend_enabled |= (graphics.words[0] >> 29) != 0;
-      stats->rasterizer_discard |=
-         (graphics.words[0] & (UINT32_C(1) << 21)) != 0;
       stats->secondary_tri_merge_disable |=
          (graphics.words[0] & (UINT32_C(1) << 26)) != 0;
       return true;
@@ -744,9 +745,8 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
              &graphics) || (graphics.words[0] & ~UINT32_C(0x00030d83)))
          return fail_at(address, "cull slot has reserved bits");
       stats->cull_enabled |= (graphics.words[0] & 3) != 0;
-      if (!!(graphics.words[0] & (UINT32_C(1) << 17)) !=
-          stats->rasterizer_discard)
-         return fail_at(address, "rasterizer-discard records disagree");
+      stats->rasterizer_discard |=
+         (graphics.words[0] & (UINT32_C(1) << 17)) != 0;
       return true;
    default:
       return false;
@@ -783,16 +783,33 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
    const unsigned viewport_count = (lengths[5] - 8) / 32;
    uint8_t output_record[AGX_PPP_HAL200_OUTPUT_LENGTH];
    uint8_t primary_record[AGX_PPP_HAL200_PRIMARY_FACE_LENGTH];
+   uint8_t secondary_record[AGX_PPP_HAL200_SECONDARY_FACE_LENGTH];
+   uint8_t cull_record[AGX_PPP_HAL200_CULL_LENGTH];
    if (!read_owned(memory, compact_address(decoded[2].context_offset),
                    output_record, sizeof(output_record)) ||
        !read_owned(memory, compact_address(decoded[3].context_offset),
                    primary_record, sizeof(primary_record)) ||
+       !read_owned(memory, compact_address(decoded[4].context_offset),
+                   secondary_record, sizeof(secondary_record)) ||
+       !read_owned(memory, compact_address(decoded[7].context_offset),
+                   cull_record, sizeof(cull_record)) ||
        load_le32(output_record + 12) != viewport_count - 1)
       return fail_at(address, "output/viewport counts disagree");
 
    if (!!(load_le32(output_record + 24) & (UINT32_C(1) << 26)) !=
        !!(load_le32(primary_record + 4) & (UINT32_C(1) << 26)))
       return fail_at(address, "output/primary triangle-merge controls disagree");
+
+   /* SECONDARY bit 21 is tag-write-disable. Rasterizer discard also sets it,
+    * but a depth/stencil-only fragment pass legitimately disables colour tag
+    * writes without discarding rasterization. CULL bit 17 is the definitive
+    * discard control; when it is set the companion tag-write bit is required. */
+   const bool tag_write_disable =
+      (load_le32(secondary_record + 4) & (UINT32_C(1) << 21)) != 0;
+   const bool rasterizer_discard =
+      (load_le32(cull_record + 4) & (UINT32_C(1) << 17)) != 0;
+   if (rasterizer_discard && !tag_write_disable)
+      return fail_at(address, "rasterizer discard leaves tag writes enabled");
 
    /* OUTPUT bits 19 and 20 are the paired viewport/layer UVS selector.  A
     * multiview stream is not complete merely because it exposes two image

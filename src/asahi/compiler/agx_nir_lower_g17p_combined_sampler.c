@@ -34,7 +34,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
        tex->backend_flags == (AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                               AGX_TEXTURE_FLAG_NO_CLAMP) ||
-       tex->dest_type != nir_type_float32 ||
+       (tex->dest_type != nir_type_float32 &&
+        tex->dest_type != nir_type_uint32 &&
+        tex->dest_type != nir_type_int32) ||
        tex->def.num_components != (tex->is_shadow ? 1 : 4) ||
        tex->def.bit_size != 32)
       return false;

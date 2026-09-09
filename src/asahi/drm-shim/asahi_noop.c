@@ -280,6 +280,7 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    matrix_stats.draws += stats->draws;
    matrix_stats.indexed_draws += stats->indexed_draws;
    matrix_stats.state_updates += stats->state_updates;
+   matrix_stats.stencil_state_updates += stats->stencil_state_updates;
    matrix_stats.links += stats->links;
    matrix_stats.viewport_count =
       MAX2(matrix_stats.viewport_count, stats->viewport_count);
@@ -528,6 +529,39 @@ check_depth_texture_coverage(void)
 
    fprintf(stderr,
            "shim: complete G17P depth/stencil render/blit/sample coverage\n");
+}
+
+static void __attribute__((destructor))
+check_stencil_blit_coverage(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_STENCIL_BLIT"))
+      return;
+
+   /* Without fragment stencil export, common meta emits one bit-selective
+    * graphics pass for each stencil bit. Require all eight fixed-function
+    * stencil updates plus the stencil-plane readback draw so merely accepting
+    * the API command cannot pass. The two clears and final transfer also have
+    * an exact three-launch compute envelope. */
+   if (matrix_stats.draws != 9 || matrix_stats.state_updates != 9 ||
+       matrix_stats.stencil_state_updates != 9 ||
+       !matrix_stats.stencil_enabled || matrix_stats.varying_fs ||
+       !matrix_stats.no_varying_fs || compute_stats.launches != 3 ||
+       compute_stats.barriers != 3 || compute_stats.strong_barriers != 2) {
+      fprintf(stderr,
+              "shim: incomplete G17P stencil blit coverage: draws=%u "
+              "state=%u stencil-state=%u stencil=%u varying=%u/%u "
+              "compute=%u/%u/%u\n",
+              matrix_stats.draws, matrix_stats.state_updates,
+              matrix_stats.stencil_state_updates,
+              matrix_stats.stencil_enabled, matrix_stats.varying_fs,
+              matrix_stats.no_varying_fs, compute_stats.launches,
+              compute_stats.barriers, compute_stats.strong_barriers);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: complete G17P eight-pass stencil blit and readback "
+           "coverage\n");
 }
 
 static void __attribute__((destructor))

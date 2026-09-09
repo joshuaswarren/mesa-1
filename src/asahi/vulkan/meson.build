@@ -2049,6 +2049,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    g17p_vulkan_stencil_blit = executable(
+      'g17p-vulkan-stencil-blit',
+      files('tests/g17p_vulkan_image_copy_subregion.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_STENCIL_BLIT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-resolve-image4',
       files('tests/g17p_vulkan_image_copy_subregion.c'),

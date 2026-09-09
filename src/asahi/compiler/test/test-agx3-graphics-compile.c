@@ -2382,6 +2382,59 @@ build_fs_texture(void)
    return build_fs_texture_bias_offset(108);
 }
 
+static nir_shader *
+build_fs_texture_typed(nir_alu_type dest_type)
+{
+   nir_shader *shader = build_fs_texture();
+   unsigned samples = 0;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_tex)
+               continue;
+
+            nir_instr_as_tex(instr)->dest_type = dest_type;
+            samples++;
+         }
+      }
+   }
+
+   assert(samples == 1);
+   return shader;
+}
+
+static nir_shader *
+build_fs_texture_uint(void)
+{
+   return build_fs_texture_typed(nir_type_uint32);
+}
+
+static nir_shader *
+build_fs_texture_int(void)
+{
+   return build_fs_texture_typed(nir_type_int32);
+}
+
+static bool
+test_combined_sampler_integer_scope(void)
+{
+   nir_shader *shader = build_fs_texture_typed(nir_type_uint16);
+   struct agx_g17p_combined_sampler_binding binding = {
+      .texture_offset_B = UINT32_MAX,
+      .sampler_index_offset_B = UINT32_MAX,
+   };
+
+   /* Integer sampled results are a native 32-bit register shape. Keep a
+    * narrower result fail-closed so widening this admission cannot silently
+    * discard an unwitnessed result-width encoding. */
+   const bool ok = !agx_nir_lower_g17p_combined_sampler(shader, &binding) &&
+                   binding.texture_offset_B == UINT32_MAX &&
+                   binding.sampler_index_offset_B == UINT32_MAX;
+   ralloc_free(shader);
+   return ok;
+}
+
 static bool
 test_combined_sampler_scope(void)
 {
@@ -3882,7 +3935,9 @@ has_compact_native_sample(const nir_shader *shader)
                 tex->coord_components != 2 ||
                 nir_src_num_components(tex->src[0].src) != 2 ||
                 nir_src_bit_size(tex->src[0].src) != 32 ||
-                tex->dest_type != nir_type_float32 ||
+                (tex->dest_type != nir_type_float32 &&
+                 tex->dest_type != nir_type_uint32 &&
+                 tex->dest_type != nir_type_int32) ||
                 tex->def.num_components != 4 || tex->def.bit_size != 32)
                return false;
          }
@@ -4805,6 +4860,12 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-vkcube-combined-sampler", build_fs_texture, true, true,
     .expected_g17p_implicit_coord_group = true,
     .expected_g17p_sampled_fragment = true},
+   {"fs-uint-combined-sampler", build_fs_texture_uint, true, true,
+    .g17p_only = true, .expected_g17p_implicit_coord_group = true,
+    .expected_g17p_sampled_fragment = true},
+   {"fs-int-combined-sampler", build_fs_texture_int, true, true,
+    .g17p_only = true, .expected_g17p_implicit_coord_group = true,
+    .expected_g17p_sampled_fragment = true},
    {"fs-texture3d-level", build_fs_texture_3d_level, true,
     .g17p_only = true, .expected_g17p_sampled_fragment = true},
    {"fs-texture3d-implicit", build_fs_texture_3d_implicit, true,
@@ -5166,7 +5227,9 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--sampler-root-only")) {
-      const bool ok = test_combined_sampler_root() && test_combined_sampler_scope();
+      const bool ok = test_combined_sampler_root() &&
+                      test_combined_sampler_scope() &&
+                      test_combined_sampler_integer_scope();
       fprintf(stderr, "native sampler plus push-root lowering: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -5267,7 +5330,8 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_combined_sampler_scope() || !test_combined_sampler_root()) {
+   if (!test_combined_sampler_scope() || !test_combined_sampler_root() ||
+       !test_combined_sampler_integer_scope()) {
       fputs("combined sampler lowering consumed a non-sampler bias\n", stderr);
       all_ok = false;
    }
