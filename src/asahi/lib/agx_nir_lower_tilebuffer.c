@@ -475,6 +475,29 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
 
       if (translucent)
          *translucent |= (exists && !written);
+
+      /* HAL200 coverage dirties the tile even when this shader has no color
+       * output at all (for example, a depth-only meta clear). The explicit
+       * zero-mask path above cannot see such an attachment. Preserve it with
+       * the same load/store pair, otherwise EOT publishes undefined color.
+       */
+      if (preserve_zero_mask && exists && !written && !tib->spilled[i]) {
+         nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+         nir_builder b = nir_builder_at(nir_after_impl(impl));
+         enum pipe_format logical = tib->logical_format[i];
+         const bool raw_r11g11b10 = lower_g17p_formats &&
+                                  logical == PIPE_FORMAT_R11G11B10_FLOAT;
+         enum pipe_format format = raw_r11g11b10 ? PIPE_FORMAT_R32_UINT :
+            lower_g17p_formats && util_format_is_srgb(logical)
+               ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
+               : agx_tilebuffer_physical_format(tib, i);
+         unsigned comps = raw_r11g11b10 ? 1 : util_format_get_nr_components(logical);
+         nir_def *value = load_tilebuffer(&b, tib, comps, 32, i, format, logical);
+         store_tilebuffer(&b, tib, format, logical, i, value, write_samples,
+                          BITFIELD_MASK(comps));
+         nir_progress(true, impl, nir_metadata_control_flow);
+         progress = true;
+      }
    }
 
    return progress;
