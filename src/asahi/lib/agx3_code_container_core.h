@@ -10,11 +10,12 @@
 #include <stdint.h>
 
 /* Write the 0x40-byte program immediately before a G17P container entry.
- * Apple's HAL200 compiler emits a SETPROFILECTL program for vertex/compute,
- * but a bare stop for fragment. */
+ * Apple's HAL200 compiler emits distinct vertex/compute, plain-fragment, and
+ * sampled-fragment programs.  sampled_fragment is valid only for fragment. */
 #define AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE 0x40u
 void agx3_build_container_constant_program(
-   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE], bool fragment);
+   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE], bool fragment,
+   bool sampled_fragment);
 
 /* A CODE block has its size word 0x80 bytes before the main entry and a
  * 0x40-byte constant program immediately before it. Blocks can be packed in

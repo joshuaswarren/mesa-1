@@ -142,6 +142,11 @@ struct agx_shader_info {
    /* Uses txf and hence needs a txf sampler mapped */
    bool uses_txf;
 
+   /* G17P fragment programs containing SMP use Apple's sampled-fragment
+    * constant-program protocol.  This is independent of descriptor source,
+    * LOD mode, and sampler-heap use. */
+   bool g17p_sampled_fragment;
+
    /* Potentially uses the sampler heap (conservative) */
    bool uses_sampler_heap;
 

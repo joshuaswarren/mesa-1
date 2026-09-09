@@ -4776,6 +4776,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
    }
 
+   /* Apple's sampled G17P fragment objects use a distinct constant program
+    * even when the texture and sampler operands are compact/immediate and no
+    * sampler heap is involved.  Publish the semantic instruction class for
+    * the linker instead of trying to reconstruct it from resource metadata. */
+   if (ctx->out) {
+      ctx->out->g17p_sampled_fragment |=
+         enc == AGX_ISA_ENCODING_AGX3B &&
+         ctx->stage == MESA_SHADER_FRAGMENT && texture_samples_left != 0;
+   }
+
    /* The valid G17P colour-only corpus has one class-12 wait/store bracket:
     * an entry gate immediately before the ordinary wait, and a final release
     * immediately after the store. Restrict synthesis to that exact API-shader

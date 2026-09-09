@@ -3377,6 +3377,7 @@ struct agx3_graphics_case {
    bool g17p_only;
    uint8_t expected_g17p_depth;
    bool expected_g17p_implicit_coord_group;
+   bool expected_g17p_sampled_fragment;
 };
 
 static bool
@@ -3472,13 +3473,15 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_binary_size = sizeof(g17p_flat_colour)},
    {"fs-interpolated-varying", build_fs_interpolated, true},
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
-   {"fs-textured-triangle", build_fs_texture_imm, true},
+   {"fs-textured-triangle", build_fs_texture_imm, true,
+    .expected_g17p_sampled_fragment = true},
    {"fs-vkcube-combined-sampler", build_fs_texture, true, true,
-    .expected_g17p_implicit_coord_group = true},
+    .expected_g17p_implicit_coord_group = true,
+    .expected_g17p_sampled_fragment = true},
    {"fs-texture3d-level", build_fs_texture_3d_level, true,
-    .g17p_only = true},
+    .g17p_only = true, .expected_g17p_sampled_fragment = true},
    {"fs-texture3d-implicit", build_fs_texture_3d_implicit, true,
-    .g17p_only = true},
+    .g17p_only = true, .expected_g17p_sampled_fragment = true},
    {"fs-descriptor-resource", build_fs_descriptor_resource, true},
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,
     AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
@@ -3623,6 +3626,15 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          if (!result)
             fprintf(stderr, "%s %s: implicit coordinate group mismatch\n",
                     enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          part.info.g17p_sampled_fragment !=
+             c->expected_g17p_sampled_fragment) {
+         result = false;
+         fprintf(stderr, "%s %s: sampled-fragment constant-program flag "
+                         "mismatch\n",
+                 enc_name(enc), c->name);
       }
 
       if (result && c->lower_combined_sampler) {

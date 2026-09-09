@@ -10,12 +10,12 @@
 #include <string.h>
 
 static int
-check_program(const char *label, bool fragment, const uint8_t *prefix,
-              size_t prefix_size)
+check_program(const char *label, bool fragment, bool sampled_fragment,
+              const uint8_t *prefix, size_t prefix_size)
 {
    uint8_t actual[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE];
    memset(actual, 0xa5, sizeof(actual));
-   agx3_build_container_constant_program(actual, fragment);
+   agx3_build_container_constant_program(actual, fragment, sampled_fragment);
 
    if (memcmp(actual, prefix, prefix_size) != 0)
       goto mismatch;
@@ -48,7 +48,7 @@ check_auxiliary_block(void)
       0xaa, 0x75, 0x02, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    uint8_t constant[64], image[0x101];
-   agx3_build_container_constant_program(constant, true);
+   agx3_build_container_constant_program(constant, true, false);
    memset(image, 0xa5, sizeof(image));
    if (agx3_code_block_size(128) != 0x100 ||
        !agx3_build_code_block(image, sizeof(image), eot_main, sizeof(eot_main),
@@ -95,9 +95,21 @@ main(void)
       0x0e, 0x00, 0x00, 0x00,
    };
 
-   return check_program("vertex/compute", false, vertex_compute_prefix,
+   /* Fresh G17P Metal pipelines using either implicit or explicit texture
+    * sampling carry this exact COPY.ep1 self-copy before END.  The matching
+    * interpolated-colour and derivative-only pipelines retain bare END, so
+    * this is selected from the compiled SMP instruction, not FS stage alone. */
+   static const uint8_t sampled_fragment_prefix[] = {
+      0x03, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00, 0x00,
+      0x20, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+
+   return check_program("vertex/compute", false, false, vertex_compute_prefix,
                         sizeof(vertex_compute_prefix)) ||
-          check_program("fragment", true, fragment_prefix,
+          check_program("fragment", true, false, fragment_prefix,
                         sizeof(fragment_prefix)) ||
+          check_program("sampled fragment", true, true,
+                        sampled_fragment_prefix,
+                        sizeof(sampled_fragment_prefix)) ||
           check_auxiliary_block();
 }

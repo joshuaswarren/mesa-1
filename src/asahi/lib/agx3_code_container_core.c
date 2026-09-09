@@ -36,7 +36,7 @@ agx3_build_code_block(void *image, size_t capacity, const void *main,
    if (constant_program)
       memcpy(constant, constant_program, AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE);
    else
-      agx3_build_container_constant_program(constant, fragment);
+      agx3_build_container_constant_program(constant, fragment, false);
 
    memcpy(bytes + AGX3_CODE_BLOCK_ENTRY_OFFSET, main, main_size);
    return true;
@@ -44,19 +44,28 @@ agx3_build_code_block(void *image, size_t capacity, const void *main,
 
 void
 agx3_build_container_constant_program(
-   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE], bool fragment)
+   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE], bool fragment,
+   bool sampled_fragment)
 {
    static const uint8_t fragment_stop[] = {
       0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t sampled_fragment_program[] = {
+      0x03, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00,
+      0x00, 0x20, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    static const uint8_t vertex_compute[] = {
       0x03, 0x00, 0x07, 0x00, 0x02, 0x00, 0x00,
       0x00, 0x60, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
 
-   const uint8_t *program = fragment ? fragment_stop : vertex_compute;
+   const uint8_t *program =
+      !fragment ? vertex_compute
+                : sampled_fragment ? sampled_fragment_program : fragment_stop;
    const size_t program_size =
-      fragment ? sizeof(fragment_stop) : sizeof(vertex_compute);
+      !fragment ? sizeof(vertex_compute)
+                : sampled_fragment ? sizeof(sampled_fragment_program)
+                                   : sizeof(fragment_stop);
 
    memcpy(image, program, program_size);
    for (size_t offset = program_size;

@@ -197,7 +197,8 @@ agx3_build_container_lead(uint8_t *image)
 }
 
 static void
-agx3_build_container(uint8_t *image, size_t code_size, bool fragment)
+agx3_build_container(uint8_t *image, size_t code_size, bool fragment,
+                     bool sampled_fragment)
 {
    memset(image, 0, agx3_container_size(code_size));
    agx3_build_container_lead(image);
@@ -207,7 +208,8 @@ agx3_build_container(uint8_t *image, size_t code_size, bool fragment)
                     ALIGN_POT(code_size, 64));
 
    uint8_t *constant = image + AGX3_CONTAINER_LEAD + AGX3_CONTAINER_BLOCK_HDR;
-   agx3_build_container_constant_program(constant, fragment);
+   agx3_build_container_constant_program(constant, fragment,
+                                         sampled_fragment);
 }
 
 static bool
@@ -258,6 +260,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    bool staging_known = true;
    bool reads_tib = false, writes_sample_mask = false,
         disable_tri_merging = false, tag_write_disable = true;
+   bool sampled_fragment = false;
 
    if (nr_samples_shaded) {
       size += sizeof(sample_loop_header);
@@ -286,6 +289,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       disable_tri_merging |= part->info.disable_tri_merging;
       linked->uses_base_param |= part->info.uses_base_param;
       linked->uses_txf |= part->info.uses_txf;
+      sampled_fragment |= part->info.g17p_sampled_fragment;
       tag_write_disable &= part->info.tag_write_disable;
    }
 
@@ -333,7 +337,8 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    if (container)
-      agx3_build_container(container_map, size, fragment);
+      agx3_build_container(container_map, size, fragment,
+                           fragment && sampled_fragment);
 
    size_t offset = 0;
    if (colour_fused) {
