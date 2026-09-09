@@ -43,11 +43,12 @@ bool agx3_vary_interp_at(enum agx_isa_encoding enc, uint16_t dest,
                          enum agx3_vary_location location,
                          uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
 
-/* Native G17P sets f63 when F32INTERP is the first fragment-input operation.
- * LDCF f48 is the alternate encoding of this one shared entry marker, so a
- * later first operation from the other family must not restart the part.
- * This marker is independent of f54, whose optimization/liveness role remains
- * unproven and is deliberately left clear. */
+/* Native G17P uses f63 as the shared fragment-input entry marker for a plain
+ * varying-only program. Sampled and derivative-capable fragments leave it
+ * clear to retain their helper-lane protocol. LDCF f48 is the alternate
+ * encoding of the same marker, so a later first operation from the other
+ * family must not restart the part. This is independent of f54, whose
+ * optimization/liveness role remains unproven and is deliberately clear. */
 /* G17P center RHW used only by the coefficient-tagged projective reciprocal.
  * Native pure smooth and smooth+position.z witnesses set f54(bit50); ordinary
  * position.w/output/arithmetic witnesses clear it. Numerical semantics beyond
@@ -68,7 +69,7 @@ bool agx3_vary_interp(enum agx_isa_encoding enc, uint16_t dest,
 
 /* Load the raw coefficient triple for `coef_index` into `dest`, on scoreboard
  * slot `slot` (1..6/1..8). */
-/* Native G17P sets f48 when LDCF is the first fragment-input operation. */
+/* Native G17P sets f48 on a plain program's first LDCF; see f63 above. */
 bool agx3_vary_ldcf_at_start(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t coef_index, uint8_t slot, bool first,
                             uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);

@@ -3385,11 +3385,11 @@ g17p_implicit_coord_group(const struct agx_shader_part *part)
 {
    /* Apple's G17P implicit sample orders its front end as RHW, reciprocal,
     * both user interpolants, both direct coordinate publications, PIXWAIT.
-    * Physical user registers are allocator-specific; this exact Mesa prefix
-    * pins the same native transaction boundary so pressure scheduling cannot
-    * interleave the first publication with the second interpolation again. */
+    * Its first F32INTERP leaves f63 clear for the sampled-fragment helper
+    * protocol. Physical user registers are allocator-specific; this exact
+    * Mesa prefix pins both that policy and the native transaction boundary. */
    static const uint8_t expected[] = {
-      0x2f,0x0d,0x54,0x00,0x03,0x00,0x04,0x02,0x10,0x00,
+      0x2f,0x05,0x54,0x00,0x03,0x00,0x04,0x02,0x10,0x00,
       0xaf,0x00,0x54,0x00,0x03,0x00,0x00,0x48,0x20,0x01,
       0x2f,0x05,0x54,0x02,0x03,0x02,0x00,0x02,0x10,0x00,
       0x2f,0x05,0x54,0x04,0x03,0x04,0x00,0x02,0x10,0x00,

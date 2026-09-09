@@ -5366,6 +5366,32 @@ TEST_F(AGX3PackBinary, FragmentInputStartsOnceWithSmoothFirst)
    EXPECT_EQ(code[11] & 8, 0u); /* unmarked LDCF */
 }
 
+TEST_F(AGX3PackBinary, FragmentHelperProtocolLeavesInputEntryUnmarked)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(b, agx_register(2, AGX_SIZE_32), agx_immediate(4), 1);
+   agx_dfdx_to(b, agx_register(4, AGX_SIZE_32),
+               agx_register(6, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto code = pack(b);
+   ASSERT_GE(code.size(), 16u);
+   EXPECT_EQ(code[0], 0x1f);
+   EXPECT_EQ(code[1] & 8, 0u); /* helper-capable LDCF: f48 clear */
+
+   /* Removing the derivative is a negative control: the same plain LDCF is
+    * the fragment-input entry and retains Apple's f48 marker. */
+   agx_builder *plain = builder(AGX_ISA_ENCODING_AGX3B);
+   plain->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_ldcf_to(plain, agx_register(2, AGX_SIZE_32), agx_immediate(4), 1);
+   agx_stop(plain);
+   const auto plain_code = pack(plain);
+   ASSERT_GE(plain_code.size(), 6u);
+   EXPECT_EQ(plain_code[0], 0x1f);
+   EXPECT_EQ(plain_code[1] & 8, 8u);
+}
+
 TEST_F(AGX3PackBinary, ProjectiveRhwModeIndependentOfFirstAndRcpDestination)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -6360,7 +6386,9 @@ TEST_F(AGX3PackBinary, GradientRetiresAsyncSourceBeforeNativeDfdx)
 
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
-   ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, true, bytes, &len));
+   /* Apple's derivative fragments leave the shared f48/f63 input marker
+    * clear so helper lanes survive into the quad operation. */
+   ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, false, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
                                 bytes, &len));

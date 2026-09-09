@@ -4725,6 +4725,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    bool has_zs_emit = false;
+   bool g17p_fragment_helper_protocol =
+      enc == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT && ctx->nir &&
+      (ctx->nir->info.fs.needs_coarse_quad_helper_invocations ||
+       ctx->nir->info.fs.needs_full_quad_helper_invocations);
    bool uniform_half_used[512] = {false};
    unsigned count = 0;
 
@@ -4759,6 +4764,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             image_writes_left++;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE)
             texture_samples_left++;
+         /* Native keeps the fragment-input start marker clear in every
+          * sampled or derivative fragment in the corpus, including explicit
+          * LOD samples.  This conservatively preserves helper-capable lanes;
+          * plain varying-only fragments retain the marker below. */
+         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+             scan_I->op == AGX_OPCODE_DFDX ||
+             scan_I->op == AGX_OPCODE_DFDY)
+            g17p_fragment_helper_protocol = true;
          if (scan_I->op == AGX_OPCODE_UNIFORM_STORE &&
              scan_I->nr_srcs == 2 &&
              scan_I->src[1].type == AGX_INDEX_IMMEDIATE) {
@@ -5267,7 +5280,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                interp_wait = 0;
             }
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started;
+               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started &&
+               !g17p_fragment_helper_protocol;
             if (!agx3_emit_interp(emission, enc, I, interp_wait, first,
                                   ctx->stage == MESA_SHADER_FRAGMENT))
                AGX3_REFUSE(I);
@@ -5332,7 +5346,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_LDCF) {
             const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
-               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started;
+               ctx->stage == MESA_SHADER_FRAGMENT && !fragment_input_started &&
+               !g17p_fragment_helper_protocol;
             if (!agx3_emit_ldcf(emission, enc, I, slot, wait, first))
                AGX3_REFUSE(I);
             fragment_input_started = true;
