@@ -4198,6 +4198,22 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          perf_debug(cmd, "Emulating sample mask");
       }
 
+      /* G17P has no AGX3 per-sample fragment path: hk_compile_shader()
+       * canonicalized this shader's sample builtins to single-sample, which is
+       * exact at one rasterization sample and wrong at more.  Now that the real
+       * count is known, refuse rather than shade once and hand the application
+       * gl_SampleID == 0 as if it were the answer.  A refusal is recoverable;
+       * a plausible wrong pixel is not.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
+          dyn->ms.rasterization_samples > 1) {
+         mesa_loge("G17P: per-sample fragment execution is not implemented; "
+                   "refusing a %u-sample draw that requests it",
+                   dyn->ms.rasterization_samples);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
       unsigned samples_shaded = 0;
       if (fs->info.fs.epilog_key.sample_shading)
          samples_shaded = dyn->ms.rasterization_samples;
