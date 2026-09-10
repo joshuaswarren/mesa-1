@@ -430,7 +430,7 @@ scratch array) is the register-indexed `ldtps`/`sttps` family, which
 `STACK_STORE`. Splitting it would need an add per component after RA. Not
 attempted here.
 
-### Open, and grounded enough to start: `.abs` on a mixed-width `fcmpsel`
+### Closed: `.abs` on a comparison source (`fcmpsel`)
 
 `(abs(a) < b) ? 1.0h : 0.0h` refuses:
 
@@ -457,14 +457,60 @@ o[i] = (-a[i]      < b[i]) ? 1.0h : 0.0h
 ```
 
 So NEG stays on the ten-byte endpoint (f35/f52 swap, f65 and f110 move) while
-ABS moves to a fourteen-byte one carrying f47. Whoever picks this up needs to
-map ep28/ep30 as forms in their own right -- roughly twenty fields each, one
-sweep per field -- not to add a bit to ep20. Doing the latter would produce a
-plausible-looking encoding that is a different instruction.
+ABS moves to a fourteen-byte one carrying f47. ep28/ep30 are therefore modelled
+as forms in their own right, one sweep per field, rather than by adding a bit
+to ep20 -- which would have composed cleanly and encoded a different
+instruction.
 
-This is the shape `textureGrad(samplerCube, ...)` reaches through cube-to-2D
-lowering, and the same family as the Hyprland `ext`/`glitch` mixed-width
-selects recorded further down.
+**This was the largest single codegen gap on the part.** A complete Vulkan 1.0
+CTS run reports 1,514 g17p-only refusals against zero on the AGX2 arm, and they
+reduce to this one shape:
+
+```glsl
+float f = uintBitsToFloat(b.data[i]);
+b.data[i] = (abs(f) > 1.0e30) ? 1u : 0u;
+```
+
+`isinf()` lowers to the same instruction. `isnan()` has no `abs` and always
+passed, which is what identifies the modifier rather than float classification
+as the cause. dEQP's own `isOk()` helper uses `abs()`, so the event count is
+far larger than the number of distinct causes -- `glsl.builtin` alone
+contributes 638, all `isinf`. It is also the shape `textureGrad(samplerCube,
+...)` reaches through cube-to-2D lowering.
+
+Field map for ep28/ep30, each pinned by one kernel per field:
+
+| field | meaning                                             |
+| ----- | --------------------------------------------------- |
+| f17   | destination register (swept 2/3/6/8)                |
+| f26   | destination cache hint                              |
+| f35 / f52 | comparison source 0 / 1 registers               |
+| f44 / f46 | source 0 cache / last-use                       |
+| f61 / f63 | source 1 cache / last-use                       |
+| f47 / f64 | source 0 / 1 ABSOLUTE VALUE (separable)         |
+| f68 / f85 | the two minifloat selects                       |
+| f107  | scoreboard wait slot 6                              |
+| f110  | condition (0 eq, 1 lt, 2 gt, 5 ge)                  |
+
+The half-destination (ep28) and 32-bit-destination (ep30) endpoints each
+*refuse* the other's width vector, so scanning the range cannot silently pick
+the wrong one.
+
+**Does one mechanism serve `.abs` and `.neg` here? No — and the answer is
+worth stating, because the symptom invites the opposite conclusion.** Every
+Vulkan 1.0 refusal being "a source modifier" makes it look like one hole. It
+is not: within this single opcode family, NEG is a bit on the short endpoint
+and ABS is a different, longer endpoint. Across families it is wider still —
+`.abs` on the rsqrt family is f30 on the same form, `.neg` on an integer add
+is not a modifier at all but a rewrite to `isub`. Four disjoint mechanisms,
+one symptom.
+
+An absolute source is routed to the long-endpoint encoder unconditionally.
+The short-endpoint encoder takes no abs parameter, so letting an absolute
+source fall through to it would encode the comparison *without* the
+modifier — a wrong result rather than a refusal. That is worth guarding
+deliberately: the fail-closed property only holds if nothing downstream can
+quietly accept the operand and drop the bit.
 
 ### The control arm
 
