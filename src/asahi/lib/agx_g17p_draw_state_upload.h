@@ -10,6 +10,18 @@
 #include <stdint.h>
 #include <string.h>
 
+/*
+ * Fixed words the HAL200 draw-state records carry, named so a decoder or an
+ * oracle can compare against the encoder instead of restating its constants.
+ *
+ * A hand-copied accept-set falls behind the composer silently: the six-byte
+ * fragment release was whitelisted for three payloads while the composer could
+ * derive seven, and every multiple-render-target program was reported as a
+ * corrupt command stream as a result. Export the value; do not retype it.
+ */
+#define AGX_G17P_DRAW_STATE_SELECTOR_WORD0 UINT32_C(0x00000100)
+#define AGX_G17P_VARYING_RECORD_WORD0      UINT32_C(0x10040000)
+
 #define AGX_G17P_BIND_GROUP_BYTES 0x80u
 #define AGX_G17P_VIEWPORT_RECORD_BYTES 40u
 #define AGX_G17P_VIEWPORT_RECORD_MAX_BYTES                              \
@@ -65,7 +77,10 @@ agx_g17p_ppp_indices_pack(size_t scissor_bytes, size_t depth_bias_bytes,
       return false;
 
    const uint8_t record[8] = {
-      0x00, 0x01, 0x00, 0x00,
+      (uint8_t)AGX_G17P_DRAW_STATE_SELECTOR_WORD0,
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 8),
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 16),
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 24),
       (uint8_t)scissor_index, (uint8_t)(scissor_index >> 8),
       (uint8_t)depth_bias_index, (uint8_t)(depth_bias_index >> 8),
    };
@@ -112,7 +127,7 @@ agx_g17p_upload_bind_state(void *cpu, size_t capacity, uint64_t compact,
    /* Native VertexProgramVariant+0x1008: separate f32/f16 varying counts and
     * two auxiliary words, zero for the admitted user-varying layout. */
    const uint32_t words[5] = {
-      UINT32_C(0x10040000), counts_32, counts_16, 0, 0,
+      AGX_G17P_VARYING_RECORD_WORD0, counts_32, counts_16, 0, 0,
    };
    uint8_t *varyings = (uint8_t *)cpu + varying_offset;
    for (unsigned i = 0; i < 5; ++i) {
@@ -142,7 +157,10 @@ agx_g17p_ppp_indices_base_pack(size_t scissor_bytes,
       return false;
 
    const uint8_t record[8] = {
-      0x00, 0x01, 0x00, 0x00,
+      (uint8_t)AGX_G17P_DRAW_STATE_SELECTOR_WORD0,
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 8),
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 16),
+      (uint8_t)(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 >> 24),
       (uint8_t)scissor_index, (uint8_t)(scissor_index >> 8),
       (uint8_t)depth_bias_index, (uint8_t)(depth_bias_index >> 8),
    };

@@ -307,7 +307,7 @@ agx3_g17p_native_indirect_compute_dispatch_append(
       return false;
 
    uint8_t *helper = staged + AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
-   agx3_cmdstream_store_le32(helper, UINT32_C(0x10080000));
+   agx3_cmdstream_store_le32(helper, AGX3_G17P_NATIVE_INDIRECT_HELPER_WORD0);
    agx3_cmdstream_store_le32(
       helper + 4,
       (uint32_t)(((dispatch->helper_program_va >> 38) & 0x3ff) << 22));

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "agx_bo.h"
+#include "agx_ioto_program_core.h"
 #include "agx_compile.h"
 #include "agx_nir_lower_vbo.h"
 #include "agx_pack.h"
@@ -68,8 +69,8 @@ struct agx_linked_shader {
    struct agx_fragment_control_packed fragment_control;
 };
 
-/* Write the AGX3 code container's fixed 0x340-byte leading block. */
-#define AGX3_CONTAINER_LEAD_SIZE 0x340u
+/* Write the AGX3 code container's fixed leading block. Its size lives in
+ * agx_ioto_program_core.h so decoders can share it. */
 void agx3_build_container_lead(uint8_t *image);
 
 bool agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
