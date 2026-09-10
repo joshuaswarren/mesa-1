@@ -126,6 +126,229 @@ static struct {
    size_t capacity;
 } shim_mappings;
 
+/*
+ * The kernel's T8140 native render-context view registry, mirrored.
+ *
+ * drivers/gpu/drm/asahi/mmu.rs keeps a seven-slot registry of the fixed
+ * process resources native AGXSecureGart presents twice: once at a canonical
+ * high "source" address userspace owns, and once at a low "context" address
+ * the driver materializes.  A slot is filled ONLY by a VM_BIND map whose range
+ * is a superset of that view's source interval
+ * (Vm::track_t8140_native_context_binding), and is cleared by any map or unmap
+ * that merely overlaps it (the same function, plus
+ * untrack_t8140_native_context_range).
+ *
+ * Every render submission then walks all seven slots
+ * (Uat::install_t8140_job_context_aliases) and refuses the job with ENOENT if
+ * one is empty, which is the exact hardware failure this models:
+ *
+ *   MMU: T8140 job context view 0 source 0x1000000000+0x10000 -> 0x0 is not
+ *   bound
+ *   G17P render: STAGE FAIL stage=new-user-render-storage errno=-2
+ *
+ * A no-op VM_BIND has no such registry, so a driver that never establishes
+ * these bindings -- or that later takes one away -- looks perfectly healthy
+ * under the shim and only fails on the target.
+ *
+ * The addresses are the kernel's, not a restatement of Mesa's: they come from
+ * T8140_NATIVE_CONTEXT_VIEWS, so a driver that moves its context BO without
+ * the kernel moving with it fails here rather than on Neo.
+ */
+struct asahi_t8140_context_view {
+   uint64_t source_address;
+   uint64_t size;
+   uint64_t context_address;
+};
+
+static const struct asahi_t8140_context_view t8140_context_views[] = {
+   {UINT64_C(0x1000000000), UINT64_C(0x10000), UINT64_C(0)},
+   {UINT64_C(0x1000018000), UINT64_C(0x8000), UINT64_C(0x18000)},
+   {UINT64_C(0x1000028000), UINT64_C(0x8000), UINT64_C(0x28000)},
+   {UINT64_C(0x1000038000), UINT64_C(0x8000), UINT64_C(0x38000)},
+   {UINT64_C(0x1000048000), UINT64_C(0x8000), UINT64_C(0x48000)},
+   {UINT64_C(0x1000058000), UINT64_C(0x8000), UINT64_C(0x58000)},
+   {UINT64_C(0x1000068000), UINT64_C(0xc000), UINT64_C(0x68000)},
+};
+
+/*
+ * The window the kernel reserves for the client null view for a VM's whole
+ * lifetime (T8140_CLIENT_NULL_VIEW_START/SIZE).  file.rs rejects any user bind
+ * that overlaps a driver range with EINVAL, so Mesa must bind its low
+ * presentations from 0x18000 upwards and never below.
+ */
+#define T8140_CLIENT_NULL_VIEW_START UINT64_C(0)
+#define T8140_CLIENT_NULL_VIEW_SIZE  UINT64_C(0x10000)
+
+struct asahi_t8140_context_slot {
+   bool bound;
+   uint32_t handle;
+   uint64_t object_offset;
+};
+
+static struct asahi_t8140_context_slot
+   t8140_context_slots[ARRAY_SIZE(t8140_context_views)];
+static unsigned t8140_render_submits_checked;
+static unsigned t8140_render_submits_unbound;
+
+static bool
+t8140_registry_active(void)
+{
+   return shim_params() == &params_g17p;
+}
+
+static bool
+range_overlaps(uint64_t a_start, uint64_t a_size, uint64_t b_start,
+               uint64_t b_size)
+{
+   return a_size && b_size && a_start < b_start + b_size &&
+          b_start < a_start + a_size;
+}
+
+static bool
+range_is_superset(uint64_t outer_start, uint64_t outer_size,
+                  uint64_t inner_start, uint64_t inner_size)
+{
+   return outer_size && inner_start >= outer_start &&
+          inner_start + inner_size <= outer_start + outer_size;
+}
+
+static void
+t8140_track_bind(const struct drm_asahi_gem_bind_op *op)
+{
+   if (!t8140_registry_active())
+      return;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(t8140_context_views); ++i) {
+      const struct asahi_t8140_context_view *view = &t8140_context_views[i];
+
+      /* Order matters and is the kernel's: a bind that merely overlaps the
+       * view invalidates the slot, and only a bind that fully contains it
+       * re-establishes one. */
+      if (range_overlaps(op->addr, op->range, view->source_address,
+                         view->size))
+         t8140_context_slots[i].bound = false;
+
+      if (range_is_superset(op->addr, op->range, view->source_address,
+                            view->size)) {
+         t8140_context_slots[i] = (struct asahi_t8140_context_slot){
+            .bound = true,
+            .handle = op->handle,
+            .object_offset = op->offset + (view->source_address - op->addr),
+         };
+      }
+   }
+}
+
+static void
+t8140_untrack_range(uint64_t address, uint64_t size)
+{
+   if (!t8140_registry_active())
+      return;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(t8140_context_views); ++i) {
+      const struct asahi_t8140_context_view *view = &t8140_context_views[i];
+      if (range_overlaps(address, size, view->source_address, view->size))
+         t8140_context_slots[i].bound = false;
+   }
+}
+
+/*
+ * The submission-time gate, reported in the kernel's own words so a shim log
+ * and a Neo dmesg can be compared line for line.
+ *
+ * Reporting is unconditional; failing the submit is not, because a driver that
+ * trips this still records a valid command stream and the other oracles should
+ * keep testing it.  ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS reproduces the
+ * kernel's ENOENT, and ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS asserts at exit
+ * that no render submission was ever missing a view.
+ */
+static bool
+t8140_check_context_views(void)
+{
+   if (!t8140_registry_active())
+      return true;
+
+   t8140_render_submits_checked++;
+
+   bool complete = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(t8140_context_views); ++i) {
+      if (t8140_context_slots[i].bound)
+         continue;
+
+      const struct asahi_t8140_context_view *view = &t8140_context_views[i];
+      fprintf(stderr,
+              "shim: MMU: T8140 job context view %u source %#llx+%#llx -> "
+              "%#llx is not bound\n",
+              i, (unsigned long long)view->source_address,
+              (unsigned long long)view->size,
+              (unsigned long long)view->context_address);
+      complete = false;
+   }
+
+   if (!complete) {
+      for (unsigned i = 0; i < ARRAY_SIZE(t8140_context_views); ++i) {
+         const struct asahi_t8140_context_slot *slot = &t8140_context_slots[i];
+         fprintf(stderr,
+                 "shim: T8140 context view %u: %s handle=%u object_offset=%#llx\n",
+                 i, slot->bound ? "bound" : "UNBOUND", slot->handle,
+                 (unsigned long long)slot->object_offset);
+      }
+   }
+
+   if (!complete)
+      t8140_render_submits_unbound++;
+
+   return complete;
+}
+
+/*
+ * A submit the stream oracle refused is only reported today: the ioctl returns
+ * EINVAL, Mesa prints it, and the client carries on and exits 0, so `meson
+ * test` stays green over a command stream the kernel would never have run.
+ * This knob makes a run fail closed on that.
+ */
+static unsigned g17p_streams_validated;
+static unsigned g17p_streams_rejected;
+
+static void __attribute__((destructor))
+check_g17p_stream_validity(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_VALID_STREAM"))
+      return;
+
+   if (!g17p_streams_validated || g17p_streams_rejected) {
+      fprintf(stderr,
+              "shim: G17P command streams accepted by the oracle: %u, "
+              "rejected: %u\n",
+              g17p_streams_validated, g17p_streams_rejected);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr, "shim: all %u G17P command streams were accepted\n",
+           g17p_streams_validated);
+}
+
+static void __attribute__((destructor))
+check_t8140_context_views(void)
+{
+   if (!getenv("ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS"))
+      return;
+
+   if (!t8140_render_submits_checked || t8140_render_submits_unbound) {
+      fprintf(stderr,
+              "shim: G17P render submissions with a complete native context "
+              "view set: %u of %u\n",
+              t8140_render_submits_checked - t8140_render_submits_unbound,
+              t8140_render_submits_checked);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: all %u G17P render submissions carried the complete native "
+           "context view set\n",
+           t8140_render_submits_checked);
+}
+
 static unsigned invalid_vm_binds;
 
 /* Executable-window accounting.
@@ -1082,6 +1305,14 @@ asahi_ioctl_gem_create(int fd, unsigned long request, void *arg)
 
    create->handle = drm_shim_bo_get_handle(shim_fd, &bo->base);
 
+   if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
+      fprintf(stderr,
+              "shim: gem_create size=%#llx flags=%#x%s vm_id=%u -> handle %u\n",
+              (unsigned long long)create->size, create->flags,
+              (create->flags & DRM_ASAHI_GEM_VM_PRIVATE) ? " (VM_PRIVATE)"
+                                                         : "",
+              create->vm_id, create->handle);
+
    drm_shim_bo_put(&bo->base);
 
    return 0;
@@ -1210,11 +1441,47 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
          return -EINVAL;
       }
 
+      /* file.rs rejects any user bind overlapping a driver-reserved range,
+       * and the client null view is reserved for the VM's whole lifetime. */
+      if (t8140_registry_active() &&
+          range_overlaps(start, op->range, T8140_CLIENT_NULL_VIEW_START,
+                         T8140_CLIENT_NULL_VIEW_SIZE)) {
+         fprintf(stderr,
+                 "shim: gem_bind: Invalid map range %#llx..%#llx (overlaps "
+                 "the driver-reserved T8140 client null view %#llx..%#llx)\n",
+                 (unsigned long long)start, (unsigned long long)end,
+                 (unsigned long long)T8140_CLIENT_NULL_VIEW_START,
+                 (unsigned long long)(T8140_CLIENT_NULL_VIEW_START +
+                                      T8140_CLIENT_NULL_VIEW_SIZE));
+         return -EINVAL;
+      }
+
       if (op->flags & DRM_ASAHI_BIND_UNBIND) {
          remove_mappings(fd, op->addr, op->range);
+         t8140_untrack_range(op->addr, op->range);
       } else if (!add_mapping(fd, op)) {
          fprintf(stderr, "shim: gem_bind: invalid BO mapping\n");
          return -EINVAL;
+      } else {
+         /* A repeated single page is not the same physical layout as any
+          * native restricted resource; the kernel refuses the overlap outright
+          * (Vm::validate_t8140_native_context_binding). */
+         if (t8140_registry_active() &&
+             (op->flags & DRM_ASAHI_BIND_SINGLE_PAGE)) {
+            for (unsigned v = 0; v < ARRAY_SIZE(t8140_context_views); ++v) {
+               if (range_overlaps(op->addr, op->range,
+                                  t8140_context_views[v].source_address,
+                                  t8140_context_views[v].size)) {
+                  fprintf(stderr,
+                          "shim: gem_bind: single-page map %#llx..%#llx "
+                          "overlaps native context view %u\n",
+                          (unsigned long long)start, (unsigned long long)end,
+                          v);
+                  return -EINVAL;
+               }
+            }
+         }
+         t8140_track_bind(op);
       }
    }
 
@@ -1371,6 +1638,35 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
       return -1;
    }
 
+   /* The kernel's native-context gate runs for every render submission, not
+    * only when the stream oracle is enabled, so check it first. */
+   if (t8140_registry_active()) {
+      const uint8_t *scan = (const void *)(uintptr_t)submit->cmdbuf;
+      size_t at = 0;
+      bool complete = true;
+
+      while (at + sizeof(struct drm_asahi_cmd_header) <= submit->cmdbuf_size) {
+         const struct drm_asahi_cmd_header *header = (const void *)(scan + at);
+         const size_t command_size = sizeof(*header) + header->size;
+
+         if (command_size > submit->cmdbuf_size - at)
+            break;
+
+         if (header->cmd_type == DRM_ASAHI_CMD_RENDER)
+            complete &= t8140_check_context_views();
+
+         at += command_size;
+      }
+
+      if (!complete && getenv("ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS")) {
+         fprintf(stderr,
+                 "shim: G17P render: STAGE FAIL stage=new-user-render-storage "
+                 "errno=-2\n");
+         errno = ENOENT;
+         return -1;
+      }
+   }
+
    const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
    if (!validate || !strcmp(validate, "0") || shim_params() != &params_g17p)
       return 0;
@@ -1437,6 +1733,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          };
          if (!asahi_g17p_render_aux_validate(&memory, &render) ||
              !asahi_g17p_stream_validate(&memory, &config, &stats)) {
+            g17p_streams_rejected++;
             const int rejected = g17p_stream_reject("VDM");
             if (rejected)
                return rejected;
@@ -1449,11 +1746,13 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          if (!auxiliary_clear && !matrix_case_matches(matrix_case, &stats)) {
             fprintf(stderr, "shim: G17P matrix case '%s' semantic mismatch\n",
                     matrix_case);
+            g17p_streams_rejected++;
             return -EINVAL;
          }
          if (!auxiliary_clear && matrix_case && !strcmp(matrix_case, "blend"))
             stats.blend_enabled = true;
          merge_stream_stats(&stats);
+         g17p_streams_validated++;
          fprintf(stderr,
                  "shim: G17P VDM validated: %u draws, %u indexed, %u state "
                  "updates, %u links, %u barriers (%u inter-draw, %u "
@@ -1482,6 +1781,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          };
          struct asahi_g17p_compute_stats stats;
          if (!asahi_g17p_compute_validate(&memory, &compute, &stats)) {
+            g17p_streams_rejected++;
             const int rejected = g17p_stream_reject("CDM");
             if (rejected)
                return rejected;
@@ -1495,6 +1795,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          compute_stats.prologue_barriers += stats.prologue_barriers;
          compute_stats.strong_barriers += stats.strong_barriers;
          compute_stats.terminated |= stats.terminated;
+         g17p_streams_validated++;
          fprintf(stderr,
                  "shim: G17P CDM validated: %u launches (%u 2D), %u barriers, "
                  "%u prologue (%u strong)\n",
