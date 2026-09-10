@@ -851,7 +851,18 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool support_lod_bias =
       agx_chip_sampler_generation(dev->dev.chip) == AGX_SAMPLER_GENERATION_GEN4;
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
+   /* G17P's texture_load has no witnessed integer-offset form, and a txf
+    * offset is defined as plain integer coordinate addition, so fold it into
+    * the coordinate before descriptor binding rather than carrying a backend
+    * source the fetch encoder cannot express. Gallium already selects this
+    * path; without it here, texelFetchOffset() reaches the packer as a
+    * texture_load with a 32-bit immediate source, which trips
+    * agx_validate_sources() in a debug build and, in a release build, reaches
+    * an encoder with no offset field at all. */
+   if (dev->dev.chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, agx_nir_lower_g17p_texture_early, support_lod_bias);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);

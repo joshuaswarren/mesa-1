@@ -1,9 +1,14 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
-**Status: the SSBO limit below is GONE, so is the `fcmpsel` one, and so are the
-32-bit rounding modes. Two texture-side gaps and one saturate gap remain.**
+**Status (2026-09-10): the coordinate offset and the depth comparison are now
+encoded in every LOD mode, and the whole in-tree probe corpus compiles -- 24 of
+24 compute and 48 of 48 fragment, with no refusal line anywhere.** The SSBO
+limit, the `fcmpsel` one, the 32-bit rounding modes and the bias / gradient
+sample forms were already closed before that. What remains on the texture side
+is listed under "The rule, as it stands now", and it is a much shorter list
+than this file used to claim.
 
-> **CORRECTION (2026-09-10).** The previous revision said "the float source
+> **CORRECTION (2026-09-10).** An earlier revision said "the float source
 > modifiers" were done, without qualification. **That was too broad, and it was
 > wrong for a whole instruction family.** `f30`/`f31` were modelled on
 > `f32log2`, `f32exp2` and `f32rcp`, but *not* on `f32rsqrt` or `f32sqrtstep`,
@@ -17,20 +22,37 @@
 > The `iadd` narrow-operand row further down was likewise recorded as fixed
 > when only *half* of it was. See "The `iadd` widening fix was partial" below.
 >
+> The `fcmpsel` row carries the same hazard and is **not** fully closed either:
+> measured against Vulkan CTS on 2026-09-10, the absolute-source closure lands
+> for the uniform-width 32-bit case but **not** for a 16-bit destination
+> (`fcmpsel [d16 ... s1=32:reg.abs ...]`, dEQP's `isOk()` written to a
+> `mediump` output) nor for mixed operand widths (`[d32 s0=16:imm
+> s1=32:reg.abs ...]`, from `isinf`). Those two shapes are ~98% of the
+> refusals measured across `glsl.conversions` and `glsl.builtin`.
+>
 > The lesson is the one this file already teaches in its retraction: a claim
 > phrased over a *category* ("the float source modifiers") is not supported by
-> evidence gathered on *instances* of it. Name the forms you actually tested. Every row of the original matrix compiles, including
-the ones marked **no**, and so do device atomics. The measurement that produced
-the matrix is preserved verbatim further down, because the *method* is what
-makes it re-runnable, and because the retraction it carries is still worth
-reading before theorising about a wrong value on this ISA.
+> evidence gathered on *instances* of it. Name the forms you actually tested.
 
-**Every vkQuake pipeline now compiles: 385 of 385, 248 of 248 unique
-pipelines**, up from 67 of 385, with no packer refusal anywhere in the run. See
-"vkQuake" below for the exact reproduction.
+Every row of the original matrix compiles, including the ones marked **no**,
+and so do device atomics. The measurement that produced the matrix is preserved
+verbatim further down, because the *method* is what makes it re-runnable, and
+because the retraction it carries is still worth reading before theorising
+about a wrong value on this ISA.
 
-Measured 2026-09-07 under the G17P drm-shim, on the integration branch plus the
-commits named in "What changed". No hardware.
+**Two of the entries this file listed as the next texture gaps to do -- the
+bindless texture-heap descriptor shape, and `textureGrad`'s gradient staging --
+were already closed when they were measured on 2026-09-10 and had been for some
+time.** They are kept in this file only as history; do not plan work from them.
+The lesson is the one the retraction below already teaches: run the probes
+before believing the document, this one included.
+
+**Every vkQuake pipeline compiles: 385 of 385, 248 of 248 unique pipelines**, up
+from 67 of 385, with no packer refusal anywhere in the run. See "vkQuake" below
+for the exact reproduction.
+
+Measured 2026-09-07 and re-measured 2026-09-10 under the G17P drm-shim. No
+hardware: nothing in this file says any of it *renders*.
 
 ## Current matrix
 
@@ -89,8 +111,21 @@ and every textured draw:
 | `texture(sampler2DArray, vec3(uv, layer))`                          | see below |
 | `texture(samplerCube, n)`                                           | see below |
 | `textureGather(tex, uv, comp)`                                      | yes‡    |
-| `texture(sampler2DShadow, ...)`                                     | **no**§ |
-| `textureGrad` on a 2D **array**                                      | **no**§  |
+| `texture(sampler2DShadow, ...)`                                     | yes     |
+| `textureGrad` on a 2D **array**                                      | yes     |
+| `textureOffset(tex, uv, ivec2(1,1))`                                | yes¶    |
+| `textureLodOffset` / `textureGradOffset` / `textureGatherOffset`    | yes¶    |
+| `textureOffset(tex, uv, ivec2(1,1), 0.5)` — offset **and** bias      | yes¶    |
+| `textureOffset(sampler2DArray, ...)`                                | yes¶    |
+| `textureLod(sampler2DShadow, ...)` — a comparison at a fixed level   | yes¶    |
+| `textureGather(sampler2DShadow, uv, ref)` — a comparison gather      | yes¶    |
+| `texture(sampler2DArrayShadow, ...)`                                | yes¶    |
+| `textureGather(sampler2DArray, ...)`                                | yes¶    |
+| `textureGrad(sampler3D, ...)` / `texture(sampler3D, uvw, bias)`      | yes¶    |
+| `texture(samplerCubeShadow, ...)`                                   | yes¶    |
+| `texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))`                   | yes¶    |
+| `textureGather(samplerCube, n)`                                     | **no**¶ |
+| `textureQueryLod(tex, uv)`                                          | **no**¶ |
 
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
 \*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
@@ -119,6 +154,11 @@ lowering, not the ISA).
 § Shadow compare (f143) and the immediate-array-layer form (f77 = 1) are now
 *grounded* — the byte tables are below — but not implemented.
 
+¶ Measured 2026-09-10. See "The coordinate offset and the depth comparison are
+orthogonal to everything" below for the byte tables and the sweep. The
+`no` rows there are the texture-side gaps that remain, and each one says what
+is grounded and what is not.
+
 ## The rule, as it stands now
 
 There is no per-shader SSBO access limit, no atomic limit, and no missing
@@ -131,7 +171,51 @@ agx3_pack_binary.c:4288: no grounded AGX3 encoding for texture_sample
 agx3_pack_binary.c:6567: no grounded AGX3 encoding for fmul
 ```
 
-Known-missing, in the order they are worth doing:
+**The two bullets this list used to open with -- the bindless texture-heap
+descriptor shape and `textureGrad`'s gradient staging -- are CLOSED, and were
+closed before they were re-measured on 2026-09-10.** The heap form encodes as
+the uniform descriptor pair (`f103`/`f132` = 3), the gradient stages its four
+scalars into banks 8/10/12/14, and `f34_bindless_grad`-shaped shaders compile.
+They are struck here rather than deleted because they were quoted onward as
+open work.
+
+Known-missing on the texture side, measured 2026-09-10 by driving a 40-shape
+exploration corpus through the drm-shim and reading the packer's own refusal
+line:
+
+- **A cube gather** (`textureGather(samplerCube, ...)`). Grounded --
+  `texturecube::gather(s, dir)` is `05800ca490001000010000001200`, the plain
+  gather with the cube dimension f76 = 4 -- but a cube sample must first run
+  three `cem_calc` instructions and publish the face, and that path does not
+  admit a gather today.
+
+- **`textureQueryLod`.** No witness at all; it is a different instruction, not
+  a mode of `smp`.
+
+- **`textureGatherOffsets`** (four independent offsets). Each lowered gather is
+  fine in isolation, but the shader reaches the packer through the
+  *indexed-sampler* fallback with a **register** descriptor pair, and the
+  offset is only witnessed on the immediate and uniform pairs. Kept refused
+  rather than encoded from an inference.
+
+- **An array depth comparison gather** (`textureGather(sampler2DArrayShadow,
+  ...)`). Grounded but *not* by composing what is already implemented, which is
+  why it is still refused. Apple's `depth2d_array::gather_compare(s, uv,
+  layer, ref)` is `05800ca490002db4010000001200`: f143 on top of the plain
+  array gather, using the **f77 = 1 register-layer** form with f31/f37 = 3.
+  Its `sample_compare` sibling `1d800ca090002db4010000001200` uses the same
+  f77 = 1. But this packer's `shadow && array` path emits the **f77 = 2
+  packed-layer** form instead. Both forms are real and both are witnessed;
+  which one an array comparison should use is not settled here, and encoding a
+  gather through the f77 = 2 path would be an inference, not a witness.
+
+- **An array sample with both an immediate level/bias and an offset.** f43 is
+  one shared immediate slot and the array LOD already claims it. Apple stages
+  the offset separately and selects f141 = 2
+  (`05800cb8b000451b010010001202`); that staging has no slot plan here, so the
+  collision refuses rather than dropping a value.
+
+Known-missing elsewhere:
 
 - **The float saturate modifier.** `clamp(x, 0.0, 1.0)` on a value that is
   itself a product reaches the packer as `fmul.sat`, and the generic ALU
@@ -141,17 +225,14 @@ Known-missing, in the order they are worth doing:
   the plain add does not set f14. That is a witness, not a swept field
   assignment — nothing here varied f14 against a second shape — so it is
   recorded as a starting point, not as an encoding.
+  (`f16_saturate_texture` compiles today: the shape that reaches the packer
+  from that probe is no longer `fmul.sat`.)
 
-- **The bindless texture-heap descriptor shape.** A sample whose texture and
-  sampler come from the bindless heap rather than the combined-sampler
-  descriptor names a *uniform* heap base in source 2; `agx3_emit_texture_sample`
-  requires that source to be the immediate zero. This is what actually blocks
-  the LOD-bias and gradient probes today; see below.
-
-- **`textureGrad`'s gradient staging.** The instruction mode is grounded
-  (f139 = 5) but the four gradient scalars have to be published into operand
-  banks 8/10/12/14 through the ten-byte `copy.ep1` form, and only the
-  four-byte `copy.ep0` coordinate staging is implemented.
+- **A mixed-width `fcmpsel`.** `textureGrad(samplerCube, ...)` lowers cube to
+  2D array through a compare whose sources are 32-bit and whose destination is
+  16-bit, and that shape refuses in the ALU fallback, not the texture path:
+  `no grounded AGX3 encoding for fcmpsel [d16:reg8 s0=32:reg6.abs.cache
+  s1=32:reg2.cache s2=16:imm1 s3=16:imm0 cond=5 chan=1]`.
 
 ## The source modifiers and the 32-bit rounding modes
 
@@ -1064,6 +1145,298 @@ rather than being encoded from an unwitnessed shape. `f29_texture_gather` and
   Mesa's f112 = 4 fragment samples are hardware-proven (the desktop renders),
   so this is recorded, not changed.
 
+## The coordinate offset and the depth comparison are orthogonal to everything
+
+Measured 2026-09-10. Every byte below is Apple's own, from the Metal 27.1
+offline AIR native translator targeting our exact part, and every field vector
+was recovered by re-composing the bytes through the production tables
+(`tools/decomp.c`) rather than by reading a disassembler's field names. The
+harness is `README-metal-witness.md`; the `.metal` sources and `.nat` outputs
+are in `.tmp/g17p-texgrad-evidence` alongside the earlier gradient work.
+
+```sh
+xcrun metal   -mmacosx-version-min=26.0 -c tex2.metal -o tex2.air
+xcrun metallib tex2.air -o tex2.metallib
+xcrun metal-nt -arch applegpu_g17p -N tex2.mtlp-json \
+               -platform_version macos 26.0 26.0 tex2.metallib -o out.nat
+```
+
+Each fragment entry is declared `fragment void` and stores to a `device`
+buffer, because a render pipeline compiled with no attachment information
+optimises a colour-only fragment away to an 80-byte stub and every variant you
+are trying to tell apart comes back byte-identical.
+
+### The offset is three fields, and it composes with every other property
+
+Each row below differs from its offset-free control by exactly
+**f43 = (y << 4) | x, f51 = 1, f141 = 1** — and by nothing else. That is what
+makes the offset orthogonal rather than a per-mode form.
+
+```
+control                                    with int2(1,1)
+t.sample(s, uv)                            05800cb8b0000102018810001200
+t.sample(s, uv, level(2.0f))               05800cb8b0001b02018810081200
+t.sample(s, uv, level(in.dx.x))            05800cb8b0001102018810001200
+t.sample(s, uv, bias(0.5f))                05800cb8b0000b03018810021200
+t.sample(s, uv, bias(in.dx.x))             05800cb8b0008102018810001200
+t.sample(s, uv, gradient2d(dx, dy))        05800cb8b0000902008810001200
+t.gather(s, uv)                            05800ca490000102018800001200
+t.gather(s, uv, component::y)              05800cac90000102018800001200
+arr.sample(s, uv, layer)                   05800cb8b0001bb7018810001200
+arr.sample(s, uv, layer, gradient2d)       05800cb8b0000db7008810001200
+arr.gather(s, uv, layer)                   05800ca490001bb7018800001200
+depth.sample_compare(s, uv, ref)           1d800ca090002102018800001200
+depth.gather_compare(s, uv, ref)           05800ca490002102018800001200
+heap t.sample(s, uv)                       05a00cb8b8000102938b90011200802000000000
+heap t.sample(s, uv, gradient2d)           05a00cb8b8000902928b90011200802000000000
+```
+
+The value sweep is the same in every one of those modes — measured on the
+plain sample, on `level(2.0f)` and on the gather:
+
+```
+int2(1,1)   f43 = 17
+int2(2,0)   f43 = 2
+int2(0,2)   f43 = 32
+```
+
+so f43 is the signed nibble pair `(y << 4) | x`. That is exactly what
+`agx_nir_lower_texture()` already builds for `nir_tex_src_backend2`:
+
+```c
+nir_def *nibble  = nir_iand_imm(b, nir_channel(b, offset, c), 0xF);
+nir_def *shifted = nir_ishl_imm(b, nibble, 4 * c);
+```
+
+### f43 is one shared slot, and the array immediate LOD claims it first
+
+The one exception to the orthogonality, and the reason this is a guard rather
+than a free pass. An *array* sample with an immediate level or bias puts that
+immediate in f43 with f51 = 1, so an offset has nowhere to go:
+
+```
+t.sample(s, uv, 3u, bias(0.5f))                05800cb8b000051b010010001202
+t.sample(s, uv, 3u, bias(0.5f), int2(1,1))     05800cb8b000451b010010001202
+```
+
+The two differ in **one bit**: f141 goes from absent to **2**, not 1, and f43
+still holds the bias. f141 is a two-bit selector, and f141 = 2 publishes the
+offset through a separate twelve-byte staged operand — the offsetted kernel is
+twelve bytes longer than its control. That staging has no slot plan here, so
+`agx3_tex_encode_sample()` refuses the combination rather than silently
+dropping one of the two values. The *register*-layer array form leaves f43 free
+and takes the offset normally, which is the form Mesa actually emits.
+
+### The comparison is one field too
+
+Same method, one `depth2d<float>` fragment per row. Each differs from the
+corresponding colour sample by f143 = 1, the one-component f75, and the dropped
+f74 mask-group bit — and by nothing else, so the comparison is orthogonal to
+f139 exactly as the offset is:
+
+```
+depth.sample_compare(s, uv, 0.5f)                1d800ca090002000010000001200
+                          ... level(0.0f)        1d800ca090002900010000001200  f139 2
+                          ... level(2.0f)        1d800ca090002900010000081200  f139 2, f29 128
+                          ... bias(0.5f)         1d800ca090002700010000021200  f139 1, f29 32
+                          ... level(in.dx.x)     1d800ca090002001010000001200  f139 4
+                          ... bias(in.dx.x)      1d800ca090002400010000001200  f139 3
+                          ... gradient2d(dx,dy)  1d800ca090002401000000001200  f139 5
+depth.gather_compare(s, uv, 0.5f)                05800ca490002000010000001200  f144 1
+```
+
+A comparison gather returns four texels, so it carries the full f75 mask the
+ordinary gather does; every other comparison returns one. `sample_compare` with
+a *register* reference is byte-identical to the constant-reference form — the
+value is staged into bank 4 either way — which is why the reference never
+appears in the instruction.
+
+The array and cube comparisons are a different shape: they use separately
+packed layer / CEM operands (f77 = 2, f76 = 4) rather than the register-layer
+form the sweep above was taken on, and they were only witnessed with an
+implicit LOD, so they keep it.
+
+### What was actually blocking the offset: the NIR shape gate, not the ISA
+
+Worth recording because the packer's offset encoding had existed for some time
+and was **completely unreachable**. `agx_nir_lower_g17p_combined_sampler()`
+counts a sample's NIR sources against an expected total, and that total had no
+term for `nir_tex_src_offset`. Any shader with a coordinate offset therefore
+failed the shape test, the pass disowned the whole shader, and it fell back to
+the heap-descriptor form — which then refused. A bare
+
+```glsl
+uFragColor = textureOffset(tex, texcoord.xy, ivec2(1, 1));
+```
+
+reported `agx3_pack_binary.c: no grounded AGX3 encoding for texture_sample
+[... s2=64:uni16 ...]`, and the `s2=64:uni16` is the tell: source 2 is the heap
+base, so the combined-sampler lowering had already given up. This is the same
+failure mode as "What actually blocked both probes" above, one pass over.
+
+The gate runs *before* `agx_nir_lower_texture()` in the fragment path and after
+it elsewhere, so it accepts either the raw `nir_tex_src_offset` or the packed
+`nir_tex_src_backend2` and requires the value to be compile-time constant --
+only a constant can reach an immediate field.
+
+### The 3D dimension, and where the gradient's extra pair goes
+
+f76 = 3 is orthogonal to f139 exactly as the 2D dimension is. Five texture3d
+fragments differing only in the LOD argument:
+
+```
+t.sample(s, uvw)                  05800cb8b0008001010010001200
+t.sample(s, uvw, bias(0.5f))      05800cb8b0003b00010010021200   f139 1, f29 32
+t.sample(s, uvw, bias(in.dx.x))   05800cb8b0009001010010001200   f139 3
+t.sample(s, uvw, level(in.dx.x))  05800cb8b0008821010010001200   f139 4
+t.sample(s, uvw, gradient3d(...)) 05800cb8b0009c01000010001200   f139 5
+```
+
+The per-lane forms need no new staging: the `level(reg)` kernel publishes its
+scalar with f5 = 6, the same bank-6 publication `agx3_tex_stage_lod()` already
+emits for 2D.
+
+`gradient3d` stages **six** scalars where the 2D gradient stages four, and the
+extra pair continues the same interleave into banks 16 and 18. Read off two
+literal-gradient kernels, where each staged value is the constant itself and
+therefore names its own slot:
+
+```
+gradient2d((1,2), (4,8))                banks 8/10/12/14    = 1 / 4 / 2 / 8
+gradient3d((1,2,4), (8,16,32))          banks 8/10/12/14/16/18
+                                          = 1 / 8 / 2 / 16 / 4 / 32
+gradient3d((64,128,0.25), (0.5,.75,1.5)) = 64 / 0.5 / 128 / 0.75 / 0.25 / 1.5
+```
+
+so the run is (ddx.x, ddy.x, ddx.y, ddy.y, ddx.z, ddy.z) -- the 2D order with
+one more pair, and exactly the order `agx_emit_tex()`'s collect already builds.
+The 2D row is the control that validates the reading method.
+
+A cube *comparison* needed nothing but the NIR gate:
+`agx3_tex_encode_sample()` already produced `1d800ca090003000010000001200`
+(f76 = 4 plus f143) and the packer already published the reference before the
+CEM bracket. A cube *gather* is grounded as an instruction
+(`05800ca490001000010000001200`) but still refuses: a cube sample must first
+run three `cem_calc` instructions and publish its face, and that path does not
+admit a gather.
+
+### `glsl.texture_gather`: what the refusals are, and one candidate not yet proven
+
+A Vulkan 1.0 CTS sweep reported 332 `texture_sample` refusals in
+`glsl.texture_gather`, all sharing `s1=16:imm0, s2=64:uni16, cond=0, chan=4`
+and varying in `s5`. Measured against this tree on 2026-09-10, one probe per
+cell:
+
+| variant           | 2D             | 2D array       | cube          |
+| ----------------- | -------------- | -------------- | ------------- |
+| basic             | encodes        | **encodes now**| refuses       |
+| offset (constant) | **encodes now**| **encodes now**| not witnessed |
+| offset (dynamic)  | **refuses**    | **refuses**    | not witnessed |
+| offsets (four)    | refuses        | refuses        | not witnessed |
+
+**`s2=64:uni16` is the tell**: source 2 is the bindless heap base, so both
+`agx_nir_lower_g17p_combined_sampler()` and the indexed-sampler fallback
+declined the shader before the packer ever saw it. Every refusal in that sweep
+carries it, so none of them is an encoding gap in the sample instruction --
+they are all shape-gate rejections.
+
+- **A dynamic gather offset is a real, distinct gap.** `textureGatherOffset`
+  admits a non-constant offset (unlike `textureOffset`), and f43 is an
+  immediate field, so only a constant can reach it. There is no witness for a
+  register-offset form and **there cannot be one from Metal**: MSL requires the
+  offset argument to be a compile-time constant, so Apple's compiler cannot be
+  made to emit whatever the hardware would use. This one needs hardware or a
+  captured Apple binary, not the witness harness.
+
+- **`textureGatherOffsets`** (four independent offsets) reaches the packer
+  through the indexed-sampler fallback with a **register** descriptor pair, and
+  the offset is only witnessed on the immediate and uniform pairs.
+
+- **A cube gather** is grounded as an instruction but needs the `cem_calc`
+  face-publication path to admit a gather.
+
+#### The format axis, and how to confirm it in one run
+
+The sweep found `rgba8` (182 events) and `rgba8ui` (150) refusing while
+`rgba8i` and `depth32f` never do, at a ~13-20% rate inside each cell -- so a
+further axis decides it. **Not proven here**, because the probe harness cannot
+reach it, but there is one mechanism that fits every column:
+
+`hk_shader.c` runs `agx_nir_lower_custom_border()` when
+`HK_FEAT_CUSTOM_BORDER` is set, i.e. when the app enables
+`customBorderColors`. Its `lower()` returns early for `tex->is_shadow`, and
+otherwise clones the tex twice and emits two *query* texops
+(`has_custom_border_color_agx`, `custom_border_color_agx`). Query texops are
+not in the set `g17p_sample_shape()` accepts.
+
+That predicts exactly what the table shows: `depth32f` is a comparison, takes
+the early return, and never refuses (1076 cases, zero); the rate inside a cell
+tracks how many variants use `clamp_to_border`; and it is a shader-key axis, so
+it is invisible to a probe corpus that never enables the feature.
+
+**Confirming it costs one CTS run:** `HK_PERFTEST=noborder` disables exactly
+that pass (`hk_device.c`, `HK_PERF_NOBORDER`). If the 332 events go away, the
+axis is the border lowering and the fix belongs in the shape gate, not in the
+encoder. If they do not, this candidate is wrong and should be struck.
+
+A theory that did *not* survive: the combined-sampler pass takes only one tex
+instruction per shader (`if (sample || !g17p_sample_shape(...))`), which looked
+like it would disown any multi-texture shader. Probed directly -- two samples,
+two gathers, a gather plus a texel fetch, a sample plus `textureSize` -- and
+all four encode, because the indexed-sampler fallback picks them up. The
+one-sample restriction is real and is not the cause.
+
+### texelFetchOffset was reaching an encoder with no offset field
+
+`agx_nir_lower_g17p_texture_early()` folds a txf offset into the coordinate --
+`texelFetchOffset(s, P, lod, offset)` is *defined* as `texelFetch(s, P + offset,
+lod)`, so the fold is exact rather than an approximation, and it is the only
+option: Metal cannot express a `read()` with an offset, so no witness for such
+a field can exist.
+
+Gallium selected that pass (`agx_state.c`, gated on `AGX_CHIP_G17P`).
+**Honeykrisp did not** -- `hk_shader.c` called the generic
+`agx_nir_lower_texture_early()` unconditionally. So on the Vulkan path the
+offset survived into a `texture_load` carrying a 32-bit immediate source, which
+`agx_validate_sources()` does not model. In a debug build that is
+`exit(1)`; in a release build the validator is compiled out entirely and the
+fetch encoder, which has no offset field, is reached instead. Now gated the
+same way Gallium gates it.
+
+### Two shapes used to abort; both now fail closed
+
+`agx_validate_sources()` exempts a 32-bit immediate from its 16-bit rule only
+for `AGX_OPCODE_TEXTURE_SAMPLE` with `!I->shadow`, and `agx_validate()` ends in
+`exit(1)`. Two shapes fell outside:
+
+```
+texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))
+     67 = texture_load 45, #0, u8:u9, 1, #0, #17, xyzw, #0x0, 2d, slot 0
+
+textureOffset(sampler2DShadow, vec3(uv, 0.5), ivec2(1,1))
+     22 = collect 8, #17
+```
+
+The first is gone at the source: the fold above means no `texture_load` ever
+carries an offset on G17P. The second stays a refusal, but an honest one --
+`agx_emit_tex()` now materializes the immediate into a register before the
+collect, so what reaches the packer is ordinary IR and what comes back is
+`no grounded AGX3 encoding for texture_sample` rather than a dead process.
+
+### What is checked
+
+`test-agx3-tex-core.c` replays every row above byte for byte through
+`agx3_tex_encode_sample()`: 27 of 27 are exact against Apple's own bytes once
+the destination register and the group terminator f156 are set to what Apple's
+kernel used. `test-agx3-pack-binary.cpp` checks the packer end of it — that an
+offset survives every LOD mode, that the emitted sample instruction differs
+from its offset-free twin by exactly the field triple, that a comparison
+survives every LOD mode, and that a comparison gather keeps the four-texel
+mask. Probes `f33`-`f42` cover the same shapes from GLSL through the shim.
+
+**None of this is hardware-validated.** Every claim here is that our encoder
+produces the same bytes Apple's compiler produces for the same source shape.
+
 ## What changed earlier, and how it was measured
 
 Two compiler fixes, both grounded byte-exactly against Apple's own machine
@@ -1120,13 +1493,21 @@ Each line prints `ENCODES` or `REFUSED` with the `VkResult`; the exit status is
 the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
-As of this revision the compute probe reports 24 of 24 encoding and the
-fragment probe 25 of 28. The three refusals are `f05_texture_bias` and
-`f12_texture_grad`, both on the bindless-heap descriptor shape, and
-`f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
+As of 2026-09-10 the compute probe reports **24 of 24** encoding and the
+fragment probe **54 of 54**, with `AGX_MESA_DEBUG=shaders` printing no refusal
+line at all. That includes the sixteen probes added with the offset,
+comparison, 3D and texel-fetch work (`f33`-`f48`). `f05_texture_bias`, `f12_texture_grad` and
+`f16_saturate_texture`, which this file previously recorded as the three
+outstanding refusals, all encode. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before
 this revision too, so vkcube's reported failure is not this file's matrix and
 has not been reproduced here.
+
+**The refusal line is the authority, not the probe's pass/fail.** Two traps make
+a corpus that reads clean say nothing: Zink does not fail a draw whose pipeline
+it could not build (it logs "pipeline creation failed; dropping draws" and
+`glGetError()` returns success), and under the no-op shim nothing executes, so a
+framebuffer readback cannot tell a dropped draw from a working one.
 
 Two traps, both of which produced wrong answers before being caught:
 
