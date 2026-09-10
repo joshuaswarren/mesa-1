@@ -518,6 +518,10 @@
 #define G17P_RGBA8_MRT 0
 #endif
 
+#ifndef G17P_STK_R11G11B10_MRT
+#define G17P_STK_R11G11B10_MRT 0
+#endif
+
 #ifndef G17P_DYNAMIC_BLEND
 #define G17P_DYNAMIC_BLEND 0
 #endif
@@ -922,7 +926,9 @@
 #endif
 #define IMAGE_LAYERS ((G17P_MULTIVIEW || G17P_LAYER_OUTPUT) ? 2 : 1)
 
-#if G17P_TEXTURE_ALPHA_COMPOSITE && G17P_COMPOSITE_SRGB_TARGET
+#if G17P_STK_R11G11B10_MRT
+#define IMAGE_FORMAT VK_FORMAT_B10G11R11_UFLOAT_PACK32
+#elif G17P_TEXTURE_ALPHA_COMPOSITE && G17P_COMPOSITE_SRGB_TARGET
 #define IMAGE_FORMAT VK_FORMAT_B8G8R8A8_SRGB
 #define IMAGE_PIXEL_BYTES 4
 #elif G17P_INDIRECT_DRAW
@@ -1721,7 +1727,11 @@
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_RGBA8_MRT
+#if G17P_STK_R11G11B10_MRT
+#define PROBE_NAME "g17p-vulkan-stk-r11g11b10-mrt"
+#else
 #define PROBE_NAME "g17p-vulkan-rgba8-mrt"
+#endif
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_IMAGE1_OFFSET (2 * READBACK_GUARD_BYTES + IMAGE_BYTES)
@@ -2036,6 +2046,18 @@ verify_readback(const uint8_t *map)
       }
    }
 
+#if G17P_STK_R11G11B10_MRT
+   /* Exact B10G11R11 UFLOAT encodings. The left half receives two additive
+    * writes on RT0 and one write on RT1; the right half keeps its clear. */
+   static const uint8_t clear[2][4] = {
+      {0xc0, 0x02, 0x18, 0x64},
+      {0x50, 0x03, 0x1b, 0x6e},
+   };
+   static const uint8_t additive[2][4] = {
+      {0x80, 0x03, 0x1a, 0x78},
+      {0x00, 0x03, 0x1a, 0x58},
+   };
+#else
    static const uint8_t clear[2][4] = {
       {16, 32, 48, 64},
       {80, 96, 112, 128},
@@ -2044,6 +2066,7 @@ verify_readback(const uint8_t *map)
       {128, 64, 255, 128},
       {32, 64, 16, 128},
    };
+#endif
    const uint8_t *images[2] = {
       map + READBACK_GUARD_BYTES,
       map + READBACK_IMAGE1_OFFSET,
@@ -6125,12 +6148,21 @@ main(void)
       fnv1a64(readback_map + READBACK_GUARD_BYTES, IMAGE_BYTES);
    const uint64_t checksum1 =
       fnv1a64(readback_map + READBACK_IMAGE1_OFFSET, IMAGE_BYTES);
+#if G17P_STK_R11G11B10_MRT
+   printf(PROBE_NAME ": PASS — two distinct B10G11R11 UFLOAT attachments "
+                     "preserved exact clears outside the scissor; RT0 "
+                     "STORE/LOAD/add and RT1 independent store remained "
+                     "exact inside it immediately/3s; three guards unchanged, "
+                     "checksums %016" PRIx64 "/%016" PRIx64 "\n",
+          checksum, checksum1);
+#else
    printf(PROBE_NAME ": PASS — two distinct RGBA8 attachments preserved "
                      "exact clears outside the scissor; RT0 STORE/LOAD/add "
                      "and RT1 independent store remained exact inside it "
                      "immediately/3s; "
                      "three guards unchanged, checksums %016" PRIx64
                      "/%016" PRIx64 "\n", checksum, checksum1);
+#endif
 #else
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);

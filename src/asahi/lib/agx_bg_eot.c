@@ -412,6 +412,10 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
 
+   compiler_key.g17p_r11g11b10_mrt_eot =
+      cache->dev->chip == AGX_CHIP_G17P &&
+      agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_R11G11B10;
+
    return agx_compile_bg_eot_shader(cache, b.shader, &compiler_key, NULL);
 }
 

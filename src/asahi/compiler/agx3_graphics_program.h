@@ -51,6 +51,7 @@ enum agx3_g17p_rt0_bg_op {
 
 #define AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
 #define AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
+#define AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
 #define AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 
 bool agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,

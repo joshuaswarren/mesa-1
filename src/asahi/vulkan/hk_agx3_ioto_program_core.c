@@ -356,6 +356,7 @@ hk_agx3_g17p_rt0_bg_program_generate(
           desc->sampler_pointer_va ||
           (clear_push_halfs != HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
@@ -460,6 +461,8 @@ hk_agx3_g17p_rt0_bg_program_generate(
        (desc->op == HK_AGX3_G17P_RT0_BG_CLEAR &&
         written >
            (desc->clear_push_halfs == HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+            : desc->clear_push_halfs == HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
             : desc->clear_push_halfs == HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE

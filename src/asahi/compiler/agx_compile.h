@@ -389,6 +389,10 @@ struct agx_shader_key {
     * independently grounded only for the two-word R32G32 UINT layout. */
    bool g17p_rt0_eot_i32_selector_75;
 
+   /* Authorize the exact two-partition packed R11G11B10 EOT. Its post-RA
+    * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */
+   bool g17p_r11g11b10_mrt_eot;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.

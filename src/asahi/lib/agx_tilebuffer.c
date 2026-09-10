@@ -331,5 +331,10 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
        tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
       return AGX_G17P_MRT_RGBA8;
 
+   if (tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
+       tib->logical_format[1] == PIPE_FORMAT_R11G11B10_FLOAT &&
+       tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
+      return AGX_G17P_MRT_R11G11B10;
+
    return AGX_G17P_MRT_NONE;
 }

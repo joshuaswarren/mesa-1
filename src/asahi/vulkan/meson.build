@@ -1828,6 +1828,23 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # SuperTuxKart's default advanced pipeline renders diffuse/specular into
+    # two full-resolution GL_R11F_G11F_B10F attachments.
+    executable(
+      'g17p-vulkan-stk-r11g11b10-mrt',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [
+        c_msvc_compat_args,
+        '-DG17P_RGBA8_MRT=1',
+        '-DG17P_STK_R11G11B10_MRT=1',
+        '-DIMAGE_WIDTH=1280',
+        '-DIMAGE_HEIGHT=720',
+      ],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-dynamic-blend',
       files('tests/g17p_offscreen_triangle.c'),

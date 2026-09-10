@@ -357,7 +357,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
    const bool rgba8_mrt = mrt == AGX_G17P_MRT_RGBA8;
-   const bool dual_mrt = wboit_mrt || rgba8_mrt;
+   const bool r11g11b10_mrt = mrt == AGX_G17P_MRT_R11G11B10;
+   const bool dual_mrt = wboit_mrt || rgba8_mrt || r11g11b10_mrt;
 
    for (unsigned rt = 0; rt < HK_MAX_RTS; ++rt) {
       const enum agx_bg_eot_op op = key->op[rt];
@@ -387,6 +388,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       key->reserved_preamble =
          rgba8_mrt && dual_mrt_active
             ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+         : r11g11b10_mrt && dual_mrt_active
+            ? AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
          : wboit_mrt && dual_mrt_active
             ? AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
             : AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
@@ -424,6 +427,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    } else if (op == AGX_BG_CLEAR) {
       program_capacity =
          rgba8_mrt && dual_mrt_active
+            ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+         : r11g11b10_mrt && dual_mrt_active
             ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
          : wboit_mrt && dual_mrt_active
             ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
@@ -651,6 +656,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             clear_values[1] = att_info1->clearValue.color;
          const size_t clear_size =
             rgba8_mrt && dual_mrt_active ? 32
+            : r11g11b10_mrt && dual_mrt_active ? 28
             : wboit_mrt && dual_mrt_active ? 20 : 16;
          desc.clear_value_va =
             hk_pool_upload(cmd, clear_values, clear_size, 16);

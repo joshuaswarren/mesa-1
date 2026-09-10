@@ -15,6 +15,13 @@
 #define AGX_G17_RUNTIME_GRAPH_VA_START UINT64_C(0x7000000000)
 #define AGX_G17_RUNTIME_GRAPH_VA_END   UINT64_C(0x7100000000)
 
+/* T8140's four pair/generation AXFB aliases are installed by the kernel in
+ * every render-capable client root.  This range falls inside G17P's 4-GiB USC
+ * heap, so userspace must remove it from the allocator before creating any
+ * shader BOs. */
+#define AGX_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
+#define AGX_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002020000)
+
 /* G17P's compact VDM pointer is a 39-bit offset from 0x1000000000.
  * Keep the ordinary allocation and sparse-shadow windows below this exclusive
  * limit so every VDM control stream and payload is directly representable. */

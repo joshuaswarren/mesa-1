@@ -137,6 +137,85 @@ test_fixed_usc_allocation_skips_hole(void)
 }
 
 static void
+test_g17p_axfb_alias_is_reserved_from_usc(void)
+{
+   struct util_vma_heap main, usc;
+   const uint64_t aux_size =
+      AGX_G17P_RENDER_AUX_ALIAS_END - AGX_G17P_RENDER_AUX_ALIAS_START;
+   const uint64_t usc_start = AGX_G17P_RENDER_AUX_ALIAS_START - (2 * PAGE);
+   const uint64_t usc_size = aux_size + (4 * PAGE);
+   const uint64_t rejected_stk_va = UINT64_C(0x1000201c000);
+
+   static_assert(AGX_G17P_RENDER_AUX_ALIAS_START ==
+                    UINT64_C(0x10002000000),
+                 "kernel AXFB alias start");
+   static_assert(AGX_G17P_RENDER_AUX_ALIAS_END ==
+                    UINT64_C(0x10002020000),
+                 "kernel AXFB alias end");
+   assert(rejected_stk_va >= AGX_G17P_RENDER_AUX_ALIAS_START);
+   assert(rejected_stk_va + PAGE <= AGX_G17P_RENDER_AUX_ALIAS_END);
+
+   util_vma_heap_init(&main, UINT64_C(0x2000000000),
+                      UINT64_C(0x100000000));
+   util_vma_heap_init(&usc, usc_start, usc_size);
+
+   assert(agx_va_reserve_runtime_graph_hole(
+      AGX_CHIP_G17P, &main, UINT64_C(0x2000000000),
+      UINT64_C(0x100000000), UINT64_C(0x4000000000), &usc, usc_start,
+      usc_size));
+   assert(usc.free_size == usc_size - aux_size);
+
+   /* This is the exact 16-KiB shader allocation that the kernel rejected in
+    * SuperTuxKart.  It must be unavailable locally, while the pages directly
+    * before and after the kernel-owned range remain usable. */
+   assert(!util_vma_heap_alloc_addr(&usc, rejected_stk_va, PAGE));
+   assert(util_vma_heap_alloc_addr(
+      &usc, AGX_G17P_RENDER_AUX_ALIAS_START - PAGE, PAGE));
+   assert(util_vma_heap_alloc_addr(&usc, AGX_G17P_RENDER_AUX_ALIAS_END,
+                                   PAGE));
+
+   util_vma_heap_finish(&usc);
+   util_vma_heap_finish(&main);
+}
+
+static void
+test_g17p_production_heap_intersections(void)
+{
+   /* Exact geometry printed by the failing SuperTuxKart process.  Of every
+    * fixed range retained by the kernel, the runtime-graph shadow preimage is
+    * the sole main-heap intersection and AXFB is the sole USC intersection. */
+   const uint64_t main_start = UINT64_C(0x4000000000);
+   const uint64_t main_size = UINT64_C(0x2000000000);
+   const uint64_t sparse_ro_offset = main_size;
+   const uint64_t usc_start = UINT64_C(0x10000000000);
+   const uint64_t usc_size = UINT64_C(0x100000000);
+   const uint64_t runtime_shadow_start =
+      AGX_G17_RUNTIME_GRAPH_VA_START - sparse_ro_offset;
+   const uint64_t aux_size =
+      AGX_G17P_RENDER_AUX_ALIAS_END - AGX_G17P_RENDER_AUX_ALIAS_START;
+   struct util_vma_heap main, usc;
+
+   util_vma_heap_init(&main, main_start, main_size);
+   util_vma_heap_init(&usc, usc_start, usc_size);
+   assert(agx_va_reserve_runtime_graph_hole(
+      AGX_CHIP_G17P, &main, main_start, main_size, sparse_ro_offset, &usc,
+      usc_start, usc_size));
+
+   assert(main.free_size == main_size - RUNTIME_GRAPH_HOLE_SIZE);
+   assert(usc.free_size == usc_size - aux_size);
+   assert(!util_vma_heap_alloc_addr(&main, runtime_shadow_start, PAGE));
+   assert(!util_vma_heap_alloc_addr(
+      &main, runtime_shadow_start + RUNTIME_GRAPH_HOLE_SIZE - PAGE, PAGE));
+   assert(!util_vma_heap_alloc_addr(
+      &usc, AGX_G17P_RENDER_AUX_ALIAS_START, PAGE));
+   assert(!util_vma_heap_alloc_addr(
+      &usc, AGX_G17P_RENDER_AUX_ALIAS_END - PAGE, PAGE));
+
+   util_vma_heap_finish(&usc);
+   util_vma_heap_finish(&main);
+}
+
+static void
 test_other_chips_keep_existing_layout(void)
 {
    struct util_vma_heap main, usc;
@@ -471,11 +550,13 @@ main(void)
    test_main_and_timestamp_allocations_skip_hole();
    test_sparse_shadow_preimage_is_reserved();
    test_fixed_usc_allocation_skips_hole();
+   test_g17p_axfb_alias_is_reserved_from_usc();
+   test_g17p_production_heap_intersections();
    test_other_chips_keep_existing_layout();
    test_g17p_user_window_fits_ppp_pointer_field();
    test_g17p_user_window_fits_usc_resource_pointer();
    test_g17p_vdm_command_alias_heap();
    test_g17p_vdm_payload_context_address();
-   puts("AGX VA layout: user-window split and G17 runtime-graph hole checks passed");
+   puts("AGX VA layout: user-window split and G17 kernel reservations passed");
    return 0;
 }

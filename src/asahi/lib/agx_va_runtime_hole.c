@@ -13,6 +13,11 @@ struct agx_va_interval {
    uint64_t end;
 };
 
+static const struct agx_va_interval g17p_kernel_reserved[] = {
+   {AGX_G17_RUNTIME_GRAPH_VA_START, AGX_G17_RUNTIME_GRAPH_VA_END},
+   {AGX_G17P_RENDER_AUX_ALIAS_START, AGX_G17P_RENDER_AUX_ALIAS_END},
+};
+
 bool
 agx_g17p_vdm_alias_heap_init(struct util_vma_heap *heap)
 {
@@ -138,18 +143,31 @@ static bool
 reserve_intervals(struct util_vma_heap *heap,
                   struct agx_va_interval *intervals, unsigned count)
 {
-   if (count == 2 && intervals[1].start < intervals[0].start) {
-      const struct agx_va_interval tmp = intervals[0];
-      intervals[0] = intervals[1];
-      intervals[1] = tmp;
+   /* The main heap may contain both a fixed kernel range and the preimage of
+    * another fixed range under sparse_ro_offset.  Keep this general so adding
+    * a kernel-owned range cannot make reservations order-dependent. */
+   for (unsigned i = 1; i < count; ++i) {
+      const struct agx_va_interval current = intervals[i];
+      unsigned j = i;
+
+      while (j > 0 && current.start < intervals[j - 1].start) {
+         intervals[j] = intervals[j - 1];
+         --j;
+      }
+      intervals[j] = current;
    }
 
-   if (count == 2 && intervals[1].start <= intervals[0].end) {
-      intervals[0].end = MAX2(intervals[0].end, intervals[1].end);
-      count = 1;
-   }
-
+   unsigned merged = 0;
    for (unsigned i = 0; i < count; ++i) {
+      if (merged > 0 && intervals[i].start <= intervals[merged - 1].end) {
+         intervals[merged - 1].end =
+            MAX2(intervals[merged - 1].end, intervals[i].end);
+      } else {
+         intervals[merged++] = intervals[i];
+      }
+   }
+
+   for (unsigned i = 0; i < merged; ++i) {
       if (!util_vma_heap_alloc_addr(heap, intervals[i].start,
                                     intervals[i].end - intervals[i].start))
          return false;
@@ -172,34 +190,37 @@ agx_va_reserve_runtime_graph_hole(
        !range_end(usc_start, usc_size, &usc_end))
       return false;
 
-   struct agx_va_interval main_intervals[2];
+   struct agx_va_interval main_intervals[ARRAY_SIZE(g17p_kernel_reserved) * 2];
    unsigned main_count = 0;
 
-   add_intersection(main_intervals, &main_count, main_start, main_end,
-                    AGX_G17_RUNTIME_GRAPH_VA_START,
-                    AGX_G17_RUNTIME_GRAPH_VA_END);
-
-   /* Sparse buffers bind the main allocation again at sparse_ro_offset. */
-   if (sparse_ro_offset < AGX_G17_RUNTIME_GRAPH_VA_END) {
-      const uint64_t shadow_start =
-         sparse_ro_offset < AGX_G17_RUNTIME_GRAPH_VA_START
-            ? AGX_G17_RUNTIME_GRAPH_VA_START - sparse_ro_offset
-            : 0;
-      const uint64_t shadow_end =
-         AGX_G17_RUNTIME_GRAPH_VA_END - sparse_ro_offset;
-
+   for (unsigned i = 0; i < ARRAY_SIZE(g17p_kernel_reserved); ++i) {
+      const struct agx_va_interval reserved = g17p_kernel_reserved[i];
       add_intersection(main_intervals, &main_count, main_start, main_end,
-                       shadow_start, shadow_end);
+                       reserved.start, reserved.end);
+
+      /* Sparse buffers bind the main allocation again at sparse_ro_offset. */
+      if (sparse_ro_offset < reserved.end) {
+         const uint64_t shadow_start =
+            sparse_ro_offset < reserved.start
+               ? reserved.start - sparse_ro_offset
+               : 0;
+         const uint64_t shadow_end = reserved.end - sparse_ro_offset;
+
+         add_intersection(main_intervals, &main_count, main_start, main_end,
+                          shadow_start, shadow_end);
+      }
    }
 
    if (!reserve_intervals(main_heap, main_intervals, main_count))
       return false;
 
-   struct agx_va_interval usc_interval[1];
+   struct agx_va_interval usc_intervals[ARRAY_SIZE(g17p_kernel_reserved)];
    unsigned usc_count = 0;
-   add_intersection(usc_interval, &usc_count, usc_start, usc_end,
-                    AGX_G17_RUNTIME_GRAPH_VA_START,
-                    AGX_G17_RUNTIME_GRAPH_VA_END);
+   for (unsigned i = 0; i < ARRAY_SIZE(g17p_kernel_reserved); ++i) {
+      add_intersection(usc_intervals, &usc_count, usc_start, usc_end,
+                       g17p_kernel_reserved[i].start,
+                       g17p_kernel_reserved[i].end);
+   }
 
-   return reserve_intervals(usc_heap, usc_interval, usc_count);
+   return reserve_intervals(usc_heap, usc_intervals, usc_count);
 }
