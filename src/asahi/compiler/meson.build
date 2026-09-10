@@ -774,6 +774,13 @@ if with_tests
   )
 
   test(
+    'agx3_refusal_corpus_parser',
+    prog_python,
+    args : [files('test/extract-g17p-refusals.py'), '--self-test'],
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_graphics_program',
     executable(
       'agx3_graphics_program_test',
