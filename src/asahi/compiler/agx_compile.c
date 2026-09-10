@@ -2618,6 +2618,67 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
+      /* Chromium/Skia compares a negated f32 register for equality and then
+       * selects two unrelated f32 registers. The only native FSEL negate bit
+       * is grounded for a different half-mask endpoint, so do not infer that
+       * modifier across result shapes. Materialize IEEE fneg exactly by
+       * flipping the sign bit, using the already-grounded MOV-immediate and
+       * BITOP XOR forms, before register allocation. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32 && !I->invert_cond && !I->saturate &&
+          I->fcond == AGX_FCOND_EQ && I->src[0].size == AGX_SIZE_32 &&
+          I->src[0].type != AGX_INDEX_IMMEDIATE && I->src[0].neg &&
+          !I->src[0].abs && I->src[1].size == AGX_SIZE_32 &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
+          !I->src[1].neg && I->src[2].size == AGX_SIZE_32 &&
+          I->src[2].type != AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
+          !I->src[2].neg && I->src[3].size == AGX_SIZE_32 &&
+          I->src[3].type != AGX_INDEX_IMMEDIATE && !I->src[3].abs &&
+          !I->src[3].neg) {
+         agx_index source = I->src[0];
+         source.neg = false;
+         agx_index sign = agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+         agx_index flipped = agx_temp(ctx, AGX_SIZE_32);
+         agx_bitop_to(&b, flipped, source, sign, 0x6 /* XOR */);
+         I->src[0] = flipped;
+      }
+
+      /* A fused control-flow comparison has no native nonzero-minifloat
+       * endpoint on G17P. Chromium's three.js skinning fragment keeps such a
+       * threshold around a texture-sampling branch, so it cannot be flattened
+       * into an FSEL. Materialize the exact IEEE value while temporaries still
+       * exist; the resulting IF/WHILE/BREAK_IF_FCMP uses the already-grounded
+       * register/register compare. Keep zero inline for the distinct compact
+       * zero-comparison form. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          (I->op == AGX_OPCODE_IF_FCMP ||
+           I->op == AGX_OPCODE_WHILE_FCMP ||
+           I->op == AGX_OPCODE_BREAK_IF_FCMP) &&
+          I->nr_srcs == 2) {
+         const bool immediate_first =
+            I->src[0].type == AGX_INDEX_IMMEDIATE;
+         const unsigned immediate_src = immediate_first ? 0 : 1;
+         const unsigned register_src = immediate_src ^ 1;
+
+         if (I->src[immediate_src].type == AGX_INDEX_IMMEDIATE &&
+             I->src[immediate_src].value != 0 &&
+             I->src[register_src].type != AGX_INDEX_IMMEDIATE &&
+             I->src[register_src].size == AGX_SIZE_32 &&
+             !I->src[register_src].abs && !I->src[register_src].neg) {
+            float value =
+               agx_minifloat_decode(I->src[immediate_src].value);
+            if (I->src[immediate_src].abs)
+               value = fabsf(value);
+            if (I->src[immediate_src].neg)
+               value = -value;
+
+            uint32_t bits;
+            memcpy(&bits, &value, sizeof(bits));
+            I->src[immediate_src] = agx_mov_imm(&b, 32, bits);
+         }
+      }
+
       /* Hyprland's colour-management shaders add a highp accumulator to a
        * mediump matrix term. There is no grounded plain mixed-width FADD on
        * G17P, so widen the half input explicitly and use the ordinary f32

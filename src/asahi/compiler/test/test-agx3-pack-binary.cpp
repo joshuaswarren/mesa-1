@@ -4175,6 +4175,94 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
    }
 }
 
+TEST_F(AGX3PackBinary, ThreeJSVertexTextureCoordinatesStayLowUnderPressure)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   /* Reproduce the captured three.js skinning allocation: all 128 halves of
+    * TEX's staging-COPY source bank are live, while the dynamic descriptor is
+    * independently valid in the high bank. The allocator must make a low-bank
+    * hole for the direct coordinate COLLECT and preserve that constraint if a
+    * later live-range split relocates another value. */
+   agx_index live[64];
+   for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+      live[i] = agx_preload(b, agx_register(2 * i, AGX_SIZE_32));
+   agx_index high_live[6];
+   for (unsigned i = 0; i < ARRAY_SIZE(high_live); ++i)
+      high_live[i] = agx_preload(b, agx_register(128 + 2 * i, AGX_SIZE_32));
+   agx_index descriptor = agx_register(172, AGX_SIZE_64);
+
+   agx_index xy[2] = {
+      agx_mov_imm(b, 32, 0x41000000),
+      agx_mov_imm(b, 32, 0x41800000),
+   };
+   agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+   agx_instr *collect = agx_collect_to(b, coord, 2);
+   collect->src[0] = xy[0];
+   collect->src[1] = xy[1];
+
+   agx_index result = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+   agx_instr *tex = agx_texture_sample_to(
+      b, result, coord, agx_immediate(0), agx_immediate(0), descriptor,
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   tex->op = AGX_OPCODE_TEXTURE_LOAD;
+   tex->mask = 15;
+   agx_instr *split = agx_split(b, 4, result);
+   for (unsigned i = 0; i < 4; ++i)
+      split->dest[i] = agx_temp(b->shader, AGX_SIZE_32);
+
+   agx_index sum = agx_fadd(b, live[0], split->dest[0]);
+   for (unsigned i = 1; i < ARRAY_SIZE(live); ++i)
+      sum = agx_fadd(b, sum, live[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(high_live); ++i)
+      sum = agx_fadd(b, sum, high_live[i]);
+   agx_export(b, sum, 8);
+   agx_stop(b);
+
+   agx_pressure_schedule(b->shader);
+   agx_ra(b->shader);
+
+   ASSERT_EQ(tex->op, AGX_OPCODE_TEXTURE_LOAD);
+   ASSERT_EQ(tex->dest[0].type, AGX_INDEX_REGISTER);
+   ASSERT_EQ(tex->src[0].type, AGX_INDEX_REGISTER);
+   EXPECT_EQ(tex->src[3].type, AGX_INDEX_REGISTER);
+   EXPECT_EQ(tex->src[3].value, 172u);
+   EXPECT_LT(tex->src[0].value, 128u);
+   EXPECT_LE(tex->src[0].value + 4, 128u);
+
+   agx_lower_pseudo(b->shader);
+   agx_opt_register_cache(b->shader);
+   EXPECT_TRUE(tex->src[0].discard);
+   EXPECT_FALSE(pack(b).empty());
+
+   /* The allocator repair must not widen TEX's seven-bit coordinate field.
+    * A precoloured reproduction of the captured bad physical instruction
+    * remains fail-closed. The independently grounded high descriptor stays
+    * legal only when the coordinate itself was allocated in the low bank. */
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   bad->shader->stage = MESA_SHADER_VERTEX;
+   bad->shader->nir = rzalloc(mem_ctx, nir_shader);
+   bad->shader->nir->info.stage = MESA_SHADER_VERTEX;
+   agx_index bad_dest = agx_register(0, AGX_SIZE_32);
+   agx_index bad_coord = agx_register(140, AGX_SIZE_32);
+   bad_dest.channels_m1 = 3;
+   bad_coord.channels_m1 = 1;
+   bad_coord.discard = true;
+   agx_instr *bad_tex = agx_texture_sample_to(
+      bad, bad_dest, bad_coord, agx_immediate(0), agx_immediate(0),
+      agx_register(172, AGX_SIZE_64), agx_immediate(0), agx_null(),
+      AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0, false, false, false,
+      AGX_GATHER_NONE, false);
+   bad_tex->op = AGX_OPCODE_TEXTURE_LOAD;
+   bad_tex->mask = 15;
+   agx_stop(bad);
+   EXPECT_TRUE(pack(bad, false).empty());
+}
+
 TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -7473,9 +7561,10 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    agx_builder *b = builder(enc);
    b->shader->stage = MESA_SHADER_VERTEX;
 
-   /* Apple's applegpu_g17p vs68 witness emits UVSW indices 0..67 and staging
-    * half-indices 0..134. A shared source keeps this codec test independent
-    * of the register allocator's synthetic no-spill pressure. */
+   /* The promoted Apple vs68 witness grounds the same dense UVSW format used
+    * by the opt-in 72-output qualification shape. Exercise indices 0..71 and
+    * staging half-indices 0..142. A shared source keeps this codec test
+    * independent of the register allocator's synthetic no-spill pressure. */
    for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
    agx_stop(b);
@@ -9031,6 +9120,21 @@ TEST_F(AGX3PackBinary, FselZeroNativeLifetimeAndCompareOrder)
       ASSERT_EQ(code.size(), sizeof(native)+4);
       EXPECT_EQ(memcmp(code.data(), native, sizeof(native)),0);
    }
+}
+
+TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(2, AGX_SIZE_32);
+   a.neg = a.cache = true;
+   agx_index c = agx_register(12, AGX_SIZE_32);
+   agx_index t = agx_register(10, AGX_SIZE_32);
+   agx_index f = agx_register(18, AGX_SIZE_32);
+   c.discard = t.discard = f.discard = true;
+   agx_fcmpsel_to(b, agx_register(10, AGX_SIZE_32), a, c, t, f,
+                  AGX_FCOND_EQ);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)

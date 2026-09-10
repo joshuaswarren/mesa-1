@@ -29,6 +29,10 @@
 #define G17P_F16_IO 0
 #endif
 
+#ifndef G17P_VERTEX_OUTPUT_68
+#define G17P_VERTEX_OUTPUT_68 0
+#endif
+
 #ifndef G17P_SAMPLE_RATE_SHADING
 #define G17P_SAMPLE_RATE_SHADING 0
 #endif
@@ -427,7 +431,8 @@
 #define G17P_RASTER_DISCARD 0
 #endif
 
-#if (G17P_F16_IO + G17P_RG16_UNORM + G17P_RGBA16_UNORM +              \
+#if (G17P_F16_IO + G17P_VERTEX_OUTPUT_68 + G17P_RG16_UNORM +           \
+     G17P_RGBA16_UNORM +                                                \
      G17P_RGBA16_UINT + G17P_RGBA16_SINT + G17P_RGBA32_UINT +           \
      G17P_RGBA32_SINT +                                                  \
      G17P_RG16_SNORM + G17P_R32_UINT + G17P_R32_SFLOAT +              \
@@ -452,7 +457,12 @@
 #error "select exactly one guarded G17P oracle"
 #endif
 
-#if G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
+#if G17P_VERTEX_OUTPUT_68
+#include "g17p_vulkan_vertex_output_68_frag.h"
+#include "g17p_vulkan_vertex_output_68_vert.h"
+#define G17P_VERT_SPV g17p_vulkan_vertex_output_68_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_vertex_output_68_frag_spv
+#elif G17P_SAMPLE_RATE_SHADING || G17P_MSAA_COVERAGE == 1
 #include "g17p_vulkan_sample_rate_frag.h"
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
@@ -1404,6 +1414,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_OUTPUT_68
+#define PROBE_NAME "g17p-vulkan-vertex-output-68"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_MULTI_VIEWPORT == 2
 #define PROBE_NAME "g17p-vulkan-multi-viewport-dynamic-viewport"
 #define READBACK_IMAGE_USAGE 0
@@ -2146,6 +2161,8 @@ main(void)
    }
 #endif
    const bool record_only =
+      (G17P_VERTEX_OUTPUT_68 &&
+       getenv("G17P_VERTEX_OUTPUT_68_RECORD_ONLY") != NULL) ||
       (G17P_TEXTURE_ALPHA_COMPOSITE &&
        getenv("G17P_TEXTURE_ALPHA_COMPOSITE_RECORD_ONLY") != NULL) ||
       (G17P_IMPLICIT_LOD &&
@@ -2345,6 +2362,12 @@ main(void)
    free(physical_devices);
    if (!physical)
       die("no T8140 device has a graphics-and-transfer queue");
+
+#if G17P_VERTEX_OUTPUT_68
+   if (properties.limits.maxVertexOutputComponents < 68 ||
+       properties.limits.maxFragmentInputComponents < 68)
+      die("T8140/G17P 68-component vertex-output candidate is not enabled");
+#endif
 
 #if G17P_DYNAMIC_BLEND
    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT available_dynamic3 = {
@@ -5112,7 +5135,7 @@ main(void)
 #if G17P_TEXTURE_ORACLE || G17P_VERTEX_FORMAT || G17P_INSTANCE_RATE ||   \
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT ||        \
    G17P_INDEX_RESTART ||                                                \
-   G17P_INDIRECT_DRAW || G17P_F16_IO ||                                 \
+   G17P_INDIRECT_DRAW || G17P_F16_IO || G17P_VERTEX_OUTPUT_68 ||        \
    G17P_BRESENHAM_LINES || G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT ||  \
    G17P_RGBA8_MRT || G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND ||      \
    G17P_RASTER_DISCARD || G17P_SHADER_QUAD_CONTROL ||                   \
@@ -5260,7 +5283,8 @@ main(void)
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_MULTI_VIEWPORT ||           \
    G17P_INDEX_RESTART ||                                                  \
    G17P_INDIRECT_DRAW ||                                                 \
-   G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_BRESENHAM_LINES ||       \
+   G17P_MSAA_SAMPLES > 1 || G17P_F16_IO || G17P_VERTEX_OUTPUT_68 ||      \
+   G17P_BRESENHAM_LINES ||                                                \
    G17P_LOGIC_OP_XOR || G17P_BLEND_CONSTANT || G17P_RGBA8_MRT ||        \
    G17P_DYNAMIC_BLEND || G17P_ADVANCED_BLEND || G17P_RASTER_DISCARD || \
    G17P_SHADER_QUAD_CONTROL || G17P_RG16_UNORM ||                         \
@@ -5347,6 +5371,12 @@ main(void)
           checksum);
 #elif G17P_LAYER_OUTPUT
    printf(PROBE_NAME ": PASS — two instances selected exact layers 0 and 1 "
+                     "immediately/3s; all readback guards unchanged, "
+                     "checksum %016" PRIx64 "\n",
+          checksum);
+#elif G17P_VERTEX_OUTPUT_68
+   printf(PROBE_NAME ": PASS — position plus seventeen float4 user outputs "
+                     "(68 user/72 total UVS words) produced the exact image "
                      "immediately/3s; all readback guards unchanged, "
                      "checksum %016" PRIx64 "\n",
           checksum);

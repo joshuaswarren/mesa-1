@@ -391,6 +391,15 @@ dest_minimum(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
    return 0;
 }
 
+static bool
+ssa_has_bank_constraint(const struct ra_ctx *rctx, unsigned ssa)
+{
+   return BITSET_TEST(rctx->low_gpr, ssa) ||
+          BITSET_TEST(rctx->texture_gpr, ssa) ||
+          BITSET_TEST(rctx->log2_gpr, ssa) ||
+          BITSET_TEST(rctx->high_gpr, ssa);
+}
+
 /*
  * Search the register file for the best contiguous aligned region of the given
  * size to evict when shuffling registers. The region must not contain any
@@ -532,6 +541,12 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
             unsigned width = rctx->ncomps[ssa];
             assert(width && rctx->ssa_to_reg[ssa] == reg);
             if (reg < base + span && reg + width > base) {
+               /* A constrained destination shuffle cannot preserve a banked
+                * victim outside the victim's own encodable register range. */
+               if (ssa_has_bank_constraint(rctx, ssa)) {
+                  valid = false;
+                  break;
+               }
                if (reg < base || reg + width > base + span) {
                   valid = false;
                   break;
