@@ -9,6 +9,7 @@
 #include "vulkan/vulkan_core.h"
 
 #include "agx_helpers.h"
+#include "agx_bg_eot_key.h"
 #include "agx_nir_texture.h"
 #include "agx_pack.h"
 #include "hk_device.h"
@@ -385,8 +386,6 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layer = view->vk.base_array_layer;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
-   const struct util_format_description *desc =
-      util_format_description(p_format);
 
    bool eot =
       usage == HK_DESC_USAGE_BG_EOT || usage == HK_DESC_USAGE_LAYERED_BG_EOT;
@@ -396,6 +395,12 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
     */
    if (eot)
       p_format = util_format_linear(p_format);
+
+   if (eot && dev->dev.chip == AGX_CHIP_G17P)
+      p_format = agx_g17p_rt0_pbe_format(p_format);
+
+   const struct util_format_description *desc =
+      util_format_description(p_format);
 
    bool msaa = view->vk.image->samples > 1;
    struct hk_3d denom = view_denominator(view);

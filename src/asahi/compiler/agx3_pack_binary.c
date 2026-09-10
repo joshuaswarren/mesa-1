@@ -4323,11 +4323,14 @@ agx3_is_g17p_wboit_mrt_eot(const agx_context *ctx,
  * graph before substituting it so no other MRT layout inherits these target
  * selectors or offsets. */
 static bool
-agx3_is_g17p_rgba8_mrt_eot(const agx_context *ctx,
-                           enum agx_isa_encoding enc)
+agx3_is_g17p_dual_word_mrt_eot(const agx_context *ctx,
+                               enum agx_isa_encoding enc,
+                               enum agx_format format)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
-       ctx->is_preamble || ctx->key->no_stop)
+       ctx->is_preamble || ctx->key->no_stop ||
+       (format == AGX_FORMAT_I32 && !ctx->key->g17p_r11g11b10_mrt_eot) ||
+       (format != AGX_FORMAT_I32 && format != AGX_FORMAT_U8NORM))
       return false;
 
    unsigned instructions = 0, get_x = 0, get_y = 0, stores = 0;
@@ -4371,7 +4374,7 @@ agx3_is_g17p_rgba8_mrt_eot(const agx_context *ctx,
                return false;
          } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
-                I->format != AGX_FORMAT_U8NORM || I->dim != AGX_DIM_2D ||
+                I->format != format || I->dim != AGX_DIM_2D ||
                 !I->explicit_coords ||
                 I->src[0].type != AGX_INDEX_IMMEDIATE ||
                 I->src[0].value != 0 || I->src[0].size != AGX_SIZE_16 ||
@@ -4776,7 +4779,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;
 
-   if (agx3_is_g17p_rgba8_mrt_eot(ctx, enc)) {
+   const bool r11g11b10_mrt_eot =
+      agx3_is_g17p_dual_word_mrt_eot(ctx, enc, AGX_FORMAT_I32);
+   if (r11g11b10_mrt_eot ||
+       agx3_is_g17p_dual_word_mrt_eot(ctx, enc, AGX_FORMAT_U8NORM)) {
       /* applegpu_g17p builtin EOT generated from two
        * format3/layout2/components4 attachment keys. SHA256 of the native
        * image: b464eff17eb9adb2a6a68da4ea8a5b43ae6eee16edb28065c474ea2d51026f6c. */
@@ -4799,8 +4805,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       };
       static_assert(sizeof(g17p_rgba8_mrt_eot) == 120,
                     "RGBA8 MRT EOT native length");
+      uint8_t g17p_r11g11b10_mrt_eot[sizeof(g17p_rgba8_mrt_eot)];
       ctx->max_reg = MAX2(ctx->max_reg, 7);
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
+      if (r11g11b10_mrt_eot) {
+         /* The exact dual-target control/coordinate program is grounded by
+          * the native RGBA8 pair above. Each attachment is one tile word;
+          * packed R11G11B10 selects the independently grounded scalar-I32
+          * imgwblk tail (0x35) for both stores. No other bytes encode the
+          * logical format, which remains the PBE descriptor's responsibility. */
+         memcpy(g17p_r11g11b10_mrt_eot, g17p_rgba8_mrt_eot,
+                sizeof(g17p_rgba8_mrt_eot));
+         g17p_r11g11b10_mrt_eot[101] = 0x35;
+         g17p_r11g11b10_mrt_eot[113] = 0x35;
+         return agx3_append(emission, g17p_r11g11b10_mrt_eot,
+                            sizeof(g17p_r11g11b10_mrt_eot));
+      }
+
       return agx3_append(emission, g17p_rgba8_mrt_eot,
                          sizeof(g17p_rgba8_mrt_eot));
    }

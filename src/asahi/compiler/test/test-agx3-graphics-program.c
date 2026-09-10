@@ -112,6 +112,9 @@ main(void)
       AGX3_G17P_RT0_BG_CLEAR, AGX3_G17P_RT0_CLEAR_PUSH_HALFS, false));
    CHECK(agx3_g17p_rt0_bg_shader_resources_match(
       AGX3_G17P_RT0_BG_CLEAR, AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS, false));
+   CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR,
+      AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS, false));
    CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
       AGX3_G17P_RT0_BG_CLEAR, AGX3_G17P_RT0_CLEAR_PUSH_HALFS, true));
    CHECK(agx3_g17p_rt0_bg_shader_resources_match(
@@ -139,6 +142,14 @@ main(void)
                                            &bg_program));
    CHECK(bg_program.length > 0 &&
          bg_program.length <= AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+   bg.clear_push_halfs = AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS;
+   CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                           &bg_program));
+   CHECK(bg_program.length > 0 &&
+         bg_program.length <= AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+   bg.clear_push_halfs = AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS - 1;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
    bg.clear_value_va = 0;
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));

@@ -3330,6 +3330,83 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(rgba8_mrt.shader);
 
+   /* SuperTuxKart's deferred targets are two packed B10G11R11 images. The
+    * tilebuffer carries each as one raw I32 word in partitions 0 and 4. */
+   nir_builder r11_mrt = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P R11G11B10 MRT EOT");
+   coords = nir_trim_vector(
+      &r11_mrt, nir_load_global_invocation_id(&r11_mrt, 32), 2);
+   nir_image_store_block_agx(
+      &r11_mrt, nir_imm_intN_t(&r11_mrt, 0, 16),
+      nir_imm_int(&r11_mrt, 0), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   nir_image_store_block_agx(
+      &r11_mrt, nir_imm_intN_t(&r11_mrt, 1, 16),
+      nir_imm_int(&r11_mrt, 4), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(r11_mrt.shader);
+
+   nir_shader *r11_ungated_shader = nir_shader_clone(NULL, r11_mrt.shader);
+   memset(&part, 0xa5, sizeof(part));
+   key.g17p_rt0_eot_i32 = true;
+   key.g17p_rt0_eot_words = 1;
+   const bool r11_ungated =
+      agx_compile_shader_nir(r11_ungated_shader, &key, &part);
+   const struct agx_shader_part empty_part = {0};
+   ok &= !r11_ungated &&
+         memcmp(&part, &empty_part, sizeof(part)) == 0;
+   ralloc_free(r11_ungated_shader);
+
+   key.g17p_r11g11b10_mrt_eot = true;
+   memset(&part, 0, sizeof(part));
+   const bool r11_mrt_compiled =
+      agx_compile_shader_nir(r11_mrt.shader, &key, &part);
+   uint8_t expected_r11_mrt[sizeof(expected_rgba8_mrt)];
+   memcpy(expected_r11_mrt, expected_rgba8_mrt,
+          sizeof(expected_rgba8_mrt));
+   expected_r11_mrt[101] = 0x35;
+   expected_r11_mrt[113] = 0x35;
+   ok &= r11_mrt_compiled &&
+         part.info.binary_size == sizeof(expected_r11_mrt) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_r11_mrt) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 16 &&
+         memcmp(part.binary, expected_r11_mrt,
+                sizeof(expected_r11_mrt)) == 0;
+   if (r11_mrt_compiled)
+      free(part.binary);
+   ralloc_free(r11_mrt.shader);
+
+   /* The gate does not admit a different partition or an unrelated mixed
+    * raw/normalized pair; both failures leave no partial command text. */
+   nir_builder wrong_r11_mrt = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P raw MRT");
+   coords = nir_trim_vector(
+      &wrong_r11_mrt, nir_load_global_invocation_id(&wrong_r11_mrt, 32), 2);
+   nir_image_store_block_agx(
+      &wrong_r11_mrt, nir_imm_intN_t(&wrong_r11_mrt, 0, 16),
+      nir_imm_int(&wrong_r11_mrt, 0), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   nir_image_store_block_agx(
+      &wrong_r11_mrt, nir_imm_intN_t(&wrong_r11_mrt, 1, 16),
+      nir_imm_int(&wrong_r11_mrt, 8), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   agx_preprocess_nir(wrong_r11_mrt.shader);
+   memset(&part, 0xa5, sizeof(part));
+   const bool wrong_r11_compiled =
+      agx_compile_shader_nir(wrong_r11_mrt.shader, &key, &part);
+   ok &= !wrong_r11_compiled &&
+         memcmp(&part, &empty_part, sizeof(part)) == 0;
+   if (wrong_r11_compiled)
+      free(part.binary);
+   ralloc_free(wrong_r11_mrt.shader);
+   key.g17p_r11g11b10_mrt_eot = false;
+   key.g17p_rt0_eot_i32 = false;
+   key.g17p_rt0_eot_words = 0;
+
    /* Genuine applegpu-nt builtin EOT key0x04021100: scalar I32 tile store. */
    nir_builder i32 = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P I32 RT0 EOT");

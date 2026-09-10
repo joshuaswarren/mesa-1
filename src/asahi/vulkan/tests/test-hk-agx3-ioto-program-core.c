@@ -1579,6 +1579,9 @@ test_g17p_rt0_background_programs(void)
    CHECK(hk_agx3_g17p_rt0_bg_shader_resources_match(
       HK_AGX3_G17P_RT0_BG_CLEAR,
       HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS, false));
+   CHECK(hk_agx3_g17p_rt0_bg_shader_resources_match(
+      HK_AGX3_G17P_RT0_BG_CLEAR,
+      HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS, false));
    CHECK(!hk_agx3_g17p_rt0_bg_shader_resources_match(
       HK_AGX3_G17P_RT0_BG_CLEAR, HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS - 1,
       false));
@@ -1627,6 +1630,18 @@ test_g17p_rt0_background_programs(void)
       AGX_CHIP_G17P, &rgba8_mrt_clear, &rgba8_mrt_clear_program));
    CHECK(rgba8_mrt_clear_program.length ==
          AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+
+   struct hk_agx3_g17p_rt0_bg_program_desc r11_mrt_clear = clear;
+   r11_mrt_clear.clear_push_halfs =
+      HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS;
+   struct hk_agx3_g17p_rt0_bg_program r11_mrt_clear_program;
+   CHECK(hk_agx3_g17p_rt0_bg_program_generate(
+      AGX_CHIP_G17P, &r11_mrt_clear, &r11_mrt_clear_program));
+   CHECK(r11_mrt_clear_program.length <=
+         AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+   r11_mrt_clear.clear_push_halfs--;
+   CHECK(!hk_agx3_g17p_rt0_bg_program_generate(
+      AGX_CHIP_G17P, &r11_mrt_clear, &r11_mrt_clear_program));
 
    /* m1n1 g17p_triangle_source.py, split where HAL200 inserts LoadShader and
     * the default profile-loader prefix before the trailing COPY records. */

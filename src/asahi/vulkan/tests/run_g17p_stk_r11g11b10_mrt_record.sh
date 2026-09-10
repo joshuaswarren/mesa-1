@@ -20,12 +20,8 @@ export LD_PRELOAD="$package_dir/libasahi_noop_drm_shim.so"
 export MESA_SHADER_CACHE_DISABLE=true
 export VK_DRIVER_FILES="$package_dir/icd.json"
 
-if "$package_dir/g17p-vulkan-stk-r11g11b10-mrt" >"$log" 2>&1; then
-   cat "$log"
-   echo "unexpectedly admitted unsupported dual R11G11B10 MRT" >&2
-   exit 1
-fi
+"$package_dir/g17p-vulkan-stk-r11g11b10-mrt" >"$log" 2>&1
 cat "$log"
-grep -Fq 'vkEndCommandBuffer returned -8' "$log"
+grep -Fq 'PASS — feature advertised, shaders compiled, vkEndCommandBuffer succeeded' "$log"
 
-echo "g17p-vulkan-stk-r11g11b10-mrt-record: PASS — exact STK MRT reproduces the current fail-closed admission gap"
+echo "g17p-vulkan-stk-r11g11b10-mrt-record: PASS — exact STK MRT recorded without hardware submission"
