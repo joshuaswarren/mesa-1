@@ -95,6 +95,15 @@ bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* The same, with slot B shifted left by `shift` first (f54). Witnessed for
+ * ISUB at shifts 1..4; see agx3_alu_core.c for the byte ladder. */
+bool agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                                uint16_t dest, const uint16_t src[2],
+                                const enum agx3_alu_hint hints[2],
+                                uint8_t shift, uint16_t wait_mask,
+                                uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                uint8_t *len);
+
 /* Native signed/unsigned32 to float32 with post-RA source hints. */
 bool agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src, bool is_signed,
@@ -333,6 +342,22 @@ bool agx3_alu_fmul_minifloat_mod(
    enum agx3_alu_hint hint, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/*
+ * The same multiply with an independently selected destination width: f10
+ * chooses a scalar half (1) or a float (2) result while f26 keeps the source
+ * at 32 bits. `packHalf2x16` narrows a 32-bit product to a half, and the
+ * optimizer folds that f2f16 into the multiply, so this mixed-width form is
+ * what actually reaches the packer. See the witnesses in agx3_alu_core.c.
+ *
+ * A narrowing multiply with an absolute source is refused: the ABS deposit is
+ * witnessed only against the 32-bit destination.
+ */
+bool agx3_alu_fmul_minifloat_narrow(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs, bool dest_half,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native scalar-half times minifloat with a float32 result. */
 bool agx3_alu_fmul_half_minifloat_to_f32(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
@@ -485,6 +510,29 @@ bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache,
                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                        uint8_t *len);
+
+/*
+ * Reciprocal square root carrying the source's ABS (f30) and NEG (f31)
+ * modifiers, the same two bits f32log2/f32exp2/f32rcp already model on their
+ * own forms. `inversesqrt(abs(x))` is the standard safe form of the idiom and
+ * reached the packer as `rsqrt [s0=32:reg.abs]`, which had no encoding at all.
+ *
+ * Witnessed with `metal-nt -arch applegpu_g17p`, one kernel per modifier,
+ * each a single-field difference from the plain control and every vector
+ * recovered by re-composing through this encoder (tools/decomp.c):
+ *
+ *   o[i] = rsqrt(a[i])         af 01 56 00 02 00 b0 40 00 00
+ *   o[i] = rsqrt(-a[i])        af 01 56 00 02 00 b0 40 01 00   f31
+ *   o[i] = rsqrt(fabs(a[i]))   af 01 56 00 02 00 b0 c0 00 00   f30
+ *   o[i] = rsqrt(-fabs(a[i]))  af 01 56 00 02 00 b0 c0 01 00   both
+ *
+ * The two are separable exactly as they are on exp2: `-fabs` sets both.
+ */
+bool agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, enum agx3_alu_hint hint,
+                           bool dest_cache, uint16_t wait_mask, bool src_neg,
+                           bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                           uint8_t *len);
 
 /*
  * Full-precision base-2 logarithm and exponential.
@@ -646,6 +694,22 @@ bool agx3_alu_hceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/*
+ * The same step with the source's absolute value folded in (f30), which is
+ * what `sqrt(abs(x))` -- the standard safe-sqrt idiom -- lowers to. Witnessed
+ * against Apple's own kernels, a single-field difference from the control:
+ *
+ *   o[i] = sqrt(a[i])          2f 01 56 04 03 00 92 40 00 00
+ *   o[i] = sqrt(fabs(a[i]))    2f 01 56 04 03 00 92 c0 00 00   f30
+ *
+ * NEG is deliberately not exposed here: sqrt of a negative is NaN, no Apple
+ * witness exercises it, and an unwitnessed bit is worse than a refusal.
+ */
+bool agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, enum agx3_alu_hint hint,
+                            bool dest_cache, uint16_t wait_mask, bool src_abs,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native square-root step with a scalar half source and float32 temporary. */
 bool agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest,

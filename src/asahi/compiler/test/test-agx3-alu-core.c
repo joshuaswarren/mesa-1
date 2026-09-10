@@ -3679,12 +3679,220 @@ static void test_native_high_float_registers(void)
    puts("Native full-bank FMUL/FMA:16 exact high-register/lifetime/wait vectors PASS");
 }
 
+
+/*
+ * Source modifiers on the reciprocal-square-root family.
+ *
+ * `inversesqrt(abs(x))` and `sqrt(abs(x))` -- the standard safe forms of both
+ * idioms -- had no encoding at all: f30 was simply not modelled on these two
+ * forms, though f32log2/f32exp2/f32rcp have carried it for a while.
+ *
+ * Apple's own bytes, `metal-nt -arch applegpu_g17p`, one kernel per modifier,
+ * each a single-field difference from the plain control. Every vector was
+ * recovered by re-composing through this encoder, so these are facts about
+ * the encoder rather than readings of a disassembler.
+ */
+static void
+test_native_f32_rsqrt_modifiers(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* o[i] = rsqrt(a[i]) -- the control the three below differ from. */
+   static const uint8_t plain[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                   0x00, 0xb0, 0x40, 0x00, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                false, bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+
+   /* o[i] = rsqrt(-a[i])  -- f31 alone. */
+   static const uint8_t neg[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                 0x00, 0xb0, 0x40, 0x01, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, true,
+                                false, bytes, &len));
+   assert(len == sizeof(neg) && !memcmp(bytes, neg, len));
+
+   /* o[i] = rsqrt(fabs(a[i])) -- f30 alone. */
+   static const uint8_t abs_[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                  0x00, 0xb0, 0xc0, 0x00, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                true, bytes, &len));
+   assert(len == sizeof(abs_) && !memcmp(bytes, abs_, len));
+
+   /* o[i] = rsqrt(-fabs(a[i])) -- both, which is what makes them separable. */
+   static const uint8_t both[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                  0x00, 0xb0, 0xc0, 0x01, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, true,
+                                true, bytes, &len));
+   assert(len == sizeof(both) && !memcmp(bytes, both, len));
+
+   /* The unmodified wrapper must keep emitting the control exactly. */
+   assert(agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, bytes,
+                            &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+}
+
+/*
+ * The square-root step carries the same absolute-value bit. Apple compiles
+ * sqrt() to this step followed by a multiply with the original input, so
+ * `sqrt(abs(x))` sets f30 here and nowhere else.
+ *
+ *   o[i] = sqrt(a[i])        2f 01 56 04 03 00 92 40 00 00
+ *   o[i] = sqrt(fabs(a[i]))  2f 01 56 04 03 00 92 c0 00 00
+ */
+static void
+test_native_sqrt_step_absolute(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   static const uint8_t plain[] = {0x2f, 0x01, 0x56, 0x04, 0x03,
+                                   0x00, 0x92, 0x40, 0x00, 0x00};
+   assert(agx3_alu_sqrt_step_mod(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                 AGX3_ALU_HINT_CACHE, true, 1u << 5, false,
+                                 bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+
+   static const uint8_t abs_[] = {0x2f, 0x01, 0x56, 0x04, 0x03,
+                                  0x00, 0x92, 0xc0, 0x00, 0x00};
+   assert(agx3_alu_sqrt_step_mod(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                 AGX3_ALU_HINT_CACHE, true, 1u << 5, true,
+                                 bytes, &len));
+   assert(len == sizeof(abs_) && !memcmp(bytes, abs_, len));
+
+   /* The plain wrapper is unchanged. */
+   assert(agx3_alu_sqrt_step(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                             AGX3_ALU_HINT_CACHE, true, 1u << 5, bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+}
+
+/*
+ * The multiply's destination width (f10) is selected independently of its
+ * source width (f26), so a 32-bit value scaled by a minifloat lands directly
+ * in a half register. That is the instruction `packHalf2x16(vec2(x * k, ...))`
+ * produces once the f2f16 folds into the multiply, and it had no encoding.
+ *
+ *   o[i] = a[i] * 0.5f        (float o)  19 a1 15 03 80 c0   f10 = 2
+ *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
+ *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
+ */
+static void
+test_native_fmul_minifloat_narrow(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* 32-bit destination: the control, and byte-identical to what the
+    * unmodified entry point already emitted. */
+   static const uint8_t wide[] = {0x19, 0xa1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, false, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(wide) && !memcmp(bytes, wide, len));
+   assert(agx3_alu_fmul_minifloat_mod(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20,
+                                      false, false, AGX3_ALU_HINT_DISCARD,
+                                      1u << 5, bytes, &len));
+   assert(len == sizeof(wide) && !memcmp(bytes, wide, len));
+
+   /* Half destination: one field different. */
+   static const uint8_t narrow[] = {0x11, 0xa1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(narrow) && !memcmp(bytes, narrow, len));
+
+   /* The immediate still sweeps as the minifloat operand. */
+   static const uint8_t narrow2[] = {0x11, 0xc1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x40, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(narrow2) && !memcmp(bytes, narrow2, len));
+
+   /* A half destination may be an odd register half; a 32-bit one may not. */
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, false, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+
+   /* The ABS deposit is witnessed only against a 32-bit destination, so a
+    * narrowing multiply with an absolute source stays refused rather than
+    * inventing a bit. */
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+
+   /* AGX3c has no witness for any of this. */
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+}
+
+
+/*
+ * The subtract's slot-B shift (f54).
+ *
+ * `x * -7` is strength-reduced to `x - (x << 3)`, so a shifted integer
+ * subtract is an ordinary shape rather than an exotic one, and every such
+ * multiply failed the whole shader closed while it had no encoding. It is
+ * NOT a degenerate self-subtraction that should fold to zero: with the shift
+ * it computes -7x.
+ *
+ * Apple, one kernel per shift, `o[i] = a[i] - (c[i] << N)`.
+ */
+static void
+test_native_isub_shift(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const uint16_t src[2] = {0, 4};
+   const enum agx3_alu_hint hints[2] = {AGX3_ALU_HINT_DISCARD,
+                                        AGX3_ALU_HINT_DISCARD};
+
+   static const uint8_t sh[5][10] = {
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x17, 0x05},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xe8, 0x16, 0x05},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x16, 0x15},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xe8, 0x16, 0x15},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x16, 0x05},
+   };
+   for (uint8_t n = 0; n <= 4; ++n) {
+      assert(agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B,
+                                        AGX3_ALU_ISUB, 0, src, hints, n,
+                                        1u << 5, bytes, &len));
+      assert(len == 10 && !memcmp(bytes, sh[n], 10));
+   }
+
+   /* The unshifted wrapper keeps emitting exactly the N = 0 bytes. */
+   assert(agx3_alu_integer_reg(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_ISUB, 0, src,
+                               hints, 1u << 5, bytes, &len));
+   assert(len == 10 && !memcmp(bytes, sh[0], 10));
+
+   /* Apple stops emitting this form at N = 5, so 5 is refused rather than
+    * extrapolated, and the ADD's shifted form belongs to agx3_iadd_encode. */
+   assert(!agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_ISUB,
+                                      0, src, hints, 5, 1u << 5, bytes,
+                                      &len));
+   assert(!agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_IADD,
+                                      0, src, hints, 1, 1u << 5, bytes,
+                                      &len));
+}
+
 int main(void){
    test_native_popcount();
    test_native_minifloat_half_select();
    test_native_bit_andc();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
+   test_native_f32_rsqrt_modifiers();
+   test_native_sqrt_step_absolute();
+   test_native_fmul_minifloat_narrow();
+   test_native_isub_shift();
    test_native_f32_log2_exp2();
    test_native_f32_log2_exp2_modifiers();
    test_native_f32_floor_ceil();

@@ -82,24 +82,39 @@ agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, bool src_abs,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || ((dest | src) & 1) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~UINT16_C(0x3f)))
       return false;
    /* Apple sqrt emits this step followed by FMUL with the original input.
-    * Ordinary rsqrt is a distinct opcode and cannot replace this operation. */
+    * Ordinary rsqrt is a distinct opcode and cannot replace this operation.
+    *
+    * f30 folds the source's absolute value in, so `sqrt(abs(x))` needs no
+    * separate move. Witnessed as a single-field difference against the plain
+    * control; see agx3_alu_core.h for the byte pair. */
    const struct agx3_field_kv base[] = {{9,2},{10,2},{25,2},{26,2}};
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[12] = {
       {2,dest},{18,src},{11,dest_cache},
       {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
+      {30,src_abs},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[5+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,11,out,len);
+      fields[6+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
+   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,12,out,len);
+}
+
+bool
+agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_sqrt_step_mod(enc, dest, src, hint, dest_cache, wait_mask,
+                                 false, out, len);
 }
 
 bool
@@ -131,10 +146,42 @@ agx3_alu_fmul_minifloat_mod(
    enum agx3_alu_hint hint, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   return agx3_alu_fmul_minifloat_narrow(enc, dest, src, immediate,
+                                         dest_cache, src_abs, false, hint,
+                                         wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmul_minifloat_narrow(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs, bool dest_half,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
-       src >= 256 || ((dest | src) & 1) || immediate > 0xff ||
+       src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
+       immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* f10 is the DESTINATION width and f26 the source's; they are independent,
+    * exactly as on f32rcp. A 32-bit source multiplied by a minifloat straight
+    * into a half destination is therefore one instruction, not a multiply
+    * plus a narrowing move -- which is what NIR hands the packer for
+    * `packHalf2x16(vec2(x * k, ...))`.
+    *
+    * Witnessed with `metal-nt -arch applegpu_g17p`, a single-field difference
+    * from the all-32-bit control, and re-composed byte-exactly through this
+    * encoder:
+    *
+    *   o[i] = a[i] * 0.5f        (float o)  19 a1 15 03 80 c0   f10 = 2
+    *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
+    *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
+    *
+    * The ABS deposit below is witnessed on the 32-bit destination only, so a
+    * narrowing multiply with an absolute source stays refused. */
+   if (dest_half && src_abs)
       return false;
 
    /* Fresh Apple mul_scale: 0983150180c0 is loaded f32 * minifloat0x02
@@ -143,7 +190,7 @@ agx3_alu_fmul_minifloat_mod(
     * it shares add's operand routing, but its wait fields are80..85.
     */
    const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 2}, {25, 1}, {26, 2},
+      {9, 2}, {10, dest_half ? 1 : 2}, {25, 1}, {26, 2},
       {42, 2}, {43, 2}, {60, 2}, {74, 2},
    };
    struct agx3_field_kv fields[12] = {
@@ -946,7 +993,7 @@ agx3_alu_bit_width(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
       if(src[i]>=256 || (!narrow && (src[i]&1)) || (unsigned)hints[i]>AGX3_ALU_HINT_CACHE)
          return false;
    const struct agx3_alu_form *f=&agx3_alu_forms[op][0];
-   struct agx3_field_kv base[20],ov[13];unsigned nb=0,n=0;
+   struct agx3_field_kv base[20],ov[14];unsigned nb=0,n=0;
    for(unsigned i=0;i<f->nbase;i++){
       unsigned field=f->base[i].f;bool wait=false;
       for(unsigned j=0;j<f->nwait;j++)wait|=field==f->wait[j];
@@ -1030,9 +1077,44 @@ agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   return agx3_alu_integer_reg_shift(enc, op, dest, src, hints, 0, wait_mask,
+                                     out, len);
+}
+
+/*
+ * The same two forms with slot B shifted left first (f54).
+ *
+ * `a - (b << N)` is how a multiply by a small negative constant is strength
+ * reduced -- `x * -7` becomes `x - (x << 3)` -- so this is not a rare shape,
+ * and without it every such multiply failed the whole shader closed. Note it
+ * is NOT a degenerate self-subtraction: with the shift it computes -7x.
+ *
+ * Witnessed against Apple, one kernel per shift, everything else identical
+ * (`o[i] = a[i] - (c[i] << N)`, `metal-nt -arch applegpu_g17p`):
+ *
+ *   N = 0   1f 01 56 00 02 00 10 a8 17 05   f54 absent
+ *   N = 1   1f 01 56 00 02 00 10 e8 16 05   f54 = 1
+ *   N = 2   1f 01 56 00 02 00 10 a8 16 15   f54 = 2
+ *   N = 3   1f 01 56 00 02 00 10 e8 16 15   f54 = 3
+ *   N = 4   1f 01 56 00 02 00 10 a8 16 05   f54 = 4
+ *
+ * Apple stops emitting this form at N = 5, so the shift is capped at the four
+ * witnessed non-zero amounts rather than extrapolated.
+ */
+bool
+agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                 uint16_t dest, const uint16_t src[2],
+                 const enum agx3_alu_hint hints[2], uint8_t shift,
+                 uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    if(enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
       (op != AGX3_ALU_IADD && op != AGX3_ALU_ISUB) ||
       dest >= 256 || (dest & 1) || (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+   /* Only the subtract's shift is witnessed; the add reaches its shifted
+    * form through agx3_iadd_encode, which models it separately. */
+   if (shift != 0 && (op != AGX3_ALU_ISUB || shift > 4))
       return false;
    for(unsigned i=0;i<2;i++)
       if(src[i]>=256 || (src[i]&1) || (unsigned)hints[i]>AGX3_ALU_HINT_CACHE)
@@ -1054,6 +1136,9 @@ agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
    }
    for(unsigned i=0;i<f->nwait;i++)
       if(wait_mask&(1u<<i))ov[n++]=(struct agx3_field_kv){f->wait[i],1};
+   /* f54, slot B's shift. Zero is the form's own absence, so only deposit a
+    * real shift; that keeps every previously encodable add byte-identical. */
+   if(shift)ov[n++]=(struct agx3_field_kv){54,shift};
    return agx3_bind_compose(enc,f->mnemonic,f->ep,base,nb,ov,n,out,len);
 }
 
@@ -2265,13 +2350,15 @@ agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache,
-                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                  uint8_t *len)
+agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, bool src_neg, bool src_abs,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    /* f10 and f26 are the destination's and source's widths; the half form
-    * sets both to 1, the 32-bit form to 2. */
+    * sets both to 1, the 32-bit form to 2. f30 and f31 fold the source's
+    * absolute value and negation in, exactly as on f32log2/f32exp2/f32rcp;
+    * see agx3_alu_core.h for the four witnessed bytes. */
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || (dest & 1) || (src & 1) ||
        (wait_mask & ~UINT16_C(0x3f)) ||
@@ -2280,15 +2367,26 @@ agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, 2}, {26, 2},
    };
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[13] = {
       {2, dest}, {18, src}, {11, dest_cache},
       {27, hint == AGX3_ALU_HINT_CACHE},
       {29, hint == AGX3_ALU_HINT_DISCARD},
+      {30, src_abs}, {31, src_neg},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[5 + i] =
+      fields[7 + i] =
          (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
-   return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 11, out, len);
+   return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 13, out, len);
+}
+
+bool
+agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  enum agx3_alu_hint hint, bool dest_cache,
+                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                  uint8_t *len)
+{
+   return agx3_alu_f32rsqrt_mod(enc, dest, src, hint, dest_cache, wait_mask,
+                                false, false, out, len);
 }
 
 /* log2/exp2 share independently selected f10 destination and f26 source
