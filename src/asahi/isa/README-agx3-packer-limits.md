@@ -452,16 +452,59 @@ elements, so a scalar `float` and a `half2` are the same instruction. Read
 f54 as a 32-bit-word mask instead and `float[]` looks like an outlier that
 falsifies the whole reading; it is not an outlier, it is the clue.
 
-f2 is the data register and f16 the index register (both swept across the
-kernels above). **f56 and f57 are NOT yet resolved** -- f57 tracks the total
-access size in bytes except for the two-byte case, where it is 4 -- and
-`agx3_tps_desc`'s `frame_region` ("witnessed 1..6; exact taxonomy remains
-unknown") is not mapped to either.
+f2 is the data register and f16 the index register, both swept across the
+kernels above.
 
-That is why this is recorded rather than implemented. A wrong field here
-miscompiles a *spill*, which corrupts arbitrary shader state rather than one
-value, so it is the last place to guess. Resolve f56, f57 and `frame_region`
-by the same one-field-at-a-time sweep first.
+#### The three unknown fields are now resolved
+
+- **f57 is `byte_offset`.** Proven with three `float[32]` arrays in one kernel,
+  128 bytes apart: their accesses come back with f57 = **4, 132, 260** — steps
+  of exactly 128, over a four-byte frame header. In single-array kernels f57
+  was 4, 8 and 16, which looked like it was tracking the *element size*; it was
+  not, the array simply starts at an element-aligned base. One array cannot
+  distinguish those two readings. Two do.
+- **f56 is `shift`,** the scaling applied to the index: half → 1, four-byte →
+  2, eight-byte → 3. Sixteen-byte elements come back with f56 = 0 and a
+  pre-scaled index, so shift is witnessed at 0..3 and never 4.
+- **f41 is `frame_region`, and it is 1** in every dynamic-index witness (the
+  static-offset spills use 2).
+- The component mask f54 is witnessed at **1, 3, 7 and 15** — `float3` and
+  `half3` supply the 7 — so every contiguous mask Mesa can produce is covered.
+
+`byte_offset = 0` composes, and the existing `tps_ok()` gate already admits
+every combination above (mask 1..15, shift 0..3, frame_region 1..6).
+
+#### What actually blocks it: f66 is welded into the baseline
+
+`tps_baseline()` pins **f66 = 1** on every load, as if it were a form constant.
+It is not. Apple varies it, and *every* dynamic-index load witnessed here has
+f66 = **0**:
+
+```
+in-tree corpus vector   6f 00 54 00 00 0a 49 01 01 40 03 00   f66 = 1, index 0
+Apple float4 v[64]      6f 00 54 0e 0c 0a 57 01 04 00 02 00   f66 = 0, index 12
+Apple half3  v[64]      6f 00 54 06 06 0a 4d 01 02 80 03 00   f66 = 0, index 6
+```
+
+So the in-tree encoder **cannot emit any of these instructions**: composing the
+correct field vector yields byte 9 with an extra 0x40 every time. That, not the
+three fields above, is the real blocker — and it is the same defect shape as
+the ALU wait/lifetime bits described under "Standing defect" below, and as the
+texture guards that folded LOD mode into a predicate: *an orthogonal field
+modelled as part of a form*.
+
+What f66 selects is **not determined**. It is not index-present (the f66 = 1
+vector has index r0, which is a real register), not the slot (both use slot 6),
+and not obviously the offset. Six witnesses all sit on one side of it, so
+nothing here separates the two values.
+
+**This is where the work stops.** The three fields it was sent to resolve are
+resolved; a fourth, previously unrecorded, is not. Adding a knob for f66 would
+reproduce these six witnesses byte-exactly while guessing the policy for every
+shape not among them — and the consumer is *register spilling*, where a wrong
+field corrupts arbitrary shader state rather than one value and would present
+as unrelated failures across every future run. Determine what selects f66
+first; the encoding is otherwise ready and needs no new form.
 
 ### Closed: `.abs` on a comparison source (`fcmpsel`)
 
