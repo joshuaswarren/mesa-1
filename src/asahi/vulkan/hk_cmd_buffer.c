@@ -527,6 +527,27 @@ hk_g17p_launch_trace_enabled(void)
 }
 
 /*
+ * Terminate every native G17P compute launch with Apple's strong cache flush
+ * (barrier flags 5) instead of the weak ordering barrier (flags 0).
+ *
+ * AGX2 flushes after every launch via hk_cdm_cache_flush(); the G17P native
+ * dispatch path does not, so back-to-back dispatches in one CDM stream have no
+ * write->read dependency. That is the shape of the G17P meta copy paths. This
+ * is a one-boot probe for whether that gap is the Hyprland GMMU read fault
+ * ZINK_DEBUG=sync cures; it is off by default because it cannot be decided
+ * host-side.
+ */
+bool
+hk_g17p_strong_dispatch_flush_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled =
+         debug_get_bool_option("HK_G17P_STRONG_DISPATCH_FLUSH", false);
+   return enabled != 0;
+}
+
+/*
  * Per-submission and per-allocation address tracing. These fire on every queue
  * submit and every command BO, so at desktop frame rates they cost an unbuffered
  * stderr write per frame and bury everything else in the journal. They stay

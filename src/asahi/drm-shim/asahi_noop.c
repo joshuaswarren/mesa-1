@@ -1050,11 +1050,85 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+/* A submission's ordering is carried entirely by the barrier fields in each
+ * command header and by which ioctl the in/out syncobjs ride on. Both are
+ * write-only from userspace: the kernel is the only thing that has ever read
+ * them, so a mistake in what Honeykrisp asks for and a kernel that does not
+ * honour the request look identical from a readback that comes back stale.
+ * Set ASAHI_SHIM_SUBMIT_LOG to a path and every submit ioctl is appended to
+ * it, one line per command, exactly as the kernel would parse it. */
+static void
+asahi_log_submit(const struct drm_asahi_submit *submit)
+{
+   const char *path = getenv("ASAHI_SHIM_SUBMIT_LOG");
+   if (!path)
+      return;
+
+   FILE *log = fopen(path, "a");
+   if (!log)
+      return;
+
+   static unsigned ioctl_index;
+   fprintf(log, "submit %u in_syncs=%u out_syncs=%u bytes=%u\n", ioctl_index++,
+           submit->in_sync_count, submit->out_sync_count, submit->cmdbuf_size);
+
+   const uint8_t *cmdbuf = (const uint8_t *)(uintptr_t)submit->cmdbuf;
+   uint32_t offset = 0;
+   while (offset + sizeof(struct drm_asahi_cmd_header) <= submit->cmdbuf_size) {
+      struct drm_asahi_cmd_header header;
+      memcpy(&header, cmdbuf + offset, sizeof(header));
+
+      const char *name = header.cmd_type == DRM_ASAHI_CMD_RENDER    ? "render"
+                         : header.cmd_type == DRM_ASAHI_CMD_COMPUTE ? "compute"
+                         : header.cmd_type == DRM_ASAHI_SET_VERTEX_ATTACHMENTS
+                            ? "set-vertex-attachments"
+                         : header.cmd_type == DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS
+                            ? "set-fragment-attachments"
+                         : header.cmd_type == DRM_ASAHI_SET_COMPUTE_ATTACHMENTS
+                            ? "set-compute-attachments"
+                            : "unknown";
+
+      fprintf(log, "  cmd %s type=%u size=%u vdm_barrier=%u cdm_barrier=%u",
+              name, header.cmd_type, header.size, header.vdm_barrier,
+              header.cdm_barrier);
+
+      /* The declared control-stream extent is the other write-only field the
+       * kernel acts on. Print it: a stream whose declared end is far past the
+       * records it actually contains is indistinguishable from a correct one
+       * until the hardware reads the gap. */
+      if (header.cmd_type == DRM_ASAHI_CMD_COMPUTE &&
+          header.size >= sizeof(struct drm_asahi_cmd_compute)) {
+         struct drm_asahi_cmd_compute compute;
+         memcpy(&compute, cmdbuf + offset + sizeof(header), sizeof(compute));
+         fprintf(log, " cdm_base=0x%llx cdm_end=0x%llx cdm_len=%llu",
+                 (unsigned long long)compute.cdm_ctrl_stream_base,
+                 (unsigned long long)compute.cdm_ctrl_stream_end,
+                 (unsigned long long)(compute.cdm_ctrl_stream_end -
+                                      compute.cdm_ctrl_stream_base));
+      } else if (header.cmd_type == DRM_ASAHI_CMD_RENDER &&
+                 header.size >= sizeof(struct drm_asahi_cmd_render)) {
+         struct drm_asahi_cmd_render render;
+         memcpy(&render, cmdbuf + offset + sizeof(header), sizeof(render));
+         fprintf(log, " vdm_base=0x%llx",
+                 (unsigned long long)render.vdm_ctrl_stream_base);
+      }
+      fprintf(log, "\n");
+
+      offset += sizeof(header) + header.size;
+   }
+   if (offset != submit->cmdbuf_size)
+      fprintf(log, "  ragged walk ended at %u of %u\n", offset,
+              submit->cmdbuf_size);
+
+   fclose(log);
+}
+
 static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
    submit_calls++;
+   asahi_log_submit(submit);
    if (queue_progress_lifecycle_case()) {
       const struct drm_asahi_sync *syncs =
          (const void *)(uintptr_t)submit->syncs;
