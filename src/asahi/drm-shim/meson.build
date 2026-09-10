@@ -462,6 +462,24 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  # Whether a readback copy is ordered after the render that produced it is
+  # carried entirely by drm_asahi_cmd_header::vdm_barrier and by which ioctl
+  # the out-syncobjs ride on. Both are write-only from userspace, so a driver
+  # that asks for the wrong thing and a kernel that ignores the right thing
+  # look identical from a stale readback. Record the submissions and assert
+  # the request. The script carries its own negative control.
+  test(
+    'hk_g17p_copy_after_render_order',
+    prog_python,
+    args : [
+      files('../vulkan/tests/test-g17p-copy-after-render-order.py'),
+      meson.current_build_dir() / '../../..',
+    ],
+    depends : [_dev_icd, libasahi_noop_drm_shim, g17p_offscreen_triangle],
+    suite : ['asahi', 'g17p-copy-order'],
+    timeout : 60,
+  )
+
   g17p_image_copy_3d_fail_env = environment(
     g17p_image_copy_3d_environment)
   g17p_image_copy_3d_fail_env.set('ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')

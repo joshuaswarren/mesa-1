@@ -1101,8 +1101,32 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .dimensions = dimensions,
    };
 
-   if (!hk_agx3_g17p_native_compute_dispatch_append(&program.launch, &direct,
-                                                     &sink)) {
+   /* Every launch already ends in a barrier record; the only open question is
+    * its flags. This path passes 0, a barrier that orders the launches but
+    * does not make the producer's writes visible to the consumer. Every other
+    * compute path in the driver flushes: hk_dispatch_with_usc_launch() calls
+    * hk_cdm_cache_flush() after each AGX2 launch, and hk_dispatch_precomp_g17p()
+    * passes Apple's witnessed strong value 5 for AGX_BARRIER_ALL. So the
+    * "flush after every launch" policy hk_cdm_cache_flush() documents is not
+    * actually held on the one path every API dispatch and every vk_meta copy,
+    * fill and buffer update on G17P goes through.
+    *
+    * A missing write->read dependency here is invisible until two dispatches
+    * in one CDM stream are producer and consumer, which is exactly the shape
+    * of the G17P meta copy paths: the compressed copies emit one dispatch per
+    * block with nothing in between, and merge_control_streams() concatenates
+    * adjacent CDM streams at hk_EndCommandBuffer, so independent copies share
+    * a stream too.
+    *
+    * This is a candidate for the Hyprland GMMU read fault that ZINK_DEBUG=sync
+    * cures, and it is unproven: it cannot be settled host-side, because the
+    * shim executes nothing and both flag values encode. Ship it as a one-boot
+    * probe rather than a default, so it can be A/B'd on hardware without
+    * moving the thirteen stream oracles that currently pin the weak shape.
+    */
+   const uint8_t barrier_flags = hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &program.launch, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }

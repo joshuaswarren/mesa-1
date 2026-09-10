@@ -611,7 +611,7 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    executable(
+    g17p_offscreen_triangle = executable(
       'g17p-offscreen-triangle',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],
