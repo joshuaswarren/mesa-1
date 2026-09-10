@@ -124,6 +124,19 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * corpus, 122 in the three-query one) and no differential explains it, so it
  * is carried verbatim and deliberately unnamed.
  *
+ * f77 and f78 are the SAME PHYSICAL BITS, and f84 chooses which identity
+ * applies.  With f84=2 (and f88 set) the composer takes f77 and refuses f78;
+ * with f84=3 (and f88 clear) it takes f78 and refuses f77; it never accepts
+ * both.  Both deposit identically -- byte 6 high nibble and byte 7 -- and they
+ * differ only in range: f77 stops at 191, while every f78 value tested up to
+ * 256 encodes.  Apple emits the f84=3/f78 form in single-query kernels and the
+ * f84=2/f77 form once two or more queries are live, which is why the
+ * per-query differential above is expressed in f77.
+ *
+ * This entry point emits the f84=2/f77 variant, the one witnessed whenever
+ * more than one query is live.  The single-query f78 variant is reachable
+ * through the enumerated witnessed-site replay, not here.
+ *
  * Values outside the composer's tables are refused by the composer itself.
  * AGX3c is refused: this differential is an AGX3b/G17P corpus.
  */
