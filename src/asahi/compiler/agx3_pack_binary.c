@@ -6840,19 +6840,46 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
                c.value <= 0xff && !c.abs && !c.neg && !c.memory;
+            /*
+             * A bare narrow operand is SIGN-extended, the same rule the
+             * comment above names and the same one agx_optimizer_signext()
+             * enforces for iadd: it fuses a SIGNEXT into the multiply-add by
+             * dropping it and asserting the survivor carries no ABS. So
+             * `a*b + int(short c)` arrives with no modifier at all, which
+             * this gate used to refuse.
+             *
+             * Apple, one kernel per variable, everything else held fixed:
+             *
+             *   a*b + int(short  c)   9f 00 56 00 02 08 00 40 d0 2e 6a 00
+             *   a*b + int(ushort c)   9f 00 56 00 02 08 00 40 d0 2e 2a 00
+             *   a*b + int c           9f 00 56 00 02 08 00 40 d0 2f 2a 00
+             *
+             * f54 is slot C's width (1 = 16-bit, 2 = 32-bit) and f58 its
+             * sign-extension, set for `short` and clear for `ushort`.
+             */
             const bool addend_ok =
                no_addend || addend_imm ||
                (agx3_src_is_register(c) && !c.memory &&
                 agx_channels(c) == 1 && !(c.abs && c.neg) &&
                 (c.size == AGX_SIZE_32 || (wide && c.size == AGX_SIZE_64) ||
-                 (c.size == AGX_SIZE_16 && (c.abs || c.neg))));
+                 c.size == AGX_SIZE_16));
             const bool addend_reg = !no_addend && !addend_imm;
 
+            /*
+             * The multiplicand may likewise be narrower than the result.
+             * f24 is slot A's width and f28 its sign-extension:
+             *
+             *   int(short  a)*129 + int(short  c)
+             *      9f 00 56 00 02 02 04 02 10 2a 66 00      f24 = 1, f28 = 1
+             *   int(ushort a)*129 + int(ushort c)
+             *      9f 00 56 00 02 02 04 02 10 2a 22 00      f24 = 1, f28 = 0
+             */
             const bool a_ok = agx3_src_is_register(a) && !a.memory &&
                agx_channels(a) == 1 &&
                (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
                        : ((wide || !a.abs) && !a.neg &&
-                          a.size == AGX_SIZE_32));
+                          (a.size == AGX_SIZE_32 ||
+                           a.size == AGX_SIZE_16)));
 
             if (a_ok &&
                 (mult_imm || mult_reg) && addend_ok) {
@@ -6862,8 +6889,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_64 = wide,
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
-                  .src_a_16 = narrow,
-                  .src_a_sign_extend = wide && !a.abs,
+                  .src_a_16 = a.size == AGX_SIZE_16,
+                  /* Only the newly admitted narrow-A-into-wider-result case
+                   * gains a sign-extension; a 16-bit result is unaffected by
+                   * it, so its bytes stay exactly as they were. */
+                  .src_a_sign_extend =
+                     (wide || (!narrow && a.size == AGX_SIZE_16)) && !a.abs,
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
@@ -6881,9 +6912,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src_c = addend_reg ? c.value : 0,
                   .src_c_16 = addend_reg && c.size == AGX_SIZE_16,
                   .src_c_64 = addend_reg && c.size == AGX_SIZE_64,
+                  /* Bare narrow addend: sign-extend unless ABS marks it
+                   * unsigned. Identical to the old `c.neg` for every shape
+                   * that already encoded (ABS gave 0, NEG gave 1); only the
+                   * bare case, which used to be refused, is new. */
                   .src_c_sign_extend =
                      addend_reg && (wide ? (c.size != AGX_SIZE_64 && !c.abs)
-                                         : c.neg),
+                                         : (c.size == AGX_SIZE_16 && !c.abs)),
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
