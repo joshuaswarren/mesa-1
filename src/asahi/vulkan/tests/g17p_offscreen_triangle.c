@@ -390,8 +390,19 @@
 #define TEXTURE_PIXEL_BYTES 4
 #endif
 
+#ifndef G17P_DYNAMIC_VERTEX_INPUT
+#define G17P_DYNAMIC_VERTEX_INPUT 0
+#endif
+
 #if G17P_VERTEX_FORMAT < 0 || G17P_VERTEX_FORMAT > 3
 #error "select a valid G17P vertex-format oracle"
+#endif
+
+/* The dynamic variant reuses a vertex-format oracle's data and expected image
+ * and changes only how the vertex input is supplied, so that a difference is
+ * attributable to VK_EXT_vertex_input_dynamic_state alone. */
+#if G17P_DYNAMIC_VERTEX_INPUT && !G17P_VERTEX_FORMAT
+#error "dynamic vertex input needs a vertex-format oracle to drive"
 #endif
 
 #if G17P_VERTEX_FORMAT &&                                                  \
@@ -1166,6 +1177,16 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 1 && G17P_DYNAMIC_VERTEX_INPUT
+#define PROBE_NAME "g17p-vulkan-dynamic-vertex-input-rgba8-unorm"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 2 && G17P_DYNAMIC_VERTEX_INPUT
+#define PROBE_NAME "g17p-vulkan-dynamic-vertex-input-rg16-sint"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 1
 #define PROBE_NAME "g17p-vulkan-vertex-rgba8-unorm"
 #define READBACK_IMAGE_USAGE 0
@@ -1173,6 +1194,11 @@
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_VERTEX_FORMAT == 2
 #define PROBE_NAME "g17p-vulkan-vertex-rg16-sint"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_VERTEX_FORMAT == 3 && G17P_DYNAMIC_VERTEX_INPUT
+#define PROBE_NAME "g17p-vulkan-dynamic-vertex-input-rg16-sfloat"
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
@@ -1546,10 +1572,11 @@ VK_FN(vkEnumeratePhysicalDevices);
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR ||        \
+   G17P_DYNAMIC_VERTEX_INPUT
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
-#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL || G17P_DYNAMIC_VERTEX_INPUT
 VK_FN(vkEnumerateDeviceExtensionProperties);
 #endif
 VK_FN(vkGetPhysicalDeviceProperties);
@@ -1615,6 +1642,9 @@ VK_FN(vkCmdSetViewport);
 VK_FN(vkCmdSetColorBlendEnableEXT);
 VK_FN(vkCmdSetColorBlendEquationEXT);
 VK_FN(vkCmdSetColorWriteMaskEXT);
+#endif
+#if G17P_DYNAMIC_VERTEX_INPUT
+VK_FN(vkCmdSetVertexInputEXT);
 #endif
 #if G17P_MSAA_COVERAGE == 1 || G17P_MSAA_COVERAGE == 3
 VK_FN(vkCmdSetSampleMaskEXT);
@@ -1717,7 +1747,7 @@ fnv1a64(const uint8_t *bytes, size_t size)
    return hash;
 }
 
-#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL || G17P_DYNAMIC_VERTEX_INPUT
 static bool
 has_device_extension(VkPhysicalDevice physical, const char *name)
 {
@@ -2311,11 +2341,12 @@ main(void)
    G17P_MULTIVIEW || G17P_LAYER_OUTPUT || G17P_DYNAMIC_BLEND ||           \
    G17P_ADVANCED_BLEND || G17P_MULTI_VIEWPORT ||                           \
    G17P_TEXTURE_ALPHA_COMPOSITE || G17P_SAMPLE_RATE_SHADING ||            \
-   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR
+   G17P_MSAA_COVERAGE || G17P_SHADER_QUAD_CONTROL || G17P_YCBCR ||        \
+   G17P_DYNAMIC_VERTEX_INPUT
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
 
-#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL
+#if G17P_INDIRECT_DRAW || G17P_SHADER_QUAD_CONTROL || G17P_DYNAMIC_VERTEX_INPUT
    LOAD_INSTANCE(instance, vkEnumerateDeviceExtensionProperties);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
@@ -2570,6 +2601,23 @@ main(void)
       die("texture optimal images lack sampled/upload support");
 #endif
 
+#if G17P_DYNAMIC_VERTEX_INPUT
+   VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT dynamic_vi_available = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+   };
+   VkPhysicalDeviceFeatures2 dynamic_vi_features2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &dynamic_vi_available,
+   };
+   vkGetPhysicalDeviceFeatures2(physical, &dynamic_vi_features2);
+   if (!dynamic_vi_available.vertexInputDynamicState)
+      die("vertexInputDynamicState is not advertised");
+   if (!has_device_extension(physical,
+                             VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME))
+      die("VK_EXT_vertex_input_dynamic_state is not advertised");
+#endif
+
 #if G17P_VERTEX_FORMAT
    VkFormatProperties vertex_format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VERTEX_INPUT_FORMAT,
@@ -2701,6 +2749,16 @@ main(void)
       VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME,
    };
 #endif
+#if G17P_DYNAMIC_VERTEX_INPUT
+   VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT dynamic_vi_enabled = {
+      .sType =
+         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+      .vertexInputDynamicState = VK_TRUE,
+   };
+   const char *dynamic_vi_device_extensions[] = {
+      VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
+   };
+#endif
 #if G17P_SHADER_QUAD_CONTROL
    VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_enabled = {
       .sType =
@@ -2720,7 +2778,9 @@ main(void)
 #endif
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-#if G17P_SHADER_QUAD_CONTROL
+#if G17P_DYNAMIC_VERTEX_INPUT
+      .pNext = &dynamic_vi_enabled,
+#elif G17P_SHADER_QUAD_CONTROL
       .pNext = &quad_enabled,
 #elif G17P_F16_IO || G17P_MULTIVIEW || G17P_YCBCR
       .pNext = &enabled11,
@@ -2757,7 +2817,10 @@ main(void)
 #elif G17P_LOGIC_OP_XOR
       .pEnabledFeatures = &blend_features,
 #endif
-#if G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
+#if G17P_DYNAMIC_VERTEX_INPUT
+      .enabledExtensionCount = 1,
+      .ppEnabledExtensionNames = dynamic_vi_device_extensions,
+#elif G17P_HOST_IMAGE_COPY || G17P_TEXTURE_3D || G17P_BRESENHAM_LINES
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = device_extensions,
 #elif G17P_DYNAMIC_BLEND
@@ -2836,6 +2899,9 @@ main(void)
    LOAD_DEVICE(device, vkCmdSetColorBlendEnableEXT);
    LOAD_DEVICE(device, vkCmdSetColorBlendEquationEXT);
    LOAD_DEVICE(device, vkCmdSetColorWriteMaskEXT);
+#endif
+#if G17P_DYNAMIC_VERTEX_INPUT
+   LOAD_DEVICE(device, vkCmdSetVertexInputEXT);
 #endif
 #if G17P_MSAA_COVERAGE == 1 || G17P_MSAA_COVERAGE == 3
    LOAD_DEVICE(device, vkCmdSetSampleMaskEXT);
@@ -4449,7 +4515,8 @@ main(void)
    };
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
    G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE ||          \
+   G17P_DYNAMIC_VERTEX_INPUT
    const VkDynamicState dynamic_states[] = {
 #if G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT
       VK_DYNAMIC_STATE_VIEWPORT,
@@ -4464,6 +4531,9 @@ main(void)
       VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT,
       VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT,
       VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT,
+#endif
+#if G17P_DYNAMIC_VERTEX_INPUT
+      VK_DYNAMIC_STATE_VERTEX_INPUT_EXT,
 #endif
 #if G17P_MSAA_COVERAGE == 1 || G17P_MSAA_COVERAGE == 3
       VK_DYNAMIC_STATE_SAMPLE_MASK_EXT,
@@ -4489,7 +4559,8 @@ main(void)
       .pColorBlendState = &blend,
 #if G17P_DYNAMIC_BLEND || G17P_TEXTURE_ALPHA_COMPOSITE ||                 \
    G17P_MULTI_VIEWPORT_DYNAMIC_VIEWPORT ||                               \
-   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE
+   G17P_MULTI_VIEWPORT_DYNAMIC_SCISSOR || G17P_MSAA_COVERAGE ||          \
+   G17P_DYNAMIC_VERTEX_INPUT
       .pDynamicState = &dynamic_state,
 #endif
       .layout = pipeline_layout,
@@ -4833,6 +4904,26 @@ main(void)
    const VkDeviceSize vertex_format_offset = VERTEX_FORMAT_BIND_OFFSET;
    vkCmdBindVertexBuffers(command_buffer, VERTEX_FORMAT_BINDING, 1,
                           &vertex_format.buffer, &vertex_format_offset);
+#if G17P_DYNAMIC_VERTEX_INPUT
+   /* Identical binding and attribute to the static pipeline above; the only
+    * difference is that they arrive here instead of at pipeline creation. */
+   const VkVertexInputBindingDescription2EXT dynamic_vi_binding = {
+      .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+      .binding = VERTEX_FORMAT_BINDING,
+      .stride = VERTEX_FORMAT_STRIDE,
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+      .divisor = 1,
+   };
+   const VkVertexInputAttributeDescription2EXT dynamic_vi_attribute = {
+      .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+      .location = 0,
+      .binding = VERTEX_FORMAT_BINDING,
+      .format = VERTEX_INPUT_FORMAT,
+      .offset = VERTEX_FORMAT_ATTRIBUTE_OFFSET,
+   };
+   vkCmdSetVertexInputEXT(command_buffer, 1, &dynamic_vi_binding, 1,
+                          &dynamic_vi_attribute);
+#endif
 #elif G17P_INSTANCE_RATE
    const VkBuffer vertex_buffers[] = {vertex.buffer, instance_data.buffer};
    const VkDeviceSize vertex_offsets[] = {
