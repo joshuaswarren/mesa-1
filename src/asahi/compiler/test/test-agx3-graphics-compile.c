@@ -5618,22 +5618,38 @@ main(int argc, char **argv)
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
    };
-   bool all_ok = test_custom_border_samplers(false, 0) &&
-                 test_custom_border_samplers(true, 0) &&
-                 test_custom_border_samplers(true, 1) &&
-                 test_custom_border_samplers(true, 2) &&
-                 test_indexed_sampler_rebase_boundaries() &&
-                 test_indexed_array_and_3d_compile();
+   bool all_ok = true;
 
-   if (!test_g17p_quad_control_modes())
-      all_ok = false;
-   if (!test_g17p_divergent_quad_loop())
-      all_ok = false;
-   if (!test_g17p_alpha_coverage_boundary())
-      all_ok = false;
+   /* Name whichever check failed. An && chain short-circuits, so the ones
+    * after the first failure never ran, and none of these reported anything
+    * on their own -- between them a failure was a bare exit status with an
+    * empty log, which is indistinguishable from the test not having run. */
+#define CHECK_NAMED(label, expr)                                               \
+   do {                                                                        \
+      if (!(expr)) {                                                           \
+         fputs(label " failed\n", stderr);                                     \
+         all_ok = false;                                                       \
+      }                                                                        \
+   } while (0)
 
-   if (!test_g17p_vkcube_fragment_main())
-      all_ok = false;
+   CHECK_NAMED("custom_border_samplers(plain)",
+               test_custom_border_samplers(false, 0));
+   CHECK_NAMED("custom_border_samplers(custom)",
+               test_custom_border_samplers(true, 0));
+   CHECK_NAMED("custom_border_samplers(custom,1)",
+               test_custom_border_samplers(true, 1));
+   CHECK_NAMED("custom_border_samplers(custom,2)",
+               test_custom_border_samplers(true, 2));
+   CHECK_NAMED("indexed_sampler_rebase_boundaries",
+               test_indexed_sampler_rebase_boundaries());
+   CHECK_NAMED("indexed_array_and_3d_compile",
+               test_indexed_array_and_3d_compile());
+   CHECK_NAMED("g17p_quad_control_modes", test_g17p_quad_control_modes());
+   CHECK_NAMED("g17p_divergent_quad_loop", test_g17p_divergent_quad_loop());
+   CHECK_NAMED("g17p_alpha_coverage_boundary",
+               test_g17p_alpha_coverage_boundary());
+   CHECK_NAMED("g17p_vkcube_fragment_main", test_g17p_vkcube_fragment_main());
+#undef CHECK_NAMED
 
    if (!test_g17p_gallium_vertex_param_abi()) {
       fputs("Gallium vertex-parameter ABI is not LDDEV aligned\n", stderr);
@@ -5718,28 +5734,35 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_g17p_eot_block_store())
-      all_ok = false;
+   /* Each of these reports on its own only when it can say something useful
+    * about *how* it differed. Name the one that failed regardless, so a
+    * failure is never a bare exit status with an empty log. */
+#define RUN(fn)                                                                \
+   do {                                                                        \
+      if (!fn()) {                                                             \
+         fputs(#fn " failed\n", stderr);                                       \
+         all_ok = false;                                                       \
+      }                                                                        \
+   } while (0)
 
-   if (!test_g17p_background_reload_staging())
-      return 1;
-   if (!test_g17p_background_clear())
-      all_ok = false;
-   if (!test_g17p_background_f16_clear_narrowing())
-      all_ok = false;
-   if (!test_g17p_half_norm8_epilog())
-      all_ok = false;
-   if (!test_g17p_fragment_io_matrix())
-      all_ok = false;
-   if (!test_g17p_pipeline_statistics_fs_prolog())
-      all_ok = false;
+   RUN(test_g17p_eot_block_store);
+   RUN(test_g17p_background_reload_staging);
+   RUN(test_g17p_background_clear);
+   RUN(test_g17p_background_f16_clear_narrowing);
+   RUN(test_g17p_half_norm8_epilog);
+   RUN(test_g17p_fragment_io_matrix);
+   RUN(test_g17p_pipeline_statistics_fs_prolog);
+#undef RUN
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {
       for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
          if (cases[i].g17p_only && encodings[e] != AGX_ISA_ENCODING_AGX3B)
             continue;
-         if (!run_case(&cases[i], encodings[e]))
+         if (!run_case(&cases[i], encodings[e])) {
+            fprintf(stderr, "%s %s: case failed\n", enc_name(encodings[e]),
+                    cases[i].name);
             all_ok = false;
+         }
       }
    }
 
