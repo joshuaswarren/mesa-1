@@ -396,6 +396,22 @@ typedef struct {
    /* Invert icond/fcond */
    bool invert_cond : 1;
 
+   /*
+    * G17P carries a texture coordinate offset as an immediate field in the
+    * sample instruction (f43), while the depth comparator is a staged
+    * register. agx_emit_tex() cannot hand the packer both through src[5],
+    * which is one operand, so the offset rides here instead.
+    *
+    * Signed nibble pair, (y << 4) | x, exactly as agx_nir_lower_texture()
+    * packs nir_tex_src_offset. Only meaningful when `offset` is set.
+    *
+    * NOTE: agx_opt_cse.c's instrs_equal() is hand-written and enumerates
+    * fields one at a time. This field is compared there. Anything added
+    * beside it must be too, or two samples differing only in their offset
+    * will CSE into one.
+    */
+   uint8_t offset_xy;
+
    /* TODO: Handle tex ops more efficient */
    enum agx_dim dim       : 4;
    bool offset            : 1;
@@ -448,6 +464,8 @@ typedef struct {
    bool agx3_tex_coord_start : 1;
    bool agx3_tex_coords_staged : 1;
 } agx_instr;
+
+bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
 
 static inline void
 agx_replace_src(agx_instr *I, unsigned src_index, agx_index replacement)

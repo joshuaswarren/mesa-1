@@ -166,22 +166,16 @@ line:
   offset is only witnessed on the immediate and uniform pairs. Kept refused
   rather than encoded from an inference.
 
-- **A shadow sample carrying a coordinate offset.** The instruction is grounded
-  (`1d800ca090002102018800001200`), but `agx_emit_tex()` packs the comparator
-  and the offset into one `src[5]` vector and the comparator staging cannot
-  take it apart. **An earlier revision of this file claimed `nir_lower_tex`
-  folds a constant offset into a shadow coordinate so GLSL never asks for the
-  combination. That is wrong** -- the fold is only legal for an integer texel
-  fetch, and `textureOffset(sampler2DShadow, ...)` reaches the packer with
-  both. It now refuses cleanly (see below); it used to `exit(1)`.
-
-  Implementing it needs the packed offset to stop sharing `src[5]` with the
-  comparator, i.e. a new instruction immediate on `texture_sample`. That is an
-  additive change to `agx_opcodes.py`, but `agx_opt_cse.c`'s `instrs_equal()`
-  is **hand-written and enumerates fields one by one**, so a new immediate that
-  is not added there lets two samples differing only in their offset CSE into
-  one -- a silent wrong result. Do it with that line and a regression test, or
-  not at all.
+- **An array depth comparison gather** (`textureGather(sampler2DArrayShadow,
+  ...)`). Grounded but *not* by composing what is already implemented, which is
+  why it is still refused. Apple's `depth2d_array::gather_compare(s, uv,
+  layer, ref)` is `05800ca490002db4010000001200`: f143 on top of the plain
+  array gather, using the **f77 = 1 register-layer** form with f31/f37 = 3.
+  Its `sample_compare` sibling `1d800ca090002db4010000001200` uses the same
+  f77 = 1. But this packer's `shadow && array` path emits the **f77 = 2
+  packed-layer** form instead. Both forms are real and both are witnessed;
+  which one an array comparison should use is not settled here, and encoding a
+  gather through the f77 = 2 path would be an inference, not a witness.
 
 - **An array sample with both an immediate level/bias and an offset.** f43 is
   one shared immediate slot and the array LOD already claims it. Apple stages

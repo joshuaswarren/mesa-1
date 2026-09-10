@@ -1365,11 +1365,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool sampler_immediate =
       I->nr_srcs == 6 && I->src[4].type == AGX_INDEX_IMMEDIATE;
    const bool immediate = texture_immediate && sampler_immediate;
-   const bool immediate_offset = offset &&
-      I->src[5].type == AGX_INDEX_IMMEDIATE &&
-      I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
-      !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
-      !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
+   /* agx_emit_tex() publishes the packed offset on the instruction rather
+    * than through src[5], because a comparison sample needs that operand for
+    * its reference value. src[5] still carries the immediate when there is no
+    * comparator, and the two must agree. */
+   const bool immediate_offset = offset && I->offset_xy > 0 &&
+      (shadow || (I->src[5].type == AGX_INDEX_IMMEDIATE &&
+                  I->src[5].value == I->offset_xy &&
+                  !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
+                  !I->src[5].cache && !I->src[5].discard && !I->src[5].kill));
    /* AGX3B coordinates are copied to the fixed staging bank before SMP. COPY
     * and CEM each name a seven-bit source half-register, so the entire vector
     * must end below half 128. AGX3C retains its independently recovered direct
@@ -1406,7 +1410,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (shadow
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
-              agx_channels(I->src[5]) != 1 || I->src[5].value > 126)
+              agx_channels(I->src[5]) != 1 || I->src[5].value > 126 ||
+              (offset && !immediate_offset))
            : offset ? !immediate_offset : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
@@ -1424,22 +1429,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
        /* The coordinate offset rides in the sample's own f43/f51/f141 and is
-        * orthogonal to the LOD shape, the array layer, the gather bit and
-        * the descriptor operand class -- see agx3_tex_core.c for the witness
-        * table. Two exclusions survive here for reasons that are not the
-        * ISA's: an array sample carrying an *immediate* level or bias
-        * already spends f43 on that immediate (Apple stages the offset
-        * instead and selects f141 = 2, a form with no slot plan here), and a
-        * shadow sample cannot carry both values because agx_emit_tex() packs
-        * the comparator and the offset into one src[5] vector, which the
-        * comparator staging below cannot take apart. GLSL *does* ask for the
-        * latter -- the coordinate fold is only legal for an integer texel
-        * fetch -- so textureOffset(sampler2DShadow, ...) refuses here. The
-        * instruction itself is grounded (1d800ca090002102018800001200);
-        * encoding it needs the offset to stop sharing src[5] with the
-        * comparator. See README-agx3-packer-limits.md. */
+        * orthogonal to the LOD shape, the array layer, the gather bit, the
+        * depth comparison and the descriptor operand class -- see
+        * agx3_tex_core.c for the witness table. One exclusion survives here
+        * and it is not the ISA's: an array sample carrying an *immediate*
+        * level or bias already spends f43 on that immediate, and Apple
+        * stages the offset separately and selects f141 = 2, a form with no
+        * slot plan here. 3D and cube offsets have no witness. */
        (offset &&
-        (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube || shadow ||
+        (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube ||
          (array && (biased_lod || (explicit_lod && immediate_lod))))) ||
        /* A depth comparison is orthogonal to the LOD shape on a plain 2D
         * sample. The array and cube comparisons use their own packed layer /
@@ -1666,7 +1664,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .gather = gather_component,
       .shadow = shadow,
       .offset = offset,
-      .offset_xy = offset ? I->src[5].value : 0,
+      .offset_xy = offset ? I->offset_xy : 0,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER

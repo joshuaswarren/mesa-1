@@ -4342,6 +4342,9 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
       agx_immediate(0), offset, AGX_DIM_2D,
       AGX_LOD_MODE_AUTO_LOD, 0, true, false, false, AGX_GATHER_NONE, false);
    I->mask = 15;
+   /* The packed offset reaches the packer on the instruction, not through
+    * src[5]: a comparison sample needs that operand for its reference. */
+   I->offset_xy = 0xf1;
    agx_stop(b);
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
@@ -10320,6 +10323,7 @@ TEST_F(AGX3PackBinary, OffsetSampleRidesEveryLodMode)
          agx_immediate(0), offset, AGX_DIM_2D, r.mode, 0,
          /*offset=*/true, false, false, AGX_GATHER_NONE, false);
       I->mask = 15;
+      I->offset_xy = 0x11;
       agx_stop(b);
       SCOPED_TRACE(r.name);
       pack(b, /*expect_ok=*/true);
@@ -10351,6 +10355,7 @@ TEST_F(AGX3PackBinary, OffsetSampleMatchesNativeFieldTriple)
       agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
       /*offset=*/true, false, false, AGX_GATHER_NONE, false);
    I->mask = 15;
+   I->offset_xy = 0x11;
    agx_stop(b);
    const std::vector<uint8_t> stream = pack(b);
 
@@ -10471,6 +10476,123 @@ TEST_F(AGX3PackBinary, ShadowGatherKeepsTheFourTexelMask)
       agx_stop(b);
       pack(b, /*expect_ok=*/mask == 15u);
    }
+}
+
+/*
+ * A comparison sample takes a coordinate offset. Apple's
+ * depth2d::sample_compare(s, uv, ref, int2(1,1)) is
+ * 1d800ca090002102018800001200 -- the plain comparison plus the same
+ * f43/f51/f141 triple every other sample takes.
+ *
+ * The reason this could not be encoded before was not the ISA: agx_emit_tex()
+ * collected the comparator and the packed offset into one src[5] vector, and
+ * the comparator staging cannot take that apart. The offset now rides on the
+ * instruction (I->offset_xy) and src[5] belongs to the comparator alone.
+ */
+TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_index compare = agx_register(2, AGX_SIZE_32);
+   compare.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I->mask = 1;
+   I->offset_xy = 0x11;
+   agx_stop(b);
+   const std::vector<uint8_t> stream = pack(b);
+
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_TEX_W32;
+   d.mask = 1;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   d.shadow = true;
+   d.offset = true;
+   d.offset_xy = 0x11;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want(bytes, bytes + len);
+   EXPECT_NE(std::search(stream.begin(), stream.end(), want.begin(),
+                         want.end()),
+             stream.end());
+
+   /* An offset the instruction does not carry must refuse rather than encode
+    * as offset (0,0), which native spells as the plain form. */
+   agx_builder *b2 = builder(enc);
+   b2->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   auto *I2 = agx_texture_sample_to(
+      b2, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I2->mask = 1;
+   agx_stop(b2);
+   pack(b2, /*expect_ok=*/false);
+}
+
+/*
+ * REGRESSION GUARD. agx_opt_cse.c's instrs_equal() is hand-written and
+ * enumerates the instruction's immediates one at a time, so a new field that
+ * is not added there lets two otherwise-identical instructions collapse into
+ * one. I->offset_xy is such a field: without its line in instrs_equal(), two
+ * samples of the same texture at the same coordinate but *different* texel
+ * offsets would CSE together and the second would silently read the first's
+ * texels.
+ *
+ * This asserts the two are not equal. Delete the offset_xy line from
+ * instrs_equal() and this test fails.
+ */
+TEST_F(AGX3PackBinary, DifferentTexelOffsetsDoNotCSETogether)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+
+   agx_index d0 = agx_register(8, AGX_SIZE_32);
+   d0.channels_m1 = 3;
+   agx_index d1 = agx_register(16, AGX_SIZE_32);
+   d1.channels_m1 = 3;
+
+   agx_index off = agx_immediate(0x11);
+   off.size = AGX_SIZE_32;
+
+   auto *a = agx_texture_sample_to(
+      b, d0, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   a->mask = 15;
+   a->offset_xy = 0x11;
+
+   auto *c = agx_texture_sample_to(
+      b, d1, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   c->mask = 15;
+   c->offset_xy = 0x22; /* the only difference */
+
+   EXPECT_NE(a->offset_xy, c->offset_xy);
+   EXPECT_FALSE(agx_instrs_equal_for_cse(a, c));
+
+   /* ... and two with the same offset still compare equal, so the guard is
+    * not simply always-false. */
+   c->offset_xy = 0x11;
+   c->dest[0] = d0;
+   EXPECT_TRUE(agx_instrs_equal_for_cse(a, c));
 }
 
 TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)

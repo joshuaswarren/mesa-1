@@ -86,7 +86,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
         nir_src_num_components(tex->src[offset_src].src) !=
            (packed_offset ? 1u : 2u) ||
         (packed_offset && nir_src_as_uint(tex->src[offset_src].src) > 0xff) ||
-        three_d || cube || tex->is_shadow))
+        three_d || cube ||
+        /* A comparison sample takes the offset -- agx_emit_tex() hands it to
+         * the packer on the instruction rather than through src[5], which the
+         * comparator needs. An array comparison does not: its layer form is
+         * not settled (see README-agx3-packer-limits.md). */
+        (tex->is_shadow && tex->is_array)))
       return false;
 
    const unsigned expected_srcs =
