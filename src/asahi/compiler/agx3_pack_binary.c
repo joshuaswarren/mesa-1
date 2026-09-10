@@ -7024,7 +7024,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                no_addend || addend_imm ||
                (agx3_src_is_register(c) && !c.memory &&
                 agx_channels(c) == 1 && !(c.abs && c.neg) &&
-<<<<<<< HEAD
                 ((!narrow && c.size == AGX_SIZE_32) ||
                  (wide && c.size == AGX_SIZE_64) ||
                  (c.size == AGX_SIZE_16 &&
@@ -7044,27 +7043,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                widening &&
                (a.size == AGX_SIZE_16 ||
                 (mult_reg && m.size == AGX_SIZE_16));
-=======
-                (c.size == AGX_SIZE_32 || (wide && c.size == AGX_SIZE_64) ||
-                 c.size == AGX_SIZE_16));
-            const bool addend_reg = !no_addend && !addend_imm;
-
-            /*
-             * The multiplicand may likewise be narrower than the result.
-             * f24 is slot A's width and f28 its sign-extension:
-             *
-             *   int(short  a)*129 + int(short  c)
-             *      9f 00 56 00 02 02 04 02 10 2a 66 00      f24 = 1, f28 = 1
-             *   int(ushort a)*129 + int(ushort c)
-             *      9f 00 56 00 02 02 04 02 10 2a 22 00      f24 = 1, f28 = 0
-             */
-            const bool a_ok = agx3_src_is_register(a) && !a.memory &&
-               agx_channels(a) == 1 &&
-               (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
-                       : ((wide || !a.abs) && !a.neg &&
-                          (a.size == AGX_SIZE_32 ||
-                           a.size == AGX_SIZE_16)));
->>>>>>> codex/gpu-desktop-merge
 
             if (a_ok &&
                 (mult_imm || mult_reg) && addend_ok &&
@@ -7077,16 +7055,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
                   .src_a_16 = a.size == AGX_SIZE_16,
-<<<<<<< HEAD
                   .src_a_sign_extend =
                      (wide || widening_half_product) && !a.abs,
-=======
-                  /* Only the newly admitted narrow-A-into-wider-result case
-                   * gains a sign-extension; a 16-bit result is unaffected by
-                   * it, so its bytes stay exactly as they were. */
-                  .src_a_sign_extend =
-                     (wide || (!narrow && a.size == AGX_SIZE_16)) && !a.abs,
->>>>>>> codex/gpu-desktop-merge
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
@@ -8153,65 +8123,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
                constant.type == AGX_INDEX_IMMEDIATE && constant.value == 0 &&
                reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
-<<<<<<< HEAD
                (I->shift == 0 || I->shift == 4);
-=======
-               I->shift == 4;
-            /*
-             * A bare 16-bit integer source is SIGN-extended. That is the
-             * compiler-wide convention, not a guess: agx_optimizer_signext()
-             * fuses a SIGNEXT into the add by dropping it and asserting the
-             * surviving source carries no ABS, and agx_pack.c spells the same
-             * rule for AGX2 as `zext = abs || immediate`. So `int16_t(x) + k`
-             * reaches the packer with no modifier at all -- which this path
-             * refused, while the register+register form beside it already
-             * encoded. The gap was partial, not a regression.
-             *
-             * Apple's own bytes, one kernel per immediate, everything else
-             * held fixed (`metal-nt -arch applegpu_g17p`):
-             *
-             *   int(short x) + 1    9f 01 56 00 02 02 00 08 15 0c   f15 = 1
-             *   int(short x) + 2    9f 01 56 00 02 04 00 08 15 0c   f15 = 2
-             *   int(short x) + 7    9f 01 56 00 02 0e 00 08 15 0c   f15 = 7
-             *   int(short x) + 17   9f 01 56 00 02 22 00 08 15 0c   f15 = 17
-             *   uint(ushort x) + 7  9f 01 56 00 02 0e 00 08 15 04   f43 clear
-             *
-             * f15 is the slot-A immediate and f43 slot B's sign-extension,
-             * set for `short` and clear for `ushort` -- the same pair the
-             * register+register form already drives.
-             */
-            const bool narrow_bare_src =
-               reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg;
->>>>>>> codex/gpu-desktop-merge
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
                 !constant.neg && constant.value <= 0xff &&
                 agx3_src_is_register(reg) && !reg.memory &&
                 agx_channels(reg) == 1 && !(reg.abs && reg.neg) &&
-<<<<<<< HEAD
                 (reg.size == AGX_SIZE_32 ||
                  (reg.size == AGX_SIZE_16 &&
                   (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
                   .dest_cache = signed_half_widen && I->dest[0].cache,
-=======
-                (reg.size == AGX_SIZE_32 || reg.size == AGX_SIZE_16)) {
-               const struct agx3_iadd_desc d = {
-                  .dest = I->dest[0].value,
-                  /* Unchanged for every shape that already encoded: only the
-                   * newly admitted bare-half source gains the cache hint. */
-                  .dest_cache = narrow_bare_src && I->dest[0].cache,
->>>>>>> codex/gpu-desktop-merge
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
                   .src_16 = reg.size == AGX_SIZE_16,
-<<<<<<< HEAD
                   .sign_extend = signed_half_widen || reg.neg,
-=======
-                  .sign_extend = signed_half_shift4 || reg.neg ||
-                                 narrow_bare_src,
->>>>>>> codex/gpu-desktop-merge
                   .shift = I->shift,
                   .wait_mask = wait,
                };
