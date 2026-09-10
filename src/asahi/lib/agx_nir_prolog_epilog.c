@@ -269,17 +269,49 @@ agx_nir_vs_prolog_raw(nir_builder *b, const void *key)
    agx_nir_vs_prolog_impl(b, key, true);
 }
 
+/*
+ * Map a lowered load_input to its slot in the vertex input ABI.
+ *
+ * The prolog publishes every attribute component as a full 32-bit value in
+ * its own pair of half-registers: agx_nir_vs_prolog_impl() fetches with
+ * nir_load_input(b, 4, 32, ...) and exports each channel at
+ * AGX_ABI_VIN_ATTRIB(4 * attrib + comp) = 2 * (8 + i), two halves apart.
+ * struct agx_vs_prolog_key carries no bit sizes at all -- only a component
+ * mask in these same 32-bit slot units -- so the prolog cannot publish
+ * anything narrower even in principle.
+ *
+ * A main shader may still declare a narrower input, since we advertise
+ * VK_KHR_16bit_storage's storageInputOutput16. That does not change the slot
+ * arithmetic: lowered NIR IO keeps nir_intrinsic_component() in 32-bit slot
+ * components even for 16-bit loads (nir_validate asserts component +
+ * num_components <= 4), and the only way two 16-bit values share one
+ * component is nir_io_semantics::high_16bits, which nir_lower_io never sets
+ * and which is produced for varyings alone (nir_lower_mediump's 16-bit
+ * varying slots and nir_opt_vectorize_io, neither of which we run). So one
+ * declared component is still exactly one 32-bit ABI slot, and all the main
+ * shader has to do is narrow the value the prolog handed it.
+ */
+static unsigned
+vs_input_abi_slot(nir_intrinsic_instr *intr)
+{
+   ASSERTED nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   assert(!sem.high_16bits && "VS inputs never share a 32-bit slot");
+   assert(intr->def.bit_size <= 32 && "64-bit attributes need two ABI slots");
+
+   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
+   unsigned comp = nir_intrinsic_component(intr);
+   assert(comp + intr->def.num_components <= 4);
+
+   return 4 * idx + comp;
+}
+
 static bool
 gather_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
 
-   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
-   unsigned comp = nir_intrinsic_component(intr);
-
-   assert(intr->def.bit_size == 32 && "todo: push conversions up?");
-   unsigned base = 4 * idx + comp;
+   unsigned base = vs_input_abi_slot(intr);
 
    b->cursor = nir_before_instr(&intr->instr);
    BITSET_WORD *comps_read = data;
@@ -305,16 +337,33 @@ lower_input_to_prolog(nir_builder *b, nir_intrinsic_instr *intr, void *_data)
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
 
-   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
-   unsigned comp = nir_intrinsic_component(intr);
-
-   assert(intr->def.bit_size == 32 && "todo: push conversions up?");
-   unsigned base = 4 * idx + comp;
+   unsigned base = vs_input_abi_slot(intr);
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *val =
-      nir_load_exported_agx(b, intr->def.num_components, intr->def.bit_size,
-                            .base = AGX_ABI_VIN_ATTRIB(base));
+
+   /* Always read the ABI slot at its published width. Loading at the narrow
+    * width would be silently wrong rather than merely slow: agx_load_exported
+    * strides the base by the DESTINATION size, so a 16-bit load would take
+    * component 1 out of component 0's high half.
+    */
+   nir_def *val = nir_load_exported_agx(b, intr->def.num_components, 32,
+                                        .base = AGX_ABI_VIN_ATTRIB(base));
+
+   if (intr->def.bit_size != 32) {
+      /* The prolog's vertex fetch already converted the attribute into the
+       * 32-bit slot with the format's own numeric type (agx_nir_lower_vbo
+       * emits f2f32/i2i32/u2u32), so narrowing by the declared base type
+       * recovers the value exactly.
+       */
+      nir_alu_type base_type =
+         nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr));
+
+      assert((base_type == nir_type_float || base_type == nir_type_int ||
+              base_type == nir_type_uint) &&
+             "narrow vertex input without a numeric type");
+
+      val = nir_convert_to_bit_size(b, val, base_type, intr->def.bit_size);
+   }
 
    nir_def_replace(&intr->def, val);
    return true;
