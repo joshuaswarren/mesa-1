@@ -51,6 +51,7 @@ main(void)
 
    const struct hk_g17p_buffer_to_image_copy volume = {
       .chip = AGX_CHIP_G17P,
+      .plane_format_renderable = true,
       .format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
       .layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       .image_type = VK_IMAGE_TYPE_3D,
@@ -265,6 +266,7 @@ main(void)
 
    const struct hk_g17p_buffer_to_image_copy vkcube = {
       .chip = AGX_CHIP_G17P,
+      .plane_format_renderable = true,
       .format = VK_FORMAT_R8G8B8A8_UNORM,
       .layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       .image_type = VK_IMAGE_TYPE_2D,
@@ -298,8 +300,20 @@ main(void)
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
    bad.format = VK_FORMAT_R8G8B8A8_UINT;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
+   /* R16G16B16A16_SFLOAT is renderable, so the driver advertises
+    * COLOR_ATTACHMENT/TRANSFER_DST for it and the copy must be serviced.
+    * It used to be refused for not being in a hardcoded allowlist, and that
+    * refusal is not local: it fails vkEndCommandBuffer, so Zink drops the
+    * whole frame and latches device_lost permanently. GL_RGBA16F is one of
+    * the formats that hung SuperTuxKart that way. */
    bad.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
+   /* A format the driver does NOT advertise as renderable still fails closed:
+    * the generic vk_meta path below the gate renders through an EOT view and
+    * has nowhere to put a non-renderable destination. */
+   bad.plane_format_renderable = false;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&bad));
+   bad.plane_format_renderable = true;
    bad = vkcube;
    bad.copy_extent.width--;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));
@@ -373,10 +387,15 @@ main(void)
    ycbcr.copy_extent = (VkExtent3D){32, 32, 1};
    CHECK(hk_g17p_buffer_to_image_copy_supported(&ycbcr));
 
+   /* The 10-bit-in-16 plane is not renderable, so the caller reports it as
+    * such and the copy falls back rather than being serviced through an EOT
+    * view it has no format for. */
    ycbcr.format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
    ycbcr.plane_count = 2;
    ycbcr.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+   ycbcr.plane_format_renderable = false;
    CHECK(!hk_g17p_buffer_to_image_copy_supported(&ycbcr));
+   ycbcr.plane_format_renderable = true;
 
    /* A volume upload is split into depth-one EOT views. The buffer image
     * stride remains the API rowLength*imageHeight product while Z advances

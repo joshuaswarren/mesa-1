@@ -301,30 +301,25 @@ hk_g17p_buffer_to_image_copy_supported(
       return false;
    }
 
-   switch (plane_format) {
-   case VK_FORMAT_R8_UNORM:
-   case VK_FORMAT_R8G8_UNORM:
-   case VK_FORMAT_B8G8R8A8_UNORM:
-   case VK_FORMAT_B8G8R8A8_SRGB:
-   case VK_FORMAT_R8G8B8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_SRGB:
-   case VK_FORMAT_R8G8B8A8_UINT:
-   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-   /* The path below this gate is generic vk_meta: it renders the staged
-    * texels through a native single-slice EOT view of the destination, so
-    * what it needs from a format is colour-attachment support, not membership
-    * of a list.  R32_UINT has that -- ail_pixel_format[PIPE_FORMAT_R32_UINT]
-    * is renderable and hk_get_format_features() therefore advertises
-    * COLOR_ATTACHMENT, TRANSFER_DST and BLIT_DST for it -- and leaving it out
-    * refused a copy the driver advertises as supported.  vkQuake uploads its
-    * whole lightmap surface-index texture that way, on the staging command
-    * buffer it shares with every other texture in the batch, so the refusal
-    * did not lose one image: it invalidated the batch. */
-   case VK_FORMAT_R32_UINT:
-      break;
-   default:
+   /* A hardcoded allowlist here refused copies the driver advertises as
+    * supported, and the consequence is far worse than one lost image: the
+    * refusal fails vkEndCommandBuffer, so Zink skips vkQueueSubmit for the
+    * WHOLE frame and latches device_lost, after which nothing that process
+    * draws ever reaches the GPU again -- with no GL error at any point.
+    * SuperTuxKart hangs that way, and vkQuake's black world was one refused
+    * R32_UINT lightmap upload invalidating the staging batch it shares with
+    * every other texture.
+    *
+    * What the generic vk_meta path below actually needs is colour-attachment
+    * support, which is exactly ail_pixel_format[].renderable -- the same bit
+    * hk_get_format_features() reports as COLOR_ATTACHMENT. Ask that instead.
+    * Formats that are not renderable still fail closed and fall back to the
+    * ordinary copy path. */
+   if (!copy->plane_format_renderable)
       return false;
-   }
+   /* Multi-plane destinations select their plane format above; a renderable
+    * plane is still required for each one. */
+   (void)plane_format;
 
    const uint32_t width =
       (copy->image_extent.width / width_scale) >> copy->mip_level;
