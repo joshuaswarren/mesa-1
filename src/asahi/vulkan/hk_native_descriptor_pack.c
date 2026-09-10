@@ -209,7 +209,13 @@ hk_pack_native_pbe(unsigned generation,
    const bool array = generation == 9 &&
                       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
                       legacy->layers > 1;
-   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
+   /* The end-of-tile store is the only producer of a multisample write
+    * target, and it only ever addresses one non-array layer. */
+   const bool multisample =
+      generation == 9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
+   if ((!array && !multisample &&
+        legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (generation != 9 || legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
@@ -217,9 +223,14 @@ hk_pack_native_pbe(unsigned generation,
         legacy->layout != AGX_LAYOUT_TWIDDLED &&
         legacy->layout != AGX_LAYOUT_GPU) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
-       legacy->samples != AGX_SAMPLE_COUNT_2 ||
+       (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
+                       legacy->samples != AGX_SAMPLE_COUNT_4)
+                    : legacy->samples != AGX_SAMPLE_COUNT_2) ||
        legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        (!array && legacy->layers != 1) ||
+       (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
+                        legacy->level != 0 || legacy->levels != 1 ||
+                        legacy->unk_mipmapped || legacy->compressed)) ||
        (generation != 9 && (legacy->level != 0 || legacy->levels != 1 ||
                             legacy->unk_mipmapped)) ||
        legacy->srgb || legacy->extended ||
@@ -251,7 +262,11 @@ hk_pack_native_pbe(unsigned generation,
       .page_aligned_layers = legacy->page_aligned_layers,
    };
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = array
+   const bool valid = multisample
+      ? agx_pbe_agx3_2d_multisample_pack(
+           generation, &fields,
+           legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
+      : array
       ? (legacy->level == 0 && legacy->levels == 1 &&
          !legacy->unk_mipmapped &&
          agx_pbe_agx3_2d_array_pack(generation, &fields, legacy->layers,

@@ -261,6 +261,15 @@ bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
 bool hk_agx3_g17p_rt0_tile_layout_supported(
    struct agx_tilebuffer_layout *tib);
 
+/* Admit the unresolved multisample colour store. Requires the caller to have
+ * confirmed the named one-boot hardware probe: the end-of-tile program and
+ * the multisample PBE descriptor are both byte-witnessed from Apple's own
+ * encoders, but no G17P silicon has executed the pair. */
+bool hk_agx3_g17p_multisample_store_supported(struct agx_tilebuffer_layout *tib,
+                                              unsigned color_attachment_count,
+                                              bool store_source,
+                                              unsigned target_samples);
+
 bool hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source);

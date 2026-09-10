@@ -6,6 +6,7 @@
 #include "agx_tilebuffer.h"
 #include <assert.h>
 #include "util/format/u_format.h"
+#include "util/u_debug.h"
 #include "layout.h"
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
@@ -21,15 +22,44 @@
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
+/* Diagnostic: admit a tile of exactly 32768 bytes rather than one byte less.
+ *
+ * This exists for one specific question. Four 8-byte samples of RGBA8 at 32x32
+ * need exactly 32768 bytes, so 4x colour misses the 32x32 tile by a single
+ * byte and falls to 32x16 -- and 32x16 is a tile geometry that essentially
+ * nothing else on G17P reaches, because at one sample you would need more than
+ * 31 bytes per pixel to get there and the G17P tile gate admits almost no such
+ * configuration. The hardware symptom of 4x (A01b: rows 0-15 exact, rows 16-31
+ * absent) is the tile height, not a sample count.
+ *
+ * So either the limit really is 32767 and the 32x16 path is broken, or the
+ * limit is 32768 on this part and 4x should never have left 32x32. Setting
+ * AGX_TILE_32K=1 picks the second and changes exactly that one comparison;
+ * the matching SPECLM bound in agx_ioto_state_core.c moves with it. Off by
+ * default: the value here is inherited from G13G and has no G17P witness in
+ * either direction.
+ */
+static bool
+agx_tile_allows_full_32k(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("AGX_TILE_32K", false);
+   return enabled != 0;
+}
+
 /* Select the largest tile size that fits */
 static uint16_t
 agx_select_tile_size(unsigned px_size_B)
 {
-   assert(px_size_B <= (MAX_BYTES_PER_TILE / MIN_TILE_SIZE_PX));
+   const unsigned limit =
+      agx_tile_allows_full_32k() ? 32768 : MAX_BYTES_PER_TILE;
 
-   return ((px_size_B * 32 * 32) <= MAX_BYTES_PER_TILE)   ? (32 * 32)
-          : ((px_size_B * 32 * 16) <= MAX_BYTES_PER_TILE) ? (32 * 16)
-                                                          : MIN_TILE_SIZE_PX;
+   assert(px_size_B <= (limit / MIN_TILE_SIZE_PX));
+
+   return ((px_size_B * 32 * 32) <= limit)   ? (32 * 32)
+          : ((px_size_B * 32 * 16) <= limit) ? (32 * 16)
+                                             : MIN_TILE_SIZE_PX;
 }
 
 static inline unsigned

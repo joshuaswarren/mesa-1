@@ -393,8 +393,15 @@ agx_ioto_g17p_fragment_speclm_build(
        (sample_size_B &&
         ((samples != 1 && samples != 2 && samples != 4) ||
          (sample_size_B & 7) || sample_size_B > 64 ||
-         sample_size_B * samples * imageblock->tile_size_px >= 32768)))
+         sample_size_B * samples * imageblock->tile_size_px > 32768u)))
       return false;
+
+   /* The imageblock bound here is structural -- a tile larger than 32 KiB has
+    * nowhere to live. Which tile a given format and sample count actually gets
+    * is agx_select_tile_size()'s policy, and that stays one byte more
+    * conservative than this unless AGX_TILE_32K says otherwise, so nothing
+    * reaches exactly 32768 by default.
+    */
 
    /* Fresh HAL200 LdShdrTransformFragment witnesses recover three complete
     * one-sample, eight-byte geometry records.  The low six bits of word 2

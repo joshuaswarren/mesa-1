@@ -98,6 +98,22 @@ hk_agx3_g17p_direct_color_resolve_supported(
           hk_agx3_g17p_rt0_tile_layout_supported(tib);
 }
 
+bool
+hk_agx3_g17p_multisample_store_supported(struct agx_tilebuffer_layout *tib,
+                                         unsigned color_attachment_count,
+                                         bool store_source,
+                                         unsigned target_samples)
+{
+   /* The mirror image of the direct resolve: this is the one path that keeps
+    * the samples. It needs storeOp = STORE, a target whose sample count is
+    * exactly the tile's, and the same bounded single-target tile layout the
+    * native EOT substitution covers. */
+   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+          color_attachment_count == 1 && store_source &&
+          target_samples == tib->nr_samples &&
+          hk_agx3_g17p_rt0_tile_layout_supported(tib);
+}
+
 static bool
 hk_agx3_g17p_graphics_state_tail(
    const struct hk_agx3_g17p_graphics_program_desc *desc,

@@ -1482,6 +1482,48 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Unresolved multisample colour store, then a per-sample texelFetch back.
+    # Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_store; the
+    # binary says so and exits non-zero rather than skipping.
+    executable(
+      'g17p-vulkan-msaa-store-fetch2',
+      files('tests/g17p_vulkan_msaa_store_fetch.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-store-fetch4',
+      files('tests/g17p_vulkan_msaa_store_fetch.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Multisample depth attachment: per-sample depth testing, and the ZLS
+    # store/load round trip across two render passes. Needs HK_G17P_MSAA=1 and
+    # HK_G17P_UNVERIFIED_FEATURES=msaa_depth.
+    executable(
+      'g17p-vulkan-msaa-depth2',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-depth4',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-hostcopy-triangle',
       files('tests/g17p_offscreen_triangle.c'),

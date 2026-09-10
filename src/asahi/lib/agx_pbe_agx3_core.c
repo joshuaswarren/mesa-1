@@ -9,6 +9,8 @@
 
 #define AGX_PBE_DIMENSION_2D 2u
 #define AGX_PBE_DIMENSION_2D_ARRAY 3u
+#define AGX_PBE_DIMENSION_2D_MULTISAMPLE 4u
+#define AGX_PBE_SAMPLE_SELECTOR_SHIFT 56u
 #define AGX_PBE_LAYOUT_LINEAR 0u
 #define AGX_PBE_LAYOUT_TWIDDLED 1u
 #define AGX_PBE_LAYOUT_GPU 2u
@@ -172,6 +174,38 @@ agx_pbe_agx3_2d_array_pack(
    word1 |= (uint64_t)fields->page_aligned_layers << 60;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
+   return true;
+}
+
+bool
+agx_pbe_agx3_2d_multisample_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t samples, struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   /* A multisample colour target is never linear and never mipmapped: the
+    * end-of-tile store addresses it through the sample-expanded twiddled
+    * layout. Refuse 8x and every other count: the encoder's selector covers
+    * them, but no tilebuffer geometry does. Gen10 has its own encoder and
+    * its own witness to recover, so it is refused here too.
+    */
+   if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
+       (samples != 2 && samples != 4) ||
+       fields->layout == AGX_PBE_LAYOUT_LINEAR ||
+       !agx_pbe_agx3_2d_pack(generation, fields, out))
+      return false;
+
+   /* PBEStateEncoderGen9 clears word0[59:53] before depositing the selector,
+    * so the two selector bits are the only ones this adds on top of the
+    * single-sample packet.
+    */
+   const uint64_t selector = (uint64_t)((samples >> 2) & 3u);
+   uint64_t word0 = load_le64(&out->bytes[0]);
+   word0 = (word0 & ~UINT64_C(0xf)) | AGX_PBE_DIMENSION_2D_MULTISAMPLE;
+   word0 |= selector << AGX_PBE_SAMPLE_SELECTOR_SHIFT;
+   store_le64(&out->bytes[0], word0);
    return true;
 }
 
