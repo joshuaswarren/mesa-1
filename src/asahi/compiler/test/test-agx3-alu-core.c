@@ -3057,6 +3057,76 @@ static void test_native_select_reg_imm(void)
    }
    puts("Native zero-compare register FSEL: four exact 16/32-bit live/dead vectors PASS");
 
+   /* A negated SECOND comparator, at both result widths. Apple's own
+    * applegpu_g17p output for `select(x, y, a < -b)` against the same kernel
+    * written `a < b`:
+    *
+    *   32-bit result   a <  b   02011f03820a03c08006
+    *                   a < -b   02011f03820a03c88006
+    *   16-bit result   a <  b   02011d03820b0320800a
+    *                   a < -b   02011d03820b0328800a
+    *
+    * One field apart (f65) in the same encoding point, so the negate does not
+    * escalate the form the way the absolute modifiers do. `-a < b` came back
+    * as 02031d01820b0228800a: f65 again, with the operands swapped and the
+    * relation flipped, so there is no bit on the first comparator and that
+    * side must stay refused. */
+   {
+      const bool neg_second[] = {false, true};
+      const bool neg_first[] = {true, false};
+      const bool no_neg[] = {false, false};
+      const uint16_t neg_src32[] = {0, 2, 10, 6};
+      const uint16_t neg_src16[] = {0, 2, 11, 10};
+      const enum agx3_alu_hint dead[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+      uint8_t nbytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t nlen;
+
+      assert(agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, no_neg,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011f03820a03c08006");
+      assert(agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, neg_second,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011f03820a03c88006");
+
+      /* The 16-bit pair is checked as a DELTA. Apple's kernel waits on a
+       * different scoreboard slot than this encoder can spell (f102 rather
+       * than the f107 every checked-in 16-bit vector carries), so its bytes
+       * are not reproducible here operand-for-operand -- but the negate's
+       * effect is: Apple's pair moves byte 6 from 0x20 to 0x28, and so does
+       * this encoder's, from 0xc0 to 0xc8. Same bit, same byte, same form. */
+      uint8_t plain16[AGX3_ALU_MAX_LENGTH];
+      uint8_t plain16_len;
+      assert(agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src16, false, no_abs, no_neg,
+         reg_immediate, dead, 1, true, false, 32, plain16, &plain16_len));
+      exact(plain16, plain16_len, "02011d03820b03c0800a");
+      assert(agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src16, false, no_abs, neg_second,
+         reg_immediate, dead, 1, true, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011d03820b03c8800a");
+      assert(nlen == plain16_len);
+      for (unsigned i = 0; i < nlen; ++i)
+         assert(nbytes[i] == (i == 7 ? (uint8_t)(plain16[i] | 0x08)
+                                     : plain16[i]));
+
+      /* Unwitnessed combinations stay refused. */
+      assert(!agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, neg_first,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      const bool one_abs[] = {true, false};
+      assert(!agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, one_abs, neg_second,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      assert(!agx3_alu_fcmp_select_reg_imm_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, true, no_abs, neg_second,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+   }
+   puts("Native FSEL negated second comparator: four exact vectors PASS");
+
    /* Own Metal kernels isolate fabs on each comparator and retain all three
     * selected-operand forms used by update_lightmap. */
    const bool both_abs[]={true,true};

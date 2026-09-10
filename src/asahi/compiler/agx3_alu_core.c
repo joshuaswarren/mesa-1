@@ -2235,8 +2235,24 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   static const bool no_neg[2] = {false, false};
+   return agx3_alu_fcmp_select_reg_imm_neg(enc, dest, src, compare_zero,
+                                           compare_abs, no_neg, immediate,
+                                           hints, condition, dest_16,
+                                           dest_cache, wait_mask, out, len);
+}
+
+bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
+                                  const uint16_t src[4], bool compare_zero,
+                                  const bool compare_abs[2],
+                                  const bool compare_neg[2],
+                                  const bool immediate[2],
+                                  const enum agx3_alu_hint hints[4], unsigned condition,
+                                  bool dest_16, bool dest_cache, uint16_t wait_mask,
+                                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src ||
-       !compare_abs || !immediate || !hints || dest>=256 ||
+       !compare_abs || !compare_neg || !immediate || !hints || dest>=256 ||
        (!dest_16 && (dest&1)) ||
        (condition!=0 && condition!=1 && condition!=2 && condition!=5 && condition!=6) ||
        (wait_mask!=0 && wait_mask!=32) ||
@@ -2275,6 +2291,25 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
         (condition > 2 && compare_abs[0] == compare_abs[1])))
       return false;
 
+   /* f65 negates the SECOND compare source. Apple's applegpu_g17p output for
+    * `select(x, y, a < -b)` differs from `select(x, y, a < b)` in exactly that
+    * one field, in the same encoding point, for both result widths:
+    *
+    *   32-bit result  a <  b   02011f03820a03c08006   ... 63:1      69:10 ...
+    *                  a < -b   02011f03820a03c88006   ... 63:1 65:1 69:10 ...
+    *   16-bit result  a <  b   02011d03820b0320800a   ... 63:1      69:11 ...
+    *                  a < -b   02011d03820b0328800a   ... 63:1 65:1 69:11 ...
+    *
+    * There is no matching bit on the FIRST source: `-a < b` comes back as
+    * 02031d01820b0228800a, which is f65 again with the operands swapped and
+    * the relation flipped to gt (f110:2). So a negated first source has to be
+    * canonicalised by the caller, and stays refused here.
+    *
+    * The abs bits escalate the encoding point (a 14-byte form); the negate
+    * does not. Mixing them is not witnessed, so it fails closed. */
+   if (compare_neg[0] || (compare_neg[1] && (compare_zero || abs_compare)))
+      return false;
+
    struct agx3_field_kv base[12];
    unsigned nbase=0;
    base[nbase++]=(struct agx3_field_kv){42,2};
@@ -2293,16 +2328,16 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
       base[nbase++]=(struct agx3_field_kv){10,2};
       base[nbase++]=(struct agx3_field_kv){11,dest_16?1:2};
    }
-   struct agx3_field_kv fields[18]={
+   struct agx3_field_kv fields[19]={
       {abs_immediate_select?17:3,dest},
       {abs_immediate_select?26:12,dest_cache},
       {35,src[0]},{compare_zero?51:52,src[1]},
       {immediate[0]?68:69,src[2]},{immediate[1]?85:86,src[3]},
       {110,condition},{107,wait_mask==32},{47,compare_abs[0]},
-      {64,compare_abs[1]},
+      {64,compare_abs[1]},{65,compare_neg[1]},
    };
    const unsigned cache[]={44,61,78,95},discard[]={46,63,80,97};
-   unsigned n=10;
+   unsigned n=11;
    for(unsigned i=0;i<4;i++) if((i<2 && !(i==1 && compare_zero)) || (i>=2 && !immediate[i-2])) {
       fields[n++]=(struct agx3_field_kv){cache[i],hints[i]==AGX3_ALU_HINT_CACHE};
       fields[n++]=(struct agx3_field_kv){discard[i],hints[i]==AGX3_ALU_HINT_DISCARD};

@@ -1820,20 +1820,57 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
    agx_instr *write = agx_image_write(b, data, coords, lod, base, index, dim,
                                       nir_is_coherent(instr));
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      switch (nir_intrinsic_format(instr)) {
-      case PIPE_FORMAT_R8G8B8A8_UINT:
-         write->format = AGX_FORMAT_I8;
-         break;
-      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      /* imgwci.f70 follows the TYPE OF THE DATA the shader stores, not the
+       * destination surface's format. Metal never puts a pixel format in a
+       * shader -- a texture2d<float, access::write> is written the same way
+       * whichever surface is bound -- so f70 cannot be encoding one. Apple's
+       * own applegpu_g17p output for four kernels that differ only in the
+       * texture's data type, each `t.write(v, gid)`:
+       *
+       *   texture2d<float> d71054000040000000040000883a0900   f70:1 f71:2
+       *   texture2d<uint>  d71054000040000000040000881a0900   f70:0 f71:2
+       *   texture2d<int>   d71054000040000000040000881a0900   f70:0 f71:2
+       *   texture2d<half>  d71054000040000000040000882a0900   f70:1 f71:1
+       *
+       * int and uint are byte-identical, so f70 separates float from integer
+       * data; f71 is the data width, which the packer pins to 32-bit.
+       *
+       * Selecting on nir_intrinsic_format() reproduced that only for the
+       * three formats spelled out here and failed every other one closed --
+       * including a format-less image, which is what Vulkan's
+       * shaderStorageImageWriteWithoutFormat gives and what DXVK's clear and
+       * copy kernels all declare. Select on the stored type instead: it
+       * gives the same f70 for those three formats and is the rule Apple's
+       * compiler is following. */
+      nir_alu_type stored =
+         nir_alu_type_get_base_type(nir_intrinsic_src_type(instr));
+      if (stored == nir_type_invalid) {
+         /* Not every producer of an image store fills in src_type. Fall back
+          * to the declared format, which says the same thing whenever it is
+          * there at all. */
+         switch (nir_intrinsic_format(instr)) {
+         case PIPE_FORMAT_R8G8B8A8_UINT:
+            stored = nir_type_uint;
+            break;
+         case PIPE_FORMAT_R8G8B8A8_UNORM:
+         case PIPE_FORMAT_R10G10B10A2_UNORM:
+            stored = nir_type_float;
+            break;
+         default:
+            break;
+         }
+      }
+
+      switch (stored) {
+      case nir_type_float:
          write->format = AGX_FORMAT_U8NORM;
          break;
-      case PIPE_FORMAT_R10G10B10A2_UNORM:
-         /* Formatted float writes share the native normalized imgwci path;
-          * the PBE descriptor supplies the packed destination format. */
-         write->format = AGX_FORMAT_RGB10A2;
+      case nir_type_int:
+      case nir_type_uint:
+         write->format = AGX_FORMAT_I8;
          break;
       default:
-         /* The AGX3 packer remains fail-closed for unqualified formats. */
+         /* The AGX3 packer remains fail-closed for anything unwitnessed. */
          write->format = AGX_NUM_FORMATS;
          break;
       }

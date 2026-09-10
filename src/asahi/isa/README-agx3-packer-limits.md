@@ -178,6 +178,118 @@ descriptors, which is what a single-texture probe gets -- a shader with more
 than one texture instruction refused until that pass, so this row was true of
 the probe and false of every application.
 
+## What real application shaders still reach (census, 2026-09-10)
+
+The corpora in this tree are clean, so a refusal inventory has to come from
+somewhere else. 460 modules reached the compiler, one process each, through the
+Honeykrisp ICD under the G17P drm-shim (`ASAHI_SHIM_CHIP=g17p`,
+`ASAHI_SHIM_VALIDATE_G17P_STREAM=1`, `AGX_MESA_DEBUG=shaders`), no hardware:
+
+| corpus | reached the compiler | refusing |
+| --- | --- | --- |
+| in-tree `isa/probes` + `vulkan/tests` + `probes/game` | 197 | 0 |
+| Hyprland 0.56.1 built-in shaders, all feature flags off | 14 | 0 |
+| three.js r180 ShaderLib, plain / textured+lit / mediump | 108 | 0 |
+| PixiJS 8.6.6 filters, mediump and highp | 18 | 0 |
+| GTK 4.16.7 `gsk/gpu`, 16 vertex+fragment pipelines | 16 | 0 |
+| Qt Quick 6.8.1 `shaders_ng` (scenegraph, shapes, particles) | 68 | 2 |
+| DXVK 2.5.3, 25 graphics + 14 compute | 39 | 14 |
+
+A further 21 modules never reached the driver: they need build defines or
+extensions the census did not supply, and glslang rejected them. They are
+counted nowhere above, in either column.
+
+That the in-tree corpus is clean is an independent re-measurement of the
+status line at the top of this file, not a restatement of it.
+
+The GLES corpora reach Vulkan the way ANGLE takes a WebGL shader there:
+`glslangValidator -V -R` hoists the global uniforms into a block, and
+`--shift-*-binding` gives each descriptor class its own binding range.
+three.js is assembled the way `WebGLProgram.js` does it — `#include`
+resolution, the generated prefix, `replaceLightNums`, `unrollLoops` — because
+the assembled string is what the browser actually compiles.
+
+**Every remaining refusal is in a translation layer or a vector-graphics
+shader, and none is in a WebGL/compositor/toolkit corpus.** After the two fixes
+below, 16 of the 460 refuse, in five canonical shapes:
+
+| n | site | shape | modules |
+| --- | --- | --- | --- |
+| 7 | `:6004` | `image_write [... fmt=0]` | DXVK integer clear/copy kernels |
+| 5 | `:6004` | `image_write [... fmt=4]` | DXVK float clear kernels |
+| 2 | `:5998` | `texture_load [... chan=4 mask=0x1 s5=16:null]` | DXVK MS depth/stencil resolve |
+| 1 | `:9920` | `fcmpsel [d32 s0=16:imm48 s1=32:reg.cache s2=16:imm1 s3=16:imm0 cond=1]` | Qt `shapecurve.frag` |
+| 1 | `:5689` | `if_fcmp [s0=32:reg.abs s1=32:reg.abs cond=0]` | Qt `conicalgradient.frag` |
+
+### The storage-image write was gated on the wrong thing
+
+`agx_emit_image_store()` chose the AGX3B encoding from
+`nir_intrinsic_format()`, admitting three formats and failing every other one
+closed — including a format-less image, which is what
+`shaderStorageImageWriteWithoutFormat` gives and what all thirteen of DXVK's
+clear and copy kernels declare. Apple's own bytes say the bit is not about the
+surface format at all; Metal cannot put a format in a shader. Four kernels
+differing only in the texture's data type:
+
+    texture2d<float>  d71054000040000000040000883a0900   f70:1 f71:2
+    texture2d<uint>   d71054000040000000040000881a0900   f70:0 f71:2
+    texture2d<int>    d71054000040000000040000881a0900   f70:0 f71:2
+    texture2d<half>   d71054000040000000040000882a0900   f70:1 f71:1
+
+`int` and `uint` are byte-identical: **f70 separates float data from integer
+data**, and f71 is the data width. Selecting on the stored type reproduces the
+three formats that already worked and covers the rest.
+
+That is one of three gates stacked on this path, so it unblocked one kernel
+(`dxvk_clear_buffer_f`) on its own. The other two are now grounded but **not
+implemented**:
+
+    2D           d71054000040000000040000883a0900   f72:1
+    3D           d71054000040000000080000883a0900   f72:3
+    2D array     d71054002000000000040000883a0900   f72:1 f73:2 f79:4
+    2D, waiting  d72054002040000100040000883a0900   f60:1 f79:4 f91:1
+
+so `f72` is the image dimension and `f73` the array layer, each with its own
+extra coordinate stage in Apple's prologue; and an image write that waits on a
+producer moves f59 to f60. `agx3_emit_storage_image_write()` still refuses
+`dim != AGX_DIM_2D` and any `wait_mask & ~1`, which is what the remaining
+twelve DXVK modules hit.
+
+### FSEL's negated comparator (closed)
+
+`fcmpsel` refused any `neg` on a compare source, which is how Qt's
+`radialgradient.frag` failed closed. Apple encodes it as **f65**, in the same
+encoding point as the unmodified compare, at both result widths:
+
+    32-bit result   a <  b   02011f03820a03c08006
+                    a < -b   02011f03820a03c88006
+    16-bit result   a <  b   02011d03820b0320800a
+                    a < -b   02011d03820b0328800a
+
+There is no matching bit on the *first* comparator: `-a < b` comes back as
+`02031d01820b0228800a`, which is f65 again with the operands swapped and the
+relation flipped to `gt`. So a negated first source has to be canonicalised by
+swapping, and stays refused until something does that.
+
+The same run also witnesses something this file records as open. The 16-bit
+`h_abs` kernel (`select(x, y, abs(a) < b)`, half result) is
+`02011d03830b0320800a00000100` — **f47 with a 16-bit destination**, which
+`agx3_alu_fcmp_select_reg_imm()` refuses outright (`abs_compare && dest_16`).
+The correction at the top of this file lists that shape as a live CTS gap; it
+is encodable, and only the gate is in the way. Not changed here, because no
+shader in this census reaches it.
+
+### Still needing an oracle
+
+`if_fcmp` with both sources absolute (Qt's `conicalgradient.frag`) is *not*
+grounded. Asked for it in MSL as `if (abs(a) < abs(b)) { ... }`, Apple's
+compiler returns a **select**, not a branch — `fsel ep30 size14`, f47 and f64
+set — so that run says what FSEL does with two absolute comparators and
+nothing about the control-flow compare. A witness needs an `if` whose body has
+a side effect Apple cannot if-convert. Until then the packer is right to refuse
+it, and the alternative fix worth considering is the NIR side: not folding
+`fabs` into a comparison that becomes control flow.
+
 ## The rule, as it stands now
 
 There is no per-shader SSBO access limit, no atomic limit, and no missing

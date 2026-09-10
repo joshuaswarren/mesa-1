@@ -503,6 +503,20 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* The same, admitting a negated SECOND compare source (f65), which Apple
+ * emits for `a < -b` at both result widths and in the same encoding point as
+ * the unmodified compare. A negated first source has no bit of its own -- the
+ * caller must swap the operands and flip the relation -- and mixing the
+ * negate with the absolute modifiers is not witnessed; both fail closed. */
+bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
+                                  const uint16_t src[4], bool compare_zero,
+                                  const bool compare_abs[2],
+                                  const bool compare_neg[2],
+                                  const bool immediate[2],
+                                  const enum agx3_alu_hint hints[4], unsigned condition,
+                                  bool dest_16, bool dest_cache, uint16_t wait_mask,
+                                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /*
  * Compare a 32-bit float against a minifloat immediate and select either of
  * two 32-bit registers -- what `x < k ? a : b` becomes once Mesa carries the
