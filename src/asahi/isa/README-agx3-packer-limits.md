@@ -423,12 +423,45 @@ forms set for `AGX3_ALU_HINT_DISCARD` -- so it is carried now rather than
 refused. `.cache` stays refused: this form models no cache hint, and claiming a
 live register is dead is a silent miscompile.
 
-**Still open on this path:** a *dynamic*-offset vector access
-(`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a runtime-indexed
-scratch array) is the register-indexed `ldtps`/`sttps` family, which
-`agx3_local_tps_core.c` models but which nothing wires to `STACK_LOAD` /
-`STACK_STORE`. Splitting it would need an add per component after RA. Not
-attempted here.
+**Still open on this path**, but no longer un-scouted: a *dynamic*-offset
+vector access (`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a
+runtime-indexed scratch array) is the register-indexed `ldtps`/`sttps` family.
+`agx3_local_tps_core.c` already models it -- `struct agx3_tps_desc` carries
+`index`, `byte_offset` **and** `mask` -- so this needs no splitting and no new
+form, only wiring to `STACK_LOAD`/`STACK_STORE` in both the packer and the
+slot pass. What it does need is the rest of the field map.
+
+Apple witnesses, from kernels with a runtime trip count *and* a runtime index
+so nothing can be unrolled (the earlier attempt at this used a constant-folded
+index and produced 64 `ldtps` with *static* offsets, which looks like the
+dynamic form and is not):
+
+| MSL array   | bytes                        | f10 | f54 | f56 | f57 |
+| ----------- | ---------------------------- | --- | --- | --- | ---- |
+| `float[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half2[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half[]`    | `6f005403040a410101800200`   | 1   | 1   | 1   | 4    |
+| `half4[]`   | `6f00540a060a470102800300`   | 1   | 15  | 3   | 8    |
+| `float2[]`  | `6f00540a060a590102800300`   | 2   | 3   | 3   | 8    |
+| `float4[]`  | `6f00540e0c0a570104000200`   | 2   | 15  | -   | 16   |
+
+`float[]` and `half2[]` are **byte-identical**, which is what decodes the
+family: f10 is the ELEMENT WIDTH (1 = 16-bit, 2 = 32-bit) and f54 the
+component mask *in those units*. A four-byte access is spelled as two 16-bit
+elements, so a scalar `float` and a `half2` are the same instruction. Read
+f54 as a 32-bit-word mask instead and `float[]` looks like an outlier that
+falsifies the whole reading; it is not an outlier, it is the clue.
+
+f2 is the data register and f16 the index register (both swept across the
+kernels above). **f56 and f57 are NOT yet resolved** -- f57 tracks the total
+access size in bytes except for the two-byte case, where it is 4 -- and
+`agx3_tps_desc`'s `frame_region` ("witnessed 1..6; exact taxonomy remains
+unknown") is not mapped to either.
+
+That is why this is recorded rather than implemented. A wrong field here
+miscompiles a *spill*, which corrupts arbitrary shader state rather than one
+value, so it is the last place to guess. Resolve f56, f57 and `frame_region`
+by the same one-field-at-a-time sweep first.
 
 ### Closed: `.abs` on a comparison source (`fcmpsel`)
 
