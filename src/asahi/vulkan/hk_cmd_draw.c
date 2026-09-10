@@ -4495,8 +4495,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    if (sw_vs->b.info.uses_draw_id) {
-      /* TODO: rodata? */
-      gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id, 2, 4);
+      /* Uploaded as a whole dword: the native G17P uniform range that
+       * publishes it is loaded in 32-bit units, so a two-byte allocation
+       * would leave the upper half of the loaded dword reading whatever
+       * followed it in the pool. The shader only consumes the low half. */
+      gfx->draw_id_ptr = hk_pool_upload(cmd, &draw_id, 4, 4);
    } else {
       gfx->draw_id_ptr = 0;
    }

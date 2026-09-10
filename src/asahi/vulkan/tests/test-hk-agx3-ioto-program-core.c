@@ -1047,6 +1047,112 @@ test_g17p_basic_graphics_program(void)
       CHECK(memcmp(program.bytes, full_program.bytes, program.length) != 0);
    }
    resource.uniform_ranges = full_vertex;
+
+   /* Exact Firefox indexed-vertex range pressure: native sampled-image heap,
+    * attribute bases, clamps, direct indexed-draw parameters, a root with
+    * three descriptor sets, and the two-half promoted constant at uniform 72.
+    * These are six independently addressed CProg inputs; the generic loader
+    * already bounds their load chunks and complete program size. */
+   const struct agx3_ioto_uniform_range firefox_indexed_vertex[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 16, .address = 0x2000},
+      {.start_halfs = 24, .size_halfs = 8, .address = 0x3000},
+      {.start_halfs = 32, .size_halfs = 4, .address = 0x4000},
+      {.start_halfs = 48, .size_halfs = 16, .address = 0x5000},
+      {.start_halfs = 72, .size_halfs = 2, .address = 0x6000},
+   };
+   resource = vertex;
+   resource.uniform_ranges = firefox_indexed_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_indexed_vertex);
+   resource.shader_binary_size = 512;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &resource, &program));
+   const struct hk_agx3_g17p_graphics_program firefox_program = program;
+   for (unsigned r = 0; r < ARRAY_SIZE(firefox_indexed_vertex); ++r) {
+      struct agx3_ioto_uniform_range changed[
+         ARRAY_SIZE(firefox_indexed_vertex)];
+      memcpy(changed, firefox_indexed_vertex, sizeof(changed));
+      changed[r].address += 0x40;
+      resource.uniform_ranges = changed;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &resource, &program));
+      CHECK(program.length == firefox_program.length &&
+            memcmp(program.bytes, firefox_program.bytes, program.length) != 0);
+   }
+   resource.uniform_ranges = firefox_indexed_vertex;
+
+   /* The complete vertex worst case: the six above plus a gl_DrawID range.
+    * The Ioto loader bounds a program by load chunks and body size, never by
+    * how many ranges produced them, so the driver budget must admit all seven
+    * or a legal program is refused fail-closed. */
+   const struct agx3_ioto_uniform_range firefox_drawid_vertex[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 24, .address = 0x2000},
+      {.start_halfs = 32, .size_halfs = 12, .address = 0x3000},
+      {.start_halfs = 44, .size_halfs = 4, .address = 0x4000},
+      {.start_halfs = 48, .size_halfs = 2, .address = 0x4400},
+      {.start_halfs = 56, .size_halfs = 16, .address = 0x5000},
+      {.start_halfs = 72, .size_halfs = 2, .address = 0x6000},
+   };
+   CHECK(ARRAY_SIZE(firefox_drawid_vertex) == HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
+   size_t drawid_bound = 0;
+   CHECK(hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, firefox_drawid_vertex,
+      ARRAY_SIZE(firefox_drawid_vertex), &drawid_bound));
+   CHECK(drawid_bound != 0);
+   resource = vertex;
+   resource.uniform_ranges = firefox_drawid_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_drawid_vertex);
+   resource.shader_binary_size = 512;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &resource, &program));
+   const struct hk_agx3_g17p_graphics_program drawid_program = program;
+   for (unsigned r = 0; r < ARRAY_SIZE(firefox_drawid_vertex); ++r) {
+      struct agx3_ioto_uniform_range changed[
+         ARRAY_SIZE(firefox_drawid_vertex)];
+      memcpy(changed, firefox_drawid_vertex, sizeof(changed));
+      changed[r].address += 0x40;
+      resource.uniform_ranges = changed;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &resource, &program));
+      CHECK(program.length == drawid_program.length &&
+            memcmp(program.bytes, drawid_program.bytes, program.length) != 0);
+   }
+
+   /* A uniform range is loaded in 32-bit dwords, so an odd size_halfs is not
+    * representable and is rejected outright. The gl_DrawID range used to be
+    * spelled with size_halfs = 1, which is why every gl_DrawID vertex program
+    * was refused even with range budget to spare. */
+   struct agx3_ioto_uniform_range odd_draw_id[
+      ARRAY_SIZE(firefox_drawid_vertex)];
+   memcpy(odd_draw_id, firefox_drawid_vertex, sizeof(odd_draw_id));
+   odd_draw_id[4].size_halfs = 1;
+   size_t odd_bound = 456;
+   CHECK(!hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, odd_draw_id, ARRAY_SIZE(odd_draw_id), &odd_bound));
+   CHECK(odd_bound == 456);
+   resource.uniform_ranges = odd_draw_id;
+   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,
+                                                       &resource, &program));
+
+   /* One range beyond the budget stays refused: the budget is derived from
+    * the collector, not a soft hint. */
+   struct agx3_ioto_uniform_range over_budget[
+      ARRAY_SIZE(firefox_drawid_vertex) + 1];
+   memcpy(over_budget, firefox_drawid_vertex, sizeof(firefox_drawid_vertex));
+   over_budget[ARRAY_SIZE(firefox_drawid_vertex)] =
+      (struct agx3_ioto_uniform_range){
+         .start_halfs = 80, .size_halfs = 2, .address = 0x7000};
+   size_t over_bound = 789;
+   CHECK(!hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, ARRAY_SIZE(over_budget), &over_bound));
+   CHECK(over_bound == 789);
+
+   resource = vertex;
+   resource.uniform_ranges = firefox_indexed_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_indexed_vertex);
+   resource.shader_binary_size = 512;
+
    size_t untouched = 123;
    CHECK(!hk_agx3_g17p_graphics_program_bound(AGX_CHIP_G17S, full_vertex,
                                                ARRAY_SIZE(full_vertex), &untouched));
