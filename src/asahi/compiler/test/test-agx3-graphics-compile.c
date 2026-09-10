@@ -4340,6 +4340,53 @@ build_fs_chromium_negated_equality_select(void)
    return fs_finish(&b);
 }
 
+/* Chromium's three.js skinning example keeps a real branch around a
+ * minifloat threshold.  The backend must materialize the nonzero immediate
+ * before register allocation so the fused IF_FCMP reaches the grounded
+ * register/register control-flow comparison. */
+static nir_shader *
+build_fs_chromium_minifloat_branch(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Chromium minifloat branch FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_push_if(&b, nir_flt(&b, nir_imm_float(&b, 0.5f), x));
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, input);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def *then_value = &tex->def;
+   nir_push_else(&b, NULL);
+   nir_def *else_value = nir_vec4(&b, x, nir_channel(&b, input, 1), x,
+                                  nir_imm_float(&b, 1.0f));
+   nir_pop_if(&b, NULL);
+
+   nir_def *selected = nir_if_phi(&b, then_value, else_value);
+   fs_store_colour(&b, selected);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   return b.shader;
+}
+
 /* Hyprland clamps the motion-blur loop bound through a float comparison that
  * selects a raw 16-bit one or a retained half register. Both constants must
  * be materialized before using the general half-register FSEL. */
@@ -4908,6 +4955,8 @@ static const struct agx3_graphics_case cases[] = {
     true, .g17p_only = true},
    {"fs-chromium-negated-equality-select",
     build_fs_chromium_negated_equality_select, true, .g17p_only = true},
+   {"fs-chromium-minifloat-branch", build_fs_chromium_minifloat_branch,
+    true, .g17p_only = true, .expected_g17p_sampled_fragment = true},
    {"fs-hyprland-motion-bound", build_fs_hyprland_motion_bound, true,
     .g17p_only = true},
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
@@ -5339,6 +5388,19 @@ main(int argc, char **argv)
       };
       const bool ok = run_case(&c, AGX_ISA_ENCODING_AGX3B);
       fprintf(stderr, "G17P Chromium negated equality select: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--chromium-minifloat-branch-only")) {
+      const struct agx3_graphics_case c = {
+         "fs-chromium-minifloat-branch",
+         build_fs_chromium_minifloat_branch,
+         true,
+         .g17p_only = true,
+         .expected_g17p_sampled_fragment = true,
+      };
+      const bool ok = run_case(&c, AGX_ISA_ENCODING_AGX3B);
+      fprintf(stderr, "G17P Chromium minifloat branch: %s\n",
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
