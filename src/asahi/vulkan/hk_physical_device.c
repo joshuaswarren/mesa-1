@@ -766,9 +766,24 @@ hk_get_device_features(
          instance->vertex_stores &&
          (hk_g17p_unverified_feature("graphics_shader_side_effects") ||
           hk_g17p_unverified_feature("graphics_memory"));
-      features->fragmentStoresAndAtomics =
-         hk_g17p_unverified_feature("graphics_shader_side_effects") ||
-         hk_g17p_unverified_feature("graphics_memory");
+      /* Qualified on hardware: g17p-vulkan-fragment-side-effects renders
+       * 1024/1024 exact pixels, 0 cleared, 0 wrong, with 0/256 mixed 2x2
+       * quads and 0/32 mixed 8x4 SIMD groups, and its fragment stores,
+       * atomics, untouched vertex fields, guard words and three-second
+       * stability all verify exactly. No GPU faults.
+       *
+       * The earlier 513/1024 that kept this gated was measured against a
+       * build predating 53aac78d1aa, which replaced the FragDepth write in
+       * agx_nir_lower_frag_sidefx with a late test and deleted the depth path
+       * that failure ran through. That change also lost the pass's
+       * idempotence -- Honeykrisp preprocesses every shader twice and a
+       * sample mask leaves no trace in shader_info -- so every side-effecting
+       * fragment shader emitted sample_mask twice, which
+       * agx_nir_lower_sample_mask documents as incorrect. Both are fixed.
+       *
+       * Dawn requires this feature; without it Chromium's WebGPU silently
+       * falls back to SwiftShader. */
+      features->fragmentStoresAndAtomics = true;
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->shaderResourceMinLod = false;
