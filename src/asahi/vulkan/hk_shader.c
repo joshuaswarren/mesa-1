@@ -1638,6 +1638,15 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
 
+   /* Set when G17P canonicalized an API request for per-sample fragment
+    * execution down to single-sample.  The collapse is exact at one
+    * rasterization sample and wrong at more, but rasterizationSamples is
+    * dynamic state, so the real count is only known per draw.  Carry the API
+    * intent to hk_flush_dynamic_state() and refuse there rather than silently
+    * shading once and reporting gl_SampleID == 0.
+    */
+   bool g17p_collapsed_sample_shading = false;
+
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
 
@@ -1665,12 +1674,22 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       nir->info.fs.uses_sample_shading |= key->fs.force_sample_shading;
 
-      /* G17P advertises only VK_SAMPLE_COUNT_1_BIT. Canonicalize sample
-       * builtins and qualifiers now, before split FS lowering observes
-       * uses_sample_shading and selects the legacy external sample loop. */
+      /* Canonicalize sample builtins and qualifiers now, before split FS
+       * lowering observes uses_sample_shading and selects the legacy external
+       * sample loop, which is AGX2 machine code (agx_linker.c).
+       *
+       * This is exact only at ONE rasterization sample, where per-sample and
+       * per-pixel invocation coincide.  We cannot condition it on the sample
+       * count here: rasterizationSamples is dynamic state (and shader objects
+       * may compile with no pipeline state at all), so the count is not known
+       * until the draw.  Record the intent instead; hk_flush_dynamic_state()
+       * refuses the draw if the count turns out to be greater than one.
+       */
       if (dev->dev.chip == AGX_CHIP_G17P &&
-          nir->info.fs.uses_sample_shading)
+          nir->info.fs.uses_sample_shading) {
+         g17p_collapsed_sample_shading = true;
          NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
+      }
 
       /* Force late-Z for Z/S self-deps. TODO: There's probably a less silly way
        * to do this.
@@ -1859,6 +1878,13 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          return result;
       }
    }
+
+   /* hk_compile_nir() runs after the collapse above, so by the time it fills
+    * hk_shader_info the NIR flag is already cleared.  Publish the API-level
+    * intent here, where every variant exists and has been compiled.
+    */
+   if (sw_stage == MESA_SHADER_FRAGMENT && g17p_collapsed_sample_shading)
+      hk_only_variant(obj)->info.fs.uses_sample_shading = true;
 
    *shader_out = obj;
    return VK_SUCCESS;

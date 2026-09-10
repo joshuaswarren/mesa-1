@@ -448,7 +448,24 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          iview1 && (key->tib.layered
                        ? iview1->planes[0].layered_eot_pbe_valid
                        : iview1->planes[0].eot_pbe_valid);
+      /* The G17P end-of-tile program always writes an ordinary single-sample
+       * PBE target: agx_build_end_of_tile_shader() pins the image dimension to
+       * GLSL_SAMPLER_DIM_2D on this chip because IMGWBLK is the dimensionless
+       * 2D builtin, and encoding an MS image there would store an unresolved
+       * surface. So the store target must be single-sample whether or not we
+       * took the direct-resolve path.
+       *
+       * Without this, storeOp = STORE on a multisample attachment picks
+       * target = iview (direct resolve requires storeOp != STORE), skips the
+       * samples != 1 check below because that is guarded by direct_resolve,
+       * and writes single-sample data into a multisample surface with no
+       * diagnostic. Refuse instead; a multisample surface cannot be stored on
+       * G17P at all, which is also why multisample images can never be sampled
+       * back and why sampledImageColorSampleCounts stays 1x.
+       */
       if (!iview || !target ||
+          (dev->dev.chip == AGX_CHIP_G17P && !direct_resolve &&
+           target->vk.image->samples != 1) ||
           (direct_resolve &&
            (target->vk.image->samples != 1 ||
             target->vk.format != iview->vk.format)) ||
@@ -701,6 +718,28 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    static_assert(AGX_BG_EOT_NONE == 0, "default initializer");
 
    key.tib.layered = (render->cr.layers > 1);
+
+   /* When the G17P end-of-tile program resolves directly, it writes the
+    * single-sample resolve target and the multisample surface is never stored
+    * -- the direct-resolve gate requires storeOp != STORE. A partial render's
+    * background program must therefore reload from that resolved surface, not
+    * from a multisample surface that was never written. Gallium expresses this
+    * as single_sample_reload (agx_state.c); Honeykrisp did not set it, so a
+    * partial render under MSAA reloaded garbage.
+    *
+    * Derive it from the same predicate the EOT side uses, so the two can only
+    * ever disagree by both changing.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P && !store &&
+       info->colorAttachmentCount >= 1) {
+      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
+
+      key.single_sample_reload = hk_agx3_g17p_direct_color_resolve_supported(
+         &key.tib, info->colorAttachmentCount,
+         att0->resolveImageView != VK_NULL_HANDLE,
+         att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT,
+         att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
+   }
 
    bool needs_textures_for_spilled_rts =
       agx_tilebuffer_spills(&render->tilebuffer) && !partial_render && !store;
@@ -4196,6 +4235,22 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       if (has_sample_mask) {
          perf_debug(cmd, "Emulating sample mask");
+      }
+
+      /* G17P has no AGX3 per-sample fragment path: hk_compile_shader()
+       * canonicalized this shader's sample builtins to single-sample, which is
+       * exact at one rasterization sample and wrong at more.  Now that the real
+       * count is known, refuse rather than shade once and hand the application
+       * gl_SampleID == 0 as if it were the answer.  A refusal is recoverable;
+       * a plausible wrong pixel is not.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
+          dyn->ms.rasterization_samples > 1) {
+         mesa_loge("G17P: per-sample fragment execution is not implemented; "
+                   "refusing a %u-sample draw that requests it",
+                   dyn->ms.rasterization_samples);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
       }
 
       unsigned samples_shaded = 0;

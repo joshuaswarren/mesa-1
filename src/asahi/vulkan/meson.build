@@ -1237,6 +1237,33 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Same data, same expected image as the static R16G16_SFLOAT oracle above;
+    # the vertex input arrives through vkCmdSetVertexInputEXT instead of the
+    # pipeline. Nothing else in the tree exercises
+    # VK_EXT_vertex_input_dynamic_state, which is the path where a sub-32-bit
+    # attribute reaches agx_nir_lower_vbo_raw's narrow branch.
+    foreach dvi : [['rgba8-unorm', '1'], ['rg16-sint', '2']]
+      executable(
+        'g17p-vulkan-dynamic-vertex-input-' + dvi[0],
+        files('tests/g17p_offscreen_triangle.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [c_msvc_compat_args, '-DG17P_VERTEX_FORMAT=' + dvi[1],
+                  '-DG17P_DYNAMIC_VERTEX_INPUT=1'],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
+    executable(
+      'g17p-vulkan-dynamic-vertex-input-rg16-sfloat',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VERTEX_FORMAT=3',
+                '-DG17P_DYNAMIC_VERTEX_INPUT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-graphics-pipeline-library',
       files('tests/g17p_graphics_pipeline_library.c'),
@@ -1291,6 +1318,21 @@ if with_tests
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
                 '-DG17P_MSAA_COVERAGE=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Variant 1 above pairs the dynamic sample mask with the per-sample
+    # fragment shader, so it also demands sampleRateShading. G17P has no AGX3
+    # per-sample fragment path, so that binary cannot pass there and a failure
+    # would be blamed on the sample mask. This variant qualifies the mask
+    # alone, with ordinary per-pixel invocation.
+    executable(
+      'g17p-vulkan-dynamic-sample-mask4-no-sample-shading',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_MSAA_COVERAGE=3'],
       gnu_symbol_visibility : 'hidden',
     )
 

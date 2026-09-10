@@ -3,9 +3,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "agx_abi.h"
 #include "agx_compile.h"
+#include "agx_linker.h"
+#include "agx_nir_lower_vbo.h"
 #include "agx_uvs.h"
 #include "nir_builder.h"
+#include "util/bitset.h"
+#include "util/format/u_formats.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -206,9 +211,296 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
    return valid;
 }
 
+/*
+ * VS input side of the same 16-bit story.
+ *
+ * The vertex prolog is a separate shader part that publishes every attribute
+ * component as a FULL 32-BIT value in its own pair of half-registers:
+ * agx_nir_vs_prolog_impl() fetches with nir_load_input(b, 4, 32, ...) and
+ * exports each channel at AGX_ABI_VIN_ATTRIB(4 * attrib + comp), which is
+ * 2 * (8 + i) -- two halves apart. struct agx_vs_prolog_key carries no bit
+ * sizes at all, so the prolog cannot publish anything narrower even in
+ * principle.
+ *
+ * A main shader may still declare a narrower input once
+ * storageInputOutput16 is advertised. The main shader must therefore load the
+ * 32-bit ABI slot and narrow, never load 16 bits: agx_load_exported_to()
+ * strides by the DESTINATION size, so a 16-bit load at the same base would
+ * read component 1 out of component 0's high half.
+ */
+struct vs_input_case {
+   const char *name;
+   unsigned attrib;    /* attribute index (load_input base) */
+   unsigned component; /* 32-bit slot component, 0..3 */
+   unsigned comps;     /* number of components loaded */
+   unsigned bit_size;
+   nir_alu_type dest_type;
+   nir_op narrow; /* expected narrowing op, nir_op_mov if none */
+};
+
+static nir_def *
+widen_to_f32(nir_builder *b, nir_def *x, nir_alu_type dest_type)
+{
+   switch (nir_alu_type_get_base_type(dest_type)) {
+   case nir_type_float:
+      return nir_f2f32(b, x);
+   case nir_type_int:
+      return nir_i2f32(b, x);
+   default:
+      return nir_u2f32(b, x);
+   }
+}
+
+static nir_shader *
+build_vs_input(const struct vs_input_case *c)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "VS input");
+
+   nir_def *attr = nir_load_input(
+      &b, c->comps, c->bit_size, nir_imm_int(&b, 0), .base = c->attrib,
+      .component = c->component, .dest_type = c->dest_type,
+      .io_semantics.location = VERT_ATTRIB_GENERIC0 + c->attrib,
+      .io_semantics.num_slots = 1);
+
+   /* Consume every component so nir_def_components_read() sees them all. */
+   nir_def *acc = nir_imm_float(&b, 0.0f);
+   for (unsigned i = 0; i < c->comps; ++i)
+      acc = nir_fadd(&b, acc, widen_to_f32(&b, nir_channel(&b, attr, i),
+                                           c->dest_type));
+
+   nir_store_output(&b,
+                    nir_vec4(&b, acc, nir_imm_float(&b, 0.0f),
+                             nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f)),
+                    nir_imm_int(&b, 0), .write_mask = 0xf,
+                    .src_type = nir_type_float32,
+                    .io_semantics.location = VARYING_SLOT_POS,
+                    .io_semantics.num_slots = 1);
+
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VERT_ATTRIB_GENERIC0 + c->attrib);
+   b.shader->info.outputs_written = VARYING_BIT_POS;
+   return b.shader;
+}
+
+static nir_intrinsic_instr *
+find_sole_intrinsic(nir_shader *nir, nir_intrinsic_op op, unsigned *count)
+{
+   nir_intrinsic_instr *found = NULL;
+   *count = 0;
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != op)
+               continue;
+
+            ++(*count);
+            if (!found)
+               found = intr;
+         }
+      }
+   }
+
+   return found;
+}
+
+/* The single ALU consumer of def, or NULL if there is not exactly one. */
+static nir_alu_instr *
+sole_alu_use(nir_def *def)
+{
+   nir_alu_instr *alu = NULL;
+
+   nir_foreach_use(use, def) {
+      if (nir_src_parent_instr(use)->type != nir_instr_type_alu)
+         return NULL;
+
+      nir_alu_instr *this = nir_instr_as_alu(nir_src_parent_instr(use));
+      if (alu && alu != this)
+         return NULL;
+
+      alu = this;
+   }
+
+   return alu;
+}
+
+static bool
+lowered_vs_input(const struct vs_input_case *c)
+{
+   nir_shader *nir = build_vs_input(c);
+   const unsigned slot = (4 * c->attrib) + c->component;
+   bool ok = false;
+
+   /* The gather reports attribute components in 32-BIT slot units, which is
+    * the unit the prolog's component_mask and BITSET_FOREACH_SET use. A
+    * 16-bit input still occupies one whole slot per component. */
+   BITSET_DECLARE(mask, AGX_MAX_ATTRIBS * 4);
+   BITSET_ZERO(mask);
+   agx_nir_gather_vs_inputs(nir, mask);
+
+   BITSET_DECLARE(expected, AGX_MAX_ATTRIBS * 4);
+   BITSET_ZERO(expected);
+   BITSET_SET_RANGE(expected, slot, slot + c->comps - 1);
+
+   if (!BITSET_EQUAL(mask, expected)) {
+      fprintf(stderr, "%s: gathered components %08x, expected %08x\n", c->name,
+              mask[0], expected[0]);
+      goto done;
+   }
+
+   agx_nir_lower_vs_input_to_prolog(nir);
+
+   unsigned nr_inputs = 0, nr_loads = 0;
+   find_sole_intrinsic(nir, nir_intrinsic_load_input, &nr_inputs);
+   nir_intrinsic_instr *load =
+      find_sole_intrinsic(nir, nir_intrinsic_load_exported_agx, &nr_loads);
+
+   if (nr_inputs != 0 || nr_loads != 1) {
+      fprintf(stderr, "%s: %u load_input and %u load_exported_agx left\n",
+              c->name, nr_inputs, nr_loads);
+      goto done;
+   }
+
+   /* The ABI slot is 32-bit wide whatever the shader asked for. */
+   if (load->def.bit_size != 32 ||
+       load->def.num_components != c->comps ||
+       nir_intrinsic_base(load) != AGX_ABI_VIN_ATTRIB(slot)) {
+      fprintf(stderr,
+              "%s: load_exported_agx %ux%ub base %u, expected %ux32b base %u\n",
+              c->name, load->def.num_components, load->def.bit_size,
+              nir_intrinsic_base(load), c->comps, AGX_ABI_VIN_ATTRIB(slot));
+      goto done;
+   }
+
+   nir_alu_instr *narrow = sole_alu_use(&load->def);
+
+   if (c->narrow == nir_op_mov) {
+      /* 32-bit: nothing may be inserted between the ABI and the shader. */
+      ok = narrow == NULL || (narrow->op != nir_op_f2f16 &&
+                              narrow->op != nir_op_i2i16 &&
+                              narrow->op != nir_op_u2u16);
+      if (!ok) {
+         fprintf(stderr, "%s: 32-bit input grew a %s\n", c->name,
+                 nir_op_infos[narrow->op].name);
+      }
+   } else {
+      ok = narrow != NULL && narrow->op == c->narrow &&
+           narrow->def.bit_size == c->bit_size &&
+           narrow->def.num_components == c->comps;
+      if (!ok) {
+         fprintf(stderr, "%s: expected a %s of the ABI slot, got %s\n", c->name,
+                 nir_op_infos[c->narrow].name,
+                 narrow ? nir_op_infos[narrow->op].name : "nothing");
+      }
+   }
+
+done:
+   ralloc_free(nir);
+   return ok;
+}
+
+/*
+ * Round-trip the ABI: build the prolog from the mask the gather produced and
+ * check it exports 32-bit values at exactly the bases the main shader loads.
+ * This is what makes the "narrow after the load" rule ground truth rather
+ * than a guess -- if the prolog ever learned to publish 16-bit halves, this
+ * is the test that would notice.
+ */
+static bool
+prolog_publishes_32bit_slots(unsigned attrib, unsigned component,
+                             unsigned comps, enum pipe_format format)
+{
+   struct agx_vs_prolog_key key = {
+      .hw = true,
+      .robustness = {.level = AGX_ROBUSTNESS_GL},
+   };
+
+   const unsigned slot = (4 * attrib) + component;
+   BITSET_SET_RANGE(key.component_mask, slot, slot + comps - 1);
+
+   key.attribs[attrib] = (struct agx_velem_key){
+      .format = format,
+      .stride = 16,
+   };
+
+   nir_builder b =
+      nir_builder_init_simple_shader(0, &agx_nir_options, "VS prolog");
+   agx_nir_vs_prolog(&b, &key);
+
+   BITSET_DECLARE(exported, AGX_MAX_ATTRIBS * 4);
+   BITSET_ZERO(exported);
+   bool ok = true;
+
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_export_agx)
+               continue;
+
+            unsigned base = nir_intrinsic_base(intr);
+            if (base < AGX_ABI_VIN_ATTRIB(0))
+               continue; /* vertex/instance ID */
+
+            unsigned i = (base - AGX_ABI_VIN_ATTRIB(0)) / 2;
+            if (AGX_ABI_VIN_ATTRIB(i) != base ||
+                intr->src[0].ssa->bit_size != 32) {
+               fprintf(stderr,
+                       "prolog exported %ub at base %u, not a 32-bit slot\n",
+                       intr->src[0].ssa->bit_size, base);
+               ok = false;
+            } else {
+               BITSET_SET(exported, i);
+            }
+         }
+      }
+   }
+
+   if (ok && !BITSET_EQUAL(exported, key.component_mask)) {
+      fprintf(stderr, "prolog exported %08x, mask asked for %08x\n",
+              exported[0], key.component_mask[0]);
+      ok = false;
+   }
+
+   ralloc_free(b.shader);
+   return ok;
+}
+
+/* 32-bit is the regression guard: it must still lower to a bare 32-bit ABI
+ * load with nothing inserted. The 16-bit rows are the storageInputOutput16
+ * cases that used to trip the bit_size == 32 assert in gather_inputs(). */
+static const struct vs_input_case vs_input_cases[] = {
+   {"vec4 f32 input", 0, 0, 4, 32, nir_type_float32, nir_op_mov},
+   {"ivec2 i32 input", 3, 1, 2, 32, nir_type_int32, nir_op_mov},
+   {"f16vec2 input", 1, 0, 2, 16, nir_type_float16, nir_op_f2f16},
+   {"f16 input at component 3", 2, 3, 1, 16, nir_type_float16, nir_op_f2f16},
+   {"i16vec4 input", 4, 0, 4, 16, nir_type_int16, nir_op_i2i16},
+   {"u16vec3 input at component 1", 5, 1, 3, 16, nir_type_uint16, nir_op_u2u16},
+};
+
 int
 main(void)
 {
+   for (unsigned i = 0; i < ARRAY_SIZE(vs_input_cases); ++i) {
+      if (!lowered_vs_input(&vs_input_cases[i]))
+         return 1;
+   }
+
+   if (!prolog_publishes_32bit_slots(1, 0, 2, PIPE_FORMAT_R16G16_FLOAT) ||
+       !prolog_publishes_32bit_slots(4, 0, 4, PIPE_FORMAT_R16G16B16A16_SINT) ||
+       !prolog_publishes_32bit_slots(0, 0, 4, PIPE_FORMAT_R32G32B32A32_FLOAT)) {
+      fprintf(stderr, "vertex prolog ABI is not 32-bit per component\n");
+      return 1;
+   }
+
    /* Fresh applegpu_g17p witnesses are exact on both sides of no_varying:
     * viewport-only with an unread FS output has five UVSWs and a five-word
     * layout, while a fragment read adds exactly one ordinary UVSW/word. Layer

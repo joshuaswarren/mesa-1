@@ -34,6 +34,35 @@ or `"label"` siblings are all parse errors.  Render pipelines use the
 `{"vertex_function": "<name>", "fragment_function": "<name>"}` pair of bare
 strings.
 
+#### Verified working invocation, MetalToolchain v27.1.5194.15 (2026-09-10)
+
+The entry above is only the innermost object.  It must be wrapped in a
+`pipelines` table, and three other things bite:
+
+    printf '{"pipelines":{"compute_pipelines":[{"compute_function":"K"}]}}' \
+        > p.mtlp-json                          # the .mtlp-json SUFFIX is load-bearing:
+                                               # any other name -> "malformed flatbuffer magic"
+    xcrun metal -c w.metal -o w.air
+    xcrun metallib w.air -o w.metallib
+    "$MT/metal-nt" -arch applegpu_g17p \
+        -platform_version macos 27.0 27.0 \     # without this the target is AIR 2.5/2.8
+        -N p.mtlp-json w.metallib -o out.bin    # and metallib is AIR 2.9 -> refused
+
+* A bare top-level `{"compute_function": ...}` or `{"compute_pipelines": ...}`
+  is `unknown field`; `{"pipelines":[...]}` is `wrong number of unnamed fields
+  in table vector`.  `pipelines` is a TABLE, not a vector -- use `{`, not `[`.
+  The four keys inside it are `compute_pipelines`, `render_pipelines`,
+  `tile_render_pipelines`, `mesh_render_pipelines` (strings recoverable from
+  `usr/metal/<n>/bin/air-pack`).
+* `-std=metalN.M` does NOT lower the emitted AIR version; only
+  `-platform_version` moves the target.  macos 26.0 gives AIR 2.8, which is
+  still too old; 27.0 works.
+* The output is a `Mach-O 64-bit GPU executable applegpu` whose code lives in
+  `__TEXT,__compute` for a compute pipeline -- NOT `__text`.  Extract with
+  `otool -s __TEXT __compute out.bin`.
+* `xcrun metal -arch applegpu_g17p -c` looks like a shortcut but dead-ends in
+  `Plugin interface not implemented: AIRNTEmitObject`.
+
 ### A render pipeline's fragment shader is dead code unless it has a side effect
 
 `metal-nt` compiles a render pipeline with no attachment information, so a
@@ -100,3 +129,33 @@ lddev signal slot = bits 70..72; lddev uniform base = byte4 = base/4.
   baseline: an all-zero field vector does not satisfy the form's predicates.
 - m1n1 `proxyclient/experiments/g17p_grid_helper_code.py` -- a captured 16 KiB
   Apple code image, 8 shaders, all of which disassemble cleanly to `end`.
+
+## Witness: the multisample texel-fetch sample index (2026-09-10)
+
+Question: does AGX3 accept a per-sample operand on a texture fetch, or is
+multisample sampling simply absent on G17P?  Answer: it accepts one.
+
+MSL `texture2d_ms<float, access::read> t; out[0] = t.read(gid, N);` compiled for
+`applegpu_g17p`, one constant N per kernel, plus a `texture2d` single-sample
+control and a register-sourced index.  Round-tripped through `decomp`:
+
+    N=0   051700000000   form 305 smp ep0 size6 : ... 119:3 132:3 133:1
+    N=1   051700000200   form 305 smp ep0 size6 : ... 119:3 126:2 132:3 133:1
+
+The two differ in exactly ONE byte and the field vectors differ in exactly one
+field.  **Field 126 carries the sample index, scaled by two** -- absent (0) at
+N=0, `126:2` at N=1.  That 2x is the ordinary half-register operand scaling,
+the same convention as `AGX_ABI_VIN_ATTRIB(i) = 2 * (8 + i)`.
+
+Two things this does NOT say, deliberately:
+
+* N=2, N=3 and the register-sourced index select a LONGER form (`smp ep1`,
+  size 8; `decomp` labels it form 360).  Its sample field was not isolated --
+  the standing per-form hazard above applies, so do not assume it is also 126.
+* Our compiler does not use this operand at all.  `agx_emit_image_load()`
+  packs the sample into the coordinate vector instead -- `agx_emit_collect_to`
+  of `{ms_index, layer}` into an extra 32-bit coordinate component
+  (agx_compile.c) -- and `agx_nir_lower_g17p_indexed_samplers` admits exactly
+  that shape.  That path is already in production for `vkCmdResolveImage` and
+  is covered by `test_indexed_multisample_fetch()`.  Both encodings evidently
+  work; this witness is a second, independent way in, not a correction.
