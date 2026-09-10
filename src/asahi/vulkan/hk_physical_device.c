@@ -870,11 +870,7 @@ hk_get_device_properties(const struct agx_device *dev,
     * 68-word limit brings WebGL, WebGL2 and WebGPU all up.  It is the default
     * so no browser needs a bespoke environment to get hardware acceleration. */
    unsigned max_vgt_output_components =
-      dev->chip == AGX_CHIP_G17P
-         ? (hk_g17p_unverified_feature("vertex_output_68")
-               ? HK_AGX3_G17P_MAX_USER_WORDS
-               : HK_AGX3_G17P_DEFAULT_USER_WORDS)
-         : 116;
+      dev->chip == AGX_CHIP_G17P ? HK_AGX3_G17P_MAX_USER_WORDS : 116;
 
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),
