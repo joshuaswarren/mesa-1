@@ -1294,6 +1294,21 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Variant 1 above pairs the dynamic sample mask with the per-sample
+    # fragment shader, so it also demands sampleRateShading. G17P has no AGX3
+    # per-sample fragment path, so that binary cannot pass there and a failure
+    # would be blamed on the sample mask. This variant qualifies the mask
+    # alone, with ordinary per-pixel invocation.
+    executable(
+      'g17p-vulkan-dynamic-sample-mask4-no-sample-shading',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_MSAA_COVERAGE=3'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-hostcopy-triangle',
       files('tests/g17p_offscreen_triangle.c'),
