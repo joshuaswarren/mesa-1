@@ -702,6 +702,28 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
    key.tib.layered = (render->cr.layers > 1);
 
+   /* When the G17P end-of-tile program resolves directly, it writes the
+    * single-sample resolve target and the multisample surface is never stored
+    * -- the direct-resolve gate requires storeOp != STORE. A partial render's
+    * background program must therefore reload from that resolved surface, not
+    * from a multisample surface that was never written. Gallium expresses this
+    * as single_sample_reload (agx_state.c); Honeykrisp did not set it, so a
+    * partial render under MSAA reloaded garbage.
+    *
+    * Derive it from the same predicate the EOT side uses, so the two can only
+    * ever disagree by both changing.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P && !store &&
+       info->colorAttachmentCount >= 1) {
+      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
+
+      key.single_sample_reload = hk_agx3_g17p_direct_color_resolve_supported(
+         &key.tib, info->colorAttachmentCount,
+         att0->resolveImageView != VK_NULL_HANDLE,
+         att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT,
+         att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
+   }
+
    bool needs_textures_for_spilled_rts =
       agx_tilebuffer_spills(&render->tilebuffer) && !partial_render && !store;
 
