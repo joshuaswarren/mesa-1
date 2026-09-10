@@ -27,6 +27,38 @@ insert_late_test(nir_builder *b)
    nir_sample_mask_agx(b, all_samples, all_samples);
 }
 
+/*
+ * This pass runs from agx_preprocess_nir, which drivers may call more than once
+ * on the same shader: Honeykrisp preprocesses at shader creation
+ * (hk_preprocess_nir) and again while lowering (hk_lower_nir). The late test
+ * must be inserted exactly once. Two sample_mask instructions on the same path
+ * run the depth/stencil test twice per sample, which the sample_mask contract
+ * documented in agx_nir_lower_sample_mask.c forbids.
+ *
+ * The FragDepth lowering this pass replaced was self-idempotent, because it
+ * recorded FRAG_RESULT_DEPTH in outputs_written and the writes_zs check below
+ * caught the second run. A sample mask leaves no such trace in shader_info, so
+ * look for the instruction itself.
+ */
+static bool
+has_sample_mask(nir_shader *s)
+{
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            if (nir_instr_as_intrinsic(instr)->intrinsic ==
+                nir_intrinsic_sample_mask_agx)
+               return true;
+         }
+      }
+   }
+
+   return false;
+}
+
 static bool
 pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -74,6 +106,12 @@ agx_nir_lower_frag_sidefx(nir_shader *s)
 
    /* If depth/stencil feedback is already used, we're done */
    if (writes_zs)
+      return false;
+
+   /* If a previous run of this pass already inserted the late test, we're done.
+    * Running it again would test every sample twice.
+    */
+   if (has_sample_mask(s))
       return false;
 
    bool done = false;

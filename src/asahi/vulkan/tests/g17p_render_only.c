@@ -1317,39 +1317,116 @@ main(
    check(vkMapMemory(device, image_memory, 0, IMAGE_BYTES, 0,
                      (void **)&pixels),
          "vkMapMemory(image)");
-   unsigned exact = 0;
-   uint32_t first = 0;
-   for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; i++) {
-      const uint8_t r = pixels[i * 4 + 0], g = pixels[i * 4 + 1];
-      const uint8_t b = pixels[i * 4 + 2], a = pixels[i * 4 + 3];
-      if (i == 0)
-         first = ((uint32_t)r << 24) | ((uint32_t)g << 16) |
-                 ((uint32_t)b << 8) | a;
+   /* Classify every pixel into exactly three buckets. The expected colour is a
+    * shader immediate and the clear is opaque black, so "still the clear
+    * value" (never stored) and "some third value" (stored wrong) are different
+    * failures with different causes, and a bare "is it non-black" test reports
+    * the second one as a pass. */
+   static const uint8_t cleared_pixel[4] = {0x00, 0x00, 0x00, 0xff};
+   uint8_t expected_pixel[4] = {0xff, 0x47, 0x0d, 0xff};
 #ifdef G17P_CONDITIONAL_RENDERING
-      const bool pixel_matches =
-         expect_execute
-            ? (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
-            : (r == 0 && g == 0 && b == 0 && a == 0xff);
-      if (pixel_matches)
-#else
-      if (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
+   if (!expect_execute)
+      memcpy(expected_pixel, cleared_pixel, sizeof(expected_pixel));
 #endif
+
+   char *classes = malloc(IMAGE_WIDTH * IMAGE_HEIGHT);
+   if (!classes)
+      die("out of memory classifying the render target");
+
+   unsigned exact = 0, still_cleared = 0, wrong = 0;
+   uint32_t first = 0;
+   unsigned first_bad = UINT32_MAX;
+   uint32_t first_bad_value = 0;
+   for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; i++) {
+      const uint8_t *p = &pixels[i * 4];
+      const uint32_t value = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                             ((uint32_t)p[2] << 8) | p[3];
+      if (i == 0)
+         first = value;
+
+      if (memcmp(p, expected_pixel, sizeof(expected_pixel)) == 0) {
+         classes[i] = '#';
          exact++;
-   }
-   fprintf(stderr,
-           "g17p-render-only: pixels exact=%u/%u first=%#010x\n",
-           exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
-   for (unsigned y = 0; y < IMAGE_HEIGHT; y += 4) {
-      char row[IMAGE_WIDTH / 2 + 1];
-      for (unsigned x = 0; x < IMAGE_WIDTH; x += 2) {
-         const uint8_t *p = &pixels[(y * IMAGE_WIDTH + x) * 4];
-         row[x / 2] = (p[0] | p[1] | p[2]) ? '#' : '.';
+         continue;
       }
-      row[IMAGE_WIDTH / 2] = 0;
-      fprintf(stderr, "g17p-render-only: |%s|\n", row);
+
+      if (memcmp(p, cleared_pixel, sizeof(cleared_pixel)) == 0) {
+         classes[i] = '.';
+         still_cleared++;
+      } else {
+         classes[i] = '?';
+         wrong++;
+      }
+
+      if (first_bad == UINT32_MAX) {
+         first_bad = i;
+         first_bad_value = value;
+      }
    }
+
+   const uint32_t expected_value = ((uint32_t)expected_pixel[0] << 24) |
+                                   ((uint32_t)expected_pixel[1] << 16) |
+                                   ((uint32_t)expected_pixel[2] << 8) |
+                                   expected_pixel[3];
+   fprintf(stderr,
+           "g17p-render-only: pixels exact=%u/%u cleared=%u wrong=%u "
+           "first=0x%08x expected=0x%08x\n",
+           exact, IMAGE_WIDTH * IMAGE_HEIGHT, still_cleared, wrong, first,
+           expected_value);
+   if (first_bad != UINT32_MAX)
+      fprintf(stderr,
+              "g17p-render-only: first non-exact pixel (%u,%u)=0x%08x\n",
+              first_bad % IMAGE_WIDTH, first_bad / IMAGE_WIDTH,
+              first_bad_value);
+
+   /* Report the granularity of any loss. A fragment SIMD group covers an 8x4
+    * pixel footprint and a derivative quad covers 2x2, so counting how many of
+    * each are uniform decides, from a single run, whether pixels are lost per
+    * pixel, per quad, or per SIMD group. The previous map sampled one row in
+    * four and one column in two, which cannot tell those apart. */
+   struct {
+      unsigned w, h;
+      const char *name;
+   } shapes[2] = {{2, 2, "quads(2x2)"}, {8, 4, "simd-groups(8x4)"}};
+   for (unsigned s = 0; s < 2; ++s) {
+      unsigned total = 0, mixed = 0;
+      for (unsigned by = 0; by < IMAGE_HEIGHT; by += shapes[s].h) {
+         for (unsigned bx = 0; bx < IMAGE_WIDTH; bx += shapes[s].w) {
+            const char first_class = classes[by * IMAGE_WIDTH + bx];
+            bool uniform = true;
+            for (unsigned y = by; y < by + shapes[s].h && y < IMAGE_HEIGHT; ++y)
+               for (unsigned x = bx; x < bx + shapes[s].w && x < IMAGE_WIDTH;
+                    ++x)
+                  uniform &= classes[y * IMAGE_WIDTH + x] == first_class;
+            total++;
+            mixed += !uniform;
+         }
+      }
+      fprintf(stderr, "g17p-render-only: %s mixed=%u/%u\n", shapes[s].name,
+              mixed, total);
+   }
+
+   /* Every row, every column: the map is the evidence, so it must not
+    * subsample. '#' is exact, '.' is the untouched clear, '?' is a third
+    * value. */
+   if (IMAGE_WIDTH <= 128 && IMAGE_HEIGHT <= 128) {
+      char *row = malloc(IMAGE_WIDTH + 1);
+      if (!row)
+         die("out of memory printing the render target");
+      row[IMAGE_WIDTH] = 0;
+      for (unsigned y = 0; y < IMAGE_HEIGHT; y++) {
+         memcpy(row, classes + (size_t)y * IMAGE_WIDTH, IMAGE_WIDTH);
+         fprintf(stderr, "g17p-render-only: %3u |%s|\n", y, row);
+      }
+      free(row);
+   }
+   free(classes);
    if (exact != IMAGE_WIDTH * IMAGE_HEIGHT)
+#ifdef G17P_CONDITIONAL_RENDERING
       die("render target differs from exact conditional result");
+#else
+      die("render target differs from the exact expected colour");
+#endif
    if (memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
       die("vertex source changed during query render");
 

@@ -719,6 +719,60 @@ fs_finish(nir_builder *b)
    return b->shader;
 }
 
+static unsigned
+count_sample_mask(nir_shader *s)
+{
+   unsigned count = 0;
+
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_sample_mask_agx)
+               count++;
+         }
+      }
+   }
+
+   return count;
+}
+
+/*
+ * agx_nir_lower_frag_sidefx gives a side-effecting fragment shader an all-live
+ * late test, and Honeykrisp preprocesses every shader twice (hk_preprocess_nir,
+ * then hk_lower_nir). The test must survive that as exactly one sample_mask:
+ * two of them run the depth/stencil test twice for every sample, which the
+ * contract in agx_nir_lower_sample_mask.c forbids. The FragDepth lowering this
+ * replaced was idempotent through info.outputs_written; the sample-mask
+ * lowering has to check for itself, so pin the invariant here.
+ */
+static bool
+test_frag_sidefx_late_test_once(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P fragment side effects");
+   b.shader->info.internal = true;
+   fs_store_colour(&b, nir_load_preamble(&b, 4, 32, .base = 4));
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.writes_memory = true;
+
+   agx_preprocess_nir(b.shader);
+   const unsigned once = count_sample_mask(b.shader);
+   agx_preprocess_nir(b.shader);
+   const unsigned twice = count_sample_mask(b.shader);
+
+   const bool ok = once == 1 && twice == 1;
+   if (!ok)
+      fprintf(stderr,
+              "frag side effects: late tests after one preprocess=%u, after "
+              "two=%u, expected 1 and 1\n",
+              once, twice);
+
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static bool
 test_g17p_background_clear(void)
 {
@@ -5752,6 +5806,7 @@ main(int argc, char **argv)
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
+   RUN(test_frag_sidefx_late_test_once);
 #undef RUN
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {
