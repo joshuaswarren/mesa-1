@@ -70,6 +70,13 @@ hk_descriptor_stride_align_for_type(
       *stride = *alignment = 0; /* These don't take up buffer space */
       break;
 
+   case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+      /* An acceleration structure descriptor is nothing but the address of
+       * its BVH: the traversal walks it with plain global loads, so there is
+       * no hardware descriptor and no bounds information to carry. */
+      *stride = *alignment = sizeof(uint64_t);
+      break;
+
    case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK:
       *stride = 1; /* Array size is bytes */
       *alignment = HK_MIN_UBO_ALIGNMENT;

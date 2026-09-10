@@ -975,6 +975,36 @@ void hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              struct hk_shader *s, struct agx_grid grid,
                              struct agx_workgroup local_size);
 
+/*
+ * Saved application state around a driver-internal meta operation.  The
+ * acceleration-structure builder needs this as much as a blit does: the
+ * common build shaders bind their own compute pipeline and push constants,
+ * so a build recorded between two application dispatches would otherwise
+ * silently clobber them.
+ */
+struct hk_meta_save {
+   struct vk_vertex_input_state _dynamic_vi;
+   struct vk_sample_locations_state _dynamic_sl;
+   struct vk_dynamic_graphics_state dynamic;
+   struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
+   struct hk_addr_range vb0;
+   struct hk_descriptor_set *desc0;
+   bool has_push_desc0;
+   enum agx_visibility_mode occlusion;
+   struct hk_push_descriptor_set push_desc0;
+   VkQueryPipelineStatisticFlags pipeline_stats_flags;
+   uint8_t push[HK_MAX_PUSH_SIZE];
+};
+
+void hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                   VkPipelineBindPoint bind_point);
+void hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                 VkPipelineBindPoint bind_point);
+
+void hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer,
+                               uint32_t invocations_x, uint32_t invocations_y,
+                               uint32_t invocations_z);
+
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,

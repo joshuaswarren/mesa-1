@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+
+#include "hk_nir_ray_tracing.h"
 #include "hk_nir_lower_robust_image.h"
 
 #include "poly/nir/poly_nir.h"
@@ -885,6 +887,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             hk_buffer_addr_format(rs->uniform_buffers,
                                   rs->null_uniform_buffer_descriptor));
+
+   /* Ray queries lower to a software traversal loop of ALU and global loads.
+    * It has to run after descriptor lowering, because rq_initialize's
+    * acceleration-structure source must already be a resolved 64-bit address
+    * by the time the traversal reads a node through it, and before shared
+    * memory is laid out, because the pass introduces shader temporaries that
+    * nir_lower_vars_to_ssa still has to promote. */
+   if (nir->info.ray_queries > 0)
+      NIR_PASS(_, nir, hk_nir_lower_ray_queries);
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for

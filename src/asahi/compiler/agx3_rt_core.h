@@ -65,6 +65,30 @@
  *    FALSE -- the geometry-cull and opacity-cull variants give -2.  f63 and
  *    f92 shift when the ray-setup allocation shifts; nothing further is
  *    established.
+ *  - CORRECTION (2026-09-10): f63, f77/f78 and f92 are REGISTER OPERANDS of
+ *    intersect_ray, not payload or per-query descriptors, and f84/f85 are
+ *    their operand-class selectors.  Two independent measurements against
+ *    `metal-nt -arch applegpu_g17p`:
+ *
+ *      * `fieldbits` gives the layout directly -- f77 is 7 bits at 60..66
+ *        under f84=2, f78 is 9 bits at the SAME start bit 60 under f84=3, and
+ *        f84 accepts 1, 2 and 3.  Two widths of one field, which is the shape
+ *        of a source-operand class selector.
+ *      * A deliberate breaker, built because the per-query reading above
+ *        survived several kernels: two kernels with a byte-identical query,
+ *        one of them holding 24 extra floats live across the intersect.
+ *        f63, f78 and f92 ALL shifted by +4 under that register pressure
+ *        while every single (f70, f68, f71) SCS tuple stayed identical.
+ *
+ *    So the "per-query allocated resource id" reading of f77 above is an
+ *    artefact: adding a query moves register allocation, and f77 follows the
+ *    allocation.  An earlier six-point pressure ladder concluded the opposite
+ *    because it held its extra values live around the wrong instruction.
+ *    The entry points that expose f77 still encode witnessed bytes, so they
+ *    remain correct as byte generators; only the NAME and the causal story
+ *    are wrong, and a lowering must not treat f77 as a query identity.
+ *    (The f92 = f78 - 4 refutation below stands and is now explained: both
+ *    are register indices that usually, but not always, move together.)
  *  - Scoreboard/wait variation on any RT form: every witnessed RT
  *    instruction carries the same wait/hint bits, so no wait mask is
  *    exposed.  Missing witness: an RT instruction with a different wait set.
