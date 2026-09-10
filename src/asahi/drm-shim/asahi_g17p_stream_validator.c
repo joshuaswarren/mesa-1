@@ -102,6 +102,22 @@ oracle_gap_at(uint64_t address, const char *what)
  * -- a corrupt stream and a decoder that has never seen this opcode look
  * identical from here -- so do not let it masquerade as a proven driver bug.
  */
+/*
+ * An ambiguous observation that does NOT stop the walk.  Some checks can spot
+ * something odd without being able to prove it wrong -- a payload that reads
+ * like an unowned pointer pair, say, when the same range legitimately carries
+ * push constants, divisors and indirect arguments.  Report the shape so a
+ * human can judge it, and keep validating.
+ */
+static void
+note_indeterminate_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P indeterminate at %#llx: %s -- not by itself evidence of "
+           "a driver bug; stream not rejected\n",
+           (unsigned long long)address, what);
+}
+
 static bool
 fail_indeterminate_at(uint64_t address, const char *what)
 {
@@ -307,15 +323,14 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                      if (pointer_shaped &&
                          (!memory->owned(memory->data, a, 32) ||
                           !memory->owned(memory->data, b, 32))) {
-                        fprintf(stderr,
-                                "shim: G17P Ioto payload at %#llx reads as an "
-                                "unowned pointer pair (%#llx, %#llx) -- "
-                                "INDETERMINATE: this range also carries push "
-                                "constants, divisors and indirect arguments, "
-                                "so it is not evidence of a driver bug; stream "
-                                "not rejected\n",
-                                (unsigned long long)source,
-                                (unsigned long long)a, (unsigned long long)b);
+                        char what[160];
+                        snprintf(what, sizeof(what),
+                                 "Ioto payload reads as an unowned pointer "
+                                 "pair (%#llx, %#llx), but this range also "
+                                 "carries push constants, divisors and "
+                                 "indirect arguments",
+                                 (unsigned long long)a, (unsigned long long)b);
+                        note_indeterminate_at(source, what);
                      }
                      if (memory->verbose && pointer_shaped) {
                         uint8_t texture[32] = {0}, sampler[32] = {0};
