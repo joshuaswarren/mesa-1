@@ -2463,6 +2463,44 @@ agx_drop_for_unusable_program(struct agx_context *ctx,
    return true;
 }
 
+/*
+ * Refuse a draw whose G17P program address came back null.
+ *
+ * agx_build_g17p_graphics_program() is fail-closed and returns 0 from a dozen
+ * places -- an unlinked shader, a preamble it cannot place, a sampling stage
+ * whose texture/sampler pointer pair is missing, a program that overflows its
+ * pool.  Every one of those used to be written straight into
+ * agx_vdm_state_update_info.pipeline and submitted, so the shape of the bug on
+ * hardware was a GPU fault at address 0 with nothing in the log connecting it
+ * to the shader that caused it.  One such gap (a compiled-shader property lost
+ * across the disk cache) took a hardware cycle to find for exactly that reason.
+ *
+ * Drop the work instead, and say which stage once per program rather than once
+ * per draw -- a refused shader in a compositor is hit every frame.
+ */
+static bool
+agx_drop_for_null_g17p_program(struct agx_context *ctx,
+                               struct agx_compiled_shader *cs,
+                               uint64_t program, const char *stage)
+{
+   if (program)
+      return false;
+
+   ctx->skipped_no_program++;
+
+   if (cs == NULL || !cs->refusal_reported) {
+      if (cs != NULL)
+         cs->refusal_reported = true;
+
+      mesa_loge("asahi: dropping work: no G17P %s program could be built for "
+                "this draw. This is a driver gap; submitting a null program "
+                "address faults the GPU.",
+                stage);
+   }
+
+   return true;
+}
+
 static enum mesa_prim
 rast_prim(enum mesa_prim mode, unsigned fill_mode)
 {
@@ -4936,7 +4974,8 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
    uint64_t fragment_program = 0;
    agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
                       MESA_SHADER_FRAGMENT, 0, 0, &fragment_program);
-   if (!fragment_program)
+   if (agx_drop_for_null_g17p_program(ctx, ctx->fs, fragment_program,
+                                      "fragment"))
       return NULL;
 
    const struct agx_ppp_hal200_fragment_fields fs_fields = {
@@ -5191,6 +5230,9 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
                             MESA_SHADER_VERTEX, 0, 0, &pipeline);
 
       if (dev->chip == AGX_CHIP_G17P) {
+         if (agx_drop_for_null_g17p_program(ctx, vs, pipeline, "vertex"))
+            return NULL;
+
          const uint32_t provoking = ctx->rast->base.flatshade_first ? 0 : 2;
          const struct agx_vdm_state_update_info info = {
             .raw_vertex_shader_word0 = counts.opaque[0],
