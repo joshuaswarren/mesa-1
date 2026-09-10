@@ -129,3 +129,33 @@ lddev signal slot = bits 70..72; lddev uniform base = byte4 = base/4.
   baseline: an all-zero field vector does not satisfy the form's predicates.
 - m1n1 `proxyclient/experiments/g17p_grid_helper_code.py` -- a captured 16 KiB
   Apple code image, 8 shaders, all of which disassemble cleanly to `end`.
+
+## Witness: the multisample texel-fetch sample index (2026-09-10)
+
+Question: does AGX3 accept a per-sample operand on a texture fetch, or is
+multisample sampling simply absent on G17P?  Answer: it accepts one.
+
+MSL `texture2d_ms<float, access::read> t; out[0] = t.read(gid, N);` compiled for
+`applegpu_g17p`, one constant N per kernel, plus a `texture2d` single-sample
+control and a register-sourced index.  Round-tripped through `decomp`:
+
+    N=0   051700000000   form 305 smp ep0 size6 : ... 119:3 132:3 133:1
+    N=1   051700000200   form 305 smp ep0 size6 : ... 119:3 126:2 132:3 133:1
+
+The two differ in exactly ONE byte and the field vectors differ in exactly one
+field.  **Field 126 carries the sample index, scaled by two** -- absent (0) at
+N=0, `126:2` at N=1.  That 2x is the ordinary half-register operand scaling,
+the same convention as `AGX_ABI_VIN_ATTRIB(i) = 2 * (8 + i)`.
+
+Two things this does NOT say, deliberately:
+
+* N=2, N=3 and the register-sourced index select a LONGER form (`smp ep1`,
+  size 8; `decomp` labels it form 360).  Its sample field was not isolated --
+  the standing per-form hazard above applies, so do not assume it is also 126.
+* Our compiler does not use this operand at all.  `agx_emit_image_load()`
+  packs the sample into the coordinate vector instead -- `agx_emit_collect_to`
+  of `{ms_index, layer}` into an extra 32-bit coordinate component
+  (agx_compile.c) -- and `agx_nir_lower_g17p_indexed_samplers` admits exactly
+  that shape.  That path is already in production for `vkCmdResolveImage` and
+  is covered by `test_indexed_multisample_fetch()`.  Both encodings evidently
+  work; this witness is a second, independent way in, not a correction.
