@@ -248,7 +248,102 @@ main(void)
                   agx3_rt_update_node(AGX_ISA_ENCODING_UNKNOWN, b, &len), b,
                   len);
 
+   /*
+    * The incStk operand differential, measured on 2026-09-10 from Apple's own
+    * compiler.  Reproduce with the harness in README-metal-witness.md:
+    *
+    *   metal -mmacosx-version-min=26.0 -c <src>.metal -o <src>.air
+    *   metallib <src>.air -o <src>.metallib
+    *   metal-nt -arch applegpu_g17p -N <src>.mtlp-json \
+    *            -platform_version macos 26.0 26.0 <src>.metallib -o <src>.nat
+    *
+    * over two sources: the five ray-query kernels of
+    * .tmp/g17p-raytracing-evidence/rq.metal, and a 1/2/3/4-concurrent-query
+    * family.  Linear-scanning both __text images yields exactly these 24
+    * (f2, f24) pairs.  Each comment names one site the bytes were read at.
+    *
+    * f2 and f24 are independent: 46 appears with both f24=5 and f24=8, and 62
+    * with both 352 and 520.  No hardware was involved; these are compiler
+    * outputs.
+    */
+   static const struct {
+      uint16_t f2, f24;
+      const char *hex;
+   } g17p_inc_stk[] = {
+      {  0,    4, "0700540080000000"}, /* rq_bary+0x430 */
+      {  0,  184, "0700540000170000"}, /* nq2+0xe0     */
+      {  4,   16, "0700540200020000"}, /* nq2+0xc8     */
+      { 10,    8, "0700540500010000"}, /* nq2+0xbc     */
+      { 12,   16, "0700540600020000"}, /* nq3+0xc8     */
+      { 18,    4, "0700540980000000"}, /* nq4+0xd4     */
+      { 20,  352, "0700540a002c0000"}, /* nq3+0xf8     */
+      { 22,  184, "0700540b00170000"}, /* nq4+0x134    */
+      { 24,  184, "0700540c00170000"}, /* nq3+0xe0     */
+      { 26,   16, "0700540d00020000"}, /* nq4+0xcc     */
+      { 28,  520, "0700540e00410000"}, /* nq4+0x1e4    */
+      { 32,  352, "07005410002c0000"}, /* nq4+0x1dc    */
+      { 40,    4, "0700541480000000"}, /* rq_prim+0x1d0 */
+      { 42,    4, "0700541580000000"}, /* rq_inst+0x1f0 */
+      { 46,    5, "07005417a0000000"}, /* nq4+0x13c    */
+      { 46,    8, "0700541700010000"}, /* nq3+0xbc     */
+      { 60,  688, "0700541e00560000"}, /* nq4+0x704    */
+      { 62,  352, "0700541f002c0000"}, /* nq2+0x384    */
+      { 62,  520, "0700541f00410000"}, /* nq3+0x55a    */
+      { 66,    7, "07005421e0000000"}, /* nq4+0x206    */
+      { 74,    6, "07005425c0000000"}, /* nq4+0x1ec    */
+      { 92,    4, "0700542e80000000"}, /* nq2+0xd0     */
+      { 96,    5, "07005430a0000000"}, /* nq2+0xe8     */
+      {100,    6, "07005432c0000000"}, /* nq3+0x100    */
+   };
+
+   for (unsigned i = 0; i < sizeof(g17p_inc_stk) / sizeof(g17p_inc_stk[0]);
+        ++i) {
+      char what[64];
+      snprintf(what, sizeof(what), "G17P incStk f2=%u f24=%u",
+               g17p_inc_stk[i].f2, g17p_inc_stk[i].f24);
+      expect(what,
+             agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B,
+                                      g17p_inc_stk[i].f2,
+                                      g17p_inc_stk[i].f24, b, &len),
+             b, len, g17p_inc_stk[i].hex);
+   }
+
+   /* The fixed witness must remain reachable through the operand codec. */
+   expect("incStk operands reproduce the fixed AGX3b witness",
+          agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 36, 4, b, &len), b,
+          len, "0700541280000000");
+
+   /* Fail-closed boundaries: no AGX3c operand witness, no odd f2, no
+    * out-of-range f24. */
+   expect_refused("incStk operands on AGX3c",
+                  agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3C, 40, 4, b,
+                                           &len),
+                  b, len);
+   expect_refused("incStk operands on AGX2",
+                  agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX2, 40, 4, b,
+                                           &len),
+                  b, len);
+   expect_refused("incStk odd f2",
+                  agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 41, 4, b,
+                                           &len),
+                  b, len);
+   expect_refused("incStk f2 out of range",
+                  agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 512, 4, b,
+                                           &len),
+                  b, len);
+   expect_refused("incStk f24 out of range",
+                  agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 40, 8192, b,
+                                           &len),
+                  b, len);
+
    /* NULL-argument hardening. */
+   checks++;
+   if (agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 40, 4, NULL, &len) ||
+       agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 40, 4, b, NULL)) {
+      fprintf(stderr, "incStk operands accepted a NULL argument\n");
+      failures++;
+   }
+
    checks++;
    if (agx3_rt_intersect_ray(AGX_ISA_ENCODING_AGX3B, 0, NULL, &len) ||
        agx3_rt_intersect_ray(AGX_ISA_ENCODING_AGX3B, 0, b, NULL) ||

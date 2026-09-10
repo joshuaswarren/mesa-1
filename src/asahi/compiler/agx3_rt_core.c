@@ -230,6 +230,37 @@ agx3_rt_inc_stk(enum agx_isa_encoding enc,
 }
 
 bool
+agx3_rt_inc_stk_operands(enum agx_isa_encoding enc, uint16_t operand_f2,
+                         uint16_t operand_f24,
+                         uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len)
+{
+   /* The invariant context shared by all 24 witnessed AGX3b encodings. */
+   static const struct agx3_field_kv b_base[] = {
+      KV(2, 0), KV(9, 2), KV(10, 2), KV(24, 0),
+   };
+
+   if (!args_ok(out, len))
+      return false;
+
+   /* f2 deposits as byte3 = f2/2, so odd values are unrepresentable rather
+    * than merely unwitnessed; f24 is 13 bits wide.  AGX3c has no operand
+    * witness at all. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || (operand_f2 & 1u) ||
+       operand_f2 > 510u || operand_f24 > 8191u) {
+      memset(out, 0, AGX3_RT_CORE_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+
+   const struct agx3_field_kv ov[] = {
+      KV(2, operand_f2),
+      KV(24, operand_f24),
+   };
+   return rt_compose(enc, "incStk", b_base, NELEM(b_base), ov, NELEM(ov), out,
+                     len);
+}
+
+bool
 agx3_rt_update_barrier(enum agx_isa_encoding enc,
                        uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len)
 {

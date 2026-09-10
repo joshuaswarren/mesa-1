@@ -115,6 +115,35 @@ bool agx3_rt_inc_stk(enum agx_isa_encoding enc,
                      uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len);
 
 /*
+ * Encode incStk with its two varying operand fields.  AGX3b only.
+ *
+ * The header comment above records that incStk's operand codec was blocked on
+ * a missing witness: "no corpus differential correlates any argument to a
+ * machine field".  That witness now exists.  Compiling five ray-query kernels
+ * and a 1/2/3/4-concurrent-query family for `applegpu_g17p` with Apple's own
+ * `metal-nt` yields 24 distinct incStk encodings covering 24 distinct
+ * (f2, f24) pairs, and f2/f24 vary independently: (46,5) and (46,8) share f2,
+ * (62,352) and (62,520) share f2 with differing f24.  Every one of the 24 is
+ * reproduced exactly by this encoder, and nothing outside f2/f24 varies across
+ * them (the `07 00 54` prefix, the zero tail, f9=2 and f10=2 are invariant).
+ *
+ * What is witnessed is the DEPOSIT, not the meaning.  f2 is an 8-bit field
+ * deposited in half-register units (byte 3 = f2/2), the same convention the
+ * memory forms use for a register operand; f24 is a 13-bit field at bit 37.
+ * Neither field's ray-traversal role is established -- deliberately no
+ * `stack_depth`/`slot` name is invented for them here, because f5 on
+ * intersect_ray was named `state_register` on an inference that the measured
+ * G17P corpus does not support (see agx3_rt_intersect_ray).
+ *
+ * AGX3c is refused: the operand differential above is an AGX3b/G17P corpus and
+ * no AGX3c incStk operand pair has been witnessed.
+ */
+bool agx3_rt_inc_stk_operands(enum agx_isa_encoding enc, uint16_t operand_f2,
+                              uint16_t operand_f24,
+                              uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
+                              uint8_t *len);
+
+/*
  * Encode the exact barrier instruction Apple's compiler emits ahead of the
  * update_node / update_bvh operations (the RT-expansion scope form of the
  * general barrier).  Other barrier scopes belong to a future barrier core,
