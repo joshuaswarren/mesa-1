@@ -512,6 +512,35 @@ modifier — a wrong result rather than a refusal. That is worth guarding
 deliberately: the fail-closed property only holds if nothing downstream can
 quietly accept the operand and drop the bit.
 
+### Not an encoding gap: `device_load` at `reg192`
+
+A complete Vulkan 1.0 CTS run reports 32 refusals in `glsl.atomic_operations`
+of one `device_load` shape whose index register is `reg192`, which looks like
+an under-witnessed bound: `agx3_translate_mem()` and `agx3_mem_core.c` both
+refuse an index register above 191 with no recorded rationale, and Apple's
+1,494-instruction corpus only witnesses index registers up to **50**.
+
+It is not an extrapolation. Composing `lddev` and `stdev` directly, sweeping
+only the index field:
+
+```
+lddev f16 = 184   67 10 44 00 01 5c 20 00 51 01 00 40 46 00
+lddev f16 = 186   67 10 44 00 01 5d 20 00 51 01 00 40 46 00
+lddev f16 = 188   67 10 44 00 01 5e 20 00 51 01 00 40 46 00
+lddev f16 = 190   67 10 44 00 01 5f 20 00 51 01 00 40 46 00
+lddev f16 = 191   67 10 44 00 81 5f 20 00 51 01 00 40 46 00
+lddev f16 = 192   refused
+stdev f16 = 190   e7 00 54 00 00 5f 21 00 11 00 00 90 11 00
+stdev f16 = 192   refused
+```
+
+Both forms top out at 191: the field cannot name a higher index register, so
+the packer's cap is the hardware's. **These refusals therefore belong to
+register allocation, not to the encoder.** Either the allocator has to keep a
+memory operation's index operand inside the low 192 halves, or address
+legalization has to move a high index into a low register first. Closing it in
+the packer is impossible; there is no encoding to add.
+
 ### The control arm
 
 `params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
@@ -526,13 +555,30 @@ the two arms differ only by generation.
 - **No hardware.** Nothing here ran on a G17P. Every claim is an encoding
   claim, checked byte-for-byte against Apple's compiler and against the
   in-tree encoder, and nothing more.
-- `EXT_vertex_input_dynamic_state` with a sub-32-bit attribute format is
-  reported to hit the mixed-width `iadd` shape through the draw-time prolog.
-  The encoding gap is closed, but a dynamic-vertex-input harness here compiled
-  no shader at all under the shim (3 lines of `AGX_MESA_DEBUG=shaders` output
-  against 204 for an ordinary graphics pipeline), and the same harness passed
-  with the fix reverted. **That path was never exercised, so no claim is made
-  about the extension.**
+- `EXT_vertex_input_dynamic_state`: **confirmed repaired by the mixed-width
+  `iadd` encoding**, though not by the measurement first attempted here. A
+  dynamic-vertex-input harness written for it compiled no shader at all under
+  the shim (3 lines of `AGX_MESA_DEBUG=shaders` output against 204 for an
+  ordinary graphics pipeline) and passed with the fix reverted, so it proved
+  nothing. A separate lane built the missing coverage — nothing in the tree
+  exercised `VK_DYNAMIC_STATE_VERTEX_INPUT_EXT` — and first proved the path was
+  *reached*: under `shaders,internal` the dynamic variant's VS prolog carries
+  the whole narrow chain (`load_constant_agx format=r16_uint`,
+  `unpack_32_2x16_split_y`, `u2u16`, `f2f32`, `iadd`) and the static variant
+  carries none of it. Then, with the fix applied and reverted:
+
+  | dynamic attribute format | before | after |
+  | ------------------------ | ------ | ----- |
+  | `R8G8B8A8_UNORM`         | passes | passes |
+  | **`R16G16_SINT`**        | **prolog fails to compile** | **passes** |
+  | `R16G16_SFLOAT`          | passes | passes |
+
+  The trigger is `i2i32`/`u2u32` on a 16-bit source, not sub-32-bit formats in
+  general: the float path goes through `f2f32` and never forms the mixed-width
+  add. "Sub-32-bit vertex formats fail" was too broad in both directions.
+  **A harness that reaches no code proves nothing in either direction** — the
+  reverted-fix arm passing should have been read as a broken measurement, not
+  as evidence.
 - The immediate-zero-minuend `isub` (`-a`) has no reproducer here: the obvious
   `uint(-int(x))` shader encodes on both arms already.
 
