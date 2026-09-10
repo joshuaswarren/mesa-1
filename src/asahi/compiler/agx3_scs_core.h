@@ -5,10 +5,16 @@
  * AGX3 scalar SCS load/store encoders and decoders.
  *
  * The supported address-space(5) forms were recovered with controlled Apple
- * G17P/G17S compiler probes: direct-absolute, and a scalar register index
- * scaled by the access width plus a uniform-register base and signed 16-bit
- * byte displacement.  Register-base, other scales, and vector forms are not
- * represented and therefore fail closed.
+ * G17P/G17S compiler probes.  Four address kinds are represented, spanning
+ * every combination Apple's G17P ray-query setup emits: direct-absolute, a
+ * scalar register index plus a uniform-register base, a scalar register index
+ * plus a register base, and a register base with no index -- each with a
+ * signed 16-bit byte displacement.  Loads and stores may move one, two or four
+ * 32-bit components.
+ *
+ * The two register-base kinds and any component mask other than one are
+ * witnessed on AGX3b only and fail closed on AGX3c.  Other scales still fail
+ * closed.
  */
 
 #pragma once
@@ -32,6 +38,14 @@ enum agx3_scs_address_kind {
 
    /* uniform[uniform_base] + gpr[index] * (1 << width) + byte_offset */
    AGX3_SCS_ADDRESS_UNIFORM_INDEXED = 1,
+
+   /* gpr[base_register] + gpr[index] + byte_offset.  Apple's operand-kind
+    * selectors read f23=2 (slot A register) and f38=2 (slot B register); the
+    * base lands in f31 rather than the uniform field f32. */
+   AGX3_SCS_ADDRESS_REGISTER_INDEXED = 2,
+
+   /* gpr[base_register] + byte_offset, no register index (f23=1, f38=2). */
+   AGX3_SCS_ADDRESS_REGISTER_BASE = 3,
 };
 
 struct agx3_scs_desc {
@@ -42,6 +56,28 @@ struct agx3_scs_desc {
    enum agx3_scs_address_kind address_kind;
    uint16_t index;        /* scalar GPR, half-register units */
    uint16_t uniform_base; /* scalar uniform, half-register units */
+
+   /* Slot-B base register (Apple f31), half-register units.  Used only by the
+    * two register-base kinds; must be zero otherwise.  Witnessed range is one
+    * byte: the composer refuses 256 and above. */
+   uint16_t base_register;
+
+   /* Apple f68.  A four-bit field: the composer accepts every value 1..15.
+    * Apple's ray-setup code uses only 1, 3 and 15, and those move one, two and
+    * four 32-bit components respectively.  Zero is treated as 1 so that a
+    * zero-initialised descriptor keeps the previous scalar behaviour, and the
+    * encoding is byte-identical to what this core emitted before. */
+   uint8_t component_mask;
+
+   /* Apple f70.  The composer accepts exactly 0..4 and refuses 5 and above.
+    * Its role is NOT established: it varies independently of `width` inside a
+    * single address kind (uniform-indexed W32 stores are witnessed with both
+    * f70=0 and f70=2), so it is deliberately not named a scale or a mode.
+    * When `has_address_selector` is false the previous derivation from
+    * `width` is kept for the two original address kinds; the two register-base
+    * kinds always require an explicit value. */
+   bool has_address_selector;
+   uint8_t address_selector;
 
    uint8_t slot;       /* load only: 1..6 (b), 1..8 (c) */
    uint16_t wait_mask; /* bit i waits for scoreboard slot i + 1 */

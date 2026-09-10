@@ -35,9 +35,94 @@ extern "C" {
 #define AGX_RT_HIT_RESULT_SIZE            156u
 #define AGX_RT_TRANSFORM_FLOATS            12u
 
-/* Exact size of Apple's inline ray-query state object.  Its internal field
- * layout remains unexposed. */
+/* Exact size of Apple's inline ray-query state object. */
 #define AGX_RT_RAY_QUERY_STATE_SIZE 168u
+
+/*
+ * Apple's inline ray-query state layout (`intersection_query`).
+ *
+ * THIS IS A DIFFERENT ABI FROM THE `IntersectRayResult` OFFSETS ABOVE.  Those
+ * describe the struct the `intersector` path returns; these describe the
+ * inline `intersection_query` object that the ray-query path keeps.  A
+ * Vulkan `rq_load` reads the latter.  The two do not agree on a single field
+ * -- committed t is at 4 in IntersectRayResult and at 112 here -- so using
+ * the IntersectRayResult offsets to lower a ray query produces a lowering
+ * that looks right and reads the wrong words.
+ *
+ * Recovered from the RIA3 runtime (raytracing_runtime_ria3.metallib, shipped
+ * in the Metal toolchain at metal/32023/lib/applegpu-nt/) and cross-checked
+ * two independent ways that agree on every field below:
+ *
+ *  - the TBAA type node `_ZTS18intersection_query` in
+ *    agx.intersection_query.reset, which gives member offsets and types, and
+ *    whose stores bind reset's own arguments: min_distance -> 0,
+ *    max_distance -> 4, origin[0..2] -> 12/16/20, direction[0..2] ->
+ *    24/28/32.  The node's members end at 160 + 8, i.e. exactly the 168 above.
+ *  - the individual `agx.get_committed_*_intersection_query` accessors, whose
+ *    load offsets match the committed sub-record member-for-member.
+ */
+#define AGX_RT_QUERY_OFF_TMIN       0u
+#define AGX_RT_QUERY_OFF_TMAX       4u
+#define AGX_RT_QUERY_OFF_ORIGIN    12u /* 3 x f32 */
+#define AGX_RT_QUERY_OFF_DIRECTION 24u /* 3 x f32 */
+#define AGX_RT_QUERY_OFF_PARAMS    48u /* 10 bytes of intersection_params */
+#define AGX_RT_QUERY_OFF_STATE     68u /* intersection_query::State */
+#define AGX_RT_QUERY_OFF_CANDIDATE 88u /* ray_query_candidate, 20 bytes */
+#define AGX_RT_QUERY_OFF_COMMITTED 112u
+
+/* Committed-hit record, absolute offsets into the 168-byte query object.
+ * Each is the load offset of the matching agx.get_committed_* accessor. */
+#define AGX_RT_QUERY_OFF_COMMITTED_T              112u /* f32   */
+#define AGX_RT_QUERY_OFF_COMMITTED_GEOMETRY_ID    120u /* i32   */
+#define AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_ID   124u /* i32   */
+#define AGX_RT_QUERY_OFF_COMMITTED_INSTANCE_COUNT 128u /* i32   */
+#define AGX_RT_QUERY_OFF_COMMITTED_TYPE           132u /* i8, hit_kind */
+#define AGX_RT_QUERY_OFF_COMMITTED_FRONT_FACE     133u /* i8, bool     */
+#define AGX_RT_QUERY_OFF_COMMITTED_BARYCENTRICS   136u /* 2 x f32 */
+#define AGX_RT_QUERY_OFF_COMMITTED_CURVE_PARAM    144u /* f32   */
+#define AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_DATA 152u /* pointer */
+
+/*
+ * Apple's SCS ray staging segment -- the block the hardware intersect_ray
+ * reads, distinct again from both ABIs above.
+ *
+ * Recovered from agx.intersection_query.next in the RIA3 runtime, whose
+ * payload segment type is
+ *
+ *   <{ [3 x [2 x float]], float, i64, ... }>
+ *
+ * and whose stores bind each element by intersection_query field index:
+ * pair[i][0] comes from field 3 (origin) and pair[i][1] from field 4
+ * (direction), so the ray is interleaved PER AXIS rather than laid out as
+ * origin.xyz then direction.xyz.  The trailing float comes from field 1,
+ * tmax.
+ *
+ * This is cross-checked against native code: G17P ray-query setup emits
+ * exactly two four-component SCS stores, at byte offsets 0 and 16, which is
+ * precisely what this layout predicts -- bytes 0..15 carry
+ * (origin.x, direction.x, origin.y, direction.y) and bytes 16..31 carry
+ * (origin.z, direction.z, tmax, the low half of the packed word).
+ *
+ * tmin is NOT staged here.  next() reads intersection_query field 0
+ * separately; it is not part of this segment.
+ */
+#define AGX_RT_SCS_RAY_AXIS_STRIDE   8u /* one (origin, direction) pair */
+#define AGX_RT_SCS_RAY_ORIGIN(axis)    ((axis) * AGX_RT_SCS_RAY_AXIS_STRIDE)
+#define AGX_RT_SCS_RAY_DIRECTION(axis)                                       \
+   ((axis) * AGX_RT_SCS_RAY_AXIS_STRIDE + 4u)
+#define AGX_RT_SCS_RAY_TMAX         24u
+/* An i64 at 28 that next() read-modify-writes from several OR-ed values.  Its
+ * contents are not mapped, so it is named only by position. */
+#define AGX_RT_SCS_RAY_PACKED_WORD  28u
+#define AGX_RT_SCS_RAY_SEGMENT_SIZE 36u
+
+/*
+ * Deliberately absent: committed instance id and user instance id.  Their
+ * accessors (agx.get_committed_instance_id / _user_instance_id) do not read a
+ * single committed field -- they resolve through the candidate record at
+ * 92/96/100/104 -- so no exact committed offset is established for them and
+ * none is invented here.
+ */
 
 /* Exact TLAS instance-leaf offsets from the RIA3 module's TBAA metadata. */
 #define AGX_RT_INSTANCE_LEAF_OFF_HEADER           0u
