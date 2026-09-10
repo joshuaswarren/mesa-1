@@ -1279,6 +1279,43 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
           hk_g17p_basic_fragment_layout(cmd);
 }
 
+/*
+ * Every uniform range hk_g17p_graphics_uniform_ranges() below can emit, by the
+ * branch that emits it. A vertex program can request all of the first block;
+ * a fragment program the second. Keeping the budget derived from this instead
+ * of hand-set is what stops a legal program from being refused fail-closed --
+ * a budget of five silently refused every Firefox/Zink vertex program that
+ * sampled a texture and promoted a constant.
+ */
+#define HK_G17P_VERTEX_RANGES                                                  \
+   (2 /* attribute bases and clamps */ + 1 /* draw parameters */ +             \
+    1 /* draw ID */ + 1 /* indexed sampler heap */ + 1 /* root */ +            \
+    1 /* promoted constants */)
+
+#define HK_G17P_FRAGMENT_RANGES                                                \
+   (1 /* blend constants */ + 1 /* combined sampler heap */ +                  \
+    1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */)
+
+static_assert(HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_VERTEX_RANGES &&
+                 HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_FRAGMENT_RANGES,
+              "the graphics range budget must cover every range "
+              "hk_g17p_graphics_uniform_ranges() can emit, or a legal "
+              "program is refused and ranges[] is written past its end");
+
+/*
+ * Record how many uniform ranges the collector had already committed when it
+ * refused. Without it the refusal diagnostic cannot distinguish "this program
+ * needs more ranges than the budget allows" from the several structural
+ * rejections that share the same message, which is exactly the ambiguity that
+ * made the Firefox hardware refusal unreadable.
+ */
+static bool
+hk_g17p_graphics_ranges_refused(size_t *range_count, size_t count)
+{
+   *range_count = count;
+   return false;
+}
+
 static bool
 hk_g17p_graphics_uniform_ranges(
    struct hk_cmd_buffer *cmd, struct hk_shader *s,
@@ -1298,11 +1335,11 @@ hk_g17p_graphics_uniform_ranges(
          ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
          : 0;
       if (nr_attribs > AGX_MAX_VBUFS)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       if (nr_attribs != 0) {
          if (!root_ptr)
-            return false;
+            return hk_g17p_graphics_ranges_refused(range_count, count);
 
          ranges[count++] = (struct agx3_ioto_uniform_range){
             .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_BASE(0),
@@ -1332,10 +1369,18 @@ hk_g17p_graphics_uniform_ranges(
          };
       }
       if (cmd->state.gfx.draw_id_ptr) {
+         /* The shader reads gl_DrawID as a single half, but a uniform range
+          * is loaded in 32-bit dwords -- agx3_ioto_uniform_program.c rejects
+          * an odd size_halfs outright -- so a one-half range could never be
+          * published and every gl_DrawID vertex program was refused. Publish
+          * the containing dword instead. AGX_ABI_VUNI_DRAW_ID is always
+          * FIRST_VERTEX + 4 and AGX_ABI_VUNI_VERTEX_PARAMS is at least
+          * FIRST_VERTEX + 8, so the second half is reserved ABI padding that
+          * no other range claims. hk_cmd_draw.c uploads the matching dword. */
          ranges[count++] = (struct agx3_ioto_uniform_range){
             .start_halfs = uniform_base +
                            AGX_ABI_VUNI_DRAW_ID(nr_attribs),
-            .size_halfs = 1,
+            .size_halfs = 2,
             .address = cmd->state.gfx.draw_id_ptr,
          };
       }
@@ -1360,17 +1405,17 @@ hk_g17p_graphics_uniform_ranges(
                 blend_base,
                 root_ptr + hk_root_descriptor_offset(draw.blend_constant),
                 &ranges[count]))
-            return false;
+            return hk_g17p_graphics_ranges_refused(range_count, count);
          count++;
       }
       root_uniform = AGX_ABI_FUNI_ROOT;
    } else {
-      return false;
+      return hk_g17p_graphics_ranges_refused(range_count, count);
    }
 
    if (s->info.agx3_combined_sampler_valid) {
       if (s->info.stage != MESA_SHADER_FRAGMENT || s->info.set_count != 0)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       struct hk_descriptor_state *descriptors =
          &cmd->state.gfx.descriptors;
@@ -1390,7 +1435,7 @@ hk_g17p_graphics_uniform_ranges(
           set_size - binding->texture_offset_B < 32 ||
           binding->sampler_index_offset_B > set_size ||
           set_size - binding->sampler_index_offset_B < sizeof(uint16_t))
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       uint16_t sampler_index;
       memcpy(&sampler_index,
@@ -1403,7 +1448,7 @@ hk_g17p_graphics_uniform_ranges(
       if (!dev->samplers.table.bo || !dev->samplers.table.bo->va ||
           dev->samplers.table.alloc > UINT16_MAX ||
           sampler_element_size > UINT16_MAX)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       const struct hk_agx3_g17p_combined_sampler_heap heap = {
          .descriptor_set_va = set_addr,
@@ -1415,7 +1460,7 @@ hk_g17p_graphics_uniform_ranges(
       };
       uint64_t pointers[2];
       if (!hk_agx3_g17p_combined_sampler_pointers(&heap, pointers))
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       /* HAL200 FragmentProgramVariant::finalize (374968..3749c0) maps
        * compiler bindpoints 0x31/0x35 to driver qwords +0xc0/+0xe0.
@@ -1427,7 +1472,7 @@ hk_g17p_graphics_uniform_ranges(
       const uint64_t pointers_va =
          hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
       if (!pointers_va)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       if (hk_g17p_launch_trace_enabled()) {
          fprintf(stderr,
@@ -1460,14 +1505,14 @@ hk_g17p_graphics_uniform_ranges(
       if ((s->info.stage != MESA_SHADER_FRAGMENT &&
            s->info.stage != MESA_SHADER_VERTEX) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
       const uint64_t pointers[2] = {
          dev->sampled_images.bo->va->addr,
          dev->samplers.table.bo->va->addr,
       };
       const uint64_t pointers_va = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
       if (!pointers_va)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
       if (hk_g17p_launch_trace_enabled()) {
          fprintf(stderr,
                  "G17P indexed sampler: texture_heap=%" PRIx64
@@ -1499,11 +1544,11 @@ hk_g17p_graphics_uniform_ranges(
 
    if (s->info.agx3_uses_root || s->info.set_count != 0) {
       if (!root_ptr)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       if (!hk_agx3_g17p_root_range(root_uniform, s->info.set_count, root_ptr,
                                    &ranges[count]))
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
       count++;
    }
 
@@ -1528,7 +1573,7 @@ hk_g17p_graphics_uniform_ranges(
           (rodata->size_16 & 1) != 0 || rodata->size_16 > 512 ||
           rodata->offset > s->bo->size ||
           size_B > s->bo->size - rodata->offset)
-         return false;
+         return hk_g17p_graphics_ranges_refused(range_count, count);
 
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = rodata->base_uniform,
@@ -1537,7 +1582,7 @@ hk_g17p_graphics_uniform_ranges(
       };
    } else if (s->b.info.rodata.size_16 != 0) {
       /* No room left in the program's range budget. */
-      return false;
+      return hk_g17p_graphics_ranges_refused(range_count, count);
    }
 
    *range_count = count;
@@ -1559,7 +1604,7 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
-      size_t range_count;
+      size_t range_count = 0;
       if (!hk_g17p_graphics_uniform_ranges(cmd, s, linked, ranges,
                                             &range_count)) {
          const unsigned nr_attribs = s->info.stage == MESA_SHADER_VERTEX
@@ -1569,14 +1614,15 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          mesa_loge_once(
             "G17P graphics uniform ranges refused: stage=%u root=%" PRIx64
             " sets=%u uses_root=%u combined=%u indexed=%u blend_constants=%u "
-            "rodata=%u@%u attribs=%u draw_params=%u draw_id=%u capacity=%u",
+            "rodata=%u@%u attribs=%u ranges=%zu/%u draw_params=%u "
+            "draw_id=%u",
             (unsigned)s->info.stage, cmd->state.gfx.root, s->info.set_count,
             s->info.agx3_uses_root, s->info.agx3_combined_sampler_valid,
             s->info.agx3_indexed_sampler_valid,
             cmd->state.gfx.uses_blend_constant, s->b.info.rodata.size_16,
-            s->b.info.rodata.base_uniform, nr_attribs,
-            cmd->state.gfx.draw_params != 0, cmd->state.gfx.draw_id_ptr != 0,
-            HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
+            s->b.info.rodata.base_uniform, nr_attribs, range_count,
+            HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
+            cmd->state.gfx.draw_params != 0, cmd->state.gfx.draw_id_ptr != 0);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
       }

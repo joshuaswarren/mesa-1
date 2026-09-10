@@ -73,6 +73,26 @@ struct hk_agx3_g17p_graphics_program_desc {
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
+
+/*
+ * The number of independently addressed uniform ranges a single graphics
+ * program can publish. Aliases the composer's capacity so the driver and
+ * agx3_g17p_graphics_program_bound() can never disagree about it.
+ *
+ * The worst case is a vertex program, which can request all seven:
+ *
+ *   1. vertex attribute bases              nr_attribs != 0
+ *   2. vertex attribute clamps             nr_attribs != 0
+ *   3. draw parameters                     uses_base_param
+ *   4. draw ID                             uses_draw_id
+ *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
+ *   6. root descriptor                     agx3_uses_root || set_count
+ *   7. promoted constants                  rodata.size_16 != 0
+ *
+ * The combined-sampler range is not in that list: it is fragment-only, and
+ * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
+ * this derivation against the collector.
+ */
 #define HK_AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_RANGES
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 

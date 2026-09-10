@@ -242,9 +242,12 @@ hk_g17p_internal_graphics_uniform_ranges(
       };
    }
    if (cmd->state.gfx.draw_id_ptr) {
+      /* A uniform range is loaded in 32-bit dwords and an odd size_halfs is
+       * rejected outright, so publish the containing dword. See the same
+       * range in hk_cmd_buffer.c. */
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = AGX_ABI_VUNI_DRAW_ID(nr_vbos),
-         .size_halfs = 1,
+         .size_halfs = 2,
          .address = cmd->state.gfx.draw_id_ptr,
       };
    }

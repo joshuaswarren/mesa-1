@@ -2047,6 +2047,19 @@ if with_tests
     # Offline proof that transform feedback records on G17P through the native
     # geometry path and G17P-compiled libagx counter-copy kernel.  --execute is
     # the hardware mode with exact buffer, counter, and guard checks.
+    # Firefox/Zink six-range native vertex program: six attributes, a draw
+    # parameter, a vertex texture sample, three descriptor sets, and a promoted
+    # constant. Recording alone reaches hk_upload_usc_words(), so the drm-shim
+    # oracle in ../drm-shim/meson.build runs it without a GPU.
+    g17p_vertex_range_pressure = executable(
+      'g17p-vulkan-vertex-range-pressure',
+      files('tests/g17p_vulkan_vertex_range_pressure.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     g17p_transform_feedback = executable(
       'g17p-vulkan-transform-feedback',
       files('tests/g17p_vulkan_transform_feedback.c'),

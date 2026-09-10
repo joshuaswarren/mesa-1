@@ -178,6 +178,25 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  # The Firefox/Zink six-range vertex program only has to be RECORDED to reach
+  # hk_upload_usc_words(); a graphics range budget below the number of ranges
+  # the collector emits refuses fail-closed at vkEndCommandBuffer. No submit,
+  # so no stream-validator expectation is set.
+  g17p_vertex_range_pressure_env = environment({
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  })
+  test(
+    'hk_g17p_vertex_range_pressure',
+    g17p_vertex_range_pressure,
+    env : g17p_vertex_range_pressure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-vertex-range-pressure'],
+    timeout : 60,
+  )
+
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
   g17p_xfb_draw_env.set('ASAHI_SHIM_G17P_EXPECT_XFB', '1')
   test(
