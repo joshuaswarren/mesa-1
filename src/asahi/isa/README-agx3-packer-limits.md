@@ -588,6 +588,76 @@ modifier — a wrong result rather than a refusal. That is worth guarding
 deliberately: the fail-closed property only holds if nothing downstream can
 quietly accept the operand and drop the bit.
 
+### `fcmpsel` is a regular four-operand form -- build to that, not to shapes
+
+Closing `.abs` on the immediate-select `fcmpsel` cleared **32 of 1,514** Vulkan
+1.0 refusals (2.1%): `glsl.builtin` 638 -> 622, `glsl.conversions` 180 -> 180,
+`glsl.texture_gather` 664 -> 664. The fix is real -- `m_abscmp` and `m_isinf`
+go REFUSED -> PASS, `m_isnan` is unchanged, g13g stays at 0 -- it is simply
+much narrower than the symptom class it belongs to. "Every refusal reduces to
+a source modifier" described the symptom; it did not predict the cure.
+
+**A falling refusal count only proves the shader now compiles.** Whether the
+32 emit *correct* code is unverifiable without hardware. Do not let "cleared"
+become "correct".
+
+The two survivors are ~98% of that measurement and they are not two more
+shapes -- they are two cells of one table this encoder does not express:
+
+```
+180x glsl.conversions, dEQP isOk() at mediump:
+  fcmpsel [d16:regN s0=32:regX.discard s1=32:regY.abs.discard
+           s2=16:regZ.discard s3=16:imm0 cond=5]
+isinf residue in glsl.builtin:
+  fcmpsel [d32:reg4 s0=16:imm0 s1=32:reg2.abs.cache
+           s2=32:reg4.discard s3=32:reg2.cache cond=1]
+```
+
+Both carry a **register** in a select slot; the in-tree family
+(`agx3_alu_fcmp_select_imm_*`) requires *both* selects to be immediates.
+
+Apple's own bytes show the form is completely regular. Four operands -- two
+compared, two selected -- and each carries an independent **(kind, width,
+value)** triple:
+
+| operand      | kind | width | value if register | value if immediate |
+| ------------ | ---- | ----- | ----------------- | ------------------ |
+| compare 0    | f42  | f43   | f35               | -                  |
+| compare 1    | f59  | f60   | f52               | -                  |
+| select true  | f76  | f77   | f70               | f68                |
+| select false | f93  | f94   | f87               | f85                |
+
+Kind is **1 = immediate, 3 = register**, and it is what selects which value
+field is live. Witnessed by holding everything else fixed and changing only
+the select operands' class:
+
+```
+(a < b) ? c : d          02 83 07 87 22 0c 03 c0 20 10
+    f76 = 3, f93 = 3, f70 = 12, f87 = 16      (registers)
+(fabs(a) < b) ? c : d    02 83 07 87 23 0c 03 00 20 10 00 80 01 00
+    the same, plus f47                        (ep27 -> ep35)
+(fabs(a) < b) ? 1.0h : 0.0h  12 03 19 05 23 b0 03 00 20 80 00 80 01 00
+    f76 = 1, f93 = 1, f68 = 48, f85 = 0       (immediates)
+0.0f < fabs(a) ? c : d   02 83 07 81 26 0c 00 c2 20 08
+    f59 = 1                                   (immediate COMPARE source)
+```
+
+and the ABS endpoint shift is the same +8 as before: the immediate-select pair
+is ep20..27 / ep28..35, the register-select pair ep27 / ep35.
+
+So the remaining work is **one regular encoder over that table**, not a fix per
+refusal shape. Given `compute.pipeline` alone reports 2,790 g17p refusals, a
+point fix per cell is the wrong shape of solution.
+
+Two cells still lack a witness, and MSL may not be able to supply them:
+Metal promotes half selects to 32-bit (`half r = (fabs(a)<b) ? c : d` with
+half `c`/`d` still emits f77 = f94 = 2), and it folds a register/immediate
+select mix away entirely rather than emitting `fcmpsel`. The 16-bit-destination
+cell arises in Mesa from *mediump* lowering, which MSL has no direct spelling
+for. Those two need either a different frontend or a decode of a captured
+shader -- **not an extrapolation from the table above**, which is exactly how a
+plausible-looking encoding for a different instruction gets written.
+
 ### Not an encoding gap: `device_load` at `reg192`
 
 A complete Vulkan 1.0 CTS run reports 32 refusals in `glsl.atomic_operations`
