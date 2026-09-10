@@ -1002,6 +1002,18 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+/* 0 (default) silent, 1 report, 2 reject. See asahi_g17p_stream_validator.h. */
+static unsigned
+g17p_strict_descriptors(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_STRICT_DESCRIPTORS");
+
+   if (value == NULL || value[0] == '\0')
+      return 0;
+
+   return (unsigned)strtoul(value, NULL, 10);
+}
+
 static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
@@ -1086,6 +1098,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .owned = shim_gpu_owned,
             .span = shim_gpu_span,
             .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+            .strict_descriptors = g17p_strict_descriptors(),
          };
          struct asahi_g17p_stream_stats stats;
          const struct asahi_g17p_stream_config config = {
@@ -1129,6 +1142,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .owned = shim_gpu_owned,
             .span = shim_gpu_span,
             .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+            .strict_descriptors = g17p_strict_descriptors(),
          };
          struct asahi_g17p_compute_stats stats;
          if (!asahi_g17p_compute_validate(&memory, &compute, &stats))

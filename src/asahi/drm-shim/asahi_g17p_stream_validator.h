@@ -18,6 +18,23 @@ struct asahi_g17p_stream_memory {
    bool (*owned)(void *data, uint64_t address, size_t size);
    bool (*span)(void *data, uint64_t address, size_t *available);
    bool verbose;
+   /*
+    * Follow the surface address inside a resource pair's texture descriptor.
+    *
+    * OFF BY DEFAULT, and it must stay that way. The payload a resource pair is
+    * read out of also carries push constants, attribute divisors and indirect
+    * arguments; decoding those sixteen bytes as a pointer pair and then
+    * decoding what they point at as a texture descriptor produces a plausible
+    * looking unowned surface on healthy streams. Measured on this tree's own
+    * asahi suite: 69 reports across 180 passing tests, concentrated in the
+    * meta blit/copy paths and in compute-only conditional-rendering cases that
+    * bind no texture at all. A check that cannot tell a pointer from an
+    * integer must not speak by default.
+    *
+    * 1 reports, 2 rejects. Point it at one reproduction, read the decode, and
+    * judge it by hand.
+    */
+   unsigned strict_descriptors;
 };
 
 struct asahi_g17p_stream_stats {
