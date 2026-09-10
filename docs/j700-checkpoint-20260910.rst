@@ -1,0 +1,34 @@
+J700 graphics checkpoint, 2026-09-10
+==================================
+
+The ``j700`` branch retains the AGX source history through
+``3d7944d34c097e774ec666394b9de0eae3be8b9e``. Two small local changes preserve
+the desktop bring-up experiments: a simpledrm DRIL loader/install alias and
+opt-in Vulkan/G17P diagnostics. Existing contributor commits and attribution
+are unchanged.
+
+The native Gallium build completed. The recorded Mesa suite had 126 passes
+and one precompiled robust-indirect golden failure. These results do not
+qualify native GLX presentation on the Neo.
+
+An earlier VirtualGL preview demonstrated hardware-rendered pixels, but it
+does not meet the native-desktop target. The next GPU client generation
+triggered a firmware translation fault before its queue timeout. Neither
+the simpledrm alias nor the diagnostic logging fixes that lifetime failure.
+
+At this checkpoint the Neo has working software XFCE and Wi-Fi/SSH. Asahi
+is loaded with a separate one-render-pair kernel experiment; DCP is unloaded
+and simpledrm/fbdev presents the desktop. VirtualGL is not running. Native
+DCP/GLX presentation and repeated hardware context creation remain blocked.
+
+The standalone native EGL device test is preserved in linux-aurora under
+``tools/j700-native-display/``. It compiled for ARM64 but has not yet run on
+the target. Qualify it across separate processes and then test native GLX
+after the kernel firmware ownership failures are resolved. Do not use a
+software renderer or VirtualGL result as native-presentation acceptance.
+
+Matching native Gallium binaries and symbols are retained in the local
+``xfce-agx-20260910`` campaign archive. The native libgallium SHA-256 is
+``6036544398d6f0da5b7b1beb8f5034a4cfbeb3e2fd5654c73f9e1d5fe91f2893``.
+The current VM build directory may contain a different diagnostic build;
+use the archived manifest when pairing source, configuration and binaries.
