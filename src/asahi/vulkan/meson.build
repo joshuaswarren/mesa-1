@@ -1524,6 +1524,27 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Isolates the multisample resolve: a clear-only pass with no draw at all,
+    # plus full-screen quads at 1x and Nx. Needs HK_G17P_MSAA=1. Pair it with
+    # AGX_SPECLM_SAMPLE_CODE.
+    executable(
+      'g17p-vulkan-msaa-resolve2',
+      files('tests/g17p_vulkan_msaa_resolve_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-resolve4',
+      files('tests/g17p_vulkan_msaa_resolve_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-hostcopy-triangle',
       files('tests/g17p_offscreen_triangle.c'),
