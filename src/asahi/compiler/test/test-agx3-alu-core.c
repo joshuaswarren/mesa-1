@@ -1280,6 +1280,135 @@ test_float_compare_zero(void)
    puts("FSEL zero: six exact mixed-width native lifetime witnesses PASS");
 }
 
+/*
+ * A HALF-WIDTH COMPARATOR on the general compare-select.
+ *
+ * agx3_alu_fcmp_select() is the endpoint that takes a register in a select
+ * slot (as opposed to two selected immediates). It pinned both comparators to
+ * 32 bits -- their width fields f43/f60 were hardcoded to 2 and their register
+ * numbers were required to be even -- so a highp value compared against a
+ * mediump one refused the whole shader closed.
+ *
+ * That is not an exotic shape. It is what three.js's point-light shadow
+ * fragment compiles to: cubeToUV()'s `absV.z >= almostOne` chain compares a
+ * 32-bit component against a half-precision texel-size term and selects
+ * between an immediate and a register. Under the G17P drm-shim the packer
+ * refused
+ *
+ *    agx3_pack_binary.c:8001: no grounded AGX3 encoding for fcmpsel
+ *      [d16:reg34 s0=32:reg34.discard s1=16:reg37.cache s2=16:imm1
+ *       s3=16:reg50.discard cond=5 chan=1 mask=0x0 fmt=0 shift=0]
+ *
+ * and vkCreateGraphicsPipelines returned VK_ERROR_FEATURE_NOT_PRESENT.
+ *
+ * The width fields are Apple's, not inferred. Two kernels built with
+ * `metal-nt -arch applegpu_g17p`, identical but for the second comparator's
+ * width (`(x <= y) ? 1.0h : z` with y a float, then y a half):
+ *
+ *    both comparators 32-bit   12 03 19 05 26 b0 03 c0 80 06
+ *    comparator 1 16-bit       12 03 19 04 26 b0 03 c0 80 05
+ *
+ * One bit moves for the width -- byte 3 bit 0, which is exactly where this
+ * encoder deposits f60 -- and the comparator register keeps the same value
+ * (4) across the pair. The other changed byte is the selected register, which
+ * Apple's allocator placed differently; note it lands on an ODD half (5),
+ * which the old even-only rule also refused.
+ */
+static void
+test_fcmp_select_half_comparator(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+
+   /* The refused three.js instruction, verbatim. */
+   struct agx3_fsel_desc d = {
+      .dest = 34,
+      .dest_16 = true,
+      .cmp0 = 34,
+      .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp0_16 = false,
+      .cmp1 = 37,
+      .cmp1_hint = AGX3_ALU_HINT_CACHE,
+      .cmp1_16 = true,
+      .sel0_kind = AGX3_FSEL_SEL_IMMEDIATE,
+      .sel0 = 1,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER,
+      .sel1 = 50,
+      .sel_16 = true,
+      .condition = 5,
+   };
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   exact(out, len, "12234da4268112002032");
+
+   /* The same instruction with a 32-bit comparator differs only in the width
+    * field and in the register number -- the length and every other byte are
+    * unchanged, so widening is not silently selecting a different endpoint. */
+   uint8_t wide[AGX3_ALU_MAX_LENGTH], wide_len;
+   struct agx3_fsel_desc d32 = d;
+   d32.cmp1_16 = false;
+   d32.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d32, wide, &wide_len));
+   exact(wide, wide_len, "12234da5268102002032");
+   assert(wide_len == len);
+
+   /* Holding the register number and moving only the width isolates the bit:
+    * byte 3, bit 0, the same bit Apple's two kernels differ in. */
+   struct agx3_fsel_desc even16 = d;
+   even16.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &even16, out, &len));
+   exact(out, len, "12234da4268102002032");
+   {
+      unsigned differing = 0;
+      for (unsigned i = 0; i < len; ++i)
+         differing += (unsigned)__builtin_popcount((unsigned)(out[i] ^ wide[i]));
+      assert(differing == 1);
+      assert((out[3] ^ wide[3]) == 0x01);
+   }
+
+   /* The first comparator takes the same treatment, odd half included. */
+   struct agx3_fsel_desc first = d;
+   first.cmp0_16 = true;
+   first.cmp0 = 35;
+   first.cmp1_16 = false;
+   first.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &first, out, &len));
+   assert(len == wide_len && memcmp(out, wide, len) != 0);
+
+   /* Fail-closed rules that must survive. Both comparators at half width is
+    * not witnessed on either entry point, a 32-bit comparator is a register
+    * pair and still may not start on an odd half, and an immediate compare
+    * slot always declares width 2. */
+   struct agx3_fsel_desc both = d;
+   both.cmp0_16 = true;
+   both.cmp0 = 34;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &both, out, &len));
+
+   struct agx3_fsel_desc odd32 = d;
+   odd32.cmp1_16 = false;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &odd32, out, &len));
+
+   struct agx3_fsel_desc odd_first = d;
+   odd_first.cmp0 = 35;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &odd_first, out, &len));
+
+   struct agx3_fsel_desc imm = d;
+   imm.cmp1_is_immediate = true;
+   imm.cmp1 = 0;
+   imm.cmp1_16 = true;
+   uint8_t imm_bytes[AGX3_ALU_MAX_LENGTH] = {0}, imm_len = 0;
+   const bool imm_ok =
+      agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &imm, imm_bytes, &imm_len);
+   struct agx3_fsel_desc imm32 = imm;
+   imm32.cmp1_16 = false;
+   uint8_t imm32_bytes[AGX3_ALU_MAX_LENGTH] = {0}, imm32_len = 0;
+   const bool imm32_ok = agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &imm32,
+                                              imm32_bytes, &imm32_len);
+   assert(imm_ok == imm32_ok);
+   assert(imm_len == imm32_len &&
+          memcmp(imm_bytes, imm32_bytes, imm_len) == 0);
+
+   puts("FSEL half comparator: three.js point-shadow shape encodes PASS");
+}
+
 static void
 test_float_compare_select(void)
 {
@@ -4310,6 +4439,7 @@ int main(void){
    test_i32_to_f16();
    test_f16_to_int32();
    test_float_compare_select();
+   test_fcmp_select_half_comparator();
    test_float_compare_zero();
    test_integer_lifetimes();
    test_bitwise_lifetimes();

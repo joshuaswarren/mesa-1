@@ -1435,9 +1435,25 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
       return false;
    if (d->dest >= 256 || (!d->dest_16 && (d->dest & 1)))
       return false;
-   if (d->cmp0 >= 256 || (d->cmp0 & 1))
+
+   /* An immediate compare slot still declares width 2 (see the base vector
+    * below), so only a register slot carries a half width. */
+   const bool cmp0_16 = d->cmp0_16;
+   const bool cmp1_16 = d->cmp1_is_immediate ? false : d->cmp1_16;
+
+   /* Mixed width is ordinary -- a highp value compared against a mediump one
+    * is what GLSL produces all day -- but no witness has both comparators at
+    * half width, and agx3_alu_fcmp_select_imm_width_internal() refuses that
+    * same pair.  Keep the two entry points agreeing. */
+   if (cmp0_16 && cmp1_16)
       return false;
-   if (!d->cmp1_is_immediate && (d->cmp1 >= 256 || (d->cmp1 & 1)))
+
+   /* A 32-bit source is a register pair and must start on an even half; a
+    * 16-bit source is a single half and may sit on an odd one.  Pinning both
+    * to even is what refused every mediump comparator that reached here. */
+   if (d->cmp0 >= 256 || (!cmp0_16 && (d->cmp0 & 1)))
+      return false;
+   if (!d->cmp1_is_immediate && (d->cmp1 >= 256 || (!cmp1_16 && (d->cmp1 & 1))))
       return false;
    if (d->cmp1_is_immediate && d->cmp1 > 0xff)
       return false;
@@ -1451,12 +1467,14 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
        (unsigned)d->cmp1_hint > AGX3_ALU_HINT_CACHE)
       return false;
 
-   /* Every compare source in the corpus is 32-bit wide, immediate ones
-    * included: an immediate slot still declares width 2. */
+   /* f43 and f60 are the two comparators' width fields, exactly as in
+    * agx3_alu_fcmp_select_imm_width_internal() above, which grounds them on
+    * the same "fsel" endpoint family.  An immediate slot always declares
+    * width 2. */
    const struct agx3_field_kv base[] = {
       {10, 2}, {11, d->dest_16 ? 1 : 2},
-      {42, AGX3_FSEL_CMP_REGISTER}, {43, 2},
-      {60, 2},
+      {42, AGX3_FSEL_CMP_REGISTER}, {43, cmp0_16 ? 1 : 2},
+      {60, cmp1_16 ? 1 : 2},
       {77, d->sel_16 ? 1 : 2}, {94, d->sel_16 ? 1 : 2},
    };
 

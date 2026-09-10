@@ -196,11 +196,14 @@ struct agx3_fsel_desc {
    uint16_t cmp0;               /* register half; slot 0 is always a register */
    enum agx3_alu_hint cmp0_hint;
    bool cmp0_abs;
+   bool cmp0_16;
 
    bool cmp1_is_immediate;
    uint16_t cmp1;               /* register half, or the immediate value */
    enum agx3_alu_hint cmp1_hint;
    bool cmp1_abs;
+   bool cmp1_16;                /* register sources only; an immediate slot
+                                 * always declares width 2 */
 
    uint8_t sel0_kind, sel1_kind; /* agx3_fsel_kind, select-slot numbering */
    uint16_t sel0, sel1;
