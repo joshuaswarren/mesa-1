@@ -7,6 +7,7 @@
  */
 
 #include "agx3_scs_core.h"
+#include "asahi/lib/agx_rt_result.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -605,10 +606,53 @@ test_g17p_ray_setup_forms(void)
                                 &out_len));
 }
 
+
+/*
+ * Apple's SCS ray staging segment, and the two four-component stores that
+ * cover it.  The layout comes from the RIA3 runtime (see agx_rt_result.h);
+ * this asserts the native G17P store pattern it predicts.
+ */
+static void
+test_scs_ray_staging_layout(void)
+{
+   /* Per-axis interleave: origin then direction, eight bytes per axis. */
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(0) == 0);
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(0) == 4);
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(1) == 8);
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(1) == 12);
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(2) == 16);
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(2) == 20);
+   CHECK(AGX_RT_SCS_RAY_TMAX == 24);
+   CHECK(AGX_RT_SCS_RAY_PACKED_WORD == 28);
+
+   /* Origin and direction alternate, so neither is contiguous. */
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(1) - AGX_RT_SCS_RAY_ORIGIN(0) ==
+         AGX_RT_SCS_RAY_AXIS_STRIDE);
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(0) > AGX_RT_SCS_RAY_ORIGIN(0));
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(0) < AGX_RT_SCS_RAY_ORIGIN(1));
+
+   /*
+    * The native code emits two four-component stores, at 0 and 16.  The first
+    * must cover axes 0 and 1 entirely; the second must start exactly at axis
+    * 2's origin and reach tmax.
+    */
+   const unsigned first_store = 0, second_store = 16, store_bytes = 4 * 4;
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(0) >= first_store);
+   CHECK(AGX_RT_SCS_RAY_DIRECTION(1) + 4 == first_store + store_bytes);
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(2) == second_store);
+   CHECK(AGX_RT_SCS_RAY_TMAX + 4 <= second_store + store_bytes);
+   CHECK(second_store + store_bytes <= AGX_RT_SCS_RAY_SEGMENT_SIZE);
+
+   /* This segment is not either of the other two ray-tracing ABIs. */
+   CHECK(AGX_RT_SCS_RAY_TMAX != AGX_RT_QUERY_OFF_TMAX);
+   CHECK(AGX_RT_SCS_RAY_ORIGIN(0) != AGX_RT_QUERY_OFF_ORIGIN);
+}
+
 int
 main(void)
 {
    test_vectors();
+   test_scs_ray_staging_layout();
    test_g17p_ray_setup_forms();
    test_synthetic_roundtrip();
    test_fail_closed();
