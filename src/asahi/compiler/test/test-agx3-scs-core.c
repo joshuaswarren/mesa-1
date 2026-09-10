@@ -485,8 +485,17 @@ test_fail_closed(void)
       0x5a, 0x12, 0x08, 0x08, 0x40, 0x01, 0x84,
    };
    struct agx3_scs_desc decoded = bad;
-   CHECK(!agx3_scs_decode_load(AGX_ISA_ENCODING_AGX3B, b_ld64,
-                               sizeof(b_ld64), &decoded));
+   /* b_ld64 was pinned here as undecodable while this core could only express
+    * a single component.  It is a real Apple form: f68=3, i.e. two 32-bit
+    * components -- a 64-bit load -- and it now decodes as exactly that. */
+   memset(&decoded, 0, sizeof(decoded));
+   CHECK(agx3_scs_decode_load(AGX_ISA_ENCODING_AGX3B, b_ld64,
+                              sizeof(b_ld64), &decoded));
+   CHECK(decoded.component_mask == 3);
+   CHECK(decoded.width == AGX3_MEM_W32);
+   CHECK(decoded.address_kind == AGX3_SCS_ADDRESS_DIRECT);
+   CHECK(decoded.byte_offset == 16);
+   CHECK(decoded.data == 4);
    CHECK(!agx3_scs_decode_load(AGX_ISA_ENCODING_AGX3C, c_register_base_ld,
                                sizeof(c_register_base_ld), &decoded));
    CHECK(!agx3_scs_decode_store(AGX_ISA_ENCODING_AGX3C, c_vector_uniform_st,
@@ -505,10 +514,102 @@ test_fail_closed(void)
                                vectors[6].length, &decoded));
 }
 
+
+/*
+ * The four address kinds and the vector component masks, as Apple's own
+ * compiler emits them in G17P ray-query setup.
+ *
+ * Produced with the Metal toolchain, one MSL source per flag variant:
+ *   metal -mmacosx-version-min=26.0 -c <src>.metal -o <src>.air
+ *   metallib <src>.air -o <src>.metallib
+ *   metal-nt -arch applegpu_g17p -N <src>.mtlp-json \
+ *            -platform_version macos 26.0 26.0 <src>.metallib -o <src>.nat
+ * then linear-disassembling __text and keeping every distinct stscs.
+ *
+ * These are the forms this core used to fail closed on: a component mask
+ * other than one, and a slot-B base register (Apple f38=2) instead of a
+ * uniform.  Each must round-trip byte-for-byte.  No hardware involved.
+ */
+static void
+test_g17p_ray_setup_forms(void)
+{
+   static const struct {
+      const char *note;
+      uint8_t bytes[14];
+      struct agx3_scs_desc d;
+   } cases[] = {
+      {"direct, 1 component",
+       {0xdf, 0x02, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x44, 0x02, 0x0a,
+        0x4c, 0x00, 0x00},
+       {.data = 0, .width = AGX3_MEM_W32, .byte_offset = 24656,
+        .address_kind = AGX3_SCS_ADDRESS_DIRECT, .component_mask = 1,
+        .value_kill = true}},
+      {"uniform-indexed, 4 components, selector 0",
+       {0xdf, 0x02, 0x54, 0x00, 0x72, 0x68, 0x20, 0x00, 0x5c, 0x05, 0x00,
+        0x40, 0x08, 0x00},
+       {.data = 0, .width = AGX3_MEM_W32, .byte_offset = 0,
+        .address_kind = AGX3_SCS_ADDRESS_UNIFORM_INDEXED, .index = 52,
+        .uniform_base = 114, .component_mask = 15,
+        .has_address_selector = true, .address_selector = 0}},
+      {"uniform-indexed, 4 components, selector 2",
+       {0xdf, 0x02, 0x54, 0x0a, 0x74, 0x40, 0x20, 0x00, 0x5c, 0x05, 0x20,
+        0xc0, 0x08, 0x00},
+       {.data = 10, .width = AGX3_MEM_W32, .byte_offset = 256,
+        .address_kind = AGX3_SCS_ADDRESS_UNIFORM_INDEXED, .index = 32,
+        .uniform_base = 116, .component_mask = 15,
+        .has_address_selector = true, .address_selector = 2}},
+      {"register-indexed, 2 components",
+       {0xdf, 0x02, 0x54, 0x1a, 0x2c, 0x54, 0x20, 0x00, 0x64, 0x01, 0x00,
+        0x00, 0x0d, 0x00},
+       {.data = 26, .width = AGX3_MEM_W32, .byte_offset = 0,
+        .address_kind = AGX3_SCS_ADDRESS_REGISTER_INDEXED, .index = 42,
+        .base_register = 44, .component_mask = 3,
+        .has_address_selector = true, .address_selector = 3}},
+      {"register-indexed, 1 component",
+       {0xdf, 0x02, 0x54, 0x34, 0x2c, 0x54, 0x20, 0x00, 0x44, 0x03, 0x00,
+        0x00, 0x0d, 0x00},
+       {.data = 52, .width = AGX3_MEM_W32, .byte_offset = 0,
+        .address_kind = AGX3_SCS_ADDRESS_REGISTER_INDEXED, .index = 42,
+        .base_register = 44, .component_mask = 1,
+        .has_address_selector = true, .address_selector = 3,
+        .value_kill = true}},
+      {"register-base, no index",
+       {0xdf, 0x02, 0x54, 0x08, 0x32, 0x00, 0x00, 0x00, 0x84, 0xe3, 0x00,
+        0x00, 0x04, 0x00},
+       {.data = 8, .width = AGX3_MEM_W8, .byte_offset = 7,
+        .address_kind = AGX3_SCS_ADDRESS_REGISTER_BASE, .base_register = 50,
+        .component_mask = 1, .has_address_selector = true,
+        .address_selector = 4, .value_kill = true}},
+   };
+
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      uint8_t encoded[AGX3_SCS_MAX_LENGTH];
+      uint8_t length = 0;
+      CHECK(agx3_scs_encode_store(AGX_ISA_ENCODING_AGX3B, &cases[i].d,
+                                  encoded, &length));
+      CHECK(length == sizeof(cases[i].bytes));
+      CHECK(memcmp(encoded, cases[i].bytes, sizeof(cases[i].bytes)) == 0);
+
+      struct agx3_scs_desc decoded;
+      memset(&decoded, 0, sizeof(decoded));
+      CHECK(agx3_scs_decode_store(AGX_ISA_ENCODING_AGX3B, cases[i].bytes,
+                                  sizeof(cases[i].bytes), &decoded));
+      CHECK(descs_equal(&decoded, &cases[i].d));
+   }
+
+   /* Register-base and vector forms are AGX3b-only: no AGX3c witness. */
+   struct agx3_scs_desc c_reg = cases[3].d;
+   uint8_t out[AGX3_SCS_MAX_LENGTH];
+   uint8_t out_len = 0;
+   CHECK(!agx3_scs_encode_store(AGX_ISA_ENCODING_AGX3C, &c_reg, out,
+                                &out_len));
+}
+
 int
 main(void)
 {
    test_vectors();
+   test_g17p_ray_setup_forms();
    test_synthetic_roundtrip();
    test_fail_closed();
 
