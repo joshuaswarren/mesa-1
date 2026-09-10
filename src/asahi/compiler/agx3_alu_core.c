@@ -1199,6 +1199,86 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
       dest_cache, wait_mask, false, out, len);
 }
 
+/*
+ * The same compare-select with an ABSOLUTE VALUE on either comparison source.
+ *
+ * This is NOT a modifier bit on the form above, and assuming it was -- the way
+ * f30 works for the rsqrt family -- would produce bytes that compose cleanly
+ * and encode a different instruction. Apple moves to a longer endpoint: the
+ * ten-byte ep20..27 family becomes a fourteen-byte ep28..35 one, and the whole
+ * destination field block shifts by +14 (dest f3 -> f17, its width f11 -> f25,
+ * its cache hint f12 -> f26). The source, immediate, condition and wait fields
+ * keep their numbers. NEG stays on the ten-byte endpoint; ABS never does.
+ *
+ * f47 and f64 are the two sources' absolute-value bits, separable because
+ * `fabs(a) < fabs(b)` sets both. Witnessed with metal-nt -arch applegpu_g17p,
+ * one kernel per field, every vector recovered by re-composing through this
+ * encoder:
+ *
+ *   (fabs(a) <  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 01 00
+ *   ( a < fabs(b)) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 02 00
+ *   (fabs(a) < fabs(b)) ? ...      12 03 19 05 23 b0 03 00 20 80 00 80 03 00
+ *   (fabs(a) >  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 02 00 20 80 00 80 01 00
+ *   (fabs(a) == b) ? 1.0h : 0.0h   12 03 19 05 27 b0 00 00 20 80 00 80 01 00
+ *   (fabs(a) >= b) ? 1.0h : 0.0h   12 03 19 05 27 b0 02 00 20 80 00 80 01 00
+ *   (fabs(a) <  b) ? 2.0h : 0.0h   12 03 19 05 23 c0 03 00 20 80 00 80 01 00
+ *   (fabs(a) <  b) ? 0.0h : 1.0h   12 03 19 05 23 80 03 00 20 b0 00 80 01 00
+ *   (fabs(a) <  b) ? 1.0f : 0.0f   02 01 1b 05 23 b0 03 00 20 80 00 80 01 00
+ *
+ * so f110 is the condition, f68 and f85 the two minifloat selects, f17 the
+ * destination register (swept 2/3/6/8 across kernels holding several selects
+ * live at once), and f44/f46 and f61/f63 the per-source cache and last-use
+ * hints. The half-destination and 32-bit-destination endpoints are mutually
+ * exclusive -- each refuses the other's width vector -- so scanning the range
+ * cannot silently pick the wrong one.
+ */
+bool
+agx3_alu_fcmp_select_imm_width_abs(enum agx_isa_encoding enc, uint16_t dest,
+                        const uint16_t src[2], const bool src_16[2],
+                        const enum agx3_alu_hint hints[2],
+                        unsigned condition, uint8_t if_true, uint8_t if_false,
+                        bool dest_16, bool dest_cache, uint16_t wait_mask,
+                        const bool src_abs[2],
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !src_16 ||
+       !hints || !src_abs || (src_16[0] && src_16[1]) ||
+       dest >= 256 || (!dest_16 && (dest & 1)) ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+   /* At least one absolute source: without one this is the shorter endpoint,
+    * and emitting the long form for it would change bytes that already work. */
+   if (!src_abs[0] && !src_abs[1])
+      return false;
+   for (unsigned i = 0; i < 2; ++i)
+      if (src[i] >= 256 || (!src_16[i] && (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+
+   const struct agx3_field_kv base[] = {
+      {0, 1}, {24, 2}, {25, dest_16 ? 1 : 2},
+      {42, 2}, {43, src_16[0] ? 1 : 2},
+      {59, 2}, {60, src_16[1] ? 1 : 2},
+      {76, 1}, {77, dest_16 ? 1 : 2}, {93, 1}, {94, dest_16 ? 1 : 2},
+   };
+   const struct agx3_field_kv fields[] = {
+      {17, dest}, {26, dest_cache}, {35, src[0]}, {52, src[1]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {61, hints[1] == AGX3_ALU_HINT_CACHE},
+      {63, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {47, src_abs[0]}, {64, src_abs[1]},
+      {68, if_true}, {85, if_false}, {110, condition},
+      {107, wait_mask == 32},
+   };
+   for (unsigned ep = 28; ep < 36; ++ep)
+      if (agx3_bind_compose(enc, "fsel", ep, base, 11, fields, 14, out, len))
+         return true;
+   return false;
+}
+
 bool
 agx3_alu_fcmp_select_imm_width_neg_second(
    enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],

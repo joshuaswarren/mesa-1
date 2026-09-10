@@ -3883,6 +3883,120 @@ test_native_isub_shift(void)
                                       &len));
 }
 
+
+/*
+ * The compare-select's absolute-value sources.
+ *
+ * ABS is not a modifier bit on the ten-byte fsel: Apple moves to a
+ * fourteen-byte endpoint (ep20..27 -> ep28..35) whose destination field block
+ * is shifted by +14. Depositing a bit into the short endpoint would compose
+ * cleanly and encode a different instruction, so the long endpoint is modelled
+ * separately. f47 and f64 are the two sources' bits, separable because
+ * fabs(a) < fabs(b) sets both. Every vector below is Apple's own, one kernel
+ * per field.
+ */
+static void
+fsel_abs_is(unsigned condition, uint8_t if_true, uint8_t if_false,
+            bool dest_16, const bool src_abs[2], const uint8_t *expect)
+{
+   /* Apple's half-destination kernels put the first comparison source in
+    * register half 2 and the 32-bit ones in half 0; the destination follows
+    * the same allocation. Match it so the bytes are comparable. */
+   const uint16_t src[2] = {(uint16_t)(dest_16 ? 2 : 0), 4};
+   const bool w32[2] = {false, false};
+   const enum agx3_alu_hint dd[2] = {AGX3_ALU_HINT_DISCARD,
+                                     AGX3_ALU_HINT_DISCARD};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   assert(agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3B, dest_16 ? 2 : 0, src, w32, dd, condition,
+      if_true, if_false, dest_16, false, 32, src_abs, bytes, &len));
+   assert(len == 14 && !memcmp(bytes, expect, 14));
+}
+
+static void
+test_native_fcmp_select_absolute(void)
+{
+   const bool abs0[2] = {true, false};
+   const bool abs1[2] = {false, true};
+   const bool abs01[2] = {true, true};
+
+   /* (fabs(a) < b) ? 1.0h : 0.0h -- the baseline the rest differ from. */
+   static const uint8_t base[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* condition alone */
+   static const uint8_t c_gt[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t c_eq[]  = {0x12,0x03,0x19,0x05,0x27,0xb0,0x00,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t c_ge[]  = {0x12,0x03,0x19,0x05,0x27,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* if_true alone: 2.0h then 4.0h */
+   static const uint8_t t_2[]   = {0x12,0x03,0x19,0x05,0x23,0xc0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t t_4[]   = {0x12,0x03,0x19,0x05,0x23,0xd0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* if_false alone */
+   static const uint8_t f_1[]   = {0x12,0x03,0x19,0x05,0x23,0x80,0x03,
+                                   0x00,0x20,0xb0,0x00,0x80,0x01,0x00};
+   static const uint8_t f_2[]   = {0x12,0x03,0x19,0x05,0x23,0x80,0x03,
+                                   0x00,0x20,0xc0,0x00,0x80,0x01,0x00};
+   /* which source carries ABS */
+   static const uint8_t a_1[]   = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x02,0x00};
+   static const uint8_t a_01[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x03,0x00};
+   /* a 32-bit destination is a different endpoint again (ep30) */
+   static const uint8_t w_lt[]  = {0x02,0x01,0x1b,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t w_gt[]  = {0x02,0x01,0x1b,0x05,0x23,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t w_t2[]  = {0x02,0x01,0x1b,0x05,0x23,0xc0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+
+   fsel_abs_is(1, 48, 0, true,  abs0,  base);
+   fsel_abs_is(2, 48, 0, true,  abs0,  c_gt);
+   fsel_abs_is(0, 48, 0, true,  abs0,  c_eq);
+   fsel_abs_is(5, 48, 0, true,  abs0,  c_ge);
+   fsel_abs_is(1, 64, 0, true,  abs0,  t_2);
+   fsel_abs_is(1, 80, 0, true,  abs0,  t_4);
+   fsel_abs_is(1, 0, 48, true,  abs0,  f_1);
+   fsel_abs_is(1, 0, 64, true,  abs0,  f_2);
+   fsel_abs_is(1, 48, 0, true,  abs1,  a_1);
+   fsel_abs_is(1, 48, 0, true,  abs01, a_01);
+   fsel_abs_is(1, 48, 0, false, abs0,  w_lt);
+   fsel_abs_is(2, 48, 0, false, abs0,  w_gt);
+   fsel_abs_is(1, 64, 0, false, abs0,  w_t2);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   const uint16_t src[2] = {2, 4};
+   const bool w32[2] = {false, false};
+   const enum agx3_alu_hint dd[2] = {AGX3_ALU_HINT_DISCARD,
+                                     AGX3_ALU_HINT_DISCARD};
+
+   /* Without an absolute source this is the SHORT endpoint, and emitting the
+    * long form would change bytes that already work: refuse instead. */
+   const bool none[2] = {false, false};
+   assert(!agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3B, 2, src, w32, dd, 1, 48, 0, true, false, 32,
+      none, bytes, &len));
+
+   /* The short endpoint is untouched: it still encodes, and still at ten
+    * bytes rather than being pulled onto the long form. Its exact bytes are
+    * owned by the tests that already cover it -- this only pins that adding
+    * the absolute-value endpoint did not divert it. */
+   len = 0;
+   assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B, 2, src, w32,
+                                         dd, 1, 48, 0, true, false, 32,
+                                         bytes, &len));
+   assert(len == 10);
+
+   /* AGX3c has no witness for any of this. */
+   len = 0;
+   assert(!agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3C, 2, src, w32, dd, 1, 48, 0, true, false, 32,
+      abs0, bytes, &len));
+}
+
 int main(void){
    test_native_popcount();
    test_native_minifloat_half_select();
@@ -3893,6 +4007,7 @@ int main(void){
    test_native_sqrt_step_absolute();
    test_native_fmul_minifloat_narrow();
    test_native_isub_shift();
+   test_native_fcmp_select_absolute();
    test_native_f32_log2_exp2();
    test_native_f32_log2_exp2_modifiers();
    test_native_f32_floor_ceil();

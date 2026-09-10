@@ -7608,13 +7608,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
              (I->src[0].size == AGX_SIZE_16 || I->src[0].size == AGX_SIZE_32) &&
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
-             !I->src[0].abs && !I->src[1].abs &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
             /* Apple spells `-a < b` as the equivalent `b > -a`, placing the
              * only witnessed negate bit on the second full-width comparator.
              * Do not generalize that modifier to another slot or condition. */
-            const bool neg_second = I->src[0].neg && !I->src[1].neg &&
+            /* An absolute comparison source moves the instruction to the
+             * longer ep28..35 endpoint. It is a different form, not a bit on
+             * the short one, so it gets its own encoder and never mixes with
+             * the negate path (which stays on the short endpoint). */
+            const bool any_abs = I->src[0].abs || I->src[1].abs;
+            const bool neg_second = !any_abs && I->src[0].neg &&
+                                    !I->src[1].neg &&
                                     I->fcond == AGX_FCOND_LT &&
                                     !I->invert_cond &&
                                     I->dest[0].size == AGX_SIZE_16 &&
@@ -7650,13 +7655,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
+            const bool src_abs[] = {I->src[order[0]].abs,
+                                    I->src[order[1]].abs};
             if (I->saturate || I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
                 ((!neg_second) && (I->src[0].neg || I->src[1].neg)) ||
                 I->src[2].abs || I->src[2].neg ||
                 I->src[3].abs || I->src[3].neg ||
-                !(neg_second
+                !(any_abs
+                     ? agx3_alu_fcmp_select_imm_width_abs(
+                          enc, I->dest[0].value, src, src_16, hints,
+                          condition, I->src[swap ? 3 : 2].value,
+                          I->src[swap ? 2 : 3].value,
+                          I->dest[0].size == AGX_SIZE_16,
+                          I->dest[0].cache, fsel_wait, src_abs, bytes, &len)
+                  : neg_second
                      ? agx3_alu_fcmp_select_imm_width_neg_second(
                           enc, I->dest[0].value, src, src_16, hints,
                           condition, I->src[swap ? 3 : 2].value,
