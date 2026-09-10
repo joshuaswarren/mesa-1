@@ -7322,6 +7322,24 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * should not hit any disassembler errors.
     */
    bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
+   if (dump_shaders && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
+      /* There is no AGX3 instruction printer here yet. Retain the exact
+       * packed bytes alongside the IR for offline comparison and decoding.
+       * Print each binary in one call so parallel compiler threads cannot
+       * interleave the individual bytes. */
+      const size_t size = binary->size - offset;
+      char *hex = ralloc_array(ctx, char, size * 2 + 1);
+      static const char digits[] = "0123456789abcdef";
+      const uint8_t *code = (const uint8_t *)binary->data + offset;
+      for (size_t i = 0; i < size; ++i) {
+         hex[2 * i] = digits[code[i] >> 4];
+         hex[2 * i + 1] = digits[code[i] & 0xf];
+      }
+      hex[2 * size] = '\0';
+      fprintf(stderr,
+              "AGX3 binary: stage=%u preamble=%u encoding=%u size=%zu hex=%s\n",
+              ctx->stage, ctx->is_preamble, ctx->key->dev.encoding, size, hex);
+   }
 #ifndef NDEBUG
    bool selftest = !dump_shaders;
 #else
