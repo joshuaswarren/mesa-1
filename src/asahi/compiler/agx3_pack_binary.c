@@ -3303,6 +3303,16 @@ agx3_cf_is_zero(agx_index src)
           !src.neg;
 }
 
+/* A float constant the control-flow compare can carry in f18: the ordinary
+ * minifloat this ISA uses for immediate float operands everywhere else.
+ * Zero is included, and keeps producing the bytes it always did. */
+static bool
+agx3_cf_fminifloat(agx_index src)
+{
+   return src.type == AGX_INDEX_IMMEDIATE && src.value <= 0xff && !src.abs &&
+          !src.neg;
+}
+
 /* A constant the witnessed 16-bit compare can carry. Above 255 Apple changes
  * the instruction, so anything wider stays refused. */
 static bool
@@ -3391,11 +3401,18 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
+   /* Branching on a float against a CONSTANT. f18 is the compare's second
+    * operand; it used to be pinned to zero, so only `x < 0.0` encoded and
+    * `x < 1.0` -- what dEQP's workgroup-memory tests branch on, and 136 of
+    * the 146 instructions left refused in the Vulkan compute block -- had no
+    * encoding. The constant is the ordinary minifloat, so a zero constant
+    * still emits exactly the bytes it always did. */
    if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
-       ((agx3_cf_is_zero(I->src[1]) && (agx3_vary_reg32(I->src[0]) || agx3_cf_reg16(I->src[0]))) ||
-        (agx3_cf_is_zero(I->src[0]) && (agx3_vary_reg32(I->src[1]) || agx3_cf_reg16(I->src[1]))))) {
-      const bool zero_first=agx3_cf_is_zero(I->src[0]);
+       ((agx3_cf_fminifloat(I->src[1]) && (agx3_vary_reg32(I->src[0]) || agx3_cf_reg16(I->src[0]))) ||
+        (agx3_cf_fminifloat(I->src[0]) && (agx3_vary_reg32(I->src[1]) || agx3_cf_reg16(I->src[1]))))) {
+      const bool zero_first=agx3_cf_fminifloat(I->src[0]);
       const agx_index source=I->src[zero_first?1:0];
+      const agx_index constant=I->src[zero_first?0:1];
       enum agx_fcond relation=I->fcond;
       if(zero_first) {
          switch(relation) {
@@ -3411,7 +3428,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       enum agx3_cf_fcond condition;bool or_nan;
       if(source.kill || agx_channels(source)!=1 ||
          !agx3_cf_map_fcond(relation,&condition,&or_nan,invert) ||
-         !agx3_cf_fcmp_zero(enc,condition,or_nan,flag_slot,source.value,source.size==AGX_SIZE_16,
+         !agx3_cf_fcmp_zero_imm(enc,condition,or_nan,flag_slot,source.value,
+            source.size==AGX_SIZE_16,(uint8_t)constant.value,
             (struct agx3_cf_source_hints){source.cache,source.discard},0,bytes,&len))
          return false;
       return agx3_append(emission,bytes,len);
