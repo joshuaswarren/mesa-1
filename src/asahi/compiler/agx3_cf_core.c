@@ -338,9 +338,10 @@ agx3_cf_patch_branch(enum agx_isa_encoding enc, bool is_bn, uint8_t *branch,
    return false;
 }
 
-bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+bool agx3_cf_fcmp_zero_imm(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         bool or_nan, unsigned slot, uint16_t source, bool source_16,
-                        struct agx3_cf_source_hints hint, uint16_t wait_mask,
+                        uint8_t minifloat, struct agx3_cf_source_hints hint,
+                        uint16_t wait_mask,
                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
    if (!agx3b(enc) || !out || !len || !fcond_ok(cond) || !slot_ok(slot) ||
@@ -349,11 +350,54 @@ bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
       return false;
    const struct agx3_field_kv base[]={KV(9,2),KV(10,source_16?1:2),KV(26,1),KV(27,2)};
    struct agx3_field_kv fields[13]={
-      KV(2,source),KV(18,0),KV(11,hint.cache),KV(13,hint.discard),
+      KV(2,source),KV(18,minifloat),KV(11,hint.cache),KV(13,hint.discard),
       KV(34,or_nan),KV(35,slot),KV(46,(unsigned)cond+(or_nan?4:0)),
    };
    for(unsigned i=0;i<6;i++)fields[7+i]=(struct agx3_field_kv)KV(38+i,!!(wait_mask&(1u<<i)));
    for(unsigned ep=0;ep<=1;ep++)
       if(agx3_bind_compose(enc,"fcmp",ep,base,4,fields,13,out,len))return true;
    return false;
+}
+
+/*
+ * The same encoding point comparing against a NON-ZERO constant.
+ *
+ * f18 is the second operand and it was pinned to zero, so `if (x < 1.0)` --
+ * ordinary GLSL, and what dEQP's workgroup-memory tests branch on -- had no
+ * encoding. This is the same defect the integer side already carried and
+ * fixed: agx3_cf_icmp_zero16_runtime() never set f16, which is what made it a
+ * zero compare.
+ *
+ * Apple's bytes, one kernel per variable, the branch body made a loop so it
+ * cannot be if-converted into a select (a trivial `if`/`else` compiles to
+ * fsel and emits no fcmp at all, which is why this needs a real branch):
+ *
+ *   if (v < 0.0f)   0a 03 2a 81 03 c2      f18 absent
+ *   if (v < 0.5f)   0a 03 2a a1 03 c2      f18 = 32
+ *   if (v < 1.0f)   0a 03 2a b1 03 c2      f18 = 48
+ *   if (v < 2.0f)   0a 03 2a c1 03 c2      f18 = 64
+ *   if (v > 1.0f)   0a 03 2a b1 02 c2      f18 = 48, relation in f46
+ *   half v < 1.0h   0a 02 2a b1 03 c2      f18 = 48, f10 = 1
+ *
+ * so the constant is the ordinary minifloat this ISA uses everywhere else.
+ */
+bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                       bool or_nan, unsigned slot, uint16_t source,
+                       bool source_16, struct agx3_cf_source_hints hint,
+                       uint16_t wait_mask,
+                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_cf_fcmp_zero_imm(enc, cond, or_nan, slot, source, source_16, 0,
+                                hint, wait_mask, out, len);
+}
+
+bool agx3_cf_fcmp_minifloat(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                            bool or_nan, unsigned slot, uint16_t source,
+                            bool source_16, uint8_t minifloat,
+                            struct agx3_cf_source_hints hint,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_cf_fcmp_zero_imm(enc, cond, or_nan, slot, source, source_16,
+                                minifloat, hint, wait_mask, out, len);
 }

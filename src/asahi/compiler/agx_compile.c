@@ -4016,8 +4016,32 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Pack shadow reference value (compare) and packed offset together */
    agx_index compare_offset = agx_null();
 
-   if (!agx_is_null(compare) && !agx_is_null(packed_offset))
+   /* G17P carries the offset as an immediate field in the sample instruction
+    * and the comparator as a staged register, so the two cannot share this
+    * one vector operand. Hand the offset to the packer out of band and leave
+    * src[5] to the comparator alone; AGX2, whose hardware reads a register
+    * pair, keeps the combined form. */
+   const bool offset_present = !agx_is_null(packed_offset);
+   const uint8_t offset_xy =
+      packed_offset.type == AGX_INDEX_IMMEDIATE ? (uint8_t)packed_offset.value
+                                                : 0;
+
+   const bool g17p_split_offset =
+      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      packed_offset.type == AGX_INDEX_IMMEDIATE;
+
+   if (g17p_split_offset && !agx_is_null(compare))
+      packed_offset = agx_null();
+
+   if (!agx_is_null(compare) && !agx_is_null(packed_offset)) {
+      /* A 32-bit immediate inside a COLLECT is not a shape
+       * agx_validate_sources() models, and it exits the process rather than
+       * failing the shader closed. */
+      if (packed_offset.type == AGX_INDEX_IMMEDIATE)
+         packed_offset = agx_mov_imm(b, 32, packed_offset.value);
+
       compare_offset = agx_vec2(b, compare, packed_offset);
+   }
    else if (!agx_is_null(packed_offset))
       compare_offset = packed_offset;
    else if (!agx_is_null(compare))
@@ -4027,8 +4051,12 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    agx_instr *I = agx_texture_sample_to(
       b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
       agx_tex_dim(instr->sampler_dim, instr->is_array), lod_mode, 0,
-      !agx_is_null(packed_offset), !agx_is_null(compare),
+      offset_present, !agx_is_null(compare),
       instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
+
+   /* The packer reads the G17P offset from the instruction, not from src[5],
+    * so it survives being split away from the comparator above. */
+   I->offset_xy = offset_xy;
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
       I->op = AGX_OPCODE_TEXTURE_LOAD;
@@ -5657,6 +5685,13 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_lower_divergent_shuffle(ctx);
 
    agx_lower_pseudo(ctx);
+
+   /* AGX3's thread-private storage moves one 32-bit component per
+    * instruction, so a vector spill or scratch access has to become a run of
+    * scalar ones. Do it before the last-use pass, so each component's hints
+    * are computed against the instructions that actually survive. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      agx3_split_vector_stack_access(ctx);
 
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);

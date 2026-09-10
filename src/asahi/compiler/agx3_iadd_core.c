@@ -193,6 +193,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->no_addend &&
        (d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend))
       return false;
+<<<<<<< HEAD
    /* Sign extension is meaningful for 16->32 as well as 32->64 products.
     * The grounded 16->32 form is specifically a paired-half pure multiply;
     * its native witnesses are both-signed and both-unsigned, not mixed. */
@@ -206,6 +207,27 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
        (d->dest_64 &&
         ((d->src_a_sign_extend && d->src_a_16) ||
          (d->multiplier_sign_extend && d->multiplier_16))))
+=======
+   /*
+    * Sign extension is a property of widening an operand into a wider result.
+    * The premise "a 32-bit product does not widen anything" only holds when
+    * the operand is itself 32 bits: a 16-bit multiplicand widened into a
+    * 32-bit result widens by exactly one step, and Apple sets f28 for it.
+    *
+    *   int(short  a) * 129 + int(short  c)
+    *      9f 00 56 00 02 02 04 02 10 2a 66 00     f10 = 2, f24 = 1, f28 = 1
+    *   int(ushort a) * 129 + int(ushort c)
+    *      9f 00 56 00 02 02 04 02 10 2a 22 00     f10 = 2, f24 = 1, f28 = 0
+    *
+    * So gate slot A's bit on slot A actually being narrow, not on the result
+    * being 64-bit. The multiplier keeps the stricter rule: no witness here
+    * exercises a narrow REGISTER multiplier with a 32-bit result, and an
+    * unwitnessed combination must still fail closed.
+    */
+   if (d->src_a_sign_extend && !d->dest_64 && !d->src_a_16)
+      return false;
+   if (d->multiplier_sign_extend && !d->dest_64)
+>>>>>>> codex/gpu-desktop-merge
       return false;
    /* The 8-bit immediate multiplier has no sign-extend bit of its own. */
    if (!d->multiplier_is_register && d->multiplier_sign_extend)

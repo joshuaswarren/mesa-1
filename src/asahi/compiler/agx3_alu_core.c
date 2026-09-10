@@ -82,24 +82,39 @@ agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
-                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, bool src_abs,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || ((dest | src) & 1) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~UINT16_C(0x3f)))
       return false;
    /* Apple sqrt emits this step followed by FMUL with the original input.
-    * Ordinary rsqrt is a distinct opcode and cannot replace this operation. */
+    * Ordinary rsqrt is a distinct opcode and cannot replace this operation.
+    *
+    * f30 folds the source's absolute value in, so `sqrt(abs(x))` needs no
+    * separate move. Witnessed as a single-field difference against the plain
+    * control; see agx3_alu_core.h for the byte pair. */
    const struct agx3_field_kv base[] = {{9,2},{10,2},{25,2},{26,2}};
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[12] = {
       {2,dest},{18,src},{11,dest_cache},
       {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
+      {30,src_abs},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[5+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,11,out,len);
+      fields[6+i] = (struct agx3_field_kv){35+i,!!(wait_mask & (1u<<i))};
+   return agx3_bind_compose(enc,"f32sqrtstep",0,base,4,fields,12,out,len);
+}
+
+bool
+agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_sqrt_step_mod(enc, dest, src, hint, dest_cache, wait_mask,
+                                 false, out, len);
 }
 
 bool
@@ -131,10 +146,42 @@ agx3_alu_fmul_minifloat_mod(
    enum agx3_alu_hint hint, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   return agx3_alu_fmul_minifloat_narrow(enc, dest, src, immediate,
+                                         dest_cache, src_abs, false, hint,
+                                         wait_mask, out, len);
+}
+
+bool
+agx3_alu_fmul_minifloat_narrow(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs, bool dest_half,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
-       src >= 256 || ((dest | src) & 1) || immediate > 0xff ||
+       src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
+       immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* f10 is the DESTINATION width and f26 the source's; they are independent,
+    * exactly as on f32rcp. A 32-bit source multiplied by a minifloat straight
+    * into a half destination is therefore one instruction, not a multiply
+    * plus a narrowing move -- which is what NIR hands the packer for
+    * `packHalf2x16(vec2(x * k, ...))`.
+    *
+    * Witnessed with `metal-nt -arch applegpu_g17p`, a single-field difference
+    * from the all-32-bit control, and re-composed byte-exactly through this
+    * encoder:
+    *
+    *   o[i] = a[i] * 0.5f        (float o)  19 a1 15 03 80 c0   f10 = 2
+    *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
+    *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
+    *
+    * The ABS deposit below is witnessed on the 32-bit destination only, so a
+    * narrowing multiply with an absolute source stays refused. */
+   if (dest_half && src_abs)
       return false;
 
    /* Fresh Apple mul_scale: 0983150180c0 is loaded f32 * minifloat0x02
@@ -143,7 +190,7 @@ agx3_alu_fmul_minifloat_mod(
     * it shares add's operand routing, but its wait fields are80..85.
     */
    const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 2}, {25, 1}, {26, 2},
+      {9, 2}, {10, dest_half ? 1 : 2}, {25, 1}, {26, 2},
       {42, 2}, {43, 2}, {60, 2}, {74, 2},
    };
    struct agx3_field_kv fields[12] = {
@@ -1058,7 +1105,7 @@ agx3_alu_bit_width(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
       if(src[i]>=256 || (!narrow && (src[i]&1)) || (unsigned)hints[i]>AGX3_ALU_HINT_CACHE)
          return false;
    const struct agx3_alu_form *f=&agx3_alu_forms[op][0];
-   struct agx3_field_kv base[20],ov[13];unsigned nb=0,n=0;
+   struct agx3_field_kv base[20],ov[14];unsigned nb=0,n=0;
    for(unsigned i=0;i<f->nbase;i++){
       unsigned field=f->base[i].f;bool wait=false;
       for(unsigned j=0;j<f->nwait;j++)wait|=field==f->wait[j];
@@ -1142,9 +1189,44 @@ agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   return agx3_alu_integer_reg_shift(enc, op, dest, src, hints, 0, wait_mask,
+                                     out, len);
+}
+
+/*
+ * The same two forms with slot B shifted left first (f54).
+ *
+ * `a - (b << N)` is how a multiply by a small negative constant is strength
+ * reduced -- `x * -7` becomes `x - (x << 3)` -- so this is not a rare shape,
+ * and without it every such multiply failed the whole shader closed. Note it
+ * is NOT a degenerate self-subtraction: with the shift it computes -7x.
+ *
+ * Witnessed against Apple, one kernel per shift, everything else identical
+ * (`o[i] = a[i] - (c[i] << N)`, `metal-nt -arch applegpu_g17p`):
+ *
+ *   N = 0   1f 01 56 00 02 00 10 a8 17 05   f54 absent
+ *   N = 1   1f 01 56 00 02 00 10 e8 16 05   f54 = 1
+ *   N = 2   1f 01 56 00 02 00 10 a8 16 15   f54 = 2
+ *   N = 3   1f 01 56 00 02 00 10 e8 16 15   f54 = 3
+ *   N = 4   1f 01 56 00 02 00 10 a8 16 05   f54 = 4
+ *
+ * Apple stops emitting this form at N = 5, so the shift is capped at the four
+ * witnessed non-zero amounts rather than extrapolated.
+ */
+bool
+agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                 uint16_t dest, const uint16_t src[2],
+                 const enum agx3_alu_hint hints[2], uint8_t shift,
+                 uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
    if(enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
       (op != AGX3_ALU_IADD && op != AGX3_ALU_ISUB) ||
       dest >= 256 || (dest & 1) || (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+   /* Only the subtract's shift is witnessed; the add reaches its shifted
+    * form through agx3_iadd_encode, which models it separately. */
+   if (shift != 0 && (op != AGX3_ALU_ISUB || shift > 4))
       return false;
    for(unsigned i=0;i<2;i++)
       if(src[i]>=256 || (src[i]&1) || (unsigned)hints[i]>AGX3_ALU_HINT_CACHE)
@@ -1166,6 +1248,9 @@ agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
    }
    for(unsigned i=0;i<f->nwait;i++)
       if(wait_mask&(1u<<i))ov[n++]=(struct agx3_field_kv){f->wait[i],1};
+   /* f54, slot B's shift. Zero is the form's own absence, so only deposit a
+    * real shift; that keeps every previously encodable add byte-identical. */
+   if(shift)ov[n++]=(struct agx3_field_kv){54,shift};
    return agx3_bind_compose(enc,f->mnemonic,f->ep,base,nb,ov,n,out,len);
 }
 
@@ -1224,6 +1309,178 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
    return agx3_alu_fcmp_select_imm_width_internal(
       enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
       dest_cache, wait_mask, false, out, len);
+}
+
+/*
+ * The same compare-select with an ABSOLUTE VALUE on either comparison source.
+ *
+ * This is NOT a modifier bit on the form above, and assuming it was -- the way
+ * f30 works for the rsqrt family -- would produce bytes that compose cleanly
+ * and encode a different instruction. Apple moves to a longer endpoint: the
+ * ten-byte ep20..27 family becomes a fourteen-byte ep28..35 one, and the whole
+ * destination field block shifts by +14 (dest f3 -> f17, its width f11 -> f25,
+ * its cache hint f12 -> f26). The source, immediate, condition and wait fields
+ * keep their numbers. NEG stays on the ten-byte endpoint; ABS never does.
+ *
+ * f47 and f64 are the two sources' absolute-value bits, separable because
+ * `fabs(a) < fabs(b)` sets both. Witnessed with metal-nt -arch applegpu_g17p,
+ * one kernel per field, every vector recovered by re-composing through this
+ * encoder:
+ *
+ *   (fabs(a) <  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 01 00
+ *   ( a < fabs(b)) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 02 00
+ *   (fabs(a) < fabs(b)) ? ...      12 03 19 05 23 b0 03 00 20 80 00 80 03 00
+ *   (fabs(a) >  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 02 00 20 80 00 80 01 00
+ *   (fabs(a) == b) ? 1.0h : 0.0h   12 03 19 05 27 b0 00 00 20 80 00 80 01 00
+ *   (fabs(a) >= b) ? 1.0h : 0.0h   12 03 19 05 27 b0 02 00 20 80 00 80 01 00
+ *   (fabs(a) <  b) ? 2.0h : 0.0h   12 03 19 05 23 c0 03 00 20 80 00 80 01 00
+ *   (fabs(a) <  b) ? 0.0h : 1.0h   12 03 19 05 23 80 03 00 20 b0 00 80 01 00
+ *   (fabs(a) <  b) ? 1.0f : 0.0f   02 01 1b 05 23 b0 03 00 20 80 00 80 01 00
+ *
+ * so f110 is the condition, f68 and f85 the two minifloat selects, f17 the
+ * destination register (swept 2/3/6/8 across kernels holding several selects
+ * live at once), and f44/f46 and f61/f63 the per-source cache and last-use
+ * hints. The half-destination and 32-bit-destination endpoints are mutually
+ * exclusive -- each refuses the other's width vector -- so scanning the range
+ * cannot silently pick the wrong one.
+ */
+bool
+agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !d || !out || !len)
+      return false;
+
+   /* Select-slot kind 2 is unidentified. Fail closed rather than deposit a
+    * value into a field whose meaning is not known. */
+   if (d->sel0_kind == AGX3_FSEL_SEL_UNKNOWN2 ||
+       d->sel1_kind == AGX3_FSEL_SEL_UNKNOWN2)
+      return false;
+   if ((d->sel0_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d->sel0_kind != AGX3_FSEL_SEL_REGISTER) ||
+       (d->sel1_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d->sel1_kind != AGX3_FSEL_SEL_REGISTER))
+      return false;
+
+   if (d->condition != 0 && d->condition != 1 && d->condition != 2 &&
+       d->condition != 5 && d->condition != 6)
+      return false;
+   if (d->wait_mask != 0 && d->wait_mask != 32)
+      return false;
+   if (d->dest >= 256 || (!d->dest_16 && (d->dest & 1)))
+      return false;
+   if (d->cmp0 >= 256 || (d->cmp0 & 1))
+      return false;
+   if (!d->cmp1_is_immediate && (d->cmp1 >= 256 || (d->cmp1 & 1)))
+      return false;
+   if (d->cmp1_is_immediate && d->cmp1 > 0xff)
+      return false;
+   if (d->sel0 >= 256 || d->sel1 >= 256)
+      return false;
+   if (d->sel0_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel0 & 1))
+      return false;
+   if (d->sel1_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel1 & 1))
+      return false;
+   if ((unsigned)d->cmp0_hint > AGX3_ALU_HINT_CACHE ||
+       (unsigned)d->cmp1_hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   /* Every compare source in the corpus is 32-bit wide, immediate ones
+    * included: an immediate slot still declares width 2. */
+   const struct agx3_field_kv base[] = {
+      {10, 2}, {11, d->dest_16 ? 1 : 2},
+      {42, AGX3_FSEL_CMP_REGISTER}, {43, 2},
+      {60, 2},
+      {77, d->sel_16 ? 1 : 2}, {94, d->sel_16 ? 1 : 2},
+   };
+
+   struct agx3_field_kv f[20];
+   unsigned n = 0;
+   f[n++] = (struct agx3_field_kv){3, d->dest};
+   f[n++] = (struct agx3_field_kv){12, d->dest_cache};
+
+   f[n++] = (struct agx3_field_kv){35, d->cmp0};
+   f[n++] = (struct agx3_field_kv){44,
+                                   d->cmp0_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){46,
+                                   d->cmp0_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){47, d->cmp0_abs};
+
+   f[n++] = (struct agx3_field_kv){59, d->cmp1_is_immediate
+                                          ? AGX3_FSEL_CMP_IMMEDIATE
+                                          : AGX3_FSEL_CMP_REGISTER};
+   f[n++] = (struct agx3_field_kv){d->cmp1_is_immediate ? 51 : 52, d->cmp1};
+   f[n++] = (struct agx3_field_kv){61,
+                                   d->cmp1_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){63,
+                                   d->cmp1_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){64, d->cmp1_abs};
+
+   f[n++] = (struct agx3_field_kv){76, d->sel0_kind};
+   f[n++] = (struct agx3_field_kv){
+      d->sel0_kind == AGX3_FSEL_SEL_REGISTER ? 70 : 68, d->sel0};
+   f[n++] = (struct agx3_field_kv){93, d->sel1_kind};
+   f[n++] = (struct agx3_field_kv){
+      d->sel1_kind == AGX3_FSEL_SEL_REGISTER ? 87 : 85, d->sel1};
+
+   f[n++] = (struct agx3_field_kv){110, d->condition};
+   f[n++] = (struct agx3_field_kv){107, d->wait_mask == 32};
+
+   /* The endpoints are mutually exclusive on their fixed bits -- each refuses
+    * another's operand-kind and width vector -- so scanning cannot silently
+    * land on the wrong one. Absolute sources sit on the longer endpoints. */
+   for (unsigned ep = 20; ep < 36; ++ep) {
+      if (agx3_bind_compose(enc, "fsel", ep, base, 7, f, n, out, len))
+         return true;
+   }
+   return false;
+}
+
+bool
+agx3_alu_fcmp_select_imm_width_abs(enum agx_isa_encoding enc, uint16_t dest,
+                        const uint16_t src[2], const bool src_16[2],
+                        const enum agx3_alu_hint hints[2],
+                        unsigned condition, uint8_t if_true, uint8_t if_false,
+                        bool dest_16, bool dest_cache, uint16_t wait_mask,
+                        const bool src_abs[2],
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !src_16 ||
+       !hints || !src_abs || (src_16[0] && src_16[1]) ||
+       dest >= 256 || (!dest_16 && (dest & 1)) ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+   /* At least one absolute source: without one this is the shorter endpoint,
+    * and emitting the long form for it would change bytes that already work. */
+   if (!src_abs[0] && !src_abs[1])
+      return false;
+   for (unsigned i = 0; i < 2; ++i)
+      if (src[i] >= 256 || (!src_16[i] && (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+
+   const struct agx3_field_kv base[] = {
+      {0, 1}, {24, 2}, {25, dest_16 ? 1 : 2},
+      {42, 2}, {43, src_16[0] ? 1 : 2},
+      {59, 2}, {60, src_16[1] ? 1 : 2},
+      {76, 1}, {77, dest_16 ? 1 : 2}, {93, 1}, {94, dest_16 ? 1 : 2},
+   };
+   const struct agx3_field_kv fields[] = {
+      {17, dest}, {26, dest_cache}, {35, src[0]}, {52, src[1]},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {61, hints[1] == AGX3_ALU_HINT_CACHE},
+      {63, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {47, src_abs[0]}, {64, src_abs[1]},
+      {68, if_true}, {85, if_false}, {110, condition},
+      {107, wait_mask == 32},
+   };
+   for (unsigned ep = 28; ep < 36; ++ep)
+      if (agx3_bind_compose(enc, "fsel", ep, base, 11, fields, 14, out, len))
+         return true;
+   return false;
 }
 
 bool
@@ -2401,13 +2658,15 @@ agx3_alu_f32rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                  enum agx3_alu_hint hint, bool dest_cache,
-                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                  uint8_t *len)
+agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, bool src_neg, bool src_abs,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    /* f10 and f26 are the destination's and source's widths; the half form
-    * sets both to 1, the 32-bit form to 2. */
+    * sets both to 1, the 32-bit form to 2. f30 and f31 fold the source's
+    * absolute value and negation in, exactly as on f32log2/f32exp2/f32rcp;
+    * see agx3_alu_core.h for the four witnessed bytes. */
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || (dest & 1) || (src & 1) ||
        (wait_mask & ~UINT16_C(0x3f)) ||
@@ -2416,15 +2675,26 @@ agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, 2}, {26, 2},
    };
-   struct agx3_field_kv fields[11] = {
+   struct agx3_field_kv fields[13] = {
       {2, dest}, {18, src}, {11, dest_cache},
       {27, hint == AGX3_ALU_HINT_CACHE},
       {29, hint == AGX3_ALU_HINT_DISCARD},
+      {30, src_abs}, {31, src_neg},
    };
    for (unsigned i = 0; i < 6; ++i)
-      fields[5 + i] =
+      fields[7 + i] =
          (struct agx3_field_kv){35 + i, !!(wait_mask & (1u << i))};
-   return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 11, out, len);
+   return agx3_bind_compose(enc, "f32rsqrt", 0, base, 4, fields, 13, out, len);
+}
+
+bool
+agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                  enum agx3_alu_hint hint, bool dest_cache,
+                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                  uint8_t *len)
+{
+   return agx3_alu_f32rsqrt_mod(enc, dest, src, hint, dest_cache, wait_mask,
+                                false, false, out, len);
 }
 
 /* log2/exp2 share independently selected f10 destination and f26 source

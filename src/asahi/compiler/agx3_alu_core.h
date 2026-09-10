@@ -95,6 +95,15 @@ bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* The same, with slot B shifted left by `shift` first (f54). Witnessed for
+ * ISUB at shifts 1..4; see agx3_alu_core.c for the byte ladder. */
+bool agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                                uint16_t dest, const uint16_t src[2],
+                                const enum agx3_alu_hint hints[2],
+                                uint8_t shift, uint16_t wait_mask,
+                                uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                uint8_t *len);
+
 /* Native signed/unsigned32 to float32 with post-RA source hints. */
 bool agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t src, bool is_signed,
@@ -136,6 +145,86 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
                              uint8_t if_false, bool dest_16, bool dest_cache,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/*
+ * The general compare-select.
+ *
+ * `fcmpsel` is four operands -- two compared, two selected -- and each carries
+ * an independent (kind, width, value) triple. **The kind numbering is NOT
+ * shared between the compare slots and the select slots**: on a compare slot
+ * the register is kind 2 and the immediate kind 1, while on a select slot the
+ * register is kind 3. Do not unify these into one operand-type enum; they are
+ * different fields on different slots, and this file has now produced that
+ * hazard three times (the ALU wait baselines, the texture LOD-vs-offset
+ * predicates, and this).
+ *
+ * Field map, recovered from the 84 real Apple `fsel` instructions in
+ * test/agx3_compose_corpus_vectors.c:
+ *
+ *   dest          f3    width f11   cache f12
+ *   compare 0     f35   kind  f42   width f43   cache f44  last-use f46  ABS f47
+ *   compare 1     f52 (register) or f51 (immediate)
+ *                       kind  f59   width f60   cache f61  last-use f63  ABS f64
+ *   select true   f70 (register) or f68 (immediate)   kind f76   width f77
+ *   select false  f87 (register) or f85 (immediate)   kind f93   width f94
+ *   condition f110, scoreboard f107
+ *
+ * Absolute sources move the instruction to a longer endpoint exactly as they
+ * do elsewhere in the family, so the endpoint range is scanned rather than
+ * computed; the endpoints are mutually exclusive on their fixed bits.
+ *
+ * Kind 2 on a SELECT slot is deliberately refused. It is the majority class in
+ * the corpus (56 of 84) and deposits into f86/f69/f97, but nothing here
+ * identifies what it names -- plausibly a uniform. A vector that cannot be
+ * encoded fails closed; that is a better state than a wrong encoding hidden by
+ * a green count.
+ */
+enum agx3_fsel_kind {
+   /* compare slots */
+   AGX3_FSEL_CMP_IMMEDIATE = 1,
+   AGX3_FSEL_CMP_REGISTER = 2,
+   /* select slots -- note the register is 3 here, not 2 */
+   AGX3_FSEL_SEL_IMMEDIATE = 1,
+   AGX3_FSEL_SEL_UNKNOWN2 = 2, /* corpus majority, unidentified, refused */
+   AGX3_FSEL_SEL_REGISTER = 3,
+};
+
+struct agx3_fsel_desc {
+   uint16_t dest;
+   bool dest_16, dest_cache;
+
+   uint16_t cmp0;               /* register half; slot 0 is always a register */
+   enum agx3_alu_hint cmp0_hint;
+   bool cmp0_abs;
+
+   bool cmp1_is_immediate;
+   uint16_t cmp1;               /* register half, or the immediate value */
+   enum agx3_alu_hint cmp1_hint;
+   bool cmp1_abs;
+
+   uint8_t sel0_kind, sel1_kind; /* agx3_fsel_kind, select-slot numbering */
+   uint16_t sel0, sel1;
+   bool sel_16;
+
+   unsigned condition;
+   uint16_t wait_mask;
+};
+
+bool agx3_alu_fcmp_select(enum agx_isa_encoding enc,
+                          const struct agx3_fsel_desc *d,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* The same select with an absolute value on either comparison source. ABS is
+ * not a bit on the form above: it moves to a longer endpoint (ten bytes ->
+ * fourteen) with the destination field block shifted by +14. f47 and f64 are
+ * the two sources' bits and are separable. See agx3_alu_core.c for the
+ * witnessed byte ladder. */
+bool agx3_alu_fcmp_select_imm_width_abs(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
+   bool dest_cache, uint16_t wait_mask, const bool src_abs[2],
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Exact G17P `b > -a ? 255 : 0` half-result form. The second full-width
  * comparator carries Apple's native negate field; other negate placements
@@ -333,6 +422,22 @@ bool agx3_alu_fmul_minifloat_mod(
    enum agx3_alu_hint hint, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/*
+ * The same multiply with an independently selected destination width: f10
+ * chooses a scalar half (1) or a float (2) result while f26 keeps the source
+ * at 32 bits. `packHalf2x16` narrows a 32-bit product to a half, and the
+ * optimizer folds that f2f16 into the multiply, so this mixed-width form is
+ * what actually reaches the packer. See the witnesses in agx3_alu_core.c.
+ *
+ * A narrowing multiply with an absolute source is refused: the ABS deposit is
+ * witnessed only against the 32-bit destination.
+ */
+bool agx3_alu_fmul_minifloat_narrow(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   uint16_t immediate, bool dest_cache, bool src_abs, bool dest_half,
+   enum agx3_alu_hint hint, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native scalar-half times minifloat with a float32 result. */
 bool agx3_alu_fmul_half_minifloat_to_f32(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
@@ -489,6 +594,29 @@ bool agx3_alu_f32rsqrt(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache,
                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                        uint8_t *len);
+
+/*
+ * Reciprocal square root carrying the source's ABS (f30) and NEG (f31)
+ * modifiers, the same two bits f32log2/f32exp2/f32rcp already model on their
+ * own forms. `inversesqrt(abs(x))` is the standard safe form of the idiom and
+ * reached the packer as `rsqrt [s0=32:reg.abs]`, which had no encoding at all.
+ *
+ * Witnessed with `metal-nt -arch applegpu_g17p`, one kernel per modifier,
+ * each a single-field difference from the plain control and every vector
+ * recovered by re-composing through this encoder (tools/decomp.c):
+ *
+ *   o[i] = rsqrt(a[i])         af 01 56 00 02 00 b0 40 00 00
+ *   o[i] = rsqrt(-a[i])        af 01 56 00 02 00 b0 40 01 00   f31
+ *   o[i] = rsqrt(fabs(a[i]))   af 01 56 00 02 00 b0 c0 00 00   f30
+ *   o[i] = rsqrt(-fabs(a[i]))  af 01 56 00 02 00 b0 c0 01 00   both
+ *
+ * The two are separable exactly as they are on exp2: `-fabs` sets both.
+ */
+bool agx3_alu_f32rsqrt_mod(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, enum agx3_alu_hint hint,
+                           bool dest_cache, uint16_t wait_mask, bool src_neg,
+                           bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                           uint8_t *len);
 
 /*
  * Full-precision base-2 logarithm and exponential.
@@ -650,6 +778,22 @@ bool agx3_alu_hceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/*
+ * The same step with the source's absolute value folded in (f30), which is
+ * what `sqrt(abs(x))` -- the standard safe-sqrt idiom -- lowers to. Witnessed
+ * against Apple's own kernels, a single-field difference from the control:
+ *
+ *   o[i] = sqrt(a[i])          2f 01 56 04 03 00 92 40 00 00
+ *   o[i] = sqrt(fabs(a[i]))    2f 01 56 04 03 00 92 c0 00 00   f30
+ *
+ * NEG is deliberately not exposed here: sqrt of a negative is NaN, no Apple
+ * witness exercises it, and an unwitnessed bit is worse than a refusal.
+ */
+bool agx3_alu_sqrt_step_mod(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, enum agx3_alu_hint hint,
+                            bool dest_cache, uint16_t wait_mask, bool src_abs,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native square-root step with a scalar half source and float32 temporary. */
 bool agx3_alu_sqrt_step_half(enum agx_isa_encoding enc, uint16_t dest,

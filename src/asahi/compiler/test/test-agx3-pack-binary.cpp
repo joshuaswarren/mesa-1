@@ -2343,8 +2343,12 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
-      /* Absolute and scalar-half sources now have exact native witnesses. */
-      if (variant == 5 || variant == 8)
+      /* Absolute and scalar-half sources now have exact native witnesses.
+       * So does variant 1, a 32-bit source narrowed into a half destination:
+       * f10 selects the destination width independently of f26, and Apple
+       * emits the mixed-width multiply directly. See
+       * FmulMinifloatNarrowsIntoHalfDestination below. */
+      if (variant == 1 || variant == 5 || variant == 8)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -2366,6 +2370,117 @@ TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
       mul->saturate = variant == 9;
       EXPECT_TRUE(pack(b, false).empty());
    }
+}
+
+/*
+ * `packHalf2x16(vec2(x * k, ...))`: agx_optimizer_fmov_rev() folds the f2f16
+ * into the multiply, so the packer sees a 32-bit source, a minifloat operand
+ * and a HALF destination. That form is Apple's own -- f10 is the destination
+ * width -- and used to fail the whole shader closed.
+ */
+TEST_F(AGX3PackBinary, FmulMinifloatNarrowsIntoHalfDestination)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_16), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple's witness is `11 a1 15 03 80 c0`; a bare test has no producer to
+    * wait on, so only the scoreboard field (f85) differs. The literal Apple
+    * bytes are asserted at encoder level in test-agx3-alu-core.c. */
+   const uint8_t native[] = {0x11, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* The 32-bit destination keeps the bytes it always had. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_32), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto wide = pack(b);
+   const uint8_t native32[] = {0x19, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(wide.size(), sizeof(native32) + 4);
+   EXPECT_EQ(memcmp(wide.data(), native32, sizeof(native32)), 0);
+}
+
+/*
+ * `sqrt(abs(x))` and `inversesqrt(abs(x))`. A bare .abs on either member of
+ * this family refused the shader; f30 carries it, witnessed one field at a
+ * time against Apple.
+ */
+TEST_F(AGX3PackBinary, RsqrtFamilyCarriesAbsoluteSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_32);
+   src.abs = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq = pack(b);
+   /* Apple: `af 01 56 00 02 00 b0 c0 00 00`; byte 2 drops to 0x54 here
+    * because there is no scoreboard slot to wait on. */
+   const uint8_t rsq_abs[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0xc0, 0x00, 0x00};
+   ASSERT_EQ(rsq.size(), sizeof(rsq_abs) + 4);
+   EXPECT_EQ(memcmp(rsq.data(), rsq_abs, sizeof(rsq_abs)), 0);
+
+   /* A negated source is separately witnessed on the same form. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_32);
+   src.neg = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq_n = pack(b);
+   const uint8_t rsq_neg[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0x40, 0x01, 0x00};
+   ASSERT_EQ(rsq_n.size(), sizeof(rsq_neg) + 4);
+   EXPECT_EQ(memcmp(rsq_n.data(), rsq_neg, sizeof(rsq_neg)), 0);
+
+   /* The half form has no modifier witness and stays closed. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_16);
+   src.abs = true;
+   agx_rsqrt_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
+/*
+ * `int16_t(x) + k`. A bare 16-bit integer source is sign-extended -- that is
+ * what agx_optimizer_signext() means by dropping the SIGNEXT and asserting
+ * the survivor carries no ABS -- and the register+immediate form refused it
+ * while the register+register form beside it already encoded.
+ */
+TEST_F(AGX3PackBinary, IaddImmediateSignExtendsBareHalfSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_16);
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple: `o[i] = int(short a[i]) + 7`, f15 = 7 and f43 = 1. */
+   const uint8_t native[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                             0x0e, 0x00, 0x08, 0x15, 0x0c};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* An ABS source is the zero-extending form, and keeps its own bytes:
+    * f43 clear, exactly as Apple's `uint(ushort a[i]) + 7`. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_16);
+   src.abs = true;
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto zext = pack(b);
+   const uint8_t native_u[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                               0x0e, 0x00, 0x08, 0x15, 0x04};
+   ASSERT_EQ(zext.size(), sizeof(native_u) + 4);
+   EXPECT_EQ(memcmp(zext.data(), native_u, sizeof(native_u)), 0);
 }
 
 TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
@@ -4534,6 +4649,9 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
       agx_immediate(0), offset, AGX_DIM_2D,
       AGX_LOD_MODE_AUTO_LOD, 0, true, false, false, AGX_GATHER_NONE, false);
    I->mask = 15;
+   /* The packed offset reaches the packer on the instruction, not through
+    * src[5]: a comparison sample needs that operand for its reference. */
+   I->offset_xy = 0xf1;
    agx_stop(b);
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
@@ -10652,30 +10770,355 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
    }
 }
 
-/* Only the plain 2D implicit gather is witnessed: an array gather, and a
- * gather carrying any LOD argument, must fail closed. */
-TEST_F(AGX3PackBinary, GatherRefusesUnwitnessedShapes)
+/* Metal's gather takes no LOD argument, so a gather carrying one has no
+ * witness and must fail closed.  The array layer does compose with it:
+ * `texture2d_array::gather(s, uv, layer)` is 05800ca490000db4010000001200,
+ * the ordinary array sample's f77/f31/f37 plus the gather's f144. */
+TEST_F(AGX3PackBinary, GatherRefusesALodButTakesAnArrayLayer)
 {
-   for (unsigned shape = 0; shape < 2; ++shape) {
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      const bool array = shape != 1;
       auto enc = AGX_ISA_ENCODING_AGX3B;
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_index dest = agx_register(8, AGX_SIZE_32);
       dest.channels_m1 = 3;
       agx_index coord = agx_register(20, AGX_SIZE_32);
-      coord.channels_m1 = shape == 0 ? 2 : 1;
+      coord.channels_m1 = array ? 2 : 1;
       auto *I = agx_texture_sample_to(
          b, dest, coord,
-         shape == 1 ? agx_immediate(agx_minifloat_encode(0.5f))
-                    : agx_immediate(0),
+         shape == 0 ? agx_immediate(0)
+                    : agx_immediate(agx_minifloat_encode(0.5f)),
          agx_immediate(0), agx_immediate(0), agx_immediate(0), agx_null(),
-         shape == 0 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
-         shape == 1 ? AGX_LOD_MODE_AUTO_LOD_BIAS : AGX_LOD_MODE_AUTO_LOD, 0,
+         array ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
+         shape == 0 ? AGX_LOD_MODE_AUTO_LOD : AGX_LOD_MODE_AUTO_LOD_BIAS, 0,
          false, false, false, AGX_GATHER_G, false);
       I->mask = 15;
       agx_stop(b);
-      pack(b, /*expect_ok=*/false);
+      /* shape 0: array gather, no LOD -> encodes.
+       * shape 1: 2D gather with an immediate bias -> refuses.
+       * shape 2: array gather with an immediate bias -> refuses. */
+      pack(b, /*expect_ok=*/shape == 0);
    }
+}
+
+/*
+ * The coordinate offset reaches the sample instruction as an immediate, in
+ * every LOD mode. Before this, the packer took an offset only on a plain
+ * implicit sample -- and the NIR combined-sampler gate disowned any shader
+ * carrying one, so even that path was unreachable and a bare textureOffset()
+ * refused the whole shader.
+ */
+TEST_F(AGX3PackBinary, OffsetSampleRidesEveryLodMode)
+{
+   struct row {
+      enum agx_lod_mode mode;
+      const char *name;
+   };
+   static const row rows[] = {
+      {AGX_LOD_MODE_AUTO_LOD, "implicit"},
+      {AGX_LOD_MODE_AUTO_LOD_BIAS, "immediate bias"},
+      {AGX_LOD_MODE_LOD_MIN, "immediate level"},
+      {AGX_LOD_MODE_LOD_GRAD, "gradient"},
+   };
+
+   for (const row &r : rows) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_index lod = agx_immediate(0);
+      if (r.mode == AGX_LOD_MODE_AUTO_LOD_BIAS)
+         lod = agx_immediate(agx_minifloat_encode(0.5f));
+      else if (r.mode == AGX_LOD_MODE_LOD_MIN)
+         lod = agx_immediate(agx_minifloat_encode(2.0f));
+      else if (r.mode == AGX_LOD_MODE_LOD_GRAD) {
+         lod = agx_register(24, AGX_SIZE_32);
+         lod.channels_m1 = 3;
+      }
+      /* Signed nibble pair (y << 4) | x -- offset (1, 1), the value
+       * agx_nir_lower_texture() packs into nir_tex_src_backend2. */
+      agx_index offset = agx_immediate(0x11);
+      offset.size = AGX_SIZE_32;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), offset, AGX_DIM_2D, r.mode, 0,
+         /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      I->offset_xy = 0x11;
+      agx_stop(b);
+      SCOPED_TRACE(r.name);
+      pack(b, /*expect_ok=*/true);
+   }
+}
+
+/*
+ * The same offset on the sample instruction itself, checked byte for byte.
+ * Apple's `t.sample(s, uv, int2(1,1))` is 05800cb8b0000102018810001200 and
+ * differs from its offset-free control by exactly f43 = 17, f51 = 1 and
+ * f141 = 1. The stream around the sample (coordinate staging, the fragment
+ * pixel entry) is checked by its own tests, so this one only asserts that
+ * the sample instruction the packer emitted carries that field triple.
+ */
+TEST_F(AGX3PackBinary, OffsetSampleMatchesNativeFieldTriple)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_index offset = agx_immediate(0x11);
+   offset.size = AGX_SIZE_32;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   I->offset_xy = 0x11;
+   agx_stop(b);
+   const std::vector<uint8_t> stream = pack(b);
+
+   /* The same sample with no offset, so the difference really is the triple
+    * and not something the shape changed along the way. */
+   agx_builder *b2 = builder(enc);
+   b2->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   auto *I2 = agx_texture_sample_to(
+      b2, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I2->mask = 15;
+   agx_stop(b2);
+   const std::vector<uint8_t> plain = pack(b2);
+
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want_plain(bytes, bytes + len);
+   d.offset = true;
+   d.offset_xy = 0x11;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want_offset(bytes, bytes + len);
+
+   EXPECT_NE(want_plain, want_offset);
+   EXPECT_NE(std::search(stream.begin(), stream.end(), want_offset.begin(),
+                         want_offset.end()),
+             stream.end());
+   EXPECT_NE(std::search(plain.begin(), plain.end(), want_plain.begin(),
+                         want_plain.end()),
+             plain.end());
+}
+
+/*
+ * The depth comparison is orthogonal to the LOD shape. Apple's depth2d
+ * sample_compare with level(2), bias(0.5), level(reg), bias(reg) and
+ * gradient2d() each differ from the corresponding colour sample by f143
+ * alone; before this, only the implicit form was admitted.
+ */
+TEST_F(AGX3PackBinary, ShadowSampleRidesEveryLodMode)
+{
+   struct row {
+      enum agx_lod_mode mode;
+      const char *name;
+   };
+   static const row rows[] = {
+      {AGX_LOD_MODE_AUTO_LOD, "implicit"},
+      {AGX_LOD_MODE_AUTO_LOD_BIAS, "immediate bias"},
+      {AGX_LOD_MODE_LOD_MIN, "immediate level"},
+      {AGX_LOD_MODE_LOD_GRAD, "gradient"},
+   };
+
+   for (const row &r : rows) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_index compare = agx_register(2, AGX_SIZE_32);
+      compare.discard = true;
+      agx_index lod = agx_immediate(0);
+      if (r.mode == AGX_LOD_MODE_AUTO_LOD_BIAS)
+         lod = agx_immediate(agx_minifloat_encode(0.5f));
+      else if (r.mode == AGX_LOD_MODE_LOD_MIN)
+         lod = agx_immediate(agx_minifloat_encode(2.0f));
+      else if (r.mode == AGX_LOD_MODE_LOD_GRAD) {
+         lod = agx_register(16, AGX_SIZE_32);
+         lod.channels_m1 = 3;
+      }
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), compare, AGX_DIM_2D, r.mode, 0, false,
+         /*shadow=*/true, false, AGX_GATHER_NONE, false);
+      I->mask = 1;
+      agx_stop(b);
+      SCOPED_TRACE(r.name);
+      pack(b, /*expect_ok=*/true);
+   }
+}
+
+/*
+ * gather_compare: the ordinary gather plus f143, returning four texels and so
+ * carrying the full f75 mask rather than the single component every other
+ * comparison carries. A comparison whose mask does not match its shape must
+ * still refuse.
+ */
+TEST_F(AGX3PackBinary, ShadowGatherKeepsTheFourTexelMask)
+{
+   for (unsigned mask : {15u, 1u}) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_index compare = agx_register(2, AGX_SIZE_32);
+      compare.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         false, /*shadow=*/true, false, AGX_GATHER_R, false);
+      I->mask = mask;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/mask == 15u);
+   }
+}
+
+/*
+ * A comparison sample takes a coordinate offset. Apple's
+ * depth2d::sample_compare(s, uv, ref, int2(1,1)) is
+ * 1d800ca090002102018800001200 -- the plain comparison plus the same
+ * f43/f51/f141 triple every other sample takes.
+ *
+ * The reason this could not be encoded before was not the ISA: agx_emit_tex()
+ * collected the comparator and the packed offset into one src[5] vector, and
+ * the comparator staging cannot take that apart. The offset now rides on the
+ * instruction (I->offset_xy) and src[5] belongs to the comparator alone.
+ */
+TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_index compare = agx_register(2, AGX_SIZE_32);
+   compare.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I->mask = 1;
+   I->offset_xy = 0x11;
+   agx_stop(b);
+   const std::vector<uint8_t> stream = pack(b);
+
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_TEX_W32;
+   d.mask = 1;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   d.shadow = true;
+   d.offset = true;
+   d.offset_xy = 0x11;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want(bytes, bytes + len);
+   EXPECT_NE(std::search(stream.begin(), stream.end(), want.begin(),
+                         want.end()),
+             stream.end());
+
+   /* An offset the instruction does not carry must refuse rather than encode
+    * as offset (0,0), which native spells as the plain form. */
+   agx_builder *b2 = builder(enc);
+   b2->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   auto *I2 = agx_texture_sample_to(
+      b2, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I2->mask = 1;
+   agx_stop(b2);
+   pack(b2, /*expect_ok=*/false);
+}
+
+/*
+ * REGRESSION GUARD. agx_opt_cse.c's instrs_equal() is hand-written and
+ * enumerates the instruction's immediates one at a time, so a new field that
+ * is not added there lets two otherwise-identical instructions collapse into
+ * one. I->offset_xy is such a field: without its line in instrs_equal(), two
+ * samples of the same texture at the same coordinate but *different* texel
+ * offsets would CSE together and the second would silently read the first's
+ * texels.
+ *
+ * This asserts the two are not equal. Delete the offset_xy line from
+ * instrs_equal() and this test fails.
+ */
+TEST_F(AGX3PackBinary, DifferentTexelOffsetsDoNotCSETogether)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+
+   agx_index d0 = agx_register(8, AGX_SIZE_32);
+   d0.channels_m1 = 3;
+   agx_index d1 = agx_register(16, AGX_SIZE_32);
+   d1.channels_m1 = 3;
+
+   agx_index off = agx_immediate(0x11);
+   off.size = AGX_SIZE_32;
+
+   auto *a = agx_texture_sample_to(
+      b, d0, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   a->mask = 15;
+   a->offset_xy = 0x11;
+
+   auto *c = agx_texture_sample_to(
+      b, d1, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   c->mask = 15;
+   c->offset_xy = 0x22; /* the only difference */
+
+   EXPECT_NE(a->offset_xy, c->offset_xy);
+   EXPECT_FALSE(agx_instrs_equal_for_cse(a, c));
+
+   /* ... and two with the same offset still compare equal, so the guard is
+    * not simply always-false. */
+   c->offset_xy = 0x11;
+   c->dest[0] = d0;
+   EXPECT_TRUE(agx_instrs_equal_for_cse(a, c));
 }
 
 TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)

@@ -252,9 +252,70 @@ test_half_float_zero_compare(void)
    }
 }
 
+/*
+ * Branching on a float against a NON-ZERO constant.
+ *
+ * f18 is the compare's second operand and was pinned to zero, so only
+ * `x < 0.0` encoded. `x < 1.0` is ordinary GLSL and was 136 of the 146
+ * instructions still refused in the Vulkan compute block after the
+ * threadgroup fix. Exactly the defect the integer side already carried:
+ * agx3_cf_icmp_zero16_runtime() never set f16.
+ *
+ * Apple, one kernel per variable. The branch body has to be a loop: a
+ * trivial if/else is if-converted to a select and emits no fcmp at all,
+ * which is why several hand-written probes for this shape found nothing.
+ */
+static void
+test_float_minifloat_compare(void)
+{
+   uint8_t out[AGX3_CF_MAX_LENGTH];
+   uint8_t len;
+   const struct agx3_cf_source_hints dead = {false, true};
+
+   struct {
+      const char *name;
+      enum agx3_cf_fcond cond;
+      uint8_t imm;
+      bool src16;
+      uint8_t bytes[6];
+   } v[] = {
+      {"v < 0.0f", AGX3_CF_FCOND_LT,  0, false, {0x0a,0x03,0x2a,0x81,0x03,0xc2}},
+      {"v < 0.5f", AGX3_CF_FCOND_LT, 32, false, {0x0a,0x03,0x2a,0xa1,0x03,0xc2}},
+      {"v < 1.0f", AGX3_CF_FCOND_LT, 48, false, {0x0a,0x03,0x2a,0xb1,0x03,0xc2}},
+      {"v < 2.0f", AGX3_CF_FCOND_LT, 64, false, {0x0a,0x03,0x2a,0xc1,0x03,0xc2}},
+      {"v > 1.0f", AGX3_CF_FCOND_GT, 48, false, {0x0a,0x03,0x2a,0xb1,0x02,0xc2}},
+      {"half v < 1.0h", AGX3_CF_FCOND_LT, 48, true,
+       {0x0a,0x02,0x2a,0xb1,0x03,0xc2}},
+   };
+
+   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
+      len = 0;
+      const bool ok = agx3_cf_fcmp_zero_imm(AGX_ISA_ENCODING_AGX3B, v[i].cond,
+                                            false, 0, 2, v[i].src16, v[i].imm,
+                                            dead, 32, out, &len);
+      checks++;
+      if (!ok || len != 6 || memcmp(out, v[i].bytes, 6)) {
+         fprintf(stderr, "FAIL float-minifloat branch: %s\n", v[i].name);
+         failures++;
+      }
+   }
+
+   /* The zero wrapper must still emit exactly the bytes it always did. */
+   len = 0;
+   const bool zero_ok =
+      agx3_cf_fcmp_zero(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false, 0, 2,
+                        false, dead, 32, out, &len);
+   checks++;
+   if (!zero_ok || len != 6 || memcmp(out, v[0].bytes, 6)) {
+      fprintf(stderr, "FAIL float-minifloat: zero wrapper changed bytes\n");
+      failures++;
+   }
+}
+
 int
 main(void)
 {
+   test_float_minifloat_compare();
    test_float_zero_compare();
    test_float_negated_register_compare();
    test_half_float_zero_compare();

@@ -98,7 +98,7 @@ agx3_index_kind(const agx_index x)
  * AGX3 encoding for fcmpsel" is true of the shapes that encode as well.
  */
 static void
-agx3_report_refusal(const agx_instr *I, unsigned line)
+agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 {
    if (!(agx_compiler_debug & AGX_DBG_SHADERS))
       return;
@@ -118,17 +118,44 @@ agx3_report_refusal(const agx_instr *I, unsigned line)
                     x.discard ? ".discard" : "");
    }
 
+   /* mask, format and shift decide gates that the operand list cannot show.
+    * A vector spill differs from a scalar one only in `mask`; and a shifted
+    * integer subtract (`a - (b << N)`, which is how a multiply by a small
+    * negative constant is strength-reduced) looks exactly like a plain
+    * negated add without `shift`. Omitting them costs a wrong diagnosis. */
    fprintf(stderr,
            "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
-           "[%s%s%s cond=%u chan=%u]\n",
+           "[%s%s%s cond=%u chan=%u mask=0x%x fmt=%u shift=%u]%s%s\n",
            line, agx_opcodes_info[I->op].name, shape,
            I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
-           (unsigned)I->fcond, I->nr_dests ? agx_channels(I->dest[0]) : 0u);
+           (unsigned)I->fcond, I->nr_dests ? agx_channels(I->dest[0]) : 0u,
+           (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift,
+           why ? " -- " : "", why ? why : "");
+}
+
+static void
+agx3_report_refusal(const agx_instr *I, unsigned line)
+{
+   agx3_report_refusal_why(I, line, NULL);
 }
 
 #define AGX3_REFUSE(I)                                                         \
    do {                                                                        \
       agx3_report_refusal((I), __LINE__);                                      \
+      goto fail;                                                               \
+   } while (0)
+
+/*
+ * Same, naming WHICH stage declined. A memory op passes through a translate
+ * step and then an encode step, and when both raise the bare message the log
+ * cannot say whether the shape was rejected for a reason the IR could fix or
+ * genuinely has no encoding -- which is the difference between IR-side work
+ * and ISA work. The line number already separates them; this says it in
+ * words so nobody has to map line numbers back to source.
+ */
+#define AGX3_REFUSE_WHY(I, why)                                                \
+   do {                                                                        \
+      agx3_report_refusal_why((I), __LINE__, (why));                           \
       goto fail;                                                               \
    } while (0)
 
@@ -1339,9 +1366,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1;
    /* A 2D gradient is four 32-bit scalars in one aligned run, which the four
     * staging copies name two halves apart. */
+   /* A 2D gradient is four 32-bit scalars in one aligned run; a 3D one is
+    * six, and agx_emit_tex()'s collect already lays both out in the
+    * interleaved order the staging banks want. */
+   const unsigned gradient_channels = three_d ? 6u : 4u;
    const bool gradient_operand = agx3_tex_plain_reg(I->src[1]) &&
-      I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 4 &&
-      (I->src[1].value & 1) == 0 && I->src[1].value + 6 < 128;
+      I->src[1].size == AGX_SIZE_32 &&
+      agx_channels(I->src[1]) == gradient_channels &&
+      (I->src[1].value & 1) == 0 &&
+      I->src[1].value + (2 * gradient_channels) - 2 < 128;
    const bool valid_lod = explicit_lod ?
       (enc == AGX_ISA_ENCODING_AGX3B &&
        (valid_immediate_lod || scalar_lod_reg)) :
@@ -1359,11 +1392,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool sampler_immediate =
       I->nr_srcs == 6 && I->src[4].type == AGX_INDEX_IMMEDIATE;
    const bool immediate = texture_immediate && sampler_immediate;
-   const bool immediate_offset = offset &&
-      I->src[5].type == AGX_INDEX_IMMEDIATE &&
-      I->src[5].value > 0 && I->src[5].value <= UINT8_MAX &&
-      !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
-      !I->src[5].cache && !I->src[5].discard && !I->src[5].kill;
+   /* agx_emit_tex() publishes the packed offset on the instruction rather
+    * than through src[5], because a comparison sample needs that operand for
+    * its reference value. src[5] still carries the immediate when there is no
+    * comparator, and the two must agree. */
+   const bool immediate_offset = offset && I->offset_xy > 0 &&
+      (shadow || (I->src[5].type == AGX_INDEX_IMMEDIATE &&
+                  I->src[5].value == I->offset_xy &&
+                  !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
+                  !I->src[5].cache && !I->src[5].discard && !I->src[5].kill));
    /* AGX3B coordinates are copied to the fixed staging bank before SMP. COPY
     * and CEM each name a seven-bit source half-register, so the entire vector
     * must end below half 128. AGX3C retains its independently recovered direct
@@ -1400,26 +1437,43 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (shadow
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
-              agx_channels(I->src[5]) != 1 || I->src[5].value > 126)
+              agx_channels(I->src[5]) != 1 || I->src[5].value > 126 ||
+              (offset && !immediate_offset))
            : offset ? !immediate_offset : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
+       /* f76 = 3 is orthogonal to f139; only the gradient is held back,
+        * because gradient3d stages six scalars and that layout has no
+        * witness. See agx3_tex_core.c for the five-row table. */
        (three_d &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
-         (!valid_immediate_lod && !implicit_lod))) ||
+         (!valid_immediate_lod && !implicit_lod && !biased_lod &&
+          !register_bias && !explicit_lod && !gradient_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
+       /* The coordinate offset rides in the sample's own f43/f51/f141 and is
+        * orthogonal to the LOD shape, the array layer, the gather bit, the
+        * depth comparison and the descriptor operand class -- see
+        * agx3_tex_core.c for the witness table. One exclusion survives here
+        * and it is not the ISA's: an array sample carrying an *immediate*
+        * level or bias already spends f43 on that immediate, and Apple
+        * stages the offset separately and selects f141 = 2, a form with no
+        * slot plan here. 3D and cube offsets have no witness. */
        (offset &&
-        (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate ||
-         array || three_d || cube || shadow || gather)) ||
-       (shadow && (three_d || !implicit_lod || gather ||
-                   I->mask != 1 || enc != AGX_ISA_ENCODING_AGX3B ||
+        (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube ||
+         (array && (biased_lod || (explicit_lod && immediate_lod))))) ||
+       /* A depth comparison is orthogonal to the LOD shape on a plain 2D
+        * sample. The array and cube comparisons use their own packed layer /
+        * CEM operands and keep the implicit LOD they were witnessed with. */
+       (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
+                   I->mask != (gather ? 15u : 1u) ||
+                   ((array || cube) && !implicit_lod) ||
                    (array && !immediate))) ||
-       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d || cube ||
+       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
@@ -1597,12 +1651,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * collect that produced them is laid out the same way, so the run is
     * copied straight through. */
    if (gradient_lod) {
-      static const uint16_t bank[4] = {
+      static const uint16_t bank[6] = {
          AGX3_TEX_GRADIENT_BANK_DDX_X, AGX3_TEX_GRADIENT_BANK_DDY_X,
          AGX3_TEX_GRADIENT_BANK_DDX_Y, AGX3_TEX_GRADIENT_BANK_DDY_Y,
+         AGX3_TEX_GRADIENT_BANK_DDX_Z, AGX3_TEX_GRADIENT_BANK_DDY_Z,
       };
 
-      for (unsigned i = 0; i < 4; ++i) {
+      for (unsigned i = 0; i < gradient_channels; ++i) {
          if (!agx3_tex_stage_copy_hints(enc, bank[i],
                                         I->src[1].value + (2 * i), stage_slot,
                                         0, I->src[1].cache, I->src[1].discard,
@@ -1641,7 +1696,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .gather = gather_component,
       .shadow = shadow,
       .offset = offset,
-      .offset_xy = offset ? I->src[5].value : 0,
+      .offset_xy = offset ? I->offset_xy : 0,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER
@@ -2281,8 +2336,9 @@ agx3_local_vector_shift(enum agx3_mem_width width, uint8_t mask)
  * is refused because Mesa's byte-addressed IR has not yet been legalized to
  * AGX3's scaled-index convention. */
 static bool
-agx3_translate_local(const agx_instr *I, bool is_store, uint8_t slot,
-                     uint16_t wait_mask, struct agx3_local_desc *d)
+agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
+                     bool is_store, uint8_t slot, uint16_t wait_mask,
+                     struct agx3_local_desc *d)
 {
    memset(d, 0, sizeof(*d));
 
@@ -2326,7 +2382,23 @@ agx3_translate_local(const agx_instr *I, bool is_store, uint8_t slot,
        index.value != 0 || index.memory || index.abs || index.neg)
       return false;
 
-   d->narrow_extend = d->width == AGX3_MEM_W8;
+   /*
+    * f11, `narrow_extend`, is an AGX3c field. The AGX3b `ldtg`/`sttg` forms
+    * have no encoding for it at all -- composing either with f11 = 1 is
+    * refused at every width, while f11 = 0 composes -- so a G17P threadgroup
+    * access necessarily carries it clear, and Apple's own compiler cannot be
+    * emitting anything else. Setting it from the width regardless of encoding
+    * therefore refused EVERY 8-bit threadgroup load and store on G17P, which
+    * is 1295 of the 1393 refused instructions in the Vulkan compute block:
+    * VK_KHR_workgroup_memory_explicit_layout puts 8-bit types in shared
+    * memory, and every one of them landed here.
+    *
+    * Clearing it leaves G17P exactly where the conformant AGX2 path already
+    * is: AGX2 has no such bit either, and Mesa's IR contract (an 8-bit value
+    * held in a 16-bit register) is the same on both.
+    */
+   d->narrow_extend =
+      d->width == AGX3_MEM_W8 && enc == AGX_ISA_ENCODING_AGX3C;
    d->slot = slot;
    d->wait_mask = wait_mask;
    return true;
@@ -2540,8 +2612,19 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
 
    const agx_index data = is_store ? I->src[0] : I->dest[0];
    const agx_index offset = I->src[is_store ? 1 : 0];
+   /*
+    * A spill store's source is normally DEAD after it -- that is the whole
+    * point of spilling -- so agx_opt_register_cache() marks it `.discard`,
+    * and refusing that rejected essentially every real spill. f27, which
+    * `src_kill` drives, is exactly that last-use bit: the same field the ALU
+    * forms set for AGX3_ALU_HINT_DISCARD. Carry it rather than refuse it.
+    *
+    * `.cache` stays refused: this form has no modelled cache hint, and
+    * claiming a live register is dead is a silent miscompile.
+    */
    if (!agx3_src_is_register(data) || data.memory || data.abs || data.neg ||
-       data.cache || data.discard || data.size != AGX_SIZE_32 ||
+       data.cache || (!is_store && data.discard) ||
+       data.size != AGX_SIZE_32 ||
        agx_channels(data) != 1 || (data.value & 1) || data.value > 254 ||
        (!is_store && data.kill) || offset.type != AGX_INDEX_IMMEDIATE ||
        offset.memory || offset.abs || offset.neg || offset.cache ||
@@ -2560,7 +2643,8 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
          .tps_half = tps_half,
          .src = data.value,
          .width = AGX3_MEM_W32,
-         .src_kill = data.kill,
+         /* Both spellings of "dead after this use" drive the same f27. */
+         .src_kill = data.kill || data.discard,
          .slot = slot,
          .wait_mask = wait_mask,
       };
@@ -3224,6 +3308,16 @@ agx3_cf_is_zero(agx_index src)
           !src.neg;
 }
 
+/* A float constant the control-flow compare can carry in f18: the ordinary
+ * minifloat this ISA uses for immediate float operands everywhere else.
+ * Zero is included, and keeps producing the bytes it always did. */
+static bool
+agx3_cf_fminifloat(agx_index src)
+{
+   return src.type == AGX_INDEX_IMMEDIATE && src.value <= 0xff && !src.abs &&
+          !src.neg;
+}
+
 /* A constant the witnessed 16-bit compare can carry. Above 255 Apple changes
  * the instruction, so anything wider stays refused. */
 static bool
@@ -3312,11 +3406,18 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
+   /* Branching on a float against a CONSTANT. f18 is the compare's second
+    * operand; it used to be pinned to zero, so only `x < 0.0` encoded and
+    * `x < 1.0` -- what dEQP's workgroup-memory tests branch on, and 136 of
+    * the 146 instructions left refused in the Vulkan compute block -- had no
+    * encoding. The constant is the ordinary minifloat, so a zero constant
+    * still emits exactly the bytes it always did. */
    if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
-       ((agx3_cf_is_zero(I->src[1]) && (agx3_vary_reg32(I->src[0]) || agx3_cf_reg16(I->src[0]))) ||
-        (agx3_cf_is_zero(I->src[0]) && (agx3_vary_reg32(I->src[1]) || agx3_cf_reg16(I->src[1]))))) {
-      const bool zero_first=agx3_cf_is_zero(I->src[0]);
+       ((agx3_cf_fminifloat(I->src[1]) && (agx3_vary_reg32(I->src[0]) || agx3_cf_reg16(I->src[0]))) ||
+        (agx3_cf_fminifloat(I->src[0]) && (agx3_vary_reg32(I->src[1]) || agx3_cf_reg16(I->src[1]))))) {
+      const bool zero_first=agx3_cf_fminifloat(I->src[0]);
       const agx_index source=I->src[zero_first?1:0];
+      const agx_index constant=I->src[zero_first?0:1];
       enum agx_fcond relation=I->fcond;
       if(zero_first) {
          switch(relation) {
@@ -3332,7 +3433,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       enum agx3_cf_fcond condition;bool or_nan;
       if(source.kill || agx_channels(source)!=1 ||
          !agx3_cf_map_fcond(relation,&condition,&or_nan,invert) ||
-         !agx3_cf_fcmp_zero(enc,condition,or_nan,flag_slot,source.value,source.size==AGX_SIZE_16,
+         !agx3_cf_fcmp_zero_imm(enc,condition,or_nan,flag_slot,source.value,
+            source.size==AGX_SIZE_16,(uint8_t)constant.value,
             (struct agx3_cf_source_hints){source.cache,source.discard},0,bytes,&len))
          return false;
       return agx3_append(emission,bytes,len);
@@ -6487,13 +6589,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_local_desc d;
             uint8_t bytes[AGX3_LOCAL_TPS_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_local(I, is_store, slot, wait, &d))
-               AGX3_REFUSE(I);
+            if (!agx3_translate_local(enc, I, is_store, slot, wait, &d))
+               AGX3_REFUSE_WHY(I, "local: translate declined (operand shape)");
             const bool ok =
                is_store ? agx3_local_encode_store(enc, &d, bytes, &len)
                         : agx3_local_encode_load(enc, &d, bytes, &len);
             if (!ok)
-               AGX3_REFUSE(I);
+               AGX3_REFUSE_WHY(I, "local: no grounded form for this "
+                                  "width/mask/base combination");
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
             continue;
          }
@@ -6590,20 +6693,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_SRSQRT) {
             const agx_index dest=I->dest[0], src=I->src[0];
+            const bool half = src.size == AGX_SIZE_16;
+            /* f30 carries the source's absolute value, so `sqrt(abs(x))` --
+             * the standard safe-sqrt idiom -- encodes without a separate
+             * move. Only the 32-bit form is witnessed; the half step keeps
+             * its narrower grounded domain. */
             if (I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate ||
                 !agx3_vary_reg32(dest) ||
                 !agx3_src_is_register(src) || src.memory ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                src.neg || src.kill || (src.abs && half) ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            const bool half = src.size == AGX_SIZE_16;
-            if ((!half && !agx3_vary_reg32(src)) ||
-                !(half ? agx3_alu_sqrt_step_half : agx3_alu_sqrt_step)(
-                   enc,dest.value,src.value,agx3_post_ra_hint(src),
-                   dest.cache,wait,bytes,&len) ||
-                !agx3_append(emission,bytes,len))
+            const bool ok =
+               half ? agx3_alu_sqrt_step_half(enc, dest.value, src.value,
+                                              agx3_post_ra_hint(src),
+                                              dest.cache, wait, bytes, &len)
+                    : (src.size == AGX_SIZE_32 && !(src.value & 1) &&
+                       src.value < 256 &&
+                       agx3_alu_sqrt_step_mod(enc, dest.value, src.value,
+                                              agx3_post_ra_hint(src),
+                                              dest.cache, wait, src.abs,
+                                              bytes, &len));
+            if (!ok || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;
          }
@@ -6640,20 +6753,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate) {
             const agx_index dest = I->dest[0], src = I->src[0];
             const bool half = dest.size == AGX_SIZE_16;
+            /* f30/f31 carry the source's ABS/NEG. inversesqrt(abs(x)) is the
+             * safe form of the idiom and had no encoding at all. The half
+             * form has no modifier witness, so it stays width-matched and
+             * unmodified. */
             if (!agx3_src_is_register(dest) || dest.memory ||
                 (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32) ||
                 agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 src.size != dest.size || agx_channels(src) != 1 ||
-                src.abs || src.neg || src.kill ||
+                src.kill || (half && (src.abs || src.neg)) ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!(half ? agx3_alu_hrsqrt : agx3_alu_f32rsqrt)(
-                   enc, dest.value, src.value,
-                   agx3_post_ra_hint(src), dest.cache, wait,
-                   bytes, &len) ||
-                !agx3_append(emission, bytes, len))
+            const bool ok =
+               half ? agx3_alu_hrsqrt(enc, dest.value, src.value,
+                                      agx3_post_ra_hint(src), dest.cache,
+                                      wait, bytes, &len)
+                    : agx3_alu_f32rsqrt_mod(enc, dest.value, src.value,
+                                            agx3_post_ra_hint(src),
+                                            dest.cache, wait, src.neg,
+                                            src.abs, bytes, &len);
+            if (!ok || !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }
@@ -6882,10 +7003,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
                c.value <= 0xff && !c.abs && !c.neg && !c.memory;
+            /*
+             * A bare narrow operand is SIGN-extended, the same rule the
+             * comment above names and the same one agx_optimizer_signext()
+             * enforces for iadd: it fuses a SIGNEXT into the multiply-add by
+             * dropping it and asserting the survivor carries no ABS. So
+             * `a*b + int(short c)` arrives with no modifier at all, which
+             * this gate used to refuse.
+             *
+             * Apple, one kernel per variable, everything else held fixed:
+             *
+             *   a*b + int(short  c)   9f 00 56 00 02 08 00 40 d0 2e 6a 00
+             *   a*b + int(ushort c)   9f 00 56 00 02 08 00 40 d0 2e 2a 00
+             *   a*b + int c           9f 00 56 00 02 08 00 40 d0 2f 2a 00
+             *
+             * f54 is slot C's width (1 = 16-bit, 2 = 32-bit) and f58 its
+             * sign-extension, set for `short` and clear for `ushort`.
+             */
             const bool addend_ok =
                no_addend || addend_imm ||
                (agx3_src_is_register(c) && !c.memory &&
                 agx_channels(c) == 1 && !(c.abs && c.neg) &&
+<<<<<<< HEAD
                 ((!narrow && c.size == AGX_SIZE_32) ||
                  (wide && c.size == AGX_SIZE_64) ||
                  (c.size == AGX_SIZE_16 &&
@@ -6905,6 +7044,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                widening &&
                (a.size == AGX_SIZE_16 ||
                 (mult_reg && m.size == AGX_SIZE_16));
+=======
+                (c.size == AGX_SIZE_32 || (wide && c.size == AGX_SIZE_64) ||
+                 c.size == AGX_SIZE_16));
+            const bool addend_reg = !no_addend && !addend_imm;
+
+            /*
+             * The multiplicand may likewise be narrower than the result.
+             * f24 is slot A's width and f28 its sign-extension:
+             *
+             *   int(short  a)*129 + int(short  c)
+             *      9f 00 56 00 02 02 04 02 10 2a 66 00      f24 = 1, f28 = 1
+             *   int(ushort a)*129 + int(ushort c)
+             *      9f 00 56 00 02 02 04 02 10 2a 22 00      f24 = 1, f28 = 0
+             */
+            const bool a_ok = agx3_src_is_register(a) && !a.memory &&
+               agx_channels(a) == 1 &&
+               (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
+                       : ((wide || !a.abs) && !a.neg &&
+                          (a.size == AGX_SIZE_32 ||
+                           a.size == AGX_SIZE_16)));
+>>>>>>> codex/gpu-desktop-merge
 
             if (a_ok &&
                 (mult_imm || mult_reg) && addend_ok &&
@@ -6917,8 +7077,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
                   .src_a_16 = a.size == AGX_SIZE_16,
+<<<<<<< HEAD
                   .src_a_sign_extend =
                      (wide || widening_half_product) && !a.abs,
+=======
+                  /* Only the newly admitted narrow-A-into-wider-result case
+                   * gains a sign-extension; a 16-bit result is unaffected by
+                   * it, so its bytes stay exactly as they were. */
+                  .src_a_sign_extend =
+                     (wide || (!narrow && a.size == AGX_SIZE_16)) && !a.abs,
+>>>>>>> codex/gpu-desktop-merge
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
@@ -6937,9 +7105,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src_c = addend_reg ? c.value : 0,
                   .src_c_16 = addend_reg && c.size == AGX_SIZE_16,
                   .src_c_64 = addend_reg && c.size == AGX_SIZE_64,
+                  /* Bare narrow addend: sign-extend unless ABS marks it
+                   * unsigned. Identical to the old `c.neg` for every shape
+                   * that already encoded (ABS gave 0, NEG gave 1); only the
+                   * bare case, which used to be refused, is new. */
                   .src_c_sign_extend =
                      addend_reg && (wide ? (c.size != AGX_SIZE_64 && !c.abs)
-                                         : c.neg),
+                                         : (c.size == AGX_SIZE_16 && !c.abs)),
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -7629,13 +7801,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
              (I->src[0].size == AGX_SIZE_16 || I->src[0].size == AGX_SIZE_32) &&
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
-             !I->src[0].abs && !I->src[1].abs &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
             /* Apple spells `-a < b` as the equivalent `b > -a`, placing the
              * only witnessed negate bit on the second full-width comparator.
              * Do not generalize that modifier to another slot or condition. */
-            const bool neg_second = I->src[0].neg && !I->src[1].neg &&
+            /* An absolute comparison source moves the instruction to the
+             * longer ep28..35 endpoint. It is a different form, not a bit on
+             * the short one, so it gets its own encoder and never mixes with
+             * the negate path (which stays on the short endpoint). */
+            const bool any_abs = I->src[0].abs || I->src[1].abs;
+            const bool neg_second = !any_abs && I->src[0].neg &&
+                                    !I->src[1].neg &&
                                     I->fcond == AGX_FCOND_LT &&
                                     !I->invert_cond &&
                                     I->dest[0].size == AGX_SIZE_16 &&
@@ -7671,13 +7848,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
+            const bool src_abs[] = {I->src[order[0]].abs,
+                                    I->src[order[1]].abs};
             if (I->saturate || I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
                 ((!neg_second) && (I->src[0].neg || I->src[1].neg)) ||
                 I->src[2].abs || I->src[2].neg ||
                 I->src[3].abs || I->src[3].neg ||
-                !(neg_second
+                !(any_abs
+                     ? agx3_alu_fcmp_select_imm_width_abs(
+                          enc, I->dest[0].value, src, src_16, hints,
+                          condition, I->src[swap ? 3 : 2].value,
+                          I->src[swap ? 2 : 3].value,
+                          I->dest[0].size == AGX_SIZE_16,
+                          I->dest[0].cache, fsel_wait, src_abs, bytes, &len)
+                  : neg_second
                      ? agx3_alu_fcmp_select_imm_width_neg_second(
                           enc, I->dest[0].value, src, src_16, hints,
                           condition, I->src[swap ? 3 : 2].value,
@@ -7693,6 +7879,110 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
+         }
+
+         /*
+          * The general compare-select: a REGISTER in a select slot, or an
+          * IMMEDIATE in a compare slot. The block above requires both selects
+          * to be immediates and both compare sources to be registers, so it
+          * skips these shapes entirely rather than refusing them, and nothing
+          * it already encodes can reach here.
+          *
+          * Both are ordinary GLSL. dEQP's isOk() written to a mediump output
+          * gives the first (a 16-bit destination selecting between a register
+          * and a constant); isinf() gives the second (a comparison against an
+          * immediate zero selecting between two registers).
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             agx_channels(I->dest[0]) == 1 &&
+             (I->dest[0].size == AGX_SIZE_16 ||
+              I->dest[0].size == AGX_SIZE_32)) {
+            const agx_index c0 = I->src[0], c1 = I->src[1];
+            const bool c0_imm = c0.type == AGX_INDEX_IMMEDIATE;
+            const bool c1_imm = c1.type == AGX_INDEX_IMMEDIATE;
+
+            /* At most one compare source may be an immediate, and every
+             * immediate compare source witnessed carries zero. Apple spells
+             * `k < b` by reversing the relation so the immediate lands in
+             * slot 1, the only slot whose kind field is witnessed taking the
+             * immediate value. */
+            if (!(c0_imm && c1_imm) &&
+                (!c0_imm || (c0.value == 0 && !c0.abs && !c0.neg)) &&
+                (!c1_imm || (c1.value == 0 && !c1.abs && !c1.neg)) &&
+                (c0_imm || agx3_src_is_register(c0)) &&
+                (c1_imm || agx3_src_is_register(c1))) {
+               const agx_index sel_t = I->src[2], sel_f = I->src[3];
+               const bool t_imm = sel_t.type == AGX_INDEX_IMMEDIATE;
+               const bool f_imm = sel_f.type == AGX_INDEX_IMMEDIATE;
+
+               unsigned condition = I->fcond;
+               bool swap = I->invert_cond;
+               if (condition == AGX_FCOND_LTN) {
+                  condition = AGX_FCOND_GE;
+                  swap = !swap;
+               } else if (condition == AGX_FCOND_GTN) {
+                  condition = AGX_FCOND_LE;
+                  swap = !swap;
+               }
+               /* Put the immediate in compare slot 1. */
+               const bool reverse = c0_imm;
+               const agx_index cmp0 = reverse ? c1 : c0;
+               const agx_index cmp1 = reverse ? c0 : c1;
+               if (reverse)
+                  condition = agx3_fcond_reverse(condition);
+
+               const agx_index tv = swap ? sel_f : sel_t;
+               const agx_index fv = swap ? sel_t : sel_f;
+               const bool tv_imm = swap ? f_imm : t_imm;
+               const bool fv_imm = swap ? t_imm : f_imm;
+
+               const struct agx3_fsel_desc d = {
+                  .dest = I->dest[0].value,
+                  .dest_16 = I->dest[0].size == AGX_SIZE_16,
+                  .dest_cache = I->dest[0].cache,
+                  .cmp0 = cmp0.value,
+                  .cmp0_hint = agx3_post_ra_hint(cmp0),
+                  .cmp0_abs = cmp0.abs,
+                  .cmp1_is_immediate = reverse ? c0_imm : c1_imm,
+                  .cmp1 = cmp1.value,
+                  .cmp1_hint = agx3_post_ra_hint(cmp1),
+                  .cmp1_abs = cmp1.abs,
+                  .sel0_kind = tv_imm ? AGX3_FSEL_SEL_IMMEDIATE
+                                      : AGX3_FSEL_SEL_REGISTER,
+                  .sel1_kind = fv_imm ? AGX3_FSEL_SEL_IMMEDIATE
+                                      : AGX3_FSEL_SEL_REGISTER,
+                  .sel0 = tv.value,
+                  .sel1 = fv.value,
+                  .sel_16 = I->dest[0].size == AGX_SIZE_16,
+                  .condition = condition,
+                  .wait_mask = 0,
+               };
+
+               const bool operands_ok =
+                  !cmp0.neg && !cmp1.neg && !tv.neg && !fv.neg && !tv.abs &&
+                  !fv.abs && !cmp0.kill && !cmp1.kill &&
+                  !(cmp0.cache && cmp0.discard) &&
+                  !(cmp1.cache && cmp1.discard) &&
+                  (tv_imm || agx3_src_is_register(tv)) &&
+                  (fv_imm || agx3_src_is_register(fv)) &&
+                  agx_channels(cmp0) == 1 && agx_channels(cmp1) == 1;
+
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+               uint8_t len = 0;
+               if (operands_ok) {
+                  /* No witness of this endpoint carries a scoreboard wait, so
+                   * retire outstanding slots first rather than dropping the
+                   * dependency. */
+                  if (wait != 0 && !agx3_retire_slots_noop(emission, enc, wait))
+                     AGX3_REFUSE(I);
+                  if (agx3_alu_fcmp_select(enc, &d, bytes, &len) &&
+                      agx3_append(emission, bytes, len))
+                     continue;
+               }
+               AGX3_REFUSE(I);
+            }
          }
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
@@ -7746,10 +8036,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Unshifted register arithmetic shares the original canonical
-          * form, but its native source hints come from post-RA lifetime. */
+         /* Register arithmetic shares the original canonical form, but its
+          * native source hints come from post-RA lifetime.
+          *
+          * The SUBTRACT additionally carries a shift on slot B (f54). NIR
+          * strength-reduces a multiply by a small negative constant into
+          * `a - (b << N)` -- `x * -7` becomes `x - (x << 3)` -- so a shifted
+          * subtract is an ordinary shape, and refusing it failed every such
+          * multiply closed. The ADD keeps its `shift == 0` restriction: its
+          * shifted form is modelled separately by agx3_iadd_encode, and
+          * re-routing a shape that already encodes is what cost two hardware
+          * probes before. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
-             I->shift == 0 && I->nr_dests == 1 && I->nr_srcs == 2 &&
+             (I->shift == 0 || I->src[1].neg) &&
+             I->nr_dests == 1 && I->nr_srcs == 2 &&
              !I->saturate && agx3_mod_src_ok(I->dest[0]) &&
              agx3_mod_src_ok(I->src[0]) && agx3_mod_src_ok(I->src[1]) &&
              !I->src[0].abs && !I->src[0].neg && !I->src[1].abs) {
@@ -7762,8 +8062,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
-                !agx3_alu_integer_reg(enc, op, I->dest[0].value, src,
-                                      hints, wait, bytes, &len) ||
+                !agx3_alu_integer_reg_shift(enc, op, I->dest[0].value, src,
+                                            hints, (uint8_t)I->shift, wait,
+                                            bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
@@ -7852,22 +8153,65 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
                constant.type == AGX_INDEX_IMMEDIATE && constant.value == 0 &&
                reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
+<<<<<<< HEAD
                (I->shift == 0 || I->shift == 4);
+=======
+               I->shift == 4;
+            /*
+             * A bare 16-bit integer source is SIGN-extended. That is the
+             * compiler-wide convention, not a guess: agx_optimizer_signext()
+             * fuses a SIGNEXT into the add by dropping it and asserting the
+             * surviving source carries no ABS, and agx_pack.c spells the same
+             * rule for AGX2 as `zext = abs || immediate`. So `int16_t(x) + k`
+             * reaches the packer with no modifier at all -- which this path
+             * refused, while the register+register form beside it already
+             * encoded. The gap was partial, not a regression.
+             *
+             * Apple's own bytes, one kernel per immediate, everything else
+             * held fixed (`metal-nt -arch applegpu_g17p`):
+             *
+             *   int(short x) + 1    9f 01 56 00 02 02 00 08 15 0c   f15 = 1
+             *   int(short x) + 2    9f 01 56 00 02 04 00 08 15 0c   f15 = 2
+             *   int(short x) + 7    9f 01 56 00 02 0e 00 08 15 0c   f15 = 7
+             *   int(short x) + 17   9f 01 56 00 02 22 00 08 15 0c   f15 = 17
+             *   uint(ushort x) + 7  9f 01 56 00 02 0e 00 08 15 04   f43 clear
+             *
+             * f15 is the slot-A immediate and f43 slot B's sign-extension,
+             * set for `short` and clear for `ushort` -- the same pair the
+             * register+register form already drives.
+             */
+            const bool narrow_bare_src =
+               reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg;
+>>>>>>> codex/gpu-desktop-merge
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
                 !constant.neg && constant.value <= 0xff &&
                 agx3_src_is_register(reg) && !reg.memory &&
                 agx_channels(reg) == 1 && !(reg.abs && reg.neg) &&
+<<<<<<< HEAD
                 (reg.size == AGX_SIZE_32 ||
                  (reg.size == AGX_SIZE_16 &&
                   (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
                   .dest_cache = signed_half_widen && I->dest[0].cache,
+=======
+                (reg.size == AGX_SIZE_32 || reg.size == AGX_SIZE_16)) {
+               const struct agx3_iadd_desc d = {
+                  .dest = I->dest[0].value,
+                  /* Unchanged for every shape that already encoded: only the
+                   * newly admitted bare-half source gains the cache hint. */
+                  .dest_cache = narrow_bare_src && I->dest[0].cache,
+>>>>>>> codex/gpu-desktop-merge
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
                   .src_16 = reg.size == AGX_SIZE_16,
+<<<<<<< HEAD
                   .sign_extend = signed_half_widen || reg.neg,
+=======
+                  .sign_extend = signed_half_shift4 || reg.neg ||
+                                 narrow_bare_src,
+>>>>>>> codex/gpu-desktop-merge
                   .shift = I->shift,
                   .wait_mask = wait,
                };
@@ -8413,11 +8757,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Both operands must be registers for the mixed-half endpoint. A
+          * 32-bit register times a minifloat IMMEDIATE narrowed to a half is
+          * a different, independently witnessed form (f10 selects the
+          * destination width on the ordinary f32mul); let it fall through to
+          * the minifloat path below instead of being claimed and refused
+          * here. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 &&
              agx_channels(I->dest[0]) == 1 &&
+             agx3_src_is_register(I->src[0]) &&
+             agx3_src_is_register(I->src[1]) &&
              ((I->src[0].size == AGX_SIZE_32 &&
                I->src[1].size == AGX_SIZE_16) ||
               (I->src[0].size == AGX_SIZE_16 &&
@@ -8892,12 +9244,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * register's last-use hint and the compact form's supported waits.
           * Commuting plain operands changes no operation or rounding.
           */
+         /* The multiply's destination width is selected independently of its
+          * source width (f10 vs f26), so a 32-bit value scaled by a minifloat
+          * straight into a half is one instruction. agx_optimizer_fmov_rev()
+          * folds the f2f16 of `packHalf2x16(vec2(x * k, ...))` into the
+          * multiply and produces exactly that shape; it used to fall off this
+          * path and refuse the shader. Only FMUL is witnessed narrowing. */
          if ((I->op == AGX_OPCODE_FADD || I->op == AGX_OPCODE_FMUL) &&
              I->nr_dests == 1 &&
              I->nr_srcs == 2 &&
              (I->op == AGX_OPCODE_FADD || !I->saturate) &&
              agx3_src_is_register(I->dest[0]) &&
-             I->dest[0].size == AGX_SIZE_32 &&
+             (I->dest[0].size == AGX_SIZE_32 ||
+              (I->op == AGX_OPCODE_FMUL &&
+               I->dest[0].size == AGX_SIZE_16)) &&
              agx_channels(I->dest[0]) == 1 &&
              (I->src[0].type == AGX_INDEX_IMMEDIATE ||
               I->src[1].type == AGX_INDEX_IMMEDIATE)) {
@@ -8946,10 +9306,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   enc, I->dest[0].value, reg.value, imm.value, reg.neg,
                   I->saturate, agx3_post_ra_hint(reg), wait, bytes, &len);
             } else if (multiply) {
-               encoded = agx3_alu_fmul_minifloat_mod(
+               encoded = agx3_alu_fmul_minifloat_narrow(
                   enc, I->dest[0].value, reg.value, imm.value,
-                  I->dest[0].cache, reg.abs, agx3_post_ra_hint(reg), wait,
-                  bytes, &len);
+                  I->dest[0].cache, reg.abs,
+                  I->dest[0].size == AGX_SIZE_16, agx3_post_ra_hint(reg),
+                  wait, bytes, &len);
             } else if (reg.abs) {
                encoded = agx3_alu_fadd_abs_minifloat(
                   enc, I->dest[0].value, reg.value, imm.value,

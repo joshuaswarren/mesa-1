@@ -540,8 +540,9 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
     'ASAHI_SHIM_G17P_EXPECT_COMPUTE' : '1',
     'ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER' : '1',
-    'HK_G17P_UNVERIFIED_FEATURES' :
-      'conditional_rendering,draw_indirect_count',
+    # draw_indirect_count was retired when V12c qualified on hardware and
+    # drawIndirectCount became unconditional; no code reads that token now.
+    'HK_G17P_UNVERIFIED_FEATURES' : 'conditional_rendering',
     'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
     'MESA_SHADER_CACHE_DISABLE' : 'true',
     'VK_DRIVER_FILES' : _dev_icd.full_path(),

@@ -136,6 +136,22 @@ bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         struct agx3_cf_source_hints hint, uint16_t wait_mask,
                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
+/* The same point comparing against a non-zero minifloat constant. f18 is the
+ * second operand and used to be pinned to zero, so `if (x < 1.0)` had no
+ * encoding at all -- the float twin of the icmp defect above. */
+bool agx3_cf_fcmp_zero_imm(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                           bool or_nan, unsigned slot, uint16_t source,
+                           bool source_16, uint8_t minifloat,
+                           struct agx3_cf_source_hints hint,
+                           uint16_t wait_mask,
+                           uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+bool agx3_cf_fcmp_minifloat(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                            bool or_nan, unsigned slot, uint16_t source,
+                            bool source_16, uint8_t minifloat,
+                            struct agx3_cf_source_hints hint,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
 /* Exec-mask stack. cndst pushes (an `if`), with push count 1 or 2 (2 = a loop
  * entry that reserves a nesting level). cndlt is the loop/break test (push
  * count fixed at 2). cndef is the `else` flip. cndend pops `count` levels. */
