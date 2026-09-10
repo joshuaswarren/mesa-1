@@ -2263,6 +2263,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Fragment-only capability/semantics oracle. Exact guarded storage and
+    # atomic results are checked while the vertex feature stays disabled.
+    executable(
+      'g17p-vulkan-fragment-side-effects',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_FRAGMENT_SIDE_EFFECTS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Game-feature probe: enables every advertised Vulkan 1.1/1.2/1.3
     # feature, then compiles AND records a dispatch for each SPIR-V module.
     # The record half is what catches a feature the compiler accepts but the

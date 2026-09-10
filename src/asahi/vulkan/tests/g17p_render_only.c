@@ -28,10 +28,16 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#if defined(G17P_GRAPHICS_SIDE_EFFECTS) || defined(G17P_FRAGMENT_SIDE_EFFECTS)
+#define G17P_ANY_SIDE_EFFECTS 1
 #include "g17p_vulkan_graphics_side_effects_frag.h"
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
 #include "g17p_vulkan_graphics_side_effects_vert.h"
 #define G17P_VERTEX_SPV g17p_vulkan_graphics_side_effects_vert_spv
+#else
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERTEX_SPV g17p_wsi_triangle_vert_spv
+#endif
 #define G17P_FRAGMENT_SPV g17p_vulkan_graphics_side_effects_frag_spv
 #else
 #include "g17p_wsi_triangle_frag.h"
@@ -48,7 +54,7 @@
 #define IMAGE_HEIGHT 32
 #endif
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 #define SIDE_EFFECT_GUARD UINT32_C(0xc09b5eed)
 struct side_effect_output {
    uint32_t prefix_guard[4];
@@ -72,7 +78,7 @@ VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceProperties);
-#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
 VK_FN(vkGetPhysicalDeviceFeatures);
 #endif
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -95,7 +101,7 @@ VK_FN(vkCreateImageView);
 VK_FN(vkCreateRenderPass);
 VK_FN(vkCreateShaderModule);
 VK_FN(vkCreatePipelineLayout);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 VK_FN(vkCreateDescriptorSetLayout);
 VK_FN(vkCreateDescriptorPool);
 VK_FN(vkAllocateDescriptorSets);
@@ -112,7 +118,7 @@ VK_FN(vkCmdBindVertexBuffers);
 #ifdef G17P_CONDITIONAL_RENDERING
 VK_FN(vkCmdBindIndexBuffer);
 #endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 VK_FN(vkCmdBindDescriptorSets);
 #endif
 VK_FN(vkCmdDraw);
@@ -300,7 +306,7 @@ main(
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
-#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
 #endif
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -397,12 +403,19 @@ main(
    free(query_queues);
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    VkPhysicalDeviceFeatures physical_features;
    vkGetPhysicalDeviceFeatures(physical, &physical_features);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    if (!physical_features.vertexPipelineStoresAndAtomics ||
        !physical_features.fragmentStoresAndAtomics)
       die("G17P graphics shader side effects were not explicitly enabled");
+#else
+   if (!physical_features.fragmentStoresAndAtomics)
+      die("G17P fragment shader side effects are not advertised");
+   if (physical_features.vertexPipelineStoresAndAtomics)
+      die("fragment capability unexpectedly enabled vertex side effects");
+#endif
 #endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -464,9 +477,11 @@ main(
          .robustBufferAccess = VK_TRUE,
 #endif
       },
-#elif defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#elif defined(G17P_ANY_SIDE_EFFECTS)
       .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
          .vertexPipelineStoresAndAtomics = VK_TRUE,
+#endif
          .fragmentStoresAndAtomics = VK_TRUE,
       },
 #endif
@@ -488,7 +503,7 @@ main(
    LOAD_DEVICE(device, vkCreateRenderPass);
    LOAD_DEVICE(device, vkCreateShaderModule);
    LOAD_DEVICE(device, vkCreatePipelineLayout);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
    LOAD_DEVICE(device, vkCreateDescriptorPool);
    LOAD_DEVICE(device, vkAllocateDescriptorSets);
@@ -505,7 +520,7 @@ main(
 #ifdef G17P_CONDITIONAL_RENDERING
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
 #endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
 #endif
    LOAD_DEVICE(device, vkCmdDraw);
@@ -624,7 +639,7 @@ main(
           sizeof(expected_conditional));
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    const VkBufferCreateInfo side_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = sizeof(struct side_effect_output),
@@ -787,12 +802,16 @@ main(
    check(vkCreateShaderModule(device, &frag_module_info, NULL, &frag_module),
          "vkCreateShaderModule(fragment)");
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    const VkDescriptorSetLayoutBinding side_binding = {
       .binding = 0,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      .stageFlags =
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+         VK_SHADER_STAGE_VERTEX_BIT |
+#endif
+         VK_SHADER_STAGE_FRAGMENT_BIT,
    };
    const VkDescriptorSetLayoutCreateInfo side_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -845,7 +864,7 @@ main(
 
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
       .setLayoutCount = 1,
       .pSetLayouts = &side_layout,
 #endif
@@ -1030,7 +1049,7 @@ main(
 #endif
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &side_set, 0, NULL);
 #endif
@@ -1136,11 +1155,18 @@ main(
       return EXIT_SUCCESS;
    }
 #endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
+#ifdef G17P_FRAGMENT_SIDE_EFFECTS
+   if (getenv("G17P_FRAGMENT_SIDE_EFFECTS_RECORD_ONLY")) {
+      puts("g17p-fragment-side-effects: record-only PASS");
+      return EXIT_SUCCESS;
+   }
+#else
    if (getenv("G17P_GRAPHICS_SIDE_EFFECTS_RECORD_ONLY")) {
       puts("g17p-graphics-side-effects: record-only PASS");
       return EXIT_SUCCESS;
    }
+#endif
 #endif
 
    const VkFenceCreateInfo fence_info = {
@@ -1191,12 +1217,13 @@ main(
       die("conditional predicate or guards changed");
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    for (unsigned i = 0; i < 4; ++i) {
       if (side_map->prefix_guard[i] != SIDE_EFFECT_GUARD ||
           side_map->suffix_guard[i] != SIDE_EFFECT_GUARD)
          die("graphics side effect crossed an SSBO guard");
    }
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    if (side_map->vertex_atomic != 3 ||
        side_map->vertex_values[0] != UINT32_C(0x17000000) ||
        side_map->vertex_values[1] != UINT32_C(0x17000001) ||
@@ -1204,13 +1231,25 @@ main(
        side_map->fragment_atomic != IMAGE_WIDTH * IMAGE_HEIGHT ||
        side_map->fragment_value != UINT32_C(0xf17e0001))
       die("vertex/fragment SSBO stores or atomics are not exact");
+#else
+   if (side_map->vertex_atomic != 0 || side_map->vertex_values[0] != 0 ||
+       side_map->vertex_values[1] != 0 || side_map->vertex_values[2] != 0 ||
+       side_map->fragment_atomic != IMAGE_WIDTH * IMAGE_HEIGHT ||
+       side_map->fragment_value != UINT32_C(0xf17e0001))
+      die("fragment SSBO stores or atomics are not exact");
+#endif
 
    const struct side_effect_output stable_side = *side_map;
    sleep(3);
    if (memcmp(side_map, &stable_side, sizeof(stable_side)) != 0)
       die("graphics side effects changed after three seconds");
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    puts("g17p-graphics-side-effects: vertex/fragment stores, atomics, guards "
         "and three-second stability exact");
+#else
+   puts("g17p-fragment-side-effects: fragment stores, atomics, untouched "
+        "vertex fields, guards and three-second stability exact");
+#endif
 #endif
 
 #ifdef G17P_OCCLUSION_QUERY
