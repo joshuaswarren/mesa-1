@@ -16,6 +16,20 @@
 
 static unsigned checks, failures;
 
+/* Compare a byte run against a lowercase hex literal. */
+static bool
+hex_is(const uint8_t *bytes, uint8_t len, const char *hex)
+{
+   if (strlen(hex) != (size_t)len * 2)
+      return false;
+   for (unsigned i = 0; i < len; ++i) {
+      unsigned value;
+      if (sscanf(hex + 2 * i, "%2x", &value) != 1 || bytes[i] != value)
+         return false;
+   }
+   return true;
+}
+
 #define REJECT(expr)                                                           \
    do {                                                                        \
       checks++;                                                                \
@@ -230,6 +244,80 @@ test_float_negated_register_compare(void)
       failures++;
 }
 
+/*
+ * An ABSOLUTE source on the control-flow float compare.
+ *
+ * ABS is not a bit on the six-byte form: Apple moves to a fourteen-byte
+ * encoding point, ep0 -> ep2, and f14 and f31 are the two sources' bits.
+ * Every other field keeps its number, so the long form differs from the short
+ * one by the endpoint and the two bits alone.
+ *
+ * metal-nt -arch applegpu_g17p, one kernel per row. The branch body is a
+ * device atomic: Metal if-converts a plain conditional assignment into an
+ * `fsel` and then the experiment answers a different question entirely.
+ */
+static void
+test_float_absolute_register_compare(void)
+{
+   static const struct {
+      const char *what;
+      bool abs0, abs1;
+      enum agx3_cf_fcond cond;
+      const char *bytes;
+   } rows[] = {
+      {"fabs(a) <  b",       true,  false, AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800100"},
+      {"a < fabs(b)",        false, true,  AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800200"},
+      {"fabs(a) < fabs(b)",  true,  true,  AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800300"},
+      {"fabs(a) > fabs(b)",  true,  true,  AGX3_CF_FCOND_GT,
+       "0a013b0303000200000000800300"},
+      {"fabs(a) == fabs(b)", true,  true,  AGX3_CF_FCOND_EQ,
+       "0a013b0307000000000000800300"},
+   };
+
+   const uint16_t src[] = {0, 2};
+   const struct agx3_cf_source_hints hints[] = {{false, true}, {true, false}};
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      const bool abs[] = {rows[i].abs0, rows[i].abs1};
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      const bool ok = agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B,
+         rows[i].cond, false, 0, src, abs, hints, 1u << 5, out, &len);
+      checks++;
+      if (!ok || len != 14 || !hex_is(out, len, rows[i].bytes)) {
+         fprintf(stderr, "FAIL native abs float branch %s\n", rows[i].what);
+         failures++;
+      }
+   }
+
+   /* Without an absolute source this is the short endpoint; emitting the long
+    * form for it would change bytes that already work. */
+   uint8_t out[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   const bool none[] = {false, false};
+   const bool both[] = {true, true};
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false,
+                            0, src, none, hints, 0, out, &len))
+      failures++;
+   /* or_nan, AGX3c and an odd half all stay refused. */
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, true,
+                            0, src, both, hints, 0, out, &len))
+      failures++;
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3C, AGX3_CF_FCOND_LT, false,
+                            0, src, both, hints, 0, out, &len))
+      failures++;
+   const uint16_t odd[] = {1, 2};
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false,
+                            0, odd, both, hints, 0, out, &len))
+      failures++;
+}
+
 static void
 test_half_float_zero_compare(void)
 {
@@ -318,6 +406,7 @@ main(void)
    test_float_minifloat_compare();
    test_float_zero_compare();
    test_float_negated_register_compare();
+   test_float_absolute_register_compare();
    test_half_float_zero_compare();
    test_half_comparisons();
    test_half_zero_lifetime();

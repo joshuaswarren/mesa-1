@@ -654,29 +654,68 @@ agx3_alu_s16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_float_to_int16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                        bool src_16, bool is_signed, enum agx3_alu_hint hint,
+                        bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 128 || (!src_16 && (src & 1)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /*
+    * `flt2int` is one form with three independent axes, each pinned by a
+    * kernel pair that changes nothing else. f10 is the RESULT width, f24 the
+    * SOURCE width and f41 the signed/unsigned mode:
+    *
+    *   short(float a)    270756020204b0c80200   f10=1 f24=2 f41=3
+    *   short(half  a)    270756020204a8c80200   f10=1 f24=1 f41=3
+    *   ushort(half a)    270756020204a8080300   f10=1 f24=1 f41=2
+    *   ushort(float a)   270756020204b0080300   f10=1 f24=2 f41=2
+    *   int(half a)       270756000200ac480300   f10=2 f24=1 f41=5
+    *
+    * The first two differ in exactly one field, which is what identifies f24
+    * as the half-source selector rather than an unrelated instruction. This
+    * used to be a hardcoded ten-byte array with the source width welded to
+    * f32, so `short(half)` -- what `int(clamp(x, 1.0, 32.0))` becomes once
+    * the arithmetic around it is half-precision, as it is in Hyprland's
+    * motion blur -- had no encoding at all and failed the shader closed.
+    *
+    * A half source may sit in an odd half; a 32-bit one may not:
+    *
+    *   short(half a[2*i+1])  270754030206a8c80200   f2=3 f16=3
+    *
+    * The wait fields are f33..f38, the six producer slots, exactly as on the
+    * 32-bit-result twin agx3_alu_f16_to_int32().
+    */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, 2}, {24, src_16 ? 1 : 2},
+      {41, is_signed ? 3 : 2}, {42, 1},
+   };
+   struct agx3_field_kv fields[10] = {
+      {2, dest}, {11, dest_cache}, {16, src},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 4;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){33 + slot,
+                                           !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "flt2int", 0, base, 6, fields, n, out, len);
+}
+
+bool
 agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     enum agx3_alu_hint hint, bool dest_cache,
                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                     uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
-       src >= 128 || (src & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       (wait_mask != 0 && wait_mask != 32))
+   if (wait_mask != 0 && wait_mask != 32)
       return false;
-
-   /* Fresh G17P Metal kernels ground the RTZ float-to-short form with odd and
-    * even half destinations, sources 0 and 2, both destination-cache states,
-    * preserved and discarded sources, and no wait versus slot 6. A kernel
-    * stores the original float after conversion, proving 0x90 preserves it. */
-   const uint8_t bytes[] = {
-      0x27, 0x07, wait_mask ? 0x56 : 0x54, (uint8_t)dest,
-      dest_cache ? 0x03 : 0x02, (uint8_t)(src << 1),
-      hint == AGX3_ALU_HINT_DISCARD ? 0xb0 : 0x90,
-      0xc8, 0x02, 0x00,
-   };
-   memcpy(out, bytes, sizeof(bytes));
-   *len = sizeof(bytes);
-   return true;
+   return agx3_alu_float_to_int16(enc, dest, src, false, true, hint,
+                                  dest_cache, wait_mask, out, len);
 }
 
 bool
@@ -1272,9 +1311,36 @@ agx3_alu_fcmp_select_imm_width_internal(enum agx_isa_encoding enc,
        condition != 5 && condition != 6) ||
        (wait_mask != 0 && wait_mask != 32))
       return false;
-   if (src1_neg && (src_16[0] || src_16[1] || condition != 2 ||
-                    if_true != 255 || if_false != 0 || !dest_16))
-      return false;
+   /* f65 negates the SECOND comparator and nothing else: it is an ordinary
+    * field in the same encoding point, orthogonal to the condition, to the
+    * result width and to the two selected immediates.
+    *
+    * Grounded with metal-nt -arch applegpu_g17p, one kernel per cell, every
+    * vector recovered by re-composing through this encoder. The reproducer's
+    * own shape -- a 32-bit result selecting 1 and 0 -- across every relation:
+    *
+    *    a >  b      02011d03228102c02080   f35=0 f52=2 f110=2
+    *   -a >  b      02031d01228103c82080   f35=2 f52=0 f110=1 f65
+    *   -a <  b      02031d01228102c82080   f35=2 f52=0 f110=2 f65
+    *   -a >= b      02031d01268103c82080   f35=2 f52=0 f110=6 f65
+    *   -a <= b      02031d01268102c82080   f35=2 f52=0 f110=5 f65
+    *   -a == b      02031d01268100c82080   f35=2 f52=0 f110=0 f65
+    *    a < -b      02011d03228103c82080   f35=0 f52=2 f110=1 f65
+    *
+    * The first four are the SWAP: the two comparator registers exchange
+    * places and the relation reverses, which is how a negated FIRST source
+    * reaches an encoding that has no bit for it. The caller performs that
+    * rewrite; this entry point only ever sees the negate on slot 1.
+    *
+    * Two controls make the rewrite a fact rather than a reading. `a < -b`
+    * sets f65 with the operands in place, so f65 really is slot 1's. And
+    * `-a < -b` comes back as 02011d03228102c02080 -- byte-identical to
+    * `a > b`, with no f65 at all -- so negating both sides is the relation
+    * flip alone, which is the same algebra the swap relies on.
+    *
+    * Mixing the negate with the absolute modifiers is still not witnessed:
+    * ABS moves to a longer endpoint that has no f65, so that stays refused
+    * in the caller rather than silently dropping a modifier. */
    for (unsigned i = 0; i < 2; ++i)
       if (src[i] >= 256 || (!src_16[i] && (src[i] & 1)) ||
           (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
@@ -1494,6 +1560,54 @@ agx3_alu_fcmp_select_imm_width_neg_second(
    return agx3_alu_fcmp_select_imm_width_internal(
       enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
       dest_cache, wait_mask, true, out, len);
+}
+
+/* The same select with the negate on either comparator. A negate on the first
+ * one has no bit: it is the operand swap with the relation reversed, which is
+ * what `neg[0]` performs here so that no caller has to know the asymmetry.
+ * Negating both sides is the relation flip on its own, with no f65 at all. */
+bool
+agx3_alu_fcmp_select_imm_width_neg(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   const bool neg[2], unsigned condition, uint8_t if_true, uint8_t if_false,
+   bool dest_16, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!src || !src_16 || !hints || !neg)
+      return false;
+
+   uint16_t s[2] = {src[0], src[1]};
+   bool w[2] = {src_16[0], src_16[1]};
+   enum agx3_alu_hint h[2] = {hints[0], hints[1]};
+   bool negate_second = neg[1];
+
+   /* Both negated, or only the first: the relation reverses. Only the
+    * first-alone case also exchanges the operands, so that the remaining
+    * negate lands on slot 1, the only slot f65 names. */
+   if (neg[0]) {
+      switch (condition) {
+      case 1: condition = 2; break;   /* lt -> gt */
+      case 2: condition = 1; break;   /* gt -> lt */
+      case 5: condition = 6; break;   /* ge -> le */
+      case 6: condition = 5; break;   /* le -> ge */
+      case 0: break;                  /* eq is its own reverse */
+      default: return false;
+      }
+
+      if (!neg[1]) {
+         const uint16_t reg = s[0]; s[0] = s[1]; s[1] = reg;
+         const bool width = w[0]; w[0] = w[1]; w[1] = width;
+         const enum agx3_alu_hint hint = h[0]; h[0] = h[1]; h[1] = hint;
+         negate_second = true;
+      } else {
+         negate_second = false;
+      }
+   }
+
+   return agx3_alu_fcmp_select_imm_width_internal(
+      enc, dest, s, w, h, condition, if_true, if_false, dest_16, dest_cache,
+      wait_mask, negate_second, out, len);
 }
 
 bool
@@ -2119,8 +2233,27 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
    const bool abs_compare = compare_abs[0] || compare_abs[1];
    const bool abs_immediate_select =
       abs_compare && (immediate[0] || immediate[1]);
+   /* A 16-bit result used to be refused alongside a comparison against an
+    * immediate zero. Only the second belongs here. The destination width is
+    * an independent field on the long endpoint, exactly as it is on the short
+    * one, and Apple's own corpus carries the combination: eight of the 84
+    * real `fsel` instructions in test/agx3_compose_corpus_vectors.c set both
+    * f11 = 1 and f47/f64, on ep33 and ep34 --
+    *
+    *   42d725d923810300208000000300   ep33 f11=1 f47=1 f64=1 f76=1 f93=1
+    *   3a8525db23820300800800000300   ep34 f11=1 f47=1 f64=1 f76=1 f93=2
+    *
+    * What actually broke was below, not here: the absolute immediate-select
+    * branch deposited a fixed 32-bit width into f25 instead of the requested
+    * one, so admitting a half result would have encoded a full one. Both are
+    * fixed together; the width now follows dest_16 on either branch.
+    *
+    * `mediump` code reaches this every time it writes a comparison on an
+    * absolute value -- the shape is fcmpsel [d16 s0=32:reg.abs s1=32:reg
+    * s2=16:reg s3=16:imm0], which is what a half-precision `(abs(a) < b) ?
+    * c : 0.0` compiles to. */
    if (abs_compare &&
-       (compare_zero || dest_16 ||
+       (compare_zero ||
         (condition > 2 && compare_abs[0] == compare_abs[1])))
       return false;
 
@@ -2137,7 +2270,7 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
    if (abs_immediate_select) {
       base[nbase++]=(struct agx3_field_kv){0,1};
       base[nbase++]=(struct agx3_field_kv){24,2};
-      base[nbase++]=(struct agx3_field_kv){25,2};
+      base[nbase++]=(struct agx3_field_kv){25,dest_16?1:2};
    } else {
       base[nbase++]=(struct agx3_field_kv){10,2};
       base[nbase++]=(struct agx3_field_kv){11,dest_16?1:2};

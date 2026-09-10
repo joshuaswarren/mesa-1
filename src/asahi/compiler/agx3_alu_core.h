@@ -226,14 +226,25 @@ bool agx3_alu_fcmp_select_imm_width_abs(
    bool dest_cache, uint16_t wait_mask, const bool src_abs[2],
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-/* Exact G17P `b > -a ? 255 : 0` half-result form. The second full-width
- * comparator carries Apple's native negate field; other negate placements
- * and selected values stay outside this deliberately narrow entry point. */
+/* G17P `b > -a` and its relatives. f65 negates the second full-width
+ * comparator and composes with every relation, both result widths and any
+ * pair of selected immediates; see agx3_alu_core.c for the byte ladder. */
 bool agx3_alu_fcmp_select_imm_width_neg_second(
    enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
    const bool src_16[2], const enum agx3_alu_hint hints[2],
    unsigned condition, uint8_t if_true, uint8_t if_false, bool dest_16,
    bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* The same, with the negate on either comparator. There is no bit for a
+ * negated FIRST source: Apple spells `-a > b` as `b < -a`, so this swaps the
+ * operands and reverses the relation rather than refusing. Negating both is
+ * the relation flip alone. */
+bool agx3_alu_fcmp_select_imm_width_neg(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
+   const bool src_16[2], const enum agx3_alu_hint hints[2],
+   const bool neg[2], unsigned condition, uint8_t if_true, uint8_t if_false,
+   bool dest_16, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* G17P f32-register == minifloat comparison selecting a half register or
@@ -346,6 +357,15 @@ bool agx3_alu_s16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 bool agx3_alu_f32_to_s16(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t src, enum agx3_alu_hint hint,
                         bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* RTZ float-to-16-bit-integer conversion. The source width (f24) and the
+ * signed/unsigned mode (f41) are separate fields from the 16-bit result width
+ * (f10), so a HALF source is the same instruction with one field changed; see
+ * agx3_alu_core.c for the kernel pairs. */
+bool agx3_alu_float_to_int16(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t src, bool src_16, bool is_signed,
+                        enum agx3_alu_hint hint, bool dest_cache,
+                        uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 bool agx3_alu_add_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        uint16_t immediate, enum agx3_alu_hint hint, bool dest_cache,

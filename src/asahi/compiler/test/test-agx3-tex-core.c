@@ -954,9 +954,46 @@ test_gradient_and_register_bias(void)
    bad_shadow.array_layer = 3;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
                                  &length));
+   /*
+    * The descriptor operand class is orthogonal to the comparison and to the
+    * packed layer. metal-nt 27.1 -arch applegpu_g17p, one fragment shader
+    * sampling `array<depth2d_array<float>, 8>` through a runtime index and
+    * one sampling a fixed depth2d_array, differ only in the four descriptor
+    * fields and the wider endpoint they imply:
+    *
+    *   fixed     1d800ca090002004010000001200
+    *   indexed   1dc00ca09c002004930380011200802000000000
+    *
+    * f143 (the comparison) and f77 = 2 (the packed layer) are byte-identical
+    * across the pair. Apple's own destination half6 and trailing profile byte
+    * are normalized here exactly as they are for the fixed form above, so the
+    * delta between these two vectors is the delta between Apple's two. Before
+    * this, every multi-texture shadow-array shader failed closed: one texture
+    * instruction gets immediate descriptors from the combined-sampler pass,
+    * several fall back to the indexed one, and SuperTuxKart's sunlightshadow
+    * samples its cascade four times.
+    */
+   struct agx3_tex_sample_desc shadow_array_indexed = shadow_array;
+   shadow_array_indexed.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   shadow_array_indexed.texture_value = 24;
+   shadow_array_indexed.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
+   shadow_array_indexed.sampler_value = 28;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,
+                                &shadow_array_indexed, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "05c00ca09c002004930380010100802000000000"));
+   /* The register-descriptor sibling differs only in the two operand-kind
+    * fields, the same way it does for every colour sample. */
+   shadow_array_indexed.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   shadow_array_indexed.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,
+                                &shadow_array_indexed, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "05c00ca09c002004130280010100802000000000"));
+   /* An odd descriptor half is still refused. */
    bad_shadow = shadow_array;
    bad_shadow.texture_kind = AGX3_TEX_OPERAND_REGISTER;
-   bad_shadow.texture_value = 2;
+   bad_shadow.texture_value = 3;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
                                  &length));
    bad_shadow = shadow_array;

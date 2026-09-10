@@ -29,10 +29,21 @@ g17p_sample_shape(const nir_tex_instr *tex)
           tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
        /* A cube comparison publishes its reference through the same CEM
         * bracket the colour cube uses; it is witnessed only with an implicit
-        * LOD. */
+        * LOD. A colour cube also takes an explicit per-lane level, on the
+        * plain cube exactly as on the cube array -- Apple's own
+        * t.sample(s, dir, level(reg)) for texturecube<float> is
+        *
+        *   05800cb8b0000003000010000100
+        *
+        * which is the instruction agx3_tex_encode_sample() already emits for
+        * AGX3_TEX_LOD_REGISTER on a cube (test-agx3-tex-core.c, "native cube
+        * register level"), field for field. Admitting only the array form
+        * here was what refused textureLod(samplerCube, dir, lod) -- the
+        * roughness-indexed probe lookup every image-based lighting shader
+        * does, SuperTuxKart's IBL.frag included. */
        (cube &&
         (tex->op != nir_texop_tex &&
-         !(!tex->is_shadow && cube_array && tex->op == nir_texop_txl))) ||
+         !(!tex->is_shadow && tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
        tex->coord_components != (cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||

@@ -1662,12 +1662,18 @@ static void test_native_u16_arithmetic(void)
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       2, 255, 0, true, false, 32, out, &len));
    exact(out, len, "02091d01a2ff02c82080");
-   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+   /* f65 is an ordinary field, not a property of one witnessed shape: it
+    * composes with every relation and with a 32-bit result. These two used
+    * to be refusals here, on the strength of nothing having been measured
+    * rather than of anything having been ruled out. */
+   assert(agx3_alu_fcmp_select_imm_width_neg_second(
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       1, 255, 0, true, false, 32, out, &len));
-   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+   exact(out, len, "02091d01a2ff03c82080");
+   assert(agx3_alu_fcmp_select_imm_width_neg_second(
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       2, 255, 0, false, false, 32, out, &len));
+   exact(out, len, "02091f01a2ff02c82080");
    puts("Native u16 ALU and mixed-width FSEL: six native byte vectors PASS");
 }
 
@@ -3005,6 +3011,125 @@ static void test_native_select_reg_imm(void)
    puts("Native absolute-comparison FSEL: fifteen exact G17P vectors PASS");
 }
 
+/*
+ * A NEGATED comparison source on `fcmpsel`.
+ *
+ * f65 names the second comparator and only that one. Apple has no bit for a
+ * negated FIRST source: it spells `-a > b` as `b < -a`, exchanging the
+ * operands and reversing the relation. Every vector below is
+ * metal-nt -arch applegpu_g17p, one kernel per row, the reproducer's own
+ * shape -- a 32-bit result selecting 1 and 0 from two loaded floats.
+ *
+ * The last two rows are what make the rewrite a fact rather than a reading.
+ * `a < -b` sets f65 with the operands left alone, so f65 is slot 1's bit; and
+ * `-a < -b` comes back byte-identical to `a > b`, with no f65 at all, so
+ * negating both sides is the relation flip on its own.
+ */
+static void test_native_select_negated_comparator(void)
+{
+   static const struct {
+      const char *what;
+      bool neg0, neg1;
+      unsigned condition;
+      const char *bytes;
+   } rows[] = {
+      {" a >  b", false, false, 2 /* gt */, "02011d03228102c02080"},
+      {"-a >  b", true,  false, 2 /* gt */, "02031d01228103c82080"},
+      {"-a <  b", true,  false, 1 /* lt */, "02031d01228102c82080"},
+      {"-a >= b", true,  false, 5 /* ge */, "02031d01268103c82080"},
+      {"-a <= b", true,  false, 6 /* le */, "02031d01268102c82080"},
+      {"-a == b", true,  false, 0 /* eq */, "02031d01268100c82080"},
+      {" a < -b", false, true,  1 /* lt */, "02011d03228103c82080"},
+      {"-a < -b", true,  true,  1 /* lt */, "02011d03228102c02080"},
+   };
+
+   const uint16_t src[] = {0, 2};
+   const bool src_16[] = {false, false};
+   const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_DISCARD,
+                                       AGX3_ALU_HINT_DISCARD};
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      const bool neg[] = {rows[i].neg0, rows[i].neg1};
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_fcmp_select_imm_width_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, neg,
+         rows[i].condition, 1, 0, true, false, 32, bytes, &len));
+      exact(bytes, len, rows[i].bytes);
+   }
+
+   /* Unmodified sources reach the same bytes through the plain encoder, so
+    * the negate path adds no encoding of its own for them. */
+   const bool no_neg[] = {false, false};
+   uint8_t through_neg[AGX3_ALU_MAX_LENGTH], neg_len;
+   uint8_t plain[AGX3_ALU_MAX_LENGTH], plain_len;
+   assert(agx3_alu_fcmp_select_imm_width_neg(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, no_neg, 2 /* gt */, 1,
+      0, true, false, 32, through_neg, &neg_len));
+   assert(agx3_alu_fcmp_select_imm_width(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, 2 /* gt */, 1, 0, true,
+      false, 32, plain, &plain_len));
+   assert(neg_len == plain_len && !memcmp(through_neg, plain, neg_len));
+
+   /* The NaN-ordering relations have no witness on this form and the caller
+    * rewrites them before it gets here, so they still fail closed. */
+   const bool neg_first[] = {true, false};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(!agx3_alu_fcmp_select_imm_width_neg(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, neg_first, 3 /* ltn */,
+      1, 0, true, false, 32, bytes, &len));
+
+   puts("Negated FSEL comparator: eight exact G17P vectors PASS");
+}
+
+/*
+ * RTZ float to a 16-bit integer, from a HALF source.
+ *
+ * The source width is its own field (f24), independent of the result width
+ * (f10) and of the signed/unsigned mode (f41). Each pair below changes one
+ * of those three and nothing else, applegpu_g17p:
+ */
+static void test_native_float_to_int16(void)
+{
+   static const struct {
+      const char *what;
+      bool src_16, is_signed;
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } rows[] = {
+      {"short(float)",  false, true,  2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204b0c80200"},
+      {"short(half)",   true,  true,  2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204a8c80200"},
+      {"ushort(half)",  true,  false, 2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204a8080300"},
+      {"ushort(float)", false, false, 2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204b0080300"},
+      /* No wait: the clamp-then-convert shape, whose input is already live. */
+      {"short(half) nowait", true, true, 2, 2, 0, AGX3_ALU_HINT_DISCARD,
+       "270754020204a8c80200"},
+      /* A half source may sit in an ODD half; a 32-bit one may not. */
+      {"short(half odd)", true, true, 3, 3, 0, AGX3_ALU_HINT_DISCARD,
+       "270754030206a8c80200"},
+   };
+
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3B, rows[i].dest,
+                                     rows[i].src, rows[i].src_16,
+                                     rows[i].is_signed, rows[i].hint, false,
+                                     rows[i].wait, bytes, &len));
+      exact(bytes, len, rows[i].bytes);
+   }
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(!agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3B, 2, 3, false, true,
+                                   AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3C, 2, 2, true, true,
+                                   AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+
+   puts("Half-source float-to-short: six exact G17P vectors PASS");
+}
+
 static void test_native_half_min(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -4177,6 +4302,8 @@ int main(void){
    test_native_extract32();
    test_blur_half_arithmetic();
    test_native_u16_arithmetic();
+   test_native_select_negated_comparator();
+   test_native_float_to_int16();
    test_native_u16_shift_right_immediate();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
