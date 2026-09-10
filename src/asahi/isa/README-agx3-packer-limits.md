@@ -1990,3 +1990,61 @@ is a different opcode byte (0x1f, not 0x9f) and carries `imm * 4` across bytes
   s3=32:reg2.discard cond=1]` (glitch). These are *mixed-width* selects -- a
   32-bit compare source with 16-bit immediate operands -- which the tied and
   untied 32-bit `fcmpsel` work above does not cover.
+
+### Re-measured against the production variants (2026-09-10)
+
+The three "Open" rows above are closed. The sweep that closed them was run on
+the shaders Hyprland actually compiles, not on the all-features-off baseline:
+`CShaderLoader::getDefines()` emits all fourteen `USE_*` flags for every
+program, and each renderer picks its own set at runtime: `renderBorder`
+(OpenGL.cpp:2197) takes `getDecoFeatures()`, which is
+`SH_FEAT_ROUNDING | SH_FEAT_CM` plus tonemap, alt-tonemap, SDR-mod or ICC, or
+just `SH_FEAT_ROUNDING | globalFeatures()` when the work buffer needs no
+colour management; `renderRoundedShadow` (2361) takes CM alone;
+`renderInnerGlow` (2476) takes `globalFeatures()` alone; `renderRect` (1081)
+takes rounding only when the rectangle is rounded. Forty-five variants
+covering all of those were compiled one per process through Zink ->
+Honeykrisp under the G17P drm-shim with `AGX_MESA_DEBUG=shaders`, alongside
+the same `gl_SampleMask` negative control this file's earlier sweep used,
+which fired.
+
+**Every decoration variant encodes**, including all nine border ones
+(plain, CM, CM+tonemap, CM+alt-tonemap, CM+SDR-mod, CM+tonemap+SDR-mod,
+CM+ICC, mirror, CM+mirror), all four shadow ones, both inner-glow ones, all
+three rounded-quad ones, and blur1/blur2/blurprepare/blurfinish/ext/glitch/
+rgbamatte and eleven surface variants.
+
+One variant does not, and it is a new row rather than one of the old ones:
+
+    surface.frag, USE_ROUNDING=1 USE_MOTION_BLUR=1
+    agx3_pack_binary.c:9914: no grounded AGX3 encoding for
+      convert [d16:reg3 s0=16:imm5 s1=16:reg1 cond=0 chan=1 mask=0x0 fmt=0
+               shift=0]
+
+That is `motion_blur.glsl`'s loop bound --
+`int samples = int(clamp(float(requestedSamples), 1.0, 64.0))` compared
+against a 16-bit loop counter -- reaching the packer as a 16-bit `convert`
+whose mode operand is the immediate, which no witness covers. Motion blur is
+off in the Omarchy configuration, so this refuses a variant the desktop does
+not currently build; it is recorded here so it is not rediscovered as a
+mystery later.
+
+The measurement trap this file records still holds exactly as written: the
+refused motion-blur shader still printed `OK (centre 0,0,0,0)` from the
+probe's own readback, because Zink logged
+`vkCreateGraphicsPipelines failed (VK_ERROR_FEATURE_NOT_PRESENT)` and dropped
+the draw, and under the no-op shim nothing writes the target either way. The
+packer's refusal line was the only thing that reported it.
+
+**What this rules out.** A refused shader makes Zink drop the draw, so the
+border would be *missing*, not discontinuous. Since no border variant is
+refused, "the border renders but with weird disconnects" is not a packer
+refusal, and the shader-encoding side of the Hyprland border is closed. The
+remaining place a border can break is the draw path: `renderBorder` issues one
+`glScissor` + `glDrawArrays` per rectangle of the damage-intersected border
+ring, so an ordinary border is four adjacent scissor rectangles that share
+their edges. `src/asahi/vulkan/tests/g17p_vulkan_scissor_ring.c` is the oracle
+for that, and its header records which existing scissor assertions do and do
+not constrain it: the two packed-byte tests cannot, and the one GL test whose
+expected values could (`test-g17p-gl-premult-pingpong.c`) has no recorded
+hardware run.

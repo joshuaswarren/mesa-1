@@ -2460,6 +2460,23 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Hyprland draws a window border as one scissored draw per rectangle of
+    # the damage-intersected border ring, so an ordinary border is four
+    # adjacent scissor rectangles sharing their edges. Every G17P scissor
+    # witness in this tree is full-frame or anchored at x=0,y=0, and none of
+    # them looks at a pixel, so the seam behaviour of the HAL200 raster
+    # record is unwitnessed. This oracle makes the framebuffer a coverage
+    # count and reads the seams directly. --record-only is the shim gate;
+    # the pixel modes need a real G17P.
+    g17p_scissor_ring = executable(
+      'g17p-vulkan-scissor-ring',
+      files('tests/g17p_vulkan_scissor_ring.c'),
+      include_directories : [inc_include],
+      dependencies : [cc.find_library('vulkan')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-compute-lid',
       files('tests/g17p_vulkan_compute_lid.c'),
