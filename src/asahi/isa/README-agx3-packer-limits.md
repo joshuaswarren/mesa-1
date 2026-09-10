@@ -981,6 +981,72 @@ CEM bracket. A cube *gather* is grounded as an instruction
 run three `cem_calc` instructions and publish its face, and that path does not
 admit a gather.
 
+### `glsl.texture_gather`: what the refusals are, and one candidate not yet proven
+
+A Vulkan 1.0 CTS sweep reported 332 `texture_sample` refusals in
+`glsl.texture_gather`, all sharing `s1=16:imm0, s2=64:uni16, cond=0, chan=4`
+and varying in `s5`. Measured against this tree on 2026-09-10, one probe per
+cell:
+
+| variant           | 2D             | 2D array       | cube          |
+| ----------------- | -------------- | -------------- | ------------- |
+| basic             | encodes        | **encodes now**| refuses       |
+| offset (constant) | **encodes now**| **encodes now**| not witnessed |
+| offset (dynamic)  | **refuses**    | **refuses**    | not witnessed |
+| offsets (four)    | refuses        | refuses        | not witnessed |
+
+**`s2=64:uni16` is the tell**: source 2 is the bindless heap base, so both
+`agx_nir_lower_g17p_combined_sampler()` and the indexed-sampler fallback
+declined the shader before the packer ever saw it. Every refusal in that sweep
+carries it, so none of them is an encoding gap in the sample instruction --
+they are all shape-gate rejections.
+
+- **A dynamic gather offset is a real, distinct gap.** `textureGatherOffset`
+  admits a non-constant offset (unlike `textureOffset`), and f43 is an
+  immediate field, so only a constant can reach it. There is no witness for a
+  register-offset form and **there cannot be one from Metal**: MSL requires the
+  offset argument to be a compile-time constant, so Apple's compiler cannot be
+  made to emit whatever the hardware would use. This one needs hardware or a
+  captured Apple binary, not the witness harness.
+
+- **`textureGatherOffsets`** (four independent offsets) reaches the packer
+  through the indexed-sampler fallback with a **register** descriptor pair, and
+  the offset is only witnessed on the immediate and uniform pairs.
+
+- **A cube gather** is grounded as an instruction but needs the `cem_calc`
+  face-publication path to admit a gather.
+
+#### The format axis, and how to confirm it in one run
+
+The sweep found `rgba8` (182 events) and `rgba8ui` (150) refusing while
+`rgba8i` and `depth32f` never do, at a ~13-20% rate inside each cell -- so a
+further axis decides it. **Not proven here**, because the probe harness cannot
+reach it, but there is one mechanism that fits every column:
+
+`hk_shader.c` runs `agx_nir_lower_custom_border()` when
+`HK_FEAT_CUSTOM_BORDER` is set, i.e. when the app enables
+`customBorderColors`. Its `lower()` returns early for `tex->is_shadow`, and
+otherwise clones the tex twice and emits two *query* texops
+(`has_custom_border_color_agx`, `custom_border_color_agx`). Query texops are
+not in the set `g17p_sample_shape()` accepts.
+
+That predicts exactly what the table shows: `depth32f` is a comparison, takes
+the early return, and never refuses (1076 cases, zero); the rate inside a cell
+tracks how many variants use `clamp_to_border`; and it is a shader-key axis, so
+it is invisible to a probe corpus that never enables the feature.
+
+**Confirming it costs one CTS run:** `HK_PERFTEST=noborder` disables exactly
+that pass (`hk_device.c`, `HK_PERF_NOBORDER`). If the 332 events go away, the
+axis is the border lowering and the fix belongs in the shape gate, not in the
+encoder. If they do not, this candidate is wrong and should be struck.
+
+A theory that did *not* survive: the combined-sampler pass takes only one tex
+instruction per shader (`if (sample || !g17p_sample_shape(...))`), which looked
+like it would disown any multi-texture shader. Probed directly -- two samples,
+two gathers, a gather plus a texel fetch, a sample plus `textureSize` -- and
+all four encode, because the indexed-sampler fallback picks them up. The
+one-sample restriction is real and is not the cause.
+
 ### texelFetchOffset was reaching an encoder with no offset field
 
 `agx_nir_lower_g17p_texture_early()` folds a txf offset into the coordinate --
