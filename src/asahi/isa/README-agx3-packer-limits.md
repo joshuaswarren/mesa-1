@@ -682,10 +682,28 @@ Operand-kind coverage across those 84 vectors, by slot:
 | select true  | 12           | 48     | 24           |
 | select false | 4            | 56     | 24           |
 
-so kind **2** — the majority class, and the one the (kind, width, value) table
-above did not name — needs identifying before building to this; only 1 and 3
-were witnessed from MSL. Everything needed is in-tree and machine-checked, so
-this is a decode exercise against existing data, not new hardware RE.
+Decoding those 84 completes the table. Each kind selects which value field is
+live, and the numbering **differs between the compare slots and the select
+slots** - the per-slot hazard this file warns about, seen again:
+
+| slot         | kind 1        | kind 2             | kind 3       |
+| ------------ | ------------- | ------------------ | ------------ |
+| compare 0/1  | immediate f51 | register f35 / f52 | -            |
+| select true  | immediate f68 | f86                | register f70 |
+| select false | immediate f85 | f86 (+f97)         | register f87 |
+
+Two things fall out. First, on a compare slot **kind 2 is the register** and
+kind 1 the immediate, while on a select slot the register is kind **3**, so a
+single "kind" enum shared across all four slots would be wrong. Second, every
+immediate compare source in the corpus has f51 = **0** (32 of 32), which is
+exactly the `s0=16:imm0` the surviving `isinf` shape carries.
+
+**Neither survivor needs kind 2.** The 16-bit-destination cell is a register
+select (kind 3) plus an immediate one (kind 1); the immediate-compare-source
+cell is kind 1 on the compare slot plus register selects. Kind 2 is the
+majority class in the corpus and remains unidentified - plausibly a uniform -
+and it is not on the path to either survivor, so it does not block this work
+and should not be guessed at to make the table look finished.
 
 The right shape of the work is therefore **one general encoder over the
 operand table, validated against all 84 corpus vectors**, rather than a fix per
