@@ -49,6 +49,10 @@ main(void)
          continue;
 
       const uint64_t sel0_kind = field(c, 76), sel1_kind = field(c, 93);
+      /* f43 and f60 are the comparators' widths. Every fsel vector in the
+       * current corpus declares both at 2 (32-bit), so wiring them changes
+       * nothing today; it is here so that the first half-width vector to
+       * arrive is encoded rather than silently widened. */
       const uint64_t cmp1_kind = field(c, 59);
       const bool cmp1_imm = cmp1_kind == AGX3_FSEL_CMP_IMMEDIATE;
 
@@ -74,10 +78,12 @@ main(void)
          .cmp0 = (uint16_t)field(c, 35),
          .cmp0_hint = hint_of(field(c, 44), field(c, 46)),
          .cmp0_abs = field(c, 47) != 0,
+         .cmp0_16 = field(c, 43) == 1,
          .cmp1_is_immediate = cmp1_imm,
          .cmp1 = (uint16_t)(cmp1_imm ? field(c, 51) : field(c, 52)),
          .cmp1_hint = hint_of(field(c, 61), field(c, 63)),
          .cmp1_abs = field(c, 64) != 0,
+         .cmp1_16 = field(c, 60) == 1,
          .sel0_kind = (uint8_t)sel0_kind,
          .sel1_kind = (uint8_t)sel1_kind,
          .sel0 = (uint16_t)(sel0_kind == AGX3_FSEL_SEL_REGISTER ? field(c, 70)

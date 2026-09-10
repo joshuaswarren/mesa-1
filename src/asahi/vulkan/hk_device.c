@@ -65,7 +65,9 @@ hk_upload_rodata(struct hk_device *dev)
    const unsigned sampler_size =
       agx_chip_sampler_heap_element_size(dev->dev.chip);
    if (!sampler_size)
-      return VK_ERROR_FEATURE_NOT_PRESENT;
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "%s has no known sampler heap element size",
+                       agx_chip_name(dev->dev.chip));
 
    const size_t rodata_size =
       align(sampler_size, sizeof(uint64_t)) + sizeof(struct poly_heap);
@@ -93,7 +95,9 @@ hk_upload_rodata(struct hk_device *dev)
    struct hk_native_sampler_descriptor txf;
    if (!hk_pack_native_txf_sampler(dev->dev.chip, &txf)) {
       agx_bo_unreference(&dev->dev, dev->rodata.bo);
-      return VK_ERROR_FEATURE_NOT_PRESENT;
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "%s cannot pack the texel-fetch sampler",
+                       agx_chip_name(dev->dev.chip));
    }
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
@@ -174,7 +178,9 @@ hk_init_sampler_heap(struct hk_device *dev, struct hk_sampler_heap *h)
    if (!sampler_size ||
        agx_chip_sampler_generation(dev->dev.chip) ==
           AGX_SAMPLER_GENERATION_UNKNOWN)
-      return VK_ERROR_FEATURE_NOT_PRESENT;
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "%s has no known sampler generation (element size %u)",
+                       agx_chip_name(dev->dev.chip), sampler_size);
 
    h->ht = agx_sampler_packed_table_create(NULL);
    if (!h->ht)
@@ -198,7 +204,9 @@ hk_init_sampler_heap(struct hk_device *dev, struct hk_sampler_heap *h)
       uint32_t index = UINT32_MAX;
       result = hk_pack_native_txf_sampler(dev->dev.chip, &txf)
          ? hk_descriptor_table_add(dev, &h->table, &txf, sampler_size, &index)
-         : VK_ERROR_FEATURE_NOT_PRESENT;
+         : vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                     "%s cannot pack the reserved texel-fetch sampler",
+                     agx_chip_name(dev->dev.chip));
       if (result != VK_SUCCESS) {
          hk_descriptor_table_finish(dev, &h->table);
          ralloc_free(h->ht);
@@ -231,7 +239,9 @@ hk_sampler_heap_add_locked(struct hk_device *dev, struct hk_sampler_heap *h,
         i < h->table.desc_size; ++i) {
       assert(bytes[i] == 0);
       if (bytes[i] != 0)
-         return VK_ERROR_FEATURE_NOT_PRESENT;
+         return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                          "sampler descriptor byte %u is %u, not zero: the "
+                          "packed dedup key would alias", i, bytes[i]);
    }
 
    struct agx_sampler_packed key;

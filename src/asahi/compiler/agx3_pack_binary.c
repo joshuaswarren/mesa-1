@@ -8045,10 +8045,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .cmp0 = cmp0.value,
                   .cmp0_hint = agx3_post_ra_hint(cmp0),
                   .cmp0_abs = cmp0.abs,
+                  .cmp0_16 = cmp0.size == AGX_SIZE_16,
                   .cmp1_is_immediate = reverse ? c0_imm : c1_imm,
                   .cmp1 = cmp1.value,
                   .cmp1_hint = agx3_post_ra_hint(cmp1),
                   .cmp1_abs = cmp1.abs,
+                  .cmp1_16 = cmp1.size == AGX_SIZE_16,
                   .sel0_kind = tv_imm ? AGX3_FSEL_SEL_IMMEDIATE
                                       : AGX3_FSEL_SEL_REGISTER,
                   .sel1_kind = fv_imm ? AGX3_FSEL_SEL_IMMEDIATE
