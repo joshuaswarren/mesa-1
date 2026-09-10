@@ -481,7 +481,31 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    }
 
    if (!bo) {
-      fprintf(stderr, "BO creation failed\n");
+      /* Three unrelated failures reach here -- GEM_CREATE, the userspace VA
+       * heap, and a kernel VM_BIND rejection -- and every caller turns all
+       * three into one VK_ERROR_OUT_OF_DEVICE_MEMORY. Print what is left in
+       * each heap so a hardware log says which one it was without having to
+       * reproduce it again. */
+      fprintf(stderr, "BO creation failed: size=%#zx align=%#x flags=%#x "
+                      "label=%s", size, align, flags,
+              label ? label : "(none)");
+
+      /* A winsys with its own VA allocator does not use these heaps, and
+       * printing their untouched sizes would name the wrong resource. */
+      if (dev->ops.va_alloc == NULL) {
+         simple_mtx_lock(&dev->vma_lock);
+         const uint64_t usc_free = dev->usc_heap.free_size;
+         const uint64_t main_free = dev->main_heap.free_size;
+         simple_mtx_unlock(&dev->vma_lock);
+
+         fprintf(stderr,
+                 "; free USC window %#" PRIx64 " of %#" PRIx64
+                 ", free user heap %#" PRIx64 " of %#" PRIx64,
+                 usc_free, AGX_USC_WINDOW_SIZE, main_free,
+                 dev->main_heap_size);
+      }
+
+      fputc('\n', stderr);
       return NULL;
    }
 

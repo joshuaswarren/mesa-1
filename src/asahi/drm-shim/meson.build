@@ -197,6 +197,30 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 60,
   )
 
+  # One command buffer holding a frame's worth of render passes and draws.
+  # Each Ioto program used to take a BO of its own -- a 16KiB page plus a
+  # 16KiB guard page of the 4GiB USC exec window for a couple of hundred
+  # bytes of program -- and this recording alone establishes thousands of
+  # executable-window mappings, which is what ran the window out under
+  # SuperTuxKart. Sub-allocated out of arena chunks the same recording needs
+  # a handful. The budget is what fails if programs go back to one BO each;
+  # there is no submit, so no stream-validator expectation is set.
+  g17p_ioto_pressure_env = environment({
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_G17P_MAX_USC_BINDS' : '64',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  })
+  test(
+    'hk_g17p_ioto_program_pressure',
+    g17p_ioto_program_pressure,
+    env : g17p_ioto_pressure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-ioto-program-pressure'],
+    timeout : 120,
+  )
+
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
   g17p_xfb_draw_env.set('ASAHI_SHIM_G17P_EXPECT_XFB', '1')
   test(

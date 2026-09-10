@@ -166,6 +166,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
       hk_cs_destroy(it);
    }
 
+   hk_ioto_arena_finish(cmd);
    hk_cmd_buffer_release_bos(cmd, &dev->dev);
 }
 
@@ -1694,28 +1695,20 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       if (s->b.info.rodata.size_16 != 0)
          hk_cmd_buffer_retain_bo(cmd, s->bo);
 
-      struct agx_bo *program_bo =
-         agx_bo_create(&dev->dev, program_capacity,
-                       AGX_IOTO_PROGRAM_ALIGNMENT, AGX_BO_EXEC | AGX_BO_LOW_VA,
-                       "G17P Ioto program");
-      if (!program_bo) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      struct hk_ioto_reservation reservation;
+      if (!hk_cmd_reserve_ioto_program(cmd, program_capacity,
+                                       "G17P Ioto program", &reservation))
          return 0;
-      }
-      util_dynarray_append(&cmd->large_bos, program_bo);
 
-      void *program_map = agx_bo_map(program_bo);
-      if (!program_map) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_MEMORY_MAP_FAILED);
-         return 0;
-      }
+      void *program_map = reservation.map;
+      const uint64_t program_va = reservation.va;
 
       /* Same fail-closed USC-window containment check as the compute path in
        * hk_cmd_dispatch.c: usc_exec_base is fixed per queue, so an exec
        * pointer outside [shader_base, +4 GiB) can only end as an unattributed
        * GPU page fault.
        */
-      if (!agx_va_in_usc_window(&dev->dev, program_bo->va->addr) ||
+      if (!agx_va_in_usc_window(&dev->dev, program_va) ||
           !agx_va_in_usc_window(&dev->dev,
                              linked->b.bo->va->addr + linked->b.entry_offset)) {
          mesa_loge("G17P graphics: exec pointer outside the USC window "
@@ -1723,14 +1716,14 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                    " shader=%" PRIx64 "\n",
                    dev->dev.shader_base,
                    dev->dev.shader_base + AGX_USC_WINDOW_SIZE,
-                   program_bo->va->addr,
+                   program_va,
                 linked->b.bo->va->addr + linked->b.entry_offset);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
          return 0;
       }
 
       const struct hk_agx3_g17p_graphics_program_desc desc = {
-         .program_va = program_bo->va->addr,
+         .program_va = program_va,
          /* The container's entry point, not the allocation base: the
        * shader loader reads the block-size dword at entry - 0x80. */
       .shader_va = linked->b.bo->va->addr + linked->b.entry_offset,
@@ -1767,12 +1760,20 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       memcpy(program_map, program.bytes, program.length);
+
+      /* Publish before tracing, so the trace names the address the launch
+       * record will actually carry rather than the reserved one -- an
+       * identical program already in this recording keeps its own. */
+      const uint64_t published =
+         hk_cmd_publish_ioto_program(cmd, &reservation, program.length);
+      if (!published)
+         return 0;
+
       if (hk_g17p_launch_trace_enabled()) {
          const char *label = s->info.stage == MESA_SHADER_FRAGMENT
                                 ? "fragment-ioto"
                                 : "vertex-ioto";
-         hk_g17p_trace_line(label, program_bo->va->addr, program_map,
-                            program.length);
+         hk_g17p_trace_line(label, published, program.bytes, program.length);
 
          const char *shader_label = s->info.stage == MESA_SHADER_FRAGMENT
                                        ? "fragment-shader"
@@ -1798,11 +1799,7 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                                MIN2(sizeof(cmd->state.gfx.descriptors.root),
                                     (size_t)128));
       }
-      if (agx_bo_sync_for_device(program_bo, 0, program.length)) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
-         return 0;
-      }
-      return program_bo->va->addr;
+      return published;
    }
 
    if (agx_chip_command_stream_generation(dev->dev.chip) !=

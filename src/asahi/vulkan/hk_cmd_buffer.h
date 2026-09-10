@@ -28,9 +28,11 @@
 #include "hk_cs_root_size.h"
 #include "hk_descriptor_set.h"
 #include "hk_drm_render_core.h"
+#include "hk_ioto_arena_core.h"
 #include "hk_pipeline_statistics_core.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
+#include "util/hash_table.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -501,6 +503,30 @@ struct hk_uploader {
    uint32_t capacity;
 };
 
+/*
+ * Bump arena for the G17P Ioto programs one command buffer records, with a
+ * content-addressed index so a program byte-identical to one already published
+ * costs nothing at all. See hk_ioto_arena_core.h for why programs cannot each
+ * have a BO.
+ */
+struct hk_ioto_arena {
+   /* Chunk currently being filled. Owned by hk_cmd_buffer::large_bos. */
+   struct agx_bo *bo;
+   uint8_t *map;
+   uint64_t base;
+   uint32_t cursor;
+   uint32_t capacity;
+
+   /* Program bytes -> address, over the chunks of this command buffer. */
+   struct hash_table *published;
+
+   /* Recording statistics, reported when the arena cannot grow. */
+   uint32_t programs;
+   uint32_t distinct;
+   uint64_t program_bytes;
+   uint64_t chunk_bytes;
+};
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -562,7 +588,54 @@ struct hk_cmd_buffer {
    /* Owned BOs and retained references needed by recorded commands. */
    struct util_dynarray large_bos;
 
+   /* Executable USC-window arena the G17P Ioto programs recorded by this
+    * command buffer are bump-allocated from. Its chunks are owned by
+    * large_bos, so it dies with the recording like every other program
+    * reference. */
+   struct hk_ioto_arena ioto;
+
 };
+
+/*
+ * One reservation inside the Ioto arena: where the program is to be composed,
+ * and the address the composer must be given for it.
+ */
+struct hk_ioto_reservation {
+   void *map;
+   uint64_t va;
+
+   /* Arena cursor before the reservation, so an identical program already
+    * published by this command buffer can give the space straight back. */
+   uint32_t rollback;
+};
+
+/*
+ * Reserve `size` bytes of executable USC-window space for one Ioto program.
+ * On failure the command buffer error is already set.
+ */
+bool hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
+                                 const char *label,
+                                 struct hk_ioto_reservation *reservation);
+
+/*
+ * Publish the `length` bytes composed at reservation->map. Returns the address
+ * the launch record must point at: either the reserved address, or that of a
+ * byte-identical program this command buffer already published, in which case
+ * the reservation is released.
+ *
+ * Reusing an earlier address is sound without assuming anything about whether
+ * a program embeds its own address: the bytes just composed for the reserved
+ * address are identical to the bytes the composer produced for the earlier
+ * one, so the earlier address holds exactly the program the composer sanctions
+ * for it.
+ */
+uint64_t hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
+                                     const struct hk_ioto_reservation *
+                                        reservation,
+                                     size_t length);
+
+/* Release the arena's bookkeeping. The chunks themselves are in large_bos. */
+void hk_ioto_arena_finish(struct hk_cmd_buffer *cmd);
 
 VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)

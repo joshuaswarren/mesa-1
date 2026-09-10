@@ -314,23 +314,6 @@ is_attachment_stored(const VkRenderingAttachmentInfo *att)
           att->resolveMode != VK_RESOLVE_MODE_NONE;
 }
 
-static struct agx_bo *
-hk_g17p_alloc_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
-                           const char *label)
-{
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct agx_bo *bo =
-      agx_bo_create(&dev->dev, size, AGX_IOTO_PROGRAM_ALIGNMENT,
-                    AGX_BO_EXEC | AGX_BO_LOW_VA, label);
-   if (!bo) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      return NULL;
-   }
-
-   util_dynarray_append(&cmd->large_bos, bo);
-   return bo;
-}
-
 static bool
 hk_g17p_bg_eot_shader_supported(const struct agx_bg_eot_shader *shader)
 {
@@ -440,16 +423,13 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       program_label = "G17P RT0 reload Ioto program";
    }
 
-   struct agx_bo *program_bo =
-      hk_g17p_alloc_ioto_program(cmd, program_capacity, program_label);
-   if (!program_bo)
+   struct hk_ioto_reservation program_reservation;
+   if (!hk_cmd_reserve_ioto_program(cmd, program_capacity, program_label,
+                                    &program_reservation))
       return (struct hk_bg_eot){0};
 
-   void *program_map = agx_bo_map(program_bo);
-   if (!program_map) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_MEMORY_MAP_FAILED);
-      return (struct hk_bg_eot){0};
-   }
+   void *program_map = program_reservation.map;
+   const uint64_t program_va = program_reservation.va;
 
    size_t program_length;
    uint64_t resource_spec;
@@ -540,7 +520,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                             pbe_argument_size);
 
       const struct agx3_g17p_rt0_eot_program_desc desc = {
-         .program_va = program_bo->va->addr,
+         .program_va = program_va,
          .shader_va = shader->ptr + shader->info.main_offset,
          .pbe_argument_va = pbe_argument_va,
          .imageblock_offset_B = agx_tilebuffer_offset_B(&key->tib, 0),
@@ -568,12 +548,15 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       memcpy(program_map, program.bytes, program.length);
       program_length = program.length;
       resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
+      /* The address the program was composed for. An identical program
+       * already published by this recording keeps its own address, which the
+       * BG/EOT trace below reports. */
       if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false))
          fprintf(stderr,
-                 "G17P EOT launch: program=%" PRIx64 " length=%zu "
+                 "G17P EOT composed: program=%" PRIx64 " length=%zu "
                  "pbe=%" PRIx64 " attachments=%u offsets=%u,%u "
                  "gprs=%u staging=%u\n",
-                 program_bo->va->addr, program_length, pbe_argument_va,
+                 program_va, program_length, pbe_argument_va,
                  desc.attachment_count, desc.imageblock_offset_B,
                  desc.imageblock_offset1_B, desc.nr_gprs,
                  desc.staging_halfs);
@@ -582,7 +565,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          cmd->state.gfx.render.g17p_direct_color_resolve = true;
    } else if (op == AGX_BG_EOT_NONE) {
       const struct hk_agx3_g17p_graphics_program_desc desc = {
-         .program_va = program_bo->va->addr,
+         .program_va = program_va,
          .shader_va = shader->ptr + shader->info.main_offset,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
@@ -633,7 +616,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       }
 
       struct agx3_g17p_rt0_bg_program_desc desc = {
-         .program_va = program_bo->va->addr,
+         .program_va = program_va,
          .shader_va = shader->ptr + shader->info.main_offset,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
@@ -713,13 +696,18 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       }
    }
 
+   const uint64_t published =
+      hk_cmd_publish_ioto_program(cmd, &program_reservation, program_length);
+   if (!published)
+      return (struct hk_bg_eot){0};
+
    if (!store && debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false)) {
       fprintf(stderr,
               "G17P BG launch: op=%s program=%" PRIx64 " resources=%" PRIx64
               " length=%zu staging_known=%u staging_halfs=%u compiler_d=%u\n",
               op == AGX_BG_CLEAR ? "clear" :
               op == AGX_BG_LOAD ? "reload" : "none",
-              program_bo->va->addr, resource_spec, program_length,
+              published, resource_spec, program_length,
               shader->info.agx3_staging_known,
               shader->info.agx3_staging_halfs,
               shader->info.agx3_staging_known
@@ -727,13 +715,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                  : shader->info.nr_gprs);
    }
 
-   if (agx_bo_sync_for_device(program_bo, 0, program_length)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
-      return (struct hk_bg_eot){0};
-   }
-
    return (struct hk_bg_eot){
-      .usc = program_bo->va->addr,
+      .usc = published,
       .rsrc_spec = resource_spec,
    };
 }
