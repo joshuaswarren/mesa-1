@@ -92,32 +92,10 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (ail_pixel_format[p_format].renderable) {
       features |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                   VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT |
-                  VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
-
-      /* G17P has no native PBE descriptor path: hk_native_pbe_supported() is
-       * AGX2 only, so hk_descriptor_write_storage_image() falls back to the
-       * bounded `native_basic` shape, which accepts exactly R8G8B8A8_UINT and
-       * R8G8B8A8_UNORM (hk_descriptor_set.c).  Every other format lands in the
-       * !supported branch and is written as a NULL descriptor -- and
-       * vkUpdateDescriptorSets cannot fail, so the application is told nothing
-       * and its stores silently disappear.
-       *
-       * Advertise storage only where the descriptor can actually be built.  A
-       * format the application is told it cannot use is a skipped test; a
-       * format it is told it can use that drops every write is wrong output.
-       */
-      const bool storage_ok =
-         !hk_descriptor_generation_is_agx2(
-             agx_chip_descriptor_generation(pdev->dev.chip))
-            ? (vk_format == VK_FORMAT_R8G8B8A8_UINT ||
-               vk_format == VK_FORMAT_R8G8B8A8_UNORM)
-            : true;
-
-      if (storage_ok) {
-         features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
-                     VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
-                     VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
-      }
+                  VK_FORMAT_FEATURE_2_BLIT_DST_BIT |
+                  VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                  VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+                  VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
    }
 
    if (vk_format_is_depth_or_stencil(vk_format)) {
