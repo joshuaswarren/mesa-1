@@ -2480,6 +2480,121 @@ test_g17p_precompiled_fill_program(void)
    return 0;
 }
 
+/* SuperTuxKart 1.4's advanced ("deferred") pipeline, transcribed from
+ * stk-code/src/graphics/rtts.cpp.  Every framebuffer the game builds must be
+ * admitted by the G17P bounded RT0 contract, because a refusal is not a
+ * degraded frame: hk_CmdBeginRendering() (hk_cmd_draw.c:1064) records
+ * VK_ERROR_FEATURE_NOT_PRESENT, Zink's zink_batch.c:777 turns that into
+ * is_device_lost and skips vkQueueSubmit, and the whole frame is dropped.
+ *
+ * Formats follow rtts.cpp:86-105.  With GL_EXT_color_buffer_float present -
+ * which Honeykrisp advertises and SuperTuxKart logs as "EXT Color Buffer
+ * Float Present" - rgba is RGBA16F, red is R16F, red32 is R32F and
+ * diffuse/specular is R11F_G11F_B10F (rtts.cpp:92).  Without it every target
+ * collapses to 8-bit (rtts.cpp:97-104).
+ *
+ * The game builds exactly two multi-attachment framebuffers, both at
+ * attachment-1 byte offset 4: FBO_SP (rtts.cpp:180-182) and
+ * FBO_COMBINED_DIFFUSE_SPECULAR (rtts.cpp:193-195).  It never builds a
+ * mixed-format pair, a third colour target, or a multisampled MRT, so the
+ * classifier's remaining fail-closed shapes are out of SuperTuxKart's reach.
+ */
+struct stk_framebuffer {
+   const char *name;
+   enum pipe_format format[2];
+   unsigned count;
+   enum agx_g17p_mrt_layout mrt;
+};
+
+static int
+test_stk_advanced_pipeline_framebuffers(void)
+{
+   /* rtts.cpp:92 - GL_EXT_color_buffer_float present (Honeykrisp's case). */
+   static const struct stk_framebuffer hdr[] = {
+      {"FBO_COLORS", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_NORMAL_AND_DEPTHS", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SP",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_RGBA_1", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_RGBA_2", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_COMBINED_DIFFUSE_SPECULAR",
+       {PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R11G11B10_FLOAT}, 2,
+       AGX_G17P_MRT_R11G11B10},
+      {"FBO_TMP1_WITH_DS", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_HALF1_R", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_HALF1", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_HALF2", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_RGBA_3", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SSAO", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_LINEAR_DEPTH", {PIPE_FORMAT_R32_FLOAT}, 1},
+      {"FBO_HALF2_R", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_QUARTER1", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_QUARTER2", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      /* rtts.cpp:253-262 - the ten bloom/lens targets share rgba. */
+      {"FBO_BLOOM_1024", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_LENS_128", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+   };
+
+   /* rtts.cpp:97-104 - the 8-bit fallback path. */
+   static const struct stk_framebuffer ldr[] = {
+      {"FBO_COLORS", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SP",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_COMBINED_DIFFUSE_SPECULAR",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_HALF1_R", {PIPE_FORMAT_R8_UNORM}, 1},
+      {"FBO_LINEAR_DEPTH", {PIPE_FORMAT_R8_UNORM}, 1},
+   };
+
+   const struct stk_framebuffer *sets[] = {hdr, ldr};
+   const unsigned counts[] = {ARRAY_SIZE(hdr), ARRAY_SIZE(ldr)};
+
+   for (unsigned s = 0; s < ARRAY_SIZE(sets); ++s) {
+      for (unsigned i = 0; i < counts[s]; ++i) {
+         const struct stk_framebuffer *fb = &sets[s][i];
+         enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+         for (unsigned rt = 0; rt < fb->count; ++rt)
+            formats[rt] = fb->format[rt];
+
+         struct agx_tilebuffer_layout tib =
+            agx_build_tilebuffer_layout(formats, fb->count, 1, false);
+
+         if (!hk_agx3_g17p_rt0_tile_layout_supported(&tib)) {
+            fprintf(stderr,
+                    "FAIL line %d: SuperTuxKart %s is fail-closed on G17P\n",
+                    __LINE__, fb->name);
+            return 1;
+         }
+         ++checks;
+
+         CHECK(agx_g17p_classify_mrt(&tib) == fb->mrt);
+
+         /* Both of SuperTuxKart's MRT framebuffers pack attachment 1 at byte
+          * offset 4 in an 8-byte sample.  Nothing in the game asks for the
+          * offset-8 or 16-byte shapes. */
+         if (fb->count == 2) {
+            CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+            CHECK(agx_tilebuffer_offset_B(&tib, 1) == 4);
+            CHECK(tib.sample_size_B == 8);
+         }
+      }
+   }
+
+   /* rtts.cpp:296-299 - the cascaded shadow framebuffer has no colour
+    * attachment and four layers.  hk clears `layered` before the bounded RT0
+    * check (hk_agx3_ioto_program_core.c:85-87), so it must be admitted. */
+   enum pipe_format none[AGX_MAX_RENDER_TARGETS] = {0};
+   struct agx_tilebuffer_layout shadow =
+      agx_build_tilebuffer_layout(none, 0, 1, true);
+   CHECK(shadow.layered);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&shadow));
+
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2495,7 +2610,8 @@ main(void)
        test_g17p_rt0_background_programs() ||
        test_g17p_rt0_background_staging() ||
        test_g17p_rt0_background_pass_control() ||
-       test_g17p_single_layer_rt0_layout() || test_alias())
+       test_g17p_single_layer_rt0_layout() ||
+       test_stk_advanced_pipeline_framebuffers() || test_alias())
       return 1;
 
    printf("Honeykrisp AGX3 Ioto program core: %u checks passed\n", checks);
