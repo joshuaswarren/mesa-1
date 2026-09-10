@@ -740,9 +740,17 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
       features->tessellationShader = false;
-      /* Per-sample main/epilog execution and native 2x/4x tile selectors are
-       * implemented. Keep the public core feature opt-in until the strict 4x
-       * SampleID/average-resolve image oracle has executed on G17P. */
+      /* The native 2x/4x BG/EOT tile selectors are implemented, but per-sample
+       * FRAGMENT execution is not: hk_shader.c unconditionally runs
+       * agx_nir_lower_g17p_1x_sample_shading() on every G17P fragment shader
+       * that sets uses_sample_shading, and agx_linker.c fails closed on a
+       * nonzero nr_samples_shaded because the AGX2 external sample loop is not
+       * AGX3 machine code.  At the default one rasterization sample that
+       * collapse is exact, so the promise is keepable there; at 2x/4x
+       * (HK_G17P_MSAA=1) gl_SampleID would silently read 0.
+       *
+       * So do NOT run the 4x SampleID oracle expecting a pass: it is blocked on
+       * a grounded AGX3 per-sample fragment path, not on hardware time. */
       features->sampleRateShading =
          hk_g17p_unverified_feature("sample_rate_shading");
       /* IA vertex/primitive recording, including reset/reuse/unavailable
@@ -803,7 +811,14 @@ hk_get_device_features(
        * descriptor does not bounds-check against the Vulkan image view.
        * Hardware qualification returned adjacent in-image texels for both
        * X- and Y-out-of-range coordinates, violating the zero RGB guarantee
-       * shared by robustImageAccess and robustImageAccess2. */
+       * shared by robustImageAccess and robustImageAccess2.
+       *
+       * That failure has since been addressed in software: the explicit
+       * view-bounds lowering in hk_nir_lower_robust_image.c (and the matching
+       * combined-sampler bounds in agx_nir_lower_g17p_combined_sampler.c)
+       * clamp against the view rather than the allocation.  The bit stays
+       * opt-in only because g17p-vulkan-robust-image2 has not been re-run on
+       * hardware since; this is a pending re-probe, not an unfixed defect. */
       features->robustImageAccess =
          hk_g17p_unverified_feature("robust_images");
       features->robustImageAccess2 =
@@ -1493,7 +1508,14 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* HAL200 advanced blend epilogs currently complete without a fault but
-       * write zero instead of the blended colour. */
+       * write zero instead of the blended colour.
+       *
+       * NOTE: this is contradicted by the hardware ledger, whose row R06e
+       * records coherent conjoint non-premultiplied MULTIPLY as exact on G17P
+       * (checksum 0c9eca2eebc81b25).  Both cannot be current.  The next
+       * advanced-blend boot must adjudicate before either is trusted; until
+       * then keep the extension withheld, because withholding a working
+       * feature is recoverable and shipping a black one is not. */
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
 
