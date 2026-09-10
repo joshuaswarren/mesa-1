@@ -10,6 +10,14 @@
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
  * of the architecture.
+ *
+ * Do not "fix" the minus one for G17P. Four 8-byte samples of RGBA8 at 32x32
+ * need exactly 32768 bytes, so 4x colour misses this bound by a single byte
+ * and falls to a 32x16 tile, which looks like an off-by-one worth testing. It
+ * was tested: admitting exactly 32768 and letting 4x keep a 32x32 tile loses
+ * the device outright (vkWaitForFences -> VK_ERROR_DEVICE_LOST on A18 Pro,
+ * 2026-09-10). The bound is real; a 32x32 tile at 4x is not something this
+ * hardware will do.
  */
 #define MAX_BYTES_PER_TILE (32768 - 1)
 
