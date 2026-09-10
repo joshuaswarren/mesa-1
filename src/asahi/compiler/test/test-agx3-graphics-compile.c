@@ -3382,6 +3382,162 @@ test_indexed_compute_storage(void)
    return ok;
 }
 
+/* Apple's builtin end-of-tile factory, asked for a 2D-multisample attachment
+ * (texture type 4) instead of a 2D one (texture type 2), emits a second
+ * program per selector. The pair differs in exactly three bytes and two
+ * encoder fields -- PACK_IMGWIR field 5 (4 -> 6) and IMGWBLK field 30
+ * (1 -> 2) -- and no instruction is added, because the block store covers
+ * every sample of the tile. That is the whole of "G17P can store an
+ * unresolved multisample surface"; see isa/README-metal-witness.md for how
+ * the witnesses were generated and round-tripped.
+ */
+static bool
+test_g17p_multisample_eot_block_store(void)
+{
+   /* Native U8NORM key 0x10020300 with texture type 4: selector 0x75 -> 0x72. */
+   static const uint8_t expected_u8norm[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0x28, 0x72, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   /* Native I32 key with texture type 4: selector 0x35 -> 0x32. */
+   static const uint8_t expected_i32[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0x28, 0x32, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+
+   /* The resolving forms of the same two selectors, unchanged. */
+   static const uint8_t expected_u8norm_resolved[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0xa8, 0x75, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t expected_i32_resolved[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+
+   /* Compile one end-of-tile store. dim selects the IMGWBLK dimension the
+    * shader asks for; the key states which Apple builtin the caller means.
+    * Returning the emitted bytes lets the caller assert both the match and
+    * the refusals. */
+   struct eot_case {
+      bool key_multisample;
+      enum pipe_format format;
+      uint8_t words;
+      bool i32;
+      bool i32_four_words;
+      bool i32_signed_four_words;
+      const uint8_t *expected;
+      size_t expected_size;
+   };
+   const struct eot_case cases[] = {
+      /* The two witnessed selectors, unresolved. */
+      {true, PIPE_FORMAT_R8_UNORM, 0, false, false, false, expected_u8norm,
+       sizeof(expected_u8norm)},
+      {true, PIPE_FORMAT_R32_UINT, 1, true, false, false, expected_i32,
+       sizeof(expected_i32)},
+      /* The same graphs without the key must still emit the resolving
+       * programs, byte for byte. Their only difference from the pair above is
+       * the three witnessed bytes, so this is what proves the key -- not some
+       * incidental compiler state -- is what selects between them. */
+      {false, PIPE_FORMAT_R8_UNORM, 0, false, false, false,
+       expected_u8norm_resolved, sizeof(expected_u8norm_resolved)},
+      {false, PIPE_FORMAT_R32_UINT, 1, true, false, false,
+       expected_i32_resolved, sizeof(expected_i32_resolved)},
+      /* The distinct 84-byte signed four-word I32 builtin has no multisample
+       * witness, so it must fail closed rather than store a resolving 2D
+       * program into a multisample surface. */
+      {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, NULL, 0},
+   };
+
+   bool ok = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      const struct eot_case *c = &cases[i];
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P MSAA RT0 EOT");
+      nir_def *coords =
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+      nir_image_store_block_agx(&b, nir_imm_intN_t(&b, 0, 16),
+                                nir_imm_int(&b, 0), coords, .format = c->format,
+                                .image_dim = GLSL_SAMPLER_DIM_2D,
+                                .explicit_coord = true);
+      agx_preprocess_nir(b.shader);
+
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .g17p_rt0_eot_multisample = c->key_multisample,
+         .g17p_rt0_eot_words = c->words,
+         .g17p_rt0_eot_i32 = c->i32,
+         .g17p_rt0_eot_i32_four_words = c->i32_four_words,
+         .g17p_rt0_eot_i32_signed_four_words = c->i32_signed_four_words,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+
+      bool case_ok;
+      if (c->expected) {
+         case_ok = compiled && part.binary &&
+                   part.info.binary_size == c->expected_size &&
+                   part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+                   part.info.agx3_staging_halfs == 8 &&
+                   memcmp(part.binary, c->expected, c->expected_size) == 0;
+      } else {
+         case_ok = !compiled;
+      }
+
+      if (!case_ok) {
+         fprintf(stderr,
+                 "G17P multisample EOT case %u: compiled=%u size=%u "
+                 "expected=%s\n",
+                 i, compiled, compiled ? part.info.binary_size : 0,
+                 c->expected ? "bytes" : "refusal");
+         if (compiled && part.binary) {
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[j]);
+            fputc('\n', stderr);
+         }
+         ok = false;
+      }
+
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+
+   return ok;
+}
+
 static bool
 test_g17p_eot_block_store(void)
 {
@@ -5546,6 +5702,11 @@ main(int argc, char **argv)
       printf("G17P RT0 and WBOIT MRT EOT: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--msaa-eot-only")) {
+      const bool ok = test_g17p_multisample_eot_block_store();
+      printf("G17P multisample RT0 EOT: %s\n", ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--custom-border-only")) {
       bool ok = test_custom_border_samplers(false, false) &&
                 test_custom_border_samplers(true, false) &&
@@ -5800,6 +5961,7 @@ main(int argc, char **argv)
    } while (0)
 
    RUN(test_g17p_eot_block_store);
+   RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);
    RUN(test_g17p_background_clear);
    RUN(test_g17p_background_f16_clear_narrowing);

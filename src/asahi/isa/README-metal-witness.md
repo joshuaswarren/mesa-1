@@ -159,3 +159,78 @@ Two things this does NOT say, deliberately:
   that shape.  That path is already in production for `vkCmdResolveImage` and
   is covered by `test_indexed_multisample_fetch()`.  Both encodings evidently
   work; this witness is a second, independent way in, not a correction.
+
+## Witness: the end-of-tile store CAN keep the samples (2026-09-10)
+
+Question: is G17P's end-of-tile store pinned to a 2D target -- i.e. can a
+multisample colour surface never be stored unresolved, so a multisample image
+can be created but never populated or read back? Answer: no. Apple's own
+builtin end-of-tile factory emits a second program per selector that stores the
+tile unresolved.
+
+`test/probes/g17p-native-rt0-eot.btnf.hex` is a flatbuffer whose root field 2 =
+5 selects that factory. Its one attachment table lives at file offset 0x70 with
+seven single-byte fields at 0x74..0x7a:
+
+    0x74 partition   0x75 internal format   0x76 texture type
+    0x77 (unused)    0x78 extra flags       0x79 components   0x7a (unused)
+
+Field 0x76 is the `Texture dimension` enum from `genxml/cmdbuf.xml`. Poking one
+byte and rerunning `metal-nt` walks it:
+
+    0 -> 48 bytes (1D)          4 -> 68 bytes (2D MULTISAMPLE)
+    2 -> 68 bytes (2D)          5,6 -> 80 bytes
+    3 -> 84 bytes (2D array)    8 -> 84 bytes (2D multisample array)
+    1,7 -> metal-nt SIGSEGVs (not renderable)
+
+The 2D and 2D-multisample programs differ in **three bytes**, and `decomp`
+round-trips that to exactly two encoder fields:
+
+    2D    PACK_IMGWIR 5:4 ... | IMGWBLK ... 29:3 30:1 32:1 ...
+    2DMS  PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:2 32:1 ...
+    2DA   PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:1 31:2 32:1 ...
+    2DMSA PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:2 31:2 32:1 ...
+
+**IMGWBLK field 30 is the dimension class** (2D = 1, multisample = 2) and field
+31 is the array flag. No instruction is added for the multisample form: the two
+grid-coordinate SR reads are unchanged and nothing computes a sample index,
+because the block store covers every sample of the tile. The array form, by
+contrast, really does add a PACK_IMGWIR and a `get_sr` for the layer.
+
+Sweeping internal format (0x75) x components (0x79) shows the transform is
+uniform across all five selectors the driver uses, byte for byte:
+
+    byte 43 (PACK_IMGWIR wire width)  0x04 -> 0x06
+    byte 60                           0xa8 -> 0x28
+    byte 61 (selector | dim)          0x?5 -> 0x?2   (?  = 7,1,3,5,9)
+
+The attachment table carries no sample count -- the count comes from the
+tilebuffer geometry and the PBE descriptor, which is consistent with a block
+store that writes the whole imageblock. The distinct 84-byte signed builtins
+(RGBA16_SINT, RGBA32_SINT) were not swept, so they have no multisample witness
+and the packer refuses them.
+
+The matching write descriptor comes from the UMD rather than the compiler:
+`AGX::PBEStateEncoderGen9<kAGXRevHAL200>::StateFields::StateFields` derives its
+dimension nibble as `2 + ((flags >> 16) & 2)` (and 3 / 8 on the array path),
+and deposits `(samples >> 2) & 3` at word0[57:56] -- the two-bit `Sample Count`
+enum, 2x=0 4x=1 8x=2. Width and height stay logical. Cross-check: the same
+function's `level | (levels-1) << 44` write into word2 and its word0 bit 58 /
+word1 bit 63 extension markers are exactly what `agx_pbe_agx3_2d_mip_pack`
+already encodes from independent evidence.
+
+## Witness: AGX3 per-sample fragment execution is an unrolled shader (2026-09-10)
+
+`.tmp/g17p-msaa-grounding/` compiles the same MSL fragment function at
+`raster_sample_count` 1, 2 and 4 (the key is a `render_pipelines` entry field of
+that name). For a shader that reads `[[sample_id]]`, Apple's `applegpu_g17p`
+text grows 234 -> 290 -> 422 bytes and the number of tile-store sequences goes
+1 -> 2 -> 4, with the sample index folded in as an immediate. So per-sample
+execution on AGX3 is **unrolled inside the fragment program**, not an external
+sample loop as on AGX2 -- which is why `agx_linker.c`'s AGX2 loop does not
+transfer and `sampleRateShading` is a compiler gap rather than a hardware one.
+
+Separately, the *per-pixel* program for the same shader is 210 bytes at 1x and
+214 at 2x and 4x (2x and 4x byte-identical), so the ordinary fragment epilogue
+also changes under multisampling. That difference is unexplained and is not a
+claim about our own epilogue being wrong.
