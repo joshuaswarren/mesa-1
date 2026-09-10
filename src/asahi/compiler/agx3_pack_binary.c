@@ -98,7 +98,7 @@ agx3_index_kind(const agx_index x)
  * AGX3 encoding for fcmpsel" is true of the shapes that encode as well.
  */
 static void
-agx3_report_refusal(const agx_instr *I, unsigned line)
+agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 {
    if (!(agx_compiler_debug & AGX_DBG_SHADERS))
       return;
@@ -125,16 +125,37 @@ agx3_report_refusal(const agx_instr *I, unsigned line)
     * negated add without `shift`. Omitting them costs a wrong diagnosis. */
    fprintf(stderr,
            "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
-           "[%s%s%s cond=%u chan=%u mask=0x%x fmt=%u shift=%u]\n",
+           "[%s%s%s cond=%u chan=%u mask=0x%x fmt=%u shift=%u]%s%s\n",
            line, agx_opcodes_info[I->op].name, shape,
            I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
            (unsigned)I->fcond, I->nr_dests ? agx_channels(I->dest[0]) : 0u,
-           (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift);
+           (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift,
+           why ? " -- " : "", why ? why : "");
+}
+
+static void
+agx3_report_refusal(const agx_instr *I, unsigned line)
+{
+   agx3_report_refusal_why(I, line, NULL);
 }
 
 #define AGX3_REFUSE(I)                                                         \
    do {                                                                        \
       agx3_report_refusal((I), __LINE__);                                      \
+      goto fail;                                                               \
+   } while (0)
+
+/*
+ * Same, naming WHICH stage declined. A memory op passes through a translate
+ * step and then an encode step, and when both raise the bare message the log
+ * cannot say whether the shape was rejected for a reason the IR could fix or
+ * genuinely has no encoding -- which is the difference between IR-side work
+ * and ISA work. The line number already separates them; this says it in
+ * words so nobody has to map line numbers back to source.
+ */
+#define AGX3_REFUSE_WHY(I, why)                                                \
+   do {                                                                        \
+      agx3_report_refusal_why((I), __LINE__, (why));                           \
       goto fail;                                                               \
    } while (0)
 
@@ -2282,8 +2303,9 @@ agx3_local_vector_shift(enum agx3_mem_width width, uint8_t mask)
  * is refused because Mesa's byte-addressed IR has not yet been legalized to
  * AGX3's scaled-index convention. */
 static bool
-agx3_translate_local(const agx_instr *I, bool is_store, uint8_t slot,
-                     uint16_t wait_mask, struct agx3_local_desc *d)
+agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
+                     bool is_store, uint8_t slot, uint16_t wait_mask,
+                     struct agx3_local_desc *d)
 {
    memset(d, 0, sizeof(*d));
 
@@ -2327,7 +2349,23 @@ agx3_translate_local(const agx_instr *I, bool is_store, uint8_t slot,
        index.value != 0 || index.memory || index.abs || index.neg)
       return false;
 
-   d->narrow_extend = d->width == AGX3_MEM_W8;
+   /*
+    * f11, `narrow_extend`, is an AGX3c field. The AGX3b `ldtg`/`sttg` forms
+    * have no encoding for it at all -- composing either with f11 = 1 is
+    * refused at every width, while f11 = 0 composes -- so a G17P threadgroup
+    * access necessarily carries it clear, and Apple's own compiler cannot be
+    * emitting anything else. Setting it from the width regardless of encoding
+    * therefore refused EVERY 8-bit threadgroup load and store on G17P, which
+    * is 1295 of the 1393 refused instructions in the Vulkan compute block:
+    * VK_KHR_workgroup_memory_explicit_layout puts 8-bit types in shared
+    * memory, and every one of them landed here.
+    *
+    * Clearing it leaves G17P exactly where the conformant AGX2 path already
+    * is: AGX2 has no such bit either, and Mesa's IR contract (an 8-bit value
+    * held in a 16-bit register) is the same on both.
+    */
+   d->narrow_extend =
+      d->width == AGX3_MEM_W8 && enc == AGX_ISA_ENCODING_AGX3C;
    d->slot = slot;
    d->wait_mask = wait_mask;
    return true;
@@ -6432,13 +6470,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_local_desc d;
             uint8_t bytes[AGX3_LOCAL_TPS_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_local(I, is_store, slot, wait, &d))
-               AGX3_REFUSE(I);
+            if (!agx3_translate_local(enc, I, is_store, slot, wait, &d))
+               AGX3_REFUSE_WHY(I, "local: translate declined (operand shape)");
             const bool ok =
                is_store ? agx3_local_encode_store(enc, &d, bytes, &len)
                         : agx3_local_encode_load(enc, &d, bytes, &len);
             if (!ok)
-               AGX3_REFUSE(I);
+               AGX3_REFUSE_WHY(I, "local: no grounded form for this "
+                                  "width/mask/base combination");
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
             continue;
          }
