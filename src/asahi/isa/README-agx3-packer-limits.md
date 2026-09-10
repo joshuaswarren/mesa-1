@@ -430,6 +430,42 @@ scratch array) is the register-indexed `ldtps`/`sttps` family, which
 `STACK_STORE`. Splitting it would need an add per component after RA. Not
 attempted here.
 
+### Open, and grounded enough to start: `.abs` on a mixed-width `fcmpsel`
+
+`(abs(a) < b) ? 1.0h : 0.0h` refuses:
+
+```
+fcmpsel [d32:reg8 s0=32:reg0.abs.discard s1=16:imm32 s2=32:reg2.discard
+         s3=16:imm0 cond=5]
+```
+
+It is tempting to assume this is another f30-style modifier bit, as it was for
+the rsqrt family. **It is not, and that is the useful finding.** Adding `.abs`
+changes the *endpoint and the instruction length*:
+
+```
+o[i] = (a[i]       < b[i]) ? 1.0h : 0.0h
+   12 03 19 05 22 b0 03 c0 20 80                    form 134 fsel ep20, 10 B
+o[i] = (fabs(a[i]) < b[i]) ? 1.0h : 0.0h
+   12 03 19 05 23 b0 03 00 20 80 00 80 01 00        form 142 fsel ep28, 14 B
+o[i] = (fabs(a[i]) > b[i]) ? 1.0h : 0.0h
+   12 03 19 05 23 b0 02 00 20 80 00 80 01 00        form 142 fsel ep28, 14 B
+o[i] = (fabs(a[i]) < b[i]) ? 1.0f : 0.0f
+   02 01 1b 05 23 b0 03 00 20 80 00 80 01 00        form 144 fsel ep30, 14 B
+o[i] = (-a[i]      < b[i]) ? 1.0h : 0.0h
+   12 05 19 03 22 b0 02 c8 20 80                    form 134 fsel ep20, 10 B
+```
+
+So NEG stays on the ten-byte endpoint (f35/f52 swap, f65 and f110 move) while
+ABS moves to a fourteen-byte one carrying f47. Whoever picks this up needs to
+map ep28/ep30 as forms in their own right -- roughly twenty fields each, one
+sweep per field -- not to add a bit to ep20. Doing the latter would produce a
+plausible-looking encoding that is a different instruction.
+
+This is the shape `textureGrad(samplerCube, ...)` reaches through cube-to-2D
+lowering, and the same family as the Hyprland `ext`/`glitch` mixed-width
+selects recorded further down.
+
 ### The control arm
 
 `params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
