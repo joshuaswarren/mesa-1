@@ -448,7 +448,24 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          iview1 && (key->tib.layered
                        ? iview1->planes[0].layered_eot_pbe_valid
                        : iview1->planes[0].eot_pbe_valid);
+      /* The G17P end-of-tile program always writes an ordinary single-sample
+       * PBE target: agx_build_end_of_tile_shader() pins the image dimension to
+       * GLSL_SAMPLER_DIM_2D on this chip because IMGWBLK is the dimensionless
+       * 2D builtin, and encoding an MS image there would store an unresolved
+       * surface. So the store target must be single-sample whether or not we
+       * took the direct-resolve path.
+       *
+       * Without this, storeOp = STORE on a multisample attachment picks
+       * target = iview (direct resolve requires storeOp != STORE), skips the
+       * samples != 1 check below because that is guarded by direct_resolve,
+       * and writes single-sample data into a multisample surface with no
+       * diagnostic. Refuse instead; a multisample surface cannot be stored on
+       * G17P at all, which is also why multisample images can never be sampled
+       * back and why sampledImageColorSampleCounts stays 1x.
+       */
       if (!iview || !target ||
+          (dev->dev.chip == AGX_CHIP_G17P && !direct_resolve &&
+           target->vk.image->samples != 1) ||
           (direct_resolve &&
            (target->vk.image->samples != 1 ||
             target->vk.format != iview->vk.format)) ||
