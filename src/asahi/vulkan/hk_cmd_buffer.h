@@ -483,6 +483,9 @@ struct hk_cs {
       struct agx_timestamp_req end;
    } timestamp;
 
+   /* Writable destinations known while recording meta compute dispatches. */
+   struct hk_drm_attachment_set compute_attachments;
+
    /* Remaining state is for graphics only, ignored for compute */
    struct agx_tilebuffer_layout tib;
 
@@ -867,6 +870,9 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       };
 
       list_inithead(&cs->node);
+      hk_drm_attachment_set_init(&cs->compute_attachments);
+      /* Only known meta destinations are collected so far. */
+      cs->compute_attachments.complete = false;
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
 

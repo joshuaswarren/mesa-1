@@ -224,6 +224,9 @@ hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
    vk_meta_fill_buffer_addr(&cmd->vk, &dev->meta, address, size, value);
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+   if (size && cmd->current_cs.cs)
+      hk_drm_attachment_set_add(&cmd->current_cs.cs->compute_attachments,
+                                address, size);
 
    if (redirect) {
       *target = cmd->current_cs.cs;
@@ -3157,6 +3160,13 @@ hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
       vk_meta_fill_buffer(&cmd->vk, &dev->meta, dstBuffer, dstOffset, dstRange,
                           data);
       hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      size_t size = vk_buffer_range(&buffer->vk, dstOffset, dstRange);
+      if (size && cmd->current_cs.cs) {
+         uint64_t address = vk_meta_buffer_address(&dev->vk, dstBuffer,
+                                                   dstOffset, dstRange);
+         hk_drm_attachment_set_add(&cmd->current_cs.cs->compute_attachments,
+                                   address, size);
+      }
       return;
    }
 

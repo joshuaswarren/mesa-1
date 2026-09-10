@@ -617,6 +617,26 @@ hk_g17p_write_range_candidates(struct hk_device *dev,
 }
 
 static void
+asahi_append_compute_attachments(struct hk_device *dev,
+                                 struct util_dynarray *payload,
+                                 const struct hk_cs *cs)
+{
+   const struct hk_drm_attachment_set *set = &cs->compute_attachments;
+   const uint32_t count = MIN2(set->count, dev->dev.params.max_attachments);
+   const struct drm_asahi_cmd_header header = {
+      .cmd_type = DRM_ASAHI_SET_COMPUTE_ATTACHMENTS,
+      .size = count * sizeof(set->list[0]),
+      .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+      .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+   };
+   /* Clear the preceding command's list even for an attachmentless dispatch. */
+   util_dynarray_append(payload, header);
+   if (count)
+      util_dynarray_append_array(payload, struct drm_asahi_attachment,
+                                 set->list, count);
+}
+
+static void
 asahi_append_fragment_attachments(struct hk_device *dev,
                                   struct util_dynarray *payload,
                                   const struct hk_cs *cs)
@@ -1397,6 +1417,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
                    cs->timestamp.end.handle);
 
+            asahi_append_compute_attachments(dev, &payload, cs);
             util_dynarray_append(&payload, header);
             struct drm_asahi_cmd_compute cmd;
             asahi_fill_cdm_command(dev, cs, &cmd);
