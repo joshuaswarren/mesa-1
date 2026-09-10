@@ -62,7 +62,10 @@ test(
     libgallium_dri,
     gl_mrt,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -88,7 +91,10 @@ test(
     gl_mrt,
     '--wboit',
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -126,6 +132,7 @@ test(
     gl_msaa,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_MSAA_DRAWS=12',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -152,7 +159,10 @@ test(
     libgallium_dri,
     gl_texture_offset,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -189,7 +199,10 @@ test(
     libgallium_dri,
     gl_depth_texture,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1',
+  ],
   suite : ['asahi'],
 )
 
@@ -299,7 +312,10 @@ test(
     libgallium_dri,
     gl_multi_viewport,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1',
+  ],
   suite : ['asahi'],
 )
 
@@ -501,6 +517,7 @@ test(
     gl_texture_cube_lod,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -548,6 +565,7 @@ test(
     gl_frag_constants,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS=7',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -576,6 +594,7 @@ test(
     gl_packed16_fbo,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_16BIT_FBO_DRAWS=4',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -593,7 +612,10 @@ test(
     libgallium_dri,
     gl_layered_fbo,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -608,6 +630,7 @@ test(
     gl_texture_array,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -635,6 +658,7 @@ test(
     gl_texture_3d,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -662,6 +686,7 @@ test(
     gl_texture_border,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS=3',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -690,7 +715,79 @@ test(
     gl_vertex_texture,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+# The kernel refuses a render job whose VM has not bound every T8140 native
+# context view (mmu.rs install_t8140_job_context_aliases), which is how a
+# driver without the fixed 0x1000000000 render-context bind fails on Neo:
+# "job context view 0 source 0x1000000000+0x10000 -> 0x0 is not bound".
+# The shim models that registry, so this asserts the bind contract host-side.
+test(
+  'asahi-g17p-gl-vertex-texture-shim-context-views',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_GL_EXPECT_RENDERER=A18 Pro',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+# The same draw on a shader-cache HIT, which is the path every launch after the
+# first one takes and which no other shim oracle exercises, because they all
+# disable the cache. A compiled-shader property that survives compilation but
+# not serialisation shows up only here.
+test(
+  'asahi-g17p-gl-vertex-texture-shim-warm-cache',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_GL_EXPECT_RENDERER=A18 Pro',
+    'ASAHI_GL_SHIM_WARM_CACHE=1',
+  ],
+  suite : ['asahi'],
+)
+
+# The AGX2 control arm: the same client and the same shim, changing only the
+# reported chip. A failure that reproduces here is not G17P-specific.
+test(
+  'asahi-g13g-gl-vertex-texture-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
   suite : ['asahi'],
@@ -716,7 +813,10 @@ test(
     libgallium_dri,
     egl_shared_context,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -767,6 +867,7 @@ test(
     gl_compute,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -957,7 +1058,10 @@ test(
     libgallium_dri,
     egl_gbm_swap,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1',
+  ],
   suite : ['asahi'],
 )
 
