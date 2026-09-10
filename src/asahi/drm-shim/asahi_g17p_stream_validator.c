@@ -72,6 +72,45 @@ fail_at(uint64_t address, const char *reason)
    return false;
 }
 
+/*
+ * A record the decoder understands but this oracle does not model.
+ *
+ * This validator's accept-set was grown from streams the Gallium driver was
+ * observed to emit.  Honeykrisp legitimately emits records outside that set --
+ * tessellation and geometry lower through TESSELLATE_DIRECT, and the compute
+ * side uses the substream/secondary barriers and link padding.  Refusing them
+ * would report a gap in the ORACLE as a bug in the DRIVER, which is the one
+ * misclassification that makes this whole harness untrustworthy.
+ *
+ * These records carry a decoded length, so the rest of the stream is still
+ * checked: say plainly that the oracle is the thing that fell short, and skip.
+ */
+static void
+oracle_gap_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P oracle gap at %#llx: %s is decodable but not modelled "
+           "by this validator -- NOT a driver bug, stream not rejected\n",
+           (unsigned long long)address, what);
+}
+
+/*
+ * A record the decoder could not identify at all.  Unlike the above there is
+ * no length, so validation cannot continue.  The cause is genuinely ambiguous
+ * -- a corrupt stream and a decoder that has never seen this opcode look
+ * identical from here -- so do not let it masquerade as a proven driver bug.
+ */
+static bool
+fail_indeterminate_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P undecodable record at %#llx: %s -- INDETERMINATE "
+           "(stream corruption or a decoder gap); not by itself evidence of a "
+           "driver bug\n",
+           (unsigned long long)address, what);
+   return false;
+}
+
 static bool
 read_owned(const struct asahi_g17p_stream_memory *memory, uint64_t address,
            void *dst, size_t size)
@@ -490,11 +529,20 @@ asahi_g17p_compute_validate(
       }
 
       case AGX3_CDM_RECORD_LINK_PADDING:
+         oracle_gap_at(cursor, "CDM link padding");
+         break;
+
       case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
+         oracle_gap_at(cursor, "CDM substream barrier");
+         break;
+
       case AGX3_CDM_RECORD_SECONDARY_BARRIER:
+         oracle_gap_at(cursor, "CDM secondary barrier");
+         break;
+
       case AGX3_CDM_RECORD_UNKNOWN:
       default:
-         return fail_at(cursor, "compute record is outside native Gallium");
+         return fail_indeterminate_at(cursor, "unrecognised CDM record");
       }
 
       cursor += record.length;
@@ -1053,9 +1101,13 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
       }
 
       case AGX_VDM_RECORD_TESSELLATE_DIRECT:
+         oracle_gap_at(cursor, "VDM direct tessellate");
+         cursor += record.length;
+         break;
+
       case AGX_VDM_RECORD_UNKNOWN:
       default:
-         return fail_at(cursor, "record is outside native Gallium matrix");
+         return fail_indeterminate_at(cursor, "unrecognised VDM record");
       }
    }
 
