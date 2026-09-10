@@ -26,7 +26,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
        (three_d &&
         (tex->is_array || tex->is_shadow ||
          (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-          tex->op != nir_texop_txl))) ||
+          tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
        /* A cube comparison publishes its reference through the same CEM
         * bracket the colour cube uses; it is witnessed only with an implicit
         * LOD. */
@@ -107,9 +107,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
    /* An explicit gradient is four 32-bit scalars staged into their own
     * operand banks. G17P array gradients name the independent dynamic layer
     * register directly in the sample instruction. */
+   const unsigned grad_components = three_d ? 3u : 2u;
    if (has_grad &&
-       (nir_src_num_components(tex->src[ddx].src) != 2 ||
-        nir_src_num_components(tex->src[ddy].src) != 2 ||
+       (nir_src_num_components(tex->src[ddx].src) != grad_components ||
+        nir_src_num_components(tex->src[ddy].src) != grad_components ||
         nir_src_bit_size(tex->src[ddx].src) != 32 ||
         nir_src_bit_size(tex->src[ddy].src) != 32))
       return false;

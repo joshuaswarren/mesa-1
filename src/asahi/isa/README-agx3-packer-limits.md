@@ -89,8 +89,10 @@ and every textured draw:
 | `textureGather(sampler2DShadow, uv, ref)` — a comparison gather      | yes¶    |
 | `texture(sampler2DArrayShadow, ...)`                                | yes¶    |
 | `textureGather(sampler2DArray, ...)`                                | yes¶    |
-| `textureGrad(sampler3D, ...)` / `texture(sampler3D, uvw, bias)`      | **no**¶ |
-| `textureGather(samplerCube, n)` / `texture(samplerCubeShadow, ...)`  | **no**¶ |
+| `textureGrad(sampler3D, ...)` / `texture(sampler3D, uvw, bias)`      | yes¶    |
+| `texture(samplerCubeShadow, ...)`                                   | yes¶    |
+| `texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))`                   | yes¶    |
+| `textureGather(samplerCube, n)`                                     | **no**¶ |
 | `textureQueryLod(tex, uv)`                                          | **no**¶ |
 
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
@@ -154,19 +156,6 @@ line:
   gather with the cube dimension f76 = 4 -- but a cube sample must first run
   three `cem_calc` instructions and publish the face, and that path does not
   admit a gather today.
-
-- **A cube depth comparison** (`samplerCubeShadow`). The instruction is
-  grounded (`1d800ca090003000010000001200`, f76 = 4 plus f143) and the packer
-  encodes it, but `agx_nir_lower_g17p_combined_sampler()` disowns a cube
-  comparison, so the shader falls back to the heap form and refuses.
-
-- **`textureGrad` on a 3D texture, and 3D bias.** `texture3d::sample(s, uvw,
-  bias(0.5f))` is `05800cb8b0003b00010010021200` and
-  `gradient3d(...)` is `05800cb8b0009c01000010001200` -- the ordinary f139
-  values on the f76 = 3 dimension, so the *instruction* is grounded for every
-  LOD mode. The gradient form additionally needs six staged scalars rather
-  than four, and that staging layout is not witnessed, so 3D stays restricted
-  to an implicit or immediate level.
 
 - **`textureQueryLod`.** No witness at all; it is a different instruction, not
   a mode of `smp`.
@@ -957,6 +946,47 @@ it elsewhere, so it accepts either the raw `nir_tex_src_offset` or the packed
 `nir_tex_src_backend2` and requires the value to be compile-time constant --
 only a constant can reach an immediate field.
 
+### The 3D dimension, and where the gradient's extra pair goes
+
+f76 = 3 is orthogonal to f139 exactly as the 2D dimension is. Five texture3d
+fragments differing only in the LOD argument:
+
+```
+t.sample(s, uvw)                  05800cb8b0008001010010001200
+t.sample(s, uvw, bias(0.5f))      05800cb8b0003b00010010021200   f139 1, f29 32
+t.sample(s, uvw, bias(in.dx.x))   05800cb8b0009001010010001200   f139 3
+t.sample(s, uvw, level(in.dx.x))  05800cb8b0008821010010001200   f139 4
+t.sample(s, uvw, gradient3d(...)) 05800cb8b0009c01000010001200   f139 5
+```
+
+The per-lane forms need no new staging: the `level(reg)` kernel publishes its
+scalar with f5 = 6, the same bank-6 publication `agx3_tex_stage_lod()` already
+emits for 2D.
+
+`gradient3d` stages **six** scalars where the 2D gradient stages four, and the
+extra pair continues the same interleave into banks 16 and 18. Read off two
+literal-gradient kernels, where each staged value is the constant itself and
+therefore names its own slot:
+
+```
+gradient2d((1,2), (4,8))                banks 8/10/12/14    = 1 / 4 / 2 / 8
+gradient3d((1,2,4), (8,16,32))          banks 8/10/12/14/16/18
+                                          = 1 / 8 / 2 / 16 / 4 / 32
+gradient3d((64,128,0.25), (0.5,.75,1.5)) = 64 / 0.5 / 128 / 0.75 / 0.25 / 1.5
+```
+
+so the run is (ddx.x, ddy.x, ddx.y, ddy.y, ddx.z, ddy.z) -- the 2D order with
+one more pair, and exactly the order `agx_emit_tex()`'s collect already builds.
+The 2D row is the control that validates the reading method.
+
+A cube *comparison* needed nothing but the NIR gate:
+`agx3_tex_encode_sample()` already produced `1d800ca090003000010000001200`
+(f76 = 4 plus f143) and the packer already published the reference before the
+CEM bracket. A cube *gather* is grounded as an instruction
+(`05800ca490001000010000001200`) but still refuses: a cube sample must first
+run three `cem_calc` instructions and publish its face, and that path does not
+admit a gather.
+
 ### texelFetchOffset was reaching an encoder with no offset field
 
 `agx_nir_lower_g17p_texture_early()` folds a txf offset into the coordinate --
@@ -1059,9 +1089,9 @@ the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
 As of 2026-09-10 the compute probe reports **24 of 24** encoding and the
-fragment probe **48 of 48**, with `AGX_MESA_DEBUG=shaders` printing no refusal
-line at all. That includes the ten probes added with the offset and comparison
-work (`f33`-`f42`). `f05_texture_bias`, `f12_texture_grad` and
+fragment probe **54 of 54**, with `AGX_MESA_DEBUG=shaders` printing no refusal
+line at all. That includes the sixteen probes added with the offset,
+comparison, 3D and texel-fetch work (`f33`-`f48`). `f05_texture_bias`, `f12_texture_grad` and
 `f16_saturate_texture`, which this file previously recorded as the three
 outstanding refusals, all encode. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before

@@ -282,12 +282,12 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * and the per-lane staging is the same bank-6 publication (f5 = 6) our 2D
     * path already emits, read straight out of the level(reg) kernel.
     *
-    * The gradient stays closed: gradient3d carries *six* scalars rather than
-    * four, and the bank layout for the extra pair is not witnessed. Array,
-    * gather and comparison combinations likewise remain closed. */
+    * gradient3d carries *six* scalars rather than four; the extra pair
+    * continues the same interleave into banks 16 and 18, witnessed on two
+    * literal-gradient kernels (see AGX3_TEX_GRADIENT_BANK_DDX_Z). Array,
+    * gather and comparison combinations remain closed. */
    if (d->three_d &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
-        d->lod == AGX3_TEX_LOD_GRADIENT ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 

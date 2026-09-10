@@ -664,9 +664,11 @@ test_sample_witnesses(void)
                                  &length));
    bad.array = false;
    bad.array_layer = 0;
+   /* The 3D gradient is witnessed now -- see test_3d_lod_witnesses() -- so
+    * it encodes; its six staged scalars are the packer's business. */
    bad.lod = AGX3_TEX_LOD_GRADIENT;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
-                                 &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
+                                &length));
    bad.lod = AGX3_TEX_LOD_AUTO;
    bad.gather = AGX3_TEX_GATHER_R;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
@@ -2534,13 +2536,22 @@ test_3d_lod_witnesses(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0008821010010001200"));
 
-   /* Apple's gradient3d row is 05800cb8b0009c01000010001200 -- the ordinary
-    * f139 = 5 -- but it stages six scalars, and the bank layout for the extra
-    * pair has no witness, so this encoder must refuse rather than reuse the
-    * four-bank 2D run. */
+   /* t.sample(s, uvw, gradient3d(dx, dy)) -- the ordinary f139 = 5. It stages
+    * six scalars rather than four; the extra pair continues the same
+    * interleave into banks 16 and 18. Read off two literal-gradient kernels,
+    * where each staged value is the constant itself:
+    *
+    *   gradient3d((1,2,4), (8,16,32))          banks 8/10/12/14/16/18
+    *                                             = 1 / 8 / 2 / 16 / 4 / 32
+    *   gradient3d((64,128,0.25), (0.5,.75,1.5)) = 64 / 0.5 / 128 / 0.75
+    *                                             / 0.25 / 1.5
+    *
+    * i.e. (ddx.x, ddy.x, ddx.y, ddy.y, ddx.z, ddy.z), the same interleave the
+    * 2D control gradient2d((1,2),(4,8)) shows on banks 8/10/12/14. */
    d = base;
    d.lod = AGX3_TEX_LOD_GRADIENT;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0009c01000010001200"));
 
    /* No 3D gather, no 3D comparison, no 3D array, nothing on AGX3c. */
    d = base;

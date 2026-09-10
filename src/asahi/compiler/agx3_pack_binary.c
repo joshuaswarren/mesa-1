@@ -1339,9 +1339,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1;
    /* A 2D gradient is four 32-bit scalars in one aligned run, which the four
     * staging copies name two halves apart. */
+   /* A 2D gradient is four 32-bit scalars in one aligned run; a 3D one is
+    * six, and agx_emit_tex()'s collect already lays both out in the
+    * interleaved order the staging banks want. */
+   const unsigned gradient_channels = three_d ? 6u : 4u;
    const bool gradient_operand = agx3_tex_plain_reg(I->src[1]) &&
-      I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 4 &&
-      (I->src[1].value & 1) == 0 && I->src[1].value + 6 < 128;
+      I->src[1].size == AGX_SIZE_32 &&
+      agx_channels(I->src[1]) == gradient_channels &&
+      (I->src[1].value & 1) == 0 &&
+      I->src[1].value + (2 * gradient_channels) - 2 < 128;
    const bool valid_lod = explicit_lod ?
       (enc == AGX_ISA_ENCODING_AGX3B &&
        (valid_immediate_lod || scalar_lod_reg)) :
@@ -1409,9 +1415,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         * because gradient3d stages six scalars and that layout has no
         * witness. See agx3_tex_core.c for the five-row table. */
        (three_d &&
-        (enc != AGX_ISA_ENCODING_AGX3B || gradient_lod ||
+        (enc != AGX_ISA_ENCODING_AGX3B ||
          (!valid_immediate_lod && !implicit_lod && !biased_lod &&
-          !register_bias && !explicit_lod))) ||
+          !register_bias && !explicit_lod && !gradient_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod))) ||
@@ -1615,12 +1621,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * collect that produced them is laid out the same way, so the run is
     * copied straight through. */
    if (gradient_lod) {
-      static const uint16_t bank[4] = {
+      static const uint16_t bank[6] = {
          AGX3_TEX_GRADIENT_BANK_DDX_X, AGX3_TEX_GRADIENT_BANK_DDY_X,
          AGX3_TEX_GRADIENT_BANK_DDX_Y, AGX3_TEX_GRADIENT_BANK_DDY_Y,
+         AGX3_TEX_GRADIENT_BANK_DDX_Z, AGX3_TEX_GRADIENT_BANK_DDY_Z,
       };
 
-      for (unsigned i = 0; i < 4; ++i) {
+      for (unsigned i = 0; i < gradient_channels; ++i) {
          if (!agx3_tex_stage_copy_hints(enc, bank[i],
                                         I->src[1].value + (2 * i), stage_slot,
                                         0, I->src[1].cache, I->src[1].discard,
