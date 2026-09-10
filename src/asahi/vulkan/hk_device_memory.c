@@ -448,7 +448,9 @@ hk_GetMemoryFdKHR(VkDevice device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
       return VK_SUCCESS;
    default:
       assert(!"unsupported handle type");
-      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "vkGetMemoryFdKHR: unsupported handle type 0x%x",
+                       pGetFdInfo->handleType);
    }
 }
 
