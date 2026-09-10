@@ -9034,6 +9034,21 @@ TEST_F(AGX3PackBinary, FselZeroNativeLifetimeAndCompareOrder)
    }
 }
 
+TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(2, AGX_SIZE_32);
+   a.neg = a.cache = true;
+   agx_index c = agx_register(12, AGX_SIZE_32);
+   agx_index t = agx_register(10, AGX_SIZE_32);
+   agx_index f = agx_register(18, AGX_SIZE_32);
+   c.discard = t.discard = f.discard = true;
+   agx_fcmpsel_to(b, agx_register(10, AGX_SIZE_32), a, c, t, f,
+                  AGX_FCOND_EQ);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

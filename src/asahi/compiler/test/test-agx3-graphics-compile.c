@@ -4314,6 +4314,32 @@ build_fs_hyprland_discard_predicate(void)
    return fs_finish(&b);
 }
 
+/* Chromium/Skia's rounded-rect fragment compares a negated highp value for
+ * equality and selects two unrelated highp values.  The backend must
+ * materialize fneg before RA and reach the grounded unmodified FSEL. */
+static nir_shader *
+build_fs_chromium_negated_equality_select(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Chromium negated equality select FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_def *y = nir_channel(&b, input, 1);
+   nir_def *t = nir_channel(&b, input, 2);
+   nir_def *f = nir_channel(&b, input, 3);
+   nir_def *selected = nir_bcsel(&b, nir_feq(&b, nir_fneg(&b, x), y), t, f);
+   fs_store_colour(&b, nir_vec4(&b, selected, x, y,
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 /* Hyprland clamps the motion-blur loop bound through a float comparison that
  * selects a raw 16-bit one or a retained half register. Both constants must
  * be materialized before using the general half-register FSEL. */
@@ -4880,6 +4906,8 @@ static const struct agx3_graphics_case cases[] = {
     .g17p_only = true},
    {"fs-hyprland-discard-predicate", build_fs_hyprland_discard_predicate,
     true, .g17p_only = true},
+   {"fs-chromium-negated-equality-select",
+    build_fs_chromium_negated_equality_select, true, .g17p_only = true},
    {"fs-hyprland-motion-bound", build_fs_hyprland_motion_bound, true,
     .g17p_only = true},
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
@@ -5298,6 +5326,19 @@ main(int argc, char **argv)
    if (argc == 2 && !strcmp(argv[1], "--vkcube-fragment-only")) {
       const bool ok = test_g17p_vkcube_fragment_main();
       fprintf(stderr, "G17P stock vkcube fragment main: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 &&
+       !strcmp(argv[1], "--chromium-negated-equality-only")) {
+      const struct agx3_graphics_case c = {
+         "fs-chromium-negated-equality-select",
+         build_fs_chromium_negated_equality_select,
+         true,
+         .g17p_only = true,
+      };
+      const bool ok = run_case(&c, AGX_ISA_ENCODING_AGX3B);
+      fprintf(stderr, "G17P Chromium negated equality select: %s\n",
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
