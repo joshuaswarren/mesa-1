@@ -3948,8 +3948,19 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Pack shadow reference value (compare) and packed offset together */
    agx_index compare_offset = agx_null();
 
-   if (!agx_is_null(compare) && !agx_is_null(packed_offset))
+   if (!agx_is_null(compare) && !agx_is_null(packed_offset)) {
+      /* G17P carries the offset as an immediate field in the sample and the
+       * comparator as a staged register, so it cannot take both through this
+       * one vector operand; the packer refuses the combination. Materialize
+       * the immediate first so what reaches the refusal is ordinary IR --
+       * a 32-bit immediate inside a COLLECT is not a shape
+       * agx_validate_sources() models, and it exits the process rather than
+       * failing the shader closed. */
+      if (packed_offset.type == AGX_INDEX_IMMEDIATE)
+         packed_offset = agx_mov_imm(b, 32, packed_offset.value);
+
       compare_offset = agx_vec2(b, compare, packed_offset);
+   }
    else if (!agx_is_null(packed_offset))
       compare_offset = packed_offset;
    else if (!agx_is_null(compare))

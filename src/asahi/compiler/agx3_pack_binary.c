@@ -1422,9 +1422,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         * instead and selects f141 = 2, a form with no slot plan here), and a
         * shadow sample cannot carry both values because agx_emit_tex() packs
         * the comparator and the offset into one src[5] vector, which the
-        * comparator staging below cannot take apart. GLSL never asks for the
-        * latter: nir_lower_tex folds a constant offset into a shadow
-        * coordinate before it reaches this packer. */
+        * comparator staging below cannot take apart. GLSL *does* ask for the
+        * latter -- the coordinate fold is only legal for an integer texel
+        * fetch -- so textureOffset(sampler2DShadow, ...) refuses here. The
+        * instruction itself is grounded (1d800ca090002102018800001200);
+        * encoding it needs the offset to stop sharing src[5] with the
+        * comparator. See README-agx3-packer-limits.md. */
        (offset &&
         (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube || shadow ||
          (array && (biased_lod || (explicit_lod && immediate_lod))))) ||

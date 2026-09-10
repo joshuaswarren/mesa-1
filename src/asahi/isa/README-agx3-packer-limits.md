@@ -180,8 +180,19 @@ line:
 - **A shadow sample carrying a coordinate offset.** The instruction is grounded
   (`1d800ca090002102018800001200`), but `agx_emit_tex()` packs the comparator
   and the offset into one `src[5]` vector and the comparator staging cannot
-  take it apart. GLSL never asks: `nir_lower_tex` folds a constant offset into
-  a shadow coordinate first.
+  take it apart. **An earlier revision of this file claimed `nir_lower_tex`
+  folds a constant offset into a shadow coordinate so GLSL never asks for the
+  combination. That is wrong** -- the fold is only legal for an integer texel
+  fetch, and `textureOffset(sampler2DShadow, ...)` reaches the packer with
+  both. It now refuses cleanly (see below); it used to `exit(1)`.
+
+  Implementing it needs the packed offset to stop sharing `src[5]` with the
+  comparator, i.e. a new instruction immediate on `texture_sample`. That is an
+  additive change to `agx_opcodes.py`, but `agx_opt_cse.c`'s `instrs_equal()`
+  is **hand-written and enumerates fields one by one**, so a new immediate that
+  is not added there lets two samples differing only in their offset CSE into
+  one -- a silent wrong result. Do it with that line and a regression test, or
+  not at all.
 
 - **An array sample with both an immediate level/bias and an offset.** f43 is
   one shared immediate slot and the array LOD already claims it. Apple stages
@@ -207,29 +218,6 @@ Known-missing elsewhere:
   16-bit, and that shape refuses in the ALU fallback, not the texture path:
   `no grounded AGX3 encoding for fcmpsel [d16:reg8 s0=32:reg6.abs.cache
   s1=32:reg2.cache s2=16:imm1 s3=16:imm0 cond=5 chan=1]`.
-
-## Two shapes abort the compiler instead of failing closed
-
-Found 2026-09-10, pre-existing, **not fixed here** because the fix wants its own
-grounding. `agx_validate_sources()` (`agx_validate.c`, the immediate branch)
-exempts a 32-bit immediate from the 16-bit rule only for
-`AGX_OPCODE_TEXTURE_SAMPLE` with `!I->shadow`. Two shapes fall outside that:
-
-```
-texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))
-  Invalid sources form after IR translation
-     67 = texture_load 45, #0, u8:u9, 1, #0, #17, xyzw, #0x0, 2d, slot 0
-
-textureOffset(sampler2DShadow, vec3(uv, 0.5), ivec2(1,1))
-  Invalid sources form after IR translation
-     22 = collect 8, #17
-```
-
-`#17` is the packed offset `(y << 4) | x` that `agx_nir_lower_texture()` builds
-and `agx_emit_tex()` widens to 32 bits. The first is a `texture_load`, the
-second a `collect`; neither is the exempted opcode. The validator is
-`#ifndef NDEBUG`, so a release driver does not abort — it proceeds, and the
-texel-fetch encoder has no offset field at all, which is the more worrying half.
 
 ## The source modifiers and the 32-bit rounding modes
 
@@ -968,6 +956,43 @@ The gate runs *before* `agx_nir_lower_texture()` in the fragment path and after
 it elsewhere, so it accepts either the raw `nir_tex_src_offset` or the packed
 `nir_tex_src_backend2` and requires the value to be compile-time constant --
 only a constant can reach an immediate field.
+
+### texelFetchOffset was reaching an encoder with no offset field
+
+`agx_nir_lower_g17p_texture_early()` folds a txf offset into the coordinate --
+`texelFetchOffset(s, P, lod, offset)` is *defined* as `texelFetch(s, P + offset,
+lod)`, so the fold is exact rather than an approximation, and it is the only
+option: Metal cannot express a `read()` with an offset, so no witness for such
+a field can exist.
+
+Gallium selected that pass (`agx_state.c`, gated on `AGX_CHIP_G17P`).
+**Honeykrisp did not** -- `hk_shader.c` called the generic
+`agx_nir_lower_texture_early()` unconditionally. So on the Vulkan path the
+offset survived into a `texture_load` carrying a 32-bit immediate source, which
+`agx_validate_sources()` does not model. In a debug build that is
+`exit(1)`; in a release build the validator is compiled out entirely and the
+fetch encoder, which has no offset field, is reached instead. Now gated the
+same way Gallium gates it.
+
+### Two shapes used to abort; both now fail closed
+
+`agx_validate_sources()` exempts a 32-bit immediate from its 16-bit rule only
+for `AGX_OPCODE_TEXTURE_SAMPLE` with `!I->shadow`, and `agx_validate()` ends in
+`exit(1)`. Two shapes fell outside:
+
+```
+texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))
+     67 = texture_load 45, #0, u8:u9, 1, #0, #17, xyzw, #0x0, 2d, slot 0
+
+textureOffset(sampler2DShadow, vec3(uv, 0.5), ivec2(1,1))
+     22 = collect 8, #17
+```
+
+The first is gone at the source: the fold above means no `texture_load` ever
+carries an offset on G17P. The second stays a refusal, but an honest one --
+`agx_emit_tex()` now materializes the immediate into a register before the
+collect, so what reaches the packer is ordinary IR and what comes back is
+`no grounded AGX3 encoding for texture_sample` rather than a dead process.
 
 ### What is checked
 
