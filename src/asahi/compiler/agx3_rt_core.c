@@ -135,6 +135,40 @@ static const struct rt_site c_intersect_sites[] = {
    {{KV(5, 8), KV(28, 1)}, 2},
 };
 
+/*
+ * The invariant context shared by every witnessed AGX3b ray-query
+ * intersect_ray; f5, f77 and f92 are the three fields that vary.
+ */
+static const struct agx3_field_kv b_intersect_query_base[] = {
+   KV(9, 5),   KV(12, 6),  KV(13, 1),  KV(30, 1),  KV(49, 32),
+   KV(55, 3),  KV(56, 3),  KV(63, 100), KV(69, 3), KV(70, 2),
+   KV(84, 2),  KV(85, 2),  KV(88, 1),  KV(98, 3),  KV(99, 1),
+};
+
+bool
+agx3_rt_intersect_ray_query(enum agx_isa_encoding enc, uint16_t site,
+                            uint16_t per_query, uint16_t context,
+                            uint8_t out[AGX3_RT_CORE_MAX_LENGTH], uint8_t *len)
+{
+   if (!args_ok(out, len))
+      return false;
+
+   /* f5 is 13 bits; f77 is refused at 192 and above. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || site > 8191u || per_query > 191u) {
+      memset(out, 0, AGX3_RT_CORE_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+
+   const struct agx3_field_kv ov[] = {
+      KV(5, site),
+      KV(77, per_query),
+      KV(92, context),
+   };
+   return rt_compose(enc, "intersect_ray", b_intersect_query_base,
+                     NELEM(b_intersect_query_base), ov, NELEM(ov), out, len);
+}
+
 unsigned
 agx3_rt_intersect_ray_num_witnessed_sites(enum agx_isa_encoding enc)
 {

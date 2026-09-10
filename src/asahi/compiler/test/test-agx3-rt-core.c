@@ -336,6 +336,67 @@ main(void)
                                            &len),
                   b, len);
 
+   /*
+    * The ray-query intersect_ray differential, measured 2026-09-10 from
+    * Apple's compiler.  Two and three simultaneously live named queries,
+    * built for applegpu_g17p with metal-nt exactly as README-metal-witness.md
+    * describes, then linear-disassembled.  f77 takes one distinct value per
+    * query while the SCS ray staging offsets stay 0 and 16 throughout; f5
+    * stays within {0, 4} regardless of how many queries are live.
+    */
+   static const struct {
+      uint16_t site, per_query, context;
+      const char *hex;
+      const char *note;
+   } g17p_query_sites[] = {
+      {0,  88, 124, "5f10540000412680854fcc00", "two queries, q1"},
+      {4,  88, 124, "5f10540400412680854fcc00", "two queries, q1"},
+      {0,  14, 124, "5f105400004126e0804fcc00", "two queries, q2"},
+      {4,  14, 124, "5f105404004126e0804fcc00", "two queries, q2"},
+      {0, 106, 122, "5f105400004126a0464fcc00", "three queries, q1"},
+      {4, 106, 122, "5f105404004126a0464fcc00", "three queries, q1"},
+      {0,  32, 122, "5f10540000412600424fcc00", "three queries, q2"},
+      {4,  32, 122, "5f10540400412600424fcc00", "three queries, q2"},
+      {0,   2, 122, "5f10540000412620404fcc00", "three queries, q3"},
+      {4,   2, 122, "5f10540400412620404fcc00", "three queries, q3"},
+   };
+
+   for (unsigned i = 0;
+        i < sizeof(g17p_query_sites) / sizeof(g17p_query_sites[0]); ++i) {
+      char what[96];
+      snprintf(what, sizeof(what), "G17P intersect_ray %s f5=%u f77=%u",
+               g17p_query_sites[i].note, g17p_query_sites[i].site,
+               g17p_query_sites[i].per_query);
+      expect(what,
+             agx3_rt_intersect_ray_query(
+                AGX_ISA_ENCODING_AGX3B, g17p_query_sites[i].site,
+                g17p_query_sites[i].per_query, g17p_query_sites[i].context, b,
+                &len),
+             b, len, g17p_query_sites[i].hex);
+   }
+
+   /* Measured bounds: f5 is 13 bits, f77 is refused at 192. */
+   expect_refused("intersect_ray query f5 above 13 bits",
+                  agx3_rt_intersect_ray_query(AGX_ISA_ENCODING_AGX3B, 8192, 2,
+                                              122, b, &len),
+                  b, len);
+   expect_refused("intersect_ray query f77 = 192",
+                  agx3_rt_intersect_ray_query(AGX_ISA_ENCODING_AGX3B, 0, 192,
+                                              122, b, &len),
+                  b, len);
+   expect_refused("intersect_ray query on AGX3c",
+                  agx3_rt_intersect_ray_query(AGX_ISA_ENCODING_AGX3C, 0, 2,
+                                              122, b, &len),
+                  b, len);
+   checks++;
+   if (agx3_rt_intersect_ray_query(AGX_ISA_ENCODING_AGX3B, 0, 2, 122, NULL,
+                                   &len) ||
+       agx3_rt_intersect_ray_query(AGX_ISA_ENCODING_AGX3B, 0, 2, 122, b,
+                                   NULL)) {
+      fprintf(stderr, "intersect_ray query accepted a NULL argument\n");
+      failures++;
+   }
+
    /* NULL-argument hardening. */
    checks++;
    if (agx3_rt_inc_stk_operands(AGX_ISA_ENCODING_AGX3B, 40, 4, NULL, &len) ||

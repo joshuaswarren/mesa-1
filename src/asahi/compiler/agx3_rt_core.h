@@ -42,13 +42,25 @@
  *    machine field (incStk's sole nonzero Apple-table operand decodes as
  *    f24=4 with no value ladder).  Missing witness: operand-varying
  *    differential pairs.  Only the canonical fixed bytes are encodable.
- *  - intersect_ray / continue_ray fields other than f5: the anonymous
- *    selector/hint fields are held at their corpus values (the alternate
- *    witnessed intersect_ray tuples are reachable only through the
- *    enumerated witnessed-site replay below).  Missing witness: semantic
- *    differentials for those fields.  f5 itself is a 13-bit half-register
- *    field per Apple's tables; its ray-state/SCS role is an inference from
- *    the surrounding lowering.
+ *  - intersect_ray f77 is no longer anonymous: a concurrency differential
+ *    (one, two and three simultaneously live named ray queries built for
+ *    applegpu_g17p) gives exactly one distinct f77 per query, so it
+ *    discriminates the ray query.  agx3_rt_intersect_ray_query encodes it.
+ *  - f5's "ray state" reading is REFUTED for intersect_ray.  It does not
+ *    discriminate queries: it stays within {0, 4} with one, two or three
+ *    queries live, and with four concurrent queries every intersect_ray
+ *    still carries f5=0.  It is a 13-bit field per Apple's tables and every
+ *    value 0..8191 encodes, but Apple emits only 0 and 4, one at each of the
+ *    two intersect_ray sites a single traversal contains.  The name
+ *    `state_register` on the older byte-level entry points predates this
+ *    measurement.
+ *  - intersect_ray f63/f78/f92 and the continue_ray context fields are still
+ *    held at their corpus values.  Missing witness: semantic differentials.
+ *    f92 is known only to vary between kernels (122 and 124 in the two
+ *    ray-query corpora), and register pressure moves none of them -- a
+ *    six-point ladder holding extra values live across the instruction
+ *    leaves it byte-identical, so they are not allocator-assigned
+ *    registers.
  *  - Scoreboard/wait variation on any RT form: every witnessed RT
  *    instruction carries the same wait/hint bits, so no wait mask is
  *    exposed.  Missing witness: an RT instruction with a different wait set.
@@ -89,6 +101,37 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * state registers.  No claim is made about what selects one context over
  * another -- that witness is missing, so the tuples are only enumerable.
  */
+/*
+ * Encode one AGX3b inline-ray-query intersect_ray from the three fields that
+ * actually vary across Apple's ray-query lowering.
+ *
+ * `per_query` is Apple's f77.  It is isolated, not guessed: compiling one, two
+ * and three simultaneously live named ray queries for applegpu_g17p yields one
+ * distinct f77 value per query (two queries -> {88, 14}; three -> {106, 32,
+ * 2}), while the SCS ray staging offsets stay 0 and 16 for every query and a
+ * six-point register-pressure ladder leaves the whole instruction unchanged.
+ * So f77 discriminates the ray query.  Its encodable range is exactly 0..191,
+ * the same bound agx3_scs_core applies to an AGX3b scalar register index,
+ * which is consistent with a half-register index but is not proof of one, so
+ * no register name is given here.
+ *
+ * `site` is Apple's f5, a full 13-bit field (0..8191 all encode).  It is NOT
+ * the per-query discriminator: it stays within {0, 4} whether one, two or
+ * three queries are live, taking one value at each of the two intersect_ray
+ * sites a single query's traversal contains.
+ *
+ * `context` is Apple's f92.  It varies between kernels (124 in the two-query
+ * corpus, 122 in the three-query one) and no differential explains it, so it
+ * is carried verbatim and deliberately unnamed.
+ *
+ * Values outside the composer's tables are refused by the composer itself.
+ * AGX3c is refused: this differential is an AGX3b/G17P corpus.
+ */
+bool agx3_rt_intersect_ray_query(enum agx_isa_encoding enc, uint16_t site,
+                                 uint16_t per_query, uint16_t context,
+                                 uint8_t out[AGX3_RT_CORE_MAX_LENGTH],
+                                 uint8_t *len);
+
 unsigned agx3_rt_intersect_ray_num_witnessed_sites(enum agx_isa_encoding enc);
 bool agx3_rt_intersect_ray_witnessed_site(enum agx_isa_encoding enc,
                                           unsigned site,
