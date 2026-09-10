@@ -23,6 +23,7 @@
 #include "agx_tilebuffer.h"
 #include "agx_usc.h"
 #include "agx_uvs.h"
+#include "agx_vdm_barrier_core.h"
 #include "agx_vdm_hal200_bind_tail_core.h"
 #include "agx_vdm_hal200_direct_draw_core.h"
 #include "hk_buffer.h"
@@ -4141,6 +4142,38 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
    uint8_t *out = cs->current;
+
+   /* Reaching here means this draw republishes render state: the early return
+    * above is the only exit for a draw that reuses the state the previous one
+    * latched.  On AGX3 that republication is not just a set of immediate
+    * words like AGX2's VDM_STATE -- it installs a fresh vertex-program
+    * template, a fresh HAL200 bind tail, and a fresh draw-state context
+    * selector, all of which are *pointers* the VDM dereferences.  Overwriting
+    * that indirection while the previous draw is still walking it is a
+    * read-after-write on the state path, and it presents as a GMMU read fault
+    * rather than a wrong pixel.
+    *
+    * AGX2 needs nothing here and is deliberately left alone: its draws carry
+    * their state inline, so there is no shared indirection to tear.
+    *
+    * This is the narrow form of what ZINK_DEBUG=sync buys.  On the graphics
+    * side that flag's only effect is CmdEndRendering per draw, which starts a
+    * new control stream, and every control stream opens with exactly this
+    * barrier word in hk_cs_init_graphics().  So sync already relies on a
+    * barrier before each draw -- it just pays for a full tilebuffer store and
+    * background reload to get one.  Emit the four bytes and skip the split.
+    *
+    * cs->stats.cmds is the number of draw bodies already written to this
+    * stream, so a zero means hk_cs_init_graphics() has just emitted the
+    * stream-head barrier and there is nothing yet to order against.
+    */
+   struct agx_vdm_barrier_core interdraw_barrier;
+   if (cs->stats.cmds > 0 &&
+       agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
+      memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
+      out += interdraw_barrier.length;
+   }
+
    struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
 
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||

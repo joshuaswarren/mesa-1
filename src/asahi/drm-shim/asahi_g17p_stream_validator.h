@@ -24,6 +24,16 @@ struct asahi_g17p_stream_stats {
    unsigned draws;
    unsigned indexed_draws;
    unsigned state_updates;
+   /* Every VDM memory-barrier record in the stream, and the subset of them
+    * that separate one draw body from a later one.  hk_cs_init_graphics()
+    * always opens a stream with one barrier before any draw exists, so only
+    * the second number describes inter-draw ordering. */
+   unsigned barriers;
+   unsigned inter_draw_barriers;
+   /* State republications that follow a draw without a barrier in between.
+    * This is the hazard the inter-draw barrier exists to close, so a test can
+    * assert it is zero rather than only that some barriers were emitted. */
+   unsigned unbarriered_state_republications;
    unsigned links;
    unsigned viewport_count;
    unsigned max_instance_count;

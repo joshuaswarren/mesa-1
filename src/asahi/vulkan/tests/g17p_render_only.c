@@ -1080,6 +1080,14 @@ main(
    vkCmdEndConditionalRenderingEXT(command_buffer);
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#if defined(G17P_REPEAT_DRAW)
+   /* Identical draws with nothing recorded in between. Honeykrisp takes the
+    * unchanged-state early return for every one after the first, so they are
+    * body-only draws that reuse the render state the first draw latched --
+    * the case that must NOT collect an inter-draw VDM barrier. */
+   for (unsigned repeat = 1; repeat < G17P_REPEAT_DRAW; ++repeat)
+      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#endif
 #endif
 #if defined(G17P_TINY_RENDER_RECORD)
    }
@@ -1175,6 +1183,16 @@ main(
               waited);
       return EXIT_FAILURE;
    }
+
+#if defined(G17P_REPEAT_DRAW)
+   /* The recorded stream is the whole point here and the shim executes
+    * nothing, so there are no pixels to compare. What the submission proves is
+    * checked by the shim's own inter-draw barrier accounting. */
+   printf("g17p-vulkan-repeat-draw: %u identical draws recorded and "
+          "submitted in one render pass\n",
+          (unsigned)G17P_REPEAT_DRAW);
+   return EXIT_SUCCESS;
+#endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
    if (submit_only) {

@@ -1976,6 +1976,19 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Four identical draws in one render pass with no state recorded between
+    # them. This is the control for the inter-draw VDM barrier: the barrier is
+    # attached to render-state republication, so a stream of body-only draws
+    # must collect none of them.
+    g17p_repeat_draw = executable(
+      'g17p-vulkan-repeat-draw',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_REPEAT_DRAW=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Record the exact tiny render shape used by startup-sized engine targets.
     # G17P_TINY_CLEAR_ONLY=1 records the corresponding clear-only stream.
     executable(

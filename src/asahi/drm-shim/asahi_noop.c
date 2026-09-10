@@ -309,6 +309,10 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    matrix_stats.draws += stats->draws;
    matrix_stats.indexed_draws += stats->indexed_draws;
    matrix_stats.state_updates += stats->state_updates;
+   matrix_stats.barriers += stats->barriers;
+   matrix_stats.inter_draw_barriers += stats->inter_draw_barriers;
+   matrix_stats.unbarriered_state_republications +=
+      stats->unbarriered_state_republications;
    matrix_stats.stencil_state_updates += stats->stencil_state_updates;
    matrix_stats.links += stats->links;
    matrix_stats.viewport_count =
@@ -382,6 +386,50 @@ check_matrix_coverage(void)
    }
 
    fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
+}
+
+/*
+ * Assert where the inter-draw VDM barrier landed.
+ *
+ * ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS is "<barriers>" or
+ * "<barriers>:<draws>".  It checks both directions at once:
+ *
+ *  - the expected number of barriers that separate two draws actually
+ *    appeared, so a fix that silently stopped emitting is caught; and
+ *  - unbarriered_state_republications is zero, so a barrier emitted in the
+ *    wrong place cannot satisfy the count.  That second number is computed
+ *    from the stream itself rather than from the expectation, which is what
+ *    makes this an ordering check and not a tally.
+ */
+static void __attribute__((destructor))
+check_inter_draw_barriers(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS");
+   if (!value)
+      return;
+
+   char *rest = NULL;
+   const unsigned expected = strtoul(value, &rest, 10);
+   const bool have_draws = rest && *rest == ':';
+   const unsigned expected_draws =
+      have_draws ? strtoul(rest + 1, NULL, 10) : 0;
+
+   if (matrix_stats.inter_draw_barriers != expected ||
+       matrix_stats.unbarriered_state_republications != 0 ||
+       (have_draws && matrix_stats.draws != expected_draws)) {
+      fprintf(stderr,
+              "shim: G17P inter-draw barriers %u/%u, unbarriered state "
+              "republications %u/0, draws %u/%s\n",
+              matrix_stats.inter_draw_barriers, expected,
+              matrix_stats.unbarriered_state_republications,
+              matrix_stats.draws, have_draws ? rest + 1 : "any");
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: G17P emitted %u inter-draw VDM barriers across %u draws "
+           "with no unbarriered state republication\n",
+           matrix_stats.inter_draw_barriers, matrix_stats.draws);
 }
 
 static void __attribute__((destructor))
@@ -1109,9 +1157,11 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          merge_stream_stats(&stats);
          fprintf(stderr,
                  "shim: G17P VDM validated: %u draws, %u indexed, %u state "
-                 "updates, %u links\n",
+                 "updates, %u links, %u barriers (%u inter-draw, %u "
+                 "unbarriered republications)\n",
                  stats.draws, stats.indexed_draws, stats.state_updates,
-                 stats.links);
+                 stats.links, stats.barriers, stats.inter_draw_barriers,
+                 stats.unbarriered_state_republications);
       } else if (header->cmd_type == DRM_ASAHI_CMD_COMPUTE) {
          if (header->size < offsetof(struct drm_asahi_cmd_compute,
                                      cdm_ctrl_stream_end) +

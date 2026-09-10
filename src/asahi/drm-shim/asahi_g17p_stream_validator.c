@@ -948,6 +948,11 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
    bool pending_selector = false;
    bool have_state = false;
    bool restart_seen = false;
+   /* Cleared by every draw body, set by every barrier record.  A state
+    * republication seen while this is false is a draw installing fresh VDM
+    * pointers over the ones an earlier draw in this same stream may still be
+    * dereferencing. */
+   bool barrier_since_last_draw = false;
    const uint64_t root = config ? config->root : 0;
    uint64_t cursor = root;
 
@@ -1048,6 +1053,9 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
 
       switch (record.kind) {
       case AGX_VDM_RECORD_BARRIER:
+         local.barriers++;
+         local.inter_draw_barriers += local.draws > 0;
+         barrier_since_last_draw = true;
          cursor += record.length;
          break;
 
@@ -1081,12 +1089,15 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          pending_selector = true;
          have_state = true;
          local.state_updates++;
+         if (local.draws > 0 && !barrier_since_last_draw)
+            local.unbarriered_state_republications++;
          break;
 
       case AGX_VDM_RECORD_INDEX_LIST_NONINDEXED:
          if (!have_state || restart_seen)
             return fail_at(cursor, "non-indexed draw has invalid state order");
          local.draws++;
+         barrier_since_last_draw = false;
          if (record.data.index_list_nonindexed.instances >
              local.max_instance_count)
             local.max_instance_count =
@@ -1110,6 +1121,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             return fail_at(cursor, "indexed draw buffer is not owned");
          restart_seen = false;
          local.draws++;
+         barrier_since_last_draw = false;
          local.indexed_draws++;
          local.primitive_mask |= UINT32_C(1) << draw->primitive;
          local.index_size_mask |= UINT8_C(1) << draw->index_size;
@@ -1145,6 +1157,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
                 16))
             return fail_at(cursor, "indirect draw arguments are not owned");
          local.draws++;
+         barrier_since_last_draw = false;
          local.primitive_mask |= UINT32_C(1) <<
                                  record.data.index_list_indirect_nonindexed.primitive;
          local.indirect_nonindexed = true;
@@ -1161,6 +1174,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             return fail_at(cursor,
                            "indexed-indirect buffers are not owned");
          local.draws++;
+         barrier_since_last_draw = false;
          local.indexed_draws++;
          local.primitive_mask |= UINT32_C(1) << draw->primitive;
          local.index_size_mask |= UINT8_C(1) << draw->index_size;
