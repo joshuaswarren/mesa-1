@@ -2489,6 +2489,76 @@ test_shadow_lod_witnesses(void)
    return 0;
 }
 
+/*
+ * The 3D dimension against every LOD shape, byte-exact against Apple.
+ *
+ * Five texture3d fragments differing only in the LOD argument, same harness
+ * as test_offset_witnesses().  f76 = 3 is orthogonal to f139 exactly as the
+ * 2D dimension is, which is what admits the bias and per-lane forms; the
+ * gradient is held back because gradient3d stages six scalars rather than
+ * four and that layout is not witnessed.
+ */
+static int
+test_3d_lod_witnesses(void)
+{
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   const struct agx3_tex_sample_desc base = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1u << 0,
+      .coord_kill = true, .final = true, .three_d = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT,
+   };
+   struct agx3_tex_sample_desc d;
+
+   /* t.sample(s, uvw) */
+   d = base;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0008001010010001200"));
+
+   /* t.sample(s, uvw, bias(0.5f)) -- f139 = 1, f29 = 32 */
+   d = base;
+   d.lod = AGX3_TEX_LOD_BIAS;
+   d.lod_x64 = 32;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0003b00010010021200"));
+
+   /* t.sample(s, uvw, bias(in.dx.x)) -- f139 = 3, scalar staged to bank 6 */
+   d = base;
+   d.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0009001010010001200"));
+
+   /* t.sample(s, uvw, level(in.dx.x)) -- f139 = 4, same bank-6 staging */
+   d = base;
+   d.lod = AGX3_TEX_LOD_REGISTER;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0008821010010001200"));
+
+   /* Apple's gradient3d row is 05800cb8b0009c01000010001200 -- the ordinary
+    * f139 = 5 -- but it stages six scalars, and the bank layout for the extra
+    * pair has no witness, so this encoder must refuse rather than reuse the
+    * four-bank 2D run. */
+   d = base;
+   d.lod = AGX3_TEX_LOD_GRADIENT;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+
+   /* No 3D gather, no 3D comparison, no 3D array, nothing on AGX3c. */
+   d = base;
+   d.gather = AGX3_TEX_GATHER_R;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.shadow = true;
+   d.mask = 1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.array = true;
+   d.array_layer = 6;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2503,7 +2573,8 @@ main(void)
        test_bindless_operand_kinds() || test_indexed_sample_witnesses() ||
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias() ||
-       test_offset_witnesses() || test_shadow_lod_witnesses())
+       test_offset_witnesses() || test_shadow_lod_witnesses() ||
+       test_3d_lod_witnesses())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

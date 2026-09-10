@@ -269,14 +269,25 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (!d->array && d->array_layer != 0))
       return false;
 
-   /* Fresh G17P texture3d witnesses cover both an immediate level and the
-    * implicit fragment-derivative form used by compositor ICC LUTs.  The
-    * dimension remains f76=3 and the implicit form differs only by selecting
-    * the ordinary AUTO LOD marker. Array, per-lane/bias/gradient, gather and
-    * comparison combinations remain closed until independently witnessed. */
+   /* The 3D dimension is f76 = 3 and is orthogonal to the LOD shape exactly
+    * as the 2D one is. Five texture3d fragments, differing only in the LOD
+    * argument, differ only in f139 and its operand:
+    *
+    *   t.sample(s, uvw)                 05800cb8b0008001010010001200
+    *   t.sample(s, uvw, bias(0.5f))     05800cb8b0003b00010010021200  f139 1, f29 32
+    *   t.sample(s, uvw, bias(in.dx.x))  05800cb8b0009001010010001200  f139 3
+    *   t.sample(s, uvw, level(in.dx.x)) 05800cb8b0008821010010001200  f139 4
+    *   t.sample(s, uvw, gradient3d(..)) 05800cb8b0009c01000010001200  f139 5
+    *
+    * and the per-lane staging is the same bank-6 publication (f5 = 6) our 2D
+    * path already emits, read straight out of the level(reg) kernel.
+    *
+    * The gradient stays closed: gradient3d carries *six* scalars rather than
+    * four, and the bank layout for the extra pair is not witnessed. Array,
+    * gather and comparison combinations likewise remain closed. */
    if (d->three_d &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
-        (d->lod != AGX3_TEX_LOD_LEVEL && d->lod != AGX3_TEX_LOD_AUTO) ||
+        d->lod == AGX3_TEX_LOD_GRADIENT ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 

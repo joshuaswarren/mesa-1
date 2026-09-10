@@ -1405,9 +1405,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
+       /* f76 = 3 is orthogonal to f139; only the gradient is held back,
+        * because gradient3d stages six scalars and that layout has no
+        * witness. See agx3_tex_core.c for the five-row table. */
        (three_d &&
-        (enc != AGX_ISA_ENCODING_AGX3B ||
-         (!valid_immediate_lod && !implicit_lod))) ||
+        (enc != AGX_ISA_ENCODING_AGX3B || gradient_lod ||
+         (!valid_immediate_lod && !implicit_lod && !biased_lod &&
+          !register_bias && !explicit_lod))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod))) ||

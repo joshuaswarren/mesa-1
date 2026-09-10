@@ -20,13 +20,19 @@ g17p_sample_shape(const nir_tex_instr *tex)
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
        tex->op != nir_texop_tg4) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d && !cube) ||
+       /* 3D takes the implicit, immediate-bias and per-lane LOD shapes the
+        * 2D dimension takes; only gradient3d, which stages six scalars
+        * rather than four, has no witness. */
        (three_d &&
         (tex->is_array || tex->is_shadow ||
-         tex->op != nir_texop_txl)) ||
+         (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+          tex->op != nir_texop_txl))) ||
+       /* A cube comparison publishes its reference through the same CEM
+        * bracket the colour cube uses; it is witnessed only with an implicit
+        * LOD. */
        (cube &&
-        (tex->is_shadow ||
-         (tex->op != nir_texop_tex &&
-          !(cube_array && tex->op == nir_texop_txl)))) ||
+        (tex->op != nir_texop_tex &&
+         !(!tex->is_shadow && cube_array && tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
        tex->coord_components != (cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
