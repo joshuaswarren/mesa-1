@@ -19,13 +19,37 @@
 
 bool drm_shim_driver_prefers_first_render_node = true;
 
+/*
+ * T8103 / M1, the AGX2 identity Honeykrisp is already conformant on.  This is
+ * the control arm for G17P work: run the same client twice, changing only
+ * ASAHI_SHIM_CHIP, and any difference is attributable to the AGX3 paths.
+ *
+ * Only the architectural identity differs from params_g17p below - generation,
+ * variant, chip id, ISA, HAL, core topology, soft faults and the 39-bit user
+ * VA range.  Everything else is held equal deliberately so the diff isolates
+ * the generation.  A stub here (the previous zero num_clusters_total) makes
+ * agx_chip_from_params return AGX_CHIP_UNKNOWN and the device fails to open,
+ * which is why the fields are spelled out.
+ */
 static const struct drm_asahi_params_global params_g13g = {
+   .features = 0,
    .gpu_generation = 13,
    .gpu_variant = 'G',
    .gpu_revision = 0,
+   .chip_id = 0x8103,
+   .num_dies = 1,
+   .num_clusters_total = 1,
+   .num_cores_per_cluster = 8,
+   .core_masks = {0xff},
    .vm_start = 0x4000,
    .vm_end = 0x7fffff8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 1,
+   .max_attachments = 16,
+   .max_frequency_khz = 1278000,
    .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 2,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY,
 };
 
 /*
