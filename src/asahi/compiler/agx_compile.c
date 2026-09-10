@@ -2387,8 +2387,25 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       b->shader->any_quad_divergent_shuffle |= b->shader->any_cf;
 
       /* Lane ID guaranteed to be uniform */
-      return agx_shuffle_to(b, dst, agx_src_index(&instr->src[0]),
-                            agx_src_index(&instr->src[1]));
+      agx_index lane = agx_src_index(&instr->src[1]);
+
+      /*
+       * AGX3's immediate-lane broadcast is only grounded for the three
+       * witnessed lanes; every other constant lane has no encoding.  The
+       * register-lane form is grounded for any lane, so materialise the
+       * constant instead of refusing the shader.  The cost is one mov that
+       * constant folding would otherwise have removed, and it only applies
+       * to the lanes that would not have compiled at all.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          lane.type == AGX_INDEX_IMMEDIATE && lane.value != 0 &&
+          lane.value != 3 && lane.value != 5) {
+         agx_index reg = agx_temp(b->shader, AGX_SIZE_32);
+         agx_mov_imm_to(b, reg, lane.value);
+         lane = reg;
+      }
+
+      return agx_shuffle_to(b, dst, agx_src_index(&instr->src[0]), lane);
    }
 
    case nir_intrinsic_quad_broadcast: {

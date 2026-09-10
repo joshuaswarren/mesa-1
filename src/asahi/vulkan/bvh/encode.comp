@@ -1,0 +1,286 @@
+/*
+ * Copyright © 2022 Konstantin Seurer
+ * Copyright © 2023 Valve Corporation
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Convert the common builder's intermediate representation into the
+ * Honeykrisp software-traversal node format.
+ *
+ * The IR is already a binary tree and so is our output, so this is a
+ * relabelling rather than a rebuild: every internal node and every leaf is
+ * independent, and one invocation handles one output node.
+ *
+ * The IR internal array is ordered root-last; the output is ordered
+ * root-first so that the root sits immediately after the header at a fixed
+ * offset (HK_BVH_ROOT_NODE).  That is the whole reason for the index
+ * reversal below.
+ */
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "hk_build_interface.h"
+
+layout(push_constant) uniform CONSTS {
+   hk_encode_args args;
+};
+
+uint32_t
+ir_leaf_node_size()
+{
+   switch (args.geometry_type) {
+   case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
+      return SIZEOF(vk_ir_triangle_node);
+   case VK_GEOMETRY_TYPE_AABBS_KHR:
+      return SIZEOF(vk_ir_aabb_node);
+   default:
+      return SIZEOF(vk_ir_instance_node);
+   }
+}
+
+uint32_t
+output_leaf_node_size()
+{
+   switch (args.geometry_type) {
+   case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
+      return SIZEOF(hk_bvh_triangle_node);
+   case VK_GEOMETRY_TYPE_AABBS_KHR:
+      return SIZEOF(hk_bvh_aabb_node);
+   default:
+      return SIZEOF(hk_bvh_instance_node);
+   }
+}
+
+uint32_t
+output_leaf_node_type()
+{
+   switch (args.geometry_type) {
+   case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
+      return hk_bvh_node_triangle;
+   case VK_GEOMETRY_TYPE_AABBS_KHR:
+      return hk_bvh_node_aabb;
+   default:
+      return hk_bvh_node_instance;
+   }
+}
+
+/*
+ * Grow a child box by one ULP-ish margin in every direction.
+ *
+ * The box test and the triangle test do not agree to the last bit, so a ray
+ * that grazes a triangle exactly on its bounding plane can pass the triangle
+ * test while failing the box test that gates it -- a dropped hit, and the
+ * classic source of pinhole artefacts in a software traversal.  Growing the
+ * box can only ever cost a redundant leaf visit.
+ */
+vk_aabb
+inflate(vk_aabb box)
+{
+   vec3 lo = box.min - max(abs(box.min), vec3(1.0)) * 1.19209290e-7;
+   vec3 hi = box.max + max(abs(box.max), vec3(1.0)) * 1.19209290e-7;
+   box.min = lo;
+   box.max = hi;
+   return box;
+}
+
+uint32_t
+pack_sbt_offset_and_flags(uint32_t sbt_offset, uint32_t flags)
+{
+   uint32_t ret = sbt_offset;
+   if ((flags & VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR) != 0)
+      ret |= HK_INSTANCE_FORCE_OPAQUE;
+   if ((flags & VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR) == 0)
+      ret |= HK_INSTANCE_NO_FORCE_NOT_OPAQUE;
+   if ((flags & VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR) != 0)
+      ret |= HK_INSTANCE_TRIANGLE_FACING_CULL_DISABLE;
+   if ((flags & VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR) != 0)
+      ret |= HK_INSTANCE_TRIANGLE_FLIP_FACING;
+   return ret;
+}
+
+/*
+ * Invert an affine object-to-world transform stored as three rows of
+ * (rotation | translation).  For M = [R | t] the inverse is [R^-1 | -R^-1 t],
+ * so only the 3x3 block is actually inverted.
+ */
+mat3x4
+invert_affine(mat3x4 otw)
+{
+   vec3 r0 = vec3(otw[0][0], otw[0][1], otw[0][2]);
+   vec3 r1 = vec3(otw[1][0], otw[1][1], otw[1][2]);
+   vec3 r2 = vec3(otw[2][0], otw[2][1], otw[2][2]);
+   vec3 t = vec3(otw[0][3], otw[1][3], otw[2][3]);
+
+   vec3 c0 = cross(r1, r2);
+   vec3 c1 = cross(r2, r0);
+   vec3 c2 = cross(r0, r1);
+
+   float det = dot(r0, c0);
+   /* A singular instance transform is undefined behaviour in Vulkan.  Fall
+    * back to something finite so the traversal cannot fault on a NaN
+    * address computation. */
+   float inv_det = det == 0.0 ? 0.0 : 1.0 / det;
+
+   /* Rows of R^-1 are the columns of the cofactor matrix, scaled. */
+   vec3 i0 = vec3(c0.x, c1.x, c2.x) * inv_det;
+   vec3 i1 = vec3(c0.y, c1.y, c2.y) * inv_det;
+   vec3 i2 = vec3(c0.z, c1.z, c2.z) * inv_det;
+
+   mat3x4 wto;
+   wto[0] = vec4(i0, -dot(i0, t));
+   wto[1] = vec4(i1, -dot(i1, t));
+   wto[2] = vec4(i2, -dot(i2, t));
+   return wto;
+}
+
+void
+encode_leaf(uint32_t index, uint32_t leaf_nodes_offset)
+{
+   uint32_t ir_size = ir_leaf_node_size();
+   uint32_t out_size = output_leaf_node_size();
+
+   VOID_REF ir_leaf = OFFSET(args.intermediate_bvh, index * ir_size);
+   VOID_REF out_leaf =
+      OFFSET(args.output_bvh, leaf_nodes_offset + index * out_size);
+
+   switch (args.geometry_type) {
+   case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
+      REF(vk_ir_triangle_node) src = REF(vk_ir_triangle_node)(ir_leaf);
+      REF(hk_bvh_triangle_node) dst = REF(hk_bvh_triangle_node)(out_leaf);
+      for (uint32_t i = 0; i < 3; i++)
+         for (uint32_t j = 0; j < 3; j++)
+            DEREF(dst).coords[i][j] = DEREF(src).coords[i][j];
+      DEREF(dst).padding = 0;
+      DEREF(dst).primitive_id = DEREF(src).triangle_id;
+      DEREF(dst).geometry_id_and_flags = DEREF(src).geometry_id_and_flags;
+      break;
+   }
+   case VK_GEOMETRY_TYPE_AABBS_KHR: {
+      REF(vk_ir_aabb_node) src = REF(vk_ir_aabb_node)(ir_leaf);
+      REF(hk_bvh_aabb_node) dst = REF(hk_bvh_aabb_node)(out_leaf);
+      DEREF(dst).bounds = DEREF(src).base.aabb;
+      DEREF(dst).primitive_id = DEREF(src).primitive_id;
+      DEREF(dst).geometry_id_and_flags = DEREF(src).geometry_id_and_flags;
+      break;
+   }
+   default: {
+      REF(vk_ir_instance_node) src = REF(vk_ir_instance_node)(ir_leaf);
+      REF(hk_bvh_instance_node) dst = REF(hk_bvh_instance_node)(out_leaf);
+      mat3x4 otw = DEREF(src).otw_matrix;
+      uint32_t sbt_and_flags = DEREF(src).sbt_offset_and_flags;
+
+      DEREF(dst).bvh_ptr = DEREF(src).base_ptr;
+      DEREF(dst).custom_instance_and_mask =
+         DEREF(src).custom_instance_and_mask;
+      DEREF(dst).sbt_offset_and_flags =
+         pack_sbt_offset_and_flags(sbt_and_flags & 0xFFFFFF,
+                                   sbt_and_flags >> 24);
+      DEREF(dst).padding = 0;
+      DEREF(dst).instance_id = DEREF(src).instance_id;
+      DEREF(dst).otw_matrix = otw;
+      DEREF(dst).wto_matrix = invert_affine(otw);
+      break;
+   }
+   }
+}
+
+void
+encode_internal(uint32_t index, uint32_t internal_count,
+                uint32_t leaf_nodes_offset)
+{
+   uint32_t ir_size = ir_leaf_node_size();
+   uint32_t out_size = output_leaf_node_size();
+
+   /* Output index i is IR index internal_count - i - 1. */
+   REF(vk_ir_box_node) src = REF(vk_ir_box_node)(
+      OFFSET(args.intermediate_bvh,
+             args.root_offset +
+                (internal_count - index - 1) * SIZEOF(vk_ir_box_node)));
+   REF(hk_bvh_box_node) dst = REF(hk_bvh_box_node)(
+      OFFSET(args.output_bvh,
+             SIZEOF(hk_bvh_header) + index * SIZEOF(hk_bvh_box_node)));
+
+   for (uint32_t child = 0; child < 2; child++) {
+      uint32_t ir_child = DEREF(src).children[child];
+
+      if (ir_child == VK_BVH_INVALID_NODE) {
+         /* An absent child is marked with NaN bounds as well as an invalid
+          * reference: the traversal rejects it on the NaN compare without
+          * having to special-case the reference first. */
+         vk_aabb empty;
+         empty.min = vec3(0.0 / 0.0);
+         empty.max = vec3(0.0 / 0.0);
+         DEREF(dst).bounds[child] = empty;
+         DEREF(dst).children[child] = HK_BVH_INVALID_NODE;
+         continue;
+      }
+
+      uint32_t ir_child_offset = ir_id_to_offset(ir_child);
+      REF(vk_ir_node) ir_node =
+         REF(vk_ir_node)(OFFSET(args.intermediate_bvh, ir_child_offset));
+      DEREF(dst).bounds[child] = inflate(DEREF(ir_node).aabb);
+
+      if (ir_child_offset < args.root_offset) {
+         uint32_t leaf_index = ir_child_offset / ir_size;
+         DEREF(dst).children[child] =
+            (leaf_nodes_offset + leaf_index * out_size) |
+            output_leaf_node_type();
+      } else {
+         uint32_t src_index =
+            (ir_child_offset - args.root_offset) / SIZEOF(vk_ir_box_node);
+         uint32_t dst_index = internal_count - src_index - 1;
+         DEREF(dst).children[child] =
+            (SIZEOF(hk_bvh_header) + dst_index * SIZEOF(hk_bvh_box_node)) |
+            hk_bvh_node_internal;
+      }
+   }
+}
+
+void
+main()
+{
+   uint32_t id = gl_GlobalInvocationID.x;
+
+   /* The builder writes the true counts into the header at run time; the
+    * dispatch was sized from a CPU-side upper bound, so clamp here. */
+   uint32_t internal_count = DEREF(args.header).ir_internal_node_count;
+   uint32_t leaf_count = DEREF(args.header).active_leaf_count;
+   uint32_t leaf_nodes_offset =
+      SIZEOF(hk_bvh_header) + internal_count * SIZEOF(hk_bvh_box_node);
+
+   if (id == 0) {
+      REF(hk_bvh_header) header = REF(hk_bvh_header)(args.output_bvh);
+      REF(vk_ir_box_node) ir_root = REF(vk_ir_box_node)(
+         OFFSET(args.intermediate_bvh,
+                args.root_offset +
+                   (internal_count - 1) * SIZEOF(vk_ir_box_node)));
+
+      DEREF(header).bounds = DEREF(ir_root).base.aabb;
+      DEREF(header).compacted_size = args.as_size;
+      DEREF(header).instance_count =
+         args.geometry_type == VK_GEOMETRY_TYPE_INSTANCES_KHR ? leaf_count : 0;
+      DEREF(header).leaf_nodes_offset = leaf_nodes_offset;
+      DEREF(header).serialization_size =
+         SIZEOF(vk_accel_struct_serialization_header) +
+         8 * DEREF(header).instance_count + args.as_size;
+   }
+
+   if (id < internal_count)
+      encode_internal(id, internal_count, leaf_nodes_offset);
+
+   uint32_t leaf_id = id - args.internal_node_bound;
+   if (id >= args.internal_node_bound && leaf_id < leaf_count)
+      encode_leaf(leaf_id, leaf_nodes_offset);
+}

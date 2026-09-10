@@ -6,6 +6,8 @@
  */
 #include "hk_device.h"
 
+#include "hk_acceleration_structure.h"
+
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #include "agx_bg_eot.h"
@@ -620,6 +622,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_queues;
    }
 
+   result = hk_device_init_accel_struct_state(dev);
+   if (result != VK_SUCCESS)
+      goto fail_mem_cache;
+
    result = hk_device_init_meta(dev);
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
@@ -662,6 +668,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_meta:
    hk_device_finish_meta(dev);
+   hk_device_finish_accel_struct_state(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
 fail_queues:
@@ -707,6 +714,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_device_finish_accel_struct_state(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
 

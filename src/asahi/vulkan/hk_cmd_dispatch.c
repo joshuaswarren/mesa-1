@@ -1164,7 +1164,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 }
 
 static void
-dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
+dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
 {
    struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
    if (agx_is_shader_empty(&s->b))
@@ -1206,7 +1206,7 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
                                       stat, agx_workgroup_threads(local_size));
    }
 
-   if (!agx_is_indirect(grid)) {
+   if (!agx_is_indirect(grid) && !in_threads) {
       grid.count[0] *= local_size.x;
       grid.count[1] *= local_size.y;
       grid.count[2] *= local_size.z;
@@ -1214,6 +1214,52 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
 
    hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
    cs->stats.calls++;
+}
+
+static void
+dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
+{
+   dispatch_grid(cmd, grid, false);
+}
+
+/*
+ * Launch an exact number of invocations, allowing a partial trailing
+ * workgroup.  The common acceleration-structure build shaders have no bounds
+ * guard of their own and rely on this; the AGX command stream takes a thread
+ * count natively, so "unaligned" costs nothing here beyond skipping the
+ * workgroup-to-thread multiply that the API entry points do.
+ *
+ * The group_count the root still advertises is rounded up, because that is
+ * what gl_NumWorkGroups and the compute-invocation statistic mean.
+ */
+void
+hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer, uint32_t invocations_x,
+                          uint32_t invocations_y, uint32_t invocations_z)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+
+   if (desc->push_dirty)
+      hk_cmd_buffer_flush_push_descriptors(cmd, desc);
+
+   struct hk_shader *s = hk_only_variant(cmd->state.cs.shader);
+   if (!s || agx_is_shader_empty(&s->b))
+      return;
+
+   desc->root.cs.base_group[0] = 0;
+   desc->root.cs.base_group[1] = 0;
+   desc->root.cs.base_group[2] = 0;
+
+   VkDispatchIndirectCommand group_count = {
+      .x = DIV_ROUND_UP(invocations_x, s->b.info.workgroup_size[0]),
+      .y = DIV_ROUND_UP(invocations_y, s->b.info.workgroup_size[1]),
+      .z = DIV_ROUND_UP(invocations_z, s->b.info.workgroup_size[2]),
+   };
+   desc->root.cs.group_count_addr =
+      hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+
+   dispatch_grid(cmd, agx_3d(invocations_x, invocations_y, invocations_z),
+                 true);
 }
 
 VKAPI_ATTR void VKAPI_CALL

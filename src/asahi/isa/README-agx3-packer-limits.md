@@ -2480,3 +2480,73 @@ for that, and its header records which existing scissor assertions do and do
 not constrain it: the two packed-byte tests cannot, and the one GL test whose
 expected values could (`test-g17p-gl-premult-pingpong.c`) has no recorded
 hardware run.
+
+## Two refusals found by compiling Mesa's own BVH builders (2026-09-10)
+
+These came from turning on `VK_KHR_acceleration_structure` and letting the
+common Mesa acceleration-structure build shaders
+(`src/vulkan/runtime/bvh/*.comp` plus the vendored radix sort) compile under
+the G17P drm-shim.  They are the first refusals found by compiling *Mesa's
+own* internal compute shaders rather than an application's; both are subgroup
+and control-flow shapes that no graphics workload in the probe corpus reaches.
+
+### 1. `shuffle` with a constant lane outside {0, 3, 5} -- CLOSED
+
+```
+agx3_pack_binary.c:6800: no grounded AGX3 encoding for shuffle
+  [d32:reg12 s0=32:reg12.discard s1=16:imm31 cond=0 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+`agx3_emit_simd_broadcast()` accepts an immediate lane only for the three
+witnessed values 0, 3 and 5.  The radix sort's first kernel broadcasts lane
+**31** (the last lane of a 32-wide subgroup, the standard end-of-scan read),
+so the very first build shader refused.
+
+**No new encoding was invented to close this.**  The register-lane and
+uniform-lane shuffle forms are already grounded for an arbitrary lane, so the
+fix is to stop turning an encodable shader into an unencodable one:
+
+- `agx_compile.c`, `nir_intrinsic_read_invocation`: on AGX3b, a constant lane
+  outside the witnessed set is materialised into a register instead of being
+  passed as an immediate.
+- `agx_optimizer.c`, the immediate inliner: it folded that mov straight back
+  in, so `AGX_OPCODE_SHUFFLE` source 1 is now excluded from inlining for the
+  same lanes.
+
+Both changes fire only on AGX3b and only for lane values that previously
+refused the whole shader, so they cannot regress anything that compiled
+before.  Suite unchanged at 183 ok / 1 expected fail / 0 fail.
+
+**What is still not closed:** the *immediate*-lane form for arbitrary lanes.
+Closing that needs a `metal-nt` witness of `simd_broadcast(x, N)` for several
+N, which would also settle whether the lane field is a plain immediate or a
+LUT.  Until then the register form carries it at the cost of one mov.
+
+### 2. Unconditional `break` nested deeper than 2 -- OPEN
+
+```
+agx3_pack_binary.c:5802: no grounded AGX3 encoding for break
+  [d0:none0 cond=0 chan=0 mask=0x0 fmt=0 shift=0]
+```
+
+`agx_lower_pseudo.c` already rewrites an AGX3 unconditional break as
+`break_if_icmp(r0l == r0l, nest)`, which is a fully grounded sequence -- but
+only for `I->nest <= 2`, because that is where the witnesses stop.  The radix
+sort's scan kernel breaks out from deeper than that and reaches the packer
+refusal.
+
+This is the blocker for `VK_KHR_ray_query` on G17P: the traversal itself is
+software and needs nothing unwitnessed, but the acceleration structure cannot
+be built until the builder's own shaders compile.
+
+**The experiment that closes it.** The nesting depth is an operand of the
+already-encodable `break_if_icmp`, so this is very likely a wider immediate
+rather than a different instruction -- but "likely" is exactly what this file
+exists to refuse.  Compile MSL with a loop break at nesting depth 1, 2, 3, 4
+and 5 through
+`metal-nt -arch applegpu_g17p -N x.mtlp-json -platform_version macos 27.0 27.0`,
+decode the resulting `break_if` at each depth, and check whether the depth
+lands in the same field and simply grows.  If it does, raising the `nest > 2`
+gate in `agx_lower_pseudo.c` is the whole fix; if the deeper forms use a
+different encoding, that encoding is what the witness gives you.  Five kernels,
+no hardware.

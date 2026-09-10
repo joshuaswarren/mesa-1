@@ -1,10 +1,13 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'hk_acceleration_structure.c',
+  'hk_acceleration_structure.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
   'hk_buffer_view.h',
+  'hk_bvh.h',
   'hk_cmd_buffer.c',
   'hk_cmd_buffer.h',
   'hk_conditional_render_core.h',
@@ -67,9 +70,12 @@ hk_files = files(
   'hk_instance.c',
   'hk_instance.h',
   'hk_nir_lower_descriptors.c',
+  'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
   'hk_nir_passthrough_gs.c',
+  'hk_nir_ray_tracing.c',
+  'hk_nir_ray_tracing.h',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
   'hk_native_descriptor_pack.h',
@@ -2660,6 +2666,8 @@ hk_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
+subdir('bvh')
+
 hk_deps = [
   dep_libdrm,
   idep_nir,
@@ -2677,6 +2685,7 @@ libhk = static_library(
   [
     hk_entrypoints,
     hk_files,
+    hk_bvh_spv,
     sha1_h,
   ],
   include_directories : [
@@ -2687,6 +2696,7 @@ libhk = static_library(
     inc_asahi,
     inc_virtio_gpu,
     inc_virtio_vdrm,
+    include_directories('.'),
   ],
   link_with : [libasahi_lib, libasahi_layout, libasahi_compiler],
   c_args : ['-Wno-c2x-extensions'],

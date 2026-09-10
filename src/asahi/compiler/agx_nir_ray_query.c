@@ -19,39 +19,23 @@ committed_result_layout(nir_ray_query_value value, uint32_t column,
    switch (value) {
    case nir_ray_query_value_intersection_type:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_TYPE,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_TYPE,
          .components = 1,
-         .storage_bit_size = 32,
+         .storage_bit_size = 8,
          .kind = AGX_NIR_RAY_QUERY_RESULT_U32,
       };
       return true;
    case nir_ray_query_value_intersection_t:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_T,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_T,
          .components = 1,
          .storage_bit_size = 32,
          .kind = AGX_NIR_RAY_QUERY_RESULT_F32,
       };
       return true;
-   case nir_ray_query_value_intersection_instance_custom_index:
-      *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_USER_INSTANCE_ID,
-         .components = 1,
-         .storage_bit_size = 32,
-         .kind = AGX_NIR_RAY_QUERY_RESULT_U32,
-      };
-      return true;
-   case nir_ray_query_value_intersection_instance_id:
-      *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_INSTANCE_ID,
-         .components = 1,
-         .storage_bit_size = 32,
-         .kind = AGX_NIR_RAY_QUERY_RESULT_U32,
-      };
-      return true;
    case nir_ray_query_value_intersection_geometry_index:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_GEOMETRY_ID,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_GEOMETRY_ID,
          .components = 1,
          .storage_bit_size = 32,
          .kind = AGX_NIR_RAY_QUERY_RESULT_U32,
@@ -59,7 +43,7 @@ committed_result_layout(nir_ray_query_value value, uint32_t column,
       return true;
    case nir_ray_query_value_intersection_primitive_index:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_PRIMITIVE_ID,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_ID,
          .components = 1,
          .storage_bit_size = 32,
          .kind = AGX_NIR_RAY_QUERY_RESULT_U32,
@@ -67,7 +51,7 @@ committed_result_layout(nir_ray_query_value value, uint32_t column,
       return true;
    case nir_ray_query_value_intersection_barycentrics:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_BARYCENTRICS,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_BARYCENTRICS,
          .components = 2,
          .storage_bit_size = 32,
          .kind = AGX_NIR_RAY_QUERY_RESULT_F32,
@@ -75,15 +59,16 @@ committed_result_layout(nir_ray_query_value value, uint32_t column,
       return true;
    case nir_ray_query_value_intersection_front_face:
       *out = (struct agx_nir_ray_query_result_layout){
-         .byte_offset = AGX_RT_HIT_OFF_FRONT_FACE,
+         .byte_offset = AGX_RT_QUERY_OFF_COMMITTED_FRONT_FACE,
          .components = 1,
          .storage_bit_size = 8,
          .kind = AGX_NIR_RAY_QUERY_RESULT_BOOL,
       };
       return true;
    default:
-      /* The runtime IR exposes more raw fields, but no exact mapping from
-       * those fields to these NIR semantics has been established. */
+      /* Everything else -- including committed instance id and user instance
+       * id, whose accessors resolve through the candidate record rather than
+       * a single committed field -- has no exact ray-query offset. */
       return false;
    }
 }

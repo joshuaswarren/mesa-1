@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_descriptor_set.h"
+
+#include "vk_acceleration_structure.h"
 #include "asahi/lib/agx_bo.h"
 #include "util/half_float.h"
 #include "vulkan/vulkan_core.h"
@@ -46,6 +48,26 @@ desc_ubo_data(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
       *size_out = set->size - offset;
 
    return (char *)set->mapped_ptr + offset;
+}
+
+static void write_desc(struct hk_descriptor_set *set, uint32_t binding,
+                       uint32_t elem, const void *desc_data, size_t desc_size);
+
+/*
+ * An acceleration structure descriptor is just its BVH address; the software
+ * traversal walks it with global loads.  A null handle writes zero, which the
+ * traversal treats as an empty structure.
+ */
+static void
+write_accel_struct_desc(struct hk_descriptor_set *set,
+                        VkAccelerationStructureKHR _accel_struct,
+                        uint32_t binding, uint32_t elem)
+{
+   VK_FROM_HANDLE(vk_acceleration_structure, accel_struct, _accel_struct);
+   uint64_t addr =
+      accel_struct ? vk_acceleration_structure_get_va(accel_struct) : 0;
+
+   write_desc(set, binding, elem, &addr, sizeof(addr));
 }
 
 static void
@@ -387,6 +409,19 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                   VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
          }
          break;
+
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
+         const VkWriteDescriptorSetAccelerationStructureKHR *write_accel =
+            vk_find_struct_const(write->pNext,
+                                 WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR);
+         for (uint32_t j = 0; j < write->descriptorCount; j++) {
+            write_accel_struct_desc(set,
+                                    write_accel->pAccelerationStructures[j],
+                                    write->dstBinding,
+                                    write->dstArrayElement + j);
+         }
+         break;
+      }
 
       case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK: {
          const VkWriteDescriptorSetInlineUniformBlock *write_inline =
@@ -893,6 +928,16 @@ hk_descriptor_set_write_template(
             write_dynamic_buffer_desc(
                set, info, entry->binding, entry->array_element + j,
                entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+         }
+         break;
+
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+         for (uint32_t j = 0; j < entry->array_count; j++) {
+            const VkAccelerationStructureKHR *accel_struct =
+               data + entry->offset + j * entry->stride;
+
+            write_accel_struct_desc(set, *accel_struct, entry->binding,
+                                    entry->array_element + j);
          }
          break;
 

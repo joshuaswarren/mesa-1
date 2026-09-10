@@ -75,9 +75,21 @@ static void
 hk_get_device_extensions(const struct hk_instance *instance,
                          struct vk_device_extension_table *ext)
 {
+   /*
+    * VK_KHR_ray_query and everything it depends on.  Software traversal:
+    * grounded end to end in shader ALU and global loads, with no dependence
+    * on the partially mapped AGX3 intersect_ray SCS ABI -- but it has never
+    * executed on hardware, and an extension bit is a promise.  It stays off
+    * until the exact-result oracle passes on a real G17P.
+    */
+   const bool ray_query = hk_g17p_unverified_feature("ray_query");
+
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
+      .KHR_acceleration_structure = ray_query,
+      .KHR_deferred_host_operations = ray_query,
+      .KHR_ray_query = ray_query,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
@@ -409,6 +421,17 @@ hk_get_device_features(
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
       .bufferDeviceAddressCaptureReplay = true,
+
+      /* VK_KHR_acceleration_structure / VK_KHR_ray_query, gated with the
+       * extensions above.  Host-side builds stay off: they are unimplemented
+       * and a conformant application therefore never reaches them. */
+      .accelerationStructure = supported_extensions->KHR_acceleration_structure,
+      .accelerationStructureCaptureReplay = false,
+      .accelerationStructureIndirectBuild = false,
+      .accelerationStructureHostCommands = false,
+      .descriptorBindingAccelerationStructureUpdateAfterBind = false,
+      .rayQuery = supported_extensions->KHR_ray_query,
+      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -978,6 +1001,22 @@ hk_get_device_properties(const struct agx_device *dev,
       .bufferImageGranularity = 0x400,
       .sparseAddressSpaceSize = HK_SPARSE_ADDR_SPACE_SIZE,
       .maxBoundDescriptorSets = HK_MAX_SETS,
+      /* VK_KHR_acceleration_structure limits.  The counts are the
+       * specification's own 24/29-bit encoding maxima, which is what bounds
+       * us: the geometry, instance and primitive ids all live in packed
+       * fields.  Scratch alignment is 128 because the common builder's
+       * shaders address scratch as uvec4. */
+      .maxGeometryCount = (1u << 24) - 1,
+      .maxInstanceCount = (1u << 24) - 1,
+      .maxPrimitiveCount = (1u << 29) - 1,
+      .maxPerStageDescriptorAccelerationStructures = HK_MAX_DESCRIPTORS,
+      .maxPerStageDescriptorUpdateAfterBindAccelerationStructures =
+         HK_MAX_DESCRIPTORS,
+      .maxDescriptorSetAccelerationStructures = HK_MAX_DESCRIPTORS,
+      .maxDescriptorSetUpdateAfterBindAccelerationStructures =
+         HK_MAX_DESCRIPTORS,
+      .minAccelerationStructureScratchOffsetAlignment = 128,
+
       .maxPerStageDescriptorSamplers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorUniformBuffers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorStorageBuffers = HK_MAX_DESCRIPTORS,
