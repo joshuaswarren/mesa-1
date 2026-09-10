@@ -195,6 +195,36 @@ agx_g17p_va_lifetime_trace(struct agx_device *dev, const char *phase,
 }
 
 #ifdef HAVE_LIBDRM
+/*
+ * Name the reason a VM_BIND was refused.
+ *
+ * A VM whose accepted job recorded an error keeps that error for the rest of
+ * its life and refuses every later map with EIO (mmu.rs
+ * wait_for_user_map_admission). The kernel says so with "G17P VM map admission
+ * refused", which contains neither "bind" nor an errno, so the failure reaches
+ * a log as a bare EIO with no cause. Ask the VM for its sticky status and put
+ * the real error next to the rejected op.
+ */
+static bool
+agx_drm_vm_status(struct agx_device *dev, int32_t *error)
+{
+   if (!(dev->params.features & DRM_ASAHI_FEATURE_VM_STATUS))
+      return false;
+
+   struct drm_asahi_vm_status status = {.vm_id = dev->vm_id};
+   struct drm_asahi_get_params params = {
+      .param_group = DRM_ASAHI_PARAM_GROUP_VM_STATUS,
+      .pointer = (uintptr_t)&status,
+      .size = sizeof(status),
+   };
+
+   if (drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GET_PARAMS, &params))
+      return false;
+
+   *error = status.error;
+   return true;
+}
+
 static int
 agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                 uint32_t count)
@@ -219,6 +249,13 @@ agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
                  (unsigned long long)ops[i].range,
                  (unsigned long long)ops[i].offset, ops[i].handle,
                  ops[i].flags);
+      }
+      int32_t vm_error = 0;
+      if (agx_drm_vm_status(dev, &vm_error) && vm_error != 0) {
+         fprintf(stderr, "; VM %u carries sticky error %d (%s) -- every later "
+                         "map is refused, so this bind is a consequence of an "
+                         "earlier submission failure, not of this address",
+                 vm_bind.vm_id, vm_error, strerror(-vm_error));
       }
       fputc('\n', stderr);
       errno = saved_errno;
