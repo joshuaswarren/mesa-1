@@ -7473,9 +7473,10 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    agx_builder *b = builder(enc);
    b->shader->stage = MESA_SHADER_VERTEX;
 
-   /* Apple's applegpu_g17p vs68 witness emits UVSW indices 0..67 and staging
-    * half-indices 0..134. A shared source keeps this codec test independent
-    * of the register allocator's synthetic no-spill pressure. */
+   /* The promoted Apple vs68 witness grounds the same dense UVSW format used
+    * by the opt-in 72-output qualification shape. Exercise indices 0..71 and
+    * staging half-indices 0..142. A shared source keeps this codec test
+    * independent of the register allocator's synthetic no-spill pressure. */
    for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
    agx_stop(b);

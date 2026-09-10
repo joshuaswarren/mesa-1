@@ -620,6 +620,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Chromium 151 ANGLE reserves one float4 output for transform feedback.
+    # This exact image oracle qualifies the resulting 68-user/72-total UVS
+    # boundary before HK_G17P_UNVERIFIED_FEATURES=vertex_output_68 is promoted.
+    executable(
+      'g17p-vulkan-vertex-output-68',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VERTEX_OUTPUT_68=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-secondary-command-buffer',
       files('tests/g17p_offscreen_triangle.c'),
