@@ -2256,6 +2256,9 @@ test_array_sample_abi_differential(void)
    for (unsigned i = 0; i < driver_len; ++i)
       CHECK(i == 6 || i == 7 || i == 12 || driver[i] == apple[i]);
 
+   return 0;
+}
+
 /*
  * The coordinate offset, byte-exact against Apple's own compiler.
  *
