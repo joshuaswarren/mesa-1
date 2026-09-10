@@ -1,8 +1,25 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
 **Status: the SSBO limit below is GONE, so is the `fcmpsel` one, and so are the
-float source modifiers and the 32-bit rounding modes. Two texture-side gaps and
-one saturate gap remain.** Every row of the original matrix compiles, including
+32-bit rounding modes. Two texture-side gaps and one saturate gap remain.**
+
+> **CORRECTION (2026-09-10).** The previous revision said "the float source
+> modifiers" were done, without qualification. **That was too broad, and it was
+> wrong for a whole instruction family.** `f30`/`f31` were modelled on
+> `f32log2`, `f32exp2` and `f32rcp`, but *not* on `f32rsqrt` or `f32sqrtstep`,
+> whose encoders had no abs/neg parameters at all and whose packer handlers
+> explicitly refused `src.abs || src.neg`. So `sqrt(abs(x))` and
+> `inversesqrt(abs(x))` -- the standard safe forms of both idioms -- failed
+> every shader that used them closed, while `inversesqrt(x + 1.0)` and
+> `normalize()` passed and made the family look done. Both are now closed
+> against Apple's own bytes; see "The rsqrt family's source modifiers" below.
+>
+> The `iadd` narrow-operand row further down was likewise recorded as fixed
+> when only *half* of it was. See "The `iadd` widening fix was partial" below.
+>
+> The lesson is the one this file already teaches in its retraction: a claim
+> phrased over a *category* ("the float source modifiers") is not supported by
+> evidence gathered on *instances* of it. Name the forms you actually tested. Every row of the original matrix compiles, including
 the ones marked **no**, and so do device atomics. The measurement that produced
 the matrix is preserved verbatim further down, because the *method* is what
 makes it re-runnable, and because the retraction it carries is still worth
@@ -257,6 +274,185 @@ refusing in vkQuake. Two causes, both worth remembering:
   The dump showed a fragment shader consisting of one texture sample and four
   exports. **Read the shader dump, not just the pass/fail line**, when a probe
   passes that should not.
+
+## Five gaps closed 2026-09-10, measured under the G17P drm-shim
+
+Reproduced with a two-arm harness: the same client, the same binary, the same
+host, changing only `ASAHI_SHIM_CHIP`. **`g17p` selects G17P only for that
+exact string** -- anything else, unset included, silently falls through to
+`params_g13g` and your "test" becomes a second control. The AGX2 arm needs the
+`params_g13g` repair described under "The control arm" below.
+
+Every encoding below is Apple's own, obtained with `metal-nt -arch
+applegpu_g17p`, decomposed with `tools/decomp.c` (which re-composes and
+compares, so a reported field vector is a fact about the encoder), and each
+field pinned by a sweep that varies **one field at a time** against a control.
+
+### The rsqrt family's source modifiers
+
+`f32rsqrt` and `f32sqrtstep` take f30 (absolute value) and f31 (negate) in the
+same bit positions the funop family uses -- but their encoders had no
+parameters for them, so `sqrt(abs(x))` and `inversesqrt(abs(x))` were refused
+outright. One kernel per modifier, each a single-field difference:
+
+```
+o[i] = rsqrt(a[i])          af 01 56 00 02 00 b0 40 00 00
+o[i] = rsqrt(-a[i])         af 01 56 00 02 00 b0 40 01 00   f31
+o[i] = rsqrt(fabs(a[i]))    af 01 56 00 02 00 b0 c0 00 00   f30
+o[i] = rsqrt(-fabs(a[i]))   af 01 56 00 02 00 b0 c0 01 00   both
+o[i] = sqrt(a[i])           2f 01 56 04 03 00 92 40 00 00
+o[i] = sqrt(fabs(a[i]))     2f 01 56 04 03 00 92 c0 00 00   f30
+```
+
+`-fabs` setting both is what makes the two separable. NEG is deliberately not
+wired on the square-root step: `sqrt` of a negative is NaN, no witness
+exercises it, and an unwitnessed bit is worse than a refusal. The half forms
+have no modifier witness either and stay closed.
+
+`f32rcp` already carried both and needed no change -- verified, not assumed.
+
+**A trap worth naming.** The first attempt still refused, because the handler
+validated its source with `agx3_vary_reg32()`, which itself returns false for
+`.abs`. A helper can be the thing rejecting the modifier you just added.
+
+### `packHalf2x16`: the multiply's destination width is independent
+
+Refused: `fmul [d16:reg2 s0=32:reg2.discard s1=16:imm32]`. f10 selects the
+**destination** width and f26 the source's, independently, exactly as on
+`f32rcp`. Apple emits the mixed-width multiply directly:
+
+```
+o[i] = a[i] * 0.5f        (float o)   19 a1 15 03 80 c0   f10 = 2
+o[i] = half(a[i] * 0.5f)  (half  o)   11 a1 15 03 80 c0   f10 = 1
+o[i] = half(a[i] * 2.0f)              11 c1 15 03 80 c0   f17 = 64
+```
+
+So the **optimizer was right and the packer was wrong**. `agx_optimizer.c`'s
+FMUL exception in `agx_optimizer_fmov_rev()` folds the `f2f16` into the
+multiply and produces exactly this shape; a proposed fix to block that fold, or
+to widen the 16-bit source, would have papered over a form the hardware has.
+
+Two blockers had to come out, not one: an *earlier* `fmul_mixed_half` block
+claimed any 16-bit-destination FMUL and then refused it because the operand was
+an immediate, so the minifloat path below it was unreachable. It now requires
+both operands to be registers.
+
+> Beware f35 here. It sits next to f10 and it moved between the two witnesses,
+> which invites reading it as a second width selector. It is the **source
+> register**: `agx3_alu_fmul_minifloat_mod()` says `{35, src}`, and it differed
+> only because register allocation differed. Two samples and a plausible story
+> is precisely the trap the retraction below documents.
+
+### The `iadd` widening fix was partial
+
+Refused: `iadd [d32:reg2 s0=16:reg2.discard s1=16:imm7]` -- a 16-bit register
+plus an immediate, widened to 32 bits. The register+register form encoded, so
+the earlier fix looked complete; **it was partial, not regressed.** The
+encoder was already right (`test-agx3-iadd-core.c` had carried the exact bytes
+for a year); only the packer gate was missing.
+
+```
+int(short x) + 1     9f 01 56 00 02 02 00 08 15 0c   f15 = 1
+int(short x) + 2     9f 01 56 00 02 04 00 08 15 0c   f15 = 2
+int(short x) + 7     9f 01 56 00 02 0e 00 08 15 0c   f15 = 7
+int(short x) + 17    9f 01 56 00 02 22 00 08 15 0c   f15 = 17
+uint(ushort x) + 7   9f 01 56 00 02 0e 00 08 15 04   f43 clear
+```
+
+f15 is the slot-A immediate, f43 slot B's sign-extension.
+
+**A bare 16-bit integer source is SIGN-extended.** That is not a guess and not
+a coin flip: `agx_optimizer_signext()` fuses a SIGNEXT into the add by dropping
+it and *asserting* the surviving source carries no ABS, and `agx_pack.c`
+spells the same rule for AGX2 as `zext = abs || immediate`. Getting this
+backwards is a silent miscompile, so it is worth stating where the rule lives.
+
+This is the **highest-frequency codegen refusal in a real Vulkan CTS run**.
+
+### The negated integer source was a shifted subtract
+
+Reported as `iadd [d32:reg4 s0=32:reg0 s1=32:reg0.neg]` and read as a
+degenerate `x + (-x)` that should have folded to zero. **It is not.** The
+refusal printer did not show `shift`, and the instruction is `shift = 3`:
+`x - (x << 3)`, the strength-reduced form of `x * -7`. There is no optimizer
+bug and nothing folds to zero.
+
+There is also no integer negate field to find. Apple compiles `a - b` and
+`a + (-b)` to byte-identical `isub`; the missing piece was the **shift on slot
+B**, f54, which the subtract carries exactly as the add does:
+
+```
+o[i] = a[i] - (c[i] << 0)   1f 01 56 00 02 00 10 a8 17 05   f54 absent
+o[i] = a[i] - (c[i] << 1)   1f 01 56 00 02 00 10 e8 16 05   f54 = 1
+o[i] = a[i] - (c[i] << 2)   1f 01 56 00 02 00 10 a8 16 15   f54 = 2
+o[i] = a[i] - (c[i] << 3)   1f 01 56 00 02 00 10 e8 16 15   f54 = 3
+o[i] = a[i] - (c[i] << 4)   1f 01 56 00 02 00 10 a8 16 05   f54 = 4
+```
+
+Apple stops emitting this form at N = 5, so the shift is capped at four rather
+than extrapolated. The ADD keeps its existing shifted path
+(`agx3_iadd_encode`) untouched: re-routing a shape that already encodes is
+what cost two hardware probes before.
+
+**`mask`, `format` and `shift` are now printed by the refusal reporter.** Two
+of the five gaps here were misdiagnosed from an operand list that omitted
+them, which is a full round trip each time.
+
+### Register spilling was capped at scalars
+
+`stack_store [d0:none0 s0=32:reg16.discard s1=16:imm0 mask=0xf fmt=2]`. AGX3's
+grounded thread-private-storage form moves **one 32-bit component per
+instruction** (`agx3_translate_static_spill()` admits `mask == 1` only), so any
+*vector* spill or scratch access failed the whole shader closed -- regardless
+of what the shader computed. That silently capped shader complexity across the
+entire driver, which makes it the widest-reaching gap of the five.
+
+Closing it needed no new encoding. `mask` is always contiguous from component
+zero (both producers build it with `BITFIELD_MASK`), components live in
+consecutive registers and their stack slots are consecutive, so N scalar
+accesses at `offset + 4*c` are exactly equivalent. `agx3_split_vector_stack_access()`
+runs after register allocation -- which covers **both** producers, real spills
+from `agx_lower_spill()` and NIR scratch from `agx_emit_{load,store}_scratch()`
+-- and before the last-use pass, so each component's hints are computed against
+the instructions that actually survive.
+
+A second blocker sat behind it: the gate refused `data.discard`, which is set
+on essentially every real spill, since a spilled value is dead after its store.
+f27, which `src_kill` drives, *is* that last-use bit -- the same field the ALU
+forms set for `AGX3_ALU_HINT_DISCARD` -- so it is carried now rather than
+refused. `.cache` stays refused: this form models no cache hint, and claiming a
+live register is dead is a silent miscompile.
+
+**Still open on this path:** a *dynamic*-offset vector access
+(`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a runtime-indexed
+scratch array) is the register-indexed `ldtps`/`sttps` family, which
+`agx3_local_tps_core.c` models but which nothing wires to `STACK_LOAD` /
+`STACK_STORE`. Splitting it would need an add per component after RA. Not
+attempted here.
+
+### The control arm
+
+`params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
+`num_clusters_total = 0`, which makes `agx_chip_from_params()` return
+`AGX_CHIP_UNKNOWN` and the device refuse to open. Without the real T8103
+identity there is no AGX2 arm at all, and every G17P result is unfalsifiable.
+Every non-architectural field is held equal to `params_g17p` deliberately, so
+the two arms differ only by generation.
+
+### Not verified
+
+- **No hardware.** Nothing here ran on a G17P. Every claim is an encoding
+  claim, checked byte-for-byte against Apple's compiler and against the
+  in-tree encoder, and nothing more.
+- `EXT_vertex_input_dynamic_state` with a sub-32-bit attribute format is
+  reported to hit the mixed-width `iadd` shape through the draw-time prolog.
+  The encoding gap is closed, but a dynamic-vertex-input harness here compiled
+  no shader at all under the shim (3 lines of `AGX_MESA_DEBUG=shaders` output
+  against 204 for an ordinary graphics pipeline), and the same harness passed
+  with the fix reverted. **That path was never exercised, so no claim is made
+  about the extension.**
+- The immediate-zero-minuend `isub` (`-a`) has no reproducer here: the obvious
+  `uint(-int(x))` shader encodes on both arms already.
 
 ## vkQuake
 
@@ -750,6 +946,12 @@ code (see "Getting Apple's own G17P encoding", below):
    all and every compute shader that sums `gl_LocalInvocationID`'s three
    16-bit components was refused outright. f24 is slot A's width and f39 is
    slot B's, on both encodings; f28 and f43 are their sign-extensions.
+
+   **This fix was PARTIAL — see "The `iadd` widening fix was partial" below.**
+   It closed the register+register form only. The register+**immediate** form,
+   `iadd d32, h_a, #k`, still had no path and stayed refused for another three
+   days, and it is the single highest-frequency codegen refusal in a real
+   Vulkan CTS run.
 
 2. **32-bit reciprocal and reciprocal square root.** `RCP` and `RSQRT`
    accepted only 16-bit operands, so a float divide or a `normalize()` — both
