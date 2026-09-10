@@ -91,6 +91,7 @@ foreach d : [[with_gallium_kmsro, [
                'repaper',
                'rockchip',
                'rzg2l-du',
+               'simpledrm',
                'ssd130x',
                'st7586',
                'st7735r',
