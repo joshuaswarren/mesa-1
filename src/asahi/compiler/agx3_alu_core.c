@@ -1233,6 +1233,98 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  * cannot silently pick the wrong one.
  */
 bool
+agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !d || !out || !len)
+      return false;
+
+   /* Select-slot kind 2 is unidentified. Fail closed rather than deposit a
+    * value into a field whose meaning is not known. */
+   if (d->sel0_kind == AGX3_FSEL_SEL_UNKNOWN2 ||
+       d->sel1_kind == AGX3_FSEL_SEL_UNKNOWN2)
+      return false;
+   if ((d->sel0_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d->sel0_kind != AGX3_FSEL_SEL_REGISTER) ||
+       (d->sel1_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d->sel1_kind != AGX3_FSEL_SEL_REGISTER))
+      return false;
+
+   if (d->condition != 0 && d->condition != 1 && d->condition != 2 &&
+       d->condition != 5 && d->condition != 6)
+      return false;
+   if (d->wait_mask != 0 && d->wait_mask != 32)
+      return false;
+   if (d->dest >= 256 || (!d->dest_16 && (d->dest & 1)))
+      return false;
+   if (d->cmp0 >= 256 || (d->cmp0 & 1))
+      return false;
+   if (!d->cmp1_is_immediate && (d->cmp1 >= 256 || (d->cmp1 & 1)))
+      return false;
+   if (d->cmp1_is_immediate && d->cmp1 > 0xff)
+      return false;
+   if (d->sel0 >= 256 || d->sel1 >= 256)
+      return false;
+   if (d->sel0_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel0 & 1))
+      return false;
+   if (d->sel1_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel1 & 1))
+      return false;
+   if ((unsigned)d->cmp0_hint > AGX3_ALU_HINT_CACHE ||
+       (unsigned)d->cmp1_hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   /* Every compare source in the corpus is 32-bit wide, immediate ones
+    * included: an immediate slot still declares width 2. */
+   const struct agx3_field_kv base[] = {
+      {10, 2}, {11, d->dest_16 ? 1 : 2},
+      {42, AGX3_FSEL_CMP_REGISTER}, {43, 2},
+      {60, 2},
+      {77, d->sel_16 ? 1 : 2}, {94, d->sel_16 ? 1 : 2},
+   };
+
+   struct agx3_field_kv f[20];
+   unsigned n = 0;
+   f[n++] = (struct agx3_field_kv){3, d->dest};
+   f[n++] = (struct agx3_field_kv){12, d->dest_cache};
+
+   f[n++] = (struct agx3_field_kv){35, d->cmp0};
+   f[n++] = (struct agx3_field_kv){44,
+                                   d->cmp0_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){46,
+                                   d->cmp0_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){47, d->cmp0_abs};
+
+   f[n++] = (struct agx3_field_kv){59, d->cmp1_is_immediate
+                                          ? AGX3_FSEL_CMP_IMMEDIATE
+                                          : AGX3_FSEL_CMP_REGISTER};
+   f[n++] = (struct agx3_field_kv){d->cmp1_is_immediate ? 51 : 52, d->cmp1};
+   f[n++] = (struct agx3_field_kv){61,
+                                   d->cmp1_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){63,
+                                   d->cmp1_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){64, d->cmp1_abs};
+
+   f[n++] = (struct agx3_field_kv){76, d->sel0_kind};
+   f[n++] = (struct agx3_field_kv){
+      d->sel0_kind == AGX3_FSEL_SEL_REGISTER ? 70 : 68, d->sel0};
+   f[n++] = (struct agx3_field_kv){93, d->sel1_kind};
+   f[n++] = (struct agx3_field_kv){
+      d->sel1_kind == AGX3_FSEL_SEL_REGISTER ? 87 : 85, d->sel1};
+
+   f[n++] = (struct agx3_field_kv){110, d->condition};
+   f[n++] = (struct agx3_field_kv){107, d->wait_mask == 32};
+
+   /* The endpoints are mutually exclusive on their fixed bits -- each refuses
+    * another's operand-kind and width vector -- so scanning cannot silently
+    * land on the wrong one. Absolute sources sit on the longer endpoints. */
+   for (unsigned ep = 20; ep < 36; ++ep) {
+      if (agx3_bind_compose(enc, "fsel", ep, base, 7, f, n, out, len))
+         return true;
+   }
+   return false;
+}
+
+bool
 agx3_alu_fcmp_select_imm_width_abs(enum agx_isa_encoding enc, uint16_t dest,
                         const uint16_t src[2], const bool src_16[2],
                         const enum agx3_alu_hint hints[2],

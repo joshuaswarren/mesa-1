@@ -146,6 +146,74 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/*
+ * The general compare-select.
+ *
+ * `fcmpsel` is four operands -- two compared, two selected -- and each carries
+ * an independent (kind, width, value) triple. **The kind numbering is NOT
+ * shared between the compare slots and the select slots**: on a compare slot
+ * the register is kind 2 and the immediate kind 1, while on a select slot the
+ * register is kind 3. Do not unify these into one operand-type enum; they are
+ * different fields on different slots, and this file has now produced that
+ * hazard three times (the ALU wait baselines, the texture LOD-vs-offset
+ * predicates, and this).
+ *
+ * Field map, recovered from the 84 real Apple `fsel` instructions in
+ * test/agx3_compose_corpus_vectors.c:
+ *
+ *   dest          f3    width f11   cache f12
+ *   compare 0     f35   kind  f42   width f43   cache f44  last-use f46  ABS f47
+ *   compare 1     f52 (register) or f51 (immediate)
+ *                       kind  f59   width f60   cache f61  last-use f63  ABS f64
+ *   select true   f70 (register) or f68 (immediate)   kind f76   width f77
+ *   select false  f87 (register) or f85 (immediate)   kind f93   width f94
+ *   condition f110, scoreboard f107
+ *
+ * Absolute sources move the instruction to a longer endpoint exactly as they
+ * do elsewhere in the family, so the endpoint range is scanned rather than
+ * computed; the endpoints are mutually exclusive on their fixed bits.
+ *
+ * Kind 2 on a SELECT slot is deliberately refused. It is the majority class in
+ * the corpus (56 of 84) and deposits into f86/f69/f97, but nothing here
+ * identifies what it names -- plausibly a uniform. A vector that cannot be
+ * encoded fails closed; that is a better state than a wrong encoding hidden by
+ * a green count.
+ */
+enum agx3_fsel_kind {
+   /* compare slots */
+   AGX3_FSEL_CMP_IMMEDIATE = 1,
+   AGX3_FSEL_CMP_REGISTER = 2,
+   /* select slots -- note the register is 3 here, not 2 */
+   AGX3_FSEL_SEL_IMMEDIATE = 1,
+   AGX3_FSEL_SEL_UNKNOWN2 = 2, /* corpus majority, unidentified, refused */
+   AGX3_FSEL_SEL_REGISTER = 3,
+};
+
+struct agx3_fsel_desc {
+   uint16_t dest;
+   bool dest_16, dest_cache;
+
+   uint16_t cmp0;               /* register half; slot 0 is always a register */
+   enum agx3_alu_hint cmp0_hint;
+   bool cmp0_abs;
+
+   bool cmp1_is_immediate;
+   uint16_t cmp1;               /* register half, or the immediate value */
+   enum agx3_alu_hint cmp1_hint;
+   bool cmp1_abs;
+
+   uint8_t sel0_kind, sel1_kind; /* agx3_fsel_kind, select-slot numbering */
+   uint16_t sel0, sel1;
+   bool sel_16;
+
+   unsigned condition;
+   uint16_t wait_mask;
+};
+
+bool agx3_alu_fcmp_select(enum agx_isa_encoding enc,
+                          const struct agx3_fsel_desc *d,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* The same select with an absolute value on either comparison source. ABS is
  * not a bit on the form above: it moves to a longer endpoint (ten bytes ->
  * fourteen) with the destination field block shifted by +14. f47 and f64 are

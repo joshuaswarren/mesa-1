@@ -504,12 +504,88 @@ forms set for `AGX3_ALU_HINT_DISCARD` -- so it is carried now rather than
 refused. `.cache` stays refused: this form models no cache hint, and claiming a
 live register is dead is a silent miscompile.
 
-**Still open on this path:** a *dynamic*-offset vector access
-(`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a runtime-indexed
-scratch array) is the register-indexed `ldtps`/`sttps` family, which
-`agx3_local_tps_core.c` models but which nothing wires to `STACK_LOAD` /
-`STACK_STORE`. Splitting it would need an add per component after RA. Not
-attempted here.
+**Still open on this path**, but no longer un-scouted: a *dynamic*-offset
+vector access (`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a
+runtime-indexed scratch array) is the register-indexed `ldtps`/`sttps` family.
+`agx3_local_tps_core.c` already models it -- `struct agx3_tps_desc` carries
+`index`, `byte_offset` **and** `mask` -- so this needs no splitting and no new
+form, only wiring to `STACK_LOAD`/`STACK_STORE` in both the packer and the
+slot pass. What it does need is the rest of the field map.
+
+Apple witnesses, from kernels with a runtime trip count *and* a runtime index
+so nothing can be unrolled (the earlier attempt at this used a constant-folded
+index and produced 64 `ldtps` with *static* offsets, which looks like the
+dynamic form and is not):
+
+| MSL array   | bytes                        | f10 | f54 | f56 | f57 |
+| ----------- | ---------------------------- | --- | --- | --- | ---- |
+| `float[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half2[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half[]`    | `6f005403040a410101800200`   | 1   | 1   | 1   | 4    |
+| `half4[]`   | `6f00540a060a470102800300`   | 1   | 15  | 3   | 8    |
+| `float2[]`  | `6f00540a060a590102800300`   | 2   | 3   | 3   | 8    |
+| `float4[]`  | `6f00540e0c0a570104000200`   | 2   | 15  | -   | 16   |
+
+`float[]` and `half2[]` are **byte-identical**, which is what decodes the
+family: f10 is the ELEMENT WIDTH (1 = 16-bit, 2 = 32-bit) and f54 the
+component mask *in those units*. A four-byte access is spelled as two 16-bit
+elements, so a scalar `float` and a `half2` are the same instruction. Read
+f54 as a 32-bit-word mask instead and `float[]` looks like an outlier that
+falsifies the whole reading; it is not an outlier, it is the clue.
+
+f2 is the data register and f16 the index register, both swept across the
+kernels above.
+
+#### The three unknown fields are now resolved
+
+- **f57 is `byte_offset`.** Proven with three `float[32]` arrays in one kernel,
+  128 bytes apart: their accesses come back with f57 = **4, 132, 260** — steps
+  of exactly 128, over a four-byte frame header. In single-array kernels f57
+  was 4, 8 and 16, which looked like it was tracking the *element size*; it was
+  not, the array simply starts at an element-aligned base. One array cannot
+  distinguish those two readings. Two do.
+- **f56 is `shift`,** the scaling applied to the index: half → 1, four-byte →
+  2, eight-byte → 3. Sixteen-byte elements come back with f56 = 0 and a
+  pre-scaled index, so shift is witnessed at 0..3 and never 4.
+- **f41 is `frame_region`, and it is 1** in every dynamic-index witness (the
+  static-offset spills use 2).
+- The component mask f54 is witnessed at **1, 3, 7 and 15** — `float3` and
+  `half3` supply the 7 — so every contiguous mask Mesa can produce is covered.
+
+`byte_offset = 0` composes, and the existing `tps_ok()` gate already admits
+every combination above (mask 1..15, shift 0..3, frame_region 1..6).
+
+#### What actually blocks it: f66 is welded into the baseline
+
+`tps_baseline()` pins **f66 = 1** on every load, as if it were a form constant.
+It is not. Apple varies it, and *every* dynamic-index load witnessed here has
+f66 = **0**:
+
+```
+in-tree corpus vector   6f 00 54 00 00 0a 49 01 01 40 03 00   f66 = 1, index 0
+Apple float4 v[64]      6f 00 54 0e 0c 0a 57 01 04 00 02 00   f66 = 0, index 12
+Apple half3  v[64]      6f 00 54 06 06 0a 4d 01 02 80 03 00   f66 = 0, index 6
+```
+
+So the in-tree encoder **cannot emit any of these instructions**: composing the
+correct field vector yields byte 9 with an extra 0x40 every time. That, not the
+three fields above, is the real blocker — and it is the same defect shape as
+the ALU wait/lifetime bits described under "Standing defect" below, and as the
+texture guards that folded LOD mode into a predicate: *an orthogonal field
+modelled as part of a form*.
+
+What f66 selects is **not determined**. It is not index-present (the f66 = 1
+vector has index r0, which is a real register), not the slot (both use slot 6),
+and not obviously the offset. Six witnesses all sit on one side of it, so
+nothing here separates the two values.
+
+**This is where the work stops.** The three fields it was sent to resolve are
+resolved; a fourth, previously unrecorded, is not. Adding a knob for f66 would
+reproduce these six witnesses byte-exactly while guessing the policy for every
+shape not among them — and the consumer is *register spilling*, where a wrong
+field corrupts arbitrary shader state rather than one value and would present
+as unrelated failures across every future run. Determine what selects f66
+first; the encoding is otherwise ready and needs no new form.
 
 ### Closed: `.abs` on a comparison source (`fcmpsel`)
 
@@ -592,6 +668,128 @@ source fall through to it would encode the comparison *without* the
 modifier — a wrong result rather than a refusal. That is worth guarding
 deliberately: the fail-closed property only holds if nothing downstream can
 quietly accept the operand and drop the bit.
+
+### `fcmpsel` is a regular four-operand form -- build to that, not to shapes
+
+Closing `.abs` on the immediate-select `fcmpsel` cleared **32 of 1,514** Vulkan
+1.0 refusals (2.1%): `glsl.builtin` 638 -> 622, `glsl.conversions` 180 -> 180,
+`glsl.texture_gather` 664 -> 664. The fix is real -- `m_abscmp` and `m_isinf`
+go REFUSED -> PASS, `m_isnan` is unchanged, g13g stays at 0 -- it is simply
+much narrower than the symptom class it belongs to. "Every refusal reduces to
+a source modifier" described the symptom; it did not predict the cure.
+
+**A falling refusal count only proves the shader now compiles.** Whether the
+32 emit *correct* code is unverifiable without hardware. Do not let "cleared"
+become "correct".
+
+The two survivors are ~98% of that measurement and they are not two more
+shapes -- they are two cells of one table this encoder does not express:
+
+```
+180x glsl.conversions, dEQP isOk() at mediump:
+  fcmpsel [d16:regN s0=32:regX.discard s1=32:regY.abs.discard
+           s2=16:regZ.discard s3=16:imm0 cond=5]
+isinf residue in glsl.builtin:
+  fcmpsel [d32:reg4 s0=16:imm0 s1=32:reg2.abs.cache
+           s2=32:reg4.discard s3=32:reg2.cache cond=1]
+```
+
+Both carry a **register** in a select slot; the in-tree family
+(`agx3_alu_fcmp_select_imm_*`) requires *both* selects to be immediates.
+
+Apple's own bytes show the form is completely regular. Four operands -- two
+compared, two selected -- and each carries an independent **(kind, width,
+value)** triple:
+
+| operand      | kind | width | value if register | value if immediate |
+| ------------ | ---- | ----- | ----------------- | ------------------ |
+| compare 0    | f42  | f43   | f35               | -                  |
+| compare 1    | f59  | f60   | f52               | -                  |
+| select true  | f76  | f77   | f70               | f68                |
+| select false | f93  | f94   | f87               | f85                |
+
+Kind is **1 = immediate, 3 = register**, and it is what selects which value
+field is live. Witnessed by holding everything else fixed and changing only
+the select operands' class:
+
+```
+(a < b) ? c : d          02 83 07 87 22 0c 03 c0 20 10
+    f76 = 3, f93 = 3, f70 = 12, f87 = 16      (registers)
+(fabs(a) < b) ? c : d    02 83 07 87 23 0c 03 00 20 10 00 80 01 00
+    the same, plus f47                        (ep27 -> ep35)
+(fabs(a) < b) ? 1.0h : 0.0h  12 03 19 05 23 b0 03 00 20 80 00 80 01 00
+    f76 = 1, f93 = 1, f68 = 48, f85 = 0       (immediates)
+0.0f < fabs(a) ? c : d   02 83 07 81 26 0c 00 c2 20 08
+    f59 = 1                                   (immediate COMPARE source)
+```
+
+and the ABS endpoint shift is the same +8 as before: the immediate-select pair
+is ep20..27 / ep28..35, the register-select pair ep27 / ep35.
+
+So the remaining work is **one regular encoder over that table**, not a fix per
+refusal shape. Given `compute.pipeline` alone reports 2,790 g17p refusals, a
+point fix per cell is the wrong shape of solution.
+
+MSL cannot supply the two survivor cells: Metal promotes half selects to
+32-bit (`half r = (fabs(a)<b) ? c : d` with half `c`/`d` still emits
+f77 = f94 = 2) and folds a register/immediate select mix away rather than
+emitting `fcmpsel` at all. The 16-bit-destination cell comes from *mediump*
+lowering, which MSL has no direct spelling for.
+
+**It does not need to.** `test/agx3_compose_corpus_vectors.c` already holds
+**84 real Apple `fsel` instructions for AGX3b**, with exact field vectors and
+bytes, and `test-agx3-compose-corpus.c` already requires the composer to
+reproduce every one byte-exactly. Both survivor cells are in it:
+
+```
+16-bit destination (f11 = 1), 8 vectors, e.g. ep33
+  42 d7 25 d9 23 81 03 00 20 80 00 00 03 00
+  f11=1 f77=1 f94=1  (16-bit dest and 16-bit selects)
+  f47=1 f64=1        (both compare sources absolute)
+  f76=1 f93=1 f68=1  (immediate selects)
+
+immediate compare source (f59 = 1), 32 vectors, e.g. ep27
+  e2 95 27 81 22 7a 02 02 20 7c
+  f59=1              (compare source 1 is an immediate)
+  f76=3 f70=122, f93=3 f87=124   (register selects)
+```
+
+Operand-kind coverage across those 84 vectors, by slot:
+
+| slot         | kind 1 (imm) | kind 2 | kind 3 (reg) |
+| ------------ | ------------ | ------ | ------------ |
+| compare 0    | 0            | 84     | 0            |
+| compare 1    | 32           | 52     | 0            |
+| select true  | 12           | 48     | 24           |
+| select false | 4            | 56     | 24           |
+
+Decoding those 84 completes the table. Each kind selects which value field is
+live, and the numbering **differs between the compare slots and the select
+slots** - the per-slot hazard this file warns about, seen again:
+
+| slot         | kind 1        | kind 2             | kind 3       |
+| ------------ | ------------- | ------------------ | ------------ |
+| compare 0/1  | immediate f51 | register f35 / f52 | -            |
+| select true  | immediate f68 | f86                | register f70 |
+| select false | immediate f85 | f86 (+f97)         | register f87 |
+
+Two things fall out. First, on a compare slot **kind 2 is the register** and
+kind 1 the immediate, while on a select slot the register is kind **3**, so a
+single "kind" enum shared across all four slots would be wrong. Second, every
+immediate compare source in the corpus has f51 = **0** (32 of 32), which is
+exactly the `s0=16:imm0` the surviving `isinf` shape carries.
+
+**Neither survivor needs kind 2.** The 16-bit-destination cell is a register
+select (kind 3) plus an immediate one (kind 1); the immediate-compare-source
+cell is kind 1 on the compare slot plus register selects. Kind 2 is the
+majority class in the corpus and remains unidentified - plausibly a uniform -
+and it is not on the path to either survivor, so it does not block this work
+and should not be guessed at to make the table look finished.
+
+The right shape of the work is therefore **one general encoder over the
+operand table, validated against all 84 corpus vectors**, rather than a fix per
+refusal cell. That matters because `compute.pipeline` alone reports 2,790
+refusals whose shapes are not yet inventoried.
 
 ### Not an encoding gap: `device_load` at `reg192`
 

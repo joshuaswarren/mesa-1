@@ -7716,6 +7716,110 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /*
+          * The general compare-select: a REGISTER in a select slot, or an
+          * IMMEDIATE in a compare slot. The block above requires both selects
+          * to be immediates and both compare sources to be registers, so it
+          * skips these shapes entirely rather than refusing them, and nothing
+          * it already encodes can reach here.
+          *
+          * Both are ordinary GLSL. dEQP's isOk() written to a mediump output
+          * gives the first (a 16-bit destination selecting between a register
+          * and a constant); isinf() gives the second (a comparison against an
+          * immediate zero selecting between two registers).
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             agx_channels(I->dest[0]) == 1 &&
+             (I->dest[0].size == AGX_SIZE_16 ||
+              I->dest[0].size == AGX_SIZE_32)) {
+            const agx_index c0 = I->src[0], c1 = I->src[1];
+            const bool c0_imm = c0.type == AGX_INDEX_IMMEDIATE;
+            const bool c1_imm = c1.type == AGX_INDEX_IMMEDIATE;
+
+            /* At most one compare source may be an immediate, and every
+             * immediate compare source witnessed carries zero. Apple spells
+             * `k < b` by reversing the relation so the immediate lands in
+             * slot 1, the only slot whose kind field is witnessed taking the
+             * immediate value. */
+            if (!(c0_imm && c1_imm) &&
+                (!c0_imm || (c0.value == 0 && !c0.abs && !c0.neg)) &&
+                (!c1_imm || (c1.value == 0 && !c1.abs && !c1.neg)) &&
+                (c0_imm || agx3_src_is_register(c0)) &&
+                (c1_imm || agx3_src_is_register(c1))) {
+               const agx_index sel_t = I->src[2], sel_f = I->src[3];
+               const bool t_imm = sel_t.type == AGX_INDEX_IMMEDIATE;
+               const bool f_imm = sel_f.type == AGX_INDEX_IMMEDIATE;
+
+               unsigned condition = I->fcond;
+               bool swap = I->invert_cond;
+               if (condition == AGX_FCOND_LTN) {
+                  condition = AGX_FCOND_GE;
+                  swap = !swap;
+               } else if (condition == AGX_FCOND_GTN) {
+                  condition = AGX_FCOND_LE;
+                  swap = !swap;
+               }
+               /* Put the immediate in compare slot 1. */
+               const bool reverse = c0_imm;
+               const agx_index cmp0 = reverse ? c1 : c0;
+               const agx_index cmp1 = reverse ? c0 : c1;
+               if (reverse)
+                  condition = agx3_fcond_reverse(condition);
+
+               const agx_index tv = swap ? sel_f : sel_t;
+               const agx_index fv = swap ? sel_t : sel_f;
+               const bool tv_imm = swap ? f_imm : t_imm;
+               const bool fv_imm = swap ? t_imm : f_imm;
+
+               const struct agx3_fsel_desc d = {
+                  .dest = I->dest[0].value,
+                  .dest_16 = I->dest[0].size == AGX_SIZE_16,
+                  .dest_cache = I->dest[0].cache,
+                  .cmp0 = cmp0.value,
+                  .cmp0_hint = agx3_post_ra_hint(cmp0),
+                  .cmp0_abs = cmp0.abs,
+                  .cmp1_is_immediate = reverse ? c0_imm : c1_imm,
+                  .cmp1 = cmp1.value,
+                  .cmp1_hint = agx3_post_ra_hint(cmp1),
+                  .cmp1_abs = cmp1.abs,
+                  .sel0_kind = tv_imm ? AGX3_FSEL_SEL_IMMEDIATE
+                                      : AGX3_FSEL_SEL_REGISTER,
+                  .sel1_kind = fv_imm ? AGX3_FSEL_SEL_IMMEDIATE
+                                      : AGX3_FSEL_SEL_REGISTER,
+                  .sel0 = tv.value,
+                  .sel1 = fv.value,
+                  .sel_16 = I->dest[0].size == AGX_SIZE_16,
+                  .condition = condition,
+                  .wait_mask = 0,
+               };
+
+               const bool operands_ok =
+                  !cmp0.neg && !cmp1.neg && !tv.neg && !fv.neg && !tv.abs &&
+                  !fv.abs && !cmp0.kill && !cmp1.kill &&
+                  !(cmp0.cache && cmp0.discard) &&
+                  !(cmp1.cache && cmp1.discard) &&
+                  (tv_imm || agx3_src_is_register(tv)) &&
+                  (fv_imm || agx3_src_is_register(fv)) &&
+                  agx_channels(cmp0) == 1 && agx_channels(cmp1) == 1;
+
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+               uint8_t len = 0;
+               if (operands_ok) {
+                  /* No witness of this endpoint carries a scoreboard wait, so
+                   * retire outstanding slots first rather than dropping the
+                   * dependency. */
+                  if (wait != 0 && !agx3_retire_slots_noop(emission, enc, wait))
+                     AGX3_REFUSE(I);
+                  if (agx3_alu_fcmp_select(enc, &d, bytes, &len) &&
+                      agx3_append(emission, bytes, len))
+                     continue;
+               }
+               AGX3_REFUSE(I);
+            }
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->shift == 4 && I->dest[0].size == AGX_SIZE_16 &&
