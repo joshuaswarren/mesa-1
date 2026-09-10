@@ -1811,6 +1811,17 @@ static void test_native_asr32(void)
    puts("Native ASR32:6 exact Apple immediate/live/dead vectors PASS");
 }
 
+static void test_native_asr16(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+   assert(agx3_alu_asr_imm16(AGX_ISA_ENCODING_AGX3B,2,2,1,
+                              AGX3_ALU_HINT_DISCARD,false,32,bytes,&length));
+   exact(bytes,length,"a7015602020404606200");
+   assert(!agx3_alu_asr_imm16(AGX_ISA_ENCODING_AGX3B,2,2,16,
+                               AGX3_ALU_HINT_DISCARD,false,32,bytes,&length));
+   puts("Native ASR16 exact Apple immediate/dead vector PASS");
+}
+
 static void test_native_narrow_multiply(void)
 {
    const uint16_t src[]={0,2};
@@ -1843,6 +1854,124 @@ static void test_native_half_multiply(void)
       exact(bytes,len,live?"2000050100c0":"10021d0300c0");
    }
    puts("Native half multiply: two complete Apple live/dead vectors PASS");
+}
+
+static void test_wait_code_forms_fail_closed(void)
+{
+   /* Two wait ENCODINGS exist and agx3_alu_compose() must not mix them up.
+    *
+    * The ten-byte integer forms carry a six-bit MASK: iadd's f45..f50 land in
+    * byte1 bits 4..7 and byte2 bits 0..1, so a pinned slot plus a requested
+    * slot is simply "wait both" -- an over-wait, conservative and safe.
+    *
+    * The compact float forms instead carry a three-bit CODE naming ONE slot,
+    * values 1..6, in byte5 bits 5..7. f32add's f52..f57 deposit
+    * 0x20/0x40/0x60/0x80/0xa0/0xc0 there, and each of those six was witnessed
+    * from Apple in a single kernel that issues six device loads and consumes
+    * them in reverse: every consumer's code matched the f12 signal slot of the
+    * lddev that produced its source. agx3_alu_table.h pins f52 (code 1) in the
+    * f32add baseline as if it were a form constant, so asking for slot 2 used
+    * to deposit both and emit 09 01 04 05 00 e0 -- code 7, a value Apple never
+    * emits and which names no slot. That is a wrong value in the instruction
+    * stream, so it must refuse; agx3_emit_alu() then retires the slot with a
+    * synchronous prelude and the shader still compiles. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const enum agx_isa_encoding B = AGX_ISA_ENCODING_AGX3B;
+
+   /* Slot 1 is the pinned code, so it still encodes, byte-for-byte as before. */
+   assert(agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 0, bytes, &len));
+   exact(bytes, len, "090104050020");
+   assert(agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 1u << 0, bytes, &len));
+   exact(bytes, len, "090104050020");
+
+   /* Slot 2 must NOT come back as code 7, and neither must any mask that
+    * would merge two codes. */
+   assert(!agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 1u << 1, bytes, &len));
+   assert(!agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 0x3u, bytes, &len));
+
+   /* The mask forms are untouched: pinned slot 6 plus the requested slot. */
+   assert(agx3_alu_compose(B, AGX3_ALU_IADD, 0, 4, 0, 0, 0, 1u << 1, bytes, &len));
+   exact(bytes, len, "9f215600020800a81305");
+   assert(agx3_alu_compose(B, AGX3_ALU_IADD, 0, 4, 0, 0, 0, 0x3u, bytes, &len));
+   exact(bytes, len, "9f315600020800a81305");
+
+   /* inv/BNOT deposits every slot now that its wait list exists; before, all
+    * 64 masks produced the same unwaited-except-slot-6 bytes. */
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0, 1u << 0, bytes, &len));
+   exact(bytes, len, "0b052600012800800000");
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0, 1u << 3, bytes, &len));
+   exact(bytes, len, "0b052600010800a00000");
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0,
+                           (1u << 0) | (1u << 3), bytes, &len));
+   exact(bytes, len, "0b052600012800a00000");
+
+   puts("Wait-code forms fail closed: f32add slot2/slot1+2 refused instead of "
+        "emitting code 7; mask forms and inv unchanged PASS");
+}
+
+static void test_native_half_saturating_arithmetic(void)
+{
+   /* applegpu_g17p, macOS 26 Metal toolchain. Each saturating vector is the
+    * unsaturated one with G17P's f14 set, which moves it from the six-byte
+    * ep1 point to the eight-byte ep2 point; the two field vectors differ in
+    * f14 alone. The live/dead pairs additionally pin which lifetime bit
+    * belongs to which source: f28 is source 0 (f17), f45 is source 1 (f34).
+    *   saturate(a[i] * b[i])          10 03 1d 02 01 00 00 82
+    *   saturate(a[i] + b[i])          10 03 1c 02 01 00 00 82
+    *   saturate(x * y), y still live  18 03 0d 02 01 00 00 82
+    *   saturate(x * y), x still live  18 02 15 03 01 00 00 82
+    *   saturate(x + y), y still live  18 03 0c 02 01 00 00 82
+    *   saturate(x + y), x still live  18 02 14 03 01 00 00 82 */
+   static const struct {
+      bool multiply;
+      uint16_t dest, src0, src1;
+      enum agx3_alu_hint hint0, hint1;
+      const char *bytes;
+   } vectors[] = {
+      {true,  2, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+       "10031d0201000082"},
+      {false, 2, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+       "10031c0201000082"},
+      {true,  3, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+       "18030d0201000082"},
+      {true,  3, 2, 3, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+       "1802150301000082"},
+      {false, 3, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+       "18030c0201000082"},
+      {false, 3, 2, 3, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+       "1802140301000082"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(*vectors); ++i) {
+      const uint16_t src[2] = {vectors[i].src0, vectors[i].src1};
+      const enum agx3_alu_hint hints[2] = {vectors[i].hint0, vectors[i].hint1};
+      assert((vectors[i].multiply ? agx3_alu_hmul_saturate : agx3_alu_hadd_saturate)(
+                AGX_ISA_ENCODING_AGX3B, vectors[i].dest, src, hints, false, 32,
+                bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   /* The unsaturated encoders must not have moved: f14 = 0 is byte-identical
+    * to omitting the field at every encoding point. */
+   {
+      const uint16_t src[2] = {3, 2};
+      const enum agx3_alu_hint hints[2] = {AGX3_ALU_HINT_DISCARD,
+                                           AGX3_ALU_HINT_DISCARD};
+      assert(agx3_alu_hmul(AGX_ISA_ENCODING_AGX3B, 2, src, hints, false, 32,
+                           bytes, &len));
+      exact(bytes, len, "10031d0200c0");
+      assert(agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 2, src, hints, false, 32,
+                           bytes, &len));
+      exact(bytes, len, "10031c0200c0");
+
+      /* Fail closed off G17P and on an out-of-range wait. */
+      assert(!agx3_alu_hmul_saturate(AGX_ISA_ENCODING_AGX3C, 2, src, hints,
+                                     false, 32, bytes, &len));
+      assert(!agx3_alu_hadd_saturate(AGX_ISA_ENCODING_AGX3B, 2, src, hints,
+                                     false, 0x40, bytes, &len));
+   }
+   puts("Native saturating half multiply/add: six exact Apple vectors plus "
+        "unsaturated parity and bounds PASS");
 }
 
 static void test_native_half_multiply_minifloat(void)
@@ -3695,6 +3824,8 @@ int main(void){
    test_native_half_inverse();
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
+   test_native_half_saturating_arithmetic();
+   test_wait_code_forms_fail_closed();
    test_native_minifloat_mixed_select();
    test_native_half_minifloat_select_f32();
    test_native_fadd_mixed_half();
@@ -3719,6 +3850,7 @@ int main(void){
    test_native_half_floor();
    test_native_half_ceil();
    test_native_asr32();
+   test_native_asr16();
    test_native_extract32();
    test_blur_half_arithmetic();
    test_native_u16_arithmetic();

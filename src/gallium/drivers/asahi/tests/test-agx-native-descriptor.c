@@ -158,6 +158,48 @@ test_g17p_txf_sampler(void)
 }
 
 static void
+test_g17p_sampler_handles(void)
+{
+   static const struct {
+      unsigned api;
+      uint16_t native;
+   } cases[] = {
+      {0, 1},
+      {AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS - 1,
+       AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS},
+      {AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS,
+       AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS + 1},
+      {AGX_GALLIUM_G17P_API_SAMPLERS - 1,
+       AGX_GALLIUM_G17P_API_SAMPLERS},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      uint16_t native = UINT16_MAX;
+      CHECK(agx_gallium_g17p_sampler_handle(AGX_CHIP_G17P, cases[i].api,
+                                            &native));
+      CHECK(native == cases[i].native);
+
+      uint16_t custom = UINT16_MAX;
+      CHECK(agx_gallium_g17p_custom_border_handle(
+         AGX_CHIP_G17P, cases[i].api, &custom));
+      CHECK(custom == AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE + cases[i].api);
+   }
+
+   uint16_t untouched = 0x5555;
+   CHECK(!agx_gallium_g17p_sampler_handle(
+      AGX_CHIP_G17P, AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
+   CHECK(untouched == 0x5555);
+   CHECK(!agx_gallium_g17p_sampler_handle(AGX_CHIP_G17G, 0, &untouched));
+   CHECK(!agx_gallium_g17p_sampler_handle(AGX_CHIP_G17P, 0, NULL));
+   CHECK(!agx_gallium_g17p_custom_border_handle(
+      AGX_CHIP_G17P, AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
+   CHECK(untouched == 0x5555);
+   CHECK(!agx_gallium_g17p_custom_border_handle(AGX_CHIP_G17G, 0,
+                                                 &untouched));
+   CHECK(!agx_gallium_g17p_custom_border_handle(AGX_CHIP_G17P, 0, NULL));
+}
+
+static void
 test_standard_border_colours(void)
 {
    enum agx_border_colour result = AGX_BORDER_COLOUR_CUSTOM;
@@ -740,6 +782,7 @@ main(void)
    test_chip_routing();
    test_feature_gates();
    test_g17p_txf_sampler();
+   test_g17p_sampler_handles();
    test_standard_border_colours();
    test_native_packers();
    test_agx3_pbe();

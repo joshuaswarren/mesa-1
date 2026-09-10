@@ -195,7 +195,9 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 
    if (tib->nr_samples > 1 &&
        tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM)
+       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_R8G8B8X8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
@@ -229,14 +231,19 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    const bool rgba16i_or_x = tib->nr_samples == 1 &&
       (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT ||
        tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_SINT);
-   const bool rgba32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT &&
+   /* API RGB32 surfaces use the four-lane RGBX physical family. The unused
+    * lane has the same tile footprint and EOT protocol as RGBA32. */
+   const bool rgbx32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_UINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgba32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT &&
+   const bool rgbx32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_SINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgba32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT &&
+   const bool rgbx32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
    const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
@@ -246,7 +253,7 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
       agx_tilebuffer_physical_format(tib, 0) ==
          PIPE_FORMAT_R11G11B10_FLOAT;
 
-   return mrt != AGX_G17P_MRT_NONE || rgba32u || rgba32i || rgba32f ||
+   return mrt != AGX_G17P_MRT_NONE || rgbx32u || rgbx32i || rgbx32f ||
           rgb10a2u || r11g11b10f ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
@@ -260,12 +267,18 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UINT ||
@@ -299,8 +312,22 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
        tib->_offset_B[1] == 8 && tib->sample_size_B == 16)
       return AGX_G17P_MRT_WBOIT;
 
-   if (tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+   const bool rt0_rgba8 =
+      tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_UNORM;
+   const bool rt1_rgba8 =
+      tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_B8G8R8A8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_R8G8B8X8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_B8G8R8X8_UNORM;
+
+   /* These logical channel orders and alpha-ignored variants all use the
+    * same four-lane U8 tile representation. Swizzle and X-channel discard
+    * live in the per-attachment PBE descriptor, outside the shared MRT EOT
+    * program. */
+   if (rt0_rgba8 && rt1_rgba8 &&
        tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
       return AGX_G17P_MRT_RGBA8;
 

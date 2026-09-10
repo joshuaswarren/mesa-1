@@ -186,9 +186,14 @@ hk_GetDeviceBufferMemoryRequirements(
    VK_FROM_HANDLE(hk_device, dev, device);
    struct hk_physical_device *pdev = hk_device_physical(dev);
 
-   const uint32_t alignment = hk_get_buffer_alignment(
-      hk_device_physical(dev), pInfo->pCreateInfo->usage,
-      pInfo->pCreateInfo->flags);
+   VkBufferUsageFlags2KHR usage = pInfo->pCreateInfo->usage;
+   const VkBufferUsageFlags2CreateInfoKHR *usage2 = vk_find_struct_const(
+      pInfo->pCreateInfo->pNext, BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR);
+   if (usage2)
+      usage = usage2->usage;
+
+   const uint32_t alignment =
+      hk_get_buffer_alignment(pdev, usage, pInfo->pCreateInfo->flags);
 
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
       .size = align64(pInfo->pCreateInfo->size, alignment),

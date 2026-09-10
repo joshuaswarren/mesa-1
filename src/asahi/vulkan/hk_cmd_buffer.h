@@ -561,6 +561,7 @@ struct hk_cmd_buffer {
 
    /* Owned BOs and retained references needed by recorded commands. */
    struct util_dynarray large_bos;
+
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,

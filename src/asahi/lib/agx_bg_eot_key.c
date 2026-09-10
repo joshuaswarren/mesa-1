@@ -42,14 +42,20 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       format == PIPE_FORMAT_R32_SINT || format == PIPE_FORMAT_R32G32_SINT ||
       format == PIPE_FORMAT_R32G32_UINT ||
       format == PIPE_FORMAT_R11G11B10_FLOAT ||
+      format == PIPE_FORMAT_R32G32B32X32_FLOAT ||
       format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+      format == PIPE_FORMAT_R32G32B32X32_UINT ||
       format == PIPE_FORMAT_R32G32B32A32_UINT ||
+      format == PIPE_FORMAT_R32G32B32X32_SINT ||
       format == PIPE_FORMAT_R32G32B32A32_SINT;
    key->g17p_rt0_eot_i32_four_words =
+      format == PIPE_FORMAT_R32G32B32X32_FLOAT ||
       format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+      format == PIPE_FORMAT_R32G32B32X32_UINT ||
       format == PIPE_FORMAT_R32G32B32A32_UINT;
    key->g17p_rt0_eot_i32_signed_four_words =
-      format == PIPE_FORMAT_R32G32B32A32_SINT;
+      format == PIPE_FORMAT_R32G32B32A32_SINT ||
+      format == PIPE_FORMAT_R32G32B32X32_SINT;
    key->g17p_rt0_eot_i32_selector_15 =
       format == PIPE_FORMAT_R32G32_SINT;
    key->g17p_rt0_eot_i32_selector_75 =
@@ -72,8 +78,14 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    case PIPE_FORMAT_R8_SINT:
    case PIPE_FORMAT_R8G8_UINT:
    case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8B8X8_UINT:
    case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_B8G8R8X8_UINT:
+   case PIPE_FORMAT_B8G8R8A8_UINT:
+   case PIPE_FORMAT_R8G8B8X8_SINT:
    case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_B8G8R8X8_SINT:
+   case PIPE_FORMAT_B8G8R8A8_SINT:
    case PIPE_FORMAT_R16_FLOAT:
    case PIPE_FORMAT_R16_UNORM:
    case PIPE_FORMAT_R16_SNORM:
@@ -116,8 +128,11 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       key->g17p_rt0_eot_words = 2;
       break;
    case PIPE_FORMAT_R32G32B32A32_UINT:
+   case PIPE_FORMAT_R32G32B32X32_UINT:
    case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R32G32B32X32_SINT:
    case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R32G32B32X32_FLOAT:
       key->g17p_rt0_eot_words = 4;
       break;
    default:

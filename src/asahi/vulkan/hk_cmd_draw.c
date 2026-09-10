@@ -81,6 +81,26 @@
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
+static bool
+hk_g17p_split_direct_draws_enabled(const struct hk_device *dev)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_SPLIT_DIRECT_DRAWS", false);
+
+   return dev->dev.chip == AGX_CHIP_G17P && enabled;
+}
+
+static bool
+hk_g17p_cycle_vdm_context_enabled(const struct hk_device *dev)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_CYCLE_VDM_CONTEXT", false);
+
+   return dev->dev.chip == AGX_CHIP_G17P && enabled;
+}
+
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
  * get some extra smoke testing.
  */
@@ -490,6 +510,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
       if (!pbe_argument_va)
          return (struct hk_bg_eot){0};
+      if (hk_g17p_launch_trace_enabled())
+         hk_g17p_trace_line("eot-pbe", pbe_argument_va, pbe_arguments,
+                            pbe_argument_size);
 
       const struct agx3_g17p_rt0_eot_program_desc desc = {
          .program_va = program_bo->va->addr,
@@ -3023,6 +3046,24 @@ hk_g17p_bind_tail_refused(unsigned line)
 }
 
 static bool
+hk_g17p_nonpoint_no_psiz_diagnostic(const struct hk_graphics_state *gfx,
+                                    const struct hk_shader *vs)
+{
+   if (!vs ||
+       !debug_get_bool_option("HK_G17P_NONPOINT_NO_PSIZ", false) ||
+       gfx->topology == AGX_PRIMITIVE_POINTS)
+      return false;
+
+   /* A terminal point-size word can be removed without shifting any later
+    * layer/viewport or clip output. */
+   return vs->info.uvs.group_offs[UVS_PSIZ] + 1 ==
+             vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] &&
+          vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] ==
+             vs->info.uvs.group_offs[UVS_CLIP_DIST] &&
+          vs->info.uvs.group_offs[UVS_CLIP_DIST] == vs->info.uvs.size;
+}
+
+static bool
 hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                               uint8_t **out)
 {
@@ -3061,6 +3102,61 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if ((linked_fs->b.cf.nr_bindings != 0) != (gfx->varyings != 0))
       return hk_g17p_bind_tail_refused(__LINE__);
 
+   /* This record describes the program actually launched by the Index List.
+    * Ordinary draws use the API vertex shader, while GS/XFB draws use the
+    * geometry raster-copy variant. Taking the API VS unconditionally makes
+    * the HAL200 output contract disagree with the live VertexProgramVariant
+    * as soon as interstage optimization changes their UVS footprints. */
+   const struct hk_shader *vs = hk_bound_hw_vs(gfx);
+   if (!vs)
+      return hk_g17p_bind_tail_refused(__LINE__);
+
+   /* Native EXP-O2A changes both point-size enable and the output count with
+    * the draw primitive: triangles do not consume the terminal point-size
+    * word. Dynamic-topology pipelines currently retain the default
+    * gl_PointSize write in their one HW variant, so provide an exact,
+    * default-off A/B for that missing variant selection. Restrict it to a
+    * terminal point-size word with no layer/viewport or clip outputs; changing
+    * a middle UVS word would require rewriting the remaining output layout. */
+   const bool nonpoint_no_psiz =
+      hk_g17p_nonpoint_no_psiz_diagnostic(gfx, vs);
+   const uint32_t active_output_size =
+      vs->info.uvs.size - (nonpoint_no_psiz ? 1 : 0);
+   const uint32_t active_output_select =
+      vs->info.uvs.osel.opaque[0] &
+      ~(nonpoint_no_psiz ? BITFIELD_BIT(18) : 0);
+
+   uint32_t output_size;
+   if (!agx_ppp_hal200_output_size_pack(
+          active_output_size, 0, &output_size))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
+   uint32_t output_select;
+   if (!agx_ppp_hal200_output_select_pack(
+          dev->dev.chip, active_output_select,
+          linked_fs->b.cf.nr_bindings != 0, linked_fs->b.cf.reads_z,
+          &output_select))
+      return hk_g17p_bind_tail_refused(__LINE__);
+
+   if (nonpoint_no_psiz)
+      mesa_logi_once("G17P non-point terminal PointSize A/B active");
+
+   /* Trace-only falsifier for the deterministic Omarchy About VF_CPF fault.
+    * The retained faulting trace has exactly this sampled-fragment contract:
+    * two coefficient bindings, position + smooth float2 + point size (size 7,
+    * selector 0x50000), and a zero final FragmentProgram record word.  Metal
+    * copies the low nibble of compiler metadata field 32 into this word;
+    * retained tex2/vary3 records carry 1.  Mesa has no demonstrated semantic
+    * equivalent for that compiler-profile class, so keep this opt-in and
+    * shape-specific. */
+   const bool about_flags1_diagnostic =
+      debug_get_bool_option("HK_G17P_HAL200_ABOUT_FLAGS1", false) &&
+      fs->b.info.g17p_sampled_fragment &&
+      linked_fs->b.cf.nr_bindings == 2 && !linked_fs->b.cf.reads_z &&
+      output_size == 7 && output_select == UINT32_C(0x00050000);
+   if (about_flags1_diagnostic)
+      mesa_loge_once("G17P HAL200 About flags=1 diagnostic active");
+
    struct agx_ppp_hal200_graphics_core fs_record;
    const struct agx_ppp_hal200_fragment_fields fs_fields = {
       /* HAL200 finalize 0x3f04e4..0x3f0508 puts iteration count at bit 16.
@@ -3070,26 +3166,8 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .unknown_0c = 0,
       .stage_program = fragment_program,
       .stage_program_template = 0,
-      .flags = 0,
+      .flags = about_flags1_diagnostic ? BITFIELD_BIT(0) : 0,
    };
-
-   /* This record describes the program actually launched by the Index List.
-    * Ordinary draws use the API vertex shader, while GS/XFB draws use the
-    * geometry raster-copy variant. Taking the API VS unconditionally makes
-    * the HAL200 output contract disagree with the live VertexProgramVariant
-    * as soon as interstage optimization changes their UVS footprints. */
-   const struct hk_shader *vs = hk_bound_hw_vs(gfx);
-   uint32_t output_size;
-   if (!vs || !agx_ppp_hal200_output_size_pack(
-                 vs->info.uvs.size, 0, &output_size))
-      return hk_g17p_bind_tail_refused(__LINE__);
-
-   uint32_t output_select;
-   if (!agx_ppp_hal200_output_select_pack(
-          dev->dev.chip, vs->info.uvs.osel.opaque[0],
-          linked_fs->b.cf.nr_bindings != 0, linked_fs->b.cf.reads_z,
-          &output_select))
-      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core output_record;
    struct agx_ppp_hal200_graphics_fields output_fields = {
@@ -4018,7 +4096,6 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
    uint8_t *out = cs->current;
-
    struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
 
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||
@@ -4607,8 +4684,20 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             .template_info = program->template_info,
          };
          info.template_info.pipeline = pipeline_program;
+         if (hk_g17p_cycle_vdm_context_enabled(dev) &&
+             cs->agx3_raw_active_context_selector == UINT32_MAX)
+            cs->agx3_raw_active_context_selector = 1;
          info.template_info.raw_active_context_selector =
             cs->agx3_raw_active_context_selector;
+
+         /* Keep VertexProgramVariant's UVS footprint coupled to the HAL200
+          * output state selected below. Native non-point draws omit the
+          * terminal PointSize word from both records. */
+         if (dev->dev.chip == AGX_CHIP_G17P &&
+             hk_g17p_nonpoint_no_psiz_diagnostic(gfx, hw_vs)) {
+            assert(info.template_info.raw_vs_output_count_0 > 0);
+            --info.template_info.raw_vs_output_count_0;
+         }
 
          struct agx_vdm_state_update encoded;
          if (!hk_agx3_encode_vdm_state_update_draw(dev->dev.chip, &info,
@@ -4659,6 +4748,15 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
          memcpy(out, encoded.bytes, encoded.length);
          out += encoded.length;
+
+         if (hk_g17p_cycle_vdm_context_enabled(dev)) {
+            assert(cs->agx3_raw_active_context_selector >= 1 &&
+                   cs->agx3_raw_active_context_selector <= 8);
+            cs->agx3_raw_active_context_selector =
+               cs->agx3_raw_active_context_selector == 8
+                  ? 1
+                  : cs->agx3_raw_active_context_selector + 1;
+         }
 
          if (dev->dev.chip == AGX_CHIP_G17P) {
             if (!hk_g17p_emit_native_bind_tail(cmd, cs, &out)) {
@@ -4761,6 +4859,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    if (!g17p_native_bind_tail_emitted)
       hk_flush_ppp_state(cmd, cs, &out);
+
    cs->current = out;
 
    if (vk_command_buffer_has_error(&cmd->vk))
@@ -4877,6 +4976,16 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
+
+   /* ZINK_DEBUG=sync closes and restarts dynamic rendering around every API
+    * draw.  CmdEndRendering therefore terminates the active VDM command;
+    * Honeykrisp's following CmdPipelineBarrier is a graphics no-op.  Reuse the
+    * established retained-render split here so this A/B tests that exact
+    * per-draw VDM command boundary with partial BG/EOT load/store semantics. */
+   if (hk_g17p_split_direct_draws_enabled(dev) &&
+       !agx_is_indirect(draw->b) && cmd->current_cs.gfx &&
+       cmd->current_cs.gfx->stats.cmds > 0)
+      hk_cmd_buffer_end_graphics(cmd);
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
    const struct vk_dynamic_graphics_state *dyn =

@@ -216,12 +216,17 @@ hk_agx3_g17p_combined_sampler_pointers(
 {
    if (!heap || !pointers || heap->descriptor_set_va == 0 ||
        heap->sampler_heap_va == 0 || (heap->texture_offset_B & 7) != 0 ||
-       heap->sampler_element_size_B != 32 ||
-       heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX)
+       heap->sampler_element_size_B != 32)
       return false;
 
+   /* The software descriptor ABI uses zero for a null sampler. Native heap
+    * entry zero is the reserved robust sampler, while application samplers
+    * retain the legacy +28 bias. Saturating this rebase keeps both encodings
+    * on the same native entry and cannot underflow into unmapped memory. */
    const uint32_t native_index =
-      heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+      heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX
+         ? 0
+         : heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
    if (native_index >= heap->sampler_count)
       return false;
 

@@ -203,6 +203,49 @@ gl_state_matrix = executable(
   build_by_default : false,
 )
 
+gl_hypr_mixed_draw = executable(
+  'f48-hypr-mixed-draw',
+  files('test-g17p-gl-hypr-mixed-draw.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GLESv2'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-hypr-mixed-draw-software-control',
+  gl_hypr_mixed_draw,
+  args : [
+    files('hypr-0.56.1-tex300.vert'),
+    files('hypr-0.56.1-border-rounded.frag'),
+  ],
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-hypr-mixed-draw-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_hypr_mixed_draw,
+    files('hypr-0.56.1-tex300.vert'),
+    files('hypr-0.56.1-border-rounded.frag'),
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_multi_viewport = executable(
   'asahi-g17p-gl-multi-viewport',
   files('test-g17p-gl-multi-viewport.c'),
@@ -582,6 +625,7 @@ test(
   ],
   env : [
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS=3',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
   suite : ['asahi'],
@@ -831,6 +875,26 @@ egl_gbm_swap = executable(
   ],
   build_by_default : false,
 )
+
+if with_platform_wayland
+  gl_buffer_age_xdg_shell = mod_wl.scan_xml(
+    mod_wl.find_protocol('xdg-shell'),
+    include_core_only : false,
+  )
+  egl_buffer_age = executable(
+    'asahi-g17p-egl-buffer-age',
+    files('test-g17p-egl-buffer-age.c'),
+    gl_buffer_age_xdg_shell,
+    dependencies : [
+      cc.find_library('EGL'),
+      cc.find_library('GLESv2'),
+      dep_gbm,
+      dep_wayland_client,
+      dependency('wayland-egl'),
+    ],
+    build_by_default : false,
+  )
+endif
 
 run_target(
   'asahi-g17p-egl-gbm-swap-shim',

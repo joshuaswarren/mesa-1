@@ -193,12 +193,19 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->no_addend &&
        (d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend))
       return false;
-   /*
-    * Sign extension is a property of widening an operand into a wider result.
-    * A 32-bit product does not widen anything, so refuse the bits there rather
-    * than dropping them: an unwitnessed combination must fail closed.
-    */
-   if (!d->dest_64 && (d->src_a_sign_extend || d->multiplier_sign_extend))
+   /* Sign extension is meaningful for 16->32 as well as 32->64 products.
+    * The grounded 16->32 form is specifically a paired-half pure multiply;
+    * its native witnesses are both-signed and both-unsigned, not mixed. */
+   const bool widening_half_product =
+      !d->dest_16 && !d->dest_64 && d->src_a_16 &&
+      d->multiplier_is_register && d->multiplier_16 && d->no_addend;
+   if ((!d->dest_64 && (d->src_a_sign_extend ||
+                        d->multiplier_sign_extend) &&
+        (!widening_half_product ||
+         d->src_a_sign_extend != d->multiplier_sign_extend)) ||
+       (d->dest_64 &&
+        ((d->src_a_sign_extend && d->src_a_16) ||
+         (d->multiplier_sign_extend && d->multiplier_16))))
       return false;
    /* The 8-bit immediate multiplier has no sign-extend bit of its own. */
    if (!d->multiplier_is_register && d->multiplier_sign_extend)
@@ -208,13 +215,15 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    /*
     * Fresh G17P ushort witnesses ground both narrow source-B classes.  The
     * register form is a low-half multiply, so signed and unsigned MSL produce
-    * the same instruction.  Keep register C and every widening bit closed:
-    * neither has a meaning for a 16-bit result in the witnessed domain.
+    * the same instruction. Current G17P Metal also witnesses a plain half
+    * register C for ushort a*b+c. Keep wider C and every widening bit closed:
+    * none has a meaning for a 16-bit result in the witnessed domain.
     */
    if (d->dest_16 &&
        (!d->src_a_16 ||
         (d->multiplier_is_register ? !d->multiplier_16 : d->no_addend) ||
-        (!d->addend_is_immediate && !d->no_addend) ||
+        (!d->addend_is_immediate && !d->no_addend &&
+         !d->src_c_16) ||
         d->src_a_sign_extend || d->multiplier_sign_extend ||
         d->src_c_sign_extend))
       return false;

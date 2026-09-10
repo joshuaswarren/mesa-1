@@ -650,6 +650,13 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
       virt.extres = util_dynarray_begin(&dev->external_bos.list);
    }
 
+   /* G17P command, VIT, and HAL200 bind-state uploads use write-combined GEM
+    * mappings.  Diagnose whether the GPU can observe a doorbell before those
+    * CPU stores have drained, without changing the default submission path. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       getenv("HK_G17P_SUBMIT_DMB") != NULL)
+      __sync_synchronize();
+
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
 
    if (dev->dev.is_virtio)

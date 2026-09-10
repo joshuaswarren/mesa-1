@@ -71,6 +71,7 @@ shim_params(void)
 struct asahi_bo {
    struct shim_bo base;
    uint32_t offset;
+   uint32_t gem_flags;
 };
 
 static struct asahi_bo *
@@ -103,6 +104,7 @@ static struct {
 
 static unsigned invalid_vm_binds;
 static bool failed_submit_once;
+static unsigned submit_calls;
 static unsigned queue_progress_queue_creates;
 static unsigned queue_progress_queue_destroys;
 static unsigned queue_progress_submits;
@@ -849,6 +851,7 @@ asahi_ioctl_gem_create(int fd, unsigned long request, void *arg)
 
    assert(UINT64_MAX - asahi.next_offset > create->size);
    bo->offset = asahi.next_offset;
+   bo->gem_flags = create->flags;
    asahi.next_offset += create->size;
 
    create->handle = drm_shim_bo_get_handle(shim_fd, &bo->base);
@@ -979,6 +982,7 @@ static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
+   submit_calls++;
    if (queue_progress_lifecycle_case()) {
       const struct drm_asahi_sync *syncs =
          (const void *)(uintptr_t)submit->syncs;
@@ -998,6 +1002,12 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
    if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
       failed_submit_once = true;
+      errno = EIO;
+      return -1;
+   }
+
+   const char *fail_submit_at = getenv("ASAHI_SHIM_FAIL_SUBMIT_AT");
+   if (fail_submit_at && strtoul(fail_submit_at, NULL, 10) == submit_calls) {
       errno = EIO;
       return -1;
    }
@@ -1025,6 +1035,22 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+
+         /* G17P creates a per-job render-storage view from the fixed HAL200
+          * context aperture.  Unlike ordinary client-VM shader and resource
+          * mappings, its source GEM must therefore be visible outside the
+          * private VM.  Mirror that kernel requirement so a private context
+          * allocation fails on the host with the same ENOENT class instead
+          * of reaching hardware first. */
+         const struct asahi_vm_mapping *context =
+            find_mapping(fd, UINT64_C(0x1000000000), UINT64_C(0x10000));
+         if (!context ||
+             (asahi_bo(context->bo)->gem_flags & DRM_ASAHI_GEM_VM_PRIVATE)) {
+            fprintf(stderr,
+                    "shim: G17P render context is absent from shared job view\n");
+            return -ENOENT;
+         }
+
          if (submit->in_sync_count > 0 && submit->out_sync_count == 2)
             synchronized_render_submits++;
          if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW") ||

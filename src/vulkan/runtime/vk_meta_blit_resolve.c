@@ -30,6 +30,7 @@
 #include "vk_render_pass.h"
 
 #include "nir_builder.h"
+#include "util/u_debug.h"
 
 struct vk_meta_blit_key {
    enum vk_meta_object_key_type key_type;
@@ -240,7 +241,19 @@ build_blit_shader(const struct vk_meta_blit_key *key)
       src_coord_z = nir_fadd_imm(b, src_coord_z, -0.5);
 
    nir_def *src_coord;
-   if (key->dim == GLSL_SAMPLER_DIM_1D) {
+   const bool fixed_coord_diagnostic =
+      debug_get_bool_option("VK_META_BLIT_FIXED_COORD", false) &&
+      key->dim == GLSL_SAMPLER_DIM_2D && !key->resolve_mode &&
+      !key->stencil_resolve_mode;
+   if (fixed_coord_diagnostic) {
+      /* The generated-mip oracle's green 2x2 block is at base-level pixel
+       * (2,0). Its centre is (2.5/64, 0.5/64); array layer zero follows.
+       * Keep the sampled descriptor/sampler/op while removing only
+       * FragCoord and push-transform values from the texture coordinate. */
+      src_coord = nir_vec3(b, nir_imm_float(b, 2.5f / 64.0f),
+                              nir_imm_float(b, 0.5f / 64.0f),
+                              nir_imm_float(b, 0.0f));
+   } else if (key->dim == GLSL_SAMPLER_DIM_1D) {
       src_coord = nir_vec2(b, nir_channel(b, src_coord_xy, 0),
                               src_coord_z);
    } else {
@@ -302,11 +315,27 @@ build_blit_shader(const struct vk_meta_blit_key *key)
       nir_variable *texture = nir_variable_create(b->shader, nir_var_uniform,
                                                   texture_type, tex_name);
       texture->data.descriptor_set = 0;
-      texture->data.binding = aspect_to_tex_binding(aspect);
+      texture->data.binding =
+         debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false)
+            ? BLIT_DESC_BINDING_SAMPLER
+            : aspect_to_tex_binding(aspect);
       nir_deref_instr *t = nir_build_deref_var(b, texture);
 
       nir_def *val;
-      if (resolve_mode == VK_RESOLVE_MODE_NONE) {
+      const bool constant_color_diagnostic =
+         debug_get_bool_option("VK_META_BLIT_CONSTANT_COLOR", false) &&
+         aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+         base_type == GLSL_TYPE_FLOAT &&
+         resolve_mode == VK_RESOLVE_MODE_NONE;
+      if (constant_color_diagnostic) {
+         /* Keep dynamic rendering, the destination mip view, rectangle
+          * coverage, and PBE/EOT unchanged while removing only the sampled
+          * source. This is an opt-in G17P blit diagnostic, not a fallback. */
+         val = nir_vec4(b, nir_imm_float(b, 1.0f),
+                           nir_imm_float(b, 0.0f),
+                           nir_imm_float(b, 1.0f),
+                           nir_imm_float(b, 1.0f));
+      } else if (resolve_mode == VK_RESOLVE_MODE_NONE) {
          val = nir_tex(b, src_coord, .lod = nir_imm_float(b, 0),
                        .texture_deref = t, .sampler_deref = s);
       } else {
@@ -340,6 +369,29 @@ get_blit_pipeline_layout(struct vk_device *device,
                          VkPipelineLayout *layout_out)
 {
    enum vk_meta_object_key_type key = VK_META_OBJECT_KEY_BLIT;
+
+   if (debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false)) {
+      const VkDescriptorSetLayoutBinding binding = {
+         .binding = BLIT_DESC_BINDING_SAMPLER,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+      const VkDescriptorSetLayoutCreateInfo desc_info = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+         .bindingCount = 1,
+         .pBindings = &binding,
+      };
+      const VkPushConstantRange push_range = {
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .offset = 0,
+         .size = sizeof(struct vk_meta_blit_push_data),
+      };
+      return vk_meta_get_pipeline_layout(device, meta, &desc_info,
+                                         &push_range, &key, sizeof(key),
+                                         layout_out);
+   }
 
    const VkDescriptorSetLayoutBinding bindings[] = {{
       .binding = BLIT_DESC_BINDING_SAMPLER,
@@ -528,8 +580,12 @@ do_blit(struct vk_command_buffer *cmd,
    uint32_t desc_count = 0;
    VkDescriptorImageInfo image_infos[3];
    VkWriteDescriptorSet desc_writes[3];
+   const bool combined_push_diagnostic =
+      debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false) &&
+      src_subres.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+      sampler != VK_NULL_HANDLE;
 
-   if (sampler != VK_NULL_HANDLE) {
+   if (sampler != VK_NULL_HANDLE && !combined_push_diagnostic) {
       image_infos[desc_count] = (VkDescriptorImageInfo) {
          .sampler = sampler,
       };
@@ -576,12 +632,17 @@ do_blit(struct vk_command_buffer *cmd,
       assert(desc_count < ARRAY_SIZE(image_infos));
       assert(desc_count < ARRAY_SIZE(desc_writes));
       image_infos[desc_count] = (VkDescriptorImageInfo) {
+         .sampler = combined_push_diagnostic ? sampler : VK_NULL_HANDLE,
          .imageView = src_view,
       };
       desc_writes[desc_count] = (VkWriteDescriptorSet) {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-         .dstBinding = aspect_to_tex_binding(aspect),
-         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .dstBinding = combined_push_diagnostic
+                          ? BLIT_DESC_BINDING_SAMPLER
+                          : aspect_to_tex_binding(aspect),
+         .descriptorType = combined_push_diagnostic
+                              ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                              : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
          .descriptorCount = 1,
          .pImageInfo = &image_infos[desc_count],
       };

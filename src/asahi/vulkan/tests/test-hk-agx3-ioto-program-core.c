@@ -1407,6 +1407,18 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(pointers[0] == UINT64_C(0x10000020040));
    CHECK(pointers[1] == UINT64_C(0x100000800e0));
 
+   /* Explicit null descriptors use software index zero. They select the
+    * reserved robust sampler at native heap entry zero, never an underflowed
+    * register descriptor. The canonical biased base has the same result. */
+   struct hk_agx3_g17p_combined_sampler_heap null_heap = heap;
+   null_heap.sampler_index = 0;
+   CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
+   CHECK(pointers[0] == UINT64_C(0x10000020040));
+   CHECK(pointers[1] == UINT64_C(0x10000080000));
+   null_heap.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+   CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
+   CHECK(pointers[1] == UINT64_C(0x10000080000));
+
    /* Native ESL consumes these two qwords, not the inline 32-byte records
     * that they address. Both hardware table indices select entry zero.
     */
@@ -1436,10 +1448,6 @@ test_g17p_combined_sampler_pointers(void)
 
    const uint64_t before[2] = {pointers[0], pointers[1]};
    struct hk_agx3_g17p_combined_sampler_heap bad = heap;
-   bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX - 1;
-   CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
-   CHECK(memcmp(pointers, before, sizeof(before)) == 0);
-   bad = heap;
    bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX + 1024;
    CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
    CHECK(memcmp(pointers, before, sizeof(before)) == 0);

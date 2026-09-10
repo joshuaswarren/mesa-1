@@ -16,13 +16,15 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
 
+   /* Native G17P texture3d samples cover explicit level and implicit
+    * fragment derivatives. The latter is the compositor ICC-LUT path. */
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
        tex->op != nir_texop_tg4) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d && !cube) ||
        (three_d &&
         (tex->is_array || tex->is_shadow ||
-         tex->op != nir_texop_txl)) ||
+         (tex->op != nir_texop_tex && tex->op != nir_texop_txl))) ||
        (cube &&
         (tex->is_shadow ||
          (tex->op != nir_texop_tex &&
@@ -568,13 +570,21 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
             nir_def *texture_index = nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
             /* The software sampler index includes AGX2's reservation of 28.
-             * Native G17P heaps are zero-based, as the immediate path is. */
+             * Native G17P heaps are zero-based, as the immediate path is.
+             *
+             * Index zero is also the descriptor ABI's null-sampler value.
+             * The native heap deliberately reserves entry zero for the robust
+             * clamp-to-border sampler, so saturate the rebasing subtraction.
+             * Wrapping zero to 0xffffffe4 turns a valid null descriptor into a
+             * wildly out-of-range register descriptor and lets TEX walk below
+             * address zero for negative/filter-footprint coordinates.
+             */
             texture_index = nir_u2u64(&b, texture_index);
             nir_steal_tex_src(tex, nir_tex_src_texture_handle);
             nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, texture_index);
             if (!fetch) {
-               nir_def *sampler_index = nir_iadd_imm(
-                  &b, nir_u2u32(&b, sampler), -28);
+               nir_def *sampler_index = nir_usub_sat(
+                  &b, nir_u2u32(&b, sampler), nir_imm_int(&b, 28));
                sampler_index = nir_u2u64(&b, sampler_index);
                nir_steal_tex_src(tex, nir_tex_src_sampler_handle);
                nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);

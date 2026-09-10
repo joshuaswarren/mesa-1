@@ -87,17 +87,49 @@ agx_set_sampler_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
    struct agx_device *dev = agx_device(ctx->base.screen);
 
-   u_foreach_bit(s, st->valid_samplers) {
-      unif->lod_bias[s] = st->samplers[s]->lod_bias_as_fp16;
+   if (dev->chip == AGX_CHIP_G17P) {
+      for (unsigned s = 0; s < PIPE_MAX_SAMPLERS; ++s) {
+         unif->custom_border_sampler_handle[s] = -1;
+         memset(unif->custom_border[s], 0, sizeof(unif->custom_border[s]));
+      }
    }
 
-   /* If we use bindless samplers, insert sampler into the heap */
+   u_foreach_bit(s, st->valid_samplers) {
+      unif->lod_bias[s] = st->samplers[s]->lod_bias_as_fp16;
+
+      if (dev->chip == AGX_CHIP_G17P &&
+          st->samplers[s]->uses_custom_border) {
+         uint16_t handle;
+         if (!agx_gallium_g17p_custom_border_handle(dev->chip, s, &handle))
+            UNREACHABLE("G17P custom-border sampler index outside table");
+
+         unif->custom_border_sampler_handle[s] = handle;
+         memcpy(unif->custom_border[s], st->samplers[s]->custom_border,
+                sizeof(unif->custom_border[s]));
+      }
+   }
+
+   /* Materialize indirect sampler handles. AGX2 uses its global heap; G17P
+    * indexes the native per-stage table uploaded with the graphics program. */
    if (st->shader && st->shader->uses_bindless_samplers) {
       u_foreach_bit(s, st->valid_samplers) {
-         unif->sampler_handle[s] =
-            28 +
-            agx_sampler_heap_add(dev, &batch->sampler_heap,
-                                 &st->samplers[s]->desc_without_custom_border);
+         if (dev->chip == AGX_CHIP_G17P) {
+            /* The G17P graphics Ioto program publishes the per-stage HAL200
+             * table directly. Indirect operands therefore name the same
+             * i+1 entries as immediate operands; the old 28+index handle
+             * belongs to AGX2's separate 8-byte global heap. */
+            uint16_t native_handle;
+            if (!agx_gallium_g17p_sampler_handle(dev->chip, s,
+                                                  &native_handle))
+               UNREACHABLE("G17P sampler index outside the native table");
+            unif->sampler_handle[s] = native_handle;
+         } else {
+            unif->sampler_handle[s] =
+               28 +
+               agx_sampler_heap_add(
+                  dev, &batch->sampler_heap,
+                  &st->samplers[s]->desc_without_custom_border);
+         }
       }
    }
 }

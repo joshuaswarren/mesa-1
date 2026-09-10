@@ -1562,7 +1562,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         !agx3_append(emission, bytes, len)))
       return false;
 
-   if (array && shadow && !cube &&
+   /* The driver's noncube array ABI stages the layer into the sampler-private
+    * bank and selects it with SMP f77=2.  Apple's direct f31/f37 form belongs
+    * to the incompatible APPLE_FRAGMENT profile and is retained only by the
+    * standalone texture encoder.
+    */
+   if (array && !cube && (shadow || implicit_lod) &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||
@@ -3736,15 +3741,15 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
           uvs_mask == 0xf;
 }
 
-/* Native 11/16/32/36/52/68-output VSs use a dense set of scalar UVSW indices and
- * distinct staging addresses. The stores may be grouped by varying rather
- * than sorted by scalar index. Recycle the six scoreboard slots after waiting
- * for earlier writes; keep the four-position golden independent. Instructions
- * before the terminal output suffix are encoded and validated normally. In
- * particular, real WebRender vertex shaders perform texture reads before a
- * dense 51-scalar suffix; requiring every preceding producer to be DCE-safe
- * incorrectly excluded that native-shaped stream even though no instruction
- * crosses a writeout.
+/* Native 11/16/32/36/52/68-output VSs and the opt-in 72-output qualification
+ * shape use a dense set of scalar UVSW indices and distinct staging addresses.
+ * The stores may be grouped by varying rather than sorted by scalar index.
+ * Recycle the six scoreboard slots after waiting for earlier writes; keep the
+ * four-position golden independent. Instructions before the terminal output
+ * suffix are encoded and validated normally. In particular, real WebRender
+ * vertex shaders perform texture reads before a dense 51-scalar suffix;
+ * requiring every preceding producer to be DCE-safe incorrectly excluded that
+ * native-shaped stream even though no instruction crosses a writeout.
  */
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
@@ -3843,6 +3848,69 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
       }
    }
    return next == count && stopped;
+}
+
+/* Firefox WebRender's captured wide vertex programs write either 39 or 50
+ * dense scalar outputs, materialize the homogeneous one, then write the last.
+ * That final pure producer makes the stores nonterminal in the IR even though
+ * every earlier value has already been copied to its component-addressed
+ * staging word.  Recognize precisely that captured suffix: accepting every
+ * nonterminal dense stream would also admit ungrounded output counts and
+ * producer schedules that this bring-up backend intentionally refuses. */
+static bool
+agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
+{
+   if (count != 40 && count != 51)
+      return false;
+
+   const unsigned last = count - 1;
+
+   unsigned next = 0;
+   bool started = false, saw_one = false, stopped = false;
+   agx_index one = agx_null();
+
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped)
+         return false;
+
+      if (!started && I->op != AGX_OPCODE_ST_VARY)
+         continue;
+      started = true;
+
+      if (I->op == AGX_OPCODE_ST_VARY) {
+         if (I->nr_dests != 0 || I->nr_srcs != 2 ||
+             I->src[0].type != AGX_INDEX_IMMEDIATE ||
+             I->src[0].value != next || next > last)
+            return false;
+
+         if ((next < last && saw_one) ||
+             (next == last &&
+              (!saw_one || !agx_is_equiv(I->src[1], one) ||
+               I->src[1].size != one.size)))
+            return false;
+
+         ++next;
+         continue;
+      }
+
+      if (I->op == AGX_OPCODE_MOV_IMM && next == last && !saw_one &&
+          I->nr_dests == 1 && I->nr_srcs == 0 && !I->saturate &&
+          agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+          I->imm == 0x3f800000) {
+         one = I->dest[0];
+         saw_one = true;
+         continue;
+      }
+
+      if (I->op == AGX_OPCODE_STOP && next == count) {
+         stopped = true;
+         continue;
+      }
+
+      return false;
+   }
+
+   return next == count && saw_one && stopped;
 }
 
 static bool
@@ -5214,10 +5282,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17p_terminal_outputs = g17p_output_count &&
       !g17p_legacy_single_source &&
       agx3_outputs_are_terminal(ctx, g17p_output_count, g17p_output_order);
-   /* Only the old six-output fallback supports intervening physical GPR
-    * reuse. Wider outputs require the pre-RA terminal bundle. */
+   /* The staging path has two deliberately separate lifetime modes: terminal
+    * bundles recycle each six-slot batch, while the six-output fallback and
+    * captured Firefox suffix retire each staging producer immediately before
+    * a later pure producer may reuse its physical GPR. */
+   const bool g17p_firefox_dense_outputs =
+      agx3_is_firefox_dense_output_suffix(ctx, g17p_output_count);
    const bool g17p_user_output_protocol = g17p_output_count == 6 ||
-      (g17p_output_count >= 5 && g17p_terminal_outputs);
+      (g17p_output_count >= 5 && g17p_terminal_outputs) ||
+      g17p_firefox_dense_outputs;
    unsigned g17p_outputs_staged = 0;
    /* User-output graphs outside the qualified scalar shapes must not
     * silently fall back to immediate, potentially out-of-order writeout. */
@@ -6765,7 +6838,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * register field.
           */
          if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs >= 3 &&
-             I->shift == 0 && agx3_src_is_register(I->dest[0]) &&
+             I->shift == 0 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) &&
              !I->dest[0].memory &&
              (I->dest[0].size == AGX_SIZE_16 ||
               I->dest[0].size == AGX_SIZE_32 ||
@@ -6784,17 +6858,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              */
             const bool narrow = I->dest[0].size == AGX_SIZE_16;
             const bool wide = I->dest[0].size == AGX_SIZE_64;
+            const bool widening = !narrow && !wide;
 
             /* The multiplier is either an 8-bit immediate or a register of
-             * the result width.  Both 16-bit and 32-bit register forms are
-             * witnessed byte-exactly (test-agx3-iadd-core.c). */
+             * the result width, plus the paired 16x16->32 widening form.
+             * Both 16-bit and 32-bit forms are witnessed byte-exactly. */
             const bool mult_imm = m.type == AGX_INDEX_IMMEDIATE && !m.abs &&
                                   !m.neg && m.value <= 0xff;
-            const bool mult_reg = agx3_src_is_register(m) && !m.memory &&
-                                  (wide || !m.abs) && !m.neg &&
-                                  m.size == (narrow ? AGX_SIZE_16
-                                                   : AGX_SIZE_32) &&
-                                  agx_channels(m) == 1;
+            const bool widening_half_multiplier =
+               widening && m.size == AGX_SIZE_16 && !m.neg;
+            const bool mult_reg =
+               agx3_src_is_register(m) && !m.memory &&
+               ((m.size == (narrow ? AGX_SIZE_16 : AGX_SIZE_32) &&
+                 (wide || !m.abs) && !m.neg) ||
+                widening_half_multiplier) &&
+               agx_channels(m) == 1;
 
             /* An immediate-zero addend is the pure-multiply form, whose
              * addend operand is absent rather than zero. Native constant
@@ -6808,33 +6886,47 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                no_addend || addend_imm ||
                (agx3_src_is_register(c) && !c.memory &&
                 agx_channels(c) == 1 && !(c.abs && c.neg) &&
-                (c.size == AGX_SIZE_32 || (wide && c.size == AGX_SIZE_64) ||
-                 (c.size == AGX_SIZE_16 && (c.abs || c.neg))));
+                ((!narrow && c.size == AGX_SIZE_32) ||
+                 (wide && c.size == AGX_SIZE_64) ||
+                 (c.size == AGX_SIZE_16 &&
+                   (narrow ? (!c.abs && !c.neg) : (c.abs || c.neg)))));
             const bool addend_reg = !no_addend && !addend_imm;
 
+            const bool widening_half_a =
+               widening && a.size == AGX_SIZE_16 && !a.neg;
             const bool a_ok = agx3_src_is_register(a) && !a.memory &&
                agx_channels(a) == 1 &&
                (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
-                       : ((wide || !a.abs) && !a.neg &&
-                          a.size == AGX_SIZE_32));
+                       : (((wide || !a.abs) && !a.neg &&
+                           a.size == AGX_SIZE_32) || widening_half_a));
+            const bool widening_half_product =
+               widening_half_a && widening_half_multiplier && a.abs == m.abs;
+            const bool widening_half_operand =
+               widening &&
+               (a.size == AGX_SIZE_16 ||
+                (mult_reg && m.size == AGX_SIZE_16));
 
             if (a_ok &&
-                (mult_imm || mult_reg) && addend_ok) {
+                (mult_imm || mult_reg) && addend_ok &&
+                (!widening_half_operand ||
+                 (widening_half_product && no_addend))) {
                const struct agx3_imad_desc d = {
                   .dest = I->dest[0].value,
                   .dest_16 = narrow,
                   .dest_64 = wide,
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
-                  .src_a_16 = narrow,
-                  .src_a_sign_extend = wide && !a.abs,
+                  .src_a_16 = a.size == AGX_SIZE_16,
+                  .src_a_sign_extend =
+                     (wide || widening_half_product) && !a.abs,
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
-                  .multiplier_16 = mult_reg && narrow,
+                  .multiplier_16 = mult_reg && m.size == AGX_SIZE_16,
                   .multiplier_kill = mult_reg && m.discard,
                   .multiplier_cache = mult_reg && m.cache,
-                  .multiplier_sign_extend = wide && mult_reg && !m.abs,
+                  .multiplier_sign_extend =
+                     (wide || widening_half_product) && mult_reg && !m.abs,
                   .src_a_kill = a.discard,
                   .src_a_cache = a.cache,
                   .src_c_kill = addend_reg && c.discard,
@@ -7749,31 +7841,33 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   continue;
             }
 
-            /* Hyprland lowers its signed 16-bit gradient counter to
-             * `iadd dst32, #0, src16 << 4`. A bare narrow integer is signed
-             * on AGX (ABS denotes unsigned); fresh G17P Metal witnesses the
-             * exact zero-immediate, sign-extended shift-4 form, including a
-             * cached destination. Keep other bare-half shifts closed. */
-            const bool signed_half_shift4 =
+            /* SIGNEXT lowers to `iadd dst32, src16, #0`; Hyprland's signed
+             * gradient counter is the same operation with `src16 << 4`.
+             * A bare narrow integer is signed on AGX (ABS denotes unsigned),
+             * and the G17P iadd corpus witnesses the sign-extended shift-0
+             * source width as well as the exact shift-4 form.  Admit only
+             * those zero-immediate widening shapes; keep every other bare
+             * half/shift combination closed. */
+            const bool signed_half_widen =
                enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
                constant.type == AGX_INDEX_IMMEDIATE && constant.value == 0 &&
                reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
-               I->shift == 4;
+               (I->shift == 0 || I->shift == 4);
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
                 !constant.neg && constant.value <= 0xff &&
                 agx3_src_is_register(reg) && !reg.memory &&
                 agx_channels(reg) == 1 && !(reg.abs && reg.neg) &&
                 (reg.size == AGX_SIZE_32 ||
                  (reg.size == AGX_SIZE_16 &&
-                  (reg.abs || reg.neg || signed_half_shift4)))) {
+                  (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = signed_half_shift4 && I->dest[0].cache,
+                  .dest_cache = signed_half_widen && I->dest[0].cache,
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
                   .src_16 = reg.size == AGX_SIZE_16,
-                  .sign_extend = signed_half_shift4 || reg.neg,
+                  .sign_extend = signed_half_widen || reg.neg,
                   .shift = I->shift,
                   .wait_mask = wait,
                };
@@ -7792,7 +7886,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * the addend. Apple emits exactly this, and f54 carries the
              * shift (witnessed at 1..4 in test-agx3-iadd-core.c).
              */
-            const agx_index a = I->src[0], bsrc = I->src[1];
+            const agx_index original_a = I->src[0];
+            const agx_index original_b = I->src[1];
+            /* Integer add is commutative. Canonicalize Firefox's reversed
+             * signed-half accumulator onto the already-grounded slot-A32 +
+             * slot-B16 form instead of inventing a second hardware shape. */
+            const bool commute_signed_half =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               original_a.size == AGX_SIZE_16 &&
+               !original_a.abs && !original_a.neg &&
+               original_b.size == AGX_SIZE_32 &&
+               !original_b.abs && !original_b.neg;
+            const agx_index a = commute_signed_half ? original_b : original_a;
+            const agx_index bsrc = commute_signed_half ? original_a : original_b;
 
             /*
              * Only take this path for a SHIFTED add. An unshifted register
@@ -7839,6 +7945,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * the select-core encoding it already had: re-routing a shape
              * that already worked is what cost two hardware probes last time.
              */
+            /* Firefox's signed-index accumulation is the grounded 32+16
+             * width pair with f43 (slot-B sign extension): a bare integer
+             * half is signed in AGX IR, while ABS denotes zero extension.
+             * Keep the admission directional so unrelated bare-half pairs
+             * do not silently enter this bring-up path. */
+            const bool signed_32_half =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               a.size == AGX_SIZE_32 && !a.abs && !a.neg &&
+               bsrc.size == AGX_SIZE_16 && !bsrc.abs && !bsrc.neg;
             const bool a_ok =
                agx3_src_is_register(a) && !a.memory && agx_channels(a) == 1 &&
                !(a.cache && a.discard) &&
@@ -7850,7 +7965,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx_channels(bsrc) == 1 && !(bsrc.cache && bsrc.discard) &&
                (bsrc.size == AGX_SIZE_32 ? (!bsrc.abs && !bsrc.neg)
                                          : (bsrc.size == AGX_SIZE_16 &&
-                                            (bsrc.abs != bsrc.neg)));
+                                            ((bsrc.abs != bsrc.neg) ||
+                                             signed_32_half)));
 
             if (I->shift == 0 && !I->saturate && a_ok && b_ok &&
                 (a.size == AGX_SIZE_16 || bsrc.size == AGX_SIZE_16)) {
@@ -7865,7 +7981,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src = bsrc.value,
                   .src_kill = bsrc.discard,
                   .src_16 = bsrc.size == AGX_SIZE_16,
-                  .sign_extend = bsrc.size == AGX_SIZE_16 && bsrc.neg,
+                  .sign_extend =
+                     bsrc.size == AGX_SIZE_16 &&
+                     (bsrc.neg || signed_32_half),
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -8365,8 +8483,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A saturating half multiply is the same instruction with G17P's
+          * f14 set, which moves it to the two-byte-longer ep2 point. This is
+          * the shape probes/f16_saturate_texture.frag reaches the packer as
+          * (clamp(texture(tex, uv) * vcolor, 0.0, 1.0) -> fmul.sat on halves)
+          * and it was refused outright before the encoder existed. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
-             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate) {
+             I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2]; enum agx3_alu_hint hints[2];
             agx_index dst=I->dest[0];
             if (!agx3_src_is_register(dst) || dst.memory || dst.size != AGX_SIZE_16 ||
@@ -8381,8 +8504,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                src[i]=x.value; hints[i]=agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if (!agx3_alu_hmul(enc,dst.value,src,hints,dst.cache,wait,bytes,&len) ||
-                !agx3_append(emission,bytes,len))
+            const bool encoded = I->saturate
+               ? agx3_alu_hmul_saturate(enc,dst.value,src,hints,dst.cache,wait,
+                                        bytes,&len)
+               : agx3_alu_hmul(enc,dst.value,src,hints,dst.cache,wait,bytes,&len);
+            if (!encoded || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;
          }
@@ -8433,8 +8559,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Same for the saturating half add. The saturating half add against
+          * an immediate is handled above; this is the register/register one. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HADD &&
-             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate) {
+             I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2];
             enum agx3_alu_hint hints[2];
             agx_index dst = I->dest[0];
@@ -8451,9 +8579,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                hints[i] = agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_alu_hadd(enc, dst.value, src, hints, dst.cache, wait,
-                               bytes, &len) ||
-                !agx3_append(emission, bytes, len))
+            const bool encoded =
+               I->saturate ? agx3_alu_hadd_saturate(enc, dst.value, src, hints,
+                                                    dst.cache, wait, bytes, &len)
+                           : agx3_alu_hadd(enc, dst.value, src, hints,
+                                           dst.cache, wait, bytes, &len);
+            if (!encoded || !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
          }
@@ -9066,17 +9197,29 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_ASR &&
-             I->nr_dests == 1 && I->nr_srcs == 2 &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->src[1].type == AGX_INDEX_IMMEDIATE &&
-             I->src[1].value >= 1 && I->src[1].value <= 31 &&
+             I->src[1].value >= 1 &&
              !I->src[1].abs && !I->src[1].neg) {
             const agx_index dest=I->dest[0], src=I->src[0];
-            if (!agx3_vary_reg32(dest) || !agx3_vary_reg32(src) ||
+            const bool half = dest.size == AGX_SIZE_16 &&
+                              src.size == AGX_SIZE_16;
+            const bool word = agx3_vary_reg32(dest) && agx3_vary_reg32(src);
+            if ((!half && !word) ||
+                I->src[1].value > (half ? 15 : 31) ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                !agx3_src_is_register(src) || src.memory ||
                 src.abs || src.neg || agx_channels(dest)!=1 || agx_channels(src)!=1)
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            if (!agx3_alu_asr_imm32(enc,dest.value,src.value,I->src[1].value,
-                                     agx3_post_ra_hint(src),dest.cache,wait,bytes,&length) ||
+            const bool encoded = half
+               ? agx3_alu_asr_imm16(enc,dest.value,src.value,I->src[1].value,
+                                     agx3_post_ra_hint(src),dest.cache,wait,
+                                     bytes,&length)
+               : agx3_alu_asr_imm32(enc,dest.value,src.value,I->src[1].value,
+                                     agx3_post_ra_hint(src),dest.cache,wait,
+                                     bytes,&length);
+            if (!encoded ||
                 !agx3_append(emission,bytes,length))
                AGX3_REFUSE(I);
             continue;

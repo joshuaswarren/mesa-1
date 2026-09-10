@@ -2618,6 +2618,32 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
+      /* Chromium/Skia compares a negated f32 register for equality and then
+       * selects two unrelated f32 registers. The only native FSEL negate bit
+       * is grounded for a different half-mask endpoint, so do not infer that
+       * modifier across result shapes. Materialize IEEE fneg exactly by
+       * flipping the sign bit, using the already-grounded MOV-immediate and
+       * BITOP XOR forms, before register allocation. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32 && !I->invert_cond && !I->saturate &&
+          I->fcond == AGX_FCOND_EQ && I->src[0].size == AGX_SIZE_32 &&
+          I->src[0].type != AGX_INDEX_IMMEDIATE && I->src[0].neg &&
+          !I->src[0].abs && I->src[1].size == AGX_SIZE_32 &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
+          !I->src[1].neg && I->src[2].size == AGX_SIZE_32 &&
+          I->src[2].type != AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
+          !I->src[2].neg && I->src[3].size == AGX_SIZE_32 &&
+          I->src[3].type != AGX_INDEX_IMMEDIATE && !I->src[3].abs &&
+          !I->src[3].neg) {
+         agx_index source = I->src[0];
+         source.neg = false;
+         agx_index sign = agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+         agx_index flipped = agx_temp(ctx, AGX_SIZE_32);
+         agx_bitop_to(&b, flipped, source, sign, 0x6 /* XOR */);
+         I->src[0] = flipped;
+      }
+
       /* Hyprland's colour-management shaders add a highp accumulator to a
        * mediump matrix term. There is no grounded plain mixed-width FADD on
        * G17P, so widen the half input explicitly and use the ordinary f32
@@ -3160,6 +3186,48 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                I->src[s] = agx_mov_imm(&b, I->dest[0].size == AGX_SIZE_16 ? 16 : 32,
                                       I->src[s].value);
          }
+      }
+   }
+}
+
+void
+agx_materialize_agx3_cf_constants(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if ((I->op != AGX_OPCODE_IF_FCMP &&
+           I->op != AGX_OPCODE_WHILE_FCMP &&
+           I->op != AGX_OPCODE_BREAK_IF_FCMP) ||
+          I->nr_srcs != 2)
+         continue;
+
+      /* G17P's structured float-CF path is grounded for f32 register pairs
+       * and for literal zero. Firefox's WebRender fragment compares a live
+       * f32 against 1.0 (and later -10.0), which reaches AIR as a nonzero
+       * minifloat. Materialize only that missing register/minifloat axis into
+       * an exact f32 LDIMM before RA; this adds no speculative CF encoding and
+       * leaves the shorter native zero form byte-identical. */
+      for (unsigned s = 0; s < 2; ++s) {
+         const unsigned other = s ^ 1;
+         if (I->src[s].type != AGX_INDEX_IMMEDIATE ||
+             I->src[s].value == 0 ||
+             I->src[other].type == AGX_INDEX_IMMEDIATE ||
+             I->src[other].size != AGX_SIZE_32 || I->src[other].memory ||
+             I->src[other].abs || I->src[other].neg)
+            continue;
+
+         float value = agx_minifloat_decode(I->src[s].value);
+         if (I->src[s].abs)
+            value = fabsf(value);
+         if (I->src[s].neg)
+            value = -value;
+
+         uint32_t bits;
+         memcpy(&bits, &value, sizeof(bits));
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         I->src[s] = agx_mov_imm(&b, 32, bits);
       }
    }
 }
@@ -5505,6 +5573,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
+
+   agx_materialize_agx3_cf_constants(ctx);
 
    /* For correctness, lower uniform sources after copyprop (for correctness,
     * as copyprop creates uniform sources). To keep register pressure in

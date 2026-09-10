@@ -9,7 +9,10 @@
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
-#define AGX3_G17P_GRAPHICS_MAX_RANGES 5u
+/* Software composer capacity, not a hardware field. Firefox/WebGL proves six
+ * independent vertex sources: VBO bases, VBO clamps, draw parameters, indexed
+ * texture/sampler heaps, descriptor root, and promoted constants. */
+#define AGX3_G17P_GRAPHICS_MAX_RANGES 6u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 
 struct agx3_g17p_graphics_program_desc {

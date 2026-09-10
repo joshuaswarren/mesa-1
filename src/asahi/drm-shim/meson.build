@@ -37,6 +37,124 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
 
+  test(
+    'hk_g17p_pipeline_cache_persistence',
+    g17p_pipeline_cache,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-pipeline-cache'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_buffer_memory_lifetime',
+    g17p_buffer_memory,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-buffer-memory'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_bda_capture_replay',
+    g17p_bda_capture,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-bda-capture'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_query_result_modes',
+    g17p_query_results,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-query-results'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_timeline_host_lifetime',
+    g17p_timeline_host,
+    env : g17p_queue_progress_environment + {
+      'ASAHI_SHIM_TIMELINE_HOST_VALUES' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-timeline-host'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_memory_budget_lifetime',
+    g17p_memory_budget,
+    env : g17p_queue_progress_environment + {
+      'HK_SYSMEM' : '1073741824',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-memory-budget'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance4_requirements',
+    g17p_maintenance4,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance4'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance5_usage2_layout',
+    g17p_maintenance5,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance5'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance6_bind_status',
+    g17p_maintenance6,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance6'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_push_descriptor_record',
+    g17p_push_descriptor,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-push-descriptor'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_push_descriptor_array_control_record',
+    g17p_push_descriptor_array_control,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-push-descriptor-array'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_array_lod_control_record',
+    g17p_array_lod_control,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-array-lod-control'],
+    timeout : 30,
+  )
+
   g17p_compressed_3d_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',

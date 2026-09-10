@@ -76,6 +76,7 @@
 #include "util/u_math.h"
 #include "util/u_vector.h"
 #include "egl_dri2.h"
+#include "egl_dri2_buffer_age_policy.h"
 #include "egldefines.h"
 #include "dispatch.h"
 
@@ -606,7 +607,13 @@ dri2_setup_screen(_EGLDisplay *disp)
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri_screen *screen = dri2_dpy->dri_screen_render_gpu;
    struct pipe_screen *pscreen = screen->base.screen;
+   const char *renderer_name =
+      pscreen->get_name ? pscreen->get_name(pscreen) : NULL;
    unsigned int api_mask = screen->api_mask;
+
+   dri2_dpy->force_zero_buffer_age =
+      dri2_force_zero_buffer_age_for_renderer(dri2_dpy->driver_name,
+                                              renderer_name);
 
 #ifdef HAVE_LIBDRM
    unsigned caps = pscreen->caps.dmabuf;

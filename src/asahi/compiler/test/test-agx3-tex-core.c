@@ -470,7 +470,7 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true,
         .array_layer = 22},
-       "05800cb8b0000db4010010001200", NULL},
+       "05800cb8b0000004010010000100", NULL},
       {"texture3d level(2.0)",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1,
@@ -497,13 +497,13 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00013b5010010001200", NULL},
+       "05800cb8b00013b5010010000100", NULL},
       {"native cube-array dynamic layer level zero",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00007b7010010001200", NULL},
+       "05800cb8b00007b7010010000100", NULL},
       {"native cube comparison",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -649,7 +649,7 @@ test_sample_witnesses(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b00005b7010010001202"));
+         hex_eq(bytes, length, "05800cb8b00005b7010010000102"));
 
    bad = (struct agx3_tex_sample_desc){
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
@@ -968,7 +968,7 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000fb5000010001200"));
+         hex_eq(bytes, length, "05800cb8b0000fb5000010000100"));
    bad = bias_reg;
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
@@ -980,7 +980,7 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000db5010010001200"));
+         hex_eq(bytes, length, "05800cb8b0000db5010010000100"));
 
    struct agx3_tex_sample_desc array_level = grad_apple;
    array_level.array = true;
@@ -990,13 +990,13 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008db6010010001208"));
+         hex_eq(bytes, length, "05800cb8b0008db6010010000108"));
    array_level.lod = AGX3_TEX_LOD_REGISTER;
    array_level.lod_x64 = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008fb4010010001200"));
+         hex_eq(bytes, length, "05800cb8b0008fb4010010000100"));
 
    bad = grad_apple;
    bad.array = true;
@@ -1432,8 +1432,8 @@ test_indexed_sample_witnesses(void)
       0x05,0x80,0x0c,0xb8,0x34,0x00,0x00,0x00,0x01,0x02,
       0x90,0x01,0x01,0x00,0xa0,0x28,0x00,0x00,0x40,0x00};
    const uint8_t uniform_array_bytes[] = {
-      0x05,0xc0,0x0c,0xb8,0xbc,0x00,0x0d,0x14,0x93,0x03,
-      0x90,0x03,0x12,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
+      0x05,0xc0,0x0c,0xb8,0xbc,0x00,0x00,0x04,0x93,0x03,
+      0x90,0x01,0x01,0x00,0x80,0x20,0x00,0x00,0x00,0x00};
    struct agx3_tex_sample_desc d = {
       .width=AGX3_TEX_W32, .mask=15, .slot=1, .wait_mask=1,
       .coord_kill=true, .final=true, .lod=AGX3_TEX_LOD_AUTO,
@@ -1497,7 +1497,7 @@ test_indexed_sample_witnesses(void)
    d.array_layer=24;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    CHECK(hex_eq(out,len,
-                "05800cb834000dc4010290011200a02800004000"));
+                "05800cb834000004010290010100a02800004000"));
    d.array=false;
    d.array_layer=0;
    d.texture_value=1;
@@ -2173,6 +2173,68 @@ test_multisample_sample_stage(void)
    return 0;
 }
 
+/* Apple's native fragment-array instructions use the complete Apple sample
+ * ABI: f83/f112=4/8 plus direct f31/f37 layer selection. Honeykrisp's
+ * descriptor heaps instead require the independently qualified 0/4 profile
+ * paired with the PACK_SMPIR private layer selected by f77=2. Keep both exact
+ * encodings without erasing the native immediate/register provenance.
+ */
+static int
+test_array_sample_abi_differential(void)
+{
+   uint8_t driver[AGX3_TEX_MAX_LENGTH], apple[AGX3_TEX_MAX_LENGTH];
+   uint8_t driver_len = 0, apple_len = 0;
+   struct agx3_tex_sample_desc d = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .array = true,
+      .array_layer = 22,
+   };
+
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, driver,
+                                &driver_len));
+   CHECK(driver_len == 14 &&
+         hex_eq(driver, driver_len, "05800cb8b0000004010010000100"));
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, apple,
+                                &apple_len));
+   CHECK(apple_len == driver_len &&
+         hex_eq(apple, apple_len, "05800cb8b0000db4010010001200"));
+   CHECK(driver[6] == 0x00 && driver[7] == 0x04 &&
+         apple[6] == 0x0d && apple[7] == 0xb4 &&
+         driver[12] == 0x01 && apple[12] == 0x12);
+   for (unsigned i = 0; i < driver_len; ++i)
+      CHECK(i == 6 || i == 7 || i == 12 || driver[i] == apple[i]);
+
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+   d.array_layer = 24;
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 0;
+   d.sampler_value = 4;
+   d.texture_kill = true;
+   d.sampler_kill = true;
+   d.wait_mask = 32;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, driver,
+                                &driver_len));
+   CHECK(driver_len == 20 &&
+         hex_eq(driver, driver_len,
+                "05800cb834000004010290010100a02800004000"));
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, apple,
+                                &apple_len));
+   CHECK(apple_len == driver_len &&
+         hex_eq(apple, apple_len,
+                "05800cb834000dc4010290011200a02800004000"));
+   CHECK(driver[6] == 0x00 && driver[7] == 0x04 &&
+         apple[6] == 0x0d && apple[7] == 0xc4 &&
+         driver[12] == 0x01 && apple[12] == 0x12);
+   for (unsigned i = 0; i < driver_len; ++i)
+      CHECK(i == 6 || i == 7 || i == 12 || driver[i] == apple[i]);
+
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2180,6 +2242,7 @@ main(void)
        test_register_array_layer() || test_cube_coordinate_stage() ||
        test_multisample_fetch() ||
        test_multisample_sample_stage() ||
+       test_array_sample_abi_differential() ||
        test_staging_source_lifetime() || test_exact_witnesses() ||
        test_supported_axes() || test_fail_closed() ||
        test_sample_witnesses() || test_copy_witnesses() ||

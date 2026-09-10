@@ -620,6 +620,18 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Chromium 151 ANGLE reserves one float4 output for transform feedback.
+    # This exact image oracle qualifies the resulting 68-user/72-total UVS
+    # boundary before HK_G17P_UNVERIFIED_FEATURES=vertex_output_68 is promoted.
+    executable(
+      'g17p-vulkan-vertex-output-68',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VERTEX_OUTPUT_68=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-secondary-command-buffer',
       files('tests/g17p_offscreen_triangle.c'),
@@ -737,6 +749,115 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Descriptor allocation/type matrix for the identical compositor sample.
+    # These allocated-set controls pair with vk_meta's pushed combined and
+    # pushed separate blit paths without involving mip generation.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined-array',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate-array',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined-array-exact',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1',
+                '-DG17P_COMPOSITE_ARRAY_NEAREST_EXACT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate-array-exact',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1',
+                '-DG17P_COMPOSITE_ARRAY_NEAREST_EXACT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Native sRGB texture discriminator: uncompressed source, implicit mip-1
+    # minification, LINEAR filtering, premultiplied source-over, and a BGRA8
+    # sRGB target. Paired source formats isolate decode/swizzle from the
+    # otherwise identical draw, sampler, blend, and target state.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-rgba8-srgb',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include, inc_src],
+      dependencies : [dep_dl, idep_mesautil],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE=1',
+                '-DG17P_COMPOSITE_SRGB_TARGET=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8-srgb',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include, inc_src],
+      dependencies : [dep_dl, idep_mesautil],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE_BGRA=1',
+                '-DG17P_COMPOSITE_SRGB_TARGET=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # GTK unified-GPU icon path: premultiplied BGRA8 base upload, complete
+    # same-image linear-blit mip chain, implicit minified sampling and
+    # compositor-style alpha blending.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -1899,6 +2020,127 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Q02 public pipeline-cache persistence oracle. Runs without submitting GPU
+    # work and checks G17 cache identity, import, merge and explicit cache hit.
+    g17p_pipeline_cache = executable(
+      'g17p-vulkan-pipeline-cache',
+      files('tests/g17p_vulkan_pipeline_cache.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # M02 public no-submit buffer-memory lifetime oracle.
+    g17p_buffer_memory = executable(
+      'g17p-vulkan-buffer-memory',
+      files('tests/g17p_vulkan_buffer_memory.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit buffer-device-address capture/replay oracle.
+    g17p_bda_capture = executable(
+      'g17p-vulkan-bda-capture',
+      files('tests/g17p_vulkan_bda_capture.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Q01b public no-submit partial/unavailable query-result ABI oracle.
+    g17p_query_results = executable(
+      'g17p-vulkan-query-results',
+      files('tests/g17p_vulkan_query_results.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # S04b public no-submit timeline host/object-lifetime oracle.
+    g17p_timeline_host = executable(
+      'g17p-vulkan-timeline-host',
+      files('tests/g17p_vulkan_timeline_host.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_EXT_memory_budget allocation-lifetime oracle.
+    g17p_memory_budget = executable(
+      'g17p-vulkan-memory-budget',
+      files('tests/g17p_vulkan_memory_budget.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance4 requirements-equivalence oracle.
+    g17p_maintenance4 = executable(
+      'g17p-vulkan-maintenance4',
+      files('tests/g17p_vulkan_maintenance4.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance5 usage2/layout oracle.
+    g17p_maintenance5 = executable(
+      'g17p-vulkan-maintenance5',
+      files('tests/g17p_vulkan_maintenance5.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance6 properties/bind-status oracle.
+    g17p_maintenance6 = executable(
+      'g17p-vulkan-maintenance6',
+      files('tests/g17p_vulkan_maintenance6.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public record-only VK_KHR_push_descriptor allocation/push matrix.
+    g17p_push_descriptor = executable(
+      'g17p-vulkan-push-descriptor',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # One-layer sampler2DArray NEAREST allocated-descriptor pixel control.
+    g17p_push_descriptor_array_control = executable(
+      'g17p-vulkan-push-descriptor-array-control',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ARRAY_CONTROL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Raw allocated sampler2DArray implicit/explicit LOD and layer matrix.
+    g17p_array_lod_control = executable(
+      'g17p-vulkan-array-lod-control',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ARRAY_LOD_CONTROL=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

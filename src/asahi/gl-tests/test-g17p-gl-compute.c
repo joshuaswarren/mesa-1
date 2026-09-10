@@ -34,7 +34,13 @@ make_program(void)
       "#version 310 es\n"
       "layout(local_size_x=8) in;\n"
       "layout(std430, binding=0) buffer Output { uint value[]; };\n"
-      "void main() { uint i=gl_GlobalInvocationID.x; value[i]=i*3u+7u; }\n";
+      "uniform highp sampler2D source[32];\n"
+      "void main() {\n"
+      "  uint i=gl_GlobalInvocationID.x;\n"
+      "  uint sampled=uint(round(textureLod(source[31], vec2(0.5), 0.0).r * "
+      "255.0));\n"
+      "  value[i]=i*3u+7u+sampled;\n"
+      "}\n";
    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
    const GLchar *source_ptr = source;
    glShaderSource(shader, 1, &source_ptr, NULL);
@@ -120,7 +126,24 @@ main(void)
    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(initial), initial,
                 GL_DYNAMIC_COPY);
    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+
+   static const uint8_t texel[4] = {19, 37, 73, 255};
+   GLuint texture;
+   glGenTextures(1, &texture);
+   glActiveTexture(GL_TEXTURE31);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA,
+                   GL_UNSIGNED_BYTE, texel);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
    glUseProgram(program);
+   /* Keep this above HAL200's 15-slot immediate sampler window. Both the
+    * texture and reserve-aware sampler handle must be register-indirect. */
+   glUniform1i(glGetUniformLocation(program, "source[31]"), 31);
    glDispatchCompute(VALUES / 8, 1, 1);
    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
    glFinish();
@@ -140,7 +163,7 @@ main(void)
 
    if (!noop) {
       for (unsigned i = 0; i < VALUES; ++i) {
-         if (guarded[GUARD_WORDS + i] != i * 3u + 7u) {
+         if (guarded[GUARD_WORDS + i] != i * 3u + 7u + texel[0]) {
             fprintf(stderr, "value %u is %#x\n", i,
                     guarded[GUARD_WORDS + i]);
             return 1;
@@ -153,6 +176,8 @@ main(void)
          return 1;
    }
 
-   puts("G17P GL compute PASS");
+   glDeleteTextures(1, &texture);
+
+   puts("G17P GL sampled compute PASS");
    return 0;
 }

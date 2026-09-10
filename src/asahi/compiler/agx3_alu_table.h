@@ -1,6 +1,12 @@
 /* GENERATED from the hand packers + composer + wait map. Per ALU op and
  * encoding: the composer form, baseline constants, operand field ids and
- * the per-slot wait-bit field ids. Do not edit by hand. */
+ * the per-slot wait-bit field ids. Do not edit by hand.
+ *
+ * EXCEPT: the AGX3b `inv` row (AGX3_ALU_BNOT) IS hand-corrected. Its wait list
+ * was generated empty, which made agx3_alu_compose() silently drop every
+ * requested wait on that form. Regenerating this file WILL revert that fix
+ * unless the generator is corrected too. See the comment on the row itself for
+ * the Apple witnesses and the measured field numbers. */
 #pragma once
 #include <stdint.h>
 
@@ -55,7 +61,22 @@ static const struct agx3_alu_form agx3_alu_forms[AGX3_ALU_NUM][2] = {
   { {"bit_and",1,2,16,30,-1,-1,8,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{49,1}},6,{44,45,46,47,48,49}}, {"bit_and",1,2,16,30,-1,-1,10,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{42,3},{43,10},{51,1}},8,{44,45,46,47,48,49,50,51}}, },
   { {"bit_or",1,2,16,30,-1,-1,8,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{49,1}},6,{44,45,46,47,48,49}}, {"bit_or",1,2,16,30,-1,-1,10,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{42,3},{43,16},{51,1}},8,{44,45,46,47,48,49,50,51}}, },
   { {"bit_xor",1,2,16,30,-1,-1,8,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{49,1}},6,{44,45,46,47,48,49}}, {"bit_xor",1,2,16,30,-1,-1,10,{{9,2},{10,2},{23,2},{24,2},{27,1},{37,2},{38,2},{42,3},{43,19},{51,1}},8,{44,45,46,47,48,49,50,51}}, },
-  { {"inv",0,2,16,-1,-1,-1,6,{{9,2},{10,2},{11,1},{23,2},{24,2},{35,1}},0,{}}, {"inv",0,2,16,-1,-1,-1,8,{{9,2},{10,2},{11,1},{23,2},{24,2},{28,3},{29,93},{37,1}},0,{}}, },
+  /* HAND-CORRECTED, NOT GENERATED -- reproduce this at the generator or the
+     next regeneration silently reintroduces a dropped-dependency bug. The row
+     is agx3_alu_forms[AGX3_ALU_BNOT][0]; it needs nwait = 6 and
+     wait = {30,31,32,33,34,35}.
+
+     inv's AGX3b wait list was empty, so agx3_alu_compose() silently dropped
+     every requested wait; f35 was additionally folded into the baseline as if
+     it were a form constant. Apple varies it: `~a[i]` after a device load is
+     0b 01 0e 00 01 08 00 80 00 00 (f35 = 1) while `~i` from a get_sr is
+     0b 03 06 00 01 28 00 00 00 00 (f30 = 1, f35 = 0). A controlled bind sweep
+     from a clean baseline puts f30..f35 at byte5 bits 5..7 and byte7 bits 5..7,
+     the same six positions bit_and's f44..f49 occupy, i.e. wait slots 1..6.
+     The AGX3c column is left empty because its fields were never measured;
+     agx3_alu_compose() now refuses a wait it has no field for rather than
+     dropping it. */
+  { {"inv",0,2,16,-1,-1,-1,6,{{9,2},{10,2},{11,1},{23,2},{24,2},{35,1}},6,{30,31,32,33,34,35}}, {"inv",0,2,16,-1,-1,-1,8,{{9,2},{10,2},{11,1},{23,2},{24,2},{28,3},{29,93},{37,1}},0,{}}, },
   { {"f32rcp",0,2,18,-1,-1,-1,7,{{9,2},{10,2},{25,2},{26,2},{29,1},{43,2},{54,1}},6,{49,50,51,52,53,54}}, {"f32rcp",0,2,18,-1,-1,-1,9,{{9,2},{10,2},{25,2},{26,2},{29,1},{43,2},{47,3},{48,64},{56,1}},8,{49,50,51,52,53,54,55,56}}, },
   { {"f32rsqrt",0,2,18,-1,-1,-1,6,{{9,2},{10,2},{25,2},{26,2},{29,1},{40,1}},6,{35,36,37,38,39,40}}, {"f32rsqrt",0,2,18,-1,-1,-1,8,{{9,2},{10,2},{25,2},{26,2},{29,1},{33,3},{34,66},{42,1}},8,{35,36,37,38,39,40,41,42}}, },
   { {"f32rint",0,2,18,-1,-1,-1,7,{{9,2},{10,2},{11,1},{25,2},{26,2},{29,1},{40,1}},6,{35,36,37,38,39,40}}, {"f32rint",0,2,18,-1,-1,-1,9,{{9,2},{10,2},{11,1},{25,2},{26,2},{29,1},{33,3},{34,65},{42,1}},8,{35,36,37,38,39,40,41,42}}, },

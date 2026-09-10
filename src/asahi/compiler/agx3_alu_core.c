@@ -889,6 +889,56 @@ agx3_alu_wait_supported(enum agx3_alu_op op)
    return op < AGX3_ALU_NUM && op != AGX3_ALU_FMIN && op != AGX3_ALU_FMAX;
 }
 
+/* One composition of `F`. `skip_pinned_waits` drops the baseline entries whose
+ * field is also one of the form's wait fields, which is how the "what the
+ * caller actually asked for" reference encoding is built below. The production
+ * path passes false, so its bytes are unchanged. */
+static bool
+agx3_alu_compose_raw(enum agx_isa_encoding enc, const struct agx3_alu_form *F,
+                     bool skip_pinned_waits, uint16_t dest, uint16_t src0,
+                     uint16_t src1, uint16_t src2, uint32_t imm,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len)
+{
+   struct agx3_field_kv base[20];
+   unsigned nbase = 0;
+   for (unsigned i = 0; i < F->nbase; ++i) {
+      if (skip_pinned_waits) {
+         bool is_wait = false;
+         for (unsigned j = 0; j < F->nwait; ++j)
+            is_wait |= (F->base[i].f == F->wait[j]);
+         if (is_wait)
+            continue;
+      }
+      base[nbase].field = F->base[i].f;
+      base[nbase].value = F->base[i].v;
+      nbase++;
+   }
+
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   if (F->f_dest >= 0) { ov[n].field = F->f_dest; ov[n].value = dest; n++; }
+   if (F->f_src0 >= 0) { ov[n].field = F->f_src0; ov[n].value = src0; n++; }
+   if (F->f_src1 >= 0) { ov[n].field = F->f_src1; ov[n].value = src1; n++; }
+   if (F->f_src2 >= 0) { ov[n].field = F->f_src2; ov[n].value = src2; n++; }
+   if (F->f_imm >= 0)  { ov[n].field = F->f_imm;  ov[n].value = imm;  n++; }
+   for (unsigned i = 0; i < F->nwait; ++i)
+      if (wait_mask & (1u << i)) { ov[n].field = F->wait[i]; ov[n].value = 1; n++; }
+
+   return agx3_bind_compose(enc, F->mnemonic, F->ep, base, nbase, ov, n, out,
+                            len);
+}
+
+static bool
+agx3_alu_form_pins_a_wait(const struct agx3_alu_form *F)
+{
+   for (unsigned i = 0; i < F->nbase; ++i)
+      for (unsigned j = 0; j < F->nwait; ++j)
+         if (F->base[i].f == F->wait[j])
+            return true;
+   return false;
+}
+
 bool
 agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op, uint16_t dest,
                  uint16_t src0, uint16_t src1, uint16_t src2, uint32_t imm,
@@ -907,25 +957,87 @@ agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op, uint16_t dest,
       return false;
    if (wait_mask && !agx3_alu_wait_supported(op))
       return false;
+   /* Only wait bits with a field in this form are deposited below. A bit past
+    * the end of wait[] would be silently dropped, which is a missing
+    * dependency rather than a refusal, so fail closed instead. Callers fall
+    * back to a synchronous prelude that retires the slot (agx3_emit_alu). */
+   if (F->nwait < 16 && (wait_mask >> F->nwait) != 0)
+      return false;
 
-   struct agx3_field_kv base[20];
-   for (unsigned i = 0; i < F->nbase; ++i) {
-      base[i].field = F->base[i].f;
-      base[i].value = F->base[i].v;
+   if (!agx3_alu_compose_raw(enc, F, false, dest, src0, src1, src2, imm,
+                             wait_mask, out, len))
+      return false;
+
+   /*
+    * agx3_alu_table.h was extracted by decoding one witnessed Apple
+    * instruction per form, so some baselines carry that specimen's own
+    * scoreboard wait as if it were a form constant. Correcting that changes
+    * the bytes of every wait-carrying ALU instruction and is held for
+    * hardware. What cannot wait is the case where the pinned wait and the
+    * requested wait are not independent bits.
+    *
+    * Two wait encodings exist. The ten-byte integer forms carry a six-bit
+    * MASK, so a pinned slot plus a requested slot is simply "wait both" --
+    * an over-wait, conservative and safe. The compact float forms instead
+    * carry a three-bit CODE naming one slot, values 1..6, and the two
+    * deposits merge arithmetically: f32add with f52 pinned (code 1) and slot
+    * 2 (f53, code 2) requested emitted 09 01 04 05 00 e0, code 7 -- a value
+    * Apple never emits and which names no slot. That is a wrong value in the
+    * instruction stream, the one failure mode with no safe reading.
+    *
+    * Tell the two apart structurally rather than by hard-coding a form: an
+    * additive (mask) deposit satisfies
+    *    emitted == pinned_only | requested_only
+    * byte for byte, because the two land in disjoint bits and nothing else
+    * differs. A merged code does not. Refuse when it does not, and
+    * agx3_emit_alu() retires the slot with a synchronous prelude instead.
+    */
+   if (wait_mask == 0)
+      return true;
+
+   uint8_t zero[AGX3_ALU_MAX_LENGTH], requested[AGX3_ALU_MAX_LENGTH];
+   uint8_t one[AGX3_ALU_MAX_LENGTH], pinned[AGX3_ALU_MAX_LENGTH];
+   uint8_t zero_len = 0, requested_len = 0, one_len = 0, pinned_len = 0;
+   if (!agx3_alu_compose_raw(enc, F, true, dest, src0, src1, src2, imm, 0, zero,
+                             &zero_len) ||
+       !agx3_alu_compose_raw(enc, F, true, dest, src0, src1, src2, imm,
+                             wait_mask, requested, &requested_len) ||
+       zero_len != *len || requested_len != *len)
+      return false;
+
+   /* Requirement one: the multi-slot deposit is the union of the single-slot
+    * deposits. On a mask form that is automatic. On a code form it is false --
+    * f32add slots 1 and 2 deposit byte5 0x20 and 0x40, but together they
+    * deposit 0xe0, which is code 7. */
+   uint8_t all[AGX3_ALU_MAX_LENGTH];
+   memcpy(all, zero, *len);
+   for (unsigned i = 0; i < F->nwait; ++i) {
+      if (!(wait_mask & (1u << i)))
+         continue;
+      if (!agx3_alu_compose_raw(enc, F, true, dest, src0, src1, src2, imm,
+                                1u << i, one, &one_len) ||
+          one_len != *len)
+         return false;
+      for (unsigned k = 0; k < *len; ++k)
+         all[k] |= one[k];
    }
+   if (memcmp(all, requested, *len) != 0)
+      return false;
 
-   struct agx3_field_kv ov[24];
-   unsigned n = 0;
-   if (F->f_dest >= 0) { ov[n].field = F->f_dest; ov[n].value = dest; n++; }
-   if (F->f_src0 >= 0) { ov[n].field = F->f_src0; ov[n].value = src0; n++; }
-   if (F->f_src1 >= 0) { ov[n].field = F->f_src1; ov[n].value = src1; n++; }
-   if (F->f_src2 >= 0) { ov[n].field = F->f_src2; ov[n].value = src2; n++; }
-   if (F->f_imm >= 0)  { ov[n].field = F->f_imm;  ov[n].value = imm;  n++; }
-   for (unsigned i = 0; i < F->nwait; ++i)
-      if (wait_mask & (1u << i)) { ov[n].field = F->wait[i]; ov[n].value = 1; n++; }
+   /* Requirement two: the form's pinned specimen wait, if it has one, is
+    * additive with what the caller asked for rather than merging into a third
+    * value. */
+   if (!agx3_alu_form_pins_a_wait(F))
+      return true;
+   if (!agx3_alu_compose_raw(enc, F, false, dest, src0, src1, src2, imm, 0,
+                             pinned, &pinned_len) ||
+       pinned_len != *len)
+      return false;
+   for (unsigned i = 0; i < *len; ++i)
+      if (out[i] != (uint8_t)(pinned[i] | requested[i]))
+         return false;
 
-   return agx3_bind_compose(enc, F->mnemonic, F->ep, base, F->nbase, ov, n, out,
-                            len);
+   return true;
 }
 
 /* Native and_live/or_live/xor_live retain their second input for a later
@@ -1691,6 +1803,30 @@ agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
       return false;
    const struct agx3_field_kv base[] = {
       {9,2},{10,2},{23,2},{24,2},{38,1},{39,2},
+   };
+   struct agx3_field_kv fields[13] = {
+      {2,dest},{11,dest_cache},{16,source},{30,shift},
+      {25,hint == AGX3_ALU_HINT_CACHE},{27,hint == AGX3_ALU_HINT_DISCARD},
+      {28,1},
+   };
+   for (unsigned i=0;i<6;i++)
+      fields[7+i]=(struct agx3_field_kv){45+i,!!(wait_mask & (1u<<i))};
+   return agx3_bind_compose(enc,"sra",0,base,6,fields,13,out,length);
+}
+
+/* Native short arithmetic shift: f10/f24 select half destination/source. */
+bool
+agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
+                   unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *length)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !length ||
+       dest >= 256 || source >= 256 || shift < 1 || shift > 15 ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+   const struct agx3_field_kv base[] = {
+      {9,2},{10,1},{23,2},{24,1},{38,1},{39,2},
    };
    struct agx3_field_kv fields[13] = {
       {2,dest},{11,dest_cache},{16,source},{30,shift},
@@ -2582,11 +2718,33 @@ agx3_alu_fmul_narrow(enum agx_isa_encoding enc, uint16_t dest,
    return false;
 }
 
-bool
-agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
-              const uint16_t src[2], const enum agx3_alu_hint hints[2],
-              bool dest_cache, uint16_t wait_mask,
-              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+/*
+ * Shared body for the scalar-half register/register multiply and add.
+ *
+ * G17P carries the float saturate modifier in f14. The compact ep0/ep1
+ * encoding points have no such field, so a saturating half operation lands on
+ * the two-byte-longer ep2 form; the composer fails closed on f14 below that,
+ * which is what selects the point. Every other field -- destination, both
+ * source registers, the destination cache bit, the two source lifetime bits
+ * and all six scoreboard waits -- is the same map the unsaturated form uses,
+ * so one body serves both. Passing f14 = 0 is byte-identical to omitting it at
+ * every encoding point, so the unsaturated callers are unchanged.
+ *
+ * Apple witnesses, metal-nt -arch applegpu_g17p, macOS 26 Metal toolchain:
+ *    a[i] * b[i]                     10 03 1d 02 00 c0            f16mul.ep1
+ *    saturate(a[i] * b[i])           10 03 1d 02 01 00 00 82      f16mul.ep2
+ *    a[i] + b[i]                     10 03 1c 02 00 c0            f16add.ep1
+ *    saturate(a[i] + b[i])           10 03 1c 02 01 00 00 82      f16add.ep2
+ *    saturate(x * y), src1 live      18 03 0d 02 01 00 00 82      f45 = 0
+ *    saturate(x * y), src0 live      18 02 15 03 01 00 00 82      f28 = 0
+ * Each saturating vector differs from its unsaturated partner in f14 alone.
+ */
+static bool
+agx3_alu_h_binop(enum agx_isa_encoding enc, const char *mnemonic,
+                 unsigned max_ep, uint16_t dest, const uint16_t src[2],
+                 const enum agx3_alu_hint hints[2], bool dest_cache,
+                 bool saturate, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
        dest >= 256 || src[0] >= 256 || src[1] >= 256 ||
@@ -2594,20 +2752,51 @@ agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
        (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
        (unsigned)hints[1] > AGX3_ALU_HINT_CACHE)
       return false;
+
    const struct agx3_field_kv base[] = {
-      {9,2},{10,1},{24,2},{25,1},{41,2},{42,1},
+      {9, 2}, {10, 1}, {24, 2}, {25, 1}, {41, 2}, {42, 1},
    };
-   struct agx3_field_kv fields[14] = {
-      {2,dest},{17,src[0]},{34,src[1]},{11,dest_cache},
-      {26,hints[0] == AGX3_ALU_HINT_CACHE},{28,hints[0] == AGX3_ALU_HINT_DISCARD},
-      {43,hints[1] == AGX3_ALU_HINT_CACHE},{45,hints[1] == AGX3_ALU_HINT_DISCARD},
+   struct agx3_field_kv fields[15] = {
+      {2, dest},
+      {17, src[0]},
+      {34, src[1]},
+      {11, dest_cache},
+      {14, saturate},
+      {26, hints[0] == AGX3_ALU_HINT_CACHE},
+      {28, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {43, hints[1] == AGX3_ALU_HINT_CACHE},
+      {45, hints[1] == AGX3_ALU_HINT_DISCARD},
    };
-   for (unsigned i=0;i<6;i++)
-      fields[8+i] = (struct agx3_field_kv){51+i,!!(wait_mask & (1u<<i))};
-   for (unsigned ep=0;ep<2;ep++)
-      if (agx3_bind_compose(enc,"f16mul",ep,base,6,fields,14,out,len))
+   for (unsigned i = 0; i < 6; ++i)
+      fields[9 + i] =
+         (struct agx3_field_kv){51 + i, !!(wait_mask & (1u << i))};
+
+   for (unsigned ep = 0; ep < max_ep; ++ep) {
+      if (agx3_bind_compose(enc, mnemonic, ep, base, 6, fields, 15, out, len))
          return true;
+   }
+
    return false;
+}
+
+bool
+agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
+              const uint16_t src[2], const enum agx3_alu_hint hints[2],
+              bool dest_cache, uint16_t wait_mask,
+              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_h_binop(enc, "f16mul", 2, dest, src, hints, dest_cache,
+                           false, wait_mask, out, len);
+}
+
+bool
+agx3_alu_hmul_saturate(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                       bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_h_binop(enc, "f16mul", 3, dest, src, hints, dest_cache,
+                           true, wait_mask, out, len);
 }
 
 bool
@@ -2656,36 +2845,18 @@ agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
               bool dest_cache, uint16_t wait_mask,
               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
-       dest >= 256 || src[0] >= 256 || src[1] >= 256 ||
-       (wait_mask & ~UINT16_C(0x3f)) ||
-       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
-       (unsigned)hints[1] > AGX3_ALU_HINT_CACHE)
-      return false;
+   return agx3_alu_h_binop(enc, "f16add", 4, dest, src, hints, dest_cache,
+                           false, wait_mask, out, len);
+}
 
-   const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 1}, {24, 2}, {25, 1}, {41, 2}, {42, 1},
-   };
-   struct agx3_field_kv fields[14] = {
-      {2, dest},
-      {17, src[0]},
-      {34, src[1]},
-      {11, dest_cache},
-      {26, hints[0] == AGX3_ALU_HINT_CACHE},
-      {28, hints[0] == AGX3_ALU_HINT_DISCARD},
-      {43, hints[1] == AGX3_ALU_HINT_CACHE},
-      {45, hints[1] == AGX3_ALU_HINT_DISCARD},
-   };
-   for (unsigned i = 0; i < 6; ++i)
-      fields[8 + i] =
-         (struct agx3_field_kv){51 + i, !!(wait_mask & (1u << i))};
-
-   for (unsigned ep = 0; ep < 4; ++ep) {
-      if (agx3_bind_compose(enc, "f16add", ep, base, 6, fields, 14, out, len))
-         return true;
-   }
-
-   return false;
+bool
+agx3_alu_hadd_saturate(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                       bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_h_binop(enc, "f16add", 4, dest, src, hints, dest_cache,
+                           true, wait_mask, out, len);
 }
 
 bool

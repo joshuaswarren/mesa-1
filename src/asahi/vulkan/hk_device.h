@@ -93,6 +93,12 @@ struct hk_device {
    struct {
       simple_mtx_t lock;
       struct list_head slabs;
+
+      /* Opt-in command-upload lifetime falsifier. These lists retain complete
+       * upload BOs and VDM slab leases after command-buffer reset, preventing
+       * either address from being recycled before device destruction. */
+      struct list_head quarantined_bos;
+      struct list_head quarantined_vdm_allocations;
    } vdm;
 
    /* Native G17P indirect compute grid helper.  A compact indirect helper

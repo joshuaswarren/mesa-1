@@ -73,7 +73,7 @@ struct hk_agx3_g17p_graphics_program_desc {
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
-#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 5u
+#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_RANGES
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 
 bool hk_agx3_g17p_graphics_program_bound(
@@ -143,9 +143,10 @@ bool hk_agx3_g17p_fragment_blend_constants_range(
 
 /* Build the bounded G17P vertex or fragment Ioto program.  A zero-range
  * fragment uses the valid ordinary-FS PIXREL suffix; a zero-range vertex uses
- * the distinct compute/vertex profile suffix. Up to three dword-aligned
+ * the distinct compute/vertex profile suffix. Up to six dword-aligned
  * absolute uniform ranges add the CProg loads used by vertex attributes,
- * descriptor roots, or the bounded native texture/sampler pair above. */
+ * draw parameters, descriptor roots, promoted constants, or the bounded
+ * native texture/sampler pair above. */
 bool hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);

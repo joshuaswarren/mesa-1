@@ -9,9 +9,10 @@
 
 /* Fragment shaders with side effects require special handling to ensure the
  * side effects execute as intended. By default, they require late depth
- * testing, to ensure the side effects happen even for killed pixels. To handle,
- * the driver inserts a dummy `gl_FragDepth = gl_Position.z` in shaders that
- * don't otherwise write their depth, forcing a late depth test.
+ * testing, to ensure the side effects happen even for killed pixels. Trigger
+ * an all-live sample test after the side effects instead of synthesizing a
+ * FragDepth write. Besides avoiding needless position interpolation, this is
+ * the native operation for running tests without changing depth.
  *
  * For side effects with force early testing forced, the sample mask is written
  * at the *beginning* of the shader.
@@ -20,23 +21,10 @@
 #define ALL_SAMPLES (0xFF)
 
 static void
-insert_z_write(nir_builder *b)
+insert_late_test(nir_builder *b)
 {
-   /* When forcing depth test to NEVER, force Z to NaN.  This works around the
-    * hardware discarding depth=NEVER.
-    *
-    * TODO: Check if Apple has a better way of handling this.
-    */
-   nir_def *bias = nir_bcsel(b, nir_ine_imm(b, nir_load_depth_never_agx(b), 0),
-                             nir_imm_float(b, NAN), nir_imm_float(b, -0.0));
-
-   nir_def *z = nir_fadd(b, bias, nir_load_frag_coord_z(b));
-
-   nir_store_output(b, z, nir_imm_int(b, 0),
-                    .io_semantics.location = FRAG_RESULT_DEPTH,
-                    .src_type = nir_type_float32);
-
-   b->shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
+   nir_sample_mask_agx(b, all_samples, all_samples);
 }
 
 static bool
@@ -52,7 +40,7 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
    *done = true;
 
    b->cursor = nir_before_instr(&intr->instr);
-   insert_z_write(b);
+   insert_late_test(b);
    return true;
 }
 
@@ -96,7 +84,7 @@ agx_nir_lower_frag_sidefx(nir_shader *s)
       nir_function_impl *impl = nir_shader_get_entrypoint(s);
       nir_builder b = nir_builder_at(nir_after_impl(impl));
 
-      insert_z_write(&b);
+      insert_late_test(&b);
    }
 
    return true;

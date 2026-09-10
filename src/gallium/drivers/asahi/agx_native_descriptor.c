@@ -81,6 +81,31 @@ agx_gallium_pack_g17p_txf_sampler(
 }
 
 bool
+agx_gallium_g17p_sampler_handle(enum agx_chip chip, unsigned api_sampler,
+                                uint16_t *native_handle)
+{
+   if (chip != AGX_CHIP_G17P || api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
+       !native_handle)
+      return false;
+
+   *native_handle = api_sampler + 1;
+   return true;
+}
+
+bool
+agx_gallium_g17p_custom_border_handle(enum agx_chip chip,
+                                      unsigned api_sampler,
+                                      uint16_t *native_handle)
+{
+   if (chip != AGX_CHIP_G17P || api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
+       !native_handle)
+      return false;
+
+   *native_handle = AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE + api_sampler;
+   return true;
+}
+
+bool
 agx_gallium_pack_native_texture(
    enum agx_descriptor_generation generation,
    struct agx_gallium_texture_descriptor *out,

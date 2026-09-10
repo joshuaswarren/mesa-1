@@ -18,6 +18,7 @@
 #include "util/macros.h"
 #include "util/ralloc.h"
 #include "util/timespec.h"
+#include "util/u_debug.h"
 #include "agx_abi.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
@@ -134,6 +135,8 @@ static const struct debug_named_value agx_debug_options[] = {
    {"1queue",    AGX_DBG_1QUEUE,   "Force usage of a single queue for multiple contexts"},
    {"nosoft",    AGX_DBG_NOSOFT,   "Disable soft fault optimizations"},
    {"nomerge",   AGX_DBG_NOMERGE,  "Disable control stream merging"},
+   {"faulttrace",AGX_DBG_FAULTTRACE,"Decode only a failed command stream"},
+   {"asynctrace",AGX_DBG_ASYNCTRACE,"Trace command streams without waiting"},
    {"bodumpverbose", AGX_DBG_BODUMPVERBOSE,   "Include extra info with dumps"},
    DEBUG_NAMED_VALUE_END
 };
@@ -143,6 +146,8 @@ void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
+
+   agx_g17p_va_lifetime_trace(dev, "bo-free", bo);
 
    if (bo->_map)
       dev->ops.bo_munmap(dev, bo);
@@ -164,6 +169,29 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    __sync_synchronize();
 
    dev->ops.bo_free(dev, handle);
+}
+
+void
+agx_g17p_va_lifetime_trace(struct agx_device *dev, const char *phase,
+                           const struct agx_bo *bo)
+{
+   if (!dev || !bo || dev->chip != AGX_CHIP_G17P ||
+       !debug_get_bool_option("AGX_G17P_VA_LIFETIME_TRACE", false))
+      return;
+
+   const uint64_t rw = bo->va ? bo->va->addr : 0;
+   const uint64_t rw_end = rw + bo->size;
+   const bool has_ro = bo->va && !(bo->va->flags & AGX_VA_USC);
+   const uint64_t ro = has_ro ? agx_rw_addr_to_ro(dev, rw) : 0;
+   const uint64_t ro_end = has_ro ? ro + bo->size : 0;
+
+   fprintf(stderr,
+           "G17P VA-LIFETIME phase=%s handle=%u flags=%#x size=%#llx "
+           "rw=[%#llx,%#llx) ro=[%#llx,%#llx) label=%s\n",
+           phase ? phase : "unknown", bo->handle, bo->flags,
+           (unsigned long long)bo->size, (unsigned long long)rw,
+           (unsigned long long)rw_end, (unsigned long long)ro,
+           (unsigned long long)ro_end, bo->label ? bo->label : "(null)");
 }
 
 #ifdef HAVE_LIBDRM
@@ -502,7 +530,8 @@ agx_bo_import(struct agx_device *dev, int fd)
 
    assert(bo->dev != NULL && "post-condition");
 
-   if (dev->debug & AGX_DBG_TRACE) {
+   if (dev->debug &
+       (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE)) {
       agx_bo_map(bo);
       agxdecode_track_alloc(dev->agxdecode, bo);
    }
@@ -1283,13 +1312,33 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    if (dev->chip == AGX_CHIP_G17P) {
       struct agx_bo *context = agx_create_fixed_bo(
-         dev, AGX_G17P_RENDER_CONTEXT_SIZE, AGX_BO_WRITEBACK,
+         dev, AGX_G17P_RENDER_CONTEXT_SIZE,
+         AGX_BO_WRITEBACK | AGX_BO_SHAREABLE,
          AGX_G17P_RENDER_CONTEXT_BASE,
          DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE,
          "G17P native render context");
       if (context == NULL) {
          fprintf(stderr, "Failed to bind G17P native render context");
          return false;
+      }
+
+      if (getenv("ASAHI_G17P_CONTEXT_TRACE")) {
+         const uint32_t gem_flags =
+            DRM_ASAHI_GEM_WRITEBACK |
+            ((context->flags & (AGX_BO_SHARED | AGX_BO_SHAREABLE))
+                ? 0
+                : DRM_ASAHI_GEM_VM_PRIVATE);
+         fprintf(stderr,
+                 "asahi: G17P context GEM_CREATE size=%#llx gem_flags=%#x "
+                 "vm_id=%u handle=%u bo_flags=%#x; VM_BIND vm_id=%u "
+                 "addr=%#llx range=%#llx offset=0 handle=%u flags=%#x\n",
+                 (unsigned long long)context->size, gem_flags,
+                 gem_flags & DRM_ASAHI_GEM_VM_PRIVATE ? dev->vm_id : 0,
+                 context->uapi_handle, context->flags, dev->vm_id,
+                 (unsigned long long)AGX_G17P_RENDER_CONTEXT_BASE,
+                 (unsigned long long)AGX_G17P_RENDER_CONTEXT_SIZE,
+                 context->uapi_handle,
+                 DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
       }
 
       void *context_map = agx_bo_map(context);

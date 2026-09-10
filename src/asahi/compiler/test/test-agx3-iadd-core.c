@@ -394,6 +394,28 @@ test_native_imad_immediate_addend(void)
         .multiplier_16=true, .multiplier_kill=true,
         .addend_is_immediate=true, .addend_immediate=1, .wait_mask=1},
        {0x9f,0x10,0x54,0x00,0x03,0x00,0x10,0x08,0x00,0x26,0x0a,0x00}},
+      /* Current Metal 32023.255, applegpu_g17p, exact
+       * `out[i] = a[i] * b[i] + c[i]` ushort MAD. */
+      {{.dest=2, .dest_16=true,
+        .src_a=3, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=2,
+        .multiplier_16=true, .multiplier_kill=true,
+        .src_c=4, .src_c_16=true, .src_c_kill=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x02,0x02,0x06,0x08,0x20,0x00,0x2e,0x2a,0x00}},
+      /* Current Metal 32023.255, applegpu_g17p, exact widening
+       * `uint(ushort) * uint(ushort)` product. */
+      {{.dest=0, .src_a=0, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=1,
+        .multiplier_16=true, .multiplier_kill=true,
+        .no_addend=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x00,0x02,0x00,0x04,0x00,0x10,0x26,0x0a,0x00}},
+      /* Same current-toolchain witness over signed short inputs. */
+      {{.dest=0, .src_a=0, .src_a_16=true, .src_a_sign_extend=true,
+        .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=1,
+        .multiplier_16=true, .multiplier_sign_extend=true,
+        .multiplier_kill=true, .no_addend=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x00,0x02,0x00,0x04,0x00,0x10,0x26,0x1e,0x00}},
    };
    for (unsigned i=0; i<sizeof(narrow)/sizeof(narrow[0]); ++i) {
       CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow[i].d,out,&len));
@@ -408,7 +430,17 @@ test_native_imad_immediate_addend(void)
    narrow_bad = narrow[3].d;
    narrow_bad.no_addend = false;
    narrow_bad.src_c = 2;
-   narrow_bad.src_c_16 = true;
+   narrow_bad.src_c_16 = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+
+   narrow_bad = narrow[8].d;
+   narrow_bad.src_a_16 = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[8].d;
+   narrow_bad.multiplier_16 = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[8].d;
+   narrow_bad.multiplier_sign_extend = false;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
 }
 

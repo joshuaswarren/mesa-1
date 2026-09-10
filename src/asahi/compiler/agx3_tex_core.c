@@ -387,21 +387,16 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   /* The driver descriptor ABI uses f83/f112=0/4 for cubes regardless of
-    * whether their descriptor indices are immediate or indirect.  Fresh
-    * attachment-only Metal 32023.917 cube fragments (native SHA256
-    * d80b059f5843e1b425820e87cffd533d826650c11c2624dd1b949a3d7c555b71)
-    * confirm that exact profile, and the hardware differential returns fixed
-    * half-gray for 4/8.  Array samples retain their separately witnessed
-    * dimension profile. */
-   const bool dimension_profile = d->array;
-   if ((operand_profile & 1) ||
-       (dimension_profile && !d->shadow))
+   /* The driver descriptor ABI uses f83/f112=0/4 for every dimension.
+    * Apple's f83/f112=4/8 fragment profile is a complete, incompatible ABI,
+    * selected only by AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT.  In particular,
+    * using Apple's profile with the driver's 2D-array descriptor produces a
+    * fixed near-half-gray sample on G17P, just as it does for cubes.
+    */
+   if (operand_profile & 1)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
-      112, ((operand_profile & 2) ||
-            (dimension_profile && !d->shadow))
-              ? 8 : 4);
+      112, (operand_profile & 2) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -441,7 +436,15 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        (intrinsic_group && !d->sample_group_nonterminal))
       ov[n++] = (struct agx3_field_kv)KV(156, 1);
    if (d->array) {
-      if (shadow_array) {
+      /* Honeykrisp's driver descriptor ABI pairs noncube arrays with the
+       * sampler-private layer staged by PACK_SMPIR.  Native Apple fragment
+       * witnesses use the direct f31/f37 path as part of their complete 4/8
+       * ABI; cube arrays retain their independently witnessed direct path.
+       */
+      const bool staged_driver_array =
+         !d->cube && d->lod == AGX3_TEX_LOD_AUTO &&
+         d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
+      if (shadow_array || staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(77, 2);
       } else {
          ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);

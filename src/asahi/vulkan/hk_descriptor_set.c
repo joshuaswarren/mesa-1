@@ -15,6 +15,7 @@
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_agx3_ioto_program_core.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
@@ -71,6 +72,17 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    /* "Zero" initialize */
    for (unsigned i = 0; i < 3; ++i) {
       hk_set_null_native_texture(generation, &desc[i].tex);
+
+      /* G17P's native sampler heap reserves entry zero for robust null
+       * sampling. The descriptor-set ABI stores application indices with the
+       * legacy +28 bias, so encode that same base for an explicit null
+       * descriptor. A zero clamp companion means "custom border present";
+       * -1 is the canonical no-border sentinel. */
+      if (generation == 9) {
+         desc[i].sw.sampler_index =
+            HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+         desc[i].sw.clamp_0_sampler_index_or_negative = -1;
+      }
    }
 
    uint8_t plane_count = 1;

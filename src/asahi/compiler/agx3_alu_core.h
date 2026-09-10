@@ -354,8 +354,12 @@ bool agx3_alu_extract_imm32(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *length);
 
-/* Signed right shift by an immediate1..31, with native source lifetime/waits. */
+/* Signed right shifts by an immediate, with native source lifetime/waits. */
 bool agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
+                        unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
+                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                        uint8_t *length);
+bool agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
                         unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
                         uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                         uint8_t *length);
@@ -674,6 +678,23 @@ bool agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
                    const uint16_t src[2], const enum agx3_alu_hint hints[2],
                    bool dest_cache, uint16_t wait_mask,
                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Saturating scalar-half multiply and add: sat(a * b) and sat(a + b).
+ * G17P spells the saturate as f14, which the compact ep0/ep1 points cannot
+ * carry, so these land on the two-byte-longer ep2 form. Apple witnesses:
+ *   saturate(a[i] * b[i])   10 03 1d 02 01 00 00 82  (vs 10 03 1d 02 00 c0)
+ *   saturate(a[i] + b[i])   10 03 1c 02 01 00 00 82  (vs 10 03 1c 02 00 c0)
+ * Their field vectors differ from the unsaturated ones in f14 alone. */
+bool agx3_alu_hmul_saturate(enum agx_isa_encoding enc, uint16_t dest,
+                            const uint16_t src[2],
+                            const enum agx3_alu_hint hints[2],
+                            bool dest_cache, uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+bool agx3_alu_hadd_saturate(enum agx_isa_encoding enc, uint16_t dest,
+                            const uint16_t src[2],
+                            const enum agx3_alu_hint hints[2],
+                            bool dest_cache, uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native scalar-half saturate: sat(src + -0.0h). */
 bool agx3_alu_hadd_saturate_negzero(
