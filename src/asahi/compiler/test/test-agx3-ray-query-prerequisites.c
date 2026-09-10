@@ -31,24 +31,64 @@ struct result_vector {
    enum agx_nir_ray_query_result_kind kind;
 };
 
+/* Absolute offsets into Apple's 168-byte inline ray-query object, not the
+ * intersector's IntersectRayResult.  See agx_rt_result.h for the two
+ * independent RIA3 sources these come from. */
 static const struct result_vector result_vectors[] = {
-   {nir_ray_query_value_intersection_type, AGX_RT_HIT_OFF_TYPE, 1, 32,
-    AGX_NIR_RAY_QUERY_RESULT_U32},
-   {nir_ray_query_value_intersection_t, AGX_RT_HIT_OFF_T, 1, 32,
+   {nir_ray_query_value_intersection_type, AGX_RT_QUERY_OFF_COMMITTED_TYPE, 1,
+    8, AGX_NIR_RAY_QUERY_RESULT_U32},
+   {nir_ray_query_value_intersection_t, AGX_RT_QUERY_OFF_COMMITTED_T, 1, 32,
     AGX_NIR_RAY_QUERY_RESULT_F32},
-   {nir_ray_query_value_intersection_instance_custom_index,
-    AGX_RT_HIT_OFF_USER_INSTANCE_ID, 1, 32, AGX_NIR_RAY_QUERY_RESULT_U32},
-   {nir_ray_query_value_intersection_instance_id, AGX_RT_HIT_OFF_INSTANCE_ID, 1,
-    32, AGX_NIR_RAY_QUERY_RESULT_U32},
-   {nir_ray_query_value_intersection_geometry_index, AGX_RT_HIT_OFF_GEOMETRY_ID,
-    1, 32, AGX_NIR_RAY_QUERY_RESULT_U32},
+   {nir_ray_query_value_intersection_geometry_index,
+    AGX_RT_QUERY_OFF_COMMITTED_GEOMETRY_ID, 1, 32,
+    AGX_NIR_RAY_QUERY_RESULT_U32},
    {nir_ray_query_value_intersection_primitive_index,
-    AGX_RT_HIT_OFF_PRIMITIVE_ID, 1, 32, AGX_NIR_RAY_QUERY_RESULT_U32},
-   {nir_ray_query_value_intersection_barycentrics, AGX_RT_HIT_OFF_BARYCENTRICS,
-    2, 32, AGX_NIR_RAY_QUERY_RESULT_F32},
-   {nir_ray_query_value_intersection_front_face, AGX_RT_HIT_OFF_FRONT_FACE, 1,
-    8, AGX_NIR_RAY_QUERY_RESULT_BOOL},
+    AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_ID, 1, 32,
+    AGX_NIR_RAY_QUERY_RESULT_U32},
+   {nir_ray_query_value_intersection_barycentrics,
+    AGX_RT_QUERY_OFF_COMMITTED_BARYCENTRICS, 2, 32,
+    AGX_NIR_RAY_QUERY_RESULT_F32},
+   {nir_ray_query_value_intersection_front_face,
+    AGX_RT_QUERY_OFF_COMMITTED_FRONT_FACE, 1, 8,
+    AGX_NIR_RAY_QUERY_RESULT_BOOL},
 };
+
+/* The two instance semantics are deliberately absent from the table above:
+ * their accessors resolve through the candidate record, so no exact committed
+ * offset is established.  The generic sweep below asserts they are refused. */
+
+/* Pin Apple's inline ray-query object layout.  These are absolute offsets into
+ * the 168-byte intersection_query, cross-checked between the RIA3 TBAA type
+ * node and the individual agx.get_committed_* accessors. */
+static void
+check_query_layout(void)
+{
+   CHECK(AGX_RT_QUERY_OFF_TMIN == 0);
+   CHECK(AGX_RT_QUERY_OFF_TMAX == 4);
+   CHECK(AGX_RT_QUERY_OFF_ORIGIN == 12);
+   CHECK(AGX_RT_QUERY_OFF_DIRECTION == 24);
+   CHECK(AGX_RT_QUERY_OFF_PARAMS == 48);
+   CHECK(AGX_RT_QUERY_OFF_STATE == 68);
+   CHECK(AGX_RT_QUERY_OFF_CANDIDATE == 88);
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED == 112);
+
+   /* Origin and direction are three consecutive f32 and must not overlap. */
+   CHECK(AGX_RT_QUERY_OFF_ORIGIN + 3 * 4 == AGX_RT_QUERY_OFF_DIRECTION);
+
+   /* The committed record and every field in it stay inside the object. */
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED_T == AGX_RT_QUERY_OFF_COMMITTED);
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_DATA + 8 <=
+         AGX_RT_RAY_QUERY_STATE_SIZE);
+
+   /* hit_kind and the front-face bool are adjacent bytes of one dword, which
+    * is why they cannot be read as separate 32-bit fields. */
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED_TYPE + 1 ==
+         AGX_RT_QUERY_OFF_COMMITTED_FRONT_FACE);
+
+   /* The ray-query ABI is NOT the intersector's IntersectRayResult. */
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED_T != AGX_RT_HIT_OFF_T);
+   CHECK(AGX_RT_QUERY_OFF_COMMITTED_PRIMITIVE_ID != AGX_RT_HIT_OFF_PRIMITIVE_ID);
+}
 
 struct intrinsic_fixture {
    nir_shader *shader;
@@ -190,6 +230,7 @@ test_fail_closed_boundaries(void)
 int
 main(void)
 {
+   check_query_layout();
    test_supported_contracts();
    test_fail_closed_boundaries();
 
