@@ -649,14 +649,48 @@ So the remaining work is **one regular encoder over that table**, not a fix per
 refusal shape. Given `compute.pipeline` alone reports 2,790 g17p refusals, a
 point fix per cell is the wrong shape of solution.
 
-Two cells still lack a witness, and MSL may not be able to supply them:
-Metal promotes half selects to 32-bit (`half r = (fabs(a)<b) ? c : d` with
-half `c`/`d` still emits f77 = f94 = 2), and it folds a register/immediate
-select mix away entirely rather than emitting `fcmpsel`. The 16-bit-destination
-cell arises in Mesa from *mediump* lowering, which MSL has no direct spelling
-for. Those two need either a different frontend or a decode of a captured
-shader -- **not an extrapolation from the table above**, which is exactly how a
-plausible-looking encoding for a different instruction gets written.
+MSL cannot supply the two survivor cells: Metal promotes half selects to
+32-bit (`half r = (fabs(a)<b) ? c : d` with half `c`/`d` still emits
+f77 = f94 = 2) and folds a register/immediate select mix away rather than
+emitting `fcmpsel` at all. The 16-bit-destination cell comes from *mediump*
+lowering, which MSL has no direct spelling for.
+
+**It does not need to.** `test/agx3_compose_corpus_vectors.c` already holds
+**84 real Apple `fsel` instructions for AGX3b**, with exact field vectors and
+bytes, and `test-agx3-compose-corpus.c` already requires the composer to
+reproduce every one byte-exactly. Both survivor cells are in it:
+
+```
+16-bit destination (f11 = 1), 8 vectors, e.g. ep33
+  42 d7 25 d9 23 81 03 00 20 80 00 00 03 00
+  f11=1 f77=1 f94=1  (16-bit dest and 16-bit selects)
+  f47=1 f64=1        (both compare sources absolute)
+  f76=1 f93=1 f68=1  (immediate selects)
+
+immediate compare source (f59 = 1), 32 vectors, e.g. ep27
+  e2 95 27 81 22 7a 02 02 20 7c
+  f59=1              (compare source 1 is an immediate)
+  f76=3 f70=122, f93=3 f87=124   (register selects)
+```
+
+Operand-kind coverage across those 84 vectors, by slot:
+
+| slot         | kind 1 (imm) | kind 2 | kind 3 (reg) |
+| ------------ | ------------ | ------ | ------------ |
+| compare 0    | 0            | 84     | 0            |
+| compare 1    | 32           | 52     | 0            |
+| select true  | 12           | 48     | 24           |
+| select false | 4            | 56     | 24           |
+
+so kind **2** — the majority class, and the one the (kind, width, value) table
+above did not name — needs identifying before building to this; only 1 and 3
+were witnessed from MSL. Everything needed is in-tree and machine-checked, so
+this is a decode exercise against existing data, not new hardware RE.
+
+The right shape of the work is therefore **one general encoder over the
+operand table, validated against all 84 corpus vectors**, rather than a fix per
+refusal cell. That matters because `compute.pipeline` alone reports 2,790
+refusals whose shapes are not yet inventoried.
 
 ### Not an encoding gap: `device_load` at `reg192`
 
