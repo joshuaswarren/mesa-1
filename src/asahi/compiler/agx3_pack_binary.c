@@ -7099,10 +7099,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   /* Bare narrow addend: sign-extend unless ABS marks it
                    * unsigned. Identical to the old `c.neg` for every shape
                    * that already encoded (ABS gave 0, NEG gave 1); only the
-                   * bare case, which used to be refused, is new. */
+                   * bare case, which used to be refused, is new.
+                   *
+                   * A 16-bit result widens nothing, so the bit has no meaning
+                   * there and the core encoder fails such a desc closed --
+                   * which refused the whole all-half MAD rather than just the
+                   * bit. Keep it to widening results. */
                   .src_c_sign_extend =
-                     addend_reg && (wide ? (c.size != AGX_SIZE_64 && !c.abs)
-                                         : (c.size == AGX_SIZE_16 && !c.abs)),
+                     addend_reg && !narrow &&
+                     (wide ? (c.size != AGX_SIZE_64 && !c.abs)
+                           : (c.size == AGX_SIZE_16 && !c.abs)),
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -8137,12 +8143,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * gradient counter is the same operation with `src16 << 4`.
              * A bare narrow integer is signed on AGX (ABS denotes unsigned),
              * and the G17P iadd corpus witnesses the sign-extended shift-0
-             * source width as well as the exact shift-4 form.  Admit only
-             * those zero-immediate widening shapes; keep every other bare
-             * half/shift combination closed. */
+             * source width as well as the exact shift-4 form.
+             *
+             * The addend's value is not part of that rule. Apple emits the
+             * same sign-extending form for a non-zero immediate:
+             *
+             *   o[i] = int(short a[i]) + 7
+             *      9f 01 54 00 02 0e 00 08 15 0c       f15 = 7, f43 = 1
+             *   o[i] = uint(ushort a[i]) + 7           f43 clear (ABS form)
+             *
+             * so gate on the source being a bare half, not on the immediate
+             * being zero. Every other bare half/shift combination stays
+             * closed. */
             const bool signed_half_widen =
                enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
-               constant.type == AGX_INDEX_IMMEDIATE && constant.value == 0 &&
+               constant.type == AGX_INDEX_IMMEDIATE &&
                reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
                (I->shift == 0 || I->shift == 4);
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
