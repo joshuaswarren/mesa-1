@@ -82,6 +82,12 @@ struct agx_ioto_g17p_imageblock {
  * generic anonymous-field packer, this retains the recovered dimension bits
  * which are still opaque to the field graph.  `output` is unchanged on every
  * failure. */
+/* The SPECLM two-bit sample selector. Only the one-sample value is witnessed;
+ * see the definition. agx_ioto_g17p_set_speclm_sample_code() forces the
+ * multisample value so that one boot can witness it. */
+unsigned agx_ioto_g17p_speclm_sample_bits(unsigned samples);
+void agx_ioto_g17p_set_speclm_sample_code(int code);
+
 bool agx_ioto_g17p_fragment_speclm_build(
    const struct agx_ioto_g17p_imageblock *imageblock, void *output,
    size_t capacity);
