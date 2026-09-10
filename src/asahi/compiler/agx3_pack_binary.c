@@ -1413,13 +1413,29 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (!implicit_lod && !explicit_lod))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->query_lod || I->sparse ||
+       /* The coordinate offset rides in the sample's own f43/f51/f141 and is
+        * orthogonal to the LOD shape, the array layer, the gather bit and
+        * the descriptor operand class -- see agx3_tex_core.c for the witness
+        * table. Two exclusions survive here for reasons that are not the
+        * ISA's: an array sample carrying an *immediate* level or bias
+        * already spends f43 on that immediate (Apple stages the offset
+        * instead and selects f141 = 2, a form with no slot plan here), and a
+        * shadow sample cannot carry both values because agx_emit_tex() packs
+        * the comparator and the offset into one src[5] vector, which the
+        * comparator staging below cannot take apart. GLSL never asks for the
+        * latter: nir_lower_tex folds a constant offset into a shadow
+        * coordinate before it reaches this packer. */
        (offset &&
-        (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || !immediate ||
-         array || three_d || cube || shadow || gather)) ||
-       (shadow && (three_d || !implicit_lod || gather ||
-                   I->mask != 1 || enc != AGX_ISA_ENCODING_AGX3B ||
+        (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube || shadow ||
+         (array && (biased_lod || (explicit_lod && immediate_lod))))) ||
+       /* A depth comparison is orthogonal to the LOD shape on a plain 2D
+        * sample. The array and cube comparisons use their own packed layer /
+        * CEM operands and keep the implicit LOD they were witnessed with. */
+       (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
+                   I->mask != (gather ? 15u : 1u) ||
+                   ((array || cube) && !implicit_lod) ||
                    (array && !immediate))) ||
-       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || array || three_d || cube ||
+       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
