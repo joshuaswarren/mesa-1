@@ -45,8 +45,8 @@ agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
                        uint8_t out[AGX3_COPY_MAX_LENGTH], uint8_t *len)
 {
    if (out == NULL || len == NULL || encoding != AGX_ISA_ENCODING_AGX3B ||
-       dest_half >= 128 || src_half >= 256 || wait_mask >= (1u << 6) ||
-       (src_cache && src_discard))
+       dest_half >= AGX3_COPY_REG16_DEST_HALVES || src_half >= 256 ||
+       wait_mask >= (1u << 6) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv baseline[] = {

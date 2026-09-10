@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/sparse_bitset.h"
@@ -10,6 +12,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/u_qsort.h"
+#include "agx3_copy_core.h"
 #include "agx_builder.h"
 #include "agx_compile.h"
 #include "agx_compiler.h"
@@ -552,6 +555,15 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
                         unsigned *span_out)
 {
    unsigned best = ~0u, best_moves = ~0u, best_span = 0;
+
+   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, and
+    * every relocation find_best_region_to_evict() can choose lies below
+    * rctx->bound[RA_GPR].  A half victim can therefore only become unencodable
+    * on a register file that actually reaches half 128.  Below that the
+    * restriction rejects regions to avoid a copy that cannot exist. */
+   bool avoid_half = avoid_half_copies &&
+                     rctx->bound[RA_GPR] > AGX3_COPY_REG16_DEST_HALVES;
+
    /* RA vectors are naturally aligned powers of two, at most 16 halves.
     * A result may overlap a larger live vector. Evict that whole vector,
     * rather than interpreting one of its interior halves as another SSA. */
@@ -576,7 +588,7 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
                 * constrained result shuffle cannot preserve a half victim in
                 * the high bank, so choose another initial victim region. */
                if (ssa_has_bank_constraint(rctx, ssa) ||
-                   (avoid_half_copies && rctx->sizes[ssa] == AGX_SIZE_16)) {
+                   (avoid_half && rctx->sizes[ssa] == AGX_SIZE_16)) {
                   valid = false;
                   break;
                }
@@ -601,7 +613,20 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
       if (best != ~0u)
          break;
    }
-   assert(best < limit && best_span);
+
+   /* Not a refusal path.  assign_regs_by_copying() feeds this result straight
+    * into BITSET_SET_COUNT() and reg_to_ssa[], so returning ~0u is an
+    * out-of-bounds write rather than a bad register choice: a build where
+    * NDEBUG removes assertions would corrupt memory silently.  Fail the same
+    * way in every build instead of only in debug. */
+   if (best >= limit || !best_span) {
+      fprintf(stderr,
+              "agx: no constrained region for count=%u minimum=%u limit=%u "
+              "bound=%u\n",
+              count, minimum, limit, rctx->bound[RA_GPR]);
+      abort();
+   }
+
    *span_out = best_span;
    return best;
 }

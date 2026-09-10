@@ -38,6 +38,11 @@ extern "C" {
 /* Apple's ordinary `copy` is four bytes; its extended ep1 record is ten. */
 #define AGX3_COPY_MAX_LENGTH 10u
 
+/* The 16-bit COPY destination field is seven bits wide, so a half copy can
+ * only name a destination below this half index.  Register allocation needs
+ * the same number to know when a half victim could become unencodable. */
+#define AGX3_COPY_REG16_DEST_HALVES 128u
+
 /*
  * Encode `copy dest32, uniform32`.  Both indices are 16-bit half-register
  * units, the unit agx_index.value already carries.  Returns false -- writing

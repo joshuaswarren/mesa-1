@@ -107,6 +107,23 @@ main(void)
       uint8_t l = 0;
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B, 128, 5, true, false, true, 0, o, &l));
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B, 0, 256, true, false, true, 0, o, &l));
+
+      /* Register allocation reads AGX3_COPY_REG16_DEST_HALVES to decide when a
+       * half victim could become unencodable, and skips the restriction
+       * entirely on a register file that never reaches it
+       * (agx_register_allocate.c, find_constrained_region).  Pin the boundary
+       * from both sides so the constant cannot drift away from the field:
+       * one below is the largest encodable destination, the constant itself is
+       * the first refused one. */
+      CHECK(agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B,
+                                   AGX3_COPY_REG16_DEST_HALVES - 1, 5, true,
+                                   false, true, 0, o, &l));
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B,
+                                    AGX3_COPY_REG16_DEST_HALVES, 5, true,
+                                    false, true, 0, o, &l));
+      CHECK(!agx3_copy_encode_uniform_to_reg16(AGX_ISA_ENCODING_AGX3B,
+                                               AGX3_COPY_REG16_DEST_HALVES, 5,
+                                               true, o, &l));
       CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX2, 0, 5, true, false, true, 0, o, &l));
 
       /* A slot-1 wait is f30, reproducing an Apple corpus copy exactly. */
