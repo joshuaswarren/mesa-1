@@ -5588,6 +5588,13 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    agx_lower_pseudo(ctx);
 
+   /* AGX3's thread-private storage moves one 32-bit component per
+    * instruction, so a vector spill or scratch access has to become a run of
+    * scalar ones. Do it before the last-use pass, so each component's hints
+    * are computed against the instructions that actually survive. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      agx3_split_vector_stack_access(ctx);
+
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);
 
