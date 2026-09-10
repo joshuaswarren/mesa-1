@@ -43,9 +43,10 @@
  *    f24=4 with no value ladder).  Missing witness: operand-varying
  *    differential pairs.  Only the canonical fixed bytes are encodable.
  *  - intersect_ray f77 is no longer anonymous: a concurrency differential
- *    (one, two and three simultaneously live named ray queries built for
- *    applegpu_g17p) gives exactly one distinct f77 per query, so it
- *    discriminates the ray query.  agx3_rt_intersect_ray_query encodes it.
+ *    over two to five named ray queries built for applegpu_g17p moves it with
+ *    the ray query and with nothing else, so it is a per-query allocated
+ *    resource id, reused once a traversal finishes rather than a dense index.
+ *    agx3_rt_intersect_ray_query encodes it.
  *  - f5's "ray state" reading is REFUTED for intersect_ray.  It does not
  *    discriminate queries: it stays within {0, 4} with one, two or three
  *    queries live, and with four concurrent queries every intersect_ray
@@ -105,15 +106,25 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * Encode one AGX3b inline-ray-query intersect_ray from the three fields that
  * actually vary across Apple's ray-query lowering.
  *
- * `per_query` is Apple's f77.  It is isolated, not guessed: compiling one, two
- * and three simultaneously live named ray queries for applegpu_g17p yields one
- * distinct f77 value per query (two queries -> {88, 14}; three -> {106, 32,
- * 2}), while the SCS ray staging offsets stay 0 and 16 for every query and a
- * six-point register-pressure ladder leaves the whole instruction unchanged.
- * So f77 discriminates the ray query.  Its encodable range is exactly 0..191,
- * the same bound agx3_scs_core applies to an AGX3b scalar register index,
- * which is consistent with a half-register index but is not proof of one, so
- * no register name is given here.
+ * `per_query` is Apple's f77.  It tracks the ray query rather than anything
+ * else: two and three separately named queries give two and three distinct
+ * values, while the SCS ray staging offsets stay 0 and 16 for every query and
+ * a six-point register-pressure ladder leaves the whole encoding
+ * byte-identical, so it is neither the ray's address nor an allocator-assigned
+ * register.
+ *
+ * It is NOT a dense per-query index, and an earlier revision of this comment
+ * overstated it as one.  Extending the sweep to four and five named queries
+ * gives only three and four distinct values: these kernels traverse their
+ * queries one after another, so the compiler reuses a value once a traversal
+ * has finished.  Read it as a per-query allocated resource id whose lifetime
+ * is the traversal, not as a query number.  Written as an array traversed in a
+ * loop the queries share one code path and this whole field is absent, the
+ * encoding taking a different form.
+ *
+ * Its encodable range is exactly 0..191, the same bound agx3_scs_core applies
+ * to an AGX3b scalar register index, which is consistent with a half-register
+ * index but is not proof of one, so no register name is given here.
  *
  * `site` is Apple's f5, a full 13-bit field (0..8191 all encode).  It is NOT
  * the per-query discriminator: it stays within {0, 4} whether one, two or
