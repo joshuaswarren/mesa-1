@@ -55,13 +55,16 @@
  *    two intersect_ray sites a single traversal contains.  The name
  *    `state_register` on the older byte-level entry points predates this
  *    measurement.
- *  - intersect_ray f63/f78/f92 and the continue_ray context fields are still
- *    held at their corpus values.  Missing witness: semantic differentials.
- *    f92 is known only to vary between kernels (122 and 124 in the two
- *    ray-query corpora), and register pressure moves none of them -- a
- *    six-point ladder holding extra values live across the instruction
- *    leaves it byte-identical, so they are not allocator-assigned
- *    registers.
+ *  - intersect_ray f63 and f92, and the continue_ray context fields, are
+ *    still held at their corpus values.  Missing witness: semantic
+ *    differentials.  Ruled out for f92: it does not track the result field
+ *    (six kernels each reading one committed field emit a byte-identical
+ *    instruction despite differing in total code length), and it does not
+ *    move with register pressure.  Recorded as refuted because it looks
+ *    convincing: f92 = f78 - 4 holds across eight consecutive kernels and is
+ *    FALSE -- the geometry-cull and opacity-cull variants give -2.  f63 and
+ *    f92 shift when the ray-setup allocation shifts; nothing further is
+ *    established.
  *  - Scoreboard/wait variation on any RT form: every witnessed RT
  *    instruction carries the same wait/hint bits, so no wait mask is
  *    exposed.  Missing witness: an RT instruction with a different wait set.
@@ -140,9 +143,15 @@ bool agx3_rt_intersect_ray(enum agx_isa_encoding enc, uint16_t state_register,
  * with f84=3 (and f88 clear) it takes f78 and refuses f77; it never accepts
  * both.  Both deposit identically -- byte 6 high nibble and byte 7 -- and they
  * differ only in range: f77 stops at 191, while every f78 value tested up to
- * 256 encodes.  Apple emits the f84=3/f78 form in single-query kernels and the
- * f84=2/f77 form once two or more queries are live, which is why the
- * per-query differential above is expressed in f77.
+ * 256 encodes.
+ *
+ * Which form Apple emits is NOT simply a function of how many queries are
+ * live.  A single-query kernel against a primitive acceleration structure
+ * uses the f84=3/f78 form and two or more queries use the f84=2/f77 form,
+ * but a SINGLE-query kernel against an instance acceleration structure also
+ * uses f77.  Instancing selects it too, so what f84 keys on is unmapped.
+ * The per-query differential above is expressed in f77 because that is the
+ * form those kernels emit.
  *
  * This entry point emits the f84=2/f77 variant, the one witnessed whenever
  * more than one query is live.  The single-query f78 variant is reachable
