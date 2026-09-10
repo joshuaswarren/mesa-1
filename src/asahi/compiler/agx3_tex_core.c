@@ -314,13 +314,34 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
-   /* Dimensioned comparison witnesses use fixed texture/sampler state and
-    * the driver's descriptor profile. Keep indexed/profile variants closed
-    * until they have their own native instructions. */
+   /*
+    * A dimensioned comparison used to require fixed texture and sampler
+    * state. The descriptor operand class is orthogonal to both the depth
+    * comparison and the packed array layer, and Apple's own bytes say so:
+    * an `array<depth2d_array<float>, 8>` sampled through a runtime index,
+    * against the same shader with a fixed texture and sampler --
+    *
+    *   fixed     1d800ca090002004010000001200          ep3, 14 B
+    *   indexed   1dc00ca09c002004930380011200802000000000   ep4, 20 B
+    *
+    * differ in exactly the four descriptor fields and the endpoint they
+    * imply: the texture gains f97 = 24 with f103/f104 going 1 -> 3/2, the
+    * sampler gains f126 = 28 with f132/f133 going 1 -> 3/2. **f143 (the
+    * comparison) and f77 = 2 (the packed layer) are identical in both**, so
+    * neither depends on where the descriptor came from.
+    *
+    * That distinction is what a real application runs into. A shader with a
+    * single texture instruction gets immediate descriptors from
+    * agx_nir_lower_g17p_combined_sampler(); one with several -- SuperTuxKart's
+    * sunlightshadow.frag samples its cascade four times -- falls back to
+    * agx_nir_lower_g17p_indexed_samplers() and arrives here with registers,
+    * where the whole shader used to fail closed.
+    *
+    * The non-driver sample ABIs stay refused: those change the operand
+    * profile itself rather than the descriptor's class.
+    */
    if (d->shadow && (d->array || d->cube) &&
-       (tk != AGX3_TEX_OPERAND_IMMEDIATE ||
-        sk != AGX3_TEX_OPERAND_IMMEDIATE ||
-        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
+       d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER)
       return false;
 
    /* Cube operand pairs are witnessed as immediate/immediate,

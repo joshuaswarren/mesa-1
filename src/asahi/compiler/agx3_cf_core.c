@@ -219,6 +219,68 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
    return agx3_bind_compose(enc, "fcmp", 0, base, 5, ov, 9, out, len);
 }
 
+/*
+ * The same register comparison with an ABSOLUTE VALUE on either source.
+ *
+ * As on `fsel`, ABS is not a bit on the six-byte form: Apple moves to a
+ * longer encoding point. Six bytes become fourteen, ep0 becomes ep2, and f14
+ * and f31 are the two sources' bits. Grounded with metal-nt -arch
+ * applegpu_g17p, one kernel per field. The branch body is a device atomic so
+ * that Metal cannot if-convert the compare into an `fsel` and answer a
+ * different question:
+ *
+ *   if (a < b)                  0a013a0303c0                    ep0,  6 B
+ *   if (fabs(a) < b)            0a013b0303000300000000800100    ep2, 14 B  f14
+ *   if (a < fabs(b))            0a013b0303000300000000800200    ep2, 14 B  f31
+ *   if (fabs(a) < fabs(b))      0a013b0303000300000000800300    ep2, 14 B  both
+ *   if (fabs(a) > fabs(b))      0a013b0303000200000000800300    f46 = 2
+ *   if (fabs(a) == fabs(b))     0a013b0307000000000000800300    f46 absent
+ *
+ * Every other field keeps its number, so the long form differs from the short
+ * one by the endpoint and the two bits alone. Qt Quick's conicalgradient.frag
+ * branches on `abs(coord.y) == abs(coord.x)` and failed closed on this.
+ *
+ * f38..f43 are the six producer wait slots on this form; Apple's kernels
+ * above wait on slot 6 because their operands come from a load.
+ */
+bool
+agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                     bool or_nan, unsigned slot, const uint16_t src[2],
+                     const bool abs[2],
+                     const struct agx3_cf_source_hints hints[2],
+                     uint16_t wait_mask,
+                     uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !abs || !hints || !out ||
+       !len || !slot_ok(slot) || or_nan || !fcond_ok(cond) ||
+       src[0] >= 128 || src[1] >= 128 || (src[0] & 1) || (src[1] & 1) ||
+       (hints[0].cache && hints[0].discard) ||
+       (hints[1].cache && hints[1].discard) ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Without an absolute source this is the short endpoint, and emitting the
+    * long form for it would change bytes that already work. */
+   if (!abs[0] && !abs[1])
+      return false;
+
+   const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2), KV(26, 2),
+                                        KV(27, 2)};
+   struct agx3_field_kv ov[16] = {
+      KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
+      KV(14, abs[0]),
+      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(31, abs[1]),
+      KV(35, slot), KV(46, cond),
+   };
+   unsigned n = 10;
+   for (unsigned wait_slot = 0; wait_slot < 6; ++wait_slot)
+      ov[n++] = (struct agx3_field_kv){38 + wait_slot,
+                                       !!(wait_mask & (1u << wait_slot))};
+
+   return agx3_bind_compose(enc, "fcmp", 2, base, 4, ov, n, out, len);
+}
+
 bool
 agx3_cf_cndst(enum agx_isa_encoding enc, unsigned slot, bool invert,
               unsigned push_count, uint8_t out[AGX3_CF_MAX_LENGTH],

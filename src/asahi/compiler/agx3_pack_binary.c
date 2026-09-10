@@ -1471,8 +1471,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         * CEM operands and keep the implicit LOD they were witnessed with. */
        (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
                    I->mask != (gather ? 15u : 1u) ||
-                   ((array || cube) && !implicit_lod) ||
-                   (array && !immediate))) ||
+                   ((array || cube) && !implicit_lod))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
@@ -3461,6 +3460,37 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       if (!agx3_cf_map_fcond(I->fcond, &cond, &or_nan, invert) ||
           !agx3_cf_fcmp_reg_neg(enc, cond, or_nan, flag_slot, src, neg, hints,
                                 bytes, &len))
+         return false;
+      return agx3_append(emission, bytes, len);
+   }
+
+   /* An ABSOLUTE comparison source. Like `fsel`, the control-flow compare
+    * puts ABS on a longer encoding point rather than on a bit of the short
+    * one, so it needs its own encoder; letting an absolute source fall
+    * through to the plain one below would drop the modifier and encode a
+    * different branch. Qt Quick's conicalgradient.frag is the shape.
+    *
+    * ABS and NEG are not witnessed together -- NEG lives only on the short
+    * form -- so that combination still fails closed. */
+   if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+       agx3_src_is_register(I->src[0]) && agx3_src_is_register(I->src[1]) &&
+       I->src[0].size == AGX_SIZE_32 && I->src[1].size == AGX_SIZE_32 &&
+       agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
+       !I->src[0].memory && !I->src[1].memory &&
+       (I->src[0].abs || I->src[1].abs) &&
+       !I->src[0].neg && !I->src[1].neg &&
+       !(I->src[0].cache && I->src[0].discard) && !I->src[0].kill &&
+       !(I->src[1].cache && I->src[1].discard) && !I->src[1].kill) {
+      enum agx3_cf_fcond cond;
+      bool or_nan;
+      const uint16_t src[] = {I->src[0].value, I->src[1].value};
+      const bool abs[] = {I->src[0].abs, I->src[1].abs};
+      const struct agx3_cf_source_hints hints[] = {
+         {I->src[0].cache, I->src[0].discard},
+         {I->src[1].cache, I->src[1].discard}};
+      if (!agx3_cf_map_fcond(I->fcond, &cond, &or_nan, invert) ||
+          !agx3_cf_fcmp_reg_abs(enc, cond, or_nan, flag_slot, src, abs, hints,
+                                0, bytes, &len))
          return false;
       return agx3_append(emission, bytes, len);
    }
@@ -7800,33 +7830,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
-            /* Apple spells `-a < b` as the equivalent `b > -a`, placing the
-             * only witnessed negate bit on the second full-width comparator.
-             * Do not generalize that modifier to another slot or condition. */
+            /* A negated comparison source. f65 names the SECOND comparator
+             * and only that one; `-a > b` is Apple's own `b < -a`, so the
+             * encoder swaps the operands and reverses the relation instead of
+             * refusing. Every relation, both result widths and any pair of
+             * selected immediates are witnessed -- see the byte ladder above
+             * agx3_alu_fcmp_select_imm_width_internal(). `dot(view - world,
+             * normal) > 0.0` is the shape that reaches this. */
             /* An absolute comparison source moves the instruction to the
              * longer ep28..35 endpoint. It is a different form, not a bit on
              * the short one, so it gets its own encoder and never mixes with
              * the negate path (which stays on the short endpoint). */
             const bool any_abs = I->src[0].abs || I->src[1].abs;
-            const bool neg_second = !any_abs && I->src[0].neg &&
-                                    !I->src[1].neg &&
-                                    I->fcond == AGX_FCOND_LT &&
-                                    !I->invert_cond &&
-                                    I->dest[0].size == AGX_SIZE_16 &&
-                                    I->src[0].size == AGX_SIZE_32 &&
-                                    I->src[1].size == AGX_SIZE_32 &&
-                                    I->src[2].value == 255 &&
-                                    I->src[3].value == 0;
-            const unsigned order[2] = {neg_second ? 1u : 0u,
-                                       neg_second ? 0u : 1u};
-            const uint16_t src[] = {I->src[order[0]].value,
-                                    I->src[order[1]].value};
+            const bool any_neg = I->src[0].neg || I->src[1].neg;
+            const bool negated = !any_abs && any_neg;
+            const uint16_t src[] = {I->src[0].value, I->src[1].value};
             const enum agx3_alu_hint hints[] = {
-               agx3_post_ra_hint(I->src[order[0]]),
-               agx3_post_ra_hint(I->src[order[1]])};
-            const bool src_16[] = {
-               I->src[order[0]].size == AGX_SIZE_16,
-               I->src[order[1]].size == AGX_SIZE_16};
+               agx3_post_ra_hint(I->src[0]), agx3_post_ra_hint(I->src[1])};
+            const bool src_16[] = {I->src[0].size == AGX_SIZE_16,
+                                   I->src[1].size == AGX_SIZE_16};
+            const bool src_neg[] = {I->src[0].neg, I->src[1].neg};
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             unsigned condition = I->fcond;
             bool swap = I->invert_cond;
@@ -7837,20 +7860,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                condition = AGX_FCOND_LE;
                swap = !swap;
             }
-            if (neg_second)
-               condition = agx3_fcond_reverse(condition);
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
                if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
-            const bool src_abs[] = {I->src[order[0]].abs,
-                                    I->src[order[1]].abs};
+            const bool src_abs[] = {I->src[0].abs, I->src[1].abs};
             if (I->saturate || I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
-                ((!neg_second) && (I->src[0].neg || I->src[1].neg)) ||
+                (any_abs && any_neg) ||
                 I->src[2].abs || I->src[2].neg ||
                 I->src[3].abs || I->src[3].neg ||
                 !(any_abs
@@ -7860,9 +7880,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                           I->src[swap ? 2 : 3].value,
                           I->dest[0].size == AGX_SIZE_16,
                           I->dest[0].cache, fsel_wait, src_abs, bytes, &len)
-                  : neg_second
-                     ? agx3_alu_fcmp_select_imm_width_neg_second(
-                          enc, I->dest[0].value, src, src_16, hints,
+                  : negated
+                     ? agx3_alu_fcmp_select_imm_width_neg(
+                          enc, I->dest[0].value, src, src_16, hints, src_neg,
                           condition, I->src[swap ? 3 : 2].value,
                           I->src[swap ? 2 : 3].value,
                           I->dest[0].size == AGX_SIZE_16,
@@ -9041,15 +9061,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /* Float to a 16-bit integer. The source width is its own field, so
+          * a HALF source is the same instruction: `int(clamp(x, 1.0, 32.0))`
+          * written in half precision -- Hyprland's motion_blur.glsl sample
+          * count, and the loop bound it then becomes -- reaches this with a
+          * 16-bit source and used to fail the whole shader closed. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->round == AGX_ROUND_RTZ &&
              I->src[0].type == AGX_INDEX_IMMEDIATE &&
-             I->src[0].value == AGX_CONVERT_F_TO_S16 &&
+             (I->src[0].value == AGX_CONVERT_F_TO_S16 ||
+              I->src[0].value == AGX_CONVERT_F_TO_U16) &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 &&
              agx_channels(I->dest[0]) == 1 &&
-             agx3_vary_reg32(I->src[1]) && agx_channels(I->src[1]) == 1 &&
+             (agx3_vary_reg32(I->src[1]) || agx3_half_reg(I->src[1])) &&
+             agx_channels(I->src[1]) == 1 &&
              !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
              !(I->src[1].cache && I->src[1].discard)) {
             uint16_t convert_wait = wait;
@@ -9059,8 +9086,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                convert_wait = 0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
-            if (!agx3_alu_f32_to_s16(
+            if (!agx3_alu_float_to_int16(
                    enc, I->dest[0].value, I->src[1].value,
+                   I->src[1].size == AGX_SIZE_16,
+                   I->src[0].value == AGX_CONVERT_F_TO_S16,
                    agx3_post_ra_hint(I->src[1]), I->dest[0].cache,
                    convert_wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))

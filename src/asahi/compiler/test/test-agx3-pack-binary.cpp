@@ -1365,9 +1365,33 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   /* No Apple witness permits the negate modifier on the other operand. */
+   /* The negate on the OTHER operand is f65 with nothing rearranged: it is
+    * the slot the field names, so the relation and the operand order both
+    * stand. `a < -b` is Apple's 02011d03228103c82080, one bit away from its
+    * 02011d03228102c02080 twin for `a > b`. */
    b = builder(enc);
    a = agx_register(8, AGX_SIZE_32);
+   c = agx_register(16, AGX_SIZE_32);
+   c.neg = true;
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+
+   const uint16_t second_src[] = {8, 16};
+   ASSERT_TRUE(agx3_alu_fcmp_select_imm_width_neg_second(
+      enc, 1, second_src, glow_width, glow_hints, AGX_FCOND_LT, 255, 0,
+      true, false, 0, bytes, &len));
+   want.clear();
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* Mixing the negate with an absolute source still has no witness: ABS is
+    * a longer endpoint that carries no f65, so it fails closed rather than
+    * dropping one of the two modifiers. */
+   b = builder(enc);
+   a = agx_register(8, AGX_SIZE_32);
+   a.abs = true;
    c = agx_register(16, AGX_SIZE_32);
    c.neg = true;
    agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
