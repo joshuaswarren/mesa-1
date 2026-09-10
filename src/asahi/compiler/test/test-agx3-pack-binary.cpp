@@ -2262,8 +2262,12 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
-      /* Absolute and scalar-half sources now have exact native witnesses. */
-      if (variant == 5 || variant == 8)
+      /* Absolute and scalar-half sources now have exact native witnesses.
+       * So does variant 1, a 32-bit source narrowed into a half destination:
+       * f10 selects the destination width independently of f26, and Apple
+       * emits the mixed-width multiply directly. See
+       * FmulMinifloatNarrowsIntoHalfDestination below. */
+      if (variant == 1 || variant == 5 || variant == 8)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -2285,6 +2289,117 @@ TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
       mul->saturate = variant == 9;
       EXPECT_TRUE(pack(b, false).empty());
    }
+}
+
+/*
+ * `packHalf2x16(vec2(x * k, ...))`: agx_optimizer_fmov_rev() folds the f2f16
+ * into the multiply, so the packer sees a 32-bit source, a minifloat operand
+ * and a HALF destination. That form is Apple's own -- f10 is the destination
+ * width -- and used to fail the whole shader closed.
+ */
+TEST_F(AGX3PackBinary, FmulMinifloatNarrowsIntoHalfDestination)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_16), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple's witness is `11 a1 15 03 80 c0`; a bare test has no producer to
+    * wait on, so only the scoreboard field (f85) differs. The literal Apple
+    * bytes are asserted at encoder level in test-agx3-alu-core.c. */
+   const uint8_t native[] = {0x11, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* The 32-bit destination keeps the bytes it always had. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_32), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto wide = pack(b);
+   const uint8_t native32[] = {0x19, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(wide.size(), sizeof(native32) + 4);
+   EXPECT_EQ(memcmp(wide.data(), native32, sizeof(native32)), 0);
+}
+
+/*
+ * `sqrt(abs(x))` and `inversesqrt(abs(x))`. A bare .abs on either member of
+ * this family refused the shader; f30 carries it, witnessed one field at a
+ * time against Apple.
+ */
+TEST_F(AGX3PackBinary, RsqrtFamilyCarriesAbsoluteSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_32);
+   src.abs = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq = pack(b);
+   /* Apple: `af 01 56 00 02 00 b0 c0 00 00`; byte 2 drops to 0x54 here
+    * because there is no scoreboard slot to wait on. */
+   const uint8_t rsq_abs[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0xc0, 0x00, 0x00};
+   ASSERT_EQ(rsq.size(), sizeof(rsq_abs) + 4);
+   EXPECT_EQ(memcmp(rsq.data(), rsq_abs, sizeof(rsq_abs)), 0);
+
+   /* A negated source is separately witnessed on the same form. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_32);
+   src.neg = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq_n = pack(b);
+   const uint8_t rsq_neg[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0x40, 0x01, 0x00};
+   ASSERT_EQ(rsq_n.size(), sizeof(rsq_neg) + 4);
+   EXPECT_EQ(memcmp(rsq_n.data(), rsq_neg, sizeof(rsq_neg)), 0);
+
+   /* The half form has no modifier witness and stays closed. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_16);
+   src.abs = true;
+   agx_rsqrt_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
+/*
+ * `int16_t(x) + k`. A bare 16-bit integer source is sign-extended -- that is
+ * what agx_optimizer_signext() means by dropping the SIGNEXT and asserting
+ * the survivor carries no ABS -- and the register+immediate form refused it
+ * while the register+register form beside it already encoded.
+ */
+TEST_F(AGX3PackBinary, IaddImmediateSignExtendsBareHalfSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_16);
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple: `o[i] = int(short a[i]) + 7`, f15 = 7 and f43 = 1. */
+   const uint8_t native[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                             0x0e, 0x00, 0x08, 0x15, 0x0c};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* An ABS source is the zero-extending form, and keeps its own bytes:
+    * f43 clear, exactly as Apple's `uint(ushort a[i]) + 7`. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_16);
+   src.abs = true;
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto zext = pack(b);
+   const uint8_t native_u[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                               0x0e, 0x00, 0x08, 0x15, 0x04};
+   ASSERT_EQ(zext.size(), sizeof(native_u) + 4);
+   EXPECT_EQ(memcmp(zext.data(), native_u, sizeof(native_u)), 0);
 }
 
 TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
