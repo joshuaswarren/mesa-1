@@ -1805,6 +1805,21 @@ agx3_tile_coverage(agx_index sample, enum agx3_tile_coverage *coverage)
        sample.discard || sample.kill)
       return false;
 
+   /* WARNING: 0xff is agx_nir_lower_tilebuffer's ALL_SAMPLES default AND the
+    * selector for the single-sample whole-pixel form, so the two are the same
+    * immediate. A multisample store that never reached
+    * agx_nir_lower_g17p_tile_samples, or reached it with a stale sample count,
+    * therefore encodes as a 1x store: it writes sample zero and leaves the
+    * rest of the tile untouched, which resolves to colour/N.
+    *
+    * That is measured, not theoretical. Under AGX_TRACE_TILE_COVERAGE a 2x
+    * render compiles tile stores with BOTH 0xff and the correct 0x20
+    * broadcast tag, from the FS epilog and from agx_background alike. Giving
+    * the 1x form its own tag so an untagged store is unencodable is the
+    * obvious fix and was tried; it did not produce a loud refusal, so the
+    * untagged path is tolerated somewhere upstream and needs finding before
+    * the encoder is changed.
+    */
    if (sample.value == AGX3_TILE_ALL_SAMPLES) {
       *coverage = AGX3_TILE_COV_1X;
       return true;
@@ -1836,6 +1851,8 @@ agx3_tile_coverage(agx_index sample, enum agx3_tile_coverage *coverage)
 /* Bind the directly witnessed single-sample tile subset.  Explicit pixel
  * coordinates and the per-sample selector remain closed because f44's exact
  * register/selector meaning is not yet grounded. */
+static const char *agx3_trace_shader_name;
+
 static bool
 agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint8_t slot, uint16_t wait_mask,
@@ -1853,6 +1870,16 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const agx_index coords = load ? I->src[1] : I->src[2];
    const int width = agx3_tile_format_width(I->format);
    enum agx3_tile_coverage coverage;
+   /* The instrument that found the 0xff collision above. Prints every tile
+    * access the encoder is asked to emit, with the shader it came from, so a
+    * stale sample tag is visible offline instead of only as wrong pixels. */
+   if (getenv("AGX_TRACE_TILE_COVERAGE")) {
+      fprintf(stderr, "TILE %s sample=%s%u fmt=%u mask=%u shader=%s\n",
+              load ? "load" : "store",
+              sample.type == AGX_INDEX_IMMEDIATE ? "imm " : "reg ",
+              sample.value, I->format, I->mask,
+              agx3_trace_shader_name ? agx3_trace_shader_name : "?");
+   }
    if ((I->format == AGX_FORMAT_RGB10A2 &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
        width < 0 || !agx3_tile_value_ok(value, I->mask, width) ||
@@ -4953,6 +4980,8 @@ agx3_post_ra_hint(agx_index index)
 bool
 agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 {
+   agx3_trace_shader_name =
+      (ctx && ctx->nir && ctx->nir->info.name) ? ctx->nir->info.name : NULL;
    const enum agx_isa_encoding enc = ctx->key->dev.encoding;
    const unsigned nslots = (enc == AGX_ISA_ENCODING_AGX3C) ? 8 : 6;
    const unsigned initial_size = emission->size;
