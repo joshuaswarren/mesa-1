@@ -34,6 +34,35 @@ or `"label"` siblings are all parse errors.  Render pipelines use the
 `{"vertex_function": "<name>", "fragment_function": "<name>"}` pair of bare
 strings.
 
+#### Verified working invocation, MetalToolchain v27.1.5194.15 (2026-09-10)
+
+The entry above is only the innermost object.  It must be wrapped in a
+`pipelines` table, and three other things bite:
+
+    printf '{"pipelines":{"compute_pipelines":[{"compute_function":"K"}]}}' \
+        > p.mtlp-json                          # the .mtlp-json SUFFIX is load-bearing:
+                                               # any other name -> "malformed flatbuffer magic"
+    xcrun metal -c w.metal -o w.air
+    xcrun metallib w.air -o w.metallib
+    "$MT/metal-nt" -arch applegpu_g17p \
+        -platform_version macos 27.0 27.0 \     # without this the target is AIR 2.5/2.8
+        -N p.mtlp-json w.metallib -o out.bin    # and metallib is AIR 2.9 -> refused
+
+* A bare top-level `{"compute_function": ...}` or `{"compute_pipelines": ...}`
+  is `unknown field`; `{"pipelines":[...]}` is `wrong number of unnamed fields
+  in table vector`.  `pipelines` is a TABLE, not a vector -- use `{`, not `[`.
+  The four keys inside it are `compute_pipelines`, `render_pipelines`,
+  `tile_render_pipelines`, `mesh_render_pipelines` (strings recoverable from
+  `usr/metal/<n>/bin/air-pack`).
+* `-std=metalN.M` does NOT lower the emitted AIR version; only
+  `-platform_version` moves the target.  macos 26.0 gives AIR 2.8, which is
+  still too old; 27.0 works.
+* The output is a `Mach-O 64-bit GPU executable applegpu` whose code lives in
+  `__TEXT,__compute` for a compute pipeline -- NOT `__text`.  Extract with
+  `otool -s __TEXT __compute out.bin`.
+* `xcrun metal -arch applegpu_g17p -c` looks like a shortcut but dead-ends in
+  `Plugin interface not implemented: AIRNTEmitObject`.
+
 ### A render pipeline's fragment shader is dead code unless it has a side effect
 
 `metal-nt` compiles a render pipeline with no attachment information, so a
