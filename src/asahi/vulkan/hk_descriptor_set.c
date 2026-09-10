@@ -591,7 +591,21 @@ hk_CreateDescriptorPool(VkDevice _device,
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
    if (bo_size) {
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, 0, "Descriptor pool");
+      /* Descriptor-set memory is never fully written: a binding the
+       * application declares and never updates -- PARTIALLY_BOUND, an
+       * unwritten array element, the deliberately over-allocated
+       * variable-count tail -- is still dereferenced by the shader.  On every
+       * other chip an unmapped or nonsense address read out of those bytes is
+       * absorbed by hardware soft fault; G17P halts with a GMMU reason-3
+       * fault and takes the device with it, so the bytes have to be
+       * predictable.  A recycled cache BO carries whatever the previous
+       * owner (a command slab, an upload pool, a geometry heap) left behind,
+       * which is exactly the shape of a wild descriptor address.
+       */
+      const enum agx_bo_flags pool_flags =
+         dev->dev.chip == AGX_CHIP_G17P ? AGX_BO_ZERO_ON_REUSE : 0;
+      pool->bo =
+         agx_bo_create(&dev->dev, bo_size, 0, pool_flags, "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -681,6 +695,17 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
          vk_object_free(&dev->vk, NULL, set);
          return result;
       }
+
+      /* Zeroing the pool BO on reuse is not enough on its own: a pool
+       * outlives its sets, and vkFreeDescriptorSets/vkResetDescriptorPool
+       * return the range to the VMA heap with the destroyed set's bytes
+       * intact.  The next set allocated over that range would otherwise
+       * inherit a live-looking texture, PBE or buffer address belonging to an
+       * object that has since been destroyed.  All-zero reads as the reserved
+       * null texture / heap index 0, which is bound and safe.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P)
+         memset(set->mapped_ptr, 0, set->size);
    }
 
    vk_descriptor_set_layout_ref(&layout->vk);

@@ -66,6 +66,45 @@ load_le64(const uint8_t *p)
    return (uint64_t)load_le32(p) | ((uint64_t)load_le32(p + 4) << 32);
 }
 
+/*
+ * The 44-bit surface address of an AGX3 texture heap element.
+ *
+ * cmdbuf.xml "Texture Gen9"/"Texture Gen10": <field name="Address" size="44"
+ * start="64" type="address" modifier="shr(4)"/>.  So bits 64..107 of the
+ * 32-byte descriptor, times sixteen.
+ *
+ * This pointer never appears in the command stream.  The stream only names
+ * the descriptor; the texture unit dereferences the address inside it at draw
+ * time.  That makes it the one GPU-dereferenced pointer a command-stream walk
+ * has historically been unable to see -- and it is exactly the pointer a
+ * never-written or recycled descriptor set aims at unmapped memory.
+ */
+static uint64_t
+agx3_texture_descriptor_surface(const uint8_t bytes[32])
+{
+   const uint64_t low = load_le32(bytes + 8);
+   const uint64_t high = load_le32(bytes + 12) & UINT32_C(0xfff);
+
+   return (low | (high << 32)) << 4;
+}
+
+/*
+ * A descriptor that is entirely zero is the reserved null texture, not a bug:
+ * hk_device.c pins heap entry zero to it and every null descriptor path in
+ * hk_descriptor_set.c writes it deliberately.  Its surface address is zero,
+ * which is never dereferenced.
+ */
+static bool
+agx3_descriptor_is_blank(const uint8_t bytes[32])
+{
+   for (unsigned i = 0; i < 32; ++i) {
+      if (bytes[i])
+         return false;
+   }
+
+   return true;
+}
+
 static bool
 fail_at(uint64_t address, const char *reason)
 {
@@ -331,6 +370,42 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                                  "indirect arguments",
                                  (unsigned long long)a, (unsigned long long)b);
                         note_indeterminate_at(source, what);
+                     }
+                     /* One level deeper than the pair itself: when the
+                      * first half really is a texture descriptor, the surface
+                      * it names must be owned.  A never-written descriptor set
+                      * -- a PARTIALLY_BOUND binding, an unwritten array
+                      * element, a range recycled out of a destroyed set --
+                      * decodes here as a live-looking pointer into memory this
+                      * VM has never mapped, and on G17P that is a halting
+                      * GMMU read fault rather than a soft-faulted zero.
+                      *
+                      * Report by default and reject only when the caller says
+                      * the payload is known to be a resource pair, because the
+                      * same bytes legitimately carry push constants. */
+                     if (memory->strict_descriptors && pointer_shaped &&
+                         memory->owned(memory->data, a, 32)) {
+                        uint8_t descriptor[32] = {0};
+                        if (memory->read(memory->data, a, descriptor,
+                                         sizeof(descriptor))) {
+                           const uint64_t surface =
+                              agx3_texture_descriptor_surface(descriptor);
+                           if (!agx3_descriptor_is_blank(descriptor) &&
+                               surface != 0 &&
+                               !memory->owned(memory->data, surface, 16)) {
+                              char what[192];
+                              snprintf(what, sizeof(what),
+                                       "texture descriptor at %#llx names "
+                                       "unowned surface %#llx -- an unwritten "
+                                       "or recycled descriptor set reads "
+                                       "exactly like this",
+                                       (unsigned long long)a,
+                                       (unsigned long long)surface);
+                              note_indeterminate_at(source, what);
+                              if (memory->strict_descriptors > 1)
+                                 return fail_at(source, what);
+                           }
+                        }
                      }
                      if (memory->verbose && pointer_shaped) {
                         uint8_t texture[32] = {0}, sampler[32] = {0};

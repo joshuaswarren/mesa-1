@@ -241,7 +241,10 @@ if with_tests
                             '../../virtio/vdrm'),
         inc_include, inc_src, inc_asahi,
       ],
-      dependencies : [idep_nir, idep_mesautil],
+      # hk_cmd_buffer.h pulls in agx_helpers.h, which includes the generated
+      # libagx_shaders.h. Without idep_libagx this target races the generator
+      # and fails to build in a Vulkan-only configuration.
+      dependencies : [idep_nir, idep_mesautil, idep_libagx],
       gnu_symbol_visibility : 'hidden',
     ),
     suite : ['asahi'],
