@@ -334,12 +334,30 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
                                                   &agx_nir_options, "agx_eot");
 
-   /* Native G17P resolves the multisample tile directly through an ordinary
-    * single-sample PBE target. IMGWBLK itself remains the dimensionless 2D
-    * builtin; encoding an MS image here stores an unresolved surface. */
-   enum glsl_sampler_dim dim =
-      (key->tib.nr_samples > 1 && cache->dev->chip != AGX_CHIP_G17P)
-         ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
+   /* A multisample tile can be written out two ways. The default is to
+    * resolve it through an ordinary single-sample PBE target, which is what
+    * every G17P path except VK_ATTACHMENT_STORE_OP_STORE wants and the only
+    * shape the earlier native EOT substitution covered. Storing the surface
+    * unresolved needs the multisample IMGWBLK dimension, and on G17P that is
+    * a separate Apple builtin rather than a field the backend may set on the
+    * 2D one -- so it is only selected when the caller asked for it and the
+    * target really is multisample.
+    */
+   const bool g17p = cache->dev->chip == AGX_CHIP_G17P;
+   const bool store_multisample =
+      key->tib.nr_samples > 1 && (!g17p || key->multisample_store);
+
+   /* AGX2 carries the sample in the store's coordinate vector, so its
+    * multisample block store is a three-component GLSL_SAMPLER_DIM_MS one.
+    * Apple's G17P builtins do not: both the resolving and the unresolved
+    * end-of-tile programs read exactly the same two grid coordinates and
+    * differ only in the IMGWBLK dimension class the packer deposits. Keep
+    * the two-coordinate 2D shape on G17P and let the compiler key select
+    * which of the two Apple programs is meant, the same way every other
+    * G17P end-of-tile selector is chosen. */
+   enum glsl_sampler_dim dim = (store_multisample && !g17p)
+                                  ? GLSL_SAMPLER_DIM_MS
+                                  : GLSL_SAMPLER_DIM_2D;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -408,9 +426,11 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
 
-   if (cache->dev->chip == AGX_CHIP_G17P)
+   if (cache->dev->chip == AGX_CHIP_G17P) {
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
+      compiler_key.g17p_rt0_eot_multisample = store_multisample;
+   }
 
    compiler_key.g17p_r11g11b10_mrt_eot =
       cache->dev->chip == AGX_CHIP_G17P &&

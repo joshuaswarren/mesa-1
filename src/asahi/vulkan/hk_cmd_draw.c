@@ -474,24 +474,26 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          iview1 && (key->tib.layered
                        ? iview1->planes[0].layered_eot_pbe_valid
                        : iview1->planes[0].eot_pbe_valid);
-      /* The G17P end-of-tile program always writes an ordinary single-sample
-       * PBE target: agx_build_end_of_tile_shader() pins the image dimension to
-       * GLSL_SAMPLER_DIM_2D on this chip because IMGWBLK is the dimensionless
-       * 2D builtin, and encoding an MS image there would store an unresolved
-       * surface. So the store target must be single-sample whether or not we
-       * took the direct-resolve path.
+      /* A G17P end-of-tile program writes either an ordinary single-sample
+       * PBE target -- resolving the tile on the way out -- or, when the key
+       * asked for it, the unresolved multisample surface through the separate
+       * multisample IMGWBLK builtin. Those are different programs, so the
+       * target's sample count has to agree with the one the key selected.
        *
        * Without this, storeOp = STORE on a multisample attachment picks
        * target = iview (direct resolve requires storeOp != STORE), skips the
        * samples != 1 check below because that is guarded by direct_resolve,
        * and writes single-sample data into a multisample surface with no
-       * diagnostic. Refuse instead; a multisample surface cannot be stored on
-       * G17P at all, which is also why multisample images can never be sampled
-       * back and why sampledImageColorSampleCounts stays 1x.
+       * diagnostic. Refuse that combination instead of storing wrong pixels.
        */
+      const bool multisample_store =
+         dev->dev.chip == AGX_CHIP_G17P && key->multisample_store;
       if (!iview || !target ||
           (dev->dev.chip == AGX_CHIP_G17P && !direct_resolve &&
-           target->vk.image->samples != 1) ||
+           !multisample_store && target->vk.image->samples != 1) ||
+          (multisample_store &&
+           (direct_resolve || target != iview ||
+            target->vk.image->samples != key->tib.nr_samples)) ||
           (direct_resolve &&
            (target->vk.image->samples != 1 ||
             target->vk.format != iview->vk.format)) ||
@@ -769,6 +771,30 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          att0->resolveImageView != VK_NULL_HANDLE,
          att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT,
          att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
+   }
+
+   /* storeOp = STORE on a multisample colour attachment is the only Vulkan
+    * path that wants the samples kept, and it is what makes a multisample
+    * VkImage readable afterwards. This applies to the mid-frame store as
+    * well: a partial render of such a pass must flush the tile unresolved and
+    * reload it unresolved, which is exactly what single_sample_reload staying
+    * false above already asks the background program for. Restricting it to
+    * the final store instead would leave the partial store with a resolving
+    * program aimed at a multisample target, which the check below then
+    * refuses -- failing the whole render pass rather than just the partial
+    * path.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P && store &&
+       info->colorAttachmentCount >= 1 &&
+       hk_g17p_unverified_feature("msaa_store")) {
+      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
+      const struct hk_image_view *iview0 =
+         hk_image_view_from_handle(att0->imageView);
+
+      key.multisample_store = hk_agx3_g17p_multisample_store_supported(
+         &key.tib, info->colorAttachmentCount,
+         att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE,
+         iview0 ? iview0->vk.image->samples : 0);
    }
 
    bool needs_textures_for_spilled_rts =

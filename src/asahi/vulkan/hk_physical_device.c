@@ -862,6 +862,24 @@ hk_get_device_properties(const struct agx_device *dev,
          : sample_counts;
    const VkSampleCountFlagBits other_sample_counts =
       dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
+   /* A multisample colour image is only sampleable if it can first be stored
+    * unresolved, which needs the native multisample end-of-tile program and
+    * the multisample PBE descriptor. Both are byte-witnessed from Apple's own
+    * encoders, but the pair has never executed, so the promise stays behind
+    * the named one-boot probe -- run g17p-vulkan-msaa-store-fetch4 (and its
+    * 2x sibling) and flip the default only if they pass.
+    *
+    * Depth, stencil, storage and integer colour do NOT move with it. The G17P
+    * tilebuffer gate (agx_g17p_rt0_tile_layout_supported) still admits more
+    * than one sample only for RGBA8/BGRA8 UNORM colour, and nothing has
+    * grounded a multisample depth or stencil tile at all.
+    */
+   const VkSampleCountFlagBits sampled_color_sample_counts =
+      dev->chip == AGX_CHIP_G17P
+         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_store")
+               ? sample_counts
+               : VK_SAMPLE_COUNT_1_BIT)
+         : sample_counts;
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
@@ -992,7 +1010,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .framebufferNoAttachmentsSampleCounts = other_sample_counts,
       .framebufferStencilSampleCounts = other_sample_counts,
       .maxColorAttachments = HK_MAX_RTS,
-      .sampledImageColorSampleCounts = other_sample_counts,
+      .sampledImageColorSampleCounts = sampled_color_sample_counts,
       .sampledImageIntegerSampleCounts = other_sample_counts,
       .sampledImageDepthSampleCounts = other_sample_counts,
       .sampledImageStencilSampleCounts = other_sample_counts,
