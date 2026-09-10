@@ -127,6 +127,24 @@ static struct {
 } shim_mappings;
 
 static unsigned invalid_vm_binds;
+
+/* Executable-window accounting.
+ *
+ * A G17P Ioto program is a couple of hundred bytes, but the smallest BO that
+ * can hold one costs a 16KiB page plus a 16KiB guard page of the 4GiB USC
+ * exec window. Counting the binds that land in that window is the only
+ * host-side measure of how fast a recording eats it, and it is exactly what
+ * ran out on hardware, so a test can hold the driver to a budget here rather
+ * than having to drive a laptop to 4GiB of address space. */
+#define SHIM_G17P_USC_WINDOW_BASE UINT64_C(0x10000000000)
+#define SHIM_G17P_USC_WINDOW_SIZE UINT64_C(0x100000000)
+
+/* Mirrors AGX_G17P_RENDER_AUX_ALIAS_* in agx_va_runtime_hole.h. */
+#define SHIM_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
+#define SHIM_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002020000)
+
+static unsigned usc_window_binds;
+static uint64_t usc_window_bytes;
 static bool failed_submit_once;
 static unsigned submit_calls;
 static unsigned queue_progress_queue_creates;
@@ -171,6 +189,39 @@ check_vm_bind_lifetime(void)
    }
 
    fprintf(stderr, "shim: all VM_BIND operations had nonzero ranges\n");
+}
+
+/*
+ * ASAHI_SHIM_G17P_MAX_USC_BINDS caps how many distinct executable-window
+ * mappings the run may establish. Recording an Ioto program per draw out of
+ * its own BO blows any useful budget immediately; sub-allocating them out of
+ * arena chunks costs a handful of binds for a whole frame.
+ */
+static void __attribute__((destructor))
+check_usc_window_pressure(void)
+{
+   const char *budget = getenv("ASAHI_SHIM_G17P_MAX_USC_BINDS");
+   if (!budget)
+      return;
+
+   fprintf(stderr,
+           "shim: G17P USC window binds=%u bytes=%llu (budget %s)\n",
+           usc_window_binds, (unsigned long long)usc_window_bytes, budget);
+
+   char *end = NULL;
+   const unsigned long limit = strtoul(budget, &end, 0);
+   if (end == budget || (end && *end != '\0')) {
+      fprintf(stderr, "shim: bad ASAHI_SHIM_G17P_MAX_USC_BINDS '%s'\n",
+              budget);
+      _Exit(EXIT_FAILURE);
+   }
+
+   if (usc_window_binds > limit) {
+      fprintf(stderr,
+              "shim: G17P executable window pressure: %u binds exceeds the "
+              "budget of %lu\n", usc_window_binds, limit);
+      _Exit(EXIT_FAILURE);
+   }
 }
 
 static void __attribute__((destructor))
@@ -811,6 +862,11 @@ add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
       .object_offset = op->offset,
       .bo = bo,
    };
+   if (op->addr >= SHIM_G17P_USC_WINDOW_BASE &&
+       op->addr - SHIM_G17P_USC_WINDOW_BASE < SHIM_G17P_USC_WINDOW_SIZE) {
+      usc_window_binds++;
+      usc_window_bytes += op->range;
+   }
    if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
       fprintf(stderr, "shim: map %#llx..%#llx handle %u offset %#llx\n",
               (unsigned long long)op->addr,
@@ -1025,6 +1081,23 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
                  (unsigned long long)start, (unsigned long long)end,
                  (unsigned long long)params->vm_start,
                  (unsigned long long)params->vm_end);
+         return -EINVAL;
+      }
+
+      /* T8140 installs four pair/generation AXFB aliases in every
+       * render-capable client root, and that range lies inside G17P's USC
+       * heap. The kernel refuses a bind that lands on them; a run that gets
+       * its allocator geometry wrong here produces thousands of rejected
+       * binds on hardware and nothing at all under a no-op shim. */
+      if (params == &params_g17p &&
+          start < SHIM_G17P_RENDER_AUX_ALIAS_END &&
+          SHIM_G17P_RENDER_AUX_ALIAS_START < end) {
+         fprintf(stderr,
+                 "shim: gem_bind: Invalid map range %#llx..%#llx "
+                 "(overlaps the kernel render-aux alias %#llx..%#llx)\n",
+                 (unsigned long long)start, (unsigned long long)end,
+                 (unsigned long long)SHIM_G17P_RENDER_AUX_ALIAS_START,
+                 (unsigned long long)SHIM_G17P_RENDER_AUX_ALIAS_END);
          return -EINVAL;
       }
 

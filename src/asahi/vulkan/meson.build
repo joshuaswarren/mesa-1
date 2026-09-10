@@ -30,6 +30,9 @@ hk_files = files(
   'hk_event.h',
   'hk_format.c',
   'hk_g17p_meta_copy_core.c',
+  'hk_ioto_arena.c',
+  'hk_ioto_arena_core.c',
+  'hk_ioto_arena_core.h',
   'hk_g17p_meta_copy_core.h',
   'hk_agx3_ioto_decode.c',
   'hk_agx3_ioto_decode.h',
@@ -151,6 +154,18 @@ if with_tests
         idep_vulkan_util_headers,
       ],
       c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_ioto_arena_core',
+    executable(
+      'hk_ioto_arena_core_test',
+      files('tests/test-hk-ioto-arena-core.c', 'hk_ioto_arena_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),
     suite : ['asahi'],
@@ -2151,6 +2166,19 @@ if with_tests
     g17p_vertex_range_pressure = executable(
       'g17p-vulkan-vertex-range-pressure',
       files('tests/g17p_vulkan_vertex_range_pressure.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # SuperTuxKart-shaped frame: many small clear/store render passes with
+    # draws, all in one command buffer. Recording alone composes every Ioto
+    # program, so the drm-shim oracle in ../drm-shim/meson.build counts the
+    # executable-window mappings it takes without a GPU.
+    g17p_ioto_program_pressure = executable(
+      'g17p-vulkan-ioto-program-pressure',
+      files('tests/g17p_vulkan_ioto_program_pressure.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
