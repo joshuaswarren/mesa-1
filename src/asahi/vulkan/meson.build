@@ -1283,6 +1283,31 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # vkQuake's world geometry and its lightmap are both produced by compute
+    # in one command buffer.  These reproduce those two kernels at their real
+    # resource shape -- ten bindings, push constants, shared memory, an
+    # atomicAdd whose return value addresses a dynamic store, and an rgba8
+    # imageStore -- and, separately, the staging command buffer that uploads
+    # the lightmap's static inputs.  Stage 1 is the brush culling that fills
+    # the indirect commands, stage 2 the lightmap, stage 3 both together.
+    foreach vkquake_compute : [
+      ['world-gen', '1'],
+      ['lightmap', '2'],
+      ['world-compute', '3'],
+    ]
+      executable(
+        'g17p-vulkan-vkquake-' + vkquake_compute[0],
+        files('tests/g17p_vulkan_vkquake_world_compute.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [
+          c_msvc_compat_args,
+          '-DG17P_VKQ_STAGE=' + vkquake_compute[1],
+        ],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
     # Robust indexed indirect draws are GPU-patched before VDM consumption.
     # This variant exercises both a freshly published and a reused HAL200
     # draw-state context in one command buffer.

@@ -928,6 +928,100 @@ Closing it is the same work as `f05_texture_bias` and `f12_texture_grad`:
 either teach that pass to keep the op, or ground the bindless-heap sample
 form.
 
+### The black world is not a packer refusal: it is a refused texture upload
+
+The sweep above qualifies *pipeline creation*, and it is clean. On hardware
+vkQuake still rendered its whole world black while the HUD, the alias models
+and the view model stayed visible, and separately aborted in
+`vk_queue_submit_add_command_buffer` on a command buffer that was neither
+INITIAL, EXECUTABLE nor PENDING. Both are one cause, and it is downstream of
+the compiler.
+
+vkQuake's world surfaces are a base texture multiplied by a lightmap that a
+compute pass rebuilds every frame (`update_lightmap.comp`). That pass reads
+its per-texel surface index from a `VK_FORMAT_R32_UINT` texture, which
+`TexMgr_LoadImage32` uploads with `vkCmdCopyBufferToImage` like every other
+texture — onto the staging command buffer that `R_StagingAllocate` hands out
+and that batches uploads until the staging buffer fills.
+
+`hk_g17p_buffer_to_image_copy_supported()` carried an eight-entry format
+allowlist that did not include `R32_UINT`, so that one copy was refused with
+`VK_ERROR_FEATURE_NOT_PRESENT`. Nothing reports it: `vkCmd*` returns void,
+and `vk_command_buffer_set_error()` only logs when the application installed a
+debug-utils messenger, which no game does. The refusal invalidates the shared
+staging command buffer, so the whole batch of uploads in flight is dropped and
+the subsequent submit is the one that trips the assertion.
+
+The gate was un-admitted, not unencodable. Everything below it is generic
+`vk_meta_copy_buffer_to_image`, which renders the staged texels through a
+native single-slice EOT view; what it needs from a format is colour-attachment
+support. `R32_UINT` has it — `ail_pixel_format[PIPE_FORMAT_R32_UINT]` is
+renderable, so `hk_get_format_features()` already advertised
+`COLOR_ATTACHMENT`, `TRANSFER_DST` and `BLIT_DST` for it. The driver
+advertised the copy and then refused it.
+
+Measured offline under the G17P drm-shim with
+`ASAHI_SHIM_VALIDATE_G17P_STREAM=1`, with vkQuake's own
+`update_lightmap.comp` compiled straight from `Shaders/`:
+
+| arm | `vkCreateComputePipelines` | upload command buffer | dispatch command buffer |
+| --- | --- | --- | --- |
+| before | ok | **`hk_cmd_meta.c:1895` FEATURE_NOT_PRESENT** | ok |
+| after  | ok | ok | ok |
+
+`G17P compute resources: txf=1 preamble=0 texture=0 sampler=1 scratch=0/0` —
+the real kernel passes `hk_g17p_compute_shader_supported()` on both arms, so
+the native compute admission gate was never the problem and neither was the
+packer.
+
+`g17p-vulkan-vkquake-world-gen`, `g17p-vulkan-vkquake-lightmap` and
+`g17p-vulkan-vkquake-world-compute` (`tests/g17p_vulkan_vkquake_*.comp`,
+`run_g17p_vkquake_world_compute_record.sh`) reproduce both kernels at their real
+resource shape and separate the staging command buffer from the per-frame one,
+so a refusal is attributed to the one that carries it rather than poisoning
+the measurement — a command buffer records no further error once it is
+INVALID. Under the shim they qualify compile and record; on hardware they
+also submit and compare the generated indirect commands, the generated index
+buffer and every lightmap texel against exact expected values.
+
+`HK_DEBUG_RECORD=1` turns on `vk_instance::enable_debug_logging`, which is
+what makes every `vk_command_buffer_set_error()` in the recording path name
+its file and line. There are about ninety of them across `hk_cmd_draw.c`,
+`hk_cmd_dispatch.c`, `hk_cmd_buffer.c` and `hk_cmd_meta.c` and they are all
+silent without it. Any "the application draws nothing and then asserts at
+submit" report should start there.
+
+## fcmpsel refuses a negated source outside one witnessed shape
+
+Found while reducing the above; it is **not** what broke vkQuake, whose real
+kernels compile. A vkQuake-shaped variant refused, and it reduces to one
+token:
+
+```glsl
+o.values[gl_GlobalInvocationID.x] = ( i.a > i.b) ? 1u : 0u;  /* compiles */
+o.values[gl_GlobalInvocationID.x] = (-i.a > i.b) ? 1u : 0u;  /* REFUSED  */
+```
+
+```
+agx3_pack_binary.c:7877: no grounded AGX3 encoding for fcmpsel
+  [d32:reg2 s0=32:reg4 s1=32:reg2.neg s2=16:imm1 s3=16:imm0
+   cond=1 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+There *is* a negate encoder, `agx3_alu_fcmp_select_imm_width_neg_second`, but
+`neg_second` admits it only for the exact witnessed shape: the negate on
+source 0, `AGX_FCOND_LT`, a 16-bit destination, both comparators 32-bit, and
+select immediates exactly 255 and 0. Here the negate landed on source 1, the
+destination is 32-bit and the immediates are 1 and 0, so the plain encoder is
+chosen and then refuses any modifier. The comment above `neg_second`
+deliberately declines to generalize, and that is the right posture: widening
+it needs an `applegpu_g17p` witness per shape, starting with the negate on
+source 1 (which the encoder can already reach by reversing the condition, as
+it does today) and a 32-bit destination.
+
+`dot(view - world, normal) > 0.0` is the shape that found it, and it is
+ordinary enough that other applications will hit it.
+
 ## Native Gallium's texel fetch: closed without AGX2 addressing
 
 `asahi-g17p-gallium-blit` reproduces the whole thing offline under the no-op

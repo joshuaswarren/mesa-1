@@ -310,6 +310,17 @@ hk_g17p_buffer_to_image_copy_supported(
    case VK_FORMAT_R8G8B8A8_SRGB:
    case VK_FORMAT_R8G8B8A8_UINT:
    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+   /* The path below this gate is generic vk_meta: it renders the staged
+    * texels through a native single-slice EOT view of the destination, so
+    * what it needs from a format is colour-attachment support, not membership
+    * of a list.  R32_UINT has that -- ail_pixel_format[PIPE_FORMAT_R32_UINT]
+    * is renderable and hk_get_format_features() therefore advertises
+    * COLOR_ATTACHMENT, TRANSFER_DST and BLIT_DST for it -- and leaving it out
+    * refused a copy the driver advertises as supported.  vkQuake uploads its
+    * whole lightmap surface-index texture that way, on the staging command
+    * buffer it shares with every other texture in the batch, so the refusal
+    * did not lose one image: it invalidated the batch. */
+   case VK_FORMAT_R32_UINT:
       break;
    default:
       return false;
