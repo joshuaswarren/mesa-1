@@ -14,6 +14,7 @@
 #include "util/build_id.h"
 #include "util/driconf.h"
 #include "util/mesa-blake3.h"
+#include "util/u_debug.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EnumerateInstanceVersion(uint32_t *pApiVersion)
@@ -154,6 +155,9 @@ hk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
                              &dispatch_table, pCreateInfo, pAllocator);
    if (result != VK_SUCCESS)
       goto fail_alloc;
+
+   instance->vk.enable_debug_logging =
+      debug_get_bool_option("HK_DEBUG_LOGGING", false);
 
    hk_init_dri_options(instance);
 

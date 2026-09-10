@@ -1062,6 +1062,15 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
+      if (hk_g17p_launch_trace_enabled()) {
+         fprintf(stderr, "G17P unsupported tilebuffer: colors=%u format0=%s "
+                         "samples=%u tile=%u sample_bytes=%u layered=%u spilled=%u\n",
+                 render->color_att_count,
+                 util_format_short_name(render->tilebuffer.logical_format[0]),
+                 render->tilebuffer.nr_samples, render->tilebuffer.tile_size,
+                 render->tilebuffer.sample_size_B, render->tilebuffer.layered,
+                 render->tilebuffer.spilled[0]);
+      }
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
