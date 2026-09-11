@@ -36,17 +36,28 @@ static bool pred_ok(const ctx *c, const agx3_pred *p)
    }
 }
 
-static bool preds_ok(ctx *c, uint32_t off, uint16_t n)
+static bool preds_test(const ctx *c, uint32_t off, uint16_t n)
 {
    for (uint16_t i = 0; i < n; i++) {
       const agx3_pred *p = &c->t->preds[off + i];
       if (p->field >= AGX3_MAX_FIELDS) return false;
       if (!pred_ok(c, p)) return false;
    }
+   return true;
+}
+
+static void preds_mark(ctx *c, uint32_t off, uint16_t n)
+{
    for (uint16_t i = 0; i < n; i++) {   /* mark consumed only if all hold */
       bset(c->consumed, c->t->preds[off + i].field);
       bset(c->is_pred, c->t->preds[off + i].field);
    }
+}
+
+static bool preds_ok(ctx *c, uint32_t off, uint16_t n)
+{
+   if (!preds_test(c, off, n)) return false;
+   preds_mark(c, off, n);
    return true;
 }
 
@@ -64,11 +75,15 @@ static bool apply_node(ctx *c, uint32_t node_id);
 static bool apply_group(ctx *c, const agx3_group *g)
 {
    for (uint16_t i = 0; i < g->alt_n; i++) {
-      ctx saved = *c;
       uint32_t alt_id = c->t->altpool[g->alt_off + i];
       const agx3_node *alt = &c->t->nodes[alt_id];
-      if (preds_ok(c, alt->pred_off, alt->pred_n) &&
-          apply_node(c, alt_id))
+      /* Most alternatives fail their predicates without modifying state.
+       * Only snapshot the encoder once an alternative can actually apply. */
+      if (!preds_test(c, alt->pred_off, alt->pred_n))
+         continue;
+      ctx saved = *c;
+      preds_mark(c, alt->pred_off, alt->pred_n);
+      if (apply_node(c, alt_id))
          return true;
       *c = saved;
    }
