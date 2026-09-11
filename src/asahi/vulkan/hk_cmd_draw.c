@@ -659,7 +659,15 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    if (store && op == AGX_EOT_STORE) {
       struct hk_image_view *iview = cmd->state.gfx.render.color_att[0].iview;
       const VkRenderingAttachmentInfo *att = &info->pColorAttachments[0];
+      /* A direct resolve is the pass's output, so only the pass's final
+       * end-of-tile program may perform one. A partial render is a mid-frame
+       * flush whose tile is reloaded by the draws that follow it, and a
+       * resolve is not reloadable: it averages the samples away. The
+       * mid-frame store therefore writes the multisample surface unresolved,
+       * which is what key->multisample_store selects below.
+       */
       const bool direct_resolve =
+         !partial_render &&
          hk_agx3_g17p_direct_color_resolve_supported(
             &key->tib, info->colorAttachmentCount,
             att->resolveImageView != VK_NULL_HANDLE,
@@ -784,7 +792,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                  desc.imageblock_offset1_B, desc.nr_gprs,
                  desc.staging_halfs);
 
-      if (direct_resolve && !partial_render)
+      if (direct_resolve)
          cmd->state.gfx.render.g17p_direct_color_resolve = true;
    } else if (op == AGX_BG_EOT_NONE) {
       const struct hk_agx3_g17p_graphics_program_desc desc = {
@@ -957,49 +965,63 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
    key.tib.layered = (render->cr.layers > 1);
 
-   /* When the G17P end-of-tile program resolves directly, it writes the
-    * single-sample resolve target and the multisample surface is never stored
-    * -- the direct-resolve gate requires storeOp != STORE. A partial render's
-    * background program must therefore reload from that resolved surface, not
-    * from a multisample surface that was never written. Gallium expresses this
-    * as single_sample_reload (agx_state.c); Honeykrisp did not set it, so a
-    * partial render under MSAA reloaded garbage.
+   /* Every background program that reloads a multisample tile reloads it from
+    * the multisample surface, per sample. That is the only surface that
+    * carries the samples, and the samples are exactly what a reload exists to
+    * restore: a resolve has averaged them away and cannot be un-averaged.
+    * This holds for loadOp = LOAD, for an incomplete render area, and for the
+    * mid-frame reload of a partial render alike, so single_sample_reload is
+    * never the right answer here and is left false.
     *
-    * Derive it from the same predicate the EOT side uses, so the two can only
-    * ever disagree by both changing.
+    * Gallium does set it (agx_state.c), and it swaps in the resolve target's
+    * surface to match. Honeykrisp once set the flag without swapping the
+    * descriptor, which asked a single-sample texture fetch for the
+    * multisample attachment -- a surface a direct resolve never writes. A
+    * fresh allocation reads as zero, so every sample a partial render carried
+    * across a stream boundary came back zero and the tile's whole history,
+    * clear included, was lost.
     */
-   if (dev->dev.chip == AGX_CHIP_G17P && !store &&
-       info->colorAttachmentCount >= 1) {
-      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
+   key.single_sample_reload = false;
 
-      key.single_sample_reload = hk_agx3_g17p_direct_color_resolve_supported(
-         &key.tib, info->colorAttachmentCount,
-         att0->resolveImageView != VK_NULL_HANDLE,
-         att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT,
-         att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE);
-   }
-
-   /* storeOp = STORE on a multisample colour attachment is the only Vulkan
-    * path that wants the samples kept, and it is what makes a multisample
-    * VkImage readable afterwards. This applies to the mid-frame store as
-    * well: a partial render of such a pass must flush the tile unresolved and
-    * reload it unresolved, which is exactly what single_sample_reload staying
-    * false above already asks the background program for. Restricting it to
-    * the final store instead would leave the partial store with a resolving
-    * program aimed at a multisample target, which the check below then
-    * refuses -- failing the whole render pass rather than just the partial
-    * path.
+   /* Keeping the samples in the stored surface is what makes a reload
+    * possible, and two different things ask for it.
+    *
+    * storeOp = STORE is the application asking, and it is what makes a
+    * multisample VkImage readable after the pass.
+    *
+    * A partial render asks for it structurally: a mid-frame flush exists only
+    * to be reloaded by the draws that follow it, inside the same render pass,
+    * so it must write the samples whatever the pass finally does with them.
+    *
+    * Only storeOp is the application's, so only storeOp is gated on the probe
+    * that promises a multisample VkImage is readable. The partial render is
+    * the driver's own, and gating it would refuse the wrong thing: every
+    * render pass builds its partial programs at BeginRendering, long before
+    * anyone knows whether a stream boundary will arrive, so a refusal there
+    * fails passes that never split at all -- measured, it takes out the
+    * single-draw resolve probes too.
+    *
+    * That leaves the mid-frame store selecting a path hardware has not yet
+    * honoured. With this store recordable at last,
+    * g17p-vulkan-msaa-store-fetch2 and -fetch4 run on an A18 Pro and every
+    * fetched sample of the stored surface reads zero, while the direct
+    * resolve of the very same draw is exact -- so the samples do not survive
+    * the store, and a multisample tile still cannot cross a stream boundary.
+    * What changes here is which of those two is the blocker: the mid-frame
+    * store now asks to keep the samples instead of resolving them away.
     */
    if (dev->dev.chip == AGX_CHIP_G17P && store &&
-       info->colorAttachmentCount >= 1 &&
-       hk_g17p_unverified_feature("msaa_store")) {
+       info->colorAttachmentCount >= 1) {
       const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
       const struct hk_image_view *iview0 =
          hk_image_view_from_handle(att0->imageView);
+      const bool keeps_samples =
+         partial_render ||
+         (att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE &&
+          hk_g17p_unverified_feature("msaa_store"));
 
       key.multisample_store = hk_agx3_g17p_multisample_store_supported(
-         &key.tib, info->colorAttachmentCount,
-         att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE,
+         &key.tib, info->colorAttachmentCount, keeps_samples,
          iview0 ? iview0->vk.image->samples : 0);
    }
 
