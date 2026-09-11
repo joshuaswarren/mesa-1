@@ -7308,9 +7308,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * and register multiplier variants have distinct baselines. */
             const bool no_addend = c.type == AGX_INDEX_IMMEDIATE &&
                                    c.value == 0 && !c.abs && !c.neg;
+            /*
+             * `.neg` on an IMAD addend is an arithmetic negate, not a source
+             * modifier: agx_pack.c gives it a dedicated bit and permits it on
+             * src[2] alone.  AGX3 spells the negated form as its own
+             * instruction, `imsub`, so admit the modifier here and let
+             * agx3_imad_encode() select the opcode.  Without this every
+             * `a*b - imm` was refused outright -- 2,692 of 6,486 refused
+             * instructions in the 2026-09-11 CTS census, the single largest
+             * shape.
+             */
             const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
-               c.value <= 0xff && !c.abs && !c.neg && !c.memory;
+               c.value <= 0xff && !c.abs && !c.memory;
             /*
              * A bare narrow operand is SIGN-extended, the same rule the
              * comment above names and the same one agx_optimizer_signext()
@@ -7396,6 +7406,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      addend_reg && !narrow &&
                      (wide ? (c.size != AGX_SIZE_64 && !c.abs)
                            : (c.size == AGX_SIZE_16 && !c.abs)),
+                  /* Subtract rather than add.  This used to have no
+                   * representation at all: a negated REGISTER addend passed
+                   * the gate above and then composed as plain `imadd`, so
+                   * `a*b - c` silently computed `a*b + c`.  A negated
+                   * immediate addend was refused instead.  Both now select
+                   * Apple's `imsub`. */
+                  .negate_addend = !no_addend && c.neg,
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
