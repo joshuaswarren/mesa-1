@@ -20,7 +20,15 @@
 #define HK_MIN_TEXEL_BUFFER_ALIGNMENT    16
 #define HK_MIN_UBO_ALIGNMENT             64
 #define HK_MAX_VIEWPORTS                 16
-#define HK_MAX_DESCRIPTOR_SIZE           72
+/* The largest per-descriptor stride any binding can take.  The AGX3 sampled
+ * image descriptor is the largest single descriptor at 72 bytes (a 32-byte
+ * texture plus the 40-byte software tail), and a VK_DESCRIPTOR_TYPE_MUTABLE_EXT
+ * binding rounds its stride up to the largest alignment in its type list --
+ * 16, from hk_buffer_address.  align(72, 16) is 80, so 72 is not a bound for a
+ * mutable binding that mixes an image with a buffer.  AGX2 never reached it
+ * because its sampled image is 64 bytes and align(64, 16) is 64.
+ */
+#define HK_MAX_DESCRIPTOR_SIZE           80
 #define HK_MAX_PUSH_DESCRIPTORS          32
 #define HK_MAX_DESCRIPTOR_SET_SIZE       (1u << 30)
 #define HK_MAX_INLINE_UNIFORM_BLOCK_SIZE (1u << 16)
