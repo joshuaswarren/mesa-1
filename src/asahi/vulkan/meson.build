@@ -6,6 +6,8 @@ hk_files = files(
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
+  'hk_bvh_depth_core.c',
+  'hk_bvh_depth_core.h',
   'hk_buffer_view.h',
   'hk_bvh.h',
   'hk_cmd_buffer.c',
@@ -101,6 +103,20 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_bvh_depth_core',
+    executable(
+      'hk_bvh_depth_core_test',
+      files('tests/test-hk-bvh-depth-core.c',
+            'hk_bvh_depth_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
   test(
     'hk_nir_ray_traversal',
     executable(
