@@ -460,6 +460,17 @@ hk_g17p_build_compute_program_raw(
       .ldshdr_f1 = kind,
    };
    if (!hk_agx3_g17p_compute_program_generate(dev->dev.chip, &desc, out)) {
+      mesa_loge("G17P compute program rejected (%s): binary=%u scratch=%u "
+                "gprs=%u compiler_d_valid=%u compiler_d=%u shared=%u "
+                "kind=%u ranges=%zu program=%" PRIx64 " shader=%" PRIx64,
+                trace ? trace : "unknown", shader_binary_size, scratch_size,
+                nr_gprs, compiler_d_valid, compiler_d,
+                threadgroup_memory_size_B, (unsigned)kind, range_count,
+                program_va, shader_va);
+      for (size_t i = 0; i < range_count; ++i)
+         mesa_loge("G17P compute range[%zu]: start=%u size=%u address=%" PRIx64,
+                   i, ranges[i].start_halfs, ranges[i].size_halfs,
+                   ranges[i].address);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
    }
@@ -547,7 +558,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
        !prog->info.main_size || !prog->info.nr_gprs ||
        prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
        !prog->info.agx3_staging_known ||
-       !data || !data_size || data_size > UINT16_MAX * 2u ||
+       !data || !data_size ||
+       data_size > HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE ||
        prog->entry_offset > UINT64_MAX - prog->ptr ||
        prog->b.workgroup.x == 0 || prog->b.workgroup.y == 0 ||
        prog->b.workgroup.z == 0 || agx_is_indirect(grid)) {
@@ -564,14 +576,25 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    if (!cs)
       return;
 
-   const uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);
+   /* Precompiled argument structs may end in a 16-bit field (KWin hits a
+    * 50-byte block). Native Ioto loads consume complete dwords, so include
+    * owned, initialized padding instead of rejecting odd half counts or
+    * reading beyond the caller's argument block. */
+   uint8_t packed_data[HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE];
+   size_t packed_size;
+   if (!hk_agx3_g17p_precompiled_data_pack(
+          data, data_size, packed_data, sizeof(packed_data), &packed_size)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   const uint64_t uploaded_data = hk_pool_upload(cmd, packed_data, packed_size, 4);
    if (!uploaded_data) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
    const struct agx3_ioto_uniform_range range = {
       .start_halfs = 0,
-      .size_halfs = DIV_ROUND_UP(data_size, 2),
+      .size_halfs = packed_size / 2,
       .address = uploaded_data,
    };
    struct agx3_cdm_direct_template_sources launch_sources;

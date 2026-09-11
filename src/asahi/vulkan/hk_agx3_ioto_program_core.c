@@ -14,6 +14,24 @@
 #include <string.h>
 
 bool
+hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
+                                 void *output, size_t capacity, size_t *written)
+{
+   if (!data || !output || !written || !size ||
+       size > HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE)
+      return false;
+
+   const size_t padded = (size + 3u) & ~(size_t)3u;
+   if (padded > capacity)
+      return false;
+
+   memmove(output, data, size);
+   memset((uint8_t *)output + size, 0, padded - size);
+   *written = padded;
+   return true;
+}
+
+bool
 hk_agx3_ioto_program_generate(
    enum agx_chip chip, const struct hk_agx3_ioto_program_desc *desc,
    void *output, size_t capacity, size_t *written)

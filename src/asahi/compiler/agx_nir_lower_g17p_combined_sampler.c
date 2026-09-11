@@ -442,11 +442,14 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
               * into the third 32-bit backend coordinate. */
              lowered_coord_components == 3)
           : (tex->num_srcs == 3 && lod >= 0 && sample < 0 &&
-             nir_src_is_const(tex->src[lod].src) &&
+             nir_src_num_components(tex->src[lod].src) == 1 &&
+             (nir_src_bit_size(tex->src[lod].src) == 16 ||
+              nir_src_bit_size(tex->src[lod].src) == 32) &&
              /* PACK_SMPIR stages this integer into the native level bank.
               * Its captured field is 12-bit x64, so whole Vulkan mip levels
               * 0..63 fit exactly and larger constants remain refused. */
-             nir_src_as_uint(tex->src[lod].src) <= 63)) &&
+             (!nir_src_is_const(tex->src[lod].src) ||
+              nir_src_as_uint(tex->src[lod].src) <= 63))) &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
       (multisample || lowered_coord_components ==
                          (lowered_buffer ? 2 : tex->coord_components));
@@ -605,9 +608,12 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                const int lod =
                   nir_tex_instr_src_index(tex, nir_tex_src_lod);
                assert(lod >= 0);
+               nir_def *level = tex->src[lod].src.ssa;
                nir_src_rewrite(&tex->src[lod].src,
-                               nir_imm_intN_t(
-                                  &b, nir_src_as_uint(tex->src[lod].src), 32));
+                               nir_src_is_const(tex->src[lod].src)
+                                  ? nir_imm_intN_t(
+                                       &b, nir_src_as_uint(tex->src[lod].src), 32)
+                                  : nir_u2u32(&b, level));
             }
 
             nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));

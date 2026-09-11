@@ -1997,11 +1997,11 @@ contains_integer_lod_stage(const struct agx_shader_part *part)
  * uint. A literal must use Apple's direct f29 level field even when constant
  * promotion is enabled, rather than manufacturing a per-lane dependency. */
 static bool
-test_g17p_nonzero_fetch_lod_compile(void)
+test_g17p_fetch_lod_compile(unsigned dynamic_bits)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options,
-      "G17P nonzero texel-fetch level");
+      "G17P constant and runtime texel-fetch levels");
    nir_def *image =
       nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
@@ -2014,8 +2014,13 @@ test_g17p_nonzero_fetch_lod_compile(void)
       nir_tex_src_backend1, nir_imm_ivec2(&b, 3, 4));
    tex->src[1] =
       nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
-   tex->src[2] = nir_tex_src_for_ssa(
-      nir_tex_src_lod, nir_imm_intN_t(&b, 2, 16));
+   nir_def *level = nir_imm_intN_t(&b, 2, 16);
+   if (dynamic_bits) {
+      level = nir_load_preamble(&b, 1, 32, .base = 12);
+      if (dynamic_bits == 16)
+         level = nir_u2u16(&b, level);
+   }
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, level);
    nir_def_init(&tex->instr, &tex->def, 4, 32);
    nir_builder_instr_insert(&b, &tex->instr);
    fs_store_colour(&b, &tex->def);
@@ -2023,9 +2028,17 @@ test_g17p_nonzero_fetch_lod_compile(void)
 
    bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
    const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
-   ok &= lod >= 0 && nir_src_bit_size(tex->src[lod].src) == 32 &&
-         nir_src_is_const(tex->src[lod].src) &&
-         nir_src_as_uint(tex->src[lod].src) == 2;
+   ok &= lod >= 0 && nir_src_bit_size(tex->src[lod].src) == 32;
+   if (dynamic_bits)
+      ok &= !nir_src_is_const(tex->src[lod].src);
+   else
+      ok &= nir_src_is_const(tex->src[lod].src) &&
+            nir_src_as_uint(tex->src[lod].src) == 2;
+
+   if (!ok) {
+      ralloc_free(b.shader);
+      return false;
+   }
 
    NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
             lower_test_descriptor_set, nir_metadata_control_flow, NULL);
@@ -2041,7 +2054,7 @@ test_g17p_nonzero_fetch_lod_compile(void)
    };
    struct agx_shader_part part = {0};
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary &&
-         !contains_integer_lod_stage(&part);
+         (contains_integer_lod_stage(&part) == (dynamic_bits != 0));
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
@@ -5871,7 +5884,9 @@ main(int argc, char **argv)
    if (argc == 2 && !strcmp(argv[1], "--indexed-fetch-only")) {
       const bool ok=test_indexed_fetch_sets() &&
                     test_indexed_multisample_fetch() &&
-                    test_g17p_nonzero_fetch_lod_compile();
+                    test_g17p_fetch_lod_compile(0) &&
+                    test_g17p_fetch_lod_compile(16) &&
+                    test_g17p_fetch_lod_compile(32);
       printf("mixed indexed texture reads, multisample resolve, sets and arrays: %s\n",ok?"PASS":"FAIL");
       return ok?0:1;
    }
@@ -6072,7 +6087,9 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_g17p_nonzero_fetch_lod_compile()) {
+   if (!test_g17p_fetch_lod_compile(0) ||
+       !test_g17p_fetch_lod_compile(16) ||
+       !test_g17p_fetch_lod_compile(32)) {
       fputs("G17P nonzero texel-fetch LOD lost its uint staging\n", stderr);
       all_ok = false;
    }
