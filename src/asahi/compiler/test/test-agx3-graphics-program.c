@@ -20,6 +20,66 @@
 int
 main(void)
 {
+   /* Glamor's instanced rectangle needs six independent VS ranges: VBO
+    * bases, clamps, draw parameters, UBO pointer, provoking vertex and clip
+    * coefficient. The old five-range limit silently left its pipeline zero. */
+   struct agx3_ioto_uniform_range rectangle_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x4000001078},
+      {.start_halfs = 8, .size_halfs = 4, .address = 0x4000001178},
+      {.start_halfs = 12, .size_halfs = 4, .address = 0x400000000c},
+      {.start_halfs = 16, .size_halfs = 4, .address = 0x4000000068},
+      {.start_halfs = 20, .size_halfs = 2, .address = 0x4000001290},
+      {.start_halfs = 22, .size_halfs = 2, .address = 0x40000012a0},
+   };
+   const size_t rectangle_count =
+      sizeof(rectangle_ranges) / sizeof(rectangle_ranges[0]);
+   size_t rectangle_bound = 0;
+   CHECK(agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, rectangle_ranges, rectangle_count, &rectangle_bound));
+   struct agx3_g17p_graphics_program_desc rectangle_desc = {
+      .program_va = UINT64_C(0x10000100000),
+      .shader_va = UINT64_C(0x100002003c0),
+      .uniform_ranges = rectangle_ranges,
+      .uniform_range_count = rectangle_count,
+      .shader_binary_size = 282,
+      .nr_gprs = 29,
+      .compiler_d_valid = true,
+      .compiler_d = 20,
+   };
+   struct agx3_g17p_graphics_program rectangle;
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &rectangle_desc, &rectangle));
+   CHECK(rectangle.length > 0 && rectangle.length <= rectangle_bound);
+   const struct agx3_g17p_graphics_program rectangle_baseline = rectangle;
+   for (unsigned i = 0; i < rectangle_count; ++i) {
+      rectangle_ranges[i].address += 0x40;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &rectangle_desc, &rectangle));
+      CHECK(rectangle.length == rectangle_baseline.length);
+      CHECK(memcmp(rectangle.bytes, rectangle_baseline.bytes,
+                   rectangle.length) != 0);
+      rectangle_ranges[i].address -= 0x40;
+   }
+
+   /* More ranges must not bypass the existing program byte budget. */
+   struct agx3_ioto_uniform_range oversized_ranges[128];
+   for (unsigned i = 0; i < 128; ++i) {
+      oversized_ranges[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 2 * i, .size_halfs = 2,
+         .address = UINT64_C(0x4000010000) + 4 * i,
+      };
+   }
+   const size_t previous_bound = rectangle_bound;
+   CHECK(!agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, oversized_ranges, 128, &rectangle_bound));
+   CHECK(rectangle_bound == previous_bound);
+   rectangle_desc.uniform_ranges = oversized_ranges;
+   rectangle_desc.uniform_range_count = 128;
+   const struct agx3_g17p_graphics_program previous_program = rectangle;
+   CHECK(!agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &rectangle_desc, &rectangle));
+   CHECK(memcmp(&rectangle, &previous_program, sizeof(rectangle)) == 0);
+
    uint16_t blend_base = UINT16_C(0xa5a5);
    CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 0,
                                                  &blend_base));

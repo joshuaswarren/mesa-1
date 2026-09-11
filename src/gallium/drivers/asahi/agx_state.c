@@ -3523,6 +3523,10 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
    for (unsigned i = 0; i < cs->push_range_count; ++i) {
       const struct agx_push_range *push = &cs->push[i];
       const uint64_t table = batch->uniforms.tables[push->table];
+      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+         fprintf(stderr, "NEO_PUSH_INPUT stage=%u index=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx\n",
+                 stage, i, push->table, push->offset, push->uniform,
+                 push->length, (unsigned long long)table);
 
       /* Fragment uniform zero is deliberately replaced by the resource pair.
        * A textured VS instead shifts its complete fixed ABI; trimming a VBO
@@ -3566,11 +3570,19 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
          .size_halfs = length,
          .address = source,
       };
+      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+         fprintf(stderr, "NEO_PUSH stage=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx source_gpu=%#llx\n",
+                 stage, push->table, push->offset, start, length,
+                 (unsigned long long)table, (unsigned long long)source);
    }
 
    if (cs->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &cs->b.info.rodata;
       const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
+      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+         fprintf(stderr, "NEO_RODATA stage=%u base=%u halfs=%u offset=%u bo=%p size=%zu\n",
+                 stage, rodata->base_uniform, rodata->size_16, rodata->offset,
+                 (void *)cs->bo, cs->bo ? (size_t)cs->bo->size : 0);
       if (!cs->bo || !cs->bo->va || (rodata->base_uniform & 1) ||
           (rodata->size_16 & 1) || count == ARRAY_SIZE(ranges) ||
           rodata->offset > cs->bo->size ||
@@ -3628,9 +3640,30 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
 
    memcpy(t.cpu, program.bytes, program.length);
    if (agx_bo_sync_for_device(program_bo,
-                              t.gpu - program_bo->va->addr,
-                              program.length))
+                               t.gpu - program_bo->va->addr,
+                               program.length))
       return 0;
+   if (getenv("NEO_AGX_BINARY_DIAGNOSTICS")) {
+      fprintf(stderr, "NEO_NATIVE stage=%u program=%#llx shader=%#llx size=%zu gprs=%u compiler_d=%u ranges=%zu\n",
+              stage, (unsigned long long)t.gpu,
+              (unsigned long long)desc.shader_va, linked->size,
+              linked->nr_gprs, linked->g17p_compiler_d, count);
+      fprintf(stderr, "NEO_IOTO stage=%u data=", stage);
+      for (size_t i = 0; i < program.length; ++i)
+         fprintf(stderr, "%02x", program.bytes[i]);
+      fputc('\n', stderr);
+      if (linked->size <= 8192 &&
+          linked->entry_offset <= linked->bo->size &&
+          linked->size <= linked->bo->size - linked->entry_offset) {
+         const uint8_t *mapping = agx_bo_map(linked->bo);
+         if (mapping) {
+            fprintf(stderr, "NEO_BINARY stage=%u data=", stage);
+            for (size_t i = 0; i < linked->size; ++i)
+               fprintf(stderr, "%02x", mapping[linked->entry_offset + i]);
+            fputc('\n', stderr);
+         }
+      }
+   }
    if (full_va)
       *full_va = t.gpu;
    return agx_usc_addr(dev, t.gpu);
@@ -5108,6 +5141,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
                             MESA_SHADER_VERTEX, 0, 0, &pipeline);
 
       if (dev->chip == AGX_CHIP_G17P) {
+         if (!pipeline) {
+            fprintf(stderr, "agx: refusing G17P draw without a vertex program\n");
+            return NULL;
+         }
          const uint32_t provoking = ctx->rast->base.flatshade_first ? 0 : 2;
          const struct agx_vdm_state_update_info info = {
             .raw_vertex_shader_word0 = counts.opaque[0],
@@ -7015,6 +7052,16 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       agx_encode_state(batch, batch->vdm.current, &draw_state_offset);
    if (!out)
       return;
+
+   if (getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+      fprintf(stderr, "NEO_DRAW queue=%u batch=%u draw=%u width=%u height=%u samples=%u mode=%u count=%u instances=%u index_size=%u vs=%#llx fs=%#llx\n",
+              ctx->queue_id, agx_batch_idx(batch), batch->draws,
+              batch->key.width, batch->key.height, batch->key.samples,
+              info->mode, draws->count, info->instance_count, info->index_size,
+              (unsigned long long)(ctx->linked.vs && ctx->linked.vs->bo
+                 ? ctx->linked.vs->bo->va->addr + ctx->linked.vs->entry_offset : 0),
+              (unsigned long long)(ctx->linked.fs && ctx->linked.fs->bo
+                 ? ctx->linked.fs->bo->va->addr + ctx->linked.fs->entry_offset : 0));
 
    if (dev->chip != AGX_CHIP_G17P && info->index_size &&
        info->primitive_restart) {

@@ -1097,9 +1097,17 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .cmdbuf_size = cmdbuf.size,
    };
 
+   if (getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+      fprintf(stderr, "NEO_SUBMIT queue=%u batch=%u seq=%llu draws=%u render=%u compute=%u bytes=%zu\n",
+              ctx->queue_id, agx_batch_idx(batch), (unsigned long long)seqid,
+              batch->draws, !!render, !!compute, (size_t)cmdbuf.size);
    int ret = dev->ops.submit(dev, &submit, &virt);
    const int submit_errno =
       ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
+   if (getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+      fprintf(stderr, "NEO_SUBMIT_RESULT queue=%u batch=%u seq=%llu ret=%d errno=%d\n",
+              ctx->queue_id, agx_batch_idx(batch), (unsigned long long)seqid,
+              ret, submit_errno);
 
    u_rwlock_rdunlock(&screen->destroy_lock);
 

@@ -9,8 +9,12 @@
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
-#define AGX3_G17P_GRAPHICS_MAX_RANGES 5u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
+/* Every nonempty range requires at least one load chunk. Range storage must
+ * cover that existing workspace budget, rather than the five ranges used by
+ * early graphics probes. Instanced Gallium shaders already need six. The
+ * bound calculation still enforces both chunk count and program byte size. */
+#define AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS
 
 struct agx3_g17p_graphics_program_desc {
    uint64_t program_va;

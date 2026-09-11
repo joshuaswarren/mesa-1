@@ -799,11 +799,24 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
    if (format == AGX_FORMAT_RGB10A2) {
       if (nr_channels != 4)
          return 0;
-      for (unsigned i = 0; i < 4; ++i)
-         if (channels[i].size != AGX_SIZE_32)
+      agx_index pack_sources[4];
+      for (unsigned i = 0; i < 4; ++i) {
+         if (channels[i].size == AGX_SIZE_32) {
+            pack_sources[i] = channels[i];
+         } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                    channels[i].size == AGX_SIZE_16) {
+            /* As with the normalized 8-bit epilog below, a texture result
+             * can arrive through the half export ABI. The native RGB10A2
+             * pack consumes f32, so widen before packing instead of handing
+             * an unpacked half vector to the tile-store encoder. */
+            pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, pack_sources[i], channels[i]);
+         } else {
             return 0;
-      packed[0] = agx_pack_rgb10a2_agx3(b, channels[0], channels[1],
-                                      channels[2], channels[3]);
+         }
+      }
+      packed[0] = agx_pack_rgb10a2_agx3(b, pack_sources[0], pack_sources[1],
+                                      pack_sources[2], pack_sources[3]);
       return 1;
    }
 
@@ -2578,6 +2591,27 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
          agx_index widened = agx_temp(ctx, AGX_SIZE_32);
          agx_fmov_to(&b, widened, I->src[s]);
          I->src[s] = widened;
+      }
+
+      /* Zink's fragment shaders combine a minifloat multiplier with an
+       * absolute addend. The immediate FMA form has no grounded addend-abs
+       * field. Clear its sign bit before RA, preserving -abs(x) when present,
+       * and keep the multiply-add fused with its original rounding.
+       */
+      if ((I->src[0].type == AGX_INDEX_IMMEDIATE ||
+           I->src[1].type == AGX_INDEX_IMMEDIATE) &&
+          I->src[2].type != AGX_INDEX_IMMEDIATE &&
+          I->src[2].type != AGX_INDEX_NULL &&
+          I->src[2].size == AGX_SIZE_32 && I->src[2].abs) {
+         const bool negate = I->src[2].neg;
+         agx_index source = I->src[2];
+         source.abs = false;
+         source.neg = false;
+         agx_index mask = agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+         agx_index absolute = agx_temp(ctx, AGX_SIZE_32);
+         agx_bitop_to(&b, absolute, source, mask, 0x8 /* AND */);
+         absolute.neg = negate;
+         I->src[2] = absolute;
       }
 
       bool mixed = false, has_neg = false, unsupported_modifier = false;
