@@ -492,7 +492,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
               " api-first-instance=%u emitted-indexed=%u"
               " emitted-indirect=%u emitted-buffer=%" PRIx64
               " fragment-program=%" PRIx64
-              " shader=%08x/%u ioto=%08x/%u size=%ux%u samples=%u"
+              " main=%08x/%u linked=%08x/%u ioto=%08x/%u"
+              " size=%ux%u samples=%u"
               " sample-size=%u sampler-count=%u colors=%u[",
               submit_sequence, (uint64_t)c->vdm_ctrl_stream_base,
               cs->stats.cmds, cs->stats.calls,
@@ -509,6 +510,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
               cs->g17p_draw_trace.emitted_indirect,
               cs->g17p_draw_trace.emitted_indirect_buffer,
               cs->g17p_draw_trace.fragment_program,
+              cs->g17p_draw_trace.fragment_main_hash,
+              cs->g17p_draw_trace.fragment_main_size,
               cs->g17p_draw_trace.fragment_shader_hash,
               cs->g17p_draw_trace.fragment_shader_size,
               cs->g17p_draw_trace.fragment_ioto_hash,

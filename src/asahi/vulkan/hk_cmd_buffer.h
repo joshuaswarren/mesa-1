@@ -402,8 +402,10 @@ struct hk_cs {
       uint64_t fragment_program;
       uint64_t emitted_indirect_buffer;
       uint32_t fragment_shader_hash;
+      uint32_t fragment_main_hash;
       uint32_t fragment_ioto_hash;
       uint32_t fragment_shader_size;
+      uint32_t fragment_main_size;
       uint32_t fragment_ioto_size;
       uint32_t api_count;
       uint32_t api_instances;

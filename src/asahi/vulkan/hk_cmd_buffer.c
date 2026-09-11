@@ -1880,6 +1880,13 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                ? _mesa_hash_data((uint8_t *)shader_map + linked->b.entry_offset,
                                  linked->b.size)
                : 0;
+         /* Keep the main shader identity separate from the linked executable:
+          * render-target epilogs can change the latter for one application
+          * shader, which makes a timeout fingerprint needlessly ambiguous.
+          */
+         cs->g17p_draw_trace.fragment_main_size = s->code_size;
+         cs->g17p_draw_trace.fragment_main_hash =
+            s->code_ptr ? _mesa_hash_data(s->code_ptr, s->code_size) : 0;
          cs->g17p_draw_trace.color_count =
             cmd->state.gfx.render.color_att_count;
          for (unsigned i = 0; i < cmd->state.gfx.render.color_att_count; ++i) {
