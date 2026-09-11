@@ -1266,6 +1266,36 @@ g17p_strict_descriptors(void)
    return (unsigned)strtoul(value, NULL, 10);
 }
 
+/*
+ * Validation normally rejects the submit, which stops the application at the
+ * first complaint. A long-running client -- a game walking a level -- then
+ * validates only the streams it emitted before that point. Warn-only mode
+ * reports every failure and lets the run continue, so one session covers the
+ * whole stream population instead of its prefix.
+ */
+static bool
+g17p_stream_warn_only(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_STREAM_WARN_ONLY");
+
+   return value != NULL && value[0] != '\0' && strcmp(value, "0");
+}
+
+static unsigned g17p_stream_failures;
+
+static int
+g17p_stream_reject(const char *what)
+{
+   g17p_stream_failures++;
+
+   if (!g17p_stream_warn_only())
+      return -EINVAL;
+
+   fprintf(stderr, "shim: continuing after %s failure %u (warn-only)\n", what,
+           g17p_stream_failures);
+   return 0;
+}
+
 static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
@@ -1360,8 +1390,13 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .depth_bias_base = render.isp_dbias_base,
          };
          if (!asahi_g17p_render_aux_validate(&memory, &render) ||
-             !asahi_g17p_stream_validate(&memory, &config, &stats))
-            return -EINVAL;
+             !asahi_g17p_stream_validate(&memory, &config, &stats)) {
+            const int rejected = g17p_stream_reject("VDM");
+            if (rejected)
+               return rejected;
+            cursor += command_size;
+            continue;
+         }
          const char *matrix_case = getenv("ASAHI_SHIM_G17P_CASE");
          const bool auxiliary_clear = stats.clear_only && matrix_case &&
                                       strcmp(matrix_case, "clear-only");
@@ -1400,8 +1435,13 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .strict_descriptors = g17p_strict_descriptors(),
          };
          struct asahi_g17p_compute_stats stats;
-         if (!asahi_g17p_compute_validate(&memory, &compute, &stats))
-            return -EINVAL;
+         if (!asahi_g17p_compute_validate(&memory, &compute, &stats)) {
+            const int rejected = g17p_stream_reject("CDM");
+            if (rejected)
+               return rejected;
+            cursor += command_size;
+            continue;
+         }
          compute_stats.launches += stats.launches;
          compute_stats.barriers += stats.barriers;
          compute_stats.prologue_barriers += stats.prologue_barriers;
