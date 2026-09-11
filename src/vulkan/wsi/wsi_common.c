@@ -2185,6 +2185,16 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                          const VkPresentInfoKHR *pPresentInfo)
 {
    struct vk_device *dev = queue->base.device;
+   if (vk_device_is_lost(dev)) {
+      /* A failed render submission may never signal the present semaphores.
+       * Do not copy or export their payloads after the device is lost. */
+      if (pPresentInfo->pResults) {
+         for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
+            pPresentInfo->pResults[i] = VK_ERROR_DEVICE_LOST;
+      }
+      return VK_ERROR_DEVICE_LOST;
+   }
+
    uint32_t current_frame = p_atomic_fetch_add(&dev->current_frame, 1);
    VkResult final_result = handle_trace(queue, dev, current_frame);
 

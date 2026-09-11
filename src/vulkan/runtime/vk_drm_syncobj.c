@@ -285,6 +285,9 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
                          enum vk_sync_wait_flags wait_flags,
                          uint64_t abs_timeout_ns)
 {
+   if (vk_device_is_lost(device))
+      return VK_ERROR_DEVICE_LOST;
+
    if ((wait_flags & VK_SYNC_WAIT_PENDING) &&
        !(waits[0].sync->type->features & VK_SYNC_FEATURE_TIMELINE)) {
       /* Sadly, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE was never implemented
@@ -325,7 +328,8 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
    if (!(wait_flags & VK_SYNC_WAIT_ANY))
       syncobj_wait_flags |= DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
 
-   int err;
+   int err = 0;
+   VkResult result = VK_SUCCESS;
    if (wait_count == 0) {
       err = 0;
    } else if (wait_flags & VK_SYNC_WAIT_PENDING) {
@@ -333,11 +337,25 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
        * syncobjs because the non-timeline wait doesn't support
        * DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE.
        */
-      err = device->sync->timeline_wait(device->sync, handles, wait_values,
-                                        wait_count, abs_timeout_ns,
-                                        syncobj_wait_flags |
-                                        DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
-                                        NULL /* first_signaled */);
+      while (true) {
+         /* A submit thread may lose the device without ever publishing this
+          * payload. Periodically check device loss while retaining the
+          * caller's deadline; a healthy pending wait must not be shortened. */
+         if (vk_device_is_lost(device)) {
+            result = VK_ERROR_DEVICE_LOST;
+            break;
+         }
+
+         uint64_t wait_timeout_ns = MIN2(abs_timeout_ns,
+            os_time_get_absolute_timeout(100000000));
+         err = device->sync->timeline_wait(device->sync, handles, wait_values,
+                                           wait_count, wait_timeout_ns,
+                                           syncobj_wait_flags |
+                                           DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                           NULL /* first_signaled */);
+         if (!err || errno != ETIME || wait_timeout_ns == abs_timeout_ns)
+            break;
+      }
    } else if (has_timeline) {
       err = device->sync->timeline_wait(device->sync, handles, wait_values,
                                         wait_count, abs_timeout_ns,
@@ -352,6 +370,9 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
 
    STACK_ARRAY_FINISH(handles);
    STACK_ARRAY_FINISH(wait_values);
+
+   if (result != VK_SUCCESS)
+      return result;
 
    if (err && errno == ETIME) {
       return VK_TIMEOUT;
