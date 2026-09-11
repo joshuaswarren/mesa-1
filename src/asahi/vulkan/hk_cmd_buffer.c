@@ -28,6 +28,7 @@
 #include "libagx_shaders.h"
 
 #include "util/log.h"
+#include "util/hash_table.h"
 #include "util/u_debug.h"
 
 #include <inttypes.h>
@@ -524,6 +525,18 @@ hk_g17p_launch_trace_enabled(void)
    static int enabled = -1;
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
+   return enabled != 0;
+}
+
+/* One short line per submitted graphics stream.  This trace exists for real
+ * applications where HK_G17P_LAUNCH_TRACE changes timing and produces too
+ * much output to find the program whose fragment timestamp never ended. */
+bool
+hk_g17p_draw_trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
    return enabled != 0;
 }
 
@@ -1851,6 +1864,31 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          hk_cmd_publish_ioto_program(cmd, &reservation, program.length);
       if (!published)
          return 0;
+
+      if (hk_g17p_draw_trace_enabled() &&
+          s->info.stage == MESA_SHADER_FRAGMENT && cmd->current_cs.gfx) {
+         struct hk_cs *cs = cmd->current_cs.gfx;
+         void *shader_map = agx_bo_map(linked->b.bo);
+
+         cs->g17p_draw_trace.fragment_program = published;
+         cs->g17p_draw_trace.fragment_ioto_hash =
+            _mesa_hash_data(program.bytes, program.length);
+         cs->g17p_draw_trace.fragment_ioto_size = program.length;
+         cs->g17p_draw_trace.fragment_shader_size = linked->b.size;
+         cs->g17p_draw_trace.fragment_shader_hash =
+            shader_map
+               ? _mesa_hash_data((uint8_t *)shader_map + linked->b.entry_offset,
+                                 linked->b.size)
+               : 0;
+         cs->g17p_draw_trace.color_count =
+            cmd->state.gfx.render.color_att_count;
+         for (unsigned i = 0; i < cmd->state.gfx.render.color_att_count; ++i) {
+            cs->g17p_draw_trace.color_formats[i] =
+               cmd->state.gfx.render.color_att[i].vk_format;
+         }
+         cs->g17p_draw_trace.depth_format =
+            cmd->state.gfx.render.depth_att.vk_format;
+      }
 
       if (hk_g17p_launch_trace_enabled()) {
          const char *label = s->info.stage == MESA_SHADER_FRAGMENT
