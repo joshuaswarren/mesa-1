@@ -204,8 +204,29 @@
 #define G17P_INDIRECT_DRAW 0
 #endif
 
+/* vkQuake records every one of its drawing contexts into its own secondary
+ * command buffer and replays them with vkCmdExecuteCommands(cb, 1, &secondary)
+ * called once per secondary, several times in a row, inside a single render
+ * pass. The plain secondary oracle executes exactly one secondary, so this
+ * variant records four and replays them one call at a time. */
+#ifndef G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define G17P_SECONDARY_COMMAND_BUFFER_MULTI 0
+#endif
+
+/* The multi variant is the single-secondary variant plus more secondaries, so
+ * it reuses every guard the single-secondary oracle already carries. */
 #ifndef G17P_SECONDARY_COMMAND_BUFFER
-#define G17P_SECONDARY_COMMAND_BUFFER 0
+#define G17P_SECONDARY_COMMAND_BUFFER G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#endif
+
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define SECONDARY_QUADRANT_COUNT 4
+/* Two triangles per quadrant, selected out of one shared vertex buffer by
+ * firstVertex. */
+#define SECONDARY_QUADRANT_VERTICES 6
+/* Every expected channel is an exact UNORM8 code point, so this absorbs a
+ * one-LSB readback quirk and nothing else. */
+#define SECONDARY_QUADRANT_TOLERANCE 1
 #endif
 
 #if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 5
@@ -957,6 +978,14 @@
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rg16_snorm_frag_spv
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+/* The ordinary position-only vertex shader. The fragment program differs from
+ * the constant-colour one only in taking its colour from a push constant, so
+ * each secondary can paint its quadrant a distinguishable colour. */
+#include "g17p_vulkan_secondary_quadrant_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_secondary_quadrant_frag_spv
 #else
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -1813,6 +1842,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define PROBE_NAME "g17p-vulkan-secondary-command-buffer-multi"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_SECONDARY_COMMAND_BUFFER
 #define PROBE_NAME "g17p-vulkan-secondary-command-buffer"
 #define READBACK_IMAGE_USAGE 0
@@ -1883,6 +1917,9 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 #if G17P_SECONDARY_COMMAND_BUFFER
 VK_FN(vkCmdExecuteCommands);
+#endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+VK_FN(vkCmdPushConstants);
 #endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
 VK_FN(vkCmdPipelineBarrier);
@@ -2095,10 +2132,143 @@ verify_upload(const struct mapped_buffer *buffer, const uint8_t *expected,
 }
 #endif
 
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+/* Quadrant 0 is replayed first, exactly as vkQuake replays its six world
+ * contexts before entities, sky, the view model and the GUI.  Every channel
+ * is an exact UNORM8 code point of an exact 0.0/1.0 fragment colour. */
+static const float secondary_quadrant_colors[SECONDARY_QUADRANT_COUNT][4] = {
+   {1.0f, 0.0f, 0.0f, 1.0f},
+   {0.0f, 1.0f, 0.0f, 1.0f},
+   {0.0f, 0.0f, 1.0f, 1.0f},
+   {1.0f, 1.0f, 0.0f, 1.0f},
+};
+static const uint8_t
+   secondary_quadrant_expected[SECONDARY_QUADRANT_COUNT][4] = {
+   {255, 0, 0, 255},
+   {0, 255, 0, 255},
+   {0, 0, 255, 255},
+   {255, 255, 0, 255},
+};
+/* The render-pass clear.  A quadrant that still carries it was never
+ * rasterized, which is the vkQuake world-surface symptom rather than a
+ * wrong-colour or wrong-order one. */
+static const uint8_t secondary_quadrant_clear[4] = {0, 0, 0, 255};
+static const char *const
+   secondary_quadrant_names[SECONDARY_QUADRANT_COUNT] = {
+   "0 (top-left, replayed first)",
+   "1 (top-right)",
+   "2 (bottom-left)",
+   "3 (bottom-right, replayed last)",
+};
+#endif
+
 static bool
 verify_readback(const uint8_t *map)
 {
-#if G17P_RGBA8_MRT
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
+      if (map[i] != 0xa5 ||
+          map[READBACK_GUARD_BYTES + READBACK_PAYLOAD_BYTES + i] != 0xa5) {
+         fprintf(stderr, PROBE_NAME ": readback guard %zu was modified\n", i);
+         return false;
+      }
+   }
+
+   const uint8_t *pixels = map + READBACK_GUARD_BYTES;
+
+   /* Report every quadrant centre on both outcomes: a pass and a "the first
+    * group is missing" failure must be equally legible from the log. */
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      const unsigned x =
+         (quadrant & 1) * (IMAGE_WIDTH / 2) + IMAGE_WIDTH / 4;
+      const unsigned y =
+         (quadrant >> 1) * (IMAGE_HEIGHT / 2) + IMAGE_HEIGHT / 4;
+      const uint8_t *centre =
+         &pixels[(y * IMAGE_WIDTH + x) * IMAGE_PIXEL_BYTES];
+      printf(PROBE_NAME ": quadrant %s centre (%u,%u) RGBA = %u %u %u %u, "
+                        "expected %u %u %u %u\n",
+             secondary_quadrant_names[quadrant], x, y, centre[0], centre[1],
+             centre[2], centre[3], secondary_quadrant_expected[quadrant][0],
+             secondary_quadrant_expected[quadrant][1],
+             secondary_quadrant_expected[quadrant][2],
+             secondary_quadrant_expected[quadrant][3]);
+   }
+
+   size_t wrong_pixels[SECONDARY_QUADRANT_COUNT] = {0};
+   size_t first_wrong_pixel[SECONDARY_QUADRANT_COUNT] = {0};
+   uint8_t first_wrong[SECONDARY_QUADRANT_COUNT][IMAGE_PIXEL_BYTES];
+   memset(first_wrong, 0, sizeof(first_wrong));
+
+   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+      const unsigned x = pixel % IMAGE_WIDTH;
+      const unsigned y = pixel / IMAGE_WIDTH;
+      const unsigned quadrant =
+         (x >= IMAGE_WIDTH / 2 ? 1u : 0u) + (y >= IMAGE_HEIGHT / 2 ? 2u : 0u);
+      const uint8_t *actual = &pixels[pixel * IMAGE_PIXEL_BYTES];
+      const uint8_t *wanted = secondary_quadrant_expected[quadrant];
+      unsigned worst_delta = 0;
+      for (unsigned byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte) {
+         const unsigned delta = actual[byte] > wanted[byte]
+                                   ? actual[byte] - wanted[byte]
+                                   : wanted[byte] - actual[byte];
+         if (delta > worst_delta)
+            worst_delta = delta;
+      }
+      if (worst_delta <= SECONDARY_QUADRANT_TOLERANCE)
+         continue;
+      if (!wrong_pixels[quadrant]) {
+         first_wrong_pixel[quadrant] = pixel;
+         memcpy(first_wrong[quadrant], actual, IMAGE_PIXEL_BYTES);
+      }
+      wrong_pixels[quadrant]++;
+   }
+
+   unsigned wrong_quadrants = 0;
+   bool cleared[SECONDARY_QUADRANT_COUNT] = {false};
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      if (!wrong_pixels[quadrant])
+         continue;
+      wrong_quadrants++;
+      cleared[quadrant] = memcmp(first_wrong[quadrant],
+                                 secondary_quadrant_clear,
+                                 IMAGE_PIXEL_BYTES) == 0;
+      fprintf(stderr,
+              PROBE_NAME ": quadrant %s is wrong in %zu of %u pixels: pixel "
+                         "%zu is RGBA %u %u %u %u, expected %u %u %u %u "
+                         "+/- %u%s\n",
+              secondary_quadrant_names[quadrant], wrong_pixels[quadrant],
+              (unsigned)((IMAGE_WIDTH / 2) * (IMAGE_HEIGHT / 2)),
+              first_wrong_pixel[quadrant], first_wrong[quadrant][0],
+              first_wrong[quadrant][1], first_wrong[quadrant][2],
+              first_wrong[quadrant][3],
+              secondary_quadrant_expected[quadrant][0],
+              secondary_quadrant_expected[quadrant][1],
+              secondary_quadrant_expected[quadrant][2],
+              secondary_quadrant_expected[quadrant][3],
+              SECONDARY_QUADRANT_TOLERANCE,
+              cleared[quadrant]
+                 ? "; that is the render-pass clear, so this secondary's draw "
+                   "never rasterized"
+                 : "");
+   }
+
+   if (!wrong_quadrants)
+      return true;
+
+   if (wrong_quadrants == 1 && cleared[0]) {
+      fprintf(stderr,
+              PROBE_NAME ": FIRST GROUP MISSING — quadrant 0 kept the clear "
+                         "while quadrants 1..3 painted correctly, so only the "
+                         "first of four consecutive one-per-call "
+                         "vkCmdExecuteCommands replays was dropped. That is "
+                         "exactly the vkQuake world-surface symptom: the "
+                         "world context is the first group in the pass.\n");
+   }
+
+   return false;
+#elif G17P_RGBA8_MRT
    for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
       if (map[i] != 0xa5 ||
           map[READBACK_GUARD_BYTES + IMAGE_BYTES + i] != 0xa5 ||
@@ -3379,6 +3549,9 @@ main(void)
 #if G17P_SECONDARY_COMMAND_BUFFER
    LOAD_DEVICE(device, vkCmdExecuteCommands);
 #endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   LOAD_DEVICE(device, vkCmdPushConstants);
+#endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
 #endif
@@ -3682,6 +3855,23 @@ main(void)
       {-1.0f, -1.0f},
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
+   };
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   /* Four disjoint clip-space quads, one per quadrant, six vertices each.
+    * Each secondary selects its own quadrant through firstVertex alone, so
+    * the pipeline, the render pass and the vertex buffer are shared and the
+    * only new variable against the single-secondary oracle is how many
+    * secondaries the pass replays. The quadrant edges land exactly on the
+    * pixel-16 boundary, so the quads neither overlap nor leave a crack. */
+   static const float vertices[][2] = {
+      {-1.0f, -1.0f}, {0.0f, -1.0f}, {-1.0f, 0.0f},
+      {0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f},
+      {0.0f, -1.0f}, {1.0f, -1.0f}, {0.0f, 0.0f},
+      {1.0f, -1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f},
+      {-1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 1.0f},
+      {0.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 1.0f},
+      {0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f},
+      {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f},
    };
 #else
    static const float vertices[][2] = {
@@ -5002,6 +5192,12 @@ main(void)
    check(vkCreateShaderModule(device, &frag_module_info, NULL, &frag_module),
          "vkCreateShaderModule(fragment)");
 
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   const VkPushConstantRange quadrant_color_range = {
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .size = sizeof(secondary_quadrant_colors[0]),
+   };
+#endif
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 #if G17P_TWO_SAMPLERS_SPLIT_SETS
@@ -5010,6 +5206,10 @@ main(void)
 #elif G17P_TEXTURE_ORACLE
       .setLayoutCount = 1,
       .pSetLayouts = &set_layout,
+#endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &quadrant_color_range,
 #endif
    };
    VkPipelineLayout pipeline_layout;
@@ -5505,10 +5705,18 @@ main(void)
 #if G17P_SECONDARY_COMMAND_BUFFER
    VkCommandBufferAllocateInfo secondary_allocate = command_allocate;
    secondary_allocate.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   secondary_allocate.commandBufferCount = SECONDARY_QUADRANT_COUNT;
+   VkCommandBuffer secondary_command_buffers[SECONDARY_QUADRANT_COUNT];
+   check(vkAllocateCommandBuffers(device, &secondary_allocate,
+                                  secondary_command_buffers),
+         "vkAllocateCommandBuffers(secondary)");
+#else
    VkCommandBuffer secondary_command_buffer;
    check(vkAllocateCommandBuffers(device, &secondary_allocate,
                                   &secondary_command_buffer),
          "vkAllocateCommandBuffers(secondary)");
+#endif
 #endif
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -5773,6 +5981,35 @@ main(void)
    vkCmdBeginRenderPass(command_buffer, &render_begin,
 #if G17P_SECONDARY_COMMAND_BUFFER
                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   const VkDeviceSize secondary_vertex_offset = 0;
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      VkCommandBuffer secondary = secondary_command_buffers[quadrant];
+      check(vkBeginCommandBuffer(secondary, &secondary_begin),
+            "vkBeginCommandBuffer(secondary)");
+      vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+      vkCmdBindVertexBuffers(secondary, 0, 1, &vertex_buffer,
+                             &secondary_vertex_offset);
+      vkCmdPushConstants(secondary, pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(secondary_quadrant_colors[quadrant]),
+                         secondary_quadrant_colors[quadrant]);
+      vkCmdDraw(secondary, SECONDARY_QUADRANT_VERTICES, 1,
+                quadrant * SECONDARY_QUADRANT_VERTICES, 0);
+      check(vkEndCommandBuffer(secondary), "vkEndCommandBuffer(secondary)");
+   }
+
+   /* vkQuake's R_SubmitContexts loop: one vkCmdExecuteCommands per secondary,
+    * four separate consecutive calls inside this one render pass. Batching
+    * them into a single commandBufferCount=4 call would not reproduce the
+    * shape under test, so do not. */
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      vkCmdExecuteCommands(command_buffer, 1,
+                           &secondary_command_buffers[quadrant]);
+   }
+#else
    check(vkBeginCommandBuffer(secondary_command_buffer, &secondary_begin),
          "vkBeginCommandBuffer(secondary)");
    vkCmdBindPipeline(secondary_command_buffer,
@@ -5784,6 +6021,7 @@ main(void)
    check(vkEndCommandBuffer(secondary_command_buffer),
          "vkEndCommandBuffer(secondary)");
    vkCmdExecuteCommands(command_buffer, 1, &secondary_command_buffer);
+#endif
 #else
                         VK_SUBPASS_CONTENTS_INLINE);
 #if !G17P_CUBE_SAMPLE
@@ -6206,6 +6444,13 @@ main(void)
    if (record_only) {
       printf(PROBE_NAME ": PASS — feature advertised, divergent quad shader "
                         "compiled, and command stream submitted\n");
+      return EXIT_SUCCESS;
+   }
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   if (record_only) {
+      printf(PROBE_NAME ": RECORD PASS — four inherited secondary draws "
+                        "replayed by four consecutive vkCmdExecuteCommands "
+                        "calls into a validated G17P command stream\n");
       return EXIT_SUCCESS;
    }
 #elif G17P_SECONDARY_COMMAND_BUFFER
@@ -6756,6 +7001,11 @@ main(void)
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UNORM exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   printf(PROBE_NAME ": PASS — four consecutive one-per-call "
+                     "vkCmdExecuteCommands replays painted all four "
+                     "quadrants exactly, 128 guard bytes unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #elif G17P_SECONDARY_COMMAND_BUFFER
    printf(PROBE_NAME ": PASS — secondary render-pass draw produced exact "
                      "RGBA8 immediately/3s, 128 guard bytes unchanged, "

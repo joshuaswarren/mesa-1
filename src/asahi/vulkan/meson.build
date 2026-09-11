@@ -697,6 +697,25 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # vkQuake's R_SubmitContexts shape. The single-secondary oracle above
+    # executes exactly one secondary, so "several consecutive
+    # vkCmdExecuteCommands calls inside one render pass" is untested: vkQuake
+    # replays six world secondaries, then six entity secondaries, then one
+    # each for sky, view model, particles and GUI, one call per secondary.
+    # The world is the first such group and is exactly what goes missing on
+    # G17P. This closes that hole with four secondaries painting four
+    # disjoint quadrants in four distinct colours, replayed one call at a
+    # time, so a dropped or misordered group names itself in the readback.
+    executable(
+      'g17p-vulkan-secondary-command-buffer-multi',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args,
+                '-DG17P_SECONDARY_COMMAND_BUFFER_MULTI=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Exact public Vulkan oracle for G17P wide Bresenham line state.
     executable(
       'g17p-vulkan-bresenham-lines',
