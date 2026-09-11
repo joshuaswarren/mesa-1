@@ -1322,11 +1322,22 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
          BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
+      const bool ok =
+         !linked->sw_indexing && nr_attribs <= AGX_MAX_VBUFS &&
+         s->agx3_vdm_state_update.source_layout ==
+            AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
 
-      return !linked->sw_indexing &&
-             nr_attribs <= AGX_MAX_VBUFS &&
-             s->agx3_vdm_state_update.source_layout ==
-                AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+      if (!ok) {
+         mesa_loge_once("G17P graphics program refused: stage=vs "
+                        "sw_indexing=%u attribs=%u/%u source_layout=%u "
+                        "(want %u)",
+                        linked->sw_indexing, nr_attribs, AGX_MAX_VBUFS,
+                        (unsigned)s->agx3_vdm_state_update.source_layout,
+                        (unsigned)
+                        AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT);
+      }
+
+      return ok;
    }
 
    /* The raster variant produced by poly_nir_lower_gs is a hardware vertex
@@ -1335,14 +1346,43 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
     * attributes, then performs the XFB stores before rasterization. */
    if (s->info.stage == MESA_SHADER_GEOMETRY &&
        s->b.info.stage == MESA_SHADER_VERTEX) {
-      return !linked->sw_indexing &&
-             s->agx3_vdm_state_update.source_layout ==
-                AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+      const bool ok =
+         !linked->sw_indexing &&
+         s->agx3_vdm_state_update.source_layout ==
+            AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+
+      if (!ok) {
+         mesa_loge_once("G17P graphics program refused: stage=gs-raster "
+                        "sw_indexing=%u source_layout=%u (want %u)",
+                        linked->sw_indexing,
+                        (unsigned)s->agx3_vdm_state_update.source_layout,
+                        (unsigned)
+                        AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT);
+      }
+
+      return ok;
    }
 
-   return s->info.stage == MESA_SHADER_FRAGMENT &&
-          hk_g17p_smooth_varyings_supported(cmd, linked) &&
-          hk_g17p_basic_fragment_layout(cmd);
+   if (s->info.stage != MESA_SHADER_FRAGMENT) {
+      mesa_loge_once("G17P graphics program refused: stage=%u has no native "
+                     "G17P graphics path (sw stage %u, hw stage %u)",
+                     (unsigned)s->info.stage, (unsigned)s->info.stage,
+                     (unsigned)s->b.info.stage);
+      return false;
+   }
+
+   {
+      const bool smooth = hk_g17p_smooth_varyings_supported(cmd, linked);
+      const bool layout = hk_g17p_basic_fragment_layout(cmd);
+
+      if (!smooth || !layout) {
+         mesa_loge_once("G17P graphics program refused: stage=fs "
+                        "smooth_varyings=%u basic_fragment_layout=%u",
+                        smooth, layout);
+      }
+
+      return smooth && layout;
+   }
 }
 
 /*
