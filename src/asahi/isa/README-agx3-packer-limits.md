@@ -549,6 +549,64 @@ separate form.** `agx3_falu_mods` now carries the widths next to the modifier
 bits for exactly this reason, and `agx3_try_float_modifier()` admits a 16-bit
 operand on any half.
 
+#### The KIND axis on the FMA multiplier slot (2026-09-10, glmark2 terrain)
+
+Widening `agx3_try_float_modifier()` along the *width* axis left the *kind*
+axis exactly as it was: `agx3_mod_src_any_width()` still demanded a register,
+so an FMA whose multiplier is an immediate **and** whose other operands carry
+`abs` fell through to `AGX3_REFUSE`. `glmark2 -b terrain` is refused on it --
+`vec4 h = 1.0 - abs(x) - abs(y);` in `terrain-noise.frag`:
+
+```
+agx3_pack_binary.c:10181: no grounded AGX3 encoding for ffma
+  [d32:reg2 s0=16:imm#32 s1=32:reg10.abs.discard s2=32:reg2.abs.discard
+   cond=0 nest=0 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+Kind is `f42`, and it sits on the same encoding point as everything else:
+`f42=2` reads the `f35` register slot, `f42=1` reads the `f34` minifloat, and
+neither disturbs `f30`/`f31` on the `f18` slot or `f64`/`f65` on the `f52`
+addend. Apple composes the cells (`.tmp/g17p-terrain-fma-imm-abs/fmaimm.metal`,
+recovered through `tools/decomp.c`):
+
+```
+ fma(a,b,c)                 09011e05810802c0            f42=2 f35=4
+ fma(0.5,b,c)               09010ea1810402c2            f42=1 f34=32
+ fma(0.5,fabs(b),c)         09010ea18304020200800100    plus f30
+ fma(0.5,fabs(b),fabs(c))   09010ea18b04020200800100    plus f30 and f64
+ fma(-0.5,b,c)              09011ea1810402c2            f34=160, NOT a neg bit
+ fma(0.5,fabs(b),-fabs(c))  09010ea19b04020200800100    plus f30, f64 and f65
+```
+
+Orthogonality is grounded for `f32add`/`f32mul`/`f32fma`/`fsel` and the
+bitwise ops -- it is **not** a general property of the ISA, so it is a cheap
+first hypothesis and not a licence to skip the witness. Every remaining cell
+this form's encoder admits therefore has its own kernel (`fmaimm2.metal`):
+
+```
+ saturate(fma(0.5,fabs(b),fabs(c)))  09010ea18b04020200820100   f14 beside f30/f64
+ saturate(fma(0.5,b,c))              09010ea1820402020082       f14 alone, ep4
+ fma(0.5,half b,c)                   09040ea1810002c2           f26=1, odd half
+ fma(0.5,b,half c)                   09010ea1810400c2           f60=1
+ fma(0.5,fabs(half b),fabs(c))       09040ea18b00020200800100   f26, f30 and f64
+```
+
+The last row is the interesting one: kind, width and two modifiers on a single
+instruction, composed by Apple.
+
+Two things worth keeping. A negated immediate multiplier is the minifloat's own
+sign bit -- there is no `f35` register slot in this form to hang a modifier on,
+so `agx3_falu_fma_mul_imm_mod()` refuses `src0_abs`/`src0_neg` and the packer
+folds the sign into the constant, as Apple does. And adding the `abs` bits
+moves the instruction from encoding point 3 (8 bytes) to point 5 (12 bytes);
+the encoder walks ep 0..5 and takes the first that composes, so the plain form
+keeps the short encoding.
+
+The refusal printer also gained a `#` for immediate operands here: `s0=16:imm32`
+reads as a 32-bit immediate when it is a 16-bit slot holding minifloat 32, and a
+width and a kind that print as one token are the same false-bug factory as a
+field left out entirely.
+
 The same is true of `fsel`. Its comparator widths are `f43`/`f60`, its absolute
 bits `f47`/`f64`, its negate `f65`, and its second comparator's *kind* `f59`
 with the value in `f51` (immediate) or `f52` (register):

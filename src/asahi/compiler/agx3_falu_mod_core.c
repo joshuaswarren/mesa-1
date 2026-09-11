@@ -390,3 +390,60 @@ agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
          return true;
    return false;
 }
+
+/* Immediate multiplier (f34, selected by f42=1) with a modifier-bearing
+ * register multiplicand (f18 + f26/f30/f31) and addend (f52 + f60/f64/f65).
+ * Baseline is the constant part of Apple's witnessed fma(0.5, b, c); every
+ * operand, modifier, lifetime hint and wait bit is an override, so a field
+ * the selected encoding point does not consume makes the composer refuse
+ * rather than silently drop it. */
+bool
+agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
+                          uint8_t multiplier, uint16_t src1, uint16_t addend,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || m == NULL || runtime == NULL ||
+       out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
+       !slot_ok(src1, m->src1_16) || !slot_ok(addend, m->addend_16) ||
+       runtime->wait_mask > 0x3f)
+      return false;
+
+   /* There is no f35 register slot in this form, so nothing can carry a
+    * multiplier-side modifier or lifetime hint; a caller that has one has not
+    * folded it into the immediate and must not be silently obeyed. */
+   if (m->src0_abs || m->src0_neg || m->src0_16 || runtime->cache[0] ||
+       runtime->discard[0])
+      return false;
+
+   for (unsigned i = 1; i < 3; ++i)
+      if (runtime->cache[i] && runtime->discard[i])
+         return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(42, 1),
+      KV(43, 2), KV(59, 2), KV(60, 2), KV(77, 2), KV(91, 2),
+   };
+   struct agx3_field_kv ov[32] = {
+      KV(2, dest),      KV(34, multiplier),
+      KV(18, src1),     KV(52, addend),
+      KV(26, m->src1_16 ? 1 : 2),   KV(30, m->src1_abs ? 1 : 0),
+      KV(31, m->src1_neg ? 1 : 0),
+      KV(60, m->addend_16 ? 1 : 2), KV(64, m->addend_abs ? 1 : 0),
+      KV(65, m->addend_neg ? 1 : 0),
+      KV(14, m->saturate ? 1 : 0),
+      KV(11, runtime->dest_cache),
+      KV(27, runtime->cache[1]),    KV(29, runtime->discard[1]),
+      KV(61, runtime->cache[2]),    KV(63, runtime->discard[2]),
+   };
+   unsigned n = 16;
+   for (unsigned i = 0; i < 6; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(97 + i, (runtime->wait_mask >> i) & 1);
+
+   for (unsigned ep = 0; ep <= 5; ++ep) {
+      if (agx3_bind_compose(enc, "f32fma", ep, base, 10, ov, n, out, len))
+         return true;
+   }
+   return false;
+}

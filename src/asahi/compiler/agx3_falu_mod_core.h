@@ -131,6 +131,42 @@ bool agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len);
 
+/*
+ * FMA whose MULTIPLIER is a minifloat immediate while the multiplicand and the
+ * addend stay registers that carry their own modifiers and widths.
+ *
+ * Operand KIND is a field of the same encoding point as the modifier bits,
+ * exactly as width is: f42 selects between "the f35 register slot" (2) and
+ * "the f34 immediate" (1), and it sits alongside f30/f31 on the f18 slot and
+ * f64/f65 on the f52 addend without disturbing either.  Modelling kind and
+ * modifier as separate encoders is what refused `k * fabs(a) + fabs(b)` --
+ * glmark2's terrain noise kernel, `1.0 - abs(x) - abs(y)` -- which stands on
+ * both axes at once and had no home in either.  Apple composes the cells, one
+ * kernel per cell (`fmaimm.metal`, decoded with tools/decomp.c):
+ *
+ *    fma(a,b,c)            09011e05810802c0      f42=2 f35=4
+ *    fma(0.5,b,c)          09010ea1810402c2      f42=1 f34=32
+ *    fma(0.5,fabs(b),c)    09010ea18304020200800100   plus f30
+ *    fma(0.5,fabs(b),      09010ea18b04020200800100   plus f30 and f64
+ *        fabs(c))
+ *    fma(0.5,-b,c)         09011ea1810402c2      f34=160: a negated
+ *                                                immediate multiplier is the
+ *                                                minifloat's own sign bit,
+ *                                                not a modifier bit
+ *    fma(0.5,fabs(b),      09010ea19b04020200800100   plus f30, f64 and f65
+ *        -fabs(c))
+ *
+ * `m->src0_*` are therefore not accepted here: fold the multiplier's sign into
+ * `multiplier` the way Apple does.
+ */
+bool agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
+                              uint8_t multiplier, uint16_t src1,
+                              uint16_t addend,
+                              const struct agx3_falu_mods *m,
+                              const struct agx3_falu_runtime *runtime,
+                              uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
+                              uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

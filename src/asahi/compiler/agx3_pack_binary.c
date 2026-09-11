@@ -111,8 +111,15 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 
    for (unsigned i = 0; i < I->nr_srcs && n > 0 && n < (int)sizeof(shape); ++i) {
       const agx_index x = I->src[i];
-      n += snprintf(shape + n, sizeof(shape) - n, " s%u=%u:%s%u%s%s%s%s%s", i,
-                    16u << x.size, agx3_index_kind(x), x.value,
+      /* An immediate's `value` is a constant, not a register number, so it
+       * gets a '#'. Without it `s0=16:imm32` reads as a 32-bit immediate when
+       * it is in fact a 16-bit slot holding the minifloat 32 -- and a width
+       * and a kind that print as one token is the same class of ambiguity as
+       * a field left out entirely. */
+      const bool immediate = x.type == AGX_INDEX_IMMEDIATE;
+      n += snprintf(shape + n, sizeof(shape) - n, " s%u=%u:%s%s%u%s%s%s%s%s", i,
+                    16u << x.size, agx3_index_kind(x), immediate ? "#" : "",
+                    x.value,
                     x.abs ? ".abs" : "", x.neg ? ".neg" : "",
                     x.kill ? ".kill" : "", x.cache ? ".cache" : "",
                     x.discard ? ".discard" : "");
@@ -9750,6 +9757,65 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        imm.value,add.value,add.neg,agx3_post_ra_hint(reg),
                        agx3_post_ra_hint(add),I->dest[0].cache,wait,bytes,&len) ||
                    !agx3_append(emission,bytes,len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+         }
+
+         /* The same native FMA, with the modifiers the compact minifloat form
+          * above cannot carry.  Operand KIND (f42 selecting the f34 immediate
+          * over the f35 register slot) is a field of the same encoding point
+          * as the f30/f31 and f64/f65 modifier bits and the f26/f60 widths,
+          * so `k * fabs(a) + fabs(b)` is one instruction, not a shape without
+          * an encoding -- Apple composes exactly this cell.  glmark2's
+          * terrain noise kernel (`vec4 h = 1.0 - abs(x) - abs(y);`) is the
+          * shape that used to take the whole fragment shader down with it.
+          *
+          * A modifier on the immediate itself is folded into the minifloat:
+          * Apple encodes fma(0.5, -b, c) as f34 = -0.5, not as a neg bit,
+          * and there is no register slot here to hang one on. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
+             I->nr_dests == 1 && I->nr_srcs == 3 &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             (I->src[0].type == AGX_INDEX_IMMEDIATE) !=
+                (I->src[1].type == AGX_INDEX_IMMEDIATE)) {
+            const bool imm_first = I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index imm = I->src[imm_first ? 0 : 1];
+            const agx_index reg = I->src[imm_first ? 1 : 0];
+            const agx_index add = I->src[2];
+
+            if (agx3_plain_immediate(imm) && imm.value <= 255 &&
+                agx3_mod_src_any_width(reg) && agx3_mod_src_any_width(add)) {
+               if (reg.kill || add.kill || (reg.cache && reg.discard) ||
+                   (add.cache && add.discard))
+                  AGX3_REFUSE(I);
+
+               uint8_t multiplier = imm.value;
+               if (imm.abs)
+                  multiplier &= 0x7f;
+               if (imm.neg)
+                  multiplier ^= 0x80;
+
+               const struct agx3_falu_mods m = {
+                  .src1_abs = reg.abs,
+                  .src1_neg = reg.neg,
+                  .src1_16 = reg.size == AGX_SIZE_16,
+                  .addend_abs = add.abs,
+                  .addend_neg = add.neg,
+                  .addend_16 = add.size == AGX_SIZE_16,
+                  .saturate = I->saturate,
+               };
+               const struct agx3_falu_runtime runtime = {
+                  .cache = {false, reg.cache, add.cache},
+                  .discard = {false, reg.discard, add.discard},
+                  .dest_cache = I->dest[0].cache,
+                  .wait_mask = wait,
+               };
+               uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], length;
+               if (!agx3_falu_fma_mul_imm_mod(enc, I->dest[0].value,
+                       multiplier, reg.value, add.value, &m, &runtime,
+                       bytes, &length) ||
+                   !agx3_append(emission, bytes, length))
                   AGX3_REFUSE(I);
                continue;
             }

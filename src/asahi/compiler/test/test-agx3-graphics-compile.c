@@ -5062,6 +5062,47 @@ build_fs_glmark2_terrain_offset(void)
    return fs_finish(&b);
 }
 
+/* terrain's procedural-noise kernel forms `1.0 - abs(x) - abs(y)` at full
+ * precision, which reaches the backend as an f32 FMA whose multiplier is a
+ * minifloat immediate and whose other two operands are absolute registers --
+ * an immediate operand and a source modifier on one encoding point at once.
+ * That combination used to have no home in either the immediate packer or the
+ * modifier packer, so it refused the whole fragment shader; see
+ * agx3_falu_fma_mul_imm_mod() for Apple's bytes. */
+static nir_shader *
+build_fs_glmark2_terrain_noise(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 terrain noise FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, v32, 0);
+   nir_def *y = nir_channel(&b, v32, 1);
+
+   /* h = 1.0 - |x| - |y| */
+   nir_def *h = nir_fsub(&b, nir_fsub(&b, nir_imm_float(&b, 1.0),
+                                      nir_fabs(&b, x)),
+                         nir_fabs(&b, y));
+   /* half * |x| + |y|: the immediate multiplier standing beside two absolute
+    * register operands, exactly as the refusal printed it. */
+   nir_def *scaled = nir_ffma(&b, nir_imm_float(&b, 0.5), nir_fabs(&b, x),
+                              nir_fabs(&b, y));
+   /* a negated immediate multiplier folds into the minifloat's sign bit */
+   nir_def *negated = nir_ffma(&b, nir_imm_float(&b, -0.5), x,
+                               nir_fabs(&b, y));
+   /* and the addend's own negation rides the f65 bit */
+   nir_def *sub = nir_ffma(&b, nir_imm_float(&b, 0.25), nir_fabs(&b, x),
+                           nir_fneg(&b, nir_fabs(&b, y)));
+
+   fs_store_colour(&b, nir_vec4(&b, h, scaled, negated, sub));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -5451,6 +5492,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-glmark2-refract", build_fs_glmark2_refract, true,
     .g17p_only = true},
    {"fs-glmark2-terrain-offset", build_fs_glmark2_terrain_offset, true,
+    .g17p_only = true},
+   {"fs-glmark2-terrain-noise", build_fs_glmark2_terrain_noise, true,
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
