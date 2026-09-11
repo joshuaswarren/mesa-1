@@ -2929,7 +2929,14 @@ agx3_subgroup_plain(agx_index index, enum agx_index_type type)
           !(index.cache && index.discard) && (index.value & 1) == 0;
 }
 
-/* Preserve the older bounded immediate broadcast witnesses. */
+/* A plain immediate operand: an unmodified single-channel constant. */
+static bool
+agx3_subgroup_imm_lane(agx_index x)
+{
+   return x.type == AGX_INDEX_IMMEDIATE && !x.memory && !x.abs && !x.neg &&
+          agx_channels(x) == 1;
+}
+
 static bool
 agx3_emit_simd_broadcast(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
@@ -2938,16 +2945,12 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
    if (I->op != AGX_OPCODE_SHUFFLE || I->nr_dests != 1 || I->nr_srcs != 2 ||
        !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
        !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER) ||
-       I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].memory ||
-       I->src[1].abs || I->src[1].neg ||
-       agx_channels(I->src[1]) != 1 || I->saturate ||
-       (I->src[1].value != 0 && I->src[1].value != 3 &&
-        I->src[1].value != 5))
+       !agx3_subgroup_imm_lane(I->src[1]) || I->saturate)
       return false;
 
-   /* G17P's immediate-lane form has direct lane 0/3/5 witnesses, including a
-    * device-load producer on slot 6.  Route AGX3b through that exact bounded
-    * encoder so a public subgroupShuffle may carry its real dependency. */
+   /* G17P puts the lane straight into f29 for every lane the field holds, so
+    * route AGX3b through the bounded immediate encoder and let it carry the
+    * producer's wait. See agx3_subgroup_core.c for Apple's per-lane sweep. */
    if (enc == AGX_ISA_ENCODING_AGX3B) {
       const struct agx3_subgroup_shuffle_desc d = {
          .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
@@ -2963,7 +2966,10 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
              agx3_append(emission, bytes, length);
    }
 
-   if (wait_mask != 0 || I->src[1].value == 5)
+   /* AGX3c keeps its own two pinned broadcast words; nothing else about that
+    * encoding has been witnessed, so it stays where it was. */
+   if (wait_mask != 0 ||
+       (I->src[1].value != 0 && I->src[1].value != 3))
       return false;
 
    struct agx3_encoded_simd_broadcast_f32_imm encoded;
@@ -3026,17 +3032,43 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
        I->src[1].type == AGX_INDEX_IMMEDIATE)
       return agx3_emit_simd_broadcast(emission, enc, I, wait_mask);
 
+   /* Every immediate-lane shuffle -- quad or SIMD, broadcast, butterfly or
+    * shift -- is the same encoding point with the lane in f29, and Apple's
+    * own words for all six mnemonics carry the producer wait in the f44 bank.
+    * Route them all here rather than pushing the three non-broadcast SIMD
+    * shapes down to the register-lane path, which cannot take a wait and so
+    * had to spend a whole synchronous prelude retiring one. */
+   if (I->nr_srcs == 2 && agx3_subgroup_imm_lane(I->src[1]) &&
+       enc == AGX_ISA_ENCODING_AGX3B) {
+      if (I->nr_dests != 1 || I->saturate ||
+          !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
+          !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER))
+         return false;
+
+      const struct agx3_subgroup_shuffle_desc d = {
+         .quad = quad,
+         .op = op,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = I->dest[0].value,
+         .src = I->src[0].value,
+         .lane = I->src[1].value,
+         .wait_mask = wait_mask,
+         .dest_hint = I->dest[0].cache,
+         .src_live = !I->src[0].discard,
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
+             agx3_append(emission, bytes, length);
+   }
+
    if (quad && I->nr_srcs == 2 && I->src[1].type == AGX_INDEX_IMMEDIATE) {
       if (I->nr_dests != 1 || I->saturate ||
           !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
           !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER) ||
-          I->src[1].memory || I->src[1].abs || I->src[1].neg ||
-          agx_channels(I->src[1]) != 1)
+          !agx3_subgroup_imm_lane(I->src[1]))
          return false;
 
-      /* The native quad broadcast carries the device-load wait directly.
-       * The witnessed quad butterfly words have no wait, so settle any
-       * producer before emitting those byte-exact forms. */
+      /* AGX3c has no witnessed wait on this form: settle any producer first. */
       if (op != AGX3_SUBGROUP_SHUFFLE_BROADCAST && wait_mask != 0) {
          if (!agx3_retire_slots_noop(emission, enc, wait_mask))
             return false;
@@ -3269,14 +3301,21 @@ agx3_emit_scoped_barrier(struct util_dynarray *emission,
           agx3_append(emission, encoded.bytes, encoded.length);
 }
 
-/* The grounded AGX3 compare forms are 32-bit and address the lower 128
- * half-registers. Source modifiers and memory/uniform operands select forms
- * whose routing has not been proved. */
+/* The grounded AGX3 compare forms are 32-bit and address an eight-bit HALF
+ * register index, so every one of the 128 architectural 32-bit registers is
+ * reachable -- see the witness block above agx3_cf_icmp_reg(), where Apple's
+ * own compiler compares halves 148/150 and loads into 178/182 in the same
+ * kernel.  This helper stopped at half 128, which quietly halved the usable
+ * register file: any shader whose live range crossed r64 had its branch
+ * refused rather than encoded.
+ *
+ * Source modifiers and memory/uniform operands still select forms whose
+ * routing has not been proved, and those keep failing closed here. */
 static bool
 agx3_cf_reg32(agx_index src)
 {
    return agx3_src_is_register(src) && !src.memory && src.size == AGX_SIZE_32 &&
-          (src.value & 1) == 0 && src.value < 128 && !src.abs && !src.neg;
+          (src.value & 1) == 0 && src.value < 256 && !src.abs && !src.neg;
 }
 
 /* Native 16-bit register comparison addresses all 256 individual halves. */

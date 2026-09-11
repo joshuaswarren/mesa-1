@@ -62,28 +62,45 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       return false;
 
    /*
-    * The immediate-lane form, added from the g17p session. f37 = 1 selects it
-    * and the lane index sits in f29; f39 and f41, which the register form
-    * carries, are absent. The per-slot wait bits are f44 + (slot - 1): PROVEN
-    * by three probes whose source comes from a device load on slot 6, all of
-    * which set f49 and nothing else.
+    * The immediate-lane form: f37 = 1 selects it and the lane index sits in
+    * f29; f39 and f41, which the register form carries, are absent. The
+    * per-slot wait bits are f44 + (slot - 1), so a source arriving on slot 6
+    * sets f49 and nothing else.
     */
    if (d->lane_kind == AGX3_SUBGROUP_LANE_IMMEDIATE) {
       const unsigned slots = 6;
-      /* G17P witnesses the SIMD broadcast subset and the exact quad family
-       * used by the public GLSL operations below. Keep every other immediate
-       * shape fail-closed. */
-      const bool simd_witness =
-         !d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST &&
-         (d->lane == 0 || d->lane == 3 || d->lane == 5);
-      const bool quad_witness =
-         d->quad && ((d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST && d->lane <= 3) ||
-                     (d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
-                      d->lane >= 1 && d->lane <= 3));
-      if (enc != AGX_ISA_ENCODING_AGX3B || (!simd_witness && !quad_witness))
-         return false;
-      if (d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_XOR &&
-          d->wait_mask != 0)
+      /*
+       * f29 IS the lane, for every immediate-lane shuffle and for every lane
+       * the seven-bit field holds.  This used to admit three SIMD broadcast
+       * lanes (0, 3, 5) and the quad family only, so `subgroupBroadcast(v,
+       * 31)` -- the last-lane read that every subgroup scan ends with, Mesa's
+       * own radix sort included -- had no encoding at all and the shader had
+       * to pay a materialising `mov` to reach the register-lane form instead.
+       *
+       * Apple's applegpu_g17p output, one kernel per lane
+       * (`.tmp/g17p-rtgaps-evidence/bcast.metal`, `shuf.metal`), is a single
+       * field sweep with nothing else moving:
+       *
+       *   simd_broadcast(a, 0)      470456000200002c0400   f29 = 0
+       *   simd_broadcast(a, 1)      470456000200022c0400   f29 = 1
+       *   simd_broadcast(a, 5)      4704560002000a2c0400   f29 = 5
+       *   simd_broadcast(a, 31)     4704560002003e2c0400   f29 = 31
+       *   simd_broadcast(a, 32)     470456000200402c0400   f29 = 32
+       *   simd_broadcast(a, 63)     4704560002007e2c0400   f29 = 63
+       *   simd_shuffle_xor(a, 63)   c704560002007e2c0400   simdbfly, same f29
+       *   simd_shuffle_up(a, 31)    4705560403003e2c0200   simdshftup
+       *   simd_shuffle_down(a, 31)  c705560403003e2c0200   simdshftdn
+       *   quad_broadcast(a, 3)      470056000200062c0400   quadshfl
+       *   quad_shuffle_xor(a, 3)    c70056000200062c0400   quadbfly
+       *
+       * Every one of those also sets f49, the slot-6 wait for the device load
+       * that feeds it -- including the quad butterfly, which this encoder
+       * previously refused to give a wait at all.
+       *
+       * The field is seven bits (half 0xff spills the eighth into f16, the
+       * source register), so lanes 0..127 encode and 128 up do not.
+       */
+      if (enc != AGX_ISA_ENCODING_AGX3B)
          return false;
       if (d->lane > 0x7f || (d->wait_mask >> slots) != 0)
          return false;
@@ -94,11 +111,11 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       ibase[inb++] = (struct agx3_field_kv){10, 2};
       ibase[inb++] = (struct agx3_field_kv){23, 2};
       ibase[inb++] = (struct agx3_field_kv){24, 2};
-      if (d->quad) {
-         ibase[inb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
-      } else {
-         ibase[inb++] = (struct agx3_field_kv){27, 1};
-      }
+      /* One liveness selector for the whole family: f25 while the source
+       * stays live, f27 on its final read.  Apple's simd shift witnesses
+       * carry f25 (the shifted result lands in a different register and the
+       * source is read again); its broadcasts carry f27. */
+      ibase[inb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
       ibase[inb++] = (struct agx3_field_kv){37, 1};
       ibase[inb++] = (struct agx3_field_kv){38, 1};
 

@@ -47,7 +47,19 @@ enum agx3_cf_fcond {
    AGX3_CF_FCOND_GT = 2,
 };
 
-#define AGX3_CF_MAX_LENGTH 10u
+/*
+ * The longest control-flow form is fourteen bytes: `fcmp.ep2`, which is what
+ * an absolute-valued comparison source moves to.  This was 10 -- the length
+ * of `fcmp.ep1` -- so agx3_cf_fcmp_reg_abs() wrote four bytes past the end of
+ * every caller's buffer, all of which are sized by this macro.  Nothing
+ * caught it because the overrun lands in stack padding on the paths that
+ * reach it; building a caller with a stack protector aborts on the spot.
+ */
+#define AGX3_CF_MAX_LENGTH 14u
+/* `b`/`bn`, whose displacement agx3_cf_patch_branch() fills in later. This is
+ * the size a caller must RESERVE for a forward branch, which is not the same
+ * number as the buffer bound above. */
+#define AGX3_CF_BRANCH_LENGTH 10u
 #define AGX3_CF_MAX_FLAG_SLOT 5u /* slots 0..5 are witnessed */
 
 struct agx3_cf_source_hints {

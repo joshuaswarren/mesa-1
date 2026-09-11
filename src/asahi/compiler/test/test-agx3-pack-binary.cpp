@@ -2999,11 +2999,39 @@ TEST_F(AGX3PackBinary, SimdBroadcastImmediateWitnesses)
    }
 }
 
-TEST_F(AGX3PackBinary, SimdBroadcastRefusesUnwitnessedLane)
+/* The lane is the whole seven-bit f29, so every lane a subgroup can name
+ * encodes -- lane 31, which ends every subgroup scan, included. Only a lane
+ * the field cannot hold is refused. */
+TEST_F(AGX3PackBinary, SimdBroadcastEncodesEveryLane)
 {
+   for (unsigned lane : {1u, 5u, 31u, 63u, 127u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_shuffle_to(b, agx_register(4, AGX_SIZE_32),
+                     agx_register(0, AGX_SIZE_32), agx_immediate(lane));
+      agx_stop(b);
+
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      const struct agx3_subgroup_shuffle_desc desc = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 4,
+         .src = 0,
+         .lane = (uint16_t)lane,
+      };
+      ASSERT_TRUE(
+         agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc, bytes,
+                                      &length));
+      std::vector<uint8_t> want;
+      append(want, bytes, length);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_shuffle_to(b, agx_register(4, AGX_SIZE_32),
-                  agx_register(0, AGX_SIZE_32), agx_immediate(1));
+                  agx_register(0, AGX_SIZE_32), agx_immediate(128));
    agx_stop(b);
    pack(b, /*expect_ok=*/false);
 }
@@ -3374,7 +3402,10 @@ TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
+/* Apple's own quad butterfly carries the slot-6 wait for its device load in
+ * f49, so this no longer costs a synchronous identity prelude to retire the
+ * producer first. */
+TEST_F(AGX3PackBinary, QuadImmediateXorWaitsForDeviceLoad)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    const agx_index value = agx_register(4, AGX_SIZE_32);
@@ -3386,10 +3417,7 @@ TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
    agx_stop(b);
 
    std::vector<uint8_t> want;
-   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
-   ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 0, 0,
-                                0, 0, 0, 1u << 5, bytes, &length));
-   append(want, bytes, length);
+   uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    const struct agx3_subgroup_shuffle_desc shuffle = {
       .quad = true,
       .op = AGX3_SUBGROUP_SHUFFLE_XOR,
@@ -3397,6 +3425,7 @@ TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
       .dest = 6,
       .src = 4,
       .lane = 1,
+      .wait_mask = 1u << 5,
       .src_live = true,
    };
    ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &shuffle,
@@ -6339,7 +6368,7 @@ TEST_F(AGX3PackBinary, StructuredIfAndForwardBranch)
       ASSERT_TRUE(agx3_cf_cndst(enc, 0, false, 1, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, true, bytes, &len));
-      ASSERT_EQ(len, AGX3_CF_MAX_LENGTH);
+      ASSERT_EQ(len, AGX3_CF_BRANCH_LENGTH);
       ASSERT_TRUE(agx3_cf_patch_branch(enc, true, bytes, 10));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_cndend(enc, 1, bytes, &len));
@@ -6382,7 +6411,7 @@ TEST_F(AGX3PackBinary, NestedLoopEntryBackedgeAndPop)
       ASSERT_TRUE(agx3_cf_cndlt(enc, 1, false, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, false, bytes, &len));
-      ASSERT_EQ(len, AGX3_CF_MAX_LENGTH);
+      ASSERT_EQ(len, AGX3_CF_BRANCH_LENGTH);
       ASSERT_TRUE(agx3_cf_patch_branch(enc, false, bytes, -14));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_cndend(enc, 2, bytes, &len));

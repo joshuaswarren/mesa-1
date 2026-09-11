@@ -2790,7 +2790,13 @@ Closing that needs a `metal-nt` witness of `simd_broadcast(x, N)` for several
 N, which would also settle whether the lane field is a plain immediate or a
 LUT.  Until then the register form carries it at the cost of one mov.
 
-### 2. Unconditional `break` nested deeper than 2 -- OPEN
+### 2. Unconditional `break` nested deeper than 2 -- CLOSED (b5397bb9dc0)
+
+> **Closed.**  The experiment below was run and the answer was neither of the
+> two options it offered: a deep break is not a wider immediate on `CNDLT`,
+> it is a different instruction, `cndcf`, carrying a sixteen-bit level count.
+> The rest of this subsection is the question as it stood, kept because the
+> method is what made it answerable.
 
 ```
 agx3_pack_binary.c:5802: no grounded AGX3 encoding for break
@@ -2818,3 +2824,109 @@ lands in the same field and simply grows.  If it does, raising the `nest > 2`
 gate in `agx_lower_pseudo.c` is the whole fix; if the deeper forms use a
 different encoding, that encoding is what the witness gives you.  Five kernels,
 no hardware.
+
+## The two gaps above, measured again on the real driver path (2026-09-10)
+
+Both of the refusals in the previous section were found in a **compiler-only**
+harness that fed SPIR-V straight to `agx_compile_shader_nir()` and substituted
+opaque device loads for `load_push_constant` and `load_num_workgroups`.  Run
+again through the production driver -- a `vkGetAccelerationStructureBuildSizesKHR`
+call under the G17P drm-shim, which is what actually invokes
+`hk_init_radix_sort()` -- **neither refusal happens**, on `agx3` at
+`6cdec595dcb` and with `AGX_MESA_DEBUG=shaders` printing no refusal line at
+all.  The sort's eight compute pipelines compile and the sizing call returns
+`accelerationStructureSize=152 buildScratch=65780`.
+
+Two different reasons, worth telling apart:
+
+* the **`shuffle` lane** was genuinely refused by the *encoder*, but
+  `agx_compile.c` and `agx_optimizer.c` had already been taught to keep the
+  constant in a register for the unwitnessed lanes, so the shader compiled --
+  at the cost of one `mov` per broadcast.  The gap was real; the blockage was
+  not.
+* the **`if_icmp` on `r132`** does not occur at all.  Substituting opaque
+  loads for the push constants and the workgroup count lengthened live ranges
+  that the real driver satisfies from uniforms, and pushed the allocator above
+  half 128.  It was an artifact of the harness.
+
+Both are still ordinary coverage holes that other shaders will reach, so both
+are now closed against Apple's own bytes rather than left standing.
+
+### The immediate lane is f29, seven bits, no LUT
+
+Section 1 above asked for "a `metal-nt` witness of `simd_broadcast(x, N)` for
+several N, which would also settle whether the lane field is a plain immediate
+or a LUT."  It is a plain immediate.  One kernel per lane, everything else
+held fixed (`.tmp/g17p-rtgaps-evidence/{bcast,shuf,quadud}.metal`):
+
+| MSL                        | applegpu_g17p                | form       |
+| -------------------------- | ---------------------------- | ---------- |
+| `simd_broadcast(a, 0)`     | `470456000200002c0400`       | simdbcast  |
+| `simd_broadcast(a, 1)`     | `470456000200022c0400`       | f29 = 1    |
+| `simd_broadcast(a, 5)`     | `4704560002000a2c0400`       | f29 = 5    |
+| `simd_broadcast(a, 31)`    | `4704560002003e2c0400`       | f29 = 31   |
+| `simd_broadcast(a, 32)`    | `470456000200402c0400`       | f29 = 32   |
+| `simd_broadcast(a, 63)`    | `4704560002007e2c0400`       | f29 = 63   |
+| `simd_shuffle_xor(a, 63)`  | `c704560002007e2c0400`       | simdbfly   |
+| `simd_shuffle_up(a, 31)`   | `4705560403003e2c0200`       | simdshftup |
+| `simd_shuffle_down(a, 31)` | `c705560403003e2c0200`       | simdshftdn |
+| `quad_broadcast(a, 3)`     | `470056000200062c0400`       | quadshfl   |
+| `quad_shuffle_xor(a, 3)`   | `c70056000200062c0400`       | quadbfly   |
+| `quad_shuffle_up(a, 3)`    | `470156040300062c0200`       | quadshftup |
+| `quad_shuffle_down(a, 3)`  | `c70156040300062c0200`       | quadshftdn |
+
+The lane lands in f29 unchanged on all six mnemonics.  The field is seven bits
+-- setting the eighth spills into f16, the source register -- so lanes 0..127
+encode, which is every lane a subgroup can name.  Every one of those words
+also sets **f49**, the slot-6 wait for the device load feeding it, including
+the quad butterfly, which the encoder previously refused to give a wait at all
+and which therefore had to spend a whole synchronous identity prelude retiring
+its producer first.
+
+All thirteen reproduce byte-exactly out of `agx3_subgroup_encode_shuffle()`
+and are pinned in `test-agx3-subgroup-core.c`.
+
+### A comparison source is an eight-bit HALF index, not a narrow class
+
+The obvious hypothesis for the `r132` refusal was the `cndcf` pattern -- that
+a register index at or above 128 is a *different operand class* rather than a
+field that is too narrow.  **That hypothesis is wrong**, and one `metal-nt`
+kernel settles it.  Ninety simultaneously live loaded values with a branch in
+the middle (`.tmp/g17p-rtgaps-evidence/{hireg2,hifcmp,hiimm}.metal`):
+
+```
+if (x88 >  x89)        0a9722950485                  icmp ep0  f2=150 f17=148
+if (x88 <  17u)        0a9922901583                  icmp ep0  f2=152 f16=17
+if (x88 != 0u)         0a992380060007830000          icmp ep1  f2=152
+if (fx88 <  fx89)      0a9722950385                  fcmp ep0  f2=150 f19=148
+if (fx88 < -fx89)      0a972295038d                  fcmp ep0  f32=1  (negate)
+if (|fx88| < |fx89|)   0a97239503000305000000200300  fcmp ep2  f14=1 f31=1
+if (fx88 == fx89)      0a972395060000850000          fcmp ep1
+if (fx88 <  0.0f)      0a9922810383                  fcmp ep0  f2=152
+if (fx88 <  1.0f)      0a9922b10383                  fcmp ep0  f18=48
+```
+
+Same field, same selectors (`f9`/`f10`/`f24`/`f25` for the integer forms,
+`f9`/`f10`/`f26`/`f27` for the float ones), just a larger value -- and the
+loads and multiply-adds interleaved with them in the same kernel write it
+higher still (`lddev` f2=178, `imadd` f2=182).  The generated composer, which
+comes from Apple's own encoder tables, takes f2/f17/f19 up to 255 and refuses
+256, and every value round-trips through `decomp.c` unchanged.
+
+So the source is a **half**-register index with eight bits: all 128
+architectural 32-bit registers are addressable, and the `>= 128` gates in
+`agx3_cf_core.c` and `agx3_cf_reg32()` were halving the usable register file
+for any shader that branches.  They now stop at 256.
+
+The `|a| < |b|` row also exposed a live defect: `AGX3_CF_MAX_LENGTH` was 10,
+the length of `fcmp.ep1`, while `agx3_cf_fcmp_reg_abs()` composes `fcmp.ep2`
+at **fourteen** bytes.  Every caller sizes its buffer by that macro, so an
+absolute-valued comparison -- Qt Quick's `conicalgradient.frag`, among others
+-- wrote four bytes past the end of a stack array.  Nothing caught it because
+the overrun lands in padding on the paths that reach it; building a caller
+with a stack protector aborts immediately.
+
+**Not changed:** the same `< 128` gate in `d12_agx3_cf_reg32()` on the D3D12
+side.  The witness applies there too, but that surface pins 128/255/256 as
+invalid across many instruction families in
+`d12_agx3_isa_core_tests.c`, so widening it is its own piece of work.

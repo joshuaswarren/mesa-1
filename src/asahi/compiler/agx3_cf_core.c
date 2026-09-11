@@ -72,12 +72,40 @@ agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
    return false;
 }
 
+/*
+ * The source fields of every comparison form are HALF-register indices with
+ * eight bits, so halves 0..255 -- all 128 architectural 32-bit registers --
+ * are addressable.  These entry points used to stop at half 128, which cut
+ * the usable 32-bit register file in half for any shader that branches, and
+ * nothing about the encoding asked for that.
+ *
+ * Apple's own applegpu_g17p output, from a kernel with ninety simultaneously
+ * live loaded values (`.tmp/g17p-rtgaps-evidence/hireg2.metal`,
+ * `hifcmp.metal`, `hiimm.metal`), compares high halves in every shape:
+ *
+ *   if (x88 >  x89)          0a9722950485                    icmp ep0  f2=150 f17=148
+ *   if (x88 <  17u)          0a9922901583                    icmp ep0  f2=152 f16=17
+ *   if (x88 != 0u)           0a992380060007830000            icmp ep1  f2=152
+ *   if (fx88 <  fx89)        0a9722950385                    fcmp ep0  f2=150 f19=148
+ *   if (fx88 < -fx89)        0a972295038d                    fcmp ep0  f32=1 (negate)
+ *   if (|fx88| < |fx89|)     0a97239503000305000000200300    fcmp ep2  f14=1 f31=1
+ *   if (fx88 == fx89)        0a972395060000850000            fcmp ep1
+ *   if (fx88 <  0.0f)        0a9922810383                    fcmp ep0  f2=152
+ *   if (fx88 <  1.0f)        0a9922b10383                    fcmp ep0  f18=48
+ *
+ * and the surrounding loads and multiply-adds in the same kernel write the
+ * same field just as high (`lddev` f2=178, `imadd` f2=182), so the index is
+ * plainly a half number and not a narrower operand class.  The generated
+ * composer -- which comes from Apple's encoder tables -- accepts f2/f17/f19
+ * up to 255 and refuses 256, and every value round-trips back through the
+ * structural decomposer unchanged.
+ */
 bool
 agx3_cf_icmp_reg(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                  unsigned slot, uint16_t src0, uint16_t src1,
                  uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!icond_ok(cond) || !slot_ok(slot) || src0 >= 128 || src1 >= 128)
+   if (!icond_ok(cond) || !slot_ok(slot) || src0 >= 256 || src1 >= 256)
       return false;
    const struct agx3_field_kv base_b[] = {KV(9, 2), KV(10, 2), KV(24, 2),
                                           KV(25, 2)};
@@ -94,7 +122,7 @@ agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                  unsigned slot, uint16_t src0, uint8_t imm,
                  uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!icond_ok(cond) || !slot_ok(slot) || src0 >= 128)
+   if (!icond_ok(cond) || !slot_ok(slot) || src0 >= 256)
       return false;
    const struct agx3_field_kv base_b[] = {KV(9, 2), KV(10, 2), KV(24, 1),
                                           KV(25, 1)};
@@ -152,7 +180,7 @@ agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
 {
    /* Preserve the historical native specimen API; production uses the
     * runtime variant with register-allocation hints and actual waits. */
-   return src0 < 128 && agx3_cf_icmp_zero16_runtime(enc,cond,slot,src0,
+   return src0 < 256 && agx3_cf_icmp_zero16_runtime(enc,cond,slot,src0,
                  (struct agx3_cf_source_hints){false,true},32,out,len);
 }
 
@@ -161,7 +189,7 @@ agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                  bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
                  uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!fcond_ok(cond) || !slot_ok(slot) || src0 >= 128 || src1 >= 128)
+   if (!fcond_ok(cond) || !slot_ok(slot) || src0 >= 256 || src1 >= 256)
       return false;
    const struct agx3_field_kv base_b[] = {KV(9, 2), KV(10, 2), KV(26, 2),
                                           KV(27, 2)};
@@ -191,7 +219,7 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
    if (enc != AGX_ISA_ENCODING_AGX3B || !src_in || !neg_in || !hints_in ||
        !out || !len || !slot_ok(slot) || or_nan ||
        (cond != AGX3_CF_FCOND_LT && cond != AGX3_CF_FCOND_GT) ||
-       (neg_in[0] == neg_in[1]) || src_in[0] >= 128 || src_in[1] >= 128 ||
+       (neg_in[0] == neg_in[1]) || src_in[0] >= 256 || src_in[1] >= 256 ||
        (src_in[0] & 1) || (src_in[1] & 1) ||
        (hints_in[0].cache && hints_in[0].discard) ||
        (hints_in[1].cache && hints_in[1].discard))
@@ -253,7 +281,7 @@ agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !src || !abs || !hints || !out ||
        !len || !slot_ok(slot) || or_nan || !fcond_ok(cond) ||
-       src[0] >= 128 || src[1] >= 128 || (src[0] & 1) || (src[1] & 1) ||
+       src[0] >= 256 || src[1] >= 256 || (src[0] & 1) || (src[1] & 1) ||
        (hints[0].cache && hints[0].discard) ||
        (hints[1].cache && hints[1].discard) ||
        (wait_mask & ~UINT16_C(0x3f)))

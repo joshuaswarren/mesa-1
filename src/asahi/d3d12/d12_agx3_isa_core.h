@@ -42,7 +42,9 @@ extern "C" {
 #define D12_AGX3_WAVE_READ_LANE_AT_F32_IMM_LENGTH 10
 #define D12_AGX3_SUBGROUP_MAX_LENGTH 16
 #define D12_AGX3_END_WITH_WAIT_FENCE_MASK_LENGTH 4
-#define D12_AGX3_CF_MAX_LENGTH 14
+/* Compare plus cnd: the longest compare is fcmp.ep2 at fourteen bytes and
+ * cnd is four. */
+#define D12_AGX3_CF_MAX_LENGTH 18
 #define D12_AGX3_VARY_MAX_LENGTH 10
 /* Texture ops: the texel fetch is 14 bytes (AGX3b) / 8 (AGX3c); the
  * filtered sample reaches 22 bytes (AGX3c smp.ep3). */

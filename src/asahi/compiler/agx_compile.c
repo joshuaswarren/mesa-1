@@ -2390,16 +2390,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       agx_index lane = agx_src_index(&instr->src[1]);
 
       /*
-       * AGX3's immediate-lane broadcast is only grounded for the three
-       * witnessed lanes; every other constant lane has no encoding.  The
-       * register-lane form is grounded for any lane, so materialise the
-       * constant instead of refusing the shader.  The cost is one mov that
-       * constant folding would otherwise have removed, and it only applies
-       * to the lanes that would not have compiled at all.
+       * AGX3's immediate-lane broadcast puts the lane in a seven-bit field,
+       * so lanes 0..127 -- every lane a subgroup can have -- encode directly.
+       * A constant outside that range is undefined behaviour rather than a
+       * program we must reject, so materialise it into the register-lane
+       * form, which takes any value, instead of refusing the shader.
        */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          lane.type == AGX_INDEX_IMMEDIATE && lane.value != 0 &&
-          lane.value != 3 && lane.value != 5) {
+          lane.type == AGX_INDEX_IMMEDIATE && lane.value > 0x7f) {
          agx_index reg = agx_temp(b->shader, AGX_SIZE_32);
          agx_mov_imm_to(b, reg, lane.value);
          lane = reg;
