@@ -5,9 +5,56 @@
 
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
+#include "agx_compiler.h"
+#include "agx_debug.h"
 
 #include "nir.h"
 #include "nir_builder.h"
+
+#include <stdio.h>
+
+/* agx_nir_lower_g17p_indexed_samplers() is all-or-nothing per shader: one
+ * unadmitted texture or image instruction and NOTHING in that shader gets a
+ * heap index, so every texture instruction in it then reaches the packer with
+ * a 32-bit bindless handle it has no encoding for.  A refusal census therefore
+ * measures shaders, not instructions, and says nothing about which shape
+ * actually caused it.  Name the instruction that did.
+ */
+static bool
+g17p_decline(const char *why, const nir_tex_instr *tex,
+             const nir_intrinsic_instr *intr, mesa_shader_stage stage)
+{
+   if (!(agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)))
+      return false;
+
+   if (tex) {
+      fprintf(stderr,
+              "G17P indexed-sampler decline (%s): stage=%u op=%u dim=%u "
+              "array=%u shadow=%u sparse=%u coords=%u srcs=%u dest_type=%u "
+              "comps=%u bits=%u flags=0x%x tex_idx=%u smp_idx=%u\n",
+              why, stage, tex->op, tex->sampler_dim, tex->is_array,
+              tex->is_shadow, tex->is_sparse, tex->coord_components,
+              tex->num_srcs, tex->dest_type, tex->def.num_components,
+              tex->def.bit_size, tex->backend_flags, tex->texture_index,
+              tex->sampler_index);
+   } else if (intr) {
+      fprintf(stderr,
+              "G17P indexed-sampler decline (%s): stage=%u image_load dim=%u "
+              "array=%u comps=%u bits=%u fmt=%u access=0x%x coordc=%u "
+              "coordb=%u lod_const=%u ms_const=%u handle_const=%u\n",
+              why, stage, nir_intrinsic_image_dim(intr),
+              nir_intrinsic_image_array(intr), intr->def.num_components,
+              intr->def.bit_size, (unsigned)nir_intrinsic_format(intr),
+              nir_intrinsic_access(intr),
+              nir_src_num_components(intr->src[1]),
+              nir_src_bit_size(intr->src[1]),
+              nir_src_is_const(intr->src[2]),
+              nir_src_is_const(intr->src[3]),
+              nir_src_as_intrinsic(intr->src[0]) &&
+                 nir_src_is_const(nir_src_as_intrinsic(intr->src[0])->src[0]));
+   }
+   return false;
+}
 
 static bool
 g17p_sample_shape(const nir_tex_instr *tex)
@@ -482,10 +529,34 @@ g17p_sample_heap_index(const nir_tex_instr *tex)
 static bool
 g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
 {
+   /* No format condition.  This predicate only decides whether the image's
+    * descriptor handle is replaced by a heap index; the rewrite is
+    * format-agnostic and agx3_emit_texture_fetch() never reads I->format --
+    * its only uses of the field are in agx3_emit_storage_image_write(), a
+    * different instruction.  Apple agrees: metal-nt -arch applegpu_g17p emits
+    * BYTE-IDENTICAL code for texture2d<float>, texture2d<uint> and
+    * texture2d<int> read(), one variable per kernel,
+    *
+    *   05 80 0c b8 b0 00 17 01 00 00 00 00 01 00
+    *
+    * so the component type lives in the descriptor and the fetch has no field
+    * for it.  The old PIPE_FORMAT_R8G8B8A8_UNORM equality was the format of
+    * the kernel this was first witnessed against, not a constraint, and
+    * because the pass is all-or-nothing per shader it took every OTHER
+    * texture instruction in the shader down with it: an r32ui or r32i
+    * imageLoad -- what every compute shader and every WebGPU storage texture
+    * uses -- refused the whole shader.
+    */
+   /* Admit exactly the dimensions agx3_emit_texture_fetch() encodes for an
+    * image load: 2D, 2D array and 3D.  Cube is genuinely not in that set, and
+    * multisample is excluded by the constant-zero sample index below.  The
+    * array and 3D coordinate staging is the same already-witnessed code the
+    * texture path uses; the predicate was narrower than the encoder. */
+   const enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
    if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
-       nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
-       nir_intrinsic_image_array(intr) ||
-       nir_intrinsic_format(intr) != PIPE_FORMAT_R8G8B8A8_UNORM ||
+       !(image_dim == GLSL_SAMPLER_DIM_2D ||
+         (image_dim == GLSL_SAMPLER_DIM_3D &&
+          !nir_intrinsic_image_array(intr))) ||
        intr->def.num_components != 4 || intr->def.bit_size != 32 ||
        nir_src_num_components(intr->src[1]) != 4 ||
        nir_src_bit_size(intr->src[1]) != 32 ||
@@ -497,11 +568,23 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
         (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_NON_READABLE)))
       return false;
 
+   /* The descriptor offset does not have to be a constant.  The rewrite below
+    * is pure SSA arithmetic -- nir_iadd_imm() onto the offset, then one
+    * nir_load_global_constant() with .align_mul = 4 -- and runs the same for a
+    * dynamically indexed descriptor as for a constant one.  The texture path
+    * (g17p_indexed_fetch_shape) never required constness in the first place,
+    * so requiring it here was an asymmetry, not a constraint.
+    *
+    * Keep the 8-alignment assertion wherever it can still be evaluated.  It is
+    * stronger than the load needs; every descriptor stride the layout produces
+    * is a multiple of 8, so base + index * stride + 64 stays 8-aligned for a
+    * dynamic index too.
+    */
    nir_intrinsic_instr *image = nir_src_as_intrinsic(intr->src[0]);
    return image && image->intrinsic == nir_intrinsic_bindless_image_agx &&
           nir_intrinsic_desc_set(image) <= UINT8_MAX &&
-          nir_src_is_const(image->src[0]) &&
-          (nir_src_as_uint(image->src[0]) & 7) == 0;
+          (!nir_src_is_const(image->src[0]) ||
+           (nir_src_as_uint(image->src[0]) & 7) == 0);
 }
 
 /* Native indexed samples consume zero-extended heap indices, loaded by the
@@ -524,7 +607,8 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
                if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
                   if (!g17p_indexed_image_fetch_shape(intr))
-                     return false;
+                     return g17p_decline("image_fetch_shape", NULL, intr,
+                                         shader->info.stage);
                   image_reads++;
                }
                continue;
@@ -540,15 +624,21 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
              * and sample(..., level(0)). Vertex implicit sampling has no
              * fragment quad derivatives, so admit only the explicit txl form
              * here; the ordinary shape validator below checks its operands. */
-            if ((!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
-                 tex->op != nir_texop_txl) ||
-                (!fetch && !g17p_sample_shape(tex)))
-               return false;
+            if (!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
+                tex->op != nir_texop_txl)
+               return g17p_decline("vertex_implicit_sample", tex, NULL,
+                                   shader->info.stage);
+            if (!fetch && !g17p_sample_shape(tex))
+               return g17p_decline("sample_shape", tex, NULL,
+                                   shader->info.stage);
             nir_intrinsic_instr *image = nir_src_as_intrinsic(
                tex->src[nir_tex_instr_src_index(tex, nir_tex_src_texture_handle)].src);
-            if (!image || image->intrinsic != nir_intrinsic_bindless_image_agx ||
-                (!fetch && !g17p_sample_heap_index(tex)))
-               return false;
+            if (!image || image->intrinsic != nir_intrinsic_bindless_image_agx)
+               return g17p_decline("handle_not_bindless", tex, NULL,
+                                   shader->info.stage);
+            if (!fetch && !g17p_sample_heap_index(tex))
+               return g17p_decline("no_sampler_heap_index", tex, NULL,
+                                   shader->info.stage);
             samples++;
          }
       }

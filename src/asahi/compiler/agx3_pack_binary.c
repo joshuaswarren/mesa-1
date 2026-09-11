@@ -117,12 +117,19 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
        * and a kind that print as one token is the same class of ambiguity as
        * a field left out entirely. */
       const bool immediate = x.type == AGX_INDEX_IMMEDIATE;
+      /* A source's CHANNEL COUNT gates several texture paths -- a 2D fetch
+       * wants two coordinate channels and an array or 3D fetch three, and
+       * without it two refusals that differ only in dimensionality print
+       * identically. Print it whenever it is not the scalar default. */
+      const unsigned chans = agx_channels(x);
       n += snprintf(shape + n, sizeof(shape) - n, " s%u=%u:%s%s%u%s%s%s%s%s", i,
                     16u << x.size, agx3_index_kind(x), immediate ? "#" : "",
                     x.value,
                     x.abs ? ".abs" : "", x.neg ? ".neg" : "",
                     x.kill ? ".kill" : "", x.cache ? ".cache" : "",
                     x.discard ? ".discard" : "");
+      if (chans != 1 && n > 0 && n < (int)sizeof(shape))
+         n += snprintf(shape + n, sizeof(shape) - n, "x%u", chans);
    }
 
    /* mask, format, shift and nest decide gates that the operand list cannot
@@ -137,12 +144,17 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
    fprintf(stderr,
            "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
            "[%s%s%s cond=%u nest=%u chan=%u mask=0x%x fmt=%u "
-           "shift=%u]%s%s\n",
+           "shift=%u dim=%u lod=%u%s%s%s%s%s]%s%s\n",
            line, agx_opcodes_info[I->op].name, shape,
            I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
            (unsigned)I->fcond, (unsigned)I->nest,
            I->nr_dests ? agx_channels(I->dest[0]) : 0u,
            (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift,
+           (unsigned)I->dim, (unsigned)I->lod_mode,
+           I->offset ? " off" : "", I->shadow ? " shadow" : "",
+           I->query_lod ? " qlod" : "",
+           I->gather != AGX_GATHER_NONE ? " gather" : "",
+           I->coherent ? " coherent" : "",
            why ? " -- " : "", why ? why : "");
 }
 
@@ -1259,7 +1271,22 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       !I->src[4].memory && !I->src[4].abs && !I->src[4].neg &&
       ((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
        (I->src[4].value == 1 && normalized));
-   const bool register_state = normalized &&
+   /* The state operand's form and f70 are ORTHOGONAL, so a register state does
+    * not imply normalized data.  metal-nt -arch applegpu_g17p, dynamically
+    * indexed `array<texture2d<T, access::write>, 4>` so the state is a
+    * register, one variable per kernel:
+    *
+    *   texture2d<float>  d72054000040001020040000883a0901
+    *   texture2d<uint>   d72054000040001020040000881a0901
+    *   texture2d<int>    d72054000040001020040000881a0901
+    *
+    * against the immediate-state controls that are already recorded in
+    * agx_compile.c (`...0000 0400 0088 3a09 00` / `...881a0900`): the state
+    * operand moves and f70 does not, and int and uint stay byte-identical.
+    * Requiring `normalized` here refused every dynamically indexed INTEGER
+    * storage image store -- 796 of 3,986 refused instructions in the
+    * 2026-09-11 census, and the bulk of binding_model's. */
+   const bool register_state =
       agx3_tex_plain_uniform64(I->src[3]) &&
       agx3_tex_plain_reg(I->src[4]) &&
       I->src[4].size == AGX_SIZE_32 && agx_channels(I->src[4]) == 1 &&
