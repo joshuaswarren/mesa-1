@@ -594,6 +594,19 @@ this form's encoder admits therefore has its own kernel (`fmaimm2.metal`):
 The last row is the interesting one: kind, width and two modifiers on a single
 instruction, composed by Apple.
 
+One bit is deliberately *not* admitted. `f31`, the multiplicand's negate, is
+never emitted beside an immediate multiplier -- asked for one, Apple folds the
+sign into the minifloat and leaves the abs bits alone:
+
+```
+ fma(0.5,-fabs(b),c)   09011ea18304020200800100   f34=160 and f30, no f31
+ fma(0.5,-b,fabs(c))   09011ea1890402c2           f34=160 and f64, no f31
+```
+
+`k * -b == -k * b`, so the packer folds it the same way and the encoder
+refuses `src1_neg`. Admitting an unwitnessed bit because its neighbours
+compose is exactly the inference this file exists to prevent.
+
 Two things worth keeping. A negated immediate multiplier is the minifloat's own
 sign bit -- there is no `f35` register slot in this form to hang a modifier on,
 so `agx3_falu_fma_mul_imm_mod()` refuses `src0_abs`/`src0_neg` and the packer

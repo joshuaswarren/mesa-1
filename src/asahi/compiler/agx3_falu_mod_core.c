@@ -412,9 +412,15 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
 
    /* There is no f35 register slot in this form, so nothing can carry a
     * multiplier-side modifier or lifetime hint; a caller that has one has not
-    * folded it into the immediate and must not be silently obeyed. */
-   if (m->src0_abs || m->src0_neg || m->src0_16 || runtime->cache[0] ||
-       runtime->discard[0])
+    * folded it into the immediate and must not be silently obeyed.
+    *
+    * f31 -- the multiplicand's negate -- is refused for a different reason:
+    * it is not witnessed here. Apple never emits it beside an immediate
+    * multiplier, folding the sign into the minifloat instead
+    * (fma(0.5,-fabs(b),c) is f34=160 with f30, no f31), which is exact
+    * because k * -b == -k * b. The caller folds it the same way. */
+   if (m->src0_abs || m->src0_neg || m->src0_16 || m->src1_neg ||
+       runtime->cache[0] || runtime->discard[0])
       return false;
 
    for (unsigned i = 1; i < 3; ++i)
@@ -425,19 +431,26 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(42, 1),
       KV(43, 2), KV(59, 2), KV(60, 2), KV(77, 2), KV(91, 2),
    };
-   struct agx3_field_kv ov[32] = {
-      KV(2, dest),      KV(34, multiplier),
-      KV(18, src1),     KV(52, addend),
-      KV(26, m->src1_16 ? 1 : 2),   KV(30, m->src1_abs ? 1 : 0),
-      KV(31, m->src1_neg ? 1 : 0),
-      KV(60, m->addend_16 ? 1 : 2), KV(64, m->addend_abs ? 1 : 0),
-      KV(65, m->addend_neg ? 1 : 0),
-      KV(14, m->saturate ? 1 : 0),
-      KV(11, runtime->dest_cache),
-      KV(27, runtime->cache[1]),    KV(29, runtime->discard[1]),
-      KV(61, runtime->cache[2]),    KV(63, runtime->discard[2]),
-   };
-   unsigned n = 16;
+   /* Appended rather than counted: a designated-initialiser list with a
+    * hand-written length silently grows a zeroed {field 0, value 0} entry the
+    * moment an override is removed. */
+   struct agx3_field_kv ov[32];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(34, multiplier);
+   ov[n++] = (struct agx3_field_kv)KV(18, src1);
+   ov[n++] = (struct agx3_field_kv)KV(52, addend);
+   ov[n++] = (struct agx3_field_kv)KV(26, m->src1_16 ? 1 : 2);
+   ov[n++] = (struct agx3_field_kv)KV(30, m->src1_abs ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(60, m->addend_16 ? 1 : 2);
+   ov[n++] = (struct agx3_field_kv)KV(64, m->addend_abs ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(65, m->addend_neg ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(14, m->saturate ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, runtime->cache[1]);
+   ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1]);
+   ov[n++] = (struct agx3_field_kv)KV(61, runtime->cache[2]);
+   ov[n++] = (struct agx3_field_kv)KV(63, runtime->discard[2]);
    for (unsigned i = 0; i < 6; ++i)
       ov[n++] = (struct agx3_field_kv)KV(97 + i, (runtime->wait_mask >> i) & 1);
 

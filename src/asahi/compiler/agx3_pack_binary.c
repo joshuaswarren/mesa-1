@@ -9796,9 +9796,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (imm.neg)
                   multiplier ^= 0x80;
 
+               /* The multiplicand's negate folds into the multiplier too:
+                * k * -b == -k * b, and Apple encodes it that way rather than
+                * setting f31, which it never emits beside an immediate. */
+               if (reg.neg)
+                  multiplier ^= 0x80;
+
                const struct agx3_falu_mods m = {
                   .src1_abs = reg.abs,
-                  .src1_neg = reg.neg,
                   .src1_16 = reg.size == AGX_SIZE_16,
                   .addend_abs = add.abs,
                   .addend_neg = add.neg,

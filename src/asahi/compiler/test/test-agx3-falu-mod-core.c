@@ -458,6 +458,15 @@ fma_mul_imm_vectors(void)
       {"fma(0.5, fabs(half b), fabs(c))", 32, 4, 0,
        {.src1_16 = true, .src1_abs = true, .addend_abs = true}, 12,
        {0x09,0x04,0x0e,0xa1,0x8b,0x00,0x02,0x02,0x00,0x80,0x01,0x00}},
+
+      /* Apple has no f31 in this form. Asked for a negated multiplicand it
+       * folds the sign into the minifloat and leaves f30/f64 alone, which is
+       * exact because k * -b == -k * b -- so these two are written with the
+       * sign already folded, as the packer folds it. */
+      {"fma(0.5, -fabs(b), c) folded", 160, 0, 4, {.src1_abs = true}, 12,
+       {0x09,0x01,0x1e,0xa1,0x83,0x04,0x02,0x02,0x00,0x80,0x01,0x00}},
+      {"fma(0.5, -b, fabs(c)) folded", 160, 0, 4, {.addend_abs = true}, 8,
+       {0x09,0x01,0x1e,0xa1,0x89,0x04,0x02,0xc2}},
    };
    unsigned fail = 0;
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
@@ -478,19 +487,28 @@ fma_mul_imm_vectors(void)
 
    /* There is no f35 register slot in this form, so a multiplier-side
     * modifier or lifetime hint has nowhere to go and must be refused rather
-    * than dropped: the caller has to fold it into the minifloat. */
+    * than dropped: the caller has to fold it into the minifloat.  The
+    * multiplicand's negate is refused for the second reason above -- f31 is
+    * unwitnessed beside an immediate multiplier, so it fails closed instead
+    * of being emitted on the strength of the other slots' behaviour. */
    {
-      const struct agx3_falu_mods bad = {.src0_neg = true};
-      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
-      if (agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3B, 0, 32, 0, 4, &bad,
-                                    &rt, out, &size)) {
-         fprintf(stderr, "FMA minifloat multiplier accepted a src0 modifier\n");
-         fail++;
+      const struct agx3_falu_mods bad[] = {
+         {.src0_neg = true}, {.src0_abs = true}, {.src0_16 = true},
+         {.src1_neg = true},
+      };
+      for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+         if (agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3B, 0, 32, 0, 4,
+                                       &bad[i], &rt, out, &size)) {
+            fprintf(stderr,
+                    "FMA minifloat multiplier accepted unwitnessed mods %u\n", i);
+            fail++;
+         }
       }
    }
 
-   printf("native FMA minifloat multiplier: ten Apple modifier/width/"
-          "saturate vectors: "
+   printf("native FMA minifloat multiplier: twelve Apple modifier/width/"
+          "saturate/sign-fold vectors: "
           "%u failures\n", fail);
    return fail;
 }
