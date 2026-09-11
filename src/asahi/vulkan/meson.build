@@ -706,6 +706,25 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # vkQuake's R_SubmitContexts shape. The single-secondary oracle above
+    # executes exactly one secondary, so "several consecutive
+    # vkCmdExecuteCommands calls inside one render pass" is untested: vkQuake
+    # replays six world secondaries, then six entity secondaries, then one
+    # each for sky, view model, particles and GUI, one call per secondary.
+    # The world is the first such group and is exactly what goes missing on
+    # G17P. This closes that hole with four secondaries painting four
+    # disjoint quadrants in four distinct colours, replayed one call at a
+    # time, so a dropped or misordered group names itself in the readback.
+    executable(
+      'g17p-vulkan-secondary-command-buffer-multi',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args,
+                '-DG17P_SECONDARY_COMMAND_BUFFER_MULTI=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Exact public Vulkan oracle for G17P wide Bresenham line state.
     executable(
       'g17p-vulkan-bresenham-lines',
@@ -814,6 +833,34 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # vkQuake world-surface shape. Every oracle above indexes at most one
+    # sampled texture per fragment invocation, so a second sampled texture
+    # that returns zero passes all of them while turning diffuse * lightmap
+    # black on every BSP surface. This closes that hole with the two samplers
+    # side by side in one descriptor set, as the narrower control.
+    executable(
+      'g17p-vulkan-texture-two-samplers-one-set',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TWO_SAMPLERS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # The same two samples with the second texture moved to its own
+    # descriptor set: vkQuake's exact binding shape, set 0 diffuse and set 1
+    # lightmap, bound together before the world draw. Paired with the one-set
+    # control above, a difference isolates the second descriptor set itself.
+    executable(
+      'g17p-vulkan-texture-two-samplers-two-sets',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TWO_SAMPLERS=1',
+                '-DG17P_TWO_SAMPLERS_SPLIT_SETS=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

@@ -4112,17 +4112,28 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
    return next == count && stopped;
 }
 
-/* Firefox WebRender's captured wide vertex programs write either 39 or 50
- * dense scalar outputs, materialize the homogeneous one, then write the last.
- * That final pure producer makes the stores nonterminal in the IR even though
- * every earlier value has already been copied to its component-addressed
- * staging word.  Recognize precisely that captured suffix: accepting every
- * nonterminal dense stream would also admit ungrounded output counts and
- * producer schedules that this bring-up backend intentionally refuses. */
+/* Firefox WebRender's wide vertex programs write a dense run of scalar
+ * outputs, materialize the homogeneous one, then write the last.  That final
+ * pure producer makes the stores nonterminal in the IR even though every
+ * earlier value has already been copied to its component-addressed staging
+ * word before the producer can reuse the GPR -- which is exactly why the late
+ * write is safe.
+ *
+ * That safety argument is structural and does not depend on how many outputs
+ * precede it, so the shape rather than the width is what is recognized here:
+ * every store dense and in index order, the sole late producer a MOV_IMM of
+ * 1.0f, that producer the exclusive source of the final store, and STOP
+ * immediately after.  Anything else still fails closed, and the width ceiling
+ * is still AGX3_MAX_VERTEX_OUTPUTS.
+ *
+ * This used to test `count != 40 && count != 51`, the two widths that had been
+ * captured.  Firefox 155 emits the identical shape 49 outputs wide, so the
+ * pinned pair refused its WebRender vertex program at `st_vary #4` and the
+ * browser came up with no WebRender pipeline at all. */
 static bool
 agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
 {
-   if (count != 40 && count != 51)
+   if (count < 5 || count > AGX3_MAX_VERTEX_OUTPUTS)
       return false;
 
    const unsigned last = count - 1;
@@ -4833,8 +4844,19 @@ struct agx3_g17p_mrt_protocol {
  * Keep this admission as narrow as the native evidence.  Ordinary fragment
  * shaders still require the colour transaction protocol below; only an
  * ignore-TIB-dependencies auxiliary shader may emit one two- or four-store
- * set to partition zero, and the stores must name distinct mask registers so
- * a repeated one cannot masquerade as a complete sample domain.
+ * set to partition zero, and each store's mask must be computed by its own
+ * instruction so a repeated one cannot masquerade as a complete sample
+ * domain.
+ *
+ * Distinct mask REGISTERS were the first spelling of that, taken from
+ * Apple's msaa_f_sampleid_s4, whose four stores land in four registers.  A
+ * register is not the mask, though: register allocation is free to reuse one
+ * register for masks that are killed at the store that reads them, and on the
+ * real four-sample reload it does -- three of the four stores name the same
+ * half register, each recomputed in between.  Refusing that refused the only
+ * shader this protocol was written for.  Two stores carry the same mask when
+ * they name the same register AND nothing redefined it in between, so that is
+ * what is checked.
  */
 static bool
 agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
@@ -4845,8 +4867,14 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
+   /* Post-RA, the definition that reaches each store is the most recent write
+    * of that half register, and the block is straight-line by the test above.
+    * 192 is the sample operand's own register ceiling in
+    * agx3_tile_sample_operand(). */
+   const agx_instr *reaching[192] = {NULL};
    unsigned stores = 0;
    uint16_t mask_regs[4];
+   const agx_instr *mask_defs[4];
    enum agx_format format = 0;
    unsigned component_mask = 0;
    bool stopped = false;
@@ -4864,8 +4892,21 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
          return false;
 
-      if (I->op != AGX_OPCODE_ST_TILE)
+      if (I->op != AGX_OPCODE_ST_TILE) {
+         agx_foreach_dest(I, d) {
+            const agx_index dest = I->dest[d];
+            if (!agx3_src_is_register(dest))
+               continue;
+
+            const unsigned halfs = agx_index_size_16(dest);
+            for (unsigned h = 0; h < halfs; ++h) {
+               const unsigned reg = dest.value + h;
+               if (reg < ARRAY_SIZE(reaching))
+                  reaching[reg] = I;
+            }
+         }
          continue;
+      }
 
       struct agx3_tile_sample sample;
       if (I->nr_srcs != 3 || I->pixel_offset != 0 || I->explicit_coords ||
@@ -4873,11 +4914,16 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
           !agx3_tile_sample_operand(I->src[1], &sample) || !sample.reg)
          return false;
 
-      if (stores >= ARRAY_SIZE(mask_regs))
+      if (stores >= ARRAY_SIZE(mask_defs))
          return false;
 
+      /* Same register and the same definition still reaching it is the same
+       * mask twice, whatever it holds. */
+      const agx_instr *def = sample.value < ARRAY_SIZE(reaching)
+                                ? reaching[sample.value] : NULL;
+
       for (unsigned i = 0; i < stores; ++i) {
-         if (mask_regs[i] == sample.value)
+         if (mask_regs[i] == sample.value && mask_defs[i] == def)
             return false;
       }
 
@@ -4888,7 +4934,8 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
          return false;
       }
 
-      mask_regs[stores++] = sample.value;
+      mask_regs[stores] = sample.value;
+      mask_defs[stores++] = def;
    }
 
    return stopped && (stores == 2 || stores == 4);

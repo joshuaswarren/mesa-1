@@ -204,8 +204,29 @@
 #define G17P_INDIRECT_DRAW 0
 #endif
 
+/* vkQuake records every one of its drawing contexts into its own secondary
+ * command buffer and replays them with vkCmdExecuteCommands(cb, 1, &secondary)
+ * called once per secondary, several times in a row, inside a single render
+ * pass. The plain secondary oracle executes exactly one secondary, so this
+ * variant records four and replays them one call at a time. */
+#ifndef G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define G17P_SECONDARY_COMMAND_BUFFER_MULTI 0
+#endif
+
+/* The multi variant is the single-secondary variant plus more secondaries, so
+ * it reuses every guard the single-secondary oracle already carries. */
 #ifndef G17P_SECONDARY_COMMAND_BUFFER
-#define G17P_SECONDARY_COMMAND_BUFFER 0
+#define G17P_SECONDARY_COMMAND_BUFFER G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#endif
+
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define SECONDARY_QUADRANT_COUNT 4
+/* Two triangles per quadrant, selected out of one shared vertex buffer by
+ * firstVertex. */
+#define SECONDARY_QUADRANT_VERTICES 6
+/* Every expected channel is an exact UNORM8 code point, so this absorbs a
+ * one-LSB readback quirk and nothing else. */
+#define SECONDARY_QUADRANT_TOLERANCE 1
 #endif
 
 #if G17P_INDIRECT_DRAW < 0 || G17P_INDIRECT_DRAW > 5
@@ -315,6 +336,44 @@
 #if G17P_COMPOSITE_SPLIT < 0 || G17P_COMPOSITE_SPLIT > 3
 #error "G17P_COMPOSITE_SPLIT must select one of two diagonals and windings"
 #endif
+
+/* vkQuake's world fragment shape: two distinct sampled textures multiplied
+ * together in one invocation. Every other G17P texture oracle, the whole
+ * alpha-composite family included, takes exactly one sample per fragment, so
+ * a second sampled texture that silently reads zero satisfies all of them
+ * while collapsing diffuse * lightmap to black on every BSP surface. Both
+ * sources are uniform at every level, so the product is exact whichever mip
+ * implicit derivatives select. */
+#ifndef G17P_TWO_SAMPLERS
+#define G17P_TWO_SAMPLERS 0
+#endif
+
+/* Move the second sampler into its own descriptor set. vkQuake binds the
+ * diffuse texture at set 0 and the lightmap at set 1, so this variant is the
+ * engine's exact binding shape and the one-set variant above is its control:
+ * a difference between the two is attributable to the second set alone. */
+#ifndef G17P_TWO_SAMPLERS_SPLIT_SETS
+#define G17P_TWO_SAMPLERS_SPLIT_SETS 0
+#endif
+
+#if G17P_TWO_SAMPLERS_SPLIT_SETS && !G17P_TWO_SAMPLERS
+#error "the split-set variant requires the two-sampler oracle"
+#endif
+
+/* Texture A is opaque (255,128,64) and texture B is opaque mid-grey. Their
+ * UNORM8 product is R 255*128/255 = 128.0, G 128*128/255 = 64.25 and
+ * B 64*128/255 = 32.125, with the constant opaque alpha the shader writes.
+ * No channel is zero and no two are equal, so a dropped, swapped, or
+ * duplicated sampler is all distinguishable; a black world surface — the
+ * failure being hunted — sits 128, 64, and 32 code points away. */
+#define G17P_TWO_SAMPLERS_SOURCE_A {0xff, 0x80, 0x40, 0xff}
+#define G17P_TWO_SAMPLERS_SOURCE_B {0x80, 0x80, 0x80, 0xff}
+#define G17P_TWO_SAMPLERS_EXPECTED {128, 64, 32, 255}
+
+/* Both sources are uniform at every level, so filtering and mip selection
+ * cannot move the result; one code point of slack per channel absorbs a
+ * differently rounded multiply without admitting a missing texture. */
+#define G17P_TWO_SAMPLERS_TOLERANCE 2
 
 #ifndef G17P_EXPLICIT_GRADIENT
 #define G17P_EXPLICIT_GRADIENT 0
@@ -454,7 +513,7 @@
    (G17P_LOD_ORACLE || G17P_TEXTURE_ALPHA_COMPOSITE ||                     \
     G17P_TEXTURE_GATHER || G17P_SATURATE_TEXTURE || G17P_SHADOW_COMPARE || \
     G17P_TEXEL_FETCH_LOD || G17P_CUBE_SAMPLE || G17P_TEXTURE_3D ||          \
-    G17P_YCBCR)
+    G17P_TWO_SAMPLERS || G17P_YCBCR)
 
 #if G17P_YCBCR
 #define TEXTURE_FORMAT VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
@@ -555,7 +614,7 @@
      G17P_LOGIC_OP_XOR + G17P_BLEND_CONSTANT + G17P_RGBA8_MRT +           \
      G17P_DYNAMIC_BLEND + G17P_ADVANCED_BLEND + G17P_RASTER_DISCARD +     \
      G17P_SAMPLE_RATE_SHADING + (G17P_MSAA_COVERAGE != 0) +                \
-     G17P_TEXTURE_ALPHA_COMPOSITE + G17P_YCBCR +                            \
+     G17P_TEXTURE_ALPHA_COMPOSITE + G17P_TWO_SAMPLERS + G17P_YCBCR +        \
      G17P_SHADER_QUAD_CONTROL) > 1
 #error "select exactly one guarded G17P oracle"
 #endif
@@ -656,6 +715,19 @@
 #define G17P_VERT_SPV g17p_vulkan_texture_alpha_composite_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_texture_alpha_composite_frag_spv
 #endif
+#elif G17P_TWO_SAMPLERS
+/* The plain implicit-LOD vertex shader: one position attribute and one
+ * smooth UV, so the only thing these two fragment programs change relative
+ * to every other texture oracle is the number of sampled textures. */
+#include "g17p_vulkan_implicit_lod_vert.h"
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+#include "g17p_vulkan_two_samplers_split_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_two_samplers_split_frag_spv
+#else
+#include "g17p_vulkan_two_samplers_frag.h"
+#define G17P_FRAG_SPV g17p_vulkan_two_samplers_frag_spv
+#endif
+#define G17P_VERT_SPV g17p_vulkan_implicit_lod_vert_spv
 #elif G17P_IMPLICIT_LOD
 #include "g17p_vulkan_implicit_lod_frag.h"
 #include "g17p_vulkan_implicit_lod_vert.h"
@@ -906,6 +978,14 @@
 #include "g17p_wsi_triangle_vert.h"
 #define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
 #define G17P_FRAG_SPV g17p_vulkan_rg16_snorm_frag_spv
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+/* The ordinary position-only vertex shader. The fragment program differs from
+ * the constant-colour one only in taking its colour from a push constant, so
+ * each secondary can paint its quadrant a distinguishable colour. */
+#include "g17p_vulkan_secondary_quadrant_frag.h"
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERT_SPV g17p_wsi_triangle_vert_spv
+#define G17P_FRAG_SPV g17p_vulkan_secondary_quadrant_frag_spv
 #else
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
@@ -1340,6 +1420,16 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TWO_SAMPLERS && G17P_TWO_SAMPLERS_SPLIT_SETS
+#define PROBE_NAME "g17p-vulkan-texture-two-samplers-two-sets"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_TWO_SAMPLERS
+#define PROBE_NAME "g17p-vulkan-texture-two-samplers-one-set"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_IMPLICIT_LOD
 #define PROBE_NAME "g17p-vulkan-implicit-lod"
 #define READBACK_IMAGE_USAGE 0
@@ -1752,6 +1842,11 @@
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+#define PROBE_NAME "g17p-vulkan-secondary-command-buffer-multi"
+#define READBACK_IMAGE_USAGE 0
+#define READBACK_GUARD_BYTES 64
+#define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_SECONDARY_COMMAND_BUFFER
 #define PROBE_NAME "g17p-vulkan-secondary-command-buffer"
 #define READBACK_IMAGE_USAGE 0
@@ -1822,6 +1917,9 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 #if G17P_SECONDARY_COMMAND_BUFFER
 VK_FN(vkCmdExecuteCommands);
+#endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+VK_FN(vkCmdPushConstants);
 #endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
 VK_FN(vkCmdPipelineBarrier);
@@ -2034,10 +2132,143 @@ verify_upload(const struct mapped_buffer *buffer, const uint8_t *expected,
 }
 #endif
 
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+/* Quadrant 0 is replayed first, exactly as vkQuake replays its six world
+ * contexts before entities, sky, the view model and the GUI.  Every channel
+ * is an exact UNORM8 code point of an exact 0.0/1.0 fragment colour. */
+static const float secondary_quadrant_colors[SECONDARY_QUADRANT_COUNT][4] = {
+   {1.0f, 0.0f, 0.0f, 1.0f},
+   {0.0f, 1.0f, 0.0f, 1.0f},
+   {0.0f, 0.0f, 1.0f, 1.0f},
+   {1.0f, 1.0f, 0.0f, 1.0f},
+};
+static const uint8_t
+   secondary_quadrant_expected[SECONDARY_QUADRANT_COUNT][4] = {
+   {255, 0, 0, 255},
+   {0, 255, 0, 255},
+   {0, 0, 255, 255},
+   {255, 255, 0, 255},
+};
+/* The render-pass clear.  A quadrant that still carries it was never
+ * rasterized, which is the vkQuake world-surface symptom rather than a
+ * wrong-colour or wrong-order one. */
+static const uint8_t secondary_quadrant_clear[4] = {0, 0, 0, 255};
+static const char *const
+   secondary_quadrant_names[SECONDARY_QUADRANT_COUNT] = {
+   "0 (top-left, replayed first)",
+   "1 (top-right)",
+   "2 (bottom-left)",
+   "3 (bottom-right, replayed last)",
+};
+#endif
+
 static bool
 verify_readback(const uint8_t *map)
 {
-#if G17P_RGBA8_MRT
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
+      if (map[i] != 0xa5 ||
+          map[READBACK_GUARD_BYTES + READBACK_PAYLOAD_BYTES + i] != 0xa5) {
+         fprintf(stderr, PROBE_NAME ": readback guard %zu was modified\n", i);
+         return false;
+      }
+   }
+
+   const uint8_t *pixels = map + READBACK_GUARD_BYTES;
+
+   /* Report every quadrant centre on both outcomes: a pass and a "the first
+    * group is missing" failure must be equally legible from the log. */
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      const unsigned x =
+         (quadrant & 1) * (IMAGE_WIDTH / 2) + IMAGE_WIDTH / 4;
+      const unsigned y =
+         (quadrant >> 1) * (IMAGE_HEIGHT / 2) + IMAGE_HEIGHT / 4;
+      const uint8_t *centre =
+         &pixels[(y * IMAGE_WIDTH + x) * IMAGE_PIXEL_BYTES];
+      printf(PROBE_NAME ": quadrant %s centre (%u,%u) RGBA = %u %u %u %u, "
+                        "expected %u %u %u %u\n",
+             secondary_quadrant_names[quadrant], x, y, centre[0], centre[1],
+             centre[2], centre[3], secondary_quadrant_expected[quadrant][0],
+             secondary_quadrant_expected[quadrant][1],
+             secondary_quadrant_expected[quadrant][2],
+             secondary_quadrant_expected[quadrant][3]);
+   }
+
+   size_t wrong_pixels[SECONDARY_QUADRANT_COUNT] = {0};
+   size_t first_wrong_pixel[SECONDARY_QUADRANT_COUNT] = {0};
+   uint8_t first_wrong[SECONDARY_QUADRANT_COUNT][IMAGE_PIXEL_BYTES];
+   memset(first_wrong, 0, sizeof(first_wrong));
+
+   for (size_t pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+      const unsigned x = pixel % IMAGE_WIDTH;
+      const unsigned y = pixel / IMAGE_WIDTH;
+      const unsigned quadrant =
+         (x >= IMAGE_WIDTH / 2 ? 1u : 0u) + (y >= IMAGE_HEIGHT / 2 ? 2u : 0u);
+      const uint8_t *actual = &pixels[pixel * IMAGE_PIXEL_BYTES];
+      const uint8_t *wanted = secondary_quadrant_expected[quadrant];
+      unsigned worst_delta = 0;
+      for (unsigned byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte) {
+         const unsigned delta = actual[byte] > wanted[byte]
+                                   ? actual[byte] - wanted[byte]
+                                   : wanted[byte] - actual[byte];
+         if (delta > worst_delta)
+            worst_delta = delta;
+      }
+      if (worst_delta <= SECONDARY_QUADRANT_TOLERANCE)
+         continue;
+      if (!wrong_pixels[quadrant]) {
+         first_wrong_pixel[quadrant] = pixel;
+         memcpy(first_wrong[quadrant], actual, IMAGE_PIXEL_BYTES);
+      }
+      wrong_pixels[quadrant]++;
+   }
+
+   unsigned wrong_quadrants = 0;
+   bool cleared[SECONDARY_QUADRANT_COUNT] = {false};
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      if (!wrong_pixels[quadrant])
+         continue;
+      wrong_quadrants++;
+      cleared[quadrant] = memcmp(first_wrong[quadrant],
+                                 secondary_quadrant_clear,
+                                 IMAGE_PIXEL_BYTES) == 0;
+      fprintf(stderr,
+              PROBE_NAME ": quadrant %s is wrong in %zu of %u pixels: pixel "
+                         "%zu is RGBA %u %u %u %u, expected %u %u %u %u "
+                         "+/- %u%s\n",
+              secondary_quadrant_names[quadrant], wrong_pixels[quadrant],
+              (unsigned)((IMAGE_WIDTH / 2) * (IMAGE_HEIGHT / 2)),
+              first_wrong_pixel[quadrant], first_wrong[quadrant][0],
+              first_wrong[quadrant][1], first_wrong[quadrant][2],
+              first_wrong[quadrant][3],
+              secondary_quadrant_expected[quadrant][0],
+              secondary_quadrant_expected[quadrant][1],
+              secondary_quadrant_expected[quadrant][2],
+              secondary_quadrant_expected[quadrant][3],
+              SECONDARY_QUADRANT_TOLERANCE,
+              cleared[quadrant]
+                 ? "; that is the render-pass clear, so this secondary's draw "
+                   "never rasterized"
+                 : "");
+   }
+
+   if (!wrong_quadrants)
+      return true;
+
+   if (wrong_quadrants == 1 && cleared[0]) {
+      fprintf(stderr,
+              PROBE_NAME ": FIRST GROUP MISSING — quadrant 0 kept the clear "
+                         "while quadrants 1..3 painted correctly, so only the "
+                         "first of four consecutive one-per-call "
+                         "vkCmdExecuteCommands replays was dropped. That is "
+                         "exactly the vkQuake world-surface symptom: the "
+                         "world context is the first group in the pass.\n");
+   }
+
+   return false;
+#elif G17P_RGBA8_MRT
    for (size_t i = 0; i < READBACK_GUARD_BYTES; ++i) {
       if (map[i] != 0xa5 ||
           map[READBACK_GUARD_BYTES + IMAGE_BYTES + i] != 0xa5 ||
@@ -2101,6 +2332,18 @@ verify_readback(const uint8_t *map)
    }
 
    const uint8_t *pixels = map + READBACK_GUARD_BYTES;
+#if G17P_TWO_SAMPLERS
+   /* Report the centre pixel on every verification, not only on failure: a
+    * passing product and a black one must both be legible from the log. */
+   {
+      const uint8_t *centre =
+         pixels + ((IMAGE_HEIGHT / 2) * IMAGE_WIDTH + IMAGE_WIDTH / 2) *
+                     IMAGE_PIXEL_BYTES;
+      printf(PROBE_NAME ": centre pixel (%u,%u) RGBA = %u %u %u %u\n",
+             IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2, centre[0], centre[1],
+             centre[2], centre[3]);
+   }
+#endif
 #if G17P_TEXTURE_GATHER
    /* For P=(0.5,0.5) on mip 0, gather returns the red component from
     * (31,32), (32,32), (32,31), (31,31), in that order. */
@@ -2140,6 +2383,11 @@ verify_readback(const uint8_t *map)
     * source (0,192,0) and clear (128,64,128), every expected UNORM8 channel
     * is an exact integer: product = coverage_eighths * opacity_sixteenths,
     * colour = (128-product, 64+product, 128-product, 255). */
+#elif G17P_TWO_SAMPLERS
+   /* Both sampled textures are uniform, so every covered pixel carries the
+    * same product. A shader that only ever receives its first texture leaves
+    * RGB at zero here, which is exactly the vkQuake world-surface failure. */
+   static const uint8_t expected[4] = G17P_TWO_SAMPLERS_EXPECTED;
 #elif G17P_LOD_ORACLE
    /* The vertex shader maps the visible clip range to UV 0..1. A 64-wide
     * texture over 32 pixels therefore has rho=2 and selects exact mip 1.
@@ -2467,6 +2715,30 @@ verify_readback(const uint8_t *map)
             fputc('\n', stderr);
          }
          srgb_out_of_tolerance |= pixel_out_of_tolerance;
+#elif G17P_TWO_SAMPLERS
+         unsigned worst_delta = 0;
+         for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte) {
+            const unsigned delta = actual[byte] > expected_pixel[byte]
+                                      ? actual[byte] - expected_pixel[byte]
+                                      : expected_pixel[byte] - actual[byte];
+            if (delta > worst_delta)
+               worst_delta = delta;
+         }
+         if (worst_delta > G17P_TWO_SAMPLERS_TOLERANCE) {
+            fprintf(stderr,
+                    PROBE_NAME ": pixel %zu RGBA %u %u %u %u is outside the "
+                               "expected product %u %u %u %u +/- %u (worst "
+                               "channel delta %u)%s\n",
+                    pixel, actual[0], actual[1], actual[2], actual[3],
+                    expected_pixel[0], expected_pixel[1], expected_pixel[2],
+                    expected_pixel[3], G17P_TWO_SAMPLERS_TOLERANCE,
+                    worst_delta,
+                    (actual[0] | actual[1] | actual[2]) == 0
+                       ? "; RGB is black, so one of the two sampled textures "
+                         "returned zero"
+                       : "");
+            return false;
+         }
 #else
          fprintf(stderr, PROBE_NAME ": pixel %zu differs: got", pixel);
          for (size_t byte = 0; byte < IMAGE_PIXEL_BYTES; ++byte)
@@ -3277,6 +3549,9 @@ main(void)
 #if G17P_SECONDARY_COMMAND_BUFFER
    LOAD_DEVICE(device, vkCmdExecuteCommands);
 #endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   LOAD_DEVICE(device, vkCmdPushConstants);
+#endif
 #if G17P_TEXTURE_ORACLE || G17P_RGBA8_MRT
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
 #endif
@@ -3581,6 +3856,23 @@ main(void)
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   /* Four disjoint clip-space quads, one per quadrant, six vertices each.
+    * Each secondary selects its own quadrant through firstVertex alone, so
+    * the pipeline, the render pass and the vertex buffer are shared and the
+    * only new variable against the single-secondary oracle is how many
+    * secondaries the pass replays. The quadrant edges land exactly on the
+    * pixel-16 boundary, so the quads neither overlap nor leave a crack. */
+   static const float vertices[][2] = {
+      {-1.0f, -1.0f}, {0.0f, -1.0f}, {-1.0f, 0.0f},
+      {0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f},
+      {0.0f, -1.0f}, {1.0f, -1.0f}, {0.0f, 0.0f},
+      {1.0f, -1.0f}, {1.0f, 0.0f}, {0.0f, 0.0f},
+      {-1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 1.0f},
+      {0.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 1.0f},
+      {0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f},
+      {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f},
+   };
 #else
    static const float vertices[][2] = {
       {-1.0f, -1.0f},
@@ -3825,6 +4117,11 @@ main(void)
 #elif G17P_TEXTURE_ALPHA_COMPOSITE
       TEXTURE_LEVELS = 3,
       TEXTURE_LAYERS = G17P_COMPOSITE_GENERATE_MIPS ? 1 : 2,
+#elif G17P_TWO_SAMPLERS
+      /* One 64x64 image supplies both sampled textures as distinct array
+       * layers, so the two descriptors differ in nothing but their view. */
+      TEXTURE_LEVELS = 3,
+      TEXTURE_LAYERS = 2,
 #else
       TEXTURE_LEVELS = 3,
       TEXTURE_LAYERS = 1,
@@ -3999,6 +4296,33 @@ main(void)
             memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, colour,
                    TEXTURE_PIXEL_BYTES);
          }
+      }
+   }
+#elif G17P_TWO_SAMPLERS
+   /* Layer 0 is tex_a and layer 1 is tex_b. Every level of both layers is
+    * uniform, so whichever mip the implicit derivatives select the sampled
+    * colours — and therefore the product — are exact. */
+   static const uint8_t source_colours[TEXTURE_LAYERS][4] = {
+      G17P_TWO_SAMPLERS_SOURCE_A,
+      G17P_TWO_SAMPLERS_SOURCE_B,
+   };
+   const size_t mip_offsets[TEXTURE_LEVELS] = {
+      TEXTURE_GUARD_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES,
+      TEXTURE_GUARD_BYTES + TEXTURE_LEVEL0_BYTES + TEXTURE_LEVEL1_BYTES,
+   };
+   const size_t mip_pixels[TEXTURE_LEVELS] = {
+      TEXTURE_WIDTH * TEXTURE_HEIGHT,
+      (TEXTURE_WIDTH / 2) * (TEXTURE_HEIGHT / 2),
+      (TEXTURE_WIDTH / 4) * (TEXTURE_HEIGHT / 4),
+   };
+   for (unsigned level = 0; level < TEXTURE_LEVELS; ++level) {
+      for (unsigned layer = 0; layer < TEXTURE_LAYERS; ++layer) {
+         uint8_t *dst = texture_upload_expected + mip_offsets[level] +
+                        layer * mip_pixels[level] * TEXTURE_PIXEL_BYTES;
+         for (size_t pixel = 0; pixel < mip_pixels[level]; ++pixel)
+            memcpy(dst + pixel * TEXTURE_PIXEL_BYTES, source_colours[layer],
+                   TEXTURE_PIXEL_BYTES);
       }
    }
 #else
@@ -4331,7 +4655,7 @@ main(void)
          .layerCount = TEXTURE_LAYERS,
       },
    };
-#if G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_TEXTURE_ALPHA_COMPOSITE || G17P_TWO_SAMPLERS
    VkImageView texture_views[2];
    for (uint32_t source = 0; source < 2; ++source) {
       VkImageViewCreateInfo source_view_info = texture_view_info;
@@ -4427,6 +4751,25 @@ main(void)
       },
    };
 #endif
+#elif G17P_TWO_SAMPLERS
+   /* Two separate combined-image-sampler cells, either side by side in set 0
+    * or — for the split variant — one here and an identical one in set 1. */
+   const VkDescriptorSetLayoutBinding descriptor_bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+#if !G17P_TWO_SAMPLERS_SPLIT_SETS
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      },
+#endif
+   };
 #else
    const VkDescriptorSetLayoutBinding descriptor_bindings[] = {{
       .binding = 0,
@@ -4448,6 +4791,15 @@ main(void)
    check(vkCreateDescriptorSetLayout(device, &set_layout_info, NULL,
                                      &set_layout),
          "vkCreateDescriptorSetLayout");
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+   /* Set 1 repeats set 0's single binding, so the two sets are identical and
+    * the only variable against the one-set control is the set index. */
+   VkDescriptorSetLayout set_layout_b;
+   check(vkCreateDescriptorSetLayout(device, &set_layout_info, NULL,
+                                     &set_layout_b),
+         "vkCreateDescriptorSetLayout(set 1)");
+   const VkDescriptorSetLayout set_layouts[2] = {set_layout, set_layout_b};
+#endif
 #if G17P_TEXTURE_ALPHA_COMPOSITE
 #if G17P_COMPOSITE_DESCRIPTOR_CELL == 2
    const VkDescriptorPoolSize pool_sizes[] = {
@@ -4476,6 +4828,11 @@ main(void)
       },
    };
 #endif
+#elif G17P_TWO_SAMPLERS
+   const VkDescriptorPoolSize pool_sizes[] = {{
+      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 2,
+   }};
 #else
    const VkDescriptorPoolSize pool_sizes[] = {{
       .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -4484,7 +4841,7 @@ main(void)
 #endif
    const VkDescriptorPoolCreateInfo descriptor_pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = 1,
+      .maxSets = G17P_TWO_SAMPLERS_SPLIT_SETS ? 2 : 1,
       .poolSizeCount = sizeof(pool_sizes) / sizeof(pool_sizes[0]),
       .pPoolSizes = pool_sizes,
    };
@@ -4492,6 +4849,18 @@ main(void)
    check(vkCreateDescriptorPool(device, &descriptor_pool_info, NULL,
                                 &descriptor_pool),
          "vkCreateDescriptorPool");
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+   const VkDescriptorSetAllocateInfo set_allocate_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = descriptor_pool,
+      .descriptorSetCount = 2,
+      .pSetLayouts = set_layouts,
+   };
+   VkDescriptorSet descriptor_sets[2];
+   check(vkAllocateDescriptorSets(device, &set_allocate_info,
+                                  descriptor_sets),
+         "vkAllocateDescriptorSets");
+#else
    const VkDescriptorSetAllocateInfo set_allocate_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
       .descriptorPool = descriptor_pool,
@@ -4502,6 +4871,7 @@ main(void)
    check(vkAllocateDescriptorSets(device, &set_allocate_info,
                                   &descriptor_set),
          "vkAllocateDescriptorSets");
+#endif
 #if G17P_TEXTURE_ALPHA_COMPOSITE
    const VkDescriptorImageInfo descriptor_images[2] = {
       {
@@ -4586,6 +4956,46 @@ main(void)
       },
    };
 #endif
+#elif G17P_TWO_SAMPLERS
+   const VkDescriptorImageInfo descriptor_images[2] = {
+      {
+         .sampler = sampler,
+         .imageView = texture_views[0],
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+      {
+         .sampler = sampler,
+         .imageView = texture_views[1],
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+   };
+   const VkWriteDescriptorSet descriptor_writes[] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+         .dstSet = descriptor_sets[0],
+#else
+         .dstSet = descriptor_set,
+#endif
+         .dstBinding = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = &descriptor_images[0],
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+         .dstSet = descriptor_sets[1],
+         .dstBinding = 0,
+#else
+         .dstSet = descriptor_set,
+         .dstBinding = 1,
+#endif
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = &descriptor_images[1],
+      },
+   };
 #else
    const VkDescriptorImageInfo descriptor_image = {
       .sampler = sampler,
@@ -4782,11 +5192,24 @@ main(void)
    check(vkCreateShaderModule(device, &frag_module_info, NULL, &frag_module),
          "vkCreateShaderModule(fragment)");
 
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   const VkPushConstantRange quadrant_color_range = {
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .size = sizeof(secondary_quadrant_colors[0]),
+   };
+#endif
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-#if G17P_TEXTURE_ORACLE
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+      .setLayoutCount = 2,
+      .pSetLayouts = set_layouts,
+#elif G17P_TEXTURE_ORACLE
       .setLayoutCount = 1,
       .pSetLayouts = &set_layout,
+#endif
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &quadrant_color_range,
 #endif
    };
    VkPipelineLayout pipeline_layout;
@@ -5282,10 +5705,18 @@ main(void)
 #if G17P_SECONDARY_COMMAND_BUFFER
    VkCommandBufferAllocateInfo secondary_allocate = command_allocate;
    secondary_allocate.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   secondary_allocate.commandBufferCount = SECONDARY_QUADRANT_COUNT;
+   VkCommandBuffer secondary_command_buffers[SECONDARY_QUADRANT_COUNT];
+   check(vkAllocateCommandBuffers(device, &secondary_allocate,
+                                  secondary_command_buffers),
+         "vkAllocateCommandBuffers(secondary)");
+#else
    VkCommandBuffer secondary_command_buffer;
    check(vkAllocateCommandBuffers(device, &secondary_allocate,
                                   &secondary_command_buffer),
          "vkAllocateCommandBuffers(secondary)");
+#endif
 #endif
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -5550,6 +5981,35 @@ main(void)
    vkCmdBeginRenderPass(command_buffer, &render_begin,
 #if G17P_SECONDARY_COMMAND_BUFFER
                         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+#if G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   const VkDeviceSize secondary_vertex_offset = 0;
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      VkCommandBuffer secondary = secondary_command_buffers[quadrant];
+      check(vkBeginCommandBuffer(secondary, &secondary_begin),
+            "vkBeginCommandBuffer(secondary)");
+      vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+      vkCmdBindVertexBuffers(secondary, 0, 1, &vertex_buffer,
+                             &secondary_vertex_offset);
+      vkCmdPushConstants(secondary, pipeline_layout,
+                         VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(secondary_quadrant_colors[quadrant]),
+                         secondary_quadrant_colors[quadrant]);
+      vkCmdDraw(secondary, SECONDARY_QUADRANT_VERTICES, 1,
+                quadrant * SECONDARY_QUADRANT_VERTICES, 0);
+      check(vkEndCommandBuffer(secondary), "vkEndCommandBuffer(secondary)");
+   }
+
+   /* vkQuake's R_SubmitContexts loop: one vkCmdExecuteCommands per secondary,
+    * four separate consecutive calls inside this one render pass. Batching
+    * them into a single commandBufferCount=4 call would not reproduce the
+    * shape under test, so do not. */
+   for (unsigned quadrant = 0; quadrant < SECONDARY_QUADRANT_COUNT;
+        ++quadrant) {
+      vkCmdExecuteCommands(command_buffer, 1,
+                           &secondary_command_buffers[quadrant]);
+   }
+#else
    check(vkBeginCommandBuffer(secondary_command_buffer, &secondary_begin),
          "vkBeginCommandBuffer(secondary)");
    vkCmdBindPipeline(secondary_command_buffer,
@@ -5561,12 +6021,18 @@ main(void)
    check(vkEndCommandBuffer(secondary_command_buffer),
          "vkEndCommandBuffer(secondary)");
    vkCmdExecuteCommands(command_buffer, 1, &secondary_command_buffer);
+#endif
 #else
                         VK_SUBPASS_CONTENTS_INLINE);
 #if !G17P_CUBE_SAMPLE
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 #endif
-#if G17P_TEXTURE_ORACLE && !G17P_TEXTURE_ALPHA_COMPOSITE
+#if G17P_TWO_SAMPLERS_SPLIT_SETS
+   /* Both sets bound in one call, first set 0, exactly as vkQuake binds its
+    * diffuse and lightmap sets before a world draw. */
+   vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipeline_layout, 0, 2, descriptor_sets, 0, NULL);
+#elif G17P_TEXTURE_ORACLE && !G17P_TEXTURE_ALPHA_COMPOSITE
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
 #endif
@@ -5980,6 +6446,13 @@ main(void)
                         "compiled, and command stream submitted\n");
       return EXIT_SUCCESS;
    }
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   if (record_only) {
+      printf(PROBE_NAME ": RECORD PASS — four inherited secondary draws "
+                        "replayed by four consecutive vkCmdExecuteCommands "
+                        "calls into a validated G17P command stream\n");
+      return EXIT_SUCCESS;
+   }
 #elif G17P_SECONDARY_COMMAND_BUFFER
    if (record_only) {
       printf(PROBE_NAME ": RECORD PASS — inherited secondary draw replayed "
@@ -6209,6 +6682,23 @@ main(void)
                      "were exact "
                      "immediately/3s; all source/readback guards unchanged, "
                      "checksum %016" PRIx64 "\n", checksum);
+#elif G17P_TWO_SAMPLERS
+   {
+      static const uint8_t wanted[4] = G17P_TWO_SAMPLERS_EXPECTED;
+      const uint8_t *centre =
+         readback_map + READBACK_GUARD_BYTES +
+         ((IMAGE_HEIGHT / 2) * IMAGE_WIDTH + IMAGE_WIDTH / 2) *
+            IMAGE_PIXEL_BYTES;
+      printf(PROBE_NAME ": PASS — two distinct sampled textures in %s "
+                        "multiplied to their exact product immediately/3s; "
+                        "centre pixel RGBA %u %u %u %u against expected "
+                        "%u %u %u %u +/- %u; all source/readback guards "
+                        "unchanged, checksum %016" PRIx64 "\n",
+             G17P_TWO_SAMPLERS_SPLIT_SETS ? "two descriptor sets"
+                                          : "one descriptor set",
+             centre[0], centre[1], centre[2], centre[3], wanted[0], wanted[1],
+             wanted[2], wanted[3], G17P_TWO_SAMPLERS_TOLERANCE, checksum);
+   }
 #elif G17P_EXPLICIT_GRADIENT
    printf(PROBE_NAME ": PASS — explicit gradients selected exact mip 1 "
                      "immediately/3s, distinct red/green/blue mips and all "
@@ -6511,6 +7001,11 @@ main(void)
    printf(PROBE_NAME ": PASS — %ux%u RGBA16 UNORM exact immediately/3s, "
                      "128 guard bytes unchanged, checksum %016" PRIx64 "\n",
           IMAGE_WIDTH, IMAGE_HEIGHT, checksum);
+#elif G17P_SECONDARY_COMMAND_BUFFER_MULTI
+   printf(PROBE_NAME ": PASS — four consecutive one-per-call "
+                     "vkCmdExecuteCommands replays painted all four "
+                     "quadrants exactly, 128 guard bytes unchanged, "
+                     "checksum %016" PRIx64 "\n", checksum);
 #elif G17P_SECONDARY_COMMAND_BUFFER
    printf(PROBE_NAME ": PASS — secondary render-pass draw produced exact "
                      "RGBA8 immediately/3s, 128 guard bytes unchanged, "
