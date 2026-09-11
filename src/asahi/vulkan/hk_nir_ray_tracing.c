@@ -467,12 +467,40 @@ hk_build_aabb_case(nir_builder *b, const struct hk_ray_traversal_args *args,
    nir_pop_if(b, NULL);
 }
 
+/*
+ * Push, refusing to run off the end of the stack.
+ *
+ * A tree deeper than the stack still loses the subtree it could not defer --
+ * that gap is described in hk_bvh.h and is not closed here.  What the guard
+ * removes is everything *worse* than a missed hit:
+ *
+ *  - Unguarded, the pointer was incremented even when the store was dropped,
+ *    so it could run past the end.  The matching pop then read a slot that
+ *    was never written and fed the undefined result into the node address
+ *    computation -- a wild global read, not a missed subtree.
+ *  - Dropping the out-of-range store at all was an accidental property of
+ *    the lowering that happens to run (nir_lower_indirect_derefs_to_if_else
+ *    _trees matches no branch).  G17P has a known scratch/spill gap, and the
+ *    day this array lowers to scratch instead, the same store becomes a real
+ *    out-of-bounds write.
+ *
+ * Bounding it here makes both arguments independent of which lowering runs.
+ * The capacity comes from the array the caller actually supplied rather than
+ * a shared constant, so a ray-tracing-pipeline caller that sizes its own
+ * stack differently is still checked against its own bound.
+ */
 static void
 hk_build_push_stack(nir_builder *b, const struct hk_ray_traversal_args *args, nir_def *node)
 {
+   unsigned entries = glsl_get_length(args->vars.stack->type);
    nir_def *stack_ptr = nir_load_deref(b, args->vars.stack_ptr);
-   nir_store_deref(b, nir_build_deref_array(b, args->vars.stack, stack_ptr), node, 0x1);
-   nir_store_deref(b, args->vars.stack_ptr, nir_iadd_imm(b, nir_load_deref(b, args->vars.stack_ptr), 1), 0x1);
+
+   nir_push_if(b, nir_ult_imm(b, stack_ptr, entries));
+   {
+      nir_store_deref(b, nir_build_deref_array(b, args->vars.stack, stack_ptr), node, 0x1);
+      nir_store_deref(b, args->vars.stack_ptr, nir_iadd_imm(b, stack_ptr, 1), 0x1);
+   }
+   nir_pop_if(b, NULL);
 }
 
 static nir_def *

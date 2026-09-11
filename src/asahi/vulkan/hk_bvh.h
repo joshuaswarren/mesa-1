@@ -134,21 +134,49 @@ struct hk_bvh_header {
 /*
  * KNOWN GAP -- deeper trees are not yet rejected or flattened.
  *
- * The traversal pushes onto a fixed HK_MAX_TLAS_DEPTH + HK_MAX_BLAS_DEPTH
- * array with no bounds check, exactly as lavapipe's does.  Lavapipe makes
- * that safe by detecting an over-deep tree during its CPU-side encode and
- * rebuilding the offending subtrees flatter.  Our encode is a GPU shader and
- * does no such pass, so a tree deeper than this is currently possible.
+ * The encoder does not cap tree depth, so a tree deeper than
+ * HK_MAX_TLAS_DEPTH + HK_MAX_BLAS_DEPTH is possible.  Lavapipe avoids this by
+ * measuring depth during its CPU-side encode and rebuilding the offending
+ * subtrees flatter (lvp_flatten_as); our encode is a GPU shader and has no
+ * such pass.
  *
- * It is not a memory-safety problem on this driver: the stack is a shader
- * temporary array indexed dynamically, and hk_lower_nir runs
- * nir_lower_indirect_derefs_to_if_else_trees, so an out-of-range push matches
- * no branch and is dropped rather than writing anywhere.  The consequence is
- * a silently missed subtree, i.e. missed intersections, not corruption.
+ * This is reachable, not theoretical.  The common builder picks PLOC for
+ * every TLAS above four instances and for most BLASes
+ * (vk_acceleration_structure.c, vk_acceleration_structure_build_state_init),
+ * and PLOC is agglomerative: nothing in it bounds the depth of the tree it
+ * merges together.
  *
- * Closing it means either a depth-limiting pass in the encoder or a
- * stack-overflow restart in the traversal.  Until then, a scene degenerate
- * enough to build a 50-deep binary tree will return wrong hits.
+ * The consequence is bounded but wrong.  hk_build_push_stack() refuses to
+ * push past the end, so an over-deep tree loses the subtree it could not
+ * defer and returns missed intersections.  It does not corrupt memory and it
+ * does not read an undefined node -- but it does silently return the wrong
+ * answer, which is the part still to fix.
+ *
+ * CLOSING IT.  The tractable route is a depth pass in the encoder, and the
+ * fact that makes it cheap is easy to miss, so it is written down here.
+ *
+ * encode_internal() maps IR index to output index as
+ *
+ *    dst_index = internal_count - src_index - 1
+ *
+ * over an IR internal array that is root-last, with every child allocated
+ * before its parent.  A parent therefore has a *larger* IR index and hence a
+ * *smaller* output index than either of its children:
+ *
+ *    output index of parent  <  output index of both children
+ *
+ * Output order is already a topological order.  So depth needs no sort, no
+ * atomics and no second traversal: sweep output indices in increasing order,
+ * seed depth[0] = 0 for the root, and when visiting node i write
+ * depth[child] = depth[i] + 1 for each internal child.  Every child is
+ * reached after its parent is final, so one linear pass suffices.
+ *
+ * What remains after that is the flatten itself, which is the expensive half:
+ * lavapipe gathers each offending subtree's leaves and re-links them into a
+ * balanced tree over the internal node slots that subtree already owns (so it
+ * needs no extra allocation).  Porting that to a compute shader means doing
+ * without recursion and without per-subtree dynamic arrays, and it is the
+ * reason this gap is still open rather than the depth measurement.
  */
 
 #endif /* HK_BVH_H */

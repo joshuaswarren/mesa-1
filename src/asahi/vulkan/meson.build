@@ -102,6 +102,20 @@ hk_files = files(
 
 if with_tests
   test(
+    'hk_nir_ray_traversal',
+    executable(
+      'hk_nir_ray_traversal_test',
+      files('tests/test-hk-nir-ray-traversal.c',
+            'hk_nir_ray_tracing.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_nir_robust_image',
     executable(
       'hk_nir_robust_image_test',
