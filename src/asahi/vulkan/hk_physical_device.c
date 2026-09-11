@@ -1629,15 +1629,23 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    hk_get_device_extensions(instance, &supported_extensions);
 
    if (pdev->dev.chip == AGX_CHIP_G17P) {
-      /* HAL200 advanced blend epilogs currently complete without a fault but
-       * write zero instead of the blended colour.
+      /* ADJUDICATED on A18 Pro: the HAL200 epilogs do NOT write zero.  A
+       * g17p-vulkan-advanced-blend run produced exact non-premultiplied RGBA8
+       * for coherent conjoint MULTIPLY and reproduced ledger row R06e's
+       * checksum 0c9eca2eebc81b25 bit-for-bit, so R06e is corroborated and the
+       * "writes zero" claim above it was stale.  The checksum is fnv1a64 over
+       * the real readback buffer and is only printed after the per-pixel
+       * comparisons and guard checks have already had their chance to bail,
+       * so the PASS is not vacuous.
        *
-       * NOTE: this is contradicted by the hardware ledger, whose row R06e
-       * records coherent conjoint non-premultiplied MULTIPLY as exact on G17P
-       * (checksum 0c9eca2eebc81b25).  Both cannot be current.  The next
-       * advanced-blend boot must adjudicate before either is trusted; until
-       * then keep the extension withheld, because withholding a working
-       * feature is recoverable and shipping a black one is not. */
+       * The extension nevertheless stays withheld: that run measured exactly
+       * one operation, while the bit promises the whole family
+       * (advancedBlendAllOperations, plus independentBlend, the
+       * non-premultiplied src/dst colour modes and correlated overlap).  One
+       * operation proves the path is live, not that every operation blends
+       * correctly.  Flip this only after a sweep across the operations and
+       * modes actually advertised -- withholding a working feature is
+       * recoverable, shipping a lying feature bit is not. */
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
 
