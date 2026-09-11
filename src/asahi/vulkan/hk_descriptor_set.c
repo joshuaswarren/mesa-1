@@ -320,6 +320,7 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
    const unsigned generation = set->layout->descriptor_generation;
    const struct hk_storage_image_descriptor_layout native =
       hk_storage_image_descriptor_layout(generation);
+   uint32_t heap_index = 0;
 
    if ((!storage || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
@@ -328,6 +329,7 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       desc.tex = view->tex;
       if (storage)
          desc.pbe = view->pbe;
+      heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);
       hk_set_null_native_pbe(generation, &desc.pbe);
@@ -337,7 +339,31 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
    memcpy(packed + native.texture, &desc.tex,
           hk_texture_descriptor_size(generation));
    memcpy(packed + native.pbe, &desc.pbe, hk_pbe_descriptor_size(generation));
-   write_desc(set, binding, elem, packed, native.stride);
+   /* G17P reaches a texture through the device heap; the descriptor carries
+    * only the index, which hk_descriptor_stride_align_for_type() reserved the
+    * eight extra bytes for.  Leaving it zero resolves to the pinned null
+    * texture, so every texel buffer read black.
+    *
+    * Both offsets are written because both readers exist in
+    * agx_nir_lower_g17p_combined_sampler.c and a buffer view has one texture
+    * for both: a texel fetch (nir_tex, the lowered 2D txf) takes
+    * AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET, while an imageLoad on an imageBuffer
+    * takes AGX_G17P_STORAGE_HEAP_INDEX_OFFSET.  The two live in the reserved
+    * eight bytes at 64 and 68 and do not overlap. */
+   const uint32_t stride = set->layout->binding[binding].stride;
+   if (heap_index &&
+       stride >= AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET + sizeof(heap_index)) {
+      memcpy(packed + AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET, &heap_index,
+             sizeof(heap_index));
+      memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET, &heap_index,
+             sizeof(heap_index));
+   }
+   /* Write the binding's whole stride, not just the texture/PBE pair: the
+    * reserved heap-index bytes live past native.stride, so a native.stride
+    * write would drop them.  write_storage_image_view_desc() already does
+    * this; texel buffers were the one caller that did not, which is the
+    * second half of why their index was always zero. */
+   write_desc(set, binding, elem, packed, MIN2(stride, sizeof(packed)));
 }
 
 static void
