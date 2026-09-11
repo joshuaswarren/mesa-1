@@ -13,7 +13,21 @@
  * COLOR_FORMAT and DEPTH_FORMAT (numeric VkFormat values) override the
  * attachment formats; DEPTH_FORMAT=0 drops the depth attachment.
  *
- * Exit status is the number of fragment modules that failed.
+ * PROBE_BINDINGS replaces the default descriptor set 0 with a comma-separated
+ * list of <binding>:<kind> entries (ubo, ssbo, cis, image, sampler), each
+ * visible to every graphics stage.  The default -- a vertex uniform buffer at
+ * 0 and a fragment combined image sampler at 1 -- is what a hand-written probe
+ * shader uses, but a real application's shader declares its own set, and a
+ * pipeline layout that does not contain a binding the shader uses does not
+ * fail cleanly: it aborts inside hk_nir_lower_descriptors.c, upstream of the
+ * packer this probe exists to measure.
+ *
+ * PROBE_PAIRS=1 reads argv as alternating <vert.spv> <frag.spv> pairs instead
+ * of one vertex module shared by every fragment module, so a corpus captured
+ * from an application -- where each program is a linked pair -- can be replayed
+ * as the pairs it actually was.
+ *
+ * Exit status is the number of pipelines that failed.
  */
 
 #define VK_NO_PROTOTYPES
@@ -113,6 +127,62 @@ env_format(const char *name, VkFormat fallback)
 {
    const char *v = getenv(name);
    return v ? (VkFormat)atoi(v) : fallback;
+}
+
+#define PROBE_MAX_BINDINGS 64
+
+/* Parse PROBE_BINDINGS, returning the number of bindings written.  Returns 2
+ * -- leaving the caller's default in place -- when the variable is unset, so
+ * every existing caller of this probe keeps the layout it was measured with. */
+static uint32_t
+parse_bindings(VkDescriptorSetLayoutBinding *out)
+{
+   const char *spec = getenv("PROBE_BINDINGS");
+   if (!spec || !*spec)
+      return 2;
+
+   uint32_t n = 0;
+   for (const char *p = spec; *p && n < PROBE_MAX_BINDINGS;) {
+      char *end = NULL;
+      const unsigned long binding = strtoul(p, &end, 10);
+      if (end == p || *end != ':')
+         die("PROBE_BINDINGS: expected <binding>:<kind>");
+      p = end + 1;
+
+      const char *kind = p;
+      while (*p && *p != ',')
+         ++p;
+      const size_t len = (size_t)(p - kind);
+      if (*p == ',')
+         ++p;
+
+      VkDescriptorType type;
+      if (!strncmp(kind, "ubo", len) && len == 3)
+         type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+      else if (!strncmp(kind, "ssbo", len) && len == 4)
+         type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      else if (!strncmp(kind, "cis", len) && len == 3)
+         type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      else if (!strncmp(kind, "image", len) && len == 5)
+         type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+      else if (!strncmp(kind, "sampled", len) && len == 7)
+         type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+      else if (!strncmp(kind, "sampler", len) && len == 7)
+         type = VK_DESCRIPTOR_TYPE_SAMPLER;
+      else
+         die("PROBE_BINDINGS: unknown descriptor kind");
+
+      out[n++] = (VkDescriptorSetLayoutBinding){
+         .binding = (uint32_t)binding,
+         .descriptorType = type,
+         .descriptorCount = 1,
+         /* Every stage: which stage uses a binding is the shader's business,
+          * and a stage flag that is too narrow fails the pipeline for a reason
+          * that has nothing to do with what is being measured. */
+         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+      };
+   }
+   return n;
 }
 
 int
@@ -215,8 +285,9 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkDestroyPipeline);
 
    /* A uniform buffer and a combined image sampler: the two descriptors a
-    * textured draw needs, which is what vkcube binds. */
-   const VkDescriptorSetLayoutBinding binds[2] = {
+    * textured draw needs, which is what vkcube binds.  PROBE_BINDINGS
+    * replaces this wholesale for a captured application shader. */
+   VkDescriptorSetLayoutBinding binds[PROBE_MAX_BINDINGS] = {
       {.binding = 0,
        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
        .descriptorCount = 1,
@@ -226,9 +297,10 @@ main(int argc, char **argv)
        .descriptorCount = 1,
        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
    };
+   uint32_t nr_binds = parse_bindings(binds);
    const VkDescriptorSetLayoutCreateInfo dsli = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 2,
+      .bindingCount = nr_binds,
       .pBindings = binds,
    };
    VkDescriptorSetLayout set_layout;
@@ -284,18 +356,38 @@ main(int argc, char **argv)
    VkRenderPass render_pass;
    check(vkCreateRenderPass(device, &rpi, NULL, &render_pass), "render pass");
 
+   const char *pairs_env = getenv("PROBE_PAIRS");
+   const bool pairs = pairs_env && strcmp(pairs_env, "0");
+   if (pairs && ((argc - 1) % 2) != 0)
+      die("PROBE_PAIRS=1 needs an even number of SPIR-V arguments");
+
    size_t vsize = 0;
-   uint32_t *vwords = read_spv(argv[1], &vsize);
-   const VkShaderModuleCreateInfo vmi = {
-      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = vsize,
-      .pCode = vwords,
-   };
-   VkShaderModule vertex;
-   check(vkCreateShaderModule(device, &vmi, NULL, &vertex), "vertex module");
+   uint32_t *vwords = NULL;
+   VkShaderModule vertex = VK_NULL_HANDLE;
+   if (!pairs) {
+      vwords = read_spv(argv[1], &vsize);
+      const VkShaderModuleCreateInfo vmi = {
+         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+         .codeSize = vsize,
+         .pCode = vwords,
+      };
+      check(vkCreateShaderModule(device, &vmi, NULL, &vertex), "vertex module");
+   }
 
    int failures = 0;
-   for (int i = 2; i < argc; ++i) {
+   for (int i = 2; i < argc; i += pairs ? 2 : 1) {
+      if (pairs) {
+         size_t psize = 0;
+         uint32_t *pwords = read_spv(argv[i - 1], &psize);
+         const VkShaderModuleCreateInfo pvmi = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = psize,
+            .pCode = pwords,
+         };
+         check(vkCreateShaderModule(device, &pvmi, NULL, &vertex),
+               "vertex module");
+         free(pwords);
+      }
       size_t fsize = 0;
       uint32_t *fwords = read_spv(argv[i], &fsize);
       const VkShaderModuleCreateInfo fmi = {
@@ -377,9 +469,14 @@ main(int argc, char **argv)
          vkDestroyPipeline(device, pipeline, NULL);
       vkDestroyShaderModule(device, fragment, NULL);
       free(fwords);
+      if (pairs) {
+         vkDestroyShaderModule(device, vertex, NULL);
+         vertex = VK_NULL_HANDLE;
+      }
    }
 
-   vkDestroyShaderModule(device, vertex, NULL);
+   if (vertex != VK_NULL_HANDLE)
+      vkDestroyShaderModule(device, vertex, NULL);
    free(vwords);
    vkDestroyRenderPass(device, render_pass, NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
