@@ -4112,17 +4112,28 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
    return next == count && stopped;
 }
 
-/* Firefox WebRender's captured wide vertex programs write either 39 or 50
- * dense scalar outputs, materialize the homogeneous one, then write the last.
- * That final pure producer makes the stores nonterminal in the IR even though
- * every earlier value has already been copied to its component-addressed
- * staging word.  Recognize precisely that captured suffix: accepting every
- * nonterminal dense stream would also admit ungrounded output counts and
- * producer schedules that this bring-up backend intentionally refuses. */
+/* Firefox WebRender's wide vertex programs write a dense run of scalar
+ * outputs, materialize the homogeneous one, then write the last.  That final
+ * pure producer makes the stores nonterminal in the IR even though every
+ * earlier value has already been copied to its component-addressed staging
+ * word before the producer can reuse the GPR -- which is exactly why the late
+ * write is safe.
+ *
+ * That safety argument is structural and does not depend on how many outputs
+ * precede it, so the shape rather than the width is what is recognized here:
+ * every store dense and in index order, the sole late producer a MOV_IMM of
+ * 1.0f, that producer the exclusive source of the final store, and STOP
+ * immediately after.  Anything else still fails closed, and the width ceiling
+ * is still AGX3_MAX_VERTEX_OUTPUTS.
+ *
+ * This used to test `count != 40 && count != 51`, the two widths that had been
+ * captured.  Firefox 155 emits the identical shape 49 outputs wide, so the
+ * pinned pair refused its WebRender vertex program at `st_vary #4` and the
+ * browser came up with no WebRender pipeline at all. */
 static bool
 agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
 {
-   if (count != 40 && count != 51)
+   if (count < 5 || count > AGX3_MAX_VERTEX_OUTPUTS)
       return false;
 
    const unsigned last = count - 1;

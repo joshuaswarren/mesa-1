@@ -8121,6 +8121,44 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsAllowLatePureProducer)
    }
 }
 
+/* Firefox 155's WebRender vertex program is the same shape with 49 dense
+ * outputs: its final store's source GPR is also read by an earlier store, so
+ * the late pure producer is only safe because every earlier value has already
+ * been copied to its own staging address.  That safety argument does not
+ * depend on the number of outputs, and the captured 40/51 pair was only ever
+ * what happened to be captured -- pinning it refused Firefox at st_vary #4 and
+ * left the browser with no WebRender pipeline at all. */
+TEST_F(AGX3PackBinary, FirefoxDenseOutputsAcceptAnyGroundedWidth)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned count : {5u, 39u, 40u, 49u, 51u, AGX3_MAX_VERTEX_OUTPUTS}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+
+      for (unsigned c = 0; c + 1 < count; ++c)
+         agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+      agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f800000);
+      agx_st_vary(b, agx_immediate(count - 1),
+                  agx_register(24, AGX_SIZE_32));
+      agx_stop(b);
+
+      const auto bytes = pack(b);
+      EXPECT_FALSE(bytes.empty()) << count;
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * count) << count;
+   }
+
+   /* The width ceiling still fails closed. */
+   agx_builder *too_wide = builder(enc);
+   too_wide->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
+      agx_st_vary(too_wide, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(too_wide, agx_register(24, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(too_wide, agx_immediate(AGX3_MAX_VERTEX_OUTPUTS),
+               agx_register(24, AGX_SIZE_32));
+   agx_stop(too_wide);
+   EXPECT_TRUE(pack(too_wide, false).empty());
+}
+
 TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -8134,14 +8172,27 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
 
    EXPECT_TRUE(pack(b, false).empty());
 
-   /* Preserve the captured-count boundary even with the otherwise exact
-    * homogeneous-one suffix. */
+   /* The late producer must be the exclusive source of the final store.  If
+    * the last store reads some other register the staged value it publishes is
+    * unrelated to the producer, so the suffix is not the grounded shape. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_VERTEX;
-   for (unsigned c = 0; c < 38; ++c)
+   for (unsigned c = 0; c < 50; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(b, agx_register(26, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+
+   /* A late producer that lands before the final store's predecessors, rather
+    * than immediately ahead of the final store, is likewise not the shape. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c < 49; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
    agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f800000);
-   agx_st_vary(b, agx_immediate(38), agx_register(24, AGX_SIZE_32));
+   agx_st_vary(b, agx_immediate(49), agx_register(24, AGX_SIZE_32));
+   agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
    agx_stop(b);
    EXPECT_TRUE(pack(b, false).empty());
 }
