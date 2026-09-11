@@ -158,6 +158,16 @@ static unsigned wsi_rollback_queue_destroys;
 static unsigned wsi_rollback_submits;
 
 static struct asahi_g17p_stream_stats matrix_stats;
+
+/*
+ * How many graphics control streams the run submitted.
+ *
+ * The barrier accounting above sums every stream together, so it cannot tell
+ * one stream carrying sixteen draws apart from sixteen streams carrying one
+ * each -- which is the entire question a draws-per-stream policy is about.
+ * Counting validated streams separates them.
+ */
+static unsigned validated_graphics_streams;
 static struct asahi_g17p_compute_stats compute_stats;
 static bool multiview_layers_two;
 static unsigned synchronized_render_submits;
@@ -357,6 +367,7 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
       else if (!matrix_stats.fragment_code)
          matrix_stats.fragment_code = stats->fragment_code;
    }
+   validated_graphics_streams++;
    matrix_stats.draws += stats->draws;
    matrix_stats.indexed_draws += stats->indexed_draws;
    matrix_stats.state_updates += stats->state_updates;
@@ -481,6 +492,53 @@ check_inter_draw_barriers(void)
            "shim: G17P emitted %u inter-draw VDM barriers across %u draws "
            "with no unbarriered state republication\n",
            matrix_stats.inter_draw_barriers, matrix_stats.draws);
+}
+
+/*
+ * Assert the shape a draws-per-stream policy produced.
+ *
+ * ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE is
+ * "<graphics streams>:<draws>:<state updates>".  All three are needed: the
+ * stream count is what a split policy changes, the draw count proves no draw
+ * was dropped on the way, and the state-update count is the invariant the
+ * G17P fix actually rests on -- a stream may publish render state once.  A
+ * policy that concatenates draw bodies while still publishing state per draw
+ * would pass a stream-count check on its own and is exactly the thing that
+ * loses the device.
+ */
+static void __attribute__((destructor))
+check_stream_shape(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE");
+   if (!value)
+      return;
+
+   unsigned expected_streams = 0, expected_draws = 0, expected_states = 0;
+   if (sscanf(value, "%u:%u:%u", &expected_streams, &expected_draws,
+              &expected_states) != 3) {
+      fprintf(stderr,
+              "shim: ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE wants "
+              "<streams>:<draws>:<state updates>, got '%s'\n",
+              value);
+      _Exit(EXIT_FAILURE);
+   }
+
+   if (validated_graphics_streams != expected_streams ||
+       matrix_stats.draws != expected_draws ||
+       matrix_stats.state_updates != expected_states) {
+      fprintf(stderr,
+              "shim: G17P stream shape %u/%u streams, %u/%u draws, %u/%u "
+              "state updates\n",
+              validated_graphics_streams, expected_streams, matrix_stats.draws,
+              expected_draws, matrix_stats.state_updates, expected_states);
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: G17P recorded %u graphics streams carrying %u draws and %u "
+           "state updates\n",
+           validated_graphics_streams, matrix_stats.draws,
+           matrix_stats.state_updates);
 }
 
 static void __attribute__((destructor))

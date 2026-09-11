@@ -487,6 +487,65 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  # What each draw-split policy does to the shape of the stream.
+  #
+  # The invariant the G17P fix rests on is that a graphics control stream
+  # publishes render state once: a stream carrying a second *publication*
+  # loses the device. How many draw *bodies* ride on that one publication is a
+  # separate axis, and the cheap one -- a body-only draw writes no state at
+  # all. These three pin both axes, against sixteen identical draws in one
+  # render pass, because a stream-count check alone cannot tell a policy that
+  # concatenates bodies from one that also concatenates publications.
+  g17p_split_shape_every_env = environment(g17p_image_copy_3d_environment)
+  g17p_split_shape_every_env.set('G17P_REPEAT_DRAW_COUNT', '16')
+  g17p_split_shape_every_env.set('HK_G17P_DRAW_SPLIT', 'every')
+  g17p_split_shape_every_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '16:16:16')
+  test(
+    'hk_g17p_split_shape_every_draw',
+    g17p_repeat_draw,
+    env : g17p_split_shape_every_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-draw-split'],
+    timeout : 30,
+  )
+
+  # Splitting on render-state republication instead. Sixteen body-only draws
+  # publish state once, so they collapse into one stream -- and that stream
+  # still carries exactly one state update, which is what makes this narrowing
+  # the same rule as the unconditional split rather than a weakening of it.
+  g17p_split_shape_republish_env = environment(g17p_image_copy_3d_environment)
+  g17p_split_shape_republish_env.set('G17P_REPEAT_DRAW_COUNT', '16')
+  g17p_split_shape_republish_env.set('HK_G17P_DRAW_SPLIT', 'republish')
+  g17p_split_shape_republish_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:16:1')
+  test(
+    'hk_g17p_split_shape_republished_state',
+    g17p_repeat_draw,
+    env : g17p_split_shape_republish_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-draw-split'],
+    timeout : 30,
+  )
+
+  # The draws-per-stream cap composes with the policy and bounds the second
+  # axis: four streams of four bodies, each still publishing state once. Four
+  # is the deepest stream measured safe on hardware; eight lost the device.
+  g17p_split_shape_cap_env = environment(g17p_image_copy_3d_environment)
+  g17p_split_shape_cap_env.set('G17P_REPEAT_DRAW_COUNT', '16')
+  g17p_split_shape_cap_env.set('HK_G17P_DRAW_SPLIT', 'republish')
+  g17p_split_shape_cap_env.set('HK_G17P_DRAWS_PER_STREAM', '4')
+  g17p_split_shape_cap_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '4:16:4')
+  test(
+    'hk_g17p_split_shape_draws_per_stream_cap',
+    g17p_repeat_draw,
+    env : g17p_split_shape_cap_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-draw-split'],
+    timeout : 30,
+  )
+
   # Whether a readback copy is ordered after the render that produced it is
   # carried entirely by drm_asahi_cmd_header::vdm_barrier and by which ioctl
   # the out-syncobjs ride on. Both are write-only from userspace, so a driver
