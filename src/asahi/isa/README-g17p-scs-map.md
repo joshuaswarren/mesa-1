@@ -9,6 +9,14 @@ experiment would settle them.  Encoders live in `compiler/agx3_scs_core.h` and
 Everything below is host-side, from Apple's own translator.  See
 `README-metal-witness.md` for the `metal-nt` invocation and its traps.
 
+**Read `README-g17p-rt-hardware-abi.md` alongside this file.**  It carries one
+complete traversal decoded byte for byte, the staged-ray field map, the
+completion protocol, and -- the part that changes how this file should be read
+-- a hardware-mandated versus compiler-chosen split derived from AGX3b/AGX3c
+invariance.  It also records that earlier RT work used the `ria3` runtime, which
+is the **wrong generation for G17P**: our part ships `ria2`, and the
+`intersect_ray` operand set differs between them.
+
 ## The layout is per-shader.  Do not hardcode it.
 
 Apple's own layout printer says the assignment "only applies to this shader in
@@ -18,6 +26,13 @@ Across 27 kernels **only bank 0 offset 0 (the staged ray) was invariant**.
 
 A lowering must therefore *read* the layout rather than assume it.  A map
 recorded from one kernel is a witness, not a contract.
+
+Refined since this was written: the variability is **allocation, not
+semantics**.  `agc.scs.get_layout()` returns a single driver-supplied packed
+`i64`, and the parts that survive the AGX3b/AGX3c boundary -- the ray record's
+bytes 0..24, the status byte's bit-6 completion flag, the epilogue's `f70=4
+f68=15` 512 stride -- are hardware-mandated, while placement is ours to choose
+because we supply that constant.  See `README-g17p-rt-hardware-abi.md`.
 
 ## The vocabulary: SCS is sliced per virtual ray id
 
