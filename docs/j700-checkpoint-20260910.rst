@@ -1,5 +1,10 @@
 J700 graphics checkpoint, 2026-09-10
-==================================
+====================================
+
+.. note::
+
+   Historical record. The blocked native-desktop state below was superseded
+   by the 2026-09-11 checkpoint in :doc:`j700`.
 
 The ``j700`` branch retains the AGX source history through
 ``3d7944d34c097e774ec666394b9de0eae3be8b9e``. Two small local changes preserve

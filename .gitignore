@@ -10,3 +10,6 @@
 /_build-native-d3d12-package*.dmg
 .venv/
 *.mda.tar
+
+# macOS Finder metadata
+.DS_Store

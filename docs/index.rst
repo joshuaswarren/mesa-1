@@ -35,6 +35,7 @@ Linux, FreeBSD, and other operating systems.
    history
    amber
    systems
+   j700
    license
    faq
    relnotes
