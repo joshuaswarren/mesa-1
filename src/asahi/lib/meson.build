@@ -405,6 +405,17 @@ if with_tests
   )
 
   test(
+    'asahi-agx-m5-va',
+    executable(
+      'asahi-agx-m5-va',
+      files('tests/test-agx-m5-va.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      c_args : ['-UNDEBUG'],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-agx-scs-layout',
     executable(
       'asahi-agx-scs-layout',

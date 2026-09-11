@@ -7,6 +7,7 @@
 
 #include "agx_device.h"
 #include "agx_g17p_bind0.h"
+#include "agx_m5_va.h"
 #include "agx_linker.h"
 #include "agx_va_runtime_hole.h"
 #include <errno.h>
@@ -973,6 +974,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * ASAHI_G17P_USC_BASE below overrides this for further experiments only. */
    if (dev->chip == AGX_CHIP_G17P)
       dev->shader_base = AGX_G17P_USC_WINDOW_BASE;
+   else if (dev->chip == AGX_CHIP_G17G)
+      dev->shader_base = AGX_M5_SHADER_BASE;
 
    /* G17P launch-level bring-up controls.
     *
@@ -1055,7 +1058,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * robustness carveout untouched while making every ordinary VDM payload
     * directly representable, with no per-run alias option.
     */
-   const bool heap_below_usc = dev->chip == AGX_CHIP_G17P;
+   const bool heap_below_usc = dev->chip == AGX_CHIP_G17P ||
+                               dev->chip == AGX_CHIP_G17G;
 
    /*
     * Start the low heap as high as it can go rather than at the reservation.
@@ -1097,20 +1101,33 @@ agx_open_device(void *memctx, struct agx_device *dev)
       return false;
    }
 
-   // Put the kernel heap at the top of the address space.
-   // Give it 32GB of address space, should be more than enough for any
-   // reasonable use case.
+   /* Default to a 32 GiB kernel heap at the top of the address space.
+    * M5 instead reserves low VA for its compact TA resource pointers. */
    uint64_t kernel_size = MAX2(dev->params.vm_kernel_min_size, 32ull << 30);
    struct drm_asahi_vm_create vm_create = {
       .kernel_start = dev->params.vm_end - kernel_size,
       .kernel_end = dev->params.vm_end,
    };
+   if (dev->chip == AGX_CHIP_G17G) {
+      struct agx_m5_va_layout layout;
+      if (!agx_m5_va_layout(dev->params.vm_start, dev->params.vm_end,
+                            dev->params.vm_kernel_min_size, dev->shader_base,
+                            &layout)) {
+         fprintf(stderr, "M5 address windows do not fit the reported GPU VM\n");
+         return false;
+      }
+      vm_create.kernel_start = layout.driver_start;
+      vm_create.kernel_end = layout.driver_end;
+      user_start = layout.data_start;
+   }
 
-   /* G17P is bounded by the narrower of the compact VDM aperture and the
-    * absolute USC texture/sampler table pointer, both of which sit below the
-    * USC window. Other chips retain the kernel-reported user limit. */
-   const uint64_t user_limit =
-      heap_below_usc ? AGX_G17P_USER_LIMIT : vm_create.kernel_start;
+   /* G17P and M5 keep data and sparse aliases below the compact VDM and
+    * absolute USC texture/sampler pointer limits. Other chips retain the
+    * kernel-reported user limit. */
+   const uint64_t user_limit = dev->chip == AGX_CHIP_G17G
+                                 ? AGX_M5_DATA_END
+                                 : heap_below_usc ? AGX_G17P_USER_LIMIT
+                                                  : vm_create.kernel_start;
    uint64_t user_size = user_limit - user_start;
 
    int ret = dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
