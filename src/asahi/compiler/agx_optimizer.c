@@ -170,10 +170,13 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
           def->src[0].size == AGX_SIZE_16)
          continue;
 
-      /* FLTNORM has only captured f32 sources. Keep the explicit widening
-       * used by linked half-width fragment outputs before normalized packing. */
+      /* FLTNORM and RGB10A2 packing have only captured f32 sources. Keep
+       * the explicit widening used by linked half-width fragment outputs
+       * before normalized packing. */
       if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          ins->op == AGX_OPCODE_FLTNORM_AGX3 && src.size == AGX_SIZE_32 &&
+          (ins->op == AGX_OPCODE_FLTNORM_AGX3 ||
+           ins->op == AGX_OPCODE_PACK_RGB10A2_AGX3) &&
+          src.size == AGX_SIZE_32 &&
           def->src[0].size == AGX_SIZE_16)
          continue;
 

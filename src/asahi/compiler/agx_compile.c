@@ -799,11 +799,24 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
    if (format == AGX_FORMAT_RGB10A2) {
       if (nr_channels != 4)
          return 0;
-      for (unsigned i = 0; i < 4; ++i)
-         if (channels[i].size != AGX_SIZE_32)
+      agx_index pack_sources[4];
+      for (unsigned i = 0; i < 4; ++i) {
+         if (channels[i].size == AGX_SIZE_32) {
+            pack_sources[i] = channels[i];
+         } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                    channels[i].size == AGX_SIZE_16) {
+            /* As with the normalized 8-bit epilog below, a texture result
+             * can arrive through the half export ABI. The native RGB10A2
+             * pack consumes f32, so widen before packing instead of handing
+             * an unpacked half vector to the tile-store encoder. */
+            pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, pack_sources[i], channels[i]);
+         } else {
             return 0;
-      packed[0] = agx_pack_rgb10a2_agx3(b, channels[0], channels[1],
-                                      channels[2], channels[3]);
+         }
+      }
+      packed[0] = agx_pack_rgb10a2_agx3(b, pack_sources[0], pack_sources[1],
+                                      pack_sources[2], pack_sources[3]);
       return 1;
    }
 

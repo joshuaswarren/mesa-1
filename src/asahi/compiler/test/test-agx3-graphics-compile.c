@@ -845,7 +845,7 @@ test_g17p_background_f16_clear_narrowing(void)
 }
 
 static nir_shader *
-build_half_norm8_epilog(void)
+build_half_normalized_epilog(enum pipe_format format)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P half ABI normalized epilog");
@@ -853,7 +853,7 @@ build_half_norm8_epilog(void)
       &b, 4, 16, .base = AGX_ABI_FOUT_COLOUR(0));
    nir_store_local_pixel_agx(
       &b, colour, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
-      .base = 0, .write_mask = 0xf, .format = PIPE_FORMAT_R8_UNORM);
+      .base = 0, .write_mask = 0xf, .format = format);
    return fs_finish(&b);
 }
 
@@ -873,7 +873,7 @@ test_g17p_half_norm8_epilog(void)
       0x07,0x02,0x54,0x0c,0x02,0x00,
       0x0e,0x00,0x00,0x00,
    };
-   nir_shader *nir = build_half_norm8_epilog();
+   nir_shader *nir = build_half_normalized_epilog(PIPE_FORMAT_R8_UNORM);
 
    struct agx_shader_key key = {
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
@@ -885,6 +885,26 @@ test_g17p_half_norm8_epilog(void)
              part.info.binary_size == sizeof(expected) &&
              memcmp(part.binary, expected, sizeof(expected)) == 0;
 
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
+static bool
+test_g17p_half_rgb10_epilog(void)
+{
+   /* A mediump texture result reaches the RGB30 desktop epilog through
+    * four half registers. It must compile instead of silently dropping
+    * the textured draw at the tile-store encoder. */
+   nir_shader *nir =
+      build_half_normalized_epilog(PIPE_FORMAT_R10G10B10A2_UNORM);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   ok &= part.binary != NULL && part.info.binary_size > 0;
    free(part.binary);
    ralloc_free(nir);
    return ok;
@@ -4793,8 +4813,34 @@ build_fs_hyprland_discard_predicate(void)
    return fs_finish(&b);
 }
 
+/* Zink's dynamic fragment path uses a minifloat multiplier and an absolute
+ * addend. Cover both multiplier positions and abs/-abs while retaining a
+ * fused FMA rather than splitting its arithmetic into two rounded steps. */
+static nir_shader *
+build_fs_zink_minifloat_abs_fma(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 Zink minifloat absolute-addend FMA FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_def *y = nir_channel(&b, input, 1);
+   nir_def *absolute = nir_fabs(&b, y);
+   nir_def *constant = nir_imm_float(&b, -2.0f);
+   nir_def *a = nir_ffma(&b, constant, x, absolute);
+   nir_def *n = nir_ffma(&b, x, constant, nir_fneg(&b, absolute));
+   fs_store_colour(&b, nir_vec4(&b, a, n, x, nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 /* Chromium/Skia's rounded-rect fragment compares a negated highp value for
- * equality and selects two unrelated highp values.  The backend must
+ * equality and selects two unrelated highp values. The backend must
  * materialize fneg before RA and reach the grounded unmodified FSEL. */
 static nir_shader *
 build_fs_chromium_negated_equality_select(void)
@@ -5405,6 +5451,8 @@ g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
 }
 
 static const struct agx3_graphics_case cases[] = {
+   {"fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
+    true, .g17p_only = true},
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
    {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
     .expected_leading_sr = 0xdd, .g17p_only = true},
@@ -5764,6 +5812,16 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--zink-minifloat-abs-fma-only")) {
+      const struct agx3_graphics_case c = {
+         "fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
+         true, .g17p_only = true,
+      };
+      const bool ok = run_case(&c, AGX_ISA_ENCODING_AGX3B);
+      fprintf(stderr, "G17P Zink minifloat absolute-addend FMA: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--alpha-coverage-only")) {
       const bool ok = test_g17p_alpha_coverage_boundary();
       fprintf(stderr, "G17P alpha-coverage boundary select: %s\n",
@@ -5863,6 +5921,11 @@ main(int argc, char **argv)
       const bool ok = test_g17p_half_norm8_epilog();
       fprintf(stderr, "G17P half ABI normalized epilog: %s\n",
               ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--half-rgb10-epilog-only")) {
+      const bool ok = test_g17p_half_rgb10_epilog();
+      fprintf(stderr, "G17P half ABI RGB10 epilog: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--fragment-io-matrix-only")) {
@@ -6071,6 +6134,7 @@ main(int argc, char **argv)
    RUN(test_g17p_background_clear);
    RUN(test_g17p_background_f16_clear_narrowing);
    RUN(test_g17p_half_norm8_epilog);
+   RUN(test_g17p_half_rgb10_epilog);
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
