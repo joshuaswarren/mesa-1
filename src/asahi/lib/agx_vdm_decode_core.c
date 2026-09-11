@@ -106,7 +106,8 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
    case 3: {
       const bool hal300 = agx_vdm_decode_is_hal300(chip);
       const size_t indexed_length = hal300 ? 32 : 28;
-      const size_t nonindexed_length = hal300 ? 20 : 16;
+      const size_t nonindexed_length =
+         agx_vdm_index_list_nonindexed_has_tail(chip) ? 20 : 16;
       const size_t indirect_nonindexed_length =
          hal300 ? AGX_VDM_INDEX_LIST_INDIRECT_NONINDEXED_MAX_LENGTH
                 : AGX_VDM_INDEX_LIST_INDIRECT_NONINDEXED_MAX_LENGTH - 4;

@@ -77,21 +77,21 @@ agx_vdm_index_list_direct_nonindexed_unpack(
    if (!bytes || !info || !agx_vdm_index_list_direct_target_supported(chip))
       return false;
 
-   const bool hal300 = agx_vdm_index_list_direct_is_hal300(chip);
-   const size_t expected_size = hal300 ? 20 : 16;
+   const bool tail = agx_vdm_index_list_nonindexed_has_tail(chip);
+   const size_t expected_size = tail ? 20 : 16;
    if (size != expected_size)
       return false;
 
    const uint8_t *raw = bytes;
    const uint32_t header = agx_vdm_index_list_load_le32(&raw[0]);
    const uint32_t expected_header =
-      hal300 ? UINT32_C(0x69c40000) : UINT32_C(0x61c40000);
+      tail ? UINT32_C(0x69c40000) : UINT32_C(0x61c40000);
    const uint8_t primitive = (uint8_t)(header >> 8);
 
    if ((header & UINT32_C(0xffff00ff)) != expected_header ||
        !agx_vdm_index_list_primitive_supported(primitive) ||
        agx_vdm_index_list_load_le32(&raw[8]) == 0 ||
-       (hal300 && agx_vdm_index_list_load_le32(&raw[16]) != UINT32_C(7)))
+       (tail && agx_vdm_index_list_load_le32(&raw[16]) != UINT32_C(7)))
       return false;
 
    info->primitive = primitive;

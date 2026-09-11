@@ -144,6 +144,15 @@ agx_vdm_index_list_direct_is_hal300_inline(enum agx_chip chip)
 }
 
 static inline bool
+agx_vdm_index_list_nonindexed_has_tail(enum agx_chip chip)
+{
+   /* The hardware-qualified M5/25G76 direct triangle has 0x61c40600 and
+    * four words. Do not infer the G17S/C fifth word from HAL300 alone.
+    * This witness does not establish M5 indexed or indirect encodings. */
+   return chip == AGX_CHIP_G17S || chip == AGX_CHIP_G17C;
+}
+
+static inline bool
 agx_vdm_index_list_index_size_supported_inline(enum agx_chip chip,
                                                 uint8_t index_size)
 {
@@ -200,14 +209,15 @@ agx_vdm_index_list_direct_pack_words(
 
    const bool hal300 = agx_vdm_index_list_direct_is_hal300_inline(chip);
    if (!indexed) {
+      const bool tail = agx_vdm_index_list_nonindexed_has_tail(chip);
       out->words[0] =
-         (hal300 ? 0x69c40000u : 0x61c40000u) | ((uint32_t)primitive << 8);
+         (tail ? 0x69c40000u : 0x61c40000u) | ((uint32_t)primitive << 8);
       out->words[1] = count;
       out->words[2] = instances;
       out->words[3] = start;
-      if (hal300)
+      if (tail)
          out->words[4] = 7;
-      out->count = hal300 ? 5 : 4;
+      out->count = tail ? 5 : 4;
       return true;
    }
 

@@ -175,12 +175,13 @@ check_exact_witnesses(void)
       struct agx_vdm_index_list_direct_nonindexed_info decoded_nonindexed;
       struct agx_vdm_index_list_direct_indexed_info decoded_indexed;
       const uint8_t *expected_nonindexed =
-         is_hal300(supported_chips[i]) ? nonindexed_hal300 : nonindexed_g15;
+         is_hal300(supported_chips[i]) && supported_chips[i] != AGX_CHIP_G17G
+            ? nonindexed_hal300 : nonindexed_g15;
       const uint8_t *expected_indexed =
          is_hal300(supported_chips[i]) ? indexed_hal300 : indexed_g15;
       const size_t nonindexed_size =
-         is_hal300(supported_chips[i]) ? sizeof(nonindexed_hal300)
-                                       : sizeof(nonindexed_g15);
+         is_hal300(supported_chips[i]) && supported_chips[i] != AGX_CHIP_G17G
+            ? sizeof(nonindexed_hal300) : sizeof(nonindexed_g15);
       const size_t indexed_size =
          is_hal300(supported_chips[i]) ? sizeof(indexed_hal300)
                                        : sizeof(indexed_g15);
@@ -434,9 +435,9 @@ check_rejections(void)
         ++i) {
       struct agx_vdm_index_list_direct_nonindexed_info decoded_nonindexed;
       struct agx_vdm_index_list_direct_indexed_info decoded_indexed;
-      CHECK(!agx_vdm_index_list_direct_nonindexed_unpack(
+      CHECK(agx_vdm_index_list_direct_nonindexed_unpack(
          hal300_chips[i], nonindexed_g15.bytes, nonindexed_g15.length,
-         &decoded_nonindexed));
+         &decoded_nonindexed) == (hal300_chips[i] == AGX_CHIP_G17G));
       CHECK(!agx_vdm_index_list_direct_indexed_unpack(
          hal300_chips[i], indexed_g15.bytes, indexed_g15.length,
          &decoded_indexed));

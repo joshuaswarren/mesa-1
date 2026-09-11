@@ -94,6 +94,37 @@ test_ppp_state_update(void)
 }
 
 static int
+test_m5_native_direct_triangle(void)
+{
+   /* M5/25G76 VDM +0x8c: a hardware-qualified draw immediately followed by
+    * Stream Terminate. Treating M5 as a five-word HAL300 draw consumes the
+    * next command and fails to decode this native stream. */
+   static const uint8_t stream[16 + AGX_VDM_STREAM_TERMINATE_CORE_LENGTH] = {
+      0x00, 0x06, 0xc4, 0x61, 0x03, 0x00, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0xc0,
+   };
+   struct agx_vdm_decoded_record draw, end;
+   CHECK(agx_vdm_decode_one(AGX_CHIP_G17G, stream, sizeof(stream), &draw));
+   CHECK(draw.kind == AGX_VDM_RECORD_INDEX_LIST_NONINDEXED);
+   CHECK(draw.length == 16);
+   CHECK(draw.data.index_list_nonindexed.primitive == 6);
+   CHECK(draw.data.index_list_nonindexed.count == 3);
+   CHECK(draw.data.index_list_nonindexed.instances == 1);
+   CHECK(draw.data.index_list_nonindexed.start == 0);
+   CHECK(agx_vdm_decode_one(AGX_CHIP_G17G, stream + draw.length,
+                            sizeof(stream) - draw.length, &end));
+   CHECK(end.kind == AGX_VDM_RECORD_STREAM_TERMINATE);
+   struct agx_vdm_index_list_direct_nonindexed packed;
+   CHECK(agx_vdm_index_list_direct_nonindexed_pack(
+      AGX_CHIP_G17G, &draw.data.index_list_nonindexed, &packed));
+   CHECK(packed.length == 16 && memcmp(packed.bytes, stream, 16) == 0);
+   CHECK(check_rejected(AGX_CHIP_G17G, stream, 15) == 0);
+   CHECK(check_rejected(AGX_CHIP_G17S, stream, sizeof(stream)) == 0);
+   return 0;
+}
+
+static int
 test_barrier(void)
 {
    for (unsigned t = 0;
@@ -653,6 +684,7 @@ test_rejection(void)
 int
 main(void)
 {
+   CHECK(test_m5_native_direct_triangle() == 0);
    CHECK(test_ppp_state_update() == 0);
    CHECK(test_barrier() == 0);
    CHECK(test_state_update() == 0);
