@@ -388,6 +388,28 @@ hk_GetAccelerationStructureBuildSizesKHR(
 {
    VK_FROM_HANDLE(hk_device, dev, _device);
 
+   /*
+    * Do not "fix" this by sizing without the sort.
+    *
+    * It looks fixable: radix_sort_vk_get_memory_requirements() reads only
+    * rs->config -- keyval dwords and the workgroup/subgroup log2s -- so the
+    * scratch size needs no compiled pipeline, and only vk_create_radix_sort_
+    * u64() returning NULL wholesale on a pipeline failure takes sizing down
+    * with the build.  Keeping a config-only object alive would make sizing
+    * succeed.
+    *
+    * It would not help.  hk_CmdBuildAccelerationStructuresKHR still records
+    * VK_ERROR_FEATURE_NOT_PRESENT, so the application trades a specific
+    * failure -- a zero size, which says the build path is not functional --
+    * for a generic one at vkEndCommandBuffer.  Reaching a *working* build
+    * needs the pipelines, and faking one is worse than either: an untouched
+    * structure leaves a TLAS instance node holding a garbage bvh_ptr that the
+    * traversal dereferences, and a hand-written empty BVH hides the real
+    * blocker behind "every ray misses".
+    *
+    * So the zero is deliberate and it is the honest answer.  Delete it when
+    * the pipelines compile, not before.
+    */
    if (!hk_init_radix_sort(dev)) {
       *pSizeInfo = (VkAccelerationStructureBuildSizesInfoKHR){
          .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
