@@ -584,6 +584,18 @@ hk_CreateDescriptorPool(VkDevice _device,
 
    list_inithead(&pool->sets);
 
+   /* The heap must be a valid empty heap before anything can fail: the error
+    * paths below run hk_destroy_descriptor_pool(), which calls
+    * util_vma_heap_finish() and walks heap->holes.  On a vk_object_zalloc'd
+    * pool that list head is all zeroes, so walking it dereferences NULL and
+    * the application takes a SIGSEGV instead of the VkResult it asked for.
+    * Firefox hit exactly this on G17P: one failed "Descriptor pool" BO -- the
+    * VM was already carrying a sticky error from an earlier submission --
+    * turned an orderly VK_ERROR_OUT_OF_DEVICE_MEMORY into a browser crash
+    * inside hk_destroy_descriptor_pool().
+    */
+   util_vma_heap_init(&pool->heap, 0, 0);
+
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
@@ -652,9 +664,9 @@ hk_CreateDescriptorPool(VkDevice _device,
        * make that extra space available to the client.
        */
       assert(pool->bo->size >= bo_size);
+      /* Re-initialising is safe: the heap above was created empty, so there
+       * are no holes to leak here. */
       util_vma_heap_init(&pool->heap, pool->bo->va->addr, pool->bo->size);
-   } else {
-      util_vma_heap_init(&pool->heap, 0, 0);
    }
 
    *pDescriptorPool = hk_descriptor_pool_to_handle(pool);
