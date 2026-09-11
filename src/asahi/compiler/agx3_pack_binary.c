@@ -100,7 +100,7 @@ agx3_index_kind(const agx_index x)
 static void
 agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 {
-   if (!(agx_compiler_debug & AGX_DBG_SHADERS))
+   if (!(agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)))
       return;
 
    char shape[512];
@@ -1275,7 +1275,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        (I->src[1].value & 1) || I->src[1].value > 252 ||
        !agx3_tex_imm(I->src[2], 0) ||
        (!immediate_state && !register_state)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
                  agx_channels(I->src[0]), I->src[1].value, I->src[1].size,
@@ -1288,7 +1288,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    const uint16_t data_dest[4] = {4, 6, 12, 14};
    if (!agx3_emit_image_coord(&staged, enc, 0, I->src[1].value) ||
        !agx3_emit_image_coord(&staged, enc, 2, I->src[1].value + 2)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
       goto fail;
    }
@@ -1301,7 +1301,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                                   c == 0 ? wait_mask : 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {
-         if (agx_compiler_debug & AGX_DBG_SHADERS)
+         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
             fprintf(stderr, "G17P imgwci data compose refusal: component=%u\n", c);
          goto fail;
       }
@@ -1321,7 +1321,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
           enc, &d, imgwci, &imgwci_len) ||
        !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci instruction compose refusal\n");
       goto fail;
    }
@@ -8900,7 +8900,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t len = 0;
             if (!agx3_isel_encode(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len)) {
-               if (agx_compiler_debug & AGX_DBG_SHADERS)
+               if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
                   fprintf(stderr,
                           "isel refused: dest=%u/%s cmp=%u,%u cond=%u "
                           "t=%s:%u f=%s:%u wait=%x\n",
@@ -10329,7 +10329,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          struct agx3_sel_instr S;
          if (!agx3_translate_instr(I, &S) ||
              !agx3_emit_alu(emission, enc, &S, wait)) {
-            if (agx_compiler_debug & AGX_DBG_SHADERS)
+            if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
                fprintf(stderr,
                        "ALUX %s wait=%x shift=%u d{v=%u sz=%u} s0{t=%u v=%u "
                        "sz=%u abs=%u} s1{t=%u v=%u sz=%u abs=%u}\n",
