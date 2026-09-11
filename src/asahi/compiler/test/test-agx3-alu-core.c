@@ -1563,11 +1563,21 @@ static void test_i32_to_f16(void)
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
-                               AGX3_ALU_HINT_CACHE, false, 0, out, &len));
+   /* A CACHED source used to be refused; f27 carries it, the way f29 carries
+    * discard.  Apple's own live-source kernel, recovered by composing with
+    * the registers held equal rather than by diffing two kernels whose
+    * register allocation differs: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 4, 0, true,
+                              AGX3_ALU_HINT_CACHE, false, 0x20, out, &len));
+   exact(out, len, "a707560402008a60");
+   /* and its dead-source twin, which our field set already reproduced: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
+                              AGX3_ALU_HINT_DISCARD, false, 0x20, out, &len));
+   exact(out, len, "a70756020204a860");
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
                                AGX3_ALU_HINT_NONE, false, 0x40, out, &len));
-   puts("Native i32-to-f16: five exact Apple vectors and refusals PASS");
+   puts("Native i32-to-f16: exact Apple vectors incl. cached source, and "
+        "refusals PASS");
 }
 
 static void

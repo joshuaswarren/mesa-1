@@ -3251,14 +3251,39 @@ TEST_F(AGX3PackBinary, G17PI32ToHalfMatchesNative)
    append(want_signed, end.bytes, end.length);
    EXPECT_EQ(pack(signed_dead), want_signed);
 
-   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   /* A CACHED source used to be refused here.  f27 carries it, exactly as f29
+    * carries discard, and test-agx3-alu-core.c holds the byte-exact Apple
+    * vector for both.  What this level has to show is that the packer reaches
+    * that encoder and that the cache hint is the ONLY thing it changes, so
+    * pack the same convert twice and diff. */
+   agx_builder *plain = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_convert_to(plain, agx_register(0, AGX_SIZE_16),
+                  agx_immediate(AGX_CONVERT_U32_TO_F),
+                  agx_register(2, AGX_SIZE_32), AGX_ROUND_RTE);
+   agx_stop(plain);
+   const std::vector<uint8_t> plain_bytes = pack(plain);
+
+   agx_builder *cached_src = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index cached = agx_register(2, AGX_SIZE_32);
    cached.cache = true;
-   agx_convert_to(bad, agx_register(0, AGX_SIZE_16),
+   agx_convert_to(cached_src, agx_register(0, AGX_SIZE_16),
                   agx_immediate(AGX_CONVERT_U32_TO_F), cached,
                   AGX_ROUND_RTE);
-   agx_stop(bad);
-   pack(bad, /*expect_ok=*/false);
+   agx_stop(cached_src);
+   const std::vector<uint8_t> cached_bytes = pack(cached_src);
+
+   ASSERT_EQ(plain_bytes.size(), cached_bytes.size());
+   unsigned differing_bytes = 0, differing_bits = 0;
+   for (size_t i = 0; i < plain_bytes.size(); ++i) {
+      const uint8_t delta = plain_bytes[i] ^ cached_bytes[i];
+      if (!delta)
+         continue;
+      differing_bytes++;
+      differing_bits += __builtin_popcount(delta);
+   }
+   EXPECT_EQ(differing_bytes, 1u);
+   EXPECT_EQ(differing_bits, 1u);
+   EXPECT_NE(plain_bytes, cached_bytes);
 }
 
 TEST_F(AGX3PackBinary, GTKHalfToInt32UsesNativeWidthAndPostRAState)

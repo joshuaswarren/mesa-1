@@ -2095,7 +2095,7 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || (src & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       hint == AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+       (wait_mask & ~0x3fu))
       return false;
 
    /* applegpu-nt 32023.917 emits int2flt with f10=1 for a half result and
@@ -2105,11 +2105,32 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {25, 2}, {26, 2},
    };
+   /* f27 is the CACHE half of the post-RA source hint and f29 the DISCARD
+    * half; the comment above named both but only f29 was ever set, so a
+    * cached source had to be refused outright.  Established by round-trip
+    * against Apple rather than by a byte diff, because applegpu_g17p
+    * allocates different registers for the two kernels and a raw diff cannot
+    * separate the hint from the allocation.  Composing with the registers
+    * held equal, our existing field set reproduces Apple's dead-source
+    * instruction exactly
+    *
+    *   a7 07 56 02 02 04 a8 60   dest=2 src=2 wait=0x20 f29=1
+    *
+    * and cannot reach the live-source one at any assignment; sweeping all 160
+    * fields then gives exactly one explanation, with no second candidate:
+    *
+    *   a7 07 56 04 02 00 8a 60   dest=4 src=0 wait=0x20 f27=1
+    *
+    * The two are complementary -- dead sets f29 and clears f27, live the
+    * reverse -- which is the one-hot {none, discard, cache} the enum already
+    * describes.  400 of the 2,455 remaining refusals in the 2026-09-11 census
+    * were this one shape, an i32-to-f16 convert whose source stays live. */
    struct agx3_field_kv fields[12] = {
       {2, dest}, {11, dest_cache}, {18, src},
+      {27, hint == AGX3_ALU_HINT_CACHE},
       {29, hint == AGX3_ALU_HINT_DISCARD}, {30, is_signed},
    };
-   unsigned n = 5;
+   unsigned n = 6;
    for (unsigned i = 0; i < 6; ++i)
       fields[n++] = (struct agx3_field_kv){33 + i, !!(wait_mask & (1u << i))};
    return agx3_bind_compose(enc, "int2flt", 0, base, 4, fields, n, out, len);
