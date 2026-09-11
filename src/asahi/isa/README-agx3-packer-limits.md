@@ -1458,13 +1458,42 @@ clear of the upper half -- refuses when its destination is at or above half
 addresses [0..255] with no aliasing, so the shape *is* reachable, and
 `AGX3_COPY_MAX_LENGTH` is already 10.
 
-It is not closed here because there is **no Apple witness for a ten-byte copy
-in this tree**. Composing at ep1 with the ep0 field assignment produces
-plausible bytes, but "plausible" is how a field role gets guessed wrong, and
-guessing wrong here writes the wrong register rather than refusing -- the exact
-hazard the section above is about. It needs a `metal-nt` witness for the long
-copy form, or a hardware oracle. It was the last refusal left in
-`webgl_materials_physical_clearcoat` after the reciprocal gate was corrected.
+> **CORRECTION (2026-09-11).** An earlier revision of this section said there
+> was "no Apple witness for a ten-byte copy in this tree". **That was wrong.**
+> `agx3_compose_corpus_vectors.c` carries 16 of them at agx3b, against 84 of
+> the four-byte form. Check the corpus before claiming a form is unwitnessed;
+> that is the same lesson this file already teaches about the matrix.
+
+What the corpus does **not** witness is the axis that matters. Every ten-byte
+half copy Apple emits has `f2 = 0` and `f16 = 0`; the only field that
+distinguishes them from the short form is **`f39 = 1`**, which never appears at
+ep0 at all:
+
+```
+ten-byte half copy   03000700020000006000   f9=2 f10=1 f23=2 f24=1 f39=1
+four-byte half copy  93052120               f9=2 f10=1 f23=2 f24=1
+                                            f2=18 f16=5 f11=1 f30=1
+```
+
+So Apple reaches for ep1 to get `f39`, not to get a bigger destination, and
+across every witness the destination register field sits at zero. `f2` and
+`f16` are only ever nonzero at ep0. The composer will deposit `f2` distinctly
+for [0..255] at ep1 -- the alias scan above says so -- but "the bits move" is
+not "the bits mean the destination register at this encoding point", and that
+is precisely the distinction the aliasing section exists to enforce. Guessing
+wrong writes the wrong register rather than refusing.
+
+Closing it therefore needs one more measurement, and it is a cheap one: a
+`metal-nt` kernel that emits a ten-byte half copy with a **nonzero**
+destination. `f39` looks like a scoreboard wait outside the six the short form
+carries in `f30`-`f35`, which is consistent with the retire-then-copy fallback
+`agx3_copy_encode_reg16()` already has, so a half copy that must wait on a high
+slot while writing a live register is the shape to ask Apple for. A hardware
+oracle -- emit at ep1 with a known destination, read the register back --
+answers the same question.
+
+It was the last refusal left in `webgl_materials_physical_clearcoat` after the
+reciprocal gate was corrected.
 
 ### Measuring the packer against an application's real shaders
 
