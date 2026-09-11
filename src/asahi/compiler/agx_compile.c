@@ -2080,6 +2080,19 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_sample_mask:
       return agx_get_sr_coverage_to(b, dst, AGX_SR_COVERAGE_MASK);
 
+   case nir_intrinsic_load_active_samples_agx:
+      /* Everywhere else this is a loop variable that the MSAA lowerings have
+       * already substituted. It survives to the backend only on G17P, where
+       * agx_nir_lower_g17p_tile_samples asks for the live coverage word as a
+       * real register operand for lstcol/lldcol: Apple's own multisample
+       * fragments read exactly this, native W16 SR39, and pass it straight to
+       * the tile access. Bits 0..3 are the covered samples -- the per-sample
+       * form ANDs this same word with 1/2/4/8. */
+      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             "only the G17P tile lowering leaves this for the backend");
+      assert(instr->def.bit_size == 16 && "16-bit sample mask");
+      return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
+
    case nir_intrinsic_load_helper_invocation:
       /* Compare special register to zero. We could lower this in NIR (letting
        * us fold in an inot) but meh?

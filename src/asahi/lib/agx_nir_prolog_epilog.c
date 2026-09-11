@@ -21,6 +21,9 @@
 #include "nir_lower_blend.h"
 #include "shader_enums.h"
 
+/* Mesa's "every sample" spelling, shared with agx_nir_lower_tilebuffer. */
+#define ALL_SAMPLES 0xFF
+
 /*
  * Insert code into a fragment shader to lower polygon stipple. The stipple is
  * passed in a sideband, rather than requiring a texture binding. This is
@@ -842,6 +845,27 @@ agx_nir_lower_fs_output_to_epilog_for_device(
    return lower_fs_output_to_epilog(s, out, chip == AGX_CHIP_G17P);
 }
 
+/*
+ * Give a G17P tile access the sample-mask source its hardware form actually
+ * takes.
+ *
+ * At one sample the operand is the whole-pixel immediate, which is what Mesa
+ * already spells as ALL_SAMPLES, so nothing has to happen.
+ *
+ * At two or four samples there is no immediate form at all. Apple's compiler
+ * reads the live coverage word out of a special register and passes that
+ * register as the mask -- raw for a per-pixel shader ("every sample this
+ * fragment covers"), ANDed with a one-hot bit for each iteration of an
+ * unrolled per-sample shader. Reproduce exactly those two shapes.
+ *
+ * A non-constant mask is already an expression in a register (the per-sample
+ * lowerings build `mask & active_samples`), so it is left alone and reaches
+ * the packer as the register form by itself. Note that in a fast-linked
+ * sample-shading epilog `active_samples` is the ABI loop-bit register rather
+ * than the hardware coverage word, so such a store is not additionally masked
+ * by coverage; sample-rate shading is its own unverified feature and is not
+ * claimed here.
+ */
 static bool
 lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -858,30 +882,38 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    const unsigned samples = *(const unsigned *)data;
-   unsigned encoded;
    if (samples == 1) {
       /* Per-sample epilogs still carry a dynamic active-sample mask, but
-       * there is only sample zero. The native 1x tile instruction has no
-       * sample operand; preserve its whole-pixel form for these epilogs. */
-      encoded = 0xff;
-   } else {
-      if (!nir_src_is_const(intr->src[src]))
+       * there is only sample zero. The native 1x tile instruction takes the
+       * whole-pixel immediate; preserve its form for these epilogs. */
+      if (nir_src_is_const(intr->src[src]) &&
+          nir_src_as_uint(intr->src[src]) == ALL_SAMPLES)
          return false;
 
-      const unsigned mask = nir_src_as_uint(intr->src[src]);
-      if (mask != 0xff &&
-          (!util_is_power_of_two_nonzero(mask) || mask >= (1u << samples)))
-         return false;
-
-      encoded = (samples << 4) | (mask == 0xff ? 0 : mask);
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_src_rewrite(&intr->src[src],
+                      nir_imm_intN_t(b, ALL_SAMPLES, 16));
+      return true;
    }
 
-   if (nir_src_is_const(intr->src[src]) &&
-       nir_src_as_uint(intr->src[src]) == encoded)
+   /* Already a live expression: the per-sample lowerings have ANDed the mask
+    * with an active-sample register, which is the register form. */
+   if (!nir_src_is_const(intr->src[src]))
+      return false;
+
+   const unsigned mask = nir_src_as_uint(intr->src[src]);
+   if (mask != ALL_SAMPLES &&
+       (mask == 0 || mask >= (1u << samples)))
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_src_rewrite(&intr->src[src], nir_imm_intN_t(b, encoded, 16));
+
+   nir_def *coverage = nir_load_active_samples_agx(b);
+   nir_def *sel = (mask == ALL_SAMPLES)
+                     ? coverage
+                     : nir_iand(b, coverage, nir_imm_intN_t(b, mask, 16));
+
+   nir_src_rewrite(&intr->src[src], sel);
    return true;
 }
 

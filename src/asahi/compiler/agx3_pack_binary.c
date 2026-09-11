@@ -1840,68 +1840,61 @@ agx3_tile_value_ok(agx_index value, uint8_t mask, int width)
 }
 
 
-/* agx_nir_lower_g17p_tile_samples tags each statically known sample-count
- * domain before backend compilation. Keeping the count in the immediate is
- * essential: native lstcol uses different selectors for 2x and 4x sample 0,
- * while lldcol uses a one-hot selector for both. */
+/*
+ * Translate the IR's sample-mask source into the lstcol/lldcol operand.
+ *
+ * Mesa's tilebuffer lowering spells "every sample" as the immediate 0xFF, and
+ * Apple's own 1x fragments spell the same thing as the immediate 1, so that
+ * one immediate is remapped. Everything else at more than one sample arrives
+ * as a live 16-bit register -- either the raw coverage word (per-pixel) or
+ * coverage ANDed with a one-hot bit (per-sample) -- exactly as Apple's
+ * compiler emits it. See agx3_tile_core.h for the witnesses.
+ *
+ * There is deliberately no immediate "all samples" encoding: no Apple
+ * multisample witness uses one, and an immediate would write samples this
+ * fragment does not cover.
+ */
 #define AGX3_TILE_ALL_SAMPLES 0xFFu
-#define AGX3_TILE_2X_TAG       0x20u
-#define AGX3_TILE_4X_TAG       0x40u
 
 static bool
-agx3_tile_coverage(agx_index sample, enum agx3_tile_coverage *coverage)
+agx3_tile_sample_operand(agx_index sample, struct agx3_tile_sample *out)
 {
-   if (sample.type != AGX_INDEX_IMMEDIATE || sample.size != AGX_SIZE_16 ||
-       sample.memory || sample.abs || sample.neg || sample.cache ||
-       sample.discard || sample.kill)
+   if (sample.abs || sample.neg || sample.memory || sample.cache ||
+       sample.size != AGX_SIZE_16)
       return false;
 
-   /* WARNING: 0xff is agx_nir_lower_tilebuffer's ALL_SAMPLES default AND the
-    * selector for the single-sample whole-pixel form, so the two are the same
-    * immediate. A multisample store that never reached
-    * agx_nir_lower_g17p_tile_samples, or reached it with a stale sample count,
-    * therefore encodes as a 1x store: it writes sample zero and leaves the
-    * rest of the tile untouched, which resolves to colour/N.
-    *
-    * That is measured, not theoretical. Under AGX_TRACE_TILE_COVERAGE a 2x
-    * render compiles tile stores with BOTH 0xff and the correct 0x20
-    * broadcast tag, from the FS epilog and from agx_background alike. Giving
-    * the 1x form its own tag so an untagged store is unencodable is the
-    * obvious fix and was tried; it did not produce a loud refusal, so the
-    * untagged path is tolerated somewhere upstream and needs finding before
-    * the encoder is changed.
-    */
-   if (sample.value == AGX3_TILE_ALL_SAMPLES) {
-      *coverage = AGX3_TILE_COV_1X;
+   if (sample.type == AGX_INDEX_IMMEDIATE) {
+      /* The whole-pixel form. Apple encodes it as immediate 1 at every width
+       * and every format; 0xFF is Mesa's spelling of the same request.
+       *
+       * AGX_TRACE_TILE_COVERAGE found this immediate being emitted for
+       * multisample renders and read it as a missing tag. It was not: the
+       * 2x/4x stores WERE tagged, and the tag they carried encoded the
+       * register alternative of this operand naming a half register nobody
+       * defined. That is why making the untagged form unencodable produced
+       * no refusal -- there was no untagged store. The tags are gone now;
+       * a multisample store carries a live mask register instead.
+       */
+      if (sample.kill || sample.discard ||
+          sample.value != AGX3_TILE_ALL_SAMPLES)
+         return false;
+
+      *out = AGX3_TILE_SAMPLE_1X;
       return true;
    }
 
-   const unsigned tag = sample.value & ~0xfu;
-   const unsigned mask = sample.value & 0xfu;
-   if (tag == AGX3_TILE_2X_TAG) {
-      if (mask == 0)
-         *coverage = AGX3_TILE_COV_2X_BROADCAST;
-      else if (mask == 1 || mask == 2)
-         *coverage = AGX3_TILE_COV_2X_SAMPLE_0 + util_logbase2(mask);
-      else
-         return false;
-   } else if (tag == AGX3_TILE_4X_TAG) {
-      if (mask == 0)
-         *coverage = AGX3_TILE_COV_4X_BROADCAST;
-      else if (util_is_power_of_two_nonzero(mask) && mask <= 8)
-         *coverage = AGX3_TILE_COV_4X_SAMPLE_0 + util_logbase2(mask);
-      else
-         return false;
-   } else {
+   if (!agx3_src_is_register(sample) || sample.value >= 192)
       return false;
-   }
 
+   /* Register allocation rewrites `kill` into the post-RA `discard` hint on
+    * some paths, and the rest of this packer reads the pair together. f55 is
+    * that hint for the sample operand. */
+   *out = agx3_tile_sample_reg(sample.value, sample.kill || sample.discard);
    return true;
 }
 
-/* Bind the directly witnessed single-sample tile subset.  Explicit pixel
- * coordinates and the per-sample selector remain closed because f44's exact
- * register/selector meaning is not yet grounded. */
+/* Bind the witnessed tile subset: the 1x whole-pixel form and the 2x/4x
+ * register-sourced sample mask. Explicit pixel coordinates stay closed. */
 static const char *agx3_trace_shader_name;
 
 static bool
@@ -1920,10 +1913,11 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const agx_index sample = load ? I->src[0] : I->src[1];
    const agx_index coords = load ? I->src[1] : I->src[2];
    const int width = agx3_tile_format_width(I->format);
-   enum agx3_tile_coverage coverage;
-   /* The instrument that found the 0xff collision above. Prints every tile
-    * access the encoder is asked to emit, with the shader it came from, so a
-    * stale sample tag is visible offline instead of only as wrong pixels. */
+   struct agx3_tile_sample sample_op;
+   /* The instrument that first surfaced this. Prints every tile access the
+    * encoder is asked to emit, with the shader it came from, so a multisample
+    * store that still carries an immediate mask is visible offline instead of
+    * only as wrong pixels. */
    if (getenv("AGX_TRACE_TILE_COVERAGE")) {
       fprintf(stderr, "TILE %s sample=%s%u fmt=%u mask=%u shader=%s\n",
               load ? "load" : "store",
@@ -1934,7 +1928,7 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    if ((I->format == AGX_FORMAT_RGB10A2 &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
        width < 0 || !agx3_tile_value_ok(value, I->mask, width) ||
-       !agx3_tile_coverage(sample, &coverage) || !agx_is_null(coords))
+       !agx3_tile_sample_operand(sample, &sample_op) || !agx_is_null(coords))
       return false;
 
    /* AGX3b f13 varies independently in high-register store witnesses.  The
@@ -1947,11 +1941,11 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    uint8_t length = 0;
    const bool ok =
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
-                            slot, I->mask, I->pixel_offset, coverage,
+                            slot, I->mask, I->pixel_offset, sample_op,
                             wait_mask, first_load, last_load, bytes, &length)
            : agx3_tile_store(enc, value.value,
                              (enum agx3_tile_width)width, I->mask,
-                             I->pixel_offset, coverage, wait_mask,
+                             I->pixel_offset, sample_op, wait_mask,
                              bytes, &length);
    return ok && agx3_append(emission, bytes, length);
 }
@@ -4830,14 +4824,17 @@ struct agx3_g17p_mrt_protocol {
 
 /* A multisample background reload writes every sample of one tilebuffer
  * partition explicitly after fetching it from the multisample attachment.
- * These are not multiple render targets: agx_nir_lower_g17p_tile_samples()
- * tags the stores with the exact 2x/4x one-hot selectors recovered for
- * LSTCOL, while every store retains the same RT byte offset and format.
+ * These are not multiple render targets: the per-sample MSAA lowering unrolls
+ * one store per sample, each carrying its own live sample-mask register
+ * (coverage ANDed with that iteration's one-hot bit -- the shape Apple's own
+ * unrolled per-sample fragments use), while every store retains the same RT
+ * byte offset and format.
  *
- * Keep this admission as narrow as the native selector evidence.  Ordinary
- * fragment shaders still require the colour transaction protocol below;
- * only an ignore-TIB-dependencies auxiliary shader may emit one complete,
- * duplicate-free set of per-sample stores to partition zero.
+ * Keep this admission as narrow as the native evidence.  Ordinary fragment
+ * shaders still require the colour transaction protocol below; only an
+ * ignore-TIB-dependencies auxiliary shader may emit one two- or four-store
+ * set to partition zero, and the stores must name distinct mask registers so
+ * a repeated one cannot masquerade as a complete sample domain.
  */
 static bool
 agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
@@ -4848,9 +4845,8 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
-   unsigned tag = 0;
-   unsigned sample_mask = 0;
    unsigned stores = 0;
+   uint16_t mask_regs[4];
    enum agx_format format = 0;
    unsigned component_mask = 0;
    bool stopped = false;
@@ -4871,38 +4867,31 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
       if (I->op != AGX_OPCODE_ST_TILE)
          continue;
 
+      struct agx3_tile_sample sample;
       if (I->nr_srcs != 3 || I->pixel_offset != 0 || I->explicit_coords ||
-          I->src[1].type != AGX_INDEX_IMMEDIATE ||
-          I->src[1].size != AGX_SIZE_16 || I->src[1].memory ||
-          I->src[1].abs || I->src[1].neg || I->src[1].cache ||
-          I->src[1].discard || I->src[1].kill ||
-          !agx_is_null(I->src[2]))
+          !agx_is_null(I->src[2]) ||
+          !agx3_tile_sample_operand(I->src[1], &sample) || !sample.reg)
          return false;
 
-      const unsigned this_tag = I->src[1].value & ~0xfu;
-      const unsigned this_sample = I->src[1].value & 0xfu;
-      if ((this_tag != AGX3_TILE_2X_TAG &&
-           this_tag != AGX3_TILE_4X_TAG) ||
-          !util_is_power_of_two_nonzero(this_sample) ||
-          (sample_mask & this_sample))
+      if (stores >= ARRAY_SIZE(mask_regs))
          return false;
+
+      for (unsigned i = 0; i < stores; ++i) {
+         if (mask_regs[i] == sample.value)
+            return false;
+      }
 
       if (stores == 0) {
-         tag = this_tag;
          format = I->format;
          component_mask = I->mask;
-      } else if (this_tag != tag || I->format != format ||
-                 I->mask != component_mask) {
+      } else if (I->format != format || I->mask != component_mask) {
          return false;
       }
 
-      sample_mask |= this_sample;
-      stores++;
+      mask_regs[stores++] = sample.value;
    }
 
-   return stopped &&
-          ((tag == AGX3_TILE_2X_TAG && stores == 2 && sample_mask == 0x3) ||
-           (tag == AGX3_TILE_4X_TAG && stores == 4 && sample_mask == 0xf));
+   return stopped && (stores == 2 || stores == 4);
 }
 
 static int

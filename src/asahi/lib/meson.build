@@ -353,6 +353,18 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-msaa-epilog',
+    executable(
+      'asahi-g17p-msaa-epilog',
+      files('tests/test-agx-g17p-msaa-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-mrt-epilog',
     executable(
       'asahi-g17p-mrt-epilog',

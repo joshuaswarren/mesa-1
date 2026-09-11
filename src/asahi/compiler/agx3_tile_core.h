@@ -29,24 +29,65 @@ enum agx3_tile_width {
    AGX3_TILE_W32 = 2,
 };
 
-enum agx3_tile_coverage {
-   AGX3_TILE_COV_1X = 1,
-   AGX3_TILE_COV_2X_BROADCAST,
-   AGX3_TILE_COV_2X_SAMPLE_0,
-   AGX3_TILE_COV_2X_SAMPLE_1,
-   AGX3_TILE_COV_4X_BROADCAST,
-   AGX3_TILE_COV_4X_SAMPLE_0,
-   AGX3_TILE_COV_4X_SAMPLE_1,
-   AGX3_TILE_COV_4X_SAMPLE_2,
-   AGX3_TILE_COV_4X_SAMPLE_3,
+/*
+ * The sample-mask operand of lstcol/lldcol. It is an ordinary source, not a
+ * "coverage selector": the form's choice group is either an 8-bit immediate
+ * (f51=1, f43) or a 16-bit register naming a half register (f51=2, f44, with
+ * f53 carrying register bit 8 -- never needed below 192 -- and f55 an extra
+ * bit that is set in every store witness and clear in the one load witness,
+ * consistent with a last-use hint, so it is driven from the IR's kill flag
+ * rather than pinned to a constant).
+ *
+ * Grounded against Apple's own applegpu_g17p output (.tmp/g17p-msaa-grounding,
+ * metal-nt MetalToolchain v27.1.5194.15):
+ *
+ *   1x, any format          lstcol ... f51=1 f43=1
+ *   2x/4x per-pixel         rld h10 <- SR39 ; lstcol ... f51=2 f44=10 f55=1
+ *   4x per-sample (unrolled)  rld h16 <- SR39
+ *                             bit_and h11 = h16 & 1   ... & 2, & 4, & 8
+ *                             lstcol ... f44=11 / 9 / 10 / 8, f51=2, f55=1
+ *   2x/4x framebuffer fetch lldcol ... f51=2 f44=19  (f55 clear: not a last use)
+ *
+ * The per-sample `& 1/2/4/8` sequence is what pins the meaning: the register
+ * holds a plain sample bitmask in bits 0..3, and SR39's low nibble is the
+ * live coverage. A per-pixel store therefore passes SR39 straight through --
+ * "every sample this fragment covers" -- which is precisely what a
+ * multisample store has to do. There is no all-sample immediate in any
+ * witness; Apple always materialises the mask into a register at 2x and 4x.
+ */
+struct agx3_tile_sample {
+   /* false: `value` is an 8-bit immediate sample mask.
+    * true:  `value` is a half-register index holding the mask. */
+   bool reg;
+   /* Register form only: f55. Set in every Apple store witness, where the
+    * mask register is dead afterwards; clear in the framebuffer-fetch load,
+    * where it is read again. */
+   bool kill;
+   uint16_t value;
 };
 
+static inline struct agx3_tile_sample
+agx3_tile_sample_imm(uint16_t mask)
+{
+   struct agx3_tile_sample s = {false, false, mask};
+   return s;
+}
+
+static inline struct agx3_tile_sample
+agx3_tile_sample_reg(uint16_t half_reg, bool kill)
+{
+   struct agx3_tile_sample s = {true, kill, half_reg};
+   return s;
+}
+
+/* The whole-pixel form every 1x Apple fragment emits. */
+#define AGX3_TILE_SAMPLE_1X agx3_tile_sample_imm(1)
 /* Store `data` to the tile buffer. `chan_mask` is the component write mask
  * (R=1, G=2, B=4, A=8). `tile_off` is the byte offset of this render target
  * (sum of the per-sample sizes of the preceding RTs). */
 bool agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
                      enum agx3_tile_width width, uint8_t chan_mask,
-                     uint16_t tile_off, enum agx3_tile_coverage cov,
+                     uint16_t tile_off, struct agx3_tile_sample sample,
                      uint16_t wait_mask, uint8_t out[AGX3_TILE_MAX_LENGTH],
                      uint8_t *len);
 
@@ -55,7 +96,7 @@ bool agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
  * AGX3b encodes only `first`, while AGX3c encodes both. */
 bool agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
                     enum agx3_tile_width width, uint8_t slot, uint8_t chan_mask,
-                    uint16_t tile_off, enum agx3_tile_coverage cov,
+                    uint16_t tile_off, struct agx3_tile_sample sample,
                     uint16_t wait_mask, bool first, bool last,
                     uint8_t out[AGX3_TILE_MAX_LENGTH], uint8_t *len);
 

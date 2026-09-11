@@ -6596,7 +6596,7 @@ check_tile_bridge(void)
          uint8_t length = 0;
          store.data = reg;
          CHECK(agx3_tile_store(target->encoding, reg, AGX3_TILE_W8, 15, 0,
-                               AGX3_TILE_COV_1X, 0, expected, &length));
+                               AGX3_TILE_SAMPLE_1X, 0, expected, &length));
          CHECK(d12_agx3_encode_tile_store(target->chip, &store, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
       }
@@ -6607,7 +6607,7 @@ check_tile_bridge(void)
          uint8_t length = 0;
          load.dest = reg;
          CHECK(agx3_tile_load(target->encoding, reg, AGX3_TILE_W8, slots, 15,
-                              0, AGX3_TILE_COV_1X, 0, true, true, expected,
+                              0, AGX3_TILE_SAMPLE_1X, 0, true, true, expected,
                               &length));
          CHECK(d12_agx3_encode_tile_load(target->chip, &load, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
@@ -6627,12 +6627,12 @@ check_tile_bridge(void)
          uint8_t length = 0;
          store.width = widths[w].d12;
          CHECK(agx3_tile_store(target->encoding, 0, widths[w].core, 15, 0,
-                               AGX3_TILE_COV_1X, 0, expected, &length));
+                               AGX3_TILE_SAMPLE_1X, 0, expected, &length));
          CHECK(d12_agx3_encode_tile_store(target->chip, &store, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
          load.width = widths[w].d12;
          CHECK(agx3_tile_load(target->encoding, 0, widths[w].core, slots, 15,
-                              0, AGX3_TILE_COV_1X, 0, true, true, expected,
+                              0, AGX3_TILE_SAMPLE_1X, 0, true, true, expected,
                               &length));
          CHECK(d12_agx3_encode_tile_load(target->chip, &load, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
@@ -6644,7 +6644,7 @@ check_tile_bridge(void)
          uint8_t length = 0;
          store.mask = mask;
          CHECK(agx3_tile_store(target->encoding, 0, AGX3_TILE_W8, mask, 0,
-                               AGX3_TILE_COV_1X, 0, expected, &length));
+                               AGX3_TILE_SAMPLE_1X, 0, expected, &length));
          CHECK(d12_agx3_encode_tile_store(target->chip, &store, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
       }
@@ -6655,11 +6655,11 @@ check_tile_bridge(void)
          uint8_t length = 0;
          store.tile_offset = load.tile_offset = offset;
          CHECK(agx3_tile_store(target->encoding, 0, AGX3_TILE_W8, 15, offset,
-                               AGX3_TILE_COV_1X, 0, expected, &length));
+                               AGX3_TILE_SAMPLE_1X, 0, expected, &length));
          CHECK(d12_agx3_encode_tile_store(target->chip, &store, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
          CHECK(agx3_tile_load(target->encoding, 0, AGX3_TILE_W8, slots, 15,
-                              offset, AGX3_TILE_COV_1X, 0, true, true,
+                              offset, AGX3_TILE_SAMPLE_1X, 0, true, true,
                               expected, &length));
          CHECK(d12_agx3_encode_tile_load(target->chip, &load, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
@@ -6671,7 +6671,7 @@ check_tile_bridge(void)
          uint8_t length = 0;
          store.wait_mask = wait == 0 ? 0 : 1u << (wait - 1);
          CHECK(agx3_tile_store(target->encoding, 0, AGX3_TILE_W8, 15, 0,
-                               AGX3_TILE_COV_1X, store.wait_mask, expected,
+                               AGX3_TILE_SAMPLE_1X, store.wait_mask, expected,
                                &length));
          CHECK(d12_agx3_encode_tile_store(target->chip, &store, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
@@ -6683,7 +6683,7 @@ check_tile_bridge(void)
          uint8_t length = 0;
          load.slot = slot;
          CHECK(agx3_tile_load(target->encoding, 0, AGX3_TILE_W8, slot, 15, 0,
-                              AGX3_TILE_COV_1X, 0, true, true, expected,
+                              AGX3_TILE_SAMPLE_1X, 0, true, true, expected,
                               &length));
          CHECK(d12_agx3_encode_tile_load(target->chip, &load, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
@@ -6695,7 +6695,7 @@ check_tile_bridge(void)
          load.first = boundary & 1;
          load.last = boundary & 2;
          CHECK(agx3_tile_load(target->encoding, 0, AGX3_TILE_W8, load.slot, 15,
-                              0, AGX3_TILE_COV_1X, 0, load.first, load.last,
+                              0, AGX3_TILE_SAMPLE_1X, 0, load.first, load.last,
                               expected, &length));
          CHECK(d12_agx3_encode_tile_load(target->chip, &load, &encoded));
          CHECK(check_tile_encoding(&encoded, expected, length) == 0);
