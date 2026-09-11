@@ -313,9 +313,24 @@
     <field name="Compression" size="2" start="106" type="hex"/> <!-- 0 for uncompressed -->
     <field name="sRGB" size="1" start="108" type="bool"/>
     <field name="sRGB 2-channel" size="1" start="109" type="bool"/>
-    <field name="Stride" size="18" start="110" type="hex" modifier="shr(4)"/>
+    <field name="Stride" size="16" start="110" type="hex" modifier="shr(4)"/>
+    <!-- Stride is SIXTEEN bits, word1[61:46]. Apple's
+         AGX::TextureGen4&lt;&gt;::encodeImageReadState masks it with
+         0x3fffc00000000000, transcribed instruction by instruction and checked
+         against a live descriptor. Declaring 18 let a stride needing 17 bits
+         run past the field and clobber "Page-aligned layers" (126) and
+         "Extended" (127) instead of tripping util_bitpack_uint's range assert.
+         Nothing hk builds reaches it today (the widest stride any path
+         produces is a buffer texture's AGX_TEXTURE_BUFFER_WIDTH * 16 minus 16,
+         which is 16383 after the shift), so this is a latent overrun; the
+         declared width is what makes the guard real. -->
     <!-- Note that 3D/arrays cannot be linear. -->
-    <field name="Depth" size="14" start="110" type="uint" modifier="minus(1)"/>
+    <field name="Depth" size="16" start="110" type="uint" modifier="minus(1)"/>
+    <!-- Sixteen bits, unioned with Stride, and it doubles as the array
+         length: Apple writes arrayLength minus 1 here when arrayLength is at
+         least 2, and depth minus 1 otherwise. Widening from 14 changes no byte
+         for any depth or layer count the limits allow (the two new bits are
+         zero below 16384); it only stops truncating above that. -->
     <field name="Page-aligned layers" size="1" start="126" type="bool"/>
 
     <!-- Read the next word (set for compression or linear 2D arrays) -->
@@ -354,8 +369,23 @@
     <field name="Address" size="44" start="64" type="address" modifier="shr(4)"/>
     <field name="sRGB" size="1" start="108" type="bool"/>
     <field name="sRGB 2-channel" size="1" start="109" type="bool"/>
-    <field name="Stride" size="18" start="110" type="hex" modifier="shr(4)"/>
-    <field name="Depth" size="14" start="110" type="uint" modifier="minus(1)"/>
+    <field name="Stride" size="16" start="110" type="hex" modifier="shr(4)"/>
+    <!-- Stride is SIXTEEN bits, word1[61:46]. Apple's
+         AGX::TextureGen4&lt;&gt;::encodeImageReadState masks it with
+         0x3fffc00000000000, transcribed instruction by instruction and checked
+         against a live descriptor. Declaring 18 let a stride needing 17 bits
+         run past the field and clobber "Page-aligned layers" (126) and
+         "Extended" (127) instead of tripping util_bitpack_uint's range assert.
+         Nothing hk builds reaches it today (the widest stride any path
+         produces is a buffer texture's AGX_TEXTURE_BUFFER_WIDTH * 16 minus 16,
+         which is 16383 after the shift), so this is a latent overrun; the
+         declared width is what makes the guard real. -->
+    <field name="Depth" size="16" start="110" type="uint" modifier="minus(1)"/>
+    <!-- Sixteen bits, unioned with Stride, and it doubles as the array
+         length: Apple writes arrayLength minus 1 here when arrayLength is at
+         least 2, and depth minus 1 otherwise. Widening from 14 changes no byte
+         for any depth or layer count the limits allow (the two new bits are
+         zero below 16384); it only stops truncating above that. -->
     <field name="Page-aligned layers" size="1" start="126" type="bool"/>
     <field name="Extended" size="1" start="127" type="bool"/>
     <field name="Acceleration buffer" size="44" start="128" type="address" modifier="shr(4)"/>
@@ -387,8 +417,23 @@
     <field name="Address" size="44" start="64" type="address" modifier="shr(4)"/>
     <field name="sRGB" size="1" start="108" type="bool"/>
     <field name="sRGB 2-channel" size="1" start="109" type="bool"/>
-    <field name="Stride" size="18" start="110" type="hex" modifier="shr(4)"/>
-    <field name="Depth" size="14" start="110" type="uint" modifier="minus(1)"/>
+    <field name="Stride" size="16" start="110" type="hex" modifier="shr(4)"/>
+    <!-- Stride is SIXTEEN bits, word1[61:46]. Apple's
+         AGX::TextureGen4&lt;&gt;::encodeImageReadState masks it with
+         0x3fffc00000000000, transcribed instruction by instruction and checked
+         against a live descriptor. Declaring 18 let a stride needing 17 bits
+         run past the field and clobber "Page-aligned layers" (126) and
+         "Extended" (127) instead of tripping util_bitpack_uint's range assert.
+         Nothing hk builds reaches it today (the widest stride any path
+         produces is a buffer texture's AGX_TEXTURE_BUFFER_WIDTH * 16 minus 16,
+         which is 16383 after the shift), so this is a latent overrun; the
+         declared width is what makes the guard real. -->
+    <field name="Depth" size="16" start="110" type="uint" modifier="minus(1)"/>
+    <!-- Sixteen bits, unioned with Stride, and it doubles as the array
+         length: Apple writes arrayLength minus 1 here when arrayLength is at
+         least 2, and depth minus 1 otherwise. Widening from 14 changes no byte
+         for any depth or layer count the limits allow (the two new bits are
+         zero below 16384); it only stops truncating above that. -->
     <field name="Page-aligned layers" size="1" start="126" type="bool"/>
     <field name="Extended" size="1" start="127" type="bool"/>
     <field name="Acceleration buffer" size="44" start="128" type="address" modifier="shr(4)"/>

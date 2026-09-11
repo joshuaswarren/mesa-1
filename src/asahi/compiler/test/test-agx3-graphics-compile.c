@@ -1827,7 +1827,17 @@ test_indexed_sampler_sets(void)
 static bool
 test_indexed_storage_image_read(void)
 {
-   for (unsigned mode = 0; mode < 4; ++mode) {
+   /* mode 0 is the fully specified positive case.  1 and 3 used to be
+    * negatives because g17p_indexed_image_fetch_shape() admitted only
+    * PIPE_FORMAT_R8G8B8A8_UNORM and only non-array 2D; neither was a
+    * constraint.  agx3_emit_texture_fetch() never reads I->format, and
+    * metal-nt -arch applegpu_g17p emits byte-identical code for
+    * texture2d<float>, texture2d<uint> and texture2d<int> read(), so the
+    * component type is in the descriptor.  3D and 2D array are dimensions the
+    * same encoder already takes.  4 and 5 keep the negative coverage on what
+    * really is outside the set: a coherent access and a cube. */
+   for (unsigned mode = 0; mode < 6; ++mode) {
+      const bool expect_lowered = mode != 2 && mode != 5;
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options,
          "indexed read-only storage image");
@@ -1848,9 +1858,10 @@ test_indexed_storage_image_read(void)
                                 zero, zero);
       nir_def *value = nir_bindless_image_load(
          &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
-         .image_dim = mode == 3 ? GLSL_SAMPLER_DIM_3D
-                                : GLSL_SAMPLER_DIM_2D,
-         .image_array = false,
+         .image_dim = mode == 3   ? GLSL_SAMPLER_DIM_3D
+                      : mode == 5 ? GLSL_SAMPLER_DIM_CUBE
+                                  : GLSL_SAMPLER_DIM_2D,
+         .image_array = mode == 4,
          .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
                              : PIPE_FORMAT_R8G8B8A8_UNORM,
          .access = ACCESS_RESTRICT | ACCESS_NON_WRITEABLE |
@@ -1903,6 +1914,9 @@ test_indexed_storage_image_read(void)
               index->intrinsic == nir_intrinsic_load_global_constant &&
               index->def.bit_size == 32 && original_handles == 1 &&
               native_handles == 1 && heap_index_loads == 2 && set4_loads == 1;
+      } else if (expect_lowered) {
+         ok = lowered && read && original_handles == 1 &&
+              native_handles == 1 && set4_loads == 1;
       } else {
          ok = !lowered && original_handles == 1 && native_handles == 0;
       }
