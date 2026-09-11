@@ -889,6 +889,35 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    caps->texture_multisample = true;
 
+   /* A Vulkan device may advertise no multisample colour framebuffer at all --
+    * every bit of framebufferColorSampleCounts above VK_SAMPLE_COUNT_1_BIT is
+    * clear.  Apple G17P is one: its end-of-tile store cannot yet write a
+    * multisample surface, so Honeykrisp reports one sample.
+    *
+    * st_extensions.c then computes MaxSamples = 0, and compute_version()'s
+    * OpenGL 3.0 term `(MaxSamples >= 4 || FakeSWMSAA)` is the ONLY term that
+    * fails, capping desktop GL at 2.1 and withdrawing the core profile
+    * entirely, even though every GL 4.x extension and GLSL 4.60 are present.
+    * (Measured on G17P: forcing the Vulkan limit to 4 moved the same driver
+    * from 2.1 compat/no core straight to 3.3 core with nothing else changed.)
+    *
+    * pipe_caps.fake_sw_msaa is Mesa's mechanism for exactly this hardware --
+    * freedreno sets it for a3xx, softpipe sets it always -- and its effect
+    * here is deliberately narrow.  It raises MaxSamples from 0 to 1 and sets
+    * FakeSWMSAA, so the version gate passes and the multisample entry points
+    * are exposed at one sample.  It does NOT change what an allocation does:
+    * ARB_internalformat_query already reports SAMPLES = {1} for every format
+    * on such a device, and _mesa_check_sample_count() refuses samples > 1
+    * against that query both before and after this cap, so a request for 4x
+    * fails identically either way.  Nothing new is promised about MSAA.
+    *
+    * This retires itself: a device that gains a real multisample framebuffer
+    * limit takes the ordinary path and reports its true MaxSamples.
+    */
+   caps->fake_sw_msaa =
+      !(screen->info.props.limits.framebufferColorSampleCounts &
+        ~(VkSampleCountFlags)VK_SAMPLE_COUNT_1_BIT);
+
    caps->fragment_shader_interlock = screen->info.have_EXT_fragment_shader_interlock;
 
    caps->shader_clock = screen->info.have_KHR_shader_clock;
