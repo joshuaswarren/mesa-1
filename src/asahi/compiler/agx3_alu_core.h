@@ -54,6 +54,32 @@ bool agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/*
+ * The same AND/OR/XOR with the second operand an IMMEDIATE. The operand kind
+ * is a field, f37, on the very encoding point the register form already uses,
+ * with the constant in f29 -- so `x & 0xff` is not a different instruction, it
+ * is the register form with one field changed. Witnessed with
+ * metal-nt -arch applegpu_g17p and recovered through tools/decomp.c:
+ *
+ *   a & c      0b051f01000000800000   f16=4 f37=2 f38=2
+ *   a & 0xff   0b011fff100200800000   f29=255 f37=1 f38=2
+ *   a | 0xff   0b011fff120a00800000   bit_or, same fields
+ *   a ^ 0xff   0b011eff120a00800000   bit_xor, same fields
+ *   a & 0x7f   0b010fff100200800000   f29=127
+ *   a ^ 1      0b010e81120a00800000   f29=1
+ *   (ushort) a & 0xff   13021fff100200800000   f10=1 f24=1, f38 still 2
+ *   (ushort) a | 0x80   13021f81020a00800000   f29=128
+ *
+ * The narrow rows are what settle f38: a 16-bit result narrows f10 and f24 but
+ * NOT f38, because an immediate operand declares width 2 whatever the
+ * destination is -- the same rule the compare-select's immediate slot follows.
+ */
+bool agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                      bool narrow, uint16_t dest, uint16_t src,
+                      uint8_t immediate, enum agx3_alu_hint hint,
+                      uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P 32-bit a & ~b.  Apple exposes this truth-table shape as bit_andc;
  * unlike AND it is not commutative, so the source order is preserved. */
 bool agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
@@ -196,12 +222,14 @@ struct agx3_fsel_desc {
    uint16_t cmp0;               /* register half; slot 0 is always a register */
    enum agx3_alu_hint cmp0_hint;
    bool cmp0_abs;
+   bool cmp0_neg;
    bool cmp0_16;
 
    bool cmp1_is_immediate;
    uint16_t cmp1;               /* register half, or the immediate value */
    enum agx3_alu_hint cmp1_hint;
    bool cmp1_abs;
+   bool cmp1_neg;
    bool cmp1_16;                /* register sources only; an immediate slot
                                  * always declares width 2 */
 
@@ -492,23 +520,26 @@ bool agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t sourc
                         uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                         uint8_t *length);
 
-/* G17P register/immediate FSEL. Absolute compare modifiers are grounded for
+/*
+ * G17P register/immediate FSEL. Absolute compare modifiers are grounded for
  * f32 eq/lt/gt, plus GE/LE with exactly one absolute comparator, with f32
- * selected values. */
+ * selected values.
+ *
+ * `compare_neg` carries a negate on EITHER comparator. f65 is the only negate
+ * field the encoding has and it names the second comparator; every other
+ * placement is rewritten inside this function rather than refused -- a negated
+ * first comparator exchanges the operands and reverses the relation (Apple's
+ * own canonicalisation, observed), negating both is the relation flip alone,
+ * a negate against the exact immediate zero is a no-op because -0.0 and +0.0
+ * compare equal, and a modifier on a minifloat comparator folds into the
+ * constant's sign bit. abs and neg compose on the same instruction. The byte
+ * ladder for all of it is in agx3_alu_core.c.
+ *
+ * This function absorbed agx3_alu_fcmp_select_reg_imm_neg(), which was a
+ * second entry point for the f65 half of the same encoding; there is one
+ * encoder now, not two.
+ */
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
-                                  const uint16_t src[4], bool compare_zero,
-                                  const bool compare_abs[2],
-                                  const bool immediate[2],
-                                  const enum agx3_alu_hint hints[4], unsigned condition,
-                                  bool dest_16, bool dest_cache, uint16_t wait_mask,
-                                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
-
-/* The same, admitting a negated SECOND compare source (f65), which Apple
- * emits for `a < -b` at both result widths and in the same encoding point as
- * the unmodified compare. A negated first source has no bit of its own -- the
- * caller must swap the operands and flip the relation -- and mixing the
- * negate with the absolute modifiers is not witnessed; both fail closed. */
-bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4], bool compare_zero,
                                   const bool compare_abs[2],
                                   const bool compare_neg[2],
