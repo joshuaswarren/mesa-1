@@ -9504,17 +9504,21 @@ TEST_F(AGX3PackBinary, ReciprocalWidthsRefuseUngroundedModes)
          src = agx_immediate(0);
       if (mode == 12)
          src = agx_uniform(0, AGX_SIZE_16);
+      /* 192, not 128: f2 and f18 of f32rcp ep0 accept [0, 191] in Apple's own
+       * composer tables, with 192 distinct encodings and no aliasing, and the
+       * packer's gate now agrees with them rather than refusing sixty-four
+       * addressable registers. */
       if (mode == 14) {
          dest.size = AGX_SIZE_16;
-         dest.value = 128;
+         dest.value = 192;
       }
       if (mode == 15)
-         src.value = 128;
+         src.value = 192;
       if (mode == 16)
-         dest.value = 128;
+         dest.value = 192;
       if (mode == 17) {
          src.size = AGX_SIZE_32;
-         src.value = 128;
+         src.value = 192;
       }
 
       agx_instr *rcp = agx_rcp_to(b, dest, src);
@@ -9522,6 +9526,23 @@ TEST_F(AGX3PackBinary, ReciprocalWidthsRefuseUngroundedModes)
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
+}
+
+/* The gap the old gate left: a reciprocal whose destination is a register the
+ * form can address but the packer refused.  Three of the ten distinct programs
+ * three.js compiles for webgl_geometry_cube, webgl_animation_keyframes and
+ * webgl_materials_physical_clearcoat died on this shape, and hk_shader.c turns
+ * a packer refusal into VK_ERROR_FEATURE_NOT_PRESENT for the whole pipeline. */
+TEST_F(AGX3PackBinary, ReciprocalEncodesAboveTheOldRegisterGate)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(140, AGX_SIZE_32);
+   agx_index src = agx_register(86, AGX_SIZE_32);
+   src.abs = true;
+   src.cache = true;
+   agx_rcp_to(b, dest, src);
+   agx_stop(b);
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfReciprocalSqrtMatchesNativeAndRefusesModifier)

@@ -3809,6 +3809,12 @@ test_native_reciprocal_widths(void)
       {0, 2, 32, false, true, false, false, true,
        AGX3_ALU_HINT_CACHE, "af005600030402442000"},
 
+      /* The exact shape three.js was refused on: a full-precision reciprocal
+       * of an absolute value, cached, with a destination above the old 128
+       * gate.  Bytes from Apple's own composer tables for f32rcp ep0. */
+      {140, 86, 0, false, false, true, false, false,
+       AGX3_ALU_HINT_CACHE, "af00548c02ac02486000"},
+
       /* Odd half input, no dependency, and texture producer slot zero. */
       {0, 3, 32, false, true, false, false, false,
        AGX3_ALU_HINT_DISCARD, "af005600020610442000"},
@@ -3858,16 +3864,24 @@ test_native_reciprocal_widths(void)
    }
    assert(forms == 6144);
 
+   /* The register fields accept [0, 191]; 192 is where Apple's tables stop,
+    * and where the refusal now is.  This positive case has to run before the
+    * refusal sweep below, which checks that a refusal leaves `len` alone. */
+   assert(agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 190, 190, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(len == 10);
+
    memset(bytes, 0xa5, sizeof(bytes));
    len = 0xa5;
    assert(!agx3_alu_rcp(
       AGX_ISA_ENCODING_AGX3C, 0, 0, false, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
-      AGX_ISA_ENCODING_AGX3B, 128, 0, true, true, false, false,
+      AGX_ISA_ENCODING_AGX3B, 192, 0, true, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
-      AGX_ISA_ENCODING_AGX3B, 0, 128, true, true, false, false,
+      AGX_ISA_ENCODING_AGX3B, 0, 192, true, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
       AGX_ISA_ENCODING_AGX3B, 1, 0, false, true, false, false,
