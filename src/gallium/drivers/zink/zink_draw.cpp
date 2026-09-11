@@ -662,8 +662,9 @@ zink_draw(struct pipe_context *pctx,
    if (ctx->vertices_query || !list_is_empty(&ctx->primitives_generated_queries))
       zink_query_update_gs_states(ctx);
 
-   if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_DRAW_ENDRP)))
       zink_batch_no_rp(ctx);
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_DRAW_BARRIER))) {
       VkMemoryBarrier mb;
       mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
       mb.pNext = NULL;
@@ -1081,8 +1082,9 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
    }
    zink_update_barriers(ctx, false, NULL, info->indirect, info->indirect_draw_count);
 
-   if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_MESH_ENDRP)))
       zink_batch_no_rp(ctx);
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_MESH_BARRIER))) {
       VkMemoryBarrier mb;
       mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
       mb.pNext = NULL;
@@ -1303,8 +1305,9 @@ zink_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
    if (ctx->memory_barrier)
       zink_flush_memory_barrier(ctx);
 
-   if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_DISPATCH_ENDRP)))
       zink_batch_no_rp(ctx);
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_DISPATCH_BARRIER))) {
       VkMemoryBarrier mb;
       mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
       mb.pNext = NULL;

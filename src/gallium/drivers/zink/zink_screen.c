@@ -128,6 +128,13 @@ DEBUG_GET_ONCE_FLAGS_OPTION(zink_debug, "ZINK_DEBUG", zink_debug_options, 0)
 uint32_t
 zink_debug;
 
+/* Which of the ZINK_DEBUG=sync sites stay armed. See enum zink_sync_site. */
+DEBUG_GET_ONCE_NUM_OPTION(zink_sync_sites_option, "ZINK_SYNC_SITES",
+                          ZINK_SYNC_SITE_ALL)
+
+uint32_t
+zink_sync_sites = ZINK_SYNC_SITE_ALL;
+
 
 static const struct debug_named_value
 zink_descriptor_options[] = {
@@ -3416,6 +3423,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    glsl_type_singleton_init_or_ref();
    zink_debug = debug_get_option_zink_debug();
+   zink_sync_sites =
+      (uint32_t)debug_get_option_zink_sync_sites_option() & ZINK_SYNC_SITE_ALL;
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_AUTO)
       zink_descriptor_mode = debug_get_option_zink_descriptor_mode();
 
