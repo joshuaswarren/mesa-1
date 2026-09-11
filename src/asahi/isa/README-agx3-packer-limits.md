@@ -1408,6 +1408,94 @@ memory operation's index operand inside the low 192 halves, or address
 legalization has to move a high index into a low register first. Closing it in
 the packer is impossible; there is no encoding to add.
 
+### Before widening a register gate, check that the field does not alias
+
+The mirror image of the `device_load` case above: a gate set *below* the
+field's real cap. `agx3_alu_rcp()` refused a destination or source at or above
+128. Sweeping the field the same way says otherwise:
+
+```
+f32rcp ep0 f2  (dest)  accepts [0..191], 192 distinct encodings, 0 aliased
+f32rcp ep0 f18 (src)   accepts [0..191], 192 distinct encodings, 0 aliased
+```
+
+191 again, which is the number the memory forms stop at too. `AGX_NUM_REGS` is
+256 halves, so any shader under real register pressure gets a reciprocal above
+128, and a packer refusal comes back from `hk_shader.c` as
+`VK_ERROR_FEATURE_NOT_PRESENT` for the whole pipeline. Three of the ten
+distinct programs three.js compiles for `webgl_geometry_cube`,
+`webgl_animation_keyframes` and `webgl_materials_physical_clearcoat` died
+there.
+
+**The "0 aliased" column is the part that makes widening safe, and it has to be
+measured rather than assumed.** "The composer accepted it" is not the same
+claim as "the field encodes it". A gate widened onto bits that go nowhere does
+not refuse -- it writes the *wrong register*, which is a wrong-pixels bug
+rather than a compile failure, and the failure mode that this whole file exists
+to avoid. So sweep the value and compare the emitted bytes pairwise: an
+accepted value that produces the same bytes as a smaller one is a silent
+mis-encode, not a wider field.
+
+The same scan says the opposite thing about the half copy, and that gate is
+therefore correct and left alone:
+
+```
+copy ep0 (4 bytes)  f2 (dest)  accepted 173, distinct 128, aliased 45
+                               dest=256 encodes 03 05 01 00
+                               dest=0   encodes 03 05 01 00   <- identical
+copy ep1 (10 bytes) f2 (dest)  accepted 256, distinct 256, aliased 0
+```
+
+`AGX3_COPY_REG16_DEST_HALVES = 128` is right for `copy` ep0: the field is seven
+bits, exactly as the header says, and the composer's acceptance of values at or
+above 256 is an artefact, not permission. Do not raise it.
+
+#### Open: the widening move above half 128
+
+`bitop d32, s16, #0` -- the zero-extending move, emitted as a half copy plus a
+clear of the upper half -- refuses when its destination is at or above half
+128, because `agx3_copy_encode_reg16()` uses `copy` ep0. The ten-byte ep1 form
+addresses [0..255] with no aliasing, so the shape *is* reachable, and
+`AGX3_COPY_MAX_LENGTH` is already 10.
+
+It is not closed here because there is **no Apple witness for a ten-byte copy
+in this tree**. Composing at ep1 with the ep0 field assignment produces
+plausible bytes, but "plausible" is how a field role gets guessed wrong, and
+guessing wrong here writes the wrong register rather than refusing -- the exact
+hazard the section above is about. It needs a `metal-nt` witness for the long
+copy form, or a hardware oracle. It was the last refusal left in
+`webgl_materials_physical_clearcoat` after the reciprocal gate was corrected.
+
+### Measuring the packer against an application's real shaders
+
+The refusal cells in this file were found by writing probe shaders for shapes
+somebody suspected. The suspicion is the weak link: a shape nobody thought of
+is a shape nobody probes. Capturing the programs an application *actually
+links* removes it, and needs no hardware.
+
+`neo-gpu-harness/scripts/threejs_shader_dump.py` hooks `createShader`,
+`shaderSource`, `attachShader` and `linkProgram` through
+`Page.addScriptToEvaluateOnNewDocument` -- before any page script, because
+three.js compiles its first program during module evaluation -- and records
+every linked vertex/fragment PAIR. 336 three.js WebGL examples yield **1285
+distinct programs**. `threejs_shader_probe.py` compiles each pair and drives it
+through `g17p-vulkan-graphics-probe` under the drm-shim (`PROBE_PAIRS=1`, and
+`PROBE_BINDINGS` derived per program from the SPIR-V, because a pipeline layout
+missing a binding the shader uses aborts inside `hk_nir_lower_descriptors.c`,
+upstream of the packer, and reads as a refusal if you are not looking).
+
+Measured 2026-09-11:
+
+| driver | programs encoding | examples with >= 1 refusal |
+| --- | --- | --- |
+| the package then deployed on the target | 1119 / 1285 | 78 of 336 |
+| `agx3` at `71684d595f8` | 1235 / 1285 | 21 of 336 |
+
+The corpus is three.js's GLSL minimally rewritten for glslang, not ANGLE's
+SPIR-V; the script documents each rewrite and why it is a fact about glslang
+rather than about the driver. **An encoding claim is all this is. No pixel of
+any of these pages has been looked at.**
+
 ### The control arm
 
 `params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
