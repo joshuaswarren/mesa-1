@@ -209,6 +209,7 @@ if with_tests
         idep_nir,
         idep_mesautil,
         idep_libagx,
+        idep_libagx_shaders_h,
         idep_vulkan_runtime_headers,
         idep_vulkan_util_headers,
       ],
@@ -264,7 +265,8 @@ if with_tests
       # hk_cmd_buffer.h pulls in agx_helpers.h, which includes the generated
       # libagx_shaders.h. Without idep_libagx this target races the generator
       # and fails to build in a Vulkan-only configuration.
-      dependencies : [idep_nir, idep_mesautil, idep_libagx],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx,
+                      idep_libagx_shaders_h],
       gnu_symbol_visibility : 'hidden',
     ),
     suite : ['asahi'],
