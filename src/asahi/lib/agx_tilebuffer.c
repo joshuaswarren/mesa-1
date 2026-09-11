@@ -6,10 +6,19 @@
 #include "agx_tilebuffer.h"
 #include <assert.h>
 #include "util/format/u_format.h"
+#include "util/u_debug.h"
 #include "layout.h"
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
  * of the architecture.
+ *
+ * Do not "fix" the minus one for G17P. Four 8-byte samples of RGBA8 at 32x32
+ * need exactly 32768 bytes, so 4x colour misses this bound by a single byte
+ * and falls to a 32x16 tile, which looks like an off-by-one worth testing. It
+ * was tested: admitting exactly 32768 and letting 4x keep a 32x32 tile loses
+ * the device outright (vkWaitForFences -> VK_ERROR_DEVICE_LOST on A18 Pro,
+ * 2026-09-10). The bound is real; a 32x32 tile at 4x is not something this
+ * hardware will do.
  */
 #define MAX_BYTES_PER_TILE (32768 - 1)
 
@@ -21,15 +30,44 @@
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
+/* Diagnostic: admit a tile of exactly 32768 bytes rather than one byte less.
+ *
+ * This exists for one specific question. Four 8-byte samples of RGBA8 at 32x32
+ * need exactly 32768 bytes, so 4x colour misses the 32x32 tile by a single
+ * byte and falls to 32x16 -- and 32x16 is a tile geometry that essentially
+ * nothing else on G17P reaches, because at one sample you would need more than
+ * 31 bytes per pixel to get there and the G17P tile gate admits almost no such
+ * configuration. The hardware symptom of 4x (A01b: rows 0-15 exact, rows 16-31
+ * absent) is the tile height, not a sample count.
+ *
+ * So either the limit really is 32767 and the 32x16 path is broken, or the
+ * limit is 32768 on this part and 4x should never have left 32x32. Setting
+ * AGX_TILE_32K=1 picks the second and changes exactly that one comparison;
+ * the matching SPECLM bound in agx_ioto_state_core.c moves with it. Off by
+ * default: the value here is inherited from G13G and has no G17P witness in
+ * either direction.
+ */
+static bool
+agx_tile_allows_full_32k(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("AGX_TILE_32K", false);
+   return enabled != 0;
+}
+
 /* Select the largest tile size that fits */
 static uint16_t
 agx_select_tile_size(unsigned px_size_B)
 {
-   assert(px_size_B <= (MAX_BYTES_PER_TILE / MIN_TILE_SIZE_PX));
+   const unsigned limit =
+      agx_tile_allows_full_32k() ? 32768 : MAX_BYTES_PER_TILE;
 
-   return ((px_size_B * 32 * 32) <= MAX_BYTES_PER_TILE)   ? (32 * 32)
-          : ((px_size_B * 32 * 16) <= MAX_BYTES_PER_TILE) ? (32 * 16)
-                                                          : MIN_TILE_SIZE_PX;
+   assert(px_size_B <= (limit / MIN_TILE_SIZE_PX));
+
+   return ((px_size_B * 32 * 32) <= limit)   ? (32 * 32)
+          : ((px_size_B * 32 * 16) <= limit) ? (32 * 16)
+                                             : MIN_TILE_SIZE_PX;
 }
 
 static inline unsigned
@@ -195,7 +233,9 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 
    if (tib->nr_samples > 1 &&
        tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM)
+       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_R8G8B8X8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
@@ -229,14 +269,19 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    const bool rgba16i_or_x = tib->nr_samples == 1 &&
       (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT ||
        tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_SINT);
-   const bool rgba32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT &&
+   /* API RGB32 surfaces use the four-lane RGBX physical family. The unused
+    * lane has the same tile footprint and EOT protocol as RGBA32. */
+   const bool rgbx32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_UINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgba32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT &&
+   const bool rgbx32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_SINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgba32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
-      tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT &&
+   const bool rgbx32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+      (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+       tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
    const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
@@ -246,7 +291,7 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
       agx_tilebuffer_physical_format(tib, 0) ==
          PIPE_FORMAT_R11G11B10_FLOAT;
 
-   return mrt != AGX_G17P_MRT_NONE || rgba32u || rgba32i || rgba32f ||
+   return mrt != AGX_G17P_MRT_NONE || rgbx32u || rgbx32i || rgbx32f ||
           rgb10a2u || r11g11b10f ||
           (tib->sample_size_B == 8 &&
            (agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_UNORM ||
@@ -260,12 +305,18 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_UINT ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_SINT ||
+            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UINT ||
@@ -299,10 +350,29 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
        tib->_offset_B[1] == 8 && tib->sample_size_B == 16)
       return AGX_G17P_MRT_WBOIT;
 
-   if (tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM &&
+   const bool rt0_rgba8 =
+      tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UNORM ||
+      tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_UNORM;
+   const bool rt1_rgba8 =
+      tib->logical_format[1] == PIPE_FORMAT_R8G8B8A8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_B8G8R8A8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_R8G8B8X8_UNORM ||
+      tib->logical_format[1] == PIPE_FORMAT_B8G8R8X8_UNORM;
+
+   /* These logical channel orders and alpha-ignored variants all use the
+    * same four-lane U8 tile representation. Swizzle and X-channel discard
+    * live in the per-attachment PBE descriptor, outside the shared MRT EOT
+    * program. */
+   if (rt0_rgba8 && rt1_rgba8 &&
        tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
       return AGX_G17P_MRT_RGBA8;
+
+   if (tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
+       tib->logical_format[1] == PIPE_FORMAT_R11G11B10_FLOAT &&
+       tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
+      return AGX_G17P_MRT_R11G11B10;
 
    return AGX_G17P_MRT_NONE;
 }

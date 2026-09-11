@@ -1,0 +1,51 @@
+/*
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Write a small blob of push-constant data to a device address.
+ *
+ * This backs vk_device::write_buffer_cp, which the common acceleration
+ * structure builder uses to seed the intermediate header before any build
+ * shader runs.  Drivers whose command processor can write memory directly do
+ * this without a dispatch; AGX has no such path, and the obvious
+ * alternative -- upload to the command pool and copy -- goes through libagx
+ * precomputed kernels that the G17P dispatch path fail-closes on.  So the
+ * copy is a shader.
+ *
+ * The blob is bounded by the guaranteed 128-byte push constant block minus
+ * the destination address and count, which is comfortably more than the
+ * 104-byte vk_ir_header this exists for.  The C side asserts the bound
+ * rather than silently truncating.
+ */
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, buffer_reference_align = 4,
+       scalar) buffer u32_ref {
+   uint32_t value;
+};
+
+layout(push_constant) uniform CONSTS {
+   uint64_t dst;
+   uint32_t count;
+   uint32_t data[28];
+};
+
+void
+main()
+{
+   uint32_t i = gl_GlobalInvocationID.x;
+   if (i >= count)
+      return;
+
+   u32_ref(dst + i * 4).value = data[i];
+}

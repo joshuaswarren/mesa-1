@@ -187,6 +187,30 @@ pack_sampler(const struct hk_physical_device *pdev,
    return hk_pack_native_sampler(pdev->dev.chip, out, &state);
 }
 
+/*
+ * hk_pack_native_sampler() answers a bare bool, so a refused sampler used to
+ * reach the application as a naked VK_ERROR_FEATURE_NOT_PRESENT with nothing
+ * to say which of a dozen fields the chip's sampler packer would not take.
+ * Print the whole state instead: it is a driver gap either way, and the next
+ * person needs the row, not the verdict.
+ */
+static VkResult
+hk_sampler_pack_error(struct hk_device *dev, const VkSamplerCreateInfo *info,
+                      VkSamplerReductionMode reduction, const char *which)
+{
+   return vk_errorf(
+      dev, VK_ERROR_FEATURE_NOT_PRESENT,
+      "%s cannot pack a sampler (%s): mag=%u min=%u mip=%u wrap=%u/%u/%u "
+      "aniso=%u/%f lod=%f..%f bias=%f compare=%u/%u border=%u reduction=%u "
+      "unnorm=%u flags=0x%x",
+      agx_chip_name(dev->dev.chip), which, info->magFilter, info->minFilter,
+      info->mipmapMode, info->addressModeU, info->addressModeV,
+      info->addressModeW, info->anisotropyEnable, info->maxAnisotropy,
+      info->minLod, info->maxLod, info->mipLodBias, info->compareEnable,
+      info->compareOp, info->borderColor, reduction,
+      info->unnormalizedCoordinates, info->flags);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateSampler(VkDevice device,
                  const VkSamplerCreateInfo *info /* pCreateInfo */,
@@ -229,7 +253,8 @@ hk_CreateSampler(VkDevice device,
    if (!pack_sampler(pdev, info, true, workaround_rgba4,
                      sampler->vk.reduction_mode, &samp)) {
       hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
-      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+      return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
+                                   "base plane");
    }
 
    /* Gen4 has no bias field, so shaders fetch it from the descriptor set.
@@ -275,7 +300,9 @@ hk_CreateSampler(VkDevice device,
                            sampler->vk.reduction_mode, &samp)) {
             hk_DestroySampler(device, hk_sampler_to_handle(sampler),
                               pAllocator);
-            return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+            return hk_sampler_pack_error(dev, &plane2_info,
+                                         sampler->vk.reduction_mode,
+                                         "chroma plane");
          }
          result = hk_sampler_heap_add(
             dev, &samp, &sampler->planes[sampler->plane_count].hw);
@@ -295,7 +322,8 @@ hk_CreateSampler(VkDevice device,
       if (!pack_sampler(pdev, info, false, workaround_rgba4,
                         sampler->vk.reduction_mode, &samp)) {
          hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
-         return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+         return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
+                                      "custom border clamp-to-0 plane");
       }
       result = hk_sampler_heap_add(dev, &samp,
                                    &sampler->planes[sampler->plane_count].hw);

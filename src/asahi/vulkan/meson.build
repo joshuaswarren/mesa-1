@@ -1,10 +1,15 @@
 # Copyright © 2022 Collabora Ltd. and Red Hat Inc.
 # SPDX-License-Identifier: MIT
 hk_files = files(
+  'hk_acceleration_structure.c',
+  'hk_acceleration_structure.h',
   'hk_buffer.c',
   'hk_buffer.h',
   'hk_buffer_view.c',
+  'hk_bvh_depth_core.c',
+  'hk_bvh_depth_core.h',
   'hk_buffer_view.h',
+  'hk_bvh.h',
   'hk_cmd_buffer.c',
   'hk_cmd_buffer.h',
   'hk_conditional_render_core.h',
@@ -30,6 +35,9 @@ hk_files = files(
   'hk_event.h',
   'hk_format.c',
   'hk_g17p_meta_copy_core.c',
+  'hk_ioto_arena.c',
+  'hk_ioto_arena_core.c',
+  'hk_ioto_arena_core.h',
   'hk_g17p_meta_copy_core.h',
   'hk_agx3_ioto_decode.c',
   'hk_agx3_ioto_decode.h',
@@ -64,9 +72,12 @@ hk_files = files(
   'hk_instance.c',
   'hk_instance.h',
   'hk_nir_lower_descriptors.c',
+  'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
   'hk_nir_passthrough_gs.c',
+  'hk_nir_ray_tracing.c',
+  'hk_nir_ray_tracing.h',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
   'hk_native_descriptor_pack.h',
@@ -92,6 +103,34 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_bvh_depth_core',
+    executable(
+      'hk_bvh_depth_core_test',
+      files('tests/test-hk-bvh-depth-core.c',
+            'hk_bvh_depth_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_ray_traversal',
+    executable(
+      'hk_nir_ray_traversal_test',
+      files('tests/test-hk-nir-ray-traversal.c',
+            'hk_nir_ray_tracing.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
   test(
     'hk_nir_robust_image',
     executable(
@@ -157,6 +196,18 @@ if with_tests
   )
 
   test(
+    'hk_ioto_arena_core',
+    executable(
+      'hk_ioto_arena_core_test',
+      files('tests/test-hk-ioto-arena-core.c', 'hk_ioto_arena_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_cmd_lifetime',
     executable(
       'hk_cmd_lifetime_test',
@@ -174,6 +225,7 @@ if with_tests
         idep_nir,
         idep_mesautil,
         idep_libagx,
+        idep_libagx_shaders_h,
         idep_vulkan_runtime_headers,
         idep_vulkan_util_headers,
       ],
@@ -226,7 +278,11 @@ if with_tests
                             '../../virtio/vdrm'),
         inc_include, inc_src, inc_asahi,
       ],
-      dependencies : [idep_nir, idep_mesautil],
+      # hk_cmd_buffer.h pulls in agx_helpers.h, which includes the generated
+      # libagx_shaders.h. Without idep_libagx this target races the generator
+      # and fails to build in a Vulkan-only configuration.
+      dependencies : [idep_nir, idep_mesautil, idep_libagx,
+                      idep_libagx_shaders_h],
       gnu_symbol_visibility : 'hidden',
     ),
     suite : ['asahi'],
@@ -611,12 +667,24 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
-    executable(
+    g17p_offscreen_triangle = executable(
       'g17p-offscreen-triangle',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Chromium 151 ANGLE reserves one float4 output for transform feedback.
+    # This exact image oracle qualifies the resulting 68-user/72-total UVS
+    # boundary before HK_G17P_UNVERIFIED_FEATURES=vertex_output_68 is promoted.
+    executable(
+      'g17p-vulkan-vertex-output-68',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VERTEX_OUTPUT_68=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -737,6 +805,115 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Descriptor allocation/type matrix for the identical compositor sample.
+    # These allocated-set controls pair with vk_meta's pushed combined and
+    # pushed separate blit paths without involving mip generation.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined-array',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate-array',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-combined-array-exact',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1',
+                '-DG17P_COMPOSITE_ARRAY_NEAREST_EXACT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-allocated-separate-array-exact',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_DESCRIPTOR_CELL=2',
+                '-DG17P_COMPOSITE_DESCRIPTOR_ARRAY=1',
+                '-DG17P_COMPOSITE_ARRAY_NEAREST_EXACT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Native sRGB texture discriminator: uncompressed source, implicit mip-1
+    # minification, LINEAR filtering, premultiplied source-over, and a BGRA8
+    # sRGB target. Paired source formats isolate decode/swizzle from the
+    # otherwise identical draw, sampler, blend, and target state.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-rgba8-srgb',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include, inc_src],
+      dependencies : [dep_dl, idep_mesautil],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE=1',
+                '-DG17P_COMPOSITE_SRGB_TARGET=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8-srgb',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include, inc_src],
+      dependencies : [dep_dl, idep_mesautil],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE=1',
+                '-DG17P_COMPOSITE_SRGB_SOURCE_BGRA=1',
+                '-DG17P_COMPOSITE_SRGB_TARGET=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # GTK unified-GPU icon path: premultiplied BGRA8 base upload, complete
+    # same-image linear-blit mip chain, implicit minified sampling and
+    # compositor-style alpha blending.
+    executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -1162,6 +1339,31 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # vkQuake's world geometry and its lightmap are both produced by compute
+    # in one command buffer.  These reproduce those two kernels at their real
+    # resource shape -- ten bindings, push constants, shared memory, an
+    # atomicAdd whose return value addresses a dynamic store, and an rgba8
+    # imageStore -- and, separately, the staging command buffer that uploads
+    # the lightmap's static inputs.  Stage 1 is the brush culling that fills
+    # the indirect commands, stage 2 the lightmap, stage 3 both together.
+    foreach vkquake_compute : [
+      ['world-gen', '1'],
+      ['lightmap', '2'],
+      ['world-compute', '3'],
+    ]
+      executable(
+        'g17p-vulkan-vkquake-' + vkquake_compute[0],
+        files('tests/g17p_vulkan_vkquake_world_compute.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [
+          c_msvc_compat_args,
+          '-DG17P_VKQ_STAGE=' + vkquake_compute[1],
+        ],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
     # Robust indexed indirect draws are GPU-patched before VDM consumption.
     # This variant exercises both a freshly published and a reused HAL200
     # draw-state context in one command buffer.
@@ -1237,6 +1439,33 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Same data, same expected image as the static R16G16_SFLOAT oracle above;
+    # the vertex input arrives through vkCmdSetVertexInputEXT instead of the
+    # pipeline. Nothing else in the tree exercises
+    # VK_EXT_vertex_input_dynamic_state, which is the path where a sub-32-bit
+    # attribute reaches agx_nir_lower_vbo_raw's narrow branch.
+    foreach dvi : [['rgba8-unorm', '1'], ['rg16-sint', '2']]
+      executable(
+        'g17p-vulkan-dynamic-vertex-input-' + dvi[0],
+        files('tests/g17p_offscreen_triangle.c'),
+        include_directories : [inc_include],
+        dependencies : [dep_dl],
+        c_args : [c_msvc_compat_args, '-DG17P_VERTEX_FORMAT=' + dvi[1],
+                  '-DG17P_DYNAMIC_VERTEX_INPUT=1'],
+        gnu_symbol_visibility : 'hidden',
+      )
+    endforeach
+
+    executable(
+      'g17p-vulkan-dynamic-vertex-input-rg16-sfloat',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_VERTEX_FORMAT=3',
+                '-DG17P_DYNAMIC_VERTEX_INPUT=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-graphics-pipeline-library',
       files('tests/g17p_graphics_pipeline_library.c'),
@@ -1291,6 +1520,84 @@ if with_tests
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
                 '-DG17P_MSAA_COVERAGE=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Variant 1 above pairs the dynamic sample mask with the per-sample
+    # fragment shader, so it also demands sampleRateShading. G17P has no AGX3
+    # per-sample fragment path, so that binary cannot pass there and a failure
+    # would be blamed on the sample mask. This variant qualifies the mask
+    # alone, with ordinary per-pixel invocation.
+    executable(
+      'g17p-vulkan-dynamic-sample-mask4-no-sample-shading',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_MSAA_COVERAGE=3'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Unresolved multisample colour store, then a per-sample texelFetch back.
+    # Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_store; the
+    # binary says so and exits non-zero rather than skipping.
+    executable(
+      'g17p-vulkan-msaa-store-fetch2',
+      files('tests/g17p_vulkan_msaa_store_fetch.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-store-fetch4',
+      files('tests/g17p_vulkan_msaa_store_fetch.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Multisample depth attachment: per-sample depth testing, and the ZLS
+    # store/load round trip across two render passes. Needs HK_G17P_MSAA=1 and
+    # HK_G17P_UNVERIFIED_FEATURES=msaa_depth.
+    executable(
+      'g17p-vulkan-msaa-depth2',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-depth4',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Isolates the multisample resolve: a clear-only pass with no draw at all,
+    # plus full-screen quads at 1x and Nx. Needs HK_G17P_MSAA=1. Pair it with
+    # AGX_SPECLM_SAMPLE_CODE.
+    executable(
+      'g17p-vulkan-msaa-resolve2',
+      files('tests/g17p_vulkan_msaa_resolve_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=2'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-msaa-resolve4',
+      files('tests/g17p_vulkan_msaa_resolve_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -1665,6 +1972,23 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # SuperTuxKart's default advanced pipeline renders diffuse/specular into
+    # two full-resolution GL_R11F_G11F_B10F attachments.
+    executable(
+      'g17p-vulkan-stk-r11g11b10-mrt',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [
+        c_msvc_compat_args,
+        '-DG17P_RGBA8_MRT=1',
+        '-DG17P_STK_R11G11B10_MRT=1',
+        '-DIMAGE_WIDTH=1280',
+        '-DIMAGE_HEIGHT=720',
+      ],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-dynamic-blend',
       files('tests/g17p_offscreen_triangle.c'),
@@ -1768,6 +2092,19 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Four identical draws in one render pass with no state recorded between
+    # them. This is the control for the inter-draw VDM barrier: the barrier is
+    # attached to render-state republication, so a stream of body-only draws
+    # must collect none of them.
+    g17p_repeat_draw = executable(
+      'g17p-vulkan-repeat-draw',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_REPEAT_DRAW=4'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -1884,6 +2221,32 @@ if with_tests
     # Offline proof that transform feedback records on G17P through the native
     # geometry path and G17P-compiled libagx counter-copy kernel.  --execute is
     # the hardware mode with exact buffer, counter, and guard checks.
+    # Firefox/Zink six-range native vertex program: six attributes, a draw
+    # parameter, a vertex texture sample, three descriptor sets, and a promoted
+    # constant. Recording alone reaches hk_upload_usc_words(), so the drm-shim
+    # oracle in ../drm-shim/meson.build runs it without a GPU.
+    g17p_vertex_range_pressure = executable(
+      'g17p-vulkan-vertex-range-pressure',
+      files('tests/g17p_vulkan_vertex_range_pressure.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # SuperTuxKart-shaped frame: many small clear/store render passes with
+    # draws, all in one command buffer. Recording alone composes every Ioto
+    # program, so the drm-shim oracle in ../drm-shim/meson.build counts the
+    # executable-window mappings it takes without a GPU.
+    g17p_ioto_program_pressure = executable(
+      'g17p-vulkan-ioto-program-pressure',
+      files('tests/g17p_vulkan_ioto_program_pressure.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     g17p_transform_feedback = executable(
       'g17p-vulkan-transform-feedback',
       files('tests/g17p_vulkan_transform_feedback.c'),
@@ -1899,6 +2262,127 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Q02 public pipeline-cache persistence oracle. Runs without submitting GPU
+    # work and checks G17 cache identity, import, merge and explicit cache hit.
+    g17p_pipeline_cache = executable(
+      'g17p-vulkan-pipeline-cache',
+      files('tests/g17p_vulkan_pipeline_cache.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # M02 public no-submit buffer-memory lifetime oracle.
+    g17p_buffer_memory = executable(
+      'g17p-vulkan-buffer-memory',
+      files('tests/g17p_vulkan_buffer_memory.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit buffer-device-address capture/replay oracle.
+    g17p_bda_capture = executable(
+      'g17p-vulkan-bda-capture',
+      files('tests/g17p_vulkan_bda_capture.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Q01b public no-submit partial/unavailable query-result ABI oracle.
+    g17p_query_results = executable(
+      'g17p-vulkan-query-results',
+      files('tests/g17p_vulkan_query_results.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # S04b public no-submit timeline host/object-lifetime oracle.
+    g17p_timeline_host = executable(
+      'g17p-vulkan-timeline-host',
+      files('tests/g17p_vulkan_timeline_host.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_EXT_memory_budget allocation-lifetime oracle.
+    g17p_memory_budget = executable(
+      'g17p-vulkan-memory-budget',
+      files('tests/g17p_vulkan_memory_budget.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance4 requirements-equivalence oracle.
+    g17p_maintenance4 = executable(
+      'g17p-vulkan-maintenance4',
+      files('tests/g17p_vulkan_maintenance4.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance5 usage2/layout oracle.
+    g17p_maintenance5 = executable(
+      'g17p-vulkan-maintenance5',
+      files('tests/g17p_vulkan_maintenance5.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public no-submit VK_KHR_maintenance6 properties/bind-status oracle.
+    g17p_maintenance6 = executable(
+      'g17p-vulkan-maintenance6',
+      files('tests/g17p_vulkan_maintenance6.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Public record-only VK_KHR_push_descriptor allocation/push matrix.
+    g17p_push_descriptor = executable(
+      'g17p-vulkan-push-descriptor',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # One-layer sampler2DArray NEAREST allocated-descriptor pixel control.
+    g17p_push_descriptor_array_control = executable(
+      'g17p-vulkan-push-descriptor-array-control',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ARRAY_CONTROL=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Raw allocated sampler2DArray implicit/explicit LOD and layer matrix.
+    g17p_array_lod_control = executable(
+      'g17p-vulkan-array-lod-control',
+      files('tests/g17p_vulkan_push_descriptor.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_ARRAY_LOD_CONTROL=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -1921,6 +2405,17 @@ if with_tests
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_GRAPHICS_SIDE_EFFECTS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # Fragment-only capability/semantics oracle. Exact guarded storage and
+    # atomic results are checked while the vertex feature stays disabled.
+    executable(
+      'g17p-vulkan-fragment-side-effects',
+      files('tests/g17p_render_only.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_FRAGMENT_SIDE_EFFECTS=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -2146,6 +2641,23 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Hyprland draws a window border as one scissored draw per rectangle of
+    # the damage-intersected border ring, so an ordinary border is four
+    # adjacent scissor rectangles sharing their edges. Every G17P scissor
+    # witness in this tree is full-frame or anchored at x=0,y=0, and none of
+    # them looks at a pixel, so the seam behaviour of the HAL200 raster
+    # record is unwitnessed. This oracle makes the framebuffer a coverage
+    # count and reads the seams directly. --record-only is the shim gate;
+    # the pixel modes need a real G17P.
+    g17p_scissor_ring = executable(
+      'g17p-vulkan-scissor-ring',
+      files('tests/g17p_vulkan_scissor_ring.c'),
+      include_directories : [inc_include],
+      dependencies : [cc.find_library('vulkan')],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-compute-lid',
       files('tests/g17p_vulkan_compute_lid.c'),
@@ -2186,6 +2698,8 @@ hk_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
+subdir('bvh')
+
 hk_deps = [
   dep_libdrm,
   idep_nir,
@@ -2203,6 +2717,7 @@ libhk = static_library(
   [
     hk_entrypoints,
     hk_files,
+    hk_bvh_spv,
     sha1_h,
   ],
   include_directories : [
@@ -2213,6 +2728,7 @@ libhk = static_library(
     inc_asahi,
     inc_virtio_gpu,
     inc_virtio_vdrm,
+    include_directories('.'),
   ],
   link_with : [libasahi_lib, libasahi_layout, libasahi_compiler],
   c_args : ['-Wno-c2x-extensions'],

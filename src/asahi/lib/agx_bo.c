@@ -101,6 +101,7 @@ agx_bo_cache_evict_stale_bos(struct agx_device *dev, int64_t now_sec)
          break;
 
       agx_bo_cache_remove_locked(dev, entry);
+      agx_g17p_va_lifetime_trace(dev, "cache-evict-stale", entry);
       agx_bo_free(dev, entry);
    }
 }
@@ -128,6 +129,8 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
              p_atomic_read(&dev->bo_cache.hits),
              p_atomic_read(&dev->bo_cache.misses));
    }
+
+   agx_g17p_va_lifetime_trace(dev, "cache-put", bo);
 
    /* Update label for debug */
    bo->label = "Unused (BO cache)";
@@ -167,6 +170,7 @@ agx_bo_cache_evict_all(struct agx_device *dev)
 
       list_for_each_entry_safe(struct agx_bo, entry, bucket, bucket_link) {
          agx_bo_cache_remove_locked(dev, entry);
+         agx_g17p_va_lifetime_trace(dev, "cache-evict-all", entry);
          agx_bo_free(dev, entry);
       }
    }
@@ -213,6 +217,7 @@ agx_bo_cache_trim(struct agx_device *dev, bool periodic,
             break;
          const size_t size = entry->size;
          agx_bo_cache_remove_locked(dev, entry);
+         agx_g17p_va_lifetime_trace(dev, "cache-evict-periodic", entry);
          agx_bo_free(dev, entry);
          trimmed += size;
       }
@@ -230,6 +235,7 @@ agx_bo_cache_trim(struct agx_device *dev, bool periodic,
          list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
       const size_t size = entry->size;
       agx_bo_cache_remove_locked(dev, entry);
+      agx_g17p_va_lifetime_trace(dev, "cache-evict-trim", entry);
       agx_bo_free(dev, entry);
       trimmed += size;
    }
@@ -424,7 +430,8 @@ agx_bo_unreference(struct agx_device *dev, struct agx_bo *bo)
    if (p_atomic_read(&bo->refcnt) == 0) {
       assert(!p_atomic_read_relaxed(&bo->writer));
 
-      if (dev->debug & AGX_DBG_TRACE)
+      if (dev->debug &
+          (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE))
          agxdecode_track_free(dev->agxdecode, bo);
 
       if (!agx_bo_cache_put(dev, bo))
@@ -474,18 +481,45 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
    }
 
    if (!bo) {
-      fprintf(stderr, "BO creation failed\n");
+      /* Three unrelated failures reach here -- GEM_CREATE, the userspace VA
+       * heap, and a kernel VM_BIND rejection -- and every caller turns all
+       * three into one VK_ERROR_OUT_OF_DEVICE_MEMORY. Print what is left in
+       * each heap so a hardware log says which one it was without having to
+       * reproduce it again. */
+      fprintf(stderr, "BO creation failed: size=%#zx align=%#x flags=%#x "
+                      "label=%s", size, align, flags,
+              label ? label : "(none)");
+
+      /* A winsys with its own VA allocator does not use these heaps, and
+       * printing their untouched sizes would name the wrong resource. */
+      if (dev->ops.va_alloc == NULL) {
+         simple_mtx_lock(&dev->vma_lock);
+         const uint64_t usc_free = dev->usc_heap.free_size;
+         const uint64_t main_free = dev->main_heap.free_size;
+         simple_mtx_unlock(&dev->vma_lock);
+
+         fprintf(stderr,
+                 "; free USC window %#" PRIx64 " of %#" PRIx64
+                 ", free user heap %#" PRIx64 " of %#" PRIx64,
+                 usc_free, AGX_USC_WINDOW_SIZE, main_free,
+                 dev->main_heap_size);
+      }
+
+      fputc('\n', stderr);
       return NULL;
    }
 
    bo->label = label;
+   if (reused)
+      agx_g17p_va_lifetime_trace(dev, "cache-reuse", bo);
    p_atomic_set(&bo->refcnt, 1);
    agx_bo_read_set_changed(dev);
 
    if (reused && (flags & AGX_BO_ZERO_ON_REUSE))
       memset(agx_bo_map(bo), 0, bo->size);
 
-   if (dev->debug & AGX_DBG_TRACE) {
+   if (dev->debug &
+       (AGX_DBG_TRACE | AGX_DBG_FAULTTRACE | AGX_DBG_ASYNCTRACE)) {
       agx_bo_map(bo);
       agxdecode_track_alloc(dev->agxdecode, bo);
    }

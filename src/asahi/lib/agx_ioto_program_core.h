@@ -19,6 +19,12 @@
 extern "C" {
 #endif
 
+/* The AGX3 code container's fixed leading block, and the first dword inside it
+ * -- the block writes its own size. Defined here rather than in agx_linker.h so
+ * a decoder or an oracle can compare against the encoder without dragging in
+ * the compiler's headers. */
+#define AGX3_CONTAINER_LEAD_SIZE 0x340u
+
 #define AGX_IOTO_PROGRAM_ALIGNMENT 64u
 #define AGX_IOTO_G17P_DEFAULT_PROFILE_PREFIX_SIZE  48u
 #define AGX_IOTO_G17P_DEFAULT_PROFILE_SUFFIX_SIZE  10u

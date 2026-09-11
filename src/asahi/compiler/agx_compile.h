@@ -356,6 +356,16 @@ struct agx_shader_key {
     * logical layout from the final AGX IR alone. */
    uint8_t g17p_rt0_eot_words;
 
+   /* Store the tile without resolving it. Apple's own builtin end-of-tile
+    * factory emits a second program per selector whose only differences are
+    * the PACK_IMGWIR wire width and the IMGWBLK dimension class (2D -> 2D
+    * multisample); see isa/README-metal-witness.md. The two forms
+    * are byte-distinct, so the backend must be told which one the caller
+    * means rather than inferring it from the tilebuffer sample count: a
+    * multisample tile is stored resolved through a single-sample target on
+    * every path except VK_ATTACHMENT_STORE_OP_STORE. */
+   bool g17p_rt0_eot_multisample;
+
    /* Select the native R5G6B5 imgwblk tail (0x35). RGB565 has three logical
     * F16 imageblock lanes spanning two words and lowers to a raw I16 block
     * store, but it does not share RGBA16F's selector. */
@@ -388,6 +398,10 @@ struct agx_shader_key {
    /* Select the native 0x75 imgwblk variant for an I32 store. This is
     * independently grounded only for the two-word R32G32 UINT layout. */
    bool g17p_rt0_eot_i32_selector_75;
+
+   /* Authorize the exact two-partition packed R11G11B10 EOT. Its post-RA
+    * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */
+   bool g17p_r11g11b10_mrt_eot;
 
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns

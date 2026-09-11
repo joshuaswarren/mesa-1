@@ -188,6 +188,135 @@ build_webgl_shadow_fs(enum glsl_sampler_dim dim, bool array)
    return b.shader;
 }
 
+static nir_shader *
+build_sampler_boundary_fs(unsigned sampler_index)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P native sampler-table boundary fragment shader");
+   nir_def *frag = nir_load_frag_coord(&b);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = sampler_index;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_fmul_imm(&b, nir_channels(&b, frag, 0x3), 1.0f / 64.0f));
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+
+   nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   BITSET_SET(b.shader->info.textures_used, 0);
+   BITSET_SET(b.shader->info.samplers_used, sampler_index);
+   return b.shader;
+}
+
+static nir_shader *
+build_dynamic_sampler_boundary_fs(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P dynamic native sampler-table fragment shader");
+   nir_def *frag = nir_load_frag_coord(&b);
+   nir_def *sampler = nir_iand_imm(
+      &b, nir_f2u32(&b, nir_channel(&b, frag, 0)),
+      AGX_GALLIUM_G17P_API_SAMPLERS - 1);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_fmul_imm(&b, nir_channels(&b, frag, 0x3), 1.0f / 64.0f));
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_texture_offset, sampler);
+   tex->src[2] =
+      nir_tex_src_for_ssa(nir_tex_src_sampler_offset, sampler);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+
+   nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   for (unsigned i = 0; i < AGX_GALLIUM_G17P_API_SAMPLERS; ++i) {
+      BITSET_SET(b.shader->info.textures_used, i);
+      BITSET_SET(b.shader->info.samplers_used, i);
+   }
+   return b.shader;
+}
+
+static bool
+check_sampler_boundary_compile(struct pipe_context *pctx)
+{
+   static const unsigned samplers[] = {
+      AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS - 1,
+      AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS,
+      AGX_GALLIUM_G17P_API_SAMPLERS - 1,
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(samplers); ++i) {
+      struct pipe_shader_state cso = {
+         .type = PIPE_SHADER_IR_NIR,
+         .report_compile_error = true,
+         .ir.nir = build_sampler_boundary_fs(samplers[i]),
+      };
+      struct agx_uncompiled_shader *shader =
+         pctx->create_fs_state(pctx, &cso);
+      const bool indirect =
+         samplers[i] >= AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS;
+
+      if (!shader || cso.error_message ||
+          shader->uses_bindless_samplers != indirect) {
+         fprintf(stderr,
+                 "G17P API sampler %u did not take the %s native-table "
+                 "path: %s\n",
+                 samplers[i], indirect ? "indirect" : "immediate",
+                 cso.error_message ? cso.error_message : "no shader");
+         free(cso.error_message);
+         if (shader)
+            pctx->delete_fs_state(pctx, shader);
+         return false;
+      }
+
+      pctx->delete_fs_state(pctx, shader);
+      free(cso.error_message);
+   }
+
+   struct pipe_shader_state dynamic_cso = {
+      .type = PIPE_SHADER_IR_NIR,
+      .report_compile_error = true,
+      .ir.nir = build_dynamic_sampler_boundary_fs(),
+   };
+   struct agx_uncompiled_shader *dynamic =
+      pctx->create_fs_state(pctx, &dynamic_cso);
+   if (!dynamic || dynamic_cso.error_message ||
+       !dynamic->uses_bindless_samplers) {
+      fprintf(stderr, "G17P dynamic sampler table did not compile: %s\n",
+              dynamic_cso.error_message ? dynamic_cso.error_message
+                                        : "no shader");
+      free(dynamic_cso.error_message);
+      if (dynamic)
+         pctx->delete_fs_state(pctx, dynamic);
+      return false;
+   }
+   pctx->delete_fs_state(pctx, dynamic);
+   free(dynamic_cso.error_message);
+
+   return true;
+}
+
 static bool
 check_es3_compile_contract(struct pipe_context *pctx)
 {
@@ -333,6 +462,15 @@ check_direct_resolve_shapes(void)
    }
    src.nr_samples = src.nr_storage_samples = 2;
 
+   src.format = dst.format = info.src.format = info.dst.format =
+      PIPE_FORMAT_B8G8R8X8_UNORM;
+   if (!agx_g17p_direct_resolve_blit_shape(&info, true)) {
+      fprintf(stderr, "exact XRGB8 resolve shape was rejected\n");
+      return false;
+   }
+   src.format = dst.format = info.src.format = info.dst.format =
+      PIPE_FORMAT_R8G8B8A8_UNORM;
+
    info.src.box.width = info.dst.box.width = 4;
    if (agx_g17p_direct_resolve_blit_shape(&info, true)) {
       fprintf(stderr, "partial offscreen resolve was accepted\n");
@@ -470,6 +608,15 @@ check_staged_resolve_shapes(void)
       return false;
    }
 
+   src.format = dst.format = info.src.format = info.dst.format =
+      PIPE_FORMAT_B8G8R8X8_UNORM;
+   if (!agx_g17p_staged_resolve_blit_shape(&info)) {
+      fprintf(stderr, "partial XRGB8 resolve staging shape was rejected\n");
+      return false;
+   }
+   src.format = dst.format = info.src.format = info.dst.format =
+      PIPE_FORMAT_R8G8B8A8_UNORM;
+
    info.sample0_only = true;
    if (agx_g17p_staged_resolve_blit_shape(&info)) {
       fprintf(stderr, "sample-zero copy was accepted as an average resolve\n");
@@ -555,6 +702,139 @@ main(void)
    if (!check_es3_compile_contract(pctx))
       return 1;
    printf("ES3 bitops/texelFetch and WebGL2 shadow compile contract passed\n");
+
+   if (screen->shader_caps[MESA_SHADER_FRAGMENT].max_texture_samplers !=
+          AGX_GALLIUM_G17P_API_SAMPLERS ||
+       screen->shader_caps[MESA_SHADER_COMPUTE].max_texture_samplers !=
+          AGX_GALLIUM_G17P_API_SAMPLERS ||
+       !check_sampler_boundary_compile(pctx))
+      return 1;
+   printf("G17P native sampler slots 0..31 compile through the local table\n");
+
+   /* WebGL2 RGB8UI render targets are represented by Gallium as the
+    * four-lane RGBX8_UINT physical family. Exercise a complete clear/store
+    * batch so format advertisement, tile layout, EOT and PBE agree. */
+   struct pipe_resource *rgb8ui =
+      make_2d(screen, PIPE_FORMAT_R8G8B8X8_UINT, 8, 8,
+              PIPE_BIND_RENDER_TARGET);
+   if (!rgb8ui) {
+      fprintf(stderr, "RGB8UI render target was not advertised\n");
+      return 1;
+   }
+   struct pipe_surface rgb8ui_surface = {
+      .texture = rgb8ui,
+      .format = PIPE_FORMAT_R8G8B8X8_UINT,
+      .first_layer = 0,
+      .last_layer = 0,
+      .level = 0,
+   };
+   struct pipe_framebuffer_state rgb8ui_fb = {
+      .width = 8,
+      .height = 8,
+      .layers = 1,
+      .samples = 1,
+      .nr_cbufs = 1,
+   };
+   rgb8ui_fb.cbufs[0] = rgb8ui_surface;
+   pctx->set_framebuffer_state(pctx, &rgb8ui_fb);
+   const union pipe_color_union rgb8ui_clear = {
+      .ui = {17, 93, 201, 0},
+   };
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &rgb8ui_clear, 0.0, 0);
+   pctx->flush(pctx, NULL, 0);
+   pipe_resource_reference(&rgb8ui, NULL);
+   printf("G17P RGB8UI clear/store completed\n");
+
+   struct pipe_resource xrgb8_msaa_template = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_B8G8R8X8_UNORM,
+      .width0 = 8,
+      .height0 = 8,
+      .depth0 = 1,
+      .array_size = 1,
+      .last_level = 0,
+      .nr_samples = 2,
+      .nr_storage_samples = 2,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_RENDER_TARGET,
+   };
+   struct pipe_resource *xrgb8_msaa =
+      screen->resource_create(screen, &xrgb8_msaa_template);
+   struct pipe_resource *xrgb8_resolve =
+      make_2d(screen, PIPE_FORMAT_B8G8R8X8_UNORM, 8, 8,
+              PIPE_BIND_RENDER_TARGET);
+   if (!xrgb8_msaa || !xrgb8_resolve) {
+      fprintf(stderr, "XRGB8 2x render target was not advertised\n");
+      return 1;
+   }
+   struct pipe_surface xrgb8_msaa_surface = {
+      .texture = xrgb8_msaa,
+      .format = PIPE_FORMAT_B8G8R8X8_UNORM,
+      .first_layer = 0,
+      .last_layer = 0,
+      .level = 0,
+   };
+   struct pipe_framebuffer_state xrgb8_msaa_fb = {
+      .width = 8,
+      .height = 8,
+      .layers = 1,
+      .samples = 2,
+      .nr_cbufs = 1,
+      .resolve = xrgb8_resolve,
+   };
+   xrgb8_msaa_fb.cbufs[0] = xrgb8_msaa_surface;
+   pctx->set_framebuffer_state(pctx, &xrgb8_msaa_fb);
+   const union pipe_color_union xrgb8_clear = {
+      .f = {0.125f, 0.5f, 0.875f, 1.0f},
+   };
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &xrgb8_clear, 0.0, 0);
+   pctx->flush(pctx, NULL, 0);
+   pipe_resource_reference(&xrgb8_msaa, NULL);
+   pipe_resource_reference(&xrgb8_resolve, NULL);
+   printf("G17P XRGB8 2x clear/direct-resolve completed\n");
+
+   struct pipe_resource *mrt_xrgb =
+      make_2d(screen, PIPE_FORMAT_R8G8B8X8_UNORM, 8, 8,
+              PIPE_BIND_RENDER_TARGET);
+   struct pipe_resource *mrt_bgra =
+      make_2d(screen, PIPE_FORMAT_B8G8R8A8_UNORM, 8, 8,
+              PIPE_BIND_RENDER_TARGET);
+   if (!mrt_xrgb || !mrt_bgra) {
+      fprintf(stderr, "RGBA8-alias MRT resources were not advertised\n");
+      return 1;
+   }
+   struct pipe_surface mrt_surfaces[2] = {
+      {
+         .texture = mrt_xrgb,
+         .format = PIPE_FORMAT_R8G8B8X8_UNORM,
+         .first_layer = 0,
+         .last_layer = 0,
+         .level = 0,
+      },
+      {
+         .texture = mrt_bgra,
+         .format = PIPE_FORMAT_B8G8R8A8_UNORM,
+         .first_layer = 0,
+         .last_layer = 0,
+         .level = 0,
+      },
+   };
+   struct pipe_framebuffer_state alias_mrt_fb = {
+      .width = 8,
+      .height = 8,
+      .layers = 1,
+      .samples = 1,
+      .nr_cbufs = 2,
+   };
+   alias_mrt_fb.cbufs[0] = mrt_surfaces[0];
+   alias_mrt_fb.cbufs[1] = mrt_surfaces[1];
+   pctx->set_framebuffer_state(pctx, &alias_mrt_fb);
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0 | PIPE_CLEAR_COLOR1, 0xf, 0, NULL,
+               &xrgb8_clear, 0.0, 0);
+   pctx->flush(pctx, NULL, 0);
+   pipe_resource_reference(&mrt_xrgb, NULL);
+   pipe_resource_reference(&mrt_bgra, NULL);
+   printf("G17P XRGB8/BGRA8 MRT clear/store completed\n");
 
    /* Exactly the blit core 983 died on: 4x8, BGRA8_UNORM source, RGBA8_UNORM
     * destination, one level, one layer, nearest. u_blitter turns this into a

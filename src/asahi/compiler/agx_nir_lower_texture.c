@@ -399,9 +399,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
    if (!is_txf &&
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) < 0) {
+      nir_def *native_sampler =
+         nir_iadd_imm(b, nir_u2u16(b, sampler), 1);
 
-      nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle,
-                            nir_iadd_imm(b, nir_u2u16(b, sampler), 1));
+      /* HAL200's register/uniform sampler operand is the widened native-table
+       * index. Immediate indices remain constants after folding, while a
+       * dynamic API index must reach the backend as one 64-bit operand. */
+      if (gen9)
+         native_sampler = nir_u2u64(b, native_sampler);
+
+      nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, native_sampler);
    }
 
    if (g17p_plain_txf_oob) {

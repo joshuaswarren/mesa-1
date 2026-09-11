@@ -14,6 +14,13 @@
 struct hk_g17p_buffer_to_image_copy {
    enum agx_chip chip;
    VkFormat format;
+   /* Whether the destination plane's format is renderable, i.e. whether the
+    * driver advertises COLOR_ATTACHMENT for it. The path below the gate is
+    * generic vk_meta, which renders the staged texels through a native EOT
+    * view, so that -- not membership of a hardcoded list -- is what decides
+    * whether the copy can be serviced. The caller supplies it because the
+    * answer lives in ail_pixel_format[], which needs the device. */
+   bool plane_format_renderable;
    VkImageLayout layout;
    VkImageType image_type;
    VkSampleCountFlagBits samples;

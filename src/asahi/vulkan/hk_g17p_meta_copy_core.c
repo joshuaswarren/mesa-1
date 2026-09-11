@@ -301,17 +301,25 @@ hk_g17p_buffer_to_image_copy_supported(
       return false;
    }
 
-   switch (plane_format) {
-   case VK_FORMAT_R8_UNORM:
-   case VK_FORMAT_R8G8_UNORM:
-   case VK_FORMAT_B8G8R8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_UINT:
-   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-      break;
-   default:
+   /* A hardcoded allowlist here refused copies the driver advertises as
+    * supported, and the consequence is far worse than one lost image: the
+    * refusal fails vkEndCommandBuffer, so Zink skips vkQueueSubmit for the
+    * WHOLE frame and latches device_lost, after which nothing that process
+    * draws ever reaches the GPU again -- with no GL error at any point.
+    * SuperTuxKart hangs that way, and vkQuake's black world was one refused
+    * R32_UINT lightmap upload invalidating the staging batch it shares with
+    * every other texture.
+    *
+    * What the generic vk_meta path below actually needs is colour-attachment
+    * support, which is exactly ail_pixel_format[].renderable -- the same bit
+    * hk_get_format_features() reports as COLOR_ATTACHMENT. Ask that instead.
+    * Formats that are not renderable still fail closed and fall back to the
+    * ordinary copy path. */
+   if (!copy->plane_format_renderable)
       return false;
-   }
+   /* Multi-plane destinations select their plane format above; a renderable
+    * plane is still required for each one. */
+   (void)plane_format;
 
    const uint32_t width =
       (copy->image_extent.width / width_scale) >> copy->mip_level;

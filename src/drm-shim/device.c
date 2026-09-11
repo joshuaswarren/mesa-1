@@ -120,6 +120,26 @@ static bool wsi_rollback_submit_cleanup_before_retry;
 static bool wsi_rollback_submit_retry_marker_seen;
 static bool wsi_rollback_stale_fence_wait_rejected;
 
+#define TIMELINE_HOST_MAX_SYNCOBJS 4096
+static struct {
+   bool alive;
+   uint64_t value;
+} timeline_host_syncobjs[TIMELINE_HOST_MAX_SYNCOBJS];
+static uint32_t timeline_host_next_handle = 1;
+
+static bool
+timeline_host_values_enabled(void)
+{
+   return getenv("ASAHI_SHIM_TIMELINE_HOST_VALUES") != NULL;
+}
+
+static bool
+timeline_host_handle_valid(uint32_t handle)
+{
+   return handle > 0 && handle < TIMELINE_HOST_MAX_SYNCOBJS &&
+          timeline_host_syncobjs[handle].alive;
+}
+
 static const char *
 queue_progress_lifecycle_case(void)
 {
@@ -883,7 +903,15 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
 {
    struct drm_syncobj_create *create = arg;
 
-   if (wsi_rollback_case()) {
+   if (timeline_host_values_enabled()) {
+      if (timeline_host_next_handle >= TIMELINE_HOST_MAX_SYNCOBJS)
+         return -ENOMEM;
+
+      create->handle = timeline_host_next_handle++;
+      timeline_host_syncobjs[create->handle].alive = true;
+      timeline_host_syncobjs[create->handle].value =
+         (create->flags & DRM_SYNCOBJ_CREATE_SIGNALED) ? 1 : 0;
+   } else if (wsi_rollback_case()) {
       if (wsi_rollback_import_failed &&
           !wsi_rollback_marker_seen) {
          const bool failed_handle_valid =
@@ -947,7 +975,11 @@ drm_shim_ioctl_syncobj_destroy(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_destroy *destroy = arg;
 
-   if (wsi_rollback_case()) {
+   if (timeline_host_values_enabled()) {
+      if (!timeline_host_handle_valid(destroy->handle))
+         return -EINVAL;
+      timeline_host_syncobjs[destroy->handle].alive = false;
+   } else if (wsi_rollback_case()) {
       wsi_rollback_syncobj_destroys++;
       if (destroy->handle < 64) {
          wsi_rollback_destroyed_handles |=
@@ -1048,6 +1080,20 @@ drm_shim_ioctl_syncobj_timeline_signal(int fd, unsigned long request,
 {
    const struct drm_syncobj_timeline_array *signal = arg;
 
+   if (timeline_host_values_enabled()) {
+      const uint32_t *handles = (const void *)(uintptr_t)signal->handles;
+      const uint64_t *points = (const void *)(uintptr_t)signal->points;
+      if (!handles || !points || signal->flags)
+         return -EINVAL;
+
+      for (uint32_t i = 0; i < signal->count_handles; ++i) {
+         if (!timeline_host_handle_valid(handles[i]) ||
+             points[i] < timeline_host_syncobjs[handles[i]].value)
+            return -EINVAL;
+         timeline_host_syncobjs[handles[i]].value = points[i];
+      }
+   }
+
    if (queue_progress_lifecycle_case()) {
       const uint32_t *handles = (const void *)(uintptr_t)signal->handles;
       const uint64_t *points = (const void *)(uintptr_t)signal->points;
@@ -1066,6 +1112,65 @@ drm_shim_ioctl_syncobj_timeline_signal(int fd, unsigned long request,
       failed_queue_timeline_signal_once = true;
       errno = ENOMEM;
       return -1;
+   }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_query(int fd, unsigned long request, void *arg)
+{
+   struct drm_syncobj_timeline_array *query = arg;
+   if (!timeline_host_values_enabled())
+      return 0;
+
+   const uint32_t *handles = (const void *)(uintptr_t)query->handles;
+   uint64_t *points = (void *)(uintptr_t)query->points;
+   if (!handles || !points ||
+       (query->flags & ~DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED))
+      return -EINVAL;
+
+   for (uint32_t i = 0; i < query->count_handles; ++i) {
+      if (!timeline_host_handle_valid(handles[i]))
+         return -EINVAL;
+      points[i] = timeline_host_syncobjs[handles[i]].value;
+   }
+
+   return 0;
+}
+
+static int
+drm_shim_ioctl_syncobj_timeline_wait(int fd, unsigned long request, void *arg)
+{
+   struct drm_syncobj_timeline_wait *wait = arg;
+   if (!timeline_host_values_enabled())
+      return 0;
+
+   const uint32_t *handles = (const void *)(uintptr_t)wait->handles;
+   const uint64_t *points = (const void *)(uintptr_t)wait->points;
+   if (!handles || !points || !wait->count_handles)
+      return -EINVAL;
+
+   const bool wait_all = wait->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+   bool ready = wait_all;
+   for (uint32_t i = 0; i < wait->count_handles; ++i) {
+      if (!timeline_host_handle_valid(handles[i]))
+         return -EINVAL;
+
+      const bool this_ready =
+         timeline_host_syncobjs[handles[i]].value >= points[i];
+      if (!wait_all && this_ready) {
+         wait->first_signaled = i;
+         ready = true;
+         break;
+      }
+      if (wait_all && !this_ready)
+         ready = false;
+   }
+
+   if (!ready) {
+      errno = ETIME;
+      return -ETIME;
    }
 
    return 0;
@@ -1190,12 +1295,6 @@ drm_shim_ioctl_prime_fd_to_handle(int fd, unsigned long request, void *arg)
 }
 
 static int
-drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
-{
-   return 0;
-}
-
-static int
 drm_shim_ioctl_syncobj_wait(int fd, unsigned long request, void *arg)
 {
    const struct drm_syncobj_wait *wait = arg;
@@ -1253,8 +1352,9 @@ ioctl_fn_t core_ioctls[] = {
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_RESET)] = drm_shim_ioctl_syncobj_reset,
    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL)] =
       drm_shim_ioctl_syncobj_timeline_signal,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT)] = drm_shim_ioctl_stub,
-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_QUERY)] = drm_shim_ioctl_stub,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT)] =
+      drm_shim_ioctl_syncobj_timeline_wait,
+   [_IOC_NR(DRM_IOCTL_SYNCOBJ_QUERY)] = drm_shim_ioctl_syncobj_query,
    [_IOC_NR(DRM_IOCTL_PRIME_HANDLE_TO_FD)] = drm_shim_ioctl_prime_handle_to_fd,
    [_IOC_NR(DRM_IOCTL_PRIME_FD_TO_HANDLE)] = drm_shim_ioctl_prime_fd_to_handle,
 };

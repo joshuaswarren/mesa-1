@@ -20,13 +20,30 @@ g17p_sample_shape(const nir_tex_instr *tex)
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
        tex->op != nir_texop_tg4) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d && !cube) ||
+       /* 3D takes the implicit, immediate-bias and per-lane LOD shapes the
+        * 2D dimension takes; only gradient3d, which stages six scalars
+        * rather than four, has no witness. */
        (three_d &&
         (tex->is_array || tex->is_shadow ||
-         tex->op != nir_texop_txl)) ||
+         (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+          tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
+       /* A cube comparison publishes its reference through the same CEM
+        * bracket the colour cube uses; it is witnessed only with an implicit
+        * LOD. A colour cube also takes an explicit per-lane level, on the
+        * plain cube exactly as on the cube array -- Apple's own
+        * t.sample(s, dir, level(reg)) for texturecube<float> is
+        *
+        *   05800cb8b0000003000010000100
+        *
+        * which is the instruction agx3_tex_encode_sample() already emits for
+        * AGX3_TEX_LOD_REGISTER on a cube (test-agx3-tex-core.c, "native cube
+        * register level"), field for field. Admitting only the array form
+        * here was what refused textureLod(samplerCube, dir, lod) -- the
+        * roughness-indexed probe lookup every image-based lighting shader
+        * does, SuperTuxKart's IBL.frag included. */
        (cube &&
-        (tex->is_shadow ||
-         (tex->op != nir_texop_tex &&
-          !(cube_array && tex->op == nir_texop_txl)))) ||
+        (tex->op != nir_texop_tex &&
+         !(!tex->is_shadow && tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
        tex->coord_components != (cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
@@ -37,16 +54,25 @@ g17p_sample_shape(const nir_tex_instr *tex)
        (tex->dest_type != nir_type_float32 &&
         tex->dest_type != nir_type_uint32 &&
         tex->dest_type != nir_type_int32) ||
-       tex->def.num_components != (tex->is_shadow ? 1 : 4) ||
+       tex->def.num_components !=
+          ((tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
        tex->def.bit_size != 32)
       return false;
 
    if (tex->is_shadow) {
+      /* The depth comparison is orthogonal to the LOD shape: Apple's
+       * depth2d sample_compare with level(k), level(reg), bias(k), bias(reg)
+       * and gradient2d() each differ from the corresponding colour sample by
+       * f143 alone, and gather_compare is the ordinary gather plus f143.
+       * See the witness table in agx3_tex_core.c. The array and cube
+       * comparisons use separately packed layer / CEM operands and are only
+       * witnessed with an implicit LOD, so they stay on nir_texop_tex. */
       const int comparator =
          nir_tex_instr_src_index(tex, nir_tex_src_comparator);
-      if (tex->op != nir_texop_tex || tex->is_array || comparator < 0 ||
+      if (comparator < 0 ||
           nir_src_num_components(tex->src[comparator].src) != 1 ||
-          nir_src_bit_size(tex->src[comparator].src) != 32)
+          nir_src_bit_size(tex->src[comparator].src) != 32 ||
+          (tex->is_array && tex->op != nir_texop_tex))
          return false;
    }
 
@@ -56,26 +82,51 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
+   /* A coordinate offset is an immediate nibble pair in the sample itself
+    * (f43/f51/f141), witnessed in every LOD mode and on the gather; only a
+    * compile-time offset can reach that field. Without this the whole
+    * shader is disowned and falls back to the heap-descriptor form, which
+    * has no grounded encoding -- so a plain textureOffset() refuses. */
+   int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   const bool packed_offset = offset_src < 0;
+   if (packed_offset)
+      offset_src = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+   const bool has_offset = offset_src >= 0;
+   if (has_offset &&
+       (!nir_src_is_const(tex->src[offset_src].src) ||
+        nir_src_num_components(tex->src[offset_src].src) !=
+           (packed_offset ? 1u : 2u) ||
+        (packed_offset && nir_src_as_uint(tex->src[offset_src].src) > 0xff) ||
+        three_d || cube ||
+        /* A comparison sample takes the offset -- agx_emit_tex() hands it to
+         * the packer on the instruction rather than through src[5], which the
+         * comparator needs. An array comparison does not: its layer form is
+         * not settled (see README-agx3-packer-limits.md). */
+        (tex->is_shadow && tex->is_array)))
+      return false;
+
    const unsigned expected_srcs =
-      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) + tex->is_shadow;
+      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) + tex->is_shadow +
+      has_offset;
    if (tex->num_srcs != expected_srcs ||
        has_lod != (tex->op == nir_texop_txl) ||
        has_bias != (tex->op == nir_texop_txb) ||
        has_grad != (tex->op == nir_texop_txd))
       return false;
 
-   /* Only the plain 2D implicit gather is witnessed: no array layer and no
-    * coordinate offset, both of which the packer would silently drop. */
-   if (tex->op == nir_texop_tg4 &&
-       (tex->is_array || three_d || cube || tex->component > 3))
+   /* Metal's gather takes no LOD argument, so no gather carries one. The
+    * array layer, the coordinate offset and the depth comparison all
+    * compose with it; 3D and cube gathers are not witnessed. */
+   if (tex->op == nir_texop_tg4 && (three_d || cube || tex->component > 3))
       return false;
 
    /* An explicit gradient is four 32-bit scalars staged into their own
     * operand banks. G17P array gradients name the independent dynamic layer
     * register directly in the sample instruction. */
+   const unsigned grad_components = three_d ? 3u : 2u;
    if (has_grad &&
-       (nir_src_num_components(tex->src[ddx].src) != 2 ||
-        nir_src_num_components(tex->src[ddy].src) != 2 ||
+       (nir_src_num_components(tex->src[ddx].src) != grad_components ||
+        nir_src_num_components(tex->src[ddy].src) != grad_components ||
         nir_src_bit_size(tex->src[ddx].src) != 32 ||
         nir_src_bit_size(tex->src[ddy].src) != 32))
       return false;
@@ -568,13 +619,29 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             nir_def *address = nir_iadd(&b, set, nir_u2u64(&b, offset));
             nir_def *texture_index = nir_load_global_constant(&b, 1, 32, address, .align_mul = 4);
             /* The software sampler index includes AGX2's reservation of 28.
-             * Native G17P heaps are zero-based, as the immediate path is. */
+             * Native G17P heaps are zero-based, as the immediate path is.
+             *
+             * Rebase by saturating, not wrapping. The descriptor ABI writes a
+             * null sampler as the unbiased base itself and leaves an untouched
+             * descriptor at all-zero, so indices below the bias do reach here.
+             * hk_agx3_g17p_combined_sampler_pointers() resolves the identical
+             * heap on the immediate path as
+             *   index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX ? 0
+             *                                                    : index - base
+             * and native entry zero is the reserved robust sampler both
+             * encodings must land on. Wrapping instead sends 0 to 0xffffffe4,
+             * a register sampler descriptor far outside the heap.
+             *
+             * G17P has no saturating-subtract encoding; agx_compile_shader_nir
+             * sets lower_usub_sat for AGX3B, so this becomes the witnessed
+             * compare/subtract/select before isel. */
             texture_index = nir_u2u64(&b, texture_index);
             nir_steal_tex_src(tex, nir_tex_src_texture_handle);
             nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, texture_index);
             if (!fetch) {
-               nir_def *sampler_index = nir_iadd_imm(
-                  &b, nir_u2u32(&b, sampler), -28);
+               nir_def *sampler_index = nir_usub_sat(
+                  &b, nir_u2u32(&b, sampler),
+                  nir_imm_int(&b, AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX));
                sampler_index = nir_u2u64(&b, sampler_index);
                nir_steal_tex_src(tex, nir_tex_src_sampler_handle);
                nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);

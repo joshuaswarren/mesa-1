@@ -9,7 +9,17 @@
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
-#define AGX3_G17P_GRAPHICS_MAX_RANGES 5u
+/* Software composer capacity, not a hardware field: the Ioto loader bounds a
+ * program by its total load chunks and body size, never by how many ranges
+ * produced them. So this only has to cover every range the driver's collector
+ * can emit, and a value below that refuses a legal program fail-closed.
+ *
+ * A vertex program is the worst case and can request all seven: VBO bases,
+ * VBO clamps, draw parameters, draw ID, indexed texture/sampler heaps,
+ * descriptor root, and promoted constants. Firefox/WebGL proves six of those,
+ * every one but the draw ID. HK_AGX3_G17P_GRAPHICS_MAX_RANGES aliases this
+ * value and hk_cmd_buffer.c static-asserts it against the collector. */
+#define AGX3_G17P_GRAPHICS_MAX_RANGES 7u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 
 struct agx3_g17p_graphics_program_desc {
@@ -41,6 +51,7 @@ enum agx3_g17p_rt0_bg_op {
 
 #define AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
 #define AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
+#define AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
 #define AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 
 bool agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,

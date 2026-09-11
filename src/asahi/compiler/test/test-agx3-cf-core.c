@@ -11,10 +11,26 @@
 #include "agx3_cf_core.h"
 #include "agx3_cf_core_vectors.c"
 
+#include "util/macros.h"
+
 #include <stdio.h>
 #include <string.h>
 
 static unsigned checks, failures;
+
+/* Compare a byte run against a lowercase hex literal. */
+static bool
+hex_is(const uint8_t *bytes, uint8_t len, const char *hex)
+{
+   if (strlen(hex) != (size_t)len * 2)
+      return false;
+   for (unsigned i = 0; i < len; ++i) {
+      unsigned value;
+      if (sscanf(hex + 2 * i, "%2x", &value) != 1 || bytes[i] != value)
+         return false;
+   }
+   return true;
+}
 
 #define REJECT(expr)                                                           \
    do {                                                                        \
@@ -230,6 +246,80 @@ test_float_negated_register_compare(void)
       failures++;
 }
 
+/*
+ * An ABSOLUTE source on the control-flow float compare.
+ *
+ * ABS is not a bit on the six-byte form: Apple moves to a fourteen-byte
+ * encoding point, ep0 -> ep2, and f14 and f31 are the two sources' bits.
+ * Every other field keeps its number, so the long form differs from the short
+ * one by the endpoint and the two bits alone.
+ *
+ * metal-nt -arch applegpu_g17p, one kernel per row. The branch body is a
+ * device atomic: Metal if-converts a plain conditional assignment into an
+ * `fsel` and then the experiment answers a different question entirely.
+ */
+static void
+test_float_absolute_register_compare(void)
+{
+   static const struct {
+      const char *what;
+      bool abs0, abs1;
+      enum agx3_cf_fcond cond;
+      const char *bytes;
+   } rows[] = {
+      {"fabs(a) <  b",       true,  false, AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800100"},
+      {"a < fabs(b)",        false, true,  AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800200"},
+      {"fabs(a) < fabs(b)",  true,  true,  AGX3_CF_FCOND_LT,
+       "0a013b0303000300000000800300"},
+      {"fabs(a) > fabs(b)",  true,  true,  AGX3_CF_FCOND_GT,
+       "0a013b0303000200000000800300"},
+      {"fabs(a) == fabs(b)", true,  true,  AGX3_CF_FCOND_EQ,
+       "0a013b0307000000000000800300"},
+   };
+
+   const uint16_t src[] = {0, 2};
+   const struct agx3_cf_source_hints hints[] = {{false, true}, {true, false}};
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      const bool abs[] = {rows[i].abs0, rows[i].abs1};
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      const bool ok = agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B,
+         rows[i].cond, false, 0, src, abs, hints, 1u << 5, out, &len);
+      checks++;
+      if (!ok || len != 14 || !hex_is(out, len, rows[i].bytes)) {
+         fprintf(stderr, "FAIL native abs float branch %s\n", rows[i].what);
+         failures++;
+      }
+   }
+
+   /* Without an absolute source this is the short endpoint; emitting the long
+    * form for it would change bytes that already work. */
+   uint8_t out[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   const bool none[] = {false, false};
+   const bool both[] = {true, true};
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false,
+                            0, src, none, hints, 0, out, &len))
+      failures++;
+   /* or_nan, AGX3c and an odd half all stay refused. */
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, true,
+                            0, src, both, hints, 0, out, &len))
+      failures++;
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3C, AGX3_CF_FCOND_LT, false,
+                            0, src, both, hints, 0, out, &len))
+      failures++;
+   const uint16_t odd[] = {1, 2};
+   checks++;
+   if (agx3_cf_fcmp_reg_abs(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false,
+                            0, odd, both, hints, 0, out, &len))
+      failures++;
+}
+
 static void
 test_half_float_zero_compare(void)
 {
@@ -252,15 +342,147 @@ test_half_float_zero_compare(void)
    }
 }
 
+/*
+ * Branching on a float against a NON-ZERO constant.
+ *
+ * f18 is the compare's second operand and was pinned to zero, so only
+ * `x < 0.0` encoded. `x < 1.0` is ordinary GLSL and was 136 of the 146
+ * instructions still refused in the Vulkan compute block after the
+ * threadgroup fix. Exactly the defect the integer side already carried:
+ * agx3_cf_icmp_zero16_runtime() never set f16.
+ *
+ * Apple, one kernel per variable. The branch body has to be a loop: a
+ * trivial if/else is if-converted to a select and emits no fcmp at all,
+ * which is why several hand-written probes for this shape found nothing.
+ */
+static void
+test_float_minifloat_compare(void)
+{
+   uint8_t out[AGX3_CF_MAX_LENGTH];
+   uint8_t len;
+   const struct agx3_cf_source_hints dead = {false, true};
+
+   struct {
+      const char *name;
+      enum agx3_cf_fcond cond;
+      uint8_t imm;
+      bool src16;
+      uint8_t bytes[6];
+   } v[] = {
+      {"v < 0.0f", AGX3_CF_FCOND_LT,  0, false, {0x0a,0x03,0x2a,0x81,0x03,0xc2}},
+      {"v < 0.5f", AGX3_CF_FCOND_LT, 32, false, {0x0a,0x03,0x2a,0xa1,0x03,0xc2}},
+      {"v < 1.0f", AGX3_CF_FCOND_LT, 48, false, {0x0a,0x03,0x2a,0xb1,0x03,0xc2}},
+      {"v < 2.0f", AGX3_CF_FCOND_LT, 64, false, {0x0a,0x03,0x2a,0xc1,0x03,0xc2}},
+      {"v > 1.0f", AGX3_CF_FCOND_GT, 48, false, {0x0a,0x03,0x2a,0xb1,0x02,0xc2}},
+      {"half v < 1.0h", AGX3_CF_FCOND_LT, 48, true,
+       {0x0a,0x02,0x2a,0xb1,0x03,0xc2}},
+   };
+
+   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
+      len = 0;
+      const bool ok = agx3_cf_fcmp_zero_imm(AGX_ISA_ENCODING_AGX3B, v[i].cond,
+                                            false, 0, 2, v[i].src16, v[i].imm,
+                                            dead, 32, out, &len);
+      checks++;
+      if (!ok || len != 6 || memcmp(out, v[i].bytes, 6)) {
+         fprintf(stderr, "FAIL float-minifloat branch: %s\n", v[i].name);
+         failures++;
+      }
+   }
+
+   /* The zero wrapper must still emit exactly the bytes it always did. */
+   len = 0;
+   const bool zero_ok =
+      agx3_cf_fcmp_zero(AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_LT, false, 0, 2,
+                        false, dead, 32, out, &len);
+   checks++;
+   if (!zero_ok || len != 6 || memcmp(out, v[0].bytes, 6)) {
+      fprintf(stderr, "FAIL float-minifloat: zero wrapper changed bytes\n");
+      failures++;
+   }
+}
+
+/*
+ * A loop break that also escapes enclosing ifs. Apple's own compiler spells
+ * it CNDCF with a level count, where CNDLT is the compact count-2 form.
+ *
+ * Every row below is Apple's byte-exact `metal-nt -arch applegpu_g17p` output
+ * for MSL that breaks out of a `for` loop from inside N nested ifs, each
+ * condition reading a distinct element of a `device const uint *` so nothing
+ * can be folded, and each level storing before the next opens
+ * (.tmp/g17p-deep-break-evidence/deepbreak.metal, probe2.metal).
+ */
+static void
+test_deep_break_levels(void)
+{
+   const struct {
+      unsigned slot, count;
+      bool invert;
+      const char *hex;
+      const char *witness;
+   } native[] = {
+      {1, 3, false, "8f0554030001", "break inside 2 nested ifs"},
+      {1, 4, false, "8f0554040001", "break inside 3 nested ifs"},
+      {1, 5, false, "8f0554050001", "break inside 4 nested ifs"},
+      {1, 6, false, "8f0554060001", "break inside 5 nested ifs"},
+      {1, 7, false, "8f0554070001", "break inside 6 nested ifs"},
+      {1, 8, false, "8f0554080001", "break inside 7 nested ifs"},
+      {1, 3, true, "8f0554030009", "break from an else arm (invert)"},
+      {2, 3, false, "8f0554030002", "break out of an INNER loop"},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(native); ++i) {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      checks++;
+      if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, native[i].slot,
+                         native[i].invert, native[i].count, out, &len) ||
+          !hex_is(out, len, native[i].hex)) {
+         fprintf(stderr, "FAIL cndcf slot=%u invert=%u count=%u (%s)\n",
+                 native[i].slot, (unsigned)native[i].invert, native[i].count,
+                 native[i].witness);
+         failures++;
+      }
+   }
+
+   /* A one-level exit is not a loop break: a loop owns two levels, so the
+    * shallowest break is count 2 and that is CNDLT's encoding point. Flag
+    * slots stay inside the witnessed 0..5 range. */
+   {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 0, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 1, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 6, false, 3, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX2, 1, false, 3, out, &len));
+   }
+
+   /* The AGX3c constants are structural (cndlt/cndst siblings); assert only
+    * that the operation exists and that its count reaches the same depths,
+    * since no AGX3c capture covers it. */
+   for (unsigned count = 3; count <= 8; ++count) {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      checks++;
+      if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3C, 1, false, count, out, &len)) {
+         fprintf(stderr, "FAIL agx3c cndcf count=%u\n", count);
+         failures++;
+      }
+   }
+}
+
 int
 main(void)
 {
+   test_float_minifloat_compare();
    test_float_zero_compare();
    test_float_negated_register_compare();
+   test_float_absolute_register_compare();
    test_half_float_zero_compare();
    test_half_comparisons();
    test_half_zero_lifetime();
    test_half_immediate_compare();
+   test_deep_break_levels();
    for (size_t i = 0; i < cf_vec_count; ++i) {
       const struct cf_vec *v = &cf_vecs[i];
       const enum agx_isa_encoding e =

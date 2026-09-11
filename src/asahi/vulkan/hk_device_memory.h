@@ -21,6 +21,11 @@ struct hk_device_memory {
 
    struct agx_bo *bo;
 
+   /* Opaque application-visible token used for BDA capture/replay. This is
+    * deliberately separate from the BO's current mapping: replay buffers own
+    * the fixed VA that determines their device address. */
+   uint64_t opaque_capture_address;
+
    void *map;
 };
 

@@ -55,6 +55,11 @@ struct agx_bg_eot_key {
    unsigned reserved_preamble;
    /* Replicate a single-sample WSI colour into every multisample tile lane. */
    bool single_sample_reload;
+   /* Store the multisample tile unresolved into a multisample target rather
+    * than resolving it through a single-sample one. Only meaningful when
+    * tib.nr_samples > 1; the caller decides, because storeOp = STORE is the
+    * only Vulkan path that wants the unresolved surface. */
+   bool multisample_store;
 };
 
 struct agx_bg_eot_shader {

@@ -4,6 +4,7 @@
  */
 
 #include "agx_compile.h"
+#include "agx3_cf_core.h"
 #include "agx_compiler.h"
 #include "nir_builder.h"
 
@@ -1683,6 +1684,107 @@ check_half_ceil_compute(void)
    free(part.binary); ralloc_free(b.shader); return valid;
 }
 
+/*
+ * The acceleration-structure builder's radix-sort lookback loop breaks out
+ * from inside nested ifs. That shape used to refuse -- "no grounded AGX3
+ * encoding for break" -- because the packer only knew CNDLT, which spends
+ * exactly the loop's own two exec-mask levels. CNDCF carries the level count,
+ * so the break now encodes at any depth.
+ *
+ * Each condition reads a distinct device address, so nothing can be folded or
+ * proven, and each level stores before the next if opens, so the ifs cannot
+ * collapse into one.
+ */
+static bool
+check_deep_loop_break_compute(unsigned enclosing_ifs)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   nir_if *opened[8];
+
+   if (enclosing_ifs > ARRAY_SIZE(opened))
+      return false;
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P break under %u ifs",
+      enclosing_ifs);
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_loop *loop = nir_push_loop(&b);
+   {
+      /* The loop's own exit test: a depth-1 break, which stays on CNDLT. */
+      nir_def *guard = nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1000),
+                                       .align_mul = sizeof(uint32_t));
+      nir_break_if(&b, nir_ieq_imm(&b, guard, 0));
+
+      for (unsigned i = 0; i < enclosing_ifs; ++i) {
+         nir_def *v =
+            nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1008 + 8 * i),
+                            .align_mul = sizeof(uint32_t));
+         opened[i] = nir_push_if(&b, nir_ine_imm(&b, v, 0));
+         nir_store_global(&b, nir_imm_int(&b, i + 1),
+                          nir_imm_int64(&b, 0x2000 + 8 * i),
+                          .align_mul = sizeof(uint32_t));
+      }
+      nir_jump(&b, nir_jump_break);
+      for (unsigned i = enclosing_ifs; i-- > 0;)
+         nir_pop_if(&b, opened[i]);
+   }
+   nir_pop_loop(&b, loop);
+
+   nir_store_global(&b, nir_imm_int(&b, 0xfeed), nir_imm_int64(&b, 0x3000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+      fprintf(stderr, "G17P loop break under %u ifs was rejected\n",
+              enclosing_ifs);
+      ralloc_free(b.shader);
+      return false;
+   }
+
+   bool valid =
+      part.binary != NULL && part.info.binary_size > sizeof(end) &&
+      memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
+             end, sizeof(end)) == 0;
+
+   /* Folding an enclosing if into the break subtracts at most one level, so
+    * two or more enclosing ifs cannot land back on CNDLT: the wide form has
+    * to be there, with a count somewhere in [3, ifs + 2]. */
+   if (valid && enclosing_ifs >= 2) {
+      bool found = false;
+      for (unsigned count = 3; count <= enclosing_ifs + 2 && !found; ++count) {
+         for (unsigned invert = 0; invert < 2 && !found; ++invert) {
+            uint8_t want[AGX3_CF_MAX_LENGTH];
+            uint8_t len = 0;
+            if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 0, invert != 0, count,
+                               want, &len))
+               continue;
+            for (unsigned at = 0; at + len <= part.info.binary_size; at += 2) {
+               if (!memcmp((const uint8_t *)part.binary + at, want, len)) {
+                  found = true;
+                  break;
+               }
+            }
+         }
+      }
+      if (!found) {
+         fprintf(stderr,
+                 "G17P loop break under %u ifs emitted no CNDCF\n",
+                 enclosing_ifs);
+         valid = false;
+      }
+   }
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
 static bool
 check_uniform_alu_policy(void)
 {
@@ -1896,6 +1998,10 @@ main(int argc, char **argv)
 
    if (!check_uniform_alu_policy())
       return 1;
+   for (unsigned ifs = 0; ifs <= 6; ++ifs) {
+      if (!check_deep_loop_break_compute(ifs))
+         return 1;
+   }
    if (!check_agx2_legacy_printf_address_accepted())
       return 1;
    if (!check_mixed_fma_neg_compute())

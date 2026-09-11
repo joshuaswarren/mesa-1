@@ -21,6 +21,18 @@
 #define AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE 32u
 #define AGX_GALLIUM_DESCRIPTOR_MAX_SIZE  AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE
 #define AGX_GALLIUM_SAMPLER_AGX3_SIZE    32u
+#define AGX_GALLIUM_G17P_API_SAMPLERS    32u
+
+/* Custom borders are implemented like Honeykrisp: the ordinary API sampler
+ * bank clamps to one and a second bank clamps to zero.  The shader combines
+ * those samples with the exact API border colour. */
+#define AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE \
+   (1u + AGX_GALLIUM_G17P_API_SAMPLERS)
+
+/* HAL200's immediate sampler operand names native slots 0..15. Gallium keeps
+ * slot zero for texel fetch, leaving API samplers 0..14 directly encodable.
+ * Later API samplers use an indirect native-table index instead. */
+#define AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS 15u
 
 struct agx_gallium_texture_descriptor {
    uint32_t opaque[AGX_GALLIUM_DESCRIPTOR_MAX_SIZE / 4];
@@ -212,6 +224,16 @@ bool agx_gallium_pack_native_texture(
 /* Exact sampler zero used by native G17P texture.read()/texel-fetch paths. */
 bool agx_gallium_pack_g17p_txf_sampler(
    enum agx_chip chip, struct agx_gallium_sampler_descriptor *out);
+
+/* Convert a Gallium API sampler slot to the index in the per-stage HAL200
+ * table. This is deliberately not the legacy global-heap 28+index handle. */
+bool agx_gallium_g17p_sampler_handle(enum agx_chip chip,
+                                    unsigned api_sampler,
+                                    uint16_t *native_handle);
+
+bool agx_gallium_g17p_custom_border_handle(enum agx_chip chip,
+                                           unsigned api_sampler,
+                                           uint16_t *native_handle);
 
 bool agx_gallium_set_null_native_texture(
    enum agx_descriptor_generation generation,

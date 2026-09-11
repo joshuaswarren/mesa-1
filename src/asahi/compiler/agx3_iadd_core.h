@@ -162,8 +162,8 @@ struct agx3_imad_desc {
    bool src_a_16;      /* multiplicand is a single 16-bit half */
    /*
     * f28: widen the multiplicand by sign rather than by zero. Only meaningful
-    * when the operand is narrower than the product, so a 32-bit multiply
-    * rejects it.
+    * when the operand is narrower than the product: 16->32 and 32->64 use it,
+    * while width-matched products reject it.
     */
    bool src_a_sign_extend;
    uint8_t multiplier; /* constant multiplied by src_a (immediate form) */

@@ -270,3 +270,21 @@ if with_symbols_check
     suite : ['egl'],
   )
 endif
+
+if with_dri and with_tests and meson.can_run_host_binaries()
+  test_egl_dri2_buffer_age_policy = executable(
+    'egl-dri2-buffer-age-policy-test',
+    files('drivers/dri2/test-buffer-age-policy.c'),
+  )
+  test(
+    'egl-dri2-buffer-age-policy',
+    test_egl_dri2_buffer_age_policy,
+    suite : ['egl'],
+  )
+  test(
+    'egl-dri2-buffer-age-containment-check',
+    prog_python,
+    args : [files('egl-buffer-age-containment-check.py'), meson.current_source_dir()],
+    suite : ['egl'],
+  )
+endif

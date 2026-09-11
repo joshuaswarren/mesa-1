@@ -396,6 +396,22 @@ typedef struct {
    /* Invert icond/fcond */
    bool invert_cond : 1;
 
+   /*
+    * G17P carries a texture coordinate offset as an immediate field in the
+    * sample instruction (f43), while the depth comparator is a staged
+    * register. agx_emit_tex() cannot hand the packer both through src[5],
+    * which is one operand, so the offset rides here instead.
+    *
+    * Signed nibble pair, (y << 4) | x, exactly as agx_nir_lower_texture()
+    * packs nir_tex_src_offset. Only meaningful when `offset` is set.
+    *
+    * NOTE: agx_opt_cse.c's instrs_equal() is hand-written and enumerates
+    * fields one at a time. This field is compared there. Anything added
+    * beside it must be too, or two samples differing only in their offset
+    * will CSE into one.
+    */
+   uint8_t offset_xy;
+
    /* TODO: Handle tex ops more efficient */
    enum agx_dim dim       : 4;
    bool offset            : 1;
@@ -448,6 +464,8 @@ typedef struct {
    bool agx3_tex_coord_start : 1;
    bool agx3_tex_coords_staged : 1;
 } agx_instr;
+
+bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
 
 static inline void
 agx_replace_src(agx_instr *I, unsigned src_index, agx_index replacement)
@@ -1053,18 +1071,24 @@ void agx_optimizer_backward(agx_context *ctx);
 void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);
 void agx_lower_spill(agx_context *ctx);
+void agx3_split_vector_stack_access(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_opt_cse(agx_context *ctx);
 void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* Apple's G17P VS witness exports position plus sixteen float4 user
- * locations: 68 contiguous output/staging scalars. Keep the software bound
- * at that independently compiled hardware limit. */
-#define AGX3_MAX_VERTEX_OUTPUTS 68u
+/* The promoted Apple witness exports position plus sixteen float4 user
+ * locations (68 scalars). Keep room for the opt-in ANGLE qualification shape:
+ * position plus seventeen float4 user locations, or 72 contiguous
+ * output/staging scalars. The Vulkan property remains 64 user components by
+ * default until that exact image oracle passes on hardware. */
+#define AGX3_MAX_VERTEX_OUTPUTS 72u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
+/* Materialize nonzero minifloats used by G17P structured f32 control flow so
+ * the compare uses the already grounded register/register form. */
+void agx_materialize_agx3_cf_constants(agx_context *ctx);
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);

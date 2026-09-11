@@ -246,8 +246,16 @@ main(void)
       uint16_t local_size;
       uint64_t hash;
    } statistics[] = {
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2938, 3066, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xd75a8ff635144550)},
+      /* Two bytes longer than it used to be, and one hash apart: the restart
+       * kernel breaks out of its loop from inside an enclosing block, and
+       * that break moved off the four-byte CNDLT (which spends only the
+       * loop's own two exec-mask levels) onto the six-byte CNDCF that carries
+       * a level count. The single added instruction is
+       * `8f 05 54 03 00 09` at +0x2c8 -- slot 1, inverted, three levels --
+       * which is byte-for-byte one of Apple's own applegpu_g17p encodings
+       * (see agx3_cf_cndcf()). Nothing else in the program moved. */
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2940, 3068, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0x25b99a6f3e0f6323)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0x3b6988993fef71a1)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

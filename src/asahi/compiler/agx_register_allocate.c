@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/sparse_bitset.h"
@@ -10,6 +12,7 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/u_qsort.h"
+#include "agx3_copy_core.h"
 #include "agx_builder.h"
 #include "agx_compile.h"
 #include "agx_compiler.h"
@@ -391,6 +394,39 @@ dest_minimum(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
    return 0;
 }
 
+static bool
+ssa_has_bank_constraint(const struct ra_ctx *rctx, unsigned ssa)
+{
+   return BITSET_TEST(rctx->low_gpr, ssa) ||
+          BITSET_TEST(rctx->texture_gpr, ssa) ||
+          BITSET_TEST(rctx->log2_gpr, ssa) ||
+          BITSET_TEST(rctx->high_gpr, ssa);
+}
+
+static bool
+region_has_bank_constrained_value(const struct ra_ctx *rctx, unsigned base,
+                                  unsigned size)
+{
+   for (unsigned reg = reserved_size(rctx->shader);
+        reg < rctx->bound[RA_GPR];) {
+      if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
+         ++reg;
+         continue;
+      }
+
+      unsigned ssa = rctx->reg_to_ssa[reg];
+      unsigned width = rctx->ncomps[ssa];
+      assert(width && rctx->ssa_to_reg[ssa] == reg);
+      if (reg < base + size && reg + width > base &&
+          ssa_has_bank_constraint(rctx, ssa))
+         return true;
+
+      reg += width;
+   }
+
+   return false;
+}
+
 /*
  * Search the register file for the best contiguous aligned region of the given
  * size to evict when shuffling registers. The region must not contain any
@@ -440,6 +476,12 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
        * we're just shuffling, there are enough free registers elsewhere.
        */
       if (BITSET_TEST_COUNT(already_evicted, base, size))
+         continue;
+
+      /* Keep constrained values in their assigned bank across live-range
+       * splitting. Otherwise a later destination can relocate a valid TEX
+       * coordinate above the seven-bit COPY source range. */
+      if (region_has_bank_constrained_value(rctx, base, size))
          continue;
 
       /* Estimate the number of moves required if we pick this region */
@@ -509,9 +551,19 @@ insert_copy(struct ra_ctx *rctx, struct util_dynarray *copies, unsigned new_reg,
 
 static unsigned
 find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
-                        unsigned limit, unsigned *span_out)
+                        unsigned limit, bool avoid_half_copies,
+                        unsigned *span_out)
 {
    unsigned best = ~0u, best_moves = ~0u, best_span = 0;
+
+   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, and
+    * every relocation find_best_region_to_evict() can choose lies below
+    * rctx->bound[RA_GPR].  A half victim can therefore only become unencodable
+    * on a register file that actually reaches half 128.  Below that the
+    * restriction rejects regions to avoid a copy that cannot exist. */
+   bool avoid_half = avoid_half_copies &&
+                     rctx->bound[RA_GPR] > AGX3_COPY_REG16_DEST_HALVES;
+
    /* RA vectors are naturally aligned powers of two, at most 16 halves.
     * A result may overlap a larger live vector. Evict that whole vector,
     * rather than interpreting one of its interior halves as another SSA. */
@@ -532,6 +584,14 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
             unsigned width = rctx->ncomps[ssa];
             assert(width && rctx->ssa_to_reg[ssa] == reg);
             if (reg < base + span && reg + width > base) {
+               /* G17P's grounded half COPY has a seven-bit destination. A
+                * constrained result shuffle cannot preserve a half victim in
+                * the high bank, so choose another initial victim region. */
+               if (ssa_has_bank_constraint(rctx, ssa) ||
+                   (avoid_half && rctx->sizes[ssa] == AGX_SIZE_16)) {
+                  valid = false;
+                  break;
+               }
                if (reg < base || reg + width > base + span) {
                   valid = false;
                   break;
@@ -553,7 +613,20 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
       if (best != ~0u)
          break;
    }
-   assert(best < limit && best_span);
+
+   /* Not a refusal path.  assign_regs_by_copying() feeds this result straight
+    * into BITSET_SET_COUNT() and reg_to_ssa[], so returning ~0u is an
+    * out-of-bounds write rather than a bad register choice: a build where
+    * NDEBUG removes assertions would corrupt memory silently.  Fail the same
+    * way in every build instead of only in debug. */
+   if (best >= limit || !best_span) {
+      fprintf(stderr,
+              "agx: no constrained region for count=%u minimum=%u limit=%u "
+              "bound=%u\n",
+              count, minimum, limit, rctx->bound[RA_GPR]);
+      abort();
+   }
+
    *span_out = best_span;
    return best;
 }
@@ -572,8 +645,10 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
 
    if (minimum > 0 || limit < rctx->bound[RA_GPR]) {
       unsigned count = rctx->ncomps[dest.value], span;
-      unsigned base = find_constrained_region(rctx, count, minimum, limit,
-                                              &span);
+      unsigned base = find_constrained_region(
+         rctx, count, minimum, limit,
+         I != NULL && rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
+         &span);
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
          if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {

@@ -37,6 +37,124 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
 
+  test(
+    'hk_g17p_pipeline_cache_persistence',
+    g17p_pipeline_cache,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-pipeline-cache'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_buffer_memory_lifetime',
+    g17p_buffer_memory,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-buffer-memory'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_bda_capture_replay',
+    g17p_bda_capture,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-bda-capture'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_query_result_modes',
+    g17p_query_results,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-query-results'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_timeline_host_lifetime',
+    g17p_timeline_host,
+    env : g17p_queue_progress_environment + {
+      'ASAHI_SHIM_TIMELINE_HOST_VALUES' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-timeline-host'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_memory_budget_lifetime',
+    g17p_memory_budget,
+    env : g17p_queue_progress_environment + {
+      'HK_SYSMEM' : '1073741824',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-memory-budget'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance4_requirements',
+    g17p_maintenance4,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance4'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance5_usage2_layout',
+    g17p_maintenance5,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance5'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_maintenance6_bind_status',
+    g17p_maintenance6,
+    env : g17p_queue_progress_environment,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-maintenance6'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_push_descriptor_record',
+    g17p_push_descriptor,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-push-descriptor'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_push_descriptor_array_control_record',
+    g17p_push_descriptor_array_control,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-push-descriptor-array'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_array_lod_control_record',
+    g17p_array_lod_control,
+    env : g17p_queue_progress_environment + {
+      'G17P_PUSH_DESCRIPTOR_RECORD_ONLY' : '1',
+    },
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-array-lod-control'],
+    timeout : 30,
+  )
+
   g17p_compressed_3d_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
@@ -58,6 +176,49 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     depends : _dev_icd,
     suite : ['asahi', 'g17p-queue-progress'],
     timeout : 30,
+  )
+
+  # The Firefox/Zink six-range vertex program only has to be RECORDED to reach
+  # hk_upload_usc_words(); a graphics range budget below the number of ranges
+  # the collector emits refuses fail-closed at vkEndCommandBuffer. No submit,
+  # so no stream-validator expectation is set.
+  g17p_vertex_range_pressure_env = environment({
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  })
+  test(
+    'hk_g17p_vertex_range_pressure',
+    g17p_vertex_range_pressure,
+    env : g17p_vertex_range_pressure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-vertex-range-pressure'],
+    timeout : 60,
+  )
+
+  # One command buffer holding a frame's worth of render passes and draws.
+  # Each Ioto program used to take a BO of its own -- a 16KiB page plus a
+  # 16KiB guard page of the 4GiB USC exec window for a couple of hundred
+  # bytes of program -- and this recording alone establishes thousands of
+  # executable-window mappings, which is what ran the window out under
+  # SuperTuxKart. Sub-allocated out of arena chunks the same recording needs
+  # a handful. The budget is what fails if programs go back to one BO each;
+  # there is no submit, so no stream-validator expectation is set.
+  g17p_ioto_pressure_env = environment({
+    'ASAHI_SHIM_CHIP' : 'g17p',
+    'ASAHI_SHIM_G17P_MAX_USC_BINDS' : '64',
+    'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+    'MESA_SHADER_CACHE_DISABLE' : 'true',
+    'VK_DRIVER_FILES' : _dev_icd.full_path(),
+  })
+  test(
+    'hk_g17p_ioto_program_pressure',
+    g17p_ioto_program_pressure,
+    env : g17p_ioto_pressure_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-ioto-program-pressure'],
+    timeout : 120,
   )
 
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
@@ -265,6 +426,85 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  # Hyprland's renderBorder issues four adjacent scissored draws into one
+  # render pass, changing only the scissor between them -- the exact shape that
+  # faulted the GMMU on hardware. G17P now gives each of those draws its own
+  # control stream, so there are four barriers and none of them is *inter*-draw:
+  # each one opens a stream. Pinning 0:4 is what keeps a future change from
+  # quietly putting two draws back in one stream, which is the thing that lost
+  # the device within three seconds of opening a terminal.
+  g17p_interdraw_barrier_env = environment(g17p_image_copy_3d_environment)
+  g17p_interdraw_barrier_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
+  test(
+    'hk_g17p_interdraw_vdm_barrier',
+    g17p_scissor_ring,
+    args : ['ring', '--record-only'],
+    env : g17p_interdraw_barrier_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-interdraw-barrier'],
+    timeout : 30,
+  )
+
+  # The same four draws with HK_G17P_CONCAT_DRAWS=1, the opt-in that puts them
+  # back in one stream. That shape is not safe on hardware, but it is the only
+  # one in which an inter-draw barrier can exist at all, so it is where the
+  # emitter stays covered: three inter-draw barriers, four total, and no draw
+  # republishing render state without one in front of it.
+  #
+  # Both halves matter. Without the count, a driver that stopped emitting
+  # passes; without the unbarriered-republication check, a barrier emitted in
+  # the wrong place still satisfies the count. Reverting the emitter yields
+  # "0/3 barriers, 3/0 unbarriered", so this test can fail.
+  g17p_concat_draw_barrier_env = environment(g17p_image_copy_3d_environment)
+  g17p_concat_draw_barrier_env.set('HK_G17P_CONCAT_DRAWS', '1')
+  g17p_concat_draw_barrier_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '3:4')
+  test(
+    'hk_g17p_interdraw_vdm_barrier_concat_control',
+    g17p_scissor_ring,
+    args : ['ring', '--record-only'],
+    env : g17p_concat_draw_barrier_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-interdraw-barrier'],
+    timeout : 30,
+  )
+
+  # The narrowness control. Four identical draws with no state between them
+  # are body-only: they reuse what the first draw latched, so nothing the VDM
+  # is still dereferencing gets overwritten and no barrier is owed. Expect
+  # zero, against four draws. ZINK_DEBUG=sync cannot tell this case apart and
+  # would split the render pass four ways here too.
+  g17p_repeat_draw_barrier_env = environment(g17p_image_copy_3d_environment)
+  g17p_repeat_draw_barrier_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
+  test(
+    'hk_g17p_interdraw_vdm_barrier_body_only',
+    g17p_repeat_draw,
+    env : g17p_repeat_draw_barrier_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-interdraw-barrier'],
+    timeout : 30,
+  )
+
+  # Whether a readback copy is ordered after the render that produced it is
+  # carried entirely by drm_asahi_cmd_header::vdm_barrier and by which ioctl
+  # the out-syncobjs ride on. Both are write-only from userspace, so a driver
+  # that asks for the wrong thing and a kernel that ignores the right thing
+  # look identical from a stale readback. Record the submissions and assert
+  # the request. The script carries its own negative control.
+  test(
+    'hk_g17p_copy_after_render_order',
+    prog_python,
+    args : [
+      files('../vulkan/tests/test-g17p-copy-after-render-order.py'),
+      meson.current_build_dir() / '../../..',
+    ],
+    depends : [_dev_icd, libasahi_noop_drm_shim, g17p_offscreen_triangle],
+    suite : ['asahi', 'g17p-copy-order'],
+    timeout : 60,
+  )
+
   g17p_image_copy_3d_fail_env = environment(
     g17p_image_copy_3d_environment)
   g17p_image_copy_3d_fail_env.set('ASAHI_SHIM_FAIL_SUBMIT_ONCE', '1')
@@ -422,8 +662,9 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
     'ASAHI_SHIM_G17P_EXPECT_COMPUTE' : '1',
     'ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER' : '1',
-    'HK_G17P_UNVERIFIED_FEATURES' :
-      'conditional_rendering,draw_indirect_count',
+    # draw_indirect_count was retired when V12c qualified on hardware and
+    # drawIndirectCount became unconditional; no code reads that token now.
+    'HK_G17P_UNVERIFIED_FEATURES' : 'conditional_rendering',
     'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
     'MESA_SHADER_CACHE_DISABLE' : 'true',
     'VK_DRIVER_FILES' : _dev_icd.full_path(),

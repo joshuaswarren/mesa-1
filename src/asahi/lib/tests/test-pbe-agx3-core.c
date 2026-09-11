@@ -417,6 +417,85 @@ check_gen9_native_mips(void)
    return 0;
 }
 
+static int
+check_gen9_multisample_vector(void)
+{
+   /* PBEStateEncoderGen9<kAGXRevHAL200>::StateFields derives its dimension
+    * nibble as `2 + ((flags >> 16) & 2)`, so a non-array multisample write
+    * target is dimension 4 rather than 2, and deposits `(samples >> 2) & 3`
+    * at word0[57:56] -- the two-bit Sample Count selector, 2x=0 4x=1 8x=2.
+    * Every other field keeps its single-sample placement, including the
+    * logical (not sample-expanded) width and height.
+    *
+    * Same field vector as the array case above, so the only differences from
+    * that packet are the ones the encoder actually makes.
+    */
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 2,
+      .channels = 0x28,
+      .type = 0,
+      .swizzle_r = 0,
+      .swizzle_g = 1,
+      .swizzle_b = 2,
+      .swizzle_a = 3,
+      .width = 256,
+      .height = 128,
+      .buffer = UINT64_C(0x0000123456789ab0),
+   };
+   static const uint8_t expected_2x[32] = {
+      0x24, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t expected_4x[32] = {
+      0x24, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x01,
+      0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+
+   struct agx_pbe_agx3_descriptor packed, plain;
+   CHECK(agx_pbe_agx3_2d_multisample_pack(9, &fields, 2, &packed));
+   CHECK(packed.length == sizeof(expected_2x));
+   CHECK(memcmp(packed.bytes, expected_2x, sizeof(expected_2x)) == 0);
+   CHECK(agx_pbe_agx3_2d_multisample_pack(9, &fields, 4, &packed));
+   CHECK(memcmp(packed.bytes, expected_4x, sizeof(expected_4x)) == 0);
+
+   /* Only the dimension nibble and the two selector bits move. */
+   CHECK(agx_pbe_agx3_2d_pack(9, &fields, &plain));
+   for (unsigned samples = 2; samples <= 4; samples *= 2) {
+      CHECK(agx_pbe_agx3_2d_multisample_pack(9, &fields, samples, &packed));
+      for (unsigned i = 0; i < 32; ++i) {
+         uint8_t expect = plain.bytes[i];
+         if (i == 0)
+            expect = (uint8_t)((expect & 0xf0) | 4);
+         if (i == 7)
+            expect = (uint8_t)(expect | ((samples >> 2) & 3));
+         CHECK(packed.bytes[i] == expect);
+      }
+   }
+
+   /* Fail closed on everything without a witnessed tilebuffer geometry: 1x,
+    * 8x, non-powers of two, linear layouts and Gen10. */
+   const unsigned bad_samples[] = {0, 1, 3, 8, 16};
+   for (unsigned i = 0; i < sizeof(bad_samples) / sizeof(bad_samples[0]);
+        ++i) {
+      memset(&packed, 0xa5, sizeof(packed));
+      CHECK(!agx_pbe_agx3_2d_multisample_pack(9, &fields, bad_samples[i],
+                                              &packed));
+      CHECK(memcmp(&packed, &(struct agx_pbe_agx3_descriptor){0},
+                   sizeof(packed)) == 0);
+   }
+   struct agx_pbe_agx3_2d_fields linear = fields;
+   linear.layout = 0;
+   linear.stride_B = 1024;
+   CHECK(!agx_pbe_agx3_2d_multisample_pack(9, &linear, 4, &packed));
+   CHECK(!agx_pbe_agx3_2d_multisample_pack(10, &fields, 4, &packed));
+   CHECK(!agx_pbe_agx3_2d_multisample_pack(9, NULL, 4, &packed));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -424,7 +503,8 @@ main(void)
        check_exact_gen9_linear_vector() ||
        check_exhaustive_format_axes() ||
        check_dimension_and_address_bits() || check_fail_closed_axes() ||
-       check_gen9_single_layer_packet() || check_gen9_native_mips())
+       check_gen9_single_layer_packet() || check_gen9_native_mips() ||
+       check_gen9_multisample_vector())
       return 1;
 
    printf("agx_pbe_agx3_core: %u checks passed\n", checks);

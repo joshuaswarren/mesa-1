@@ -80,3 +80,67 @@ agx_lower_spill(agx_context *ctx)
       agx_remove_instruction(I);
    }
 }
+
+
+/*
+ * Split a multi-component thread-private-storage access into one 32-bit
+ * component per instruction, for AGX3.
+ *
+ * G17P's grounded TPS form moves a single 32-bit component:
+ * agx3_translate_static_spill() admits `mask == 1` only, and the AGX3 slot
+ * allocator describes the TPS tokens the same way. Any wider access failed
+ * the whole shader closed -- so a vec4 spill, or a vec4 element of a
+ * scratch-lowered array, was unencodable regardless of what the shader
+ * computed. That silently capped shader complexity across the driver.
+ *
+ * Splitting needs no new encoding: `mask` is always contiguous from component
+ * zero (both producers build it with BITFIELD_MASK), the components live in
+ * consecutive registers, and their stack slots are consecutive, so N scalar
+ * accesses at `offset + 4*c` are exactly equivalent. Both producers are
+ * covered by running after register allocation: agx_lower_spill()'s real
+ * spills and agx_emit_{load,store}_scratch()'s NIR scratch access.
+ *
+ * Restricted to 32-bit components with an immediate offset -- the domain the
+ * scalar TPS form is witnessed at. Anything else is left exactly as it was
+ * and still refuses, rather than being split into something unwitnessed.
+ * AGX2 never reaches here, so none of its bytes change.
+ */
+void
+agx3_split_vector_stack_access(agx_context *ctx)
+{
+   agx_foreach_instr_global_safe(ctx, I) {
+      const bool is_store = I->op == AGX_OPCODE_STACK_STORE;
+      if (!is_store && I->op != AGX_OPCODE_STACK_LOAD)
+         continue;
+
+      const unsigned nr = util_bitcount(I->mask);
+      if (nr <= 1 || I->format != AGX_FORMAT_I32)
+         continue;
+
+      /* Only a contiguous mask starting at component 0 is a plain vector. */
+      if (I->mask != BITFIELD_MASK(nr))
+         continue;
+
+      const agx_index data = is_store ? I->src[0] : I->dest[0];
+      const agx_index offset = I->src[is_store ? 1 : 0];
+      if (offset.type != AGX_INDEX_IMMEDIATE || data.size != AGX_SIZE_32)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      for (unsigned c = 0; c < nr; ++c) {
+         agx_index comp = data;
+         /* IR register values are 16-bit halves, so a 32-bit component is
+          * two of them; each stack slot is four bytes. */
+         comp.value += c * 2;
+         comp.channels_m1 = 0;
+
+         const agx_index off = agx_immediate(offset.value + (c * 4));
+         if (is_store)
+            agx_stack_store(&b, comp, off, I->format, 1);
+         else
+            agx_stack_load_to(&b, comp, off, I->format, 1);
+      }
+
+      agx_remove_instruction(I);
+   }
+}

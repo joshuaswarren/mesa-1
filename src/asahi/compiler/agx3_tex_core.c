@@ -269,14 +269,25 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (!d->array && d->array_layer != 0))
       return false;
 
-   /* Fresh G17P texture3d witnesses cover both an immediate level and the
-    * implicit fragment-derivative form used by compositor ICC LUTs.  The
-    * dimension remains f76=3 and the implicit form differs only by selecting
-    * the ordinary AUTO LOD marker. Array, per-lane/bias/gradient, gather and
-    * comparison combinations remain closed until independently witnessed. */
+   /* The 3D dimension is f76 = 3 and is orthogonal to the LOD shape exactly
+    * as the 2D one is. Five texture3d fragments, differing only in the LOD
+    * argument, differ only in f139 and its operand:
+    *
+    *   t.sample(s, uvw)                 05800cb8b0008001010010001200
+    *   t.sample(s, uvw, bias(0.5f))     05800cb8b0003b00010010021200  f139 1, f29 32
+    *   t.sample(s, uvw, bias(in.dx.x))  05800cb8b0009001010010001200  f139 3
+    *   t.sample(s, uvw, level(in.dx.x)) 05800cb8b0008821010010001200  f139 4
+    *   t.sample(s, uvw, gradient3d(..)) 05800cb8b0009c01000010001200  f139 5
+    *
+    * and the per-lane staging is the same bank-6 publication (f5 = 6) our 2D
+    * path already emits, read straight out of the level(reg) kernel.
+    *
+    * gradient3d carries *six* scalars rather than four; the extra pair
+    * continues the same interleave into banks 16 and 18, witnessed on two
+    * literal-gradient kernels (see AGX3_TEX_GRADIENT_BANK_DDX_Z). Array,
+    * gather and comparison combinations remain closed. */
    if (d->three_d &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
-        (d->lod != AGX3_TEX_LOD_LEVEL && d->lod != AGX3_TEX_LOD_AUTO) ||
         d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
       return false;
 
@@ -303,13 +314,34 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (d->texture_kill && tk != 2) || (d->sampler_kill && sk != 2))
       return false;
 
-   /* Dimensioned comparison witnesses use fixed texture/sampler state and
-    * the driver's descriptor profile. Keep indexed/profile variants closed
-    * until they have their own native instructions. */
+   /*
+    * A dimensioned comparison used to require fixed texture and sampler
+    * state. The descriptor operand class is orthogonal to both the depth
+    * comparison and the packed array layer, and Apple's own bytes say so:
+    * an `array<depth2d_array<float>, 8>` sampled through a runtime index,
+    * against the same shader with a fixed texture and sampler --
+    *
+    *   fixed     1d800ca090002004010000001200          ep3, 14 B
+    *   indexed   1dc00ca09c002004930380011200802000000000   ep4, 20 B
+    *
+    * differ in exactly the four descriptor fields and the endpoint they
+    * imply: the texture gains f97 = 24 with f103/f104 going 1 -> 3/2, the
+    * sampler gains f126 = 28 with f132/f133 going 1 -> 3/2. **f143 (the
+    * comparison) and f77 = 2 (the packed layer) are identical in both**, so
+    * neither depends on where the descriptor came from.
+    *
+    * That distinction is what a real application runs into. A shader with a
+    * single texture instruction gets immediate descriptors from
+    * agx_nir_lower_g17p_combined_sampler(); one with several -- SuperTuxKart's
+    * sunlightshadow.frag samples its cascade four times -- falls back to
+    * agx_nir_lower_g17p_indexed_samplers() and arrives here with registers,
+    * where the whole shader used to fail closed.
+    *
+    * The non-driver sample ABIs stay refused: those change the operand
+    * profile itself rather than the descriptor's class.
+    */
    if (d->shadow && (d->array || d->cube) &&
-       (tk != AGX3_TEX_OPERAND_IMMEDIATE ||
-        sk != AGX3_TEX_OPERAND_IMMEDIATE ||
-        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
+       d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER)
       return false;
 
    /* Cube operand pairs are witnessed as immediate/immediate,
@@ -317,33 +349,99 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->cube && tk != sk)
       return false;
 
-   /* Apple's G17P offset witnesses are immediate-descriptor, implicit-LOD
-    * 2D samples. Offset (0, 0) is folded to the plain form by native, so do
-    * not manufacture the enabled encoding without a corresponding witness.
+   /* The coordinate offset is one immediate nibble pair in f43 plus two
+    * selectors, f51 and f141, and it is orthogonal to every other property
+    * of the sample. Each of these differs from its offset-free control by
+    * exactly {f43 = (y << 4) | x, f51 = 1, f141 = 1} and nothing else
+    * (metal-nt 27.1, -arch applegpu_g17p, fragment render pipelines):
+    *
+    *   t.sample(s, uv)                          05800cb8b0000000010010001200
+    *   t.sample(s, uv, int2(1,1))               05800cb8b0000102018810001200
+    *   t.sample(s, uv, level(2), int2(1,1))     05800cb8b0001b02018810081200
+    *   t.sample(s, uv, level(reg), int2(1,1))   05800cb8b0001102018810001200
+    *   t.sample(s, uv, bias(reg), int2(1,1))    05800cb8b0008102018810001200
+    *   t.sample(s, uv, grad, int2(1,1))         05800cb8b0000902008810001200
+    *   t.gather(s, uv, int2(1,1))               05800ca490000102018800001200
+    *   t.sample(s, uv, layer, int2(1,1))        05800cb8b0001bb7018810001200
+    *   depth.sample_compare(s, uv, r, int2(1,1))1d800ca090002102018800001200
+    *   heap t.sample(s, uv, int2(1,1))          05a00cb8b8000102938b90011200...
+    *
+    * and the value sweep is the same in every LOD mode: offset (1,1) is
+    * f43 = 17, (2,0) is f43 = 2, (0,2) is f43 = 32.
+    *
+    * Offset (0, 0) is folded to the plain form by native, so do not
+    * manufacture the enabled encoding without a corresponding witness.
+    *
+    * f43 is a single shared immediate slot, and an *array* sample carrying
+    * an immediate level or bias already claims it (see the LOD block below).
+    * Apple does not co-encode an offset there: `t.sample(s, uv, 3u,
+    * bias(0.5f), int2(1,1))` is 05800cb8b000451b010010001202, which keeps
+    * the bias in f43 and selects f141 = 2 -- a form that publishes the
+    * offset through an extra twelve-byte staged operand. That staging has no
+    * slot plan here, so the collision is refused rather than silently
+    * dropping one of the two values.
+    *
+    * 3D and cube offsets are not witnessed and stay closed, and so is a
+    * register descriptor pair: the immediate and uniform pairs above each
+    * take the offset orthogonally, but the register pair has no offset
+    * witness of its own.
     */
+   const bool array_immediate_lod =
+      d->array &&
+      (d->lod == AGX3_TEX_LOD_BIAS || d->lod == AGX3_TEX_LOD_LEVEL);
    if (d->offset &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xy == 0 || tk != 1 ||
-        sk != 1 || d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d ||
-        d->cube || d->gather != AGX3_TEX_GATHER_NONE || d->shadow))
+       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xy == 0 ||
+        d->three_d || d->cube || array_immediate_lod ||
+        tk == AGX3_TEX_OPERAND_REGISTER || sk == AGX3_TEX_OPERAND_REGISTER))
       return false;
 
    if (!d->offset && d->offset_xy != 0)
       return false;
 
-   /* Every gather witness is a plain 2D implicit-LOD gather on AGX3b. */
+   /* Metal's gather takes no LOD argument, so every gather witness is an
+    * implicit-LOD one on AGX3b. The array layer, the coordinate offset and
+    * the depth comparison do compose with it, each contributing exactly the
+    * fields it contributes to an ordinary sample:
+    *
+    *   t.gather(s, uv)                       05800ca490000000010000001200
+    *   t.gather(s, uv, layer)                05800ca490000db4010000001200  f77/f31/f37
+    *   t.gather(s, uv, layer, int2(1,1))     05800ca490001bb7018800001200  + f43/f51/f141
+    *   depth.gather_compare(s, uv, r)        05800ca490002000010000001200  + f143
+    *   depth.gather_compare(s, uv, r, off)   05800ca490002102018800001200  + f43/f51/f141
+    *
+    * 3D and cube gathers are not witnessed and stay closed.
+    */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
        (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
-        d->lod != AGX3_TEX_LOD_AUTO || d->array || d->three_d || d->cube))
+        d->lod != AGX3_TEX_LOD_AUTO || d->three_d || d->cube))
       return false;
 
-   /* Apple's depth sample_compare witnesses are implicit samples with one
-    * result component and their reference value in fixed bank 4. Array forms
-    * select the separately packed layer with f77=2; cube forms select the
-    * CEM dimension with f76=4. */
+   /* Apple's depth sample_compare witnesses stage their reference value into
+    * fixed bank 4 and set f143. The comparison is orthogonal to the LOD
+    * shape: each of these differs from the corresponding *colour* sample by
+    * f143 = 1, f75 = 1 instead of 15, and the dropped f74 mask-group bit,
+    * and by nothing else.
+    *
+    *   depth.sample_compare(s, uv, r)             1d800ca090002000010000001200
+    *   depth.sample_compare(s, uv, r, level(0))   1d800ca090002900010000001200  f139=2
+    *   depth.sample_compare(s, uv, r, level(2))   1d800ca090002900010000081200  f139=2 f29=128
+    *   depth.sample_compare(s, uv, r, bias(0.5))  1d800ca090002700010000021200  f139=1 f29=32
+    *   depth.sample_compare(s, uv, r, level(reg)) 1d800ca090002001010000001200  f139=4
+    *   depth.sample_compare(s, uv, r, bias(reg))  1d800ca090002400010000001200  f139=3
+    *   depth.sample_compare(s, uv, r, grad)       1d800ca090002401000000001200  f139=5
+    *   depth.gather_compare(s, uv, r)             05800ca490002000010000001200  f144=1
+    *
+    * A comparison gather returns four texels, so it carries the full f75
+    * mask the ordinary gather does; every other comparison returns one.
+    *
+    * The array and cube comparisons here use their own separately packed
+    * layer / CEM operands (f77 = 2, f76 = 4) rather than the register-layer
+    * form the LOD sweep above was taken on, so they keep the implicit LOD
+    * they were witnessed with. */
    if (d->shadow &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->lod != AGX3_TEX_LOD_AUTO ||
-        d->three_d || d->gather != AGX3_TEX_GATHER_NONE ||
-        d->mask != 1))
+       (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
+        d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
+        ((d->array || d->cube) && d->lod != AGX3_TEX_LOD_AUTO)))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -387,21 +485,16 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] =
       (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   /* The driver descriptor ABI uses f83/f112=0/4 for cubes regardless of
-    * whether their descriptor indices are immediate or indirect.  Fresh
-    * attachment-only Metal 32023.917 cube fragments (native SHA256
-    * d80b059f5843e1b425820e87cffd533d826650c11c2624dd1b949a3d7c555b71)
-    * confirm that exact profile, and the hardware differential returns fixed
-    * half-gray for 4/8.  Array samples retain their separately witnessed
-    * dimension profile. */
-   const bool dimension_profile = d->array;
-   if ((operand_profile & 1) ||
-       (dimension_profile && !d->shadow))
+   /* The driver descriptor ABI uses f83/f112=0/4 for every dimension.
+    * Apple's f83/f112=4/8 fragment profile is a complete, incompatible ABI,
+    * selected only by AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT.  In particular,
+    * using Apple's profile with the driver's 2D-array descriptor produces a
+    * fixed near-half-gray sample on G17P, just as it does for cubes.
+    */
+   if (operand_profile & 1)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
    base[nb++] = (struct agx3_field_kv)KV(
-      112, ((operand_profile & 2) ||
-            (dimension_profile && !d->shadow))
-              ? 8 : 4);
+      112, (operand_profile & 2) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -441,7 +534,15 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        (intrinsic_group && !d->sample_group_nonterminal))
       ov[n++] = (struct agx3_field_kv)KV(156, 1);
    if (d->array) {
-      if (shadow_array) {
+      /* Honeykrisp's driver descriptor ABI pairs noncube arrays with the
+       * sampler-private layer staged by PACK_SMPIR.  Native Apple fragment
+       * witnesses use the direct f31/f37 path as part of their complete 4/8
+       * ABI; cube arrays retain their independently witnessed direct path.
+       */
+      const bool staged_driver_array =
+         !d->cube && d->lod == AGX3_TEX_LOD_AUTO &&
+         d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
+      if (shadow_array || staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(77, 2);
       } else {
          ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);

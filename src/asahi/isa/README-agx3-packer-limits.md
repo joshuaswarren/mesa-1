@@ -1,19 +1,70 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
-**Status: the SSBO limit below is GONE, so is the `fcmpsel` one, and so are the
-float source modifiers and the 32-bit rounding modes. Two texture-side gaps and
-one saturate gap remain.** Every row of the original matrix compiles, including
-the ones marked **no**, and so do device atomics. The measurement that produced
-the matrix is preserved verbatim further down, because the *method* is what
-makes it re-runnable, and because the retraction it carries is still worth
-reading before theorising about a wrong value on this ISA.
+**Status (2026-09-10): the coordinate offset and the depth comparison are now
+encoded in every LOD mode, and the whole in-tree probe corpus compiles -- 24 of
+25 compute and 64 of 64 fragment, with no refusal line anywhere.** A second
+pass the same day closed six more shapes, each one found by compiling a real
+application's shaders rather than a probe; see "Six application refusals closed
+2026-09-10" below. Five of those six were admission gates standing in front of
+bytes the encoder could already reach. The SSBO
+limit, the `fcmpsel` one, the 32-bit rounding modes and the bias / gradient
+sample forms were already closed before that. What remains on the texture side
+is listed under "The rule, as it stands now", and it is a much shorter list
+than this file used to claim.
 
-**Every vkQuake pipeline now compiles: 385 of 385, 248 of 248 unique
-pipelines**, up from 67 of 385, with no packer refusal anywhere in the run. See
-"vkQuake" below for the exact reproduction.
+> **CORRECTION (2026-09-10).** An earlier revision said "the float source
+> modifiers" were done, without qualification. **That was too broad, and it was
+> wrong for a whole instruction family.** `f30`/`f31` were modelled on
+> `f32log2`, `f32exp2` and `f32rcp`, but *not* on `f32rsqrt` or `f32sqrtstep`,
+> whose encoders had no abs/neg parameters at all and whose packer handlers
+> explicitly refused `src.abs || src.neg`. So `sqrt(abs(x))` and
+> `inversesqrt(abs(x))` -- the standard safe forms of both idioms -- failed
+> every shader that used them closed, while `inversesqrt(x + 1.0)` and
+> `normalize()` passed and made the family look done. Both are now closed
+> against Apple's own bytes; see "The rsqrt family's source modifiers" below.
+>
+> The `iadd` narrow-operand row further down was likewise recorded as fixed
+> when only *half* of it was. See "The `iadd` widening fix was partial" below.
+>
+> The `fcmpsel` row carries the same hazard and is **not** fully closed either:
+> measured against Vulkan CTS on 2026-09-10, the absolute-source closure lands
+> for the uniform-width 32-bit case but **not** for a 16-bit destination
+> (`fcmpsel [d16 ... s1=32:reg.abs ...]`, dEQP's `isOk()` written to a
+> `mediump` output) nor for mixed operand widths (`[d32 s0=16:imm
+> s1=32:reg.abs ...]`, from `isinf`). Those two shapes are ~98% of the
+> refusals measured across `glsl.conversions` and `glsl.builtin`.
+>
+> **UPDATE (2026-09-10, second pass): the 16-bit-destination half of that is
+> now closed** -- see "Six application refusals closed 2026-09-10" below, item
+> 6. The gate that refused it was guarding a real defect: the absolute
+> immediate-select branch deposited a fixed 32-bit width into f25, so admitting
+> a half result would have encoded a full one. The mixed-operand-width `isinf`
+> shape is untouched and still refuses. Neither has been re-measured against
+> CTS, so treat the refusal count as unknown rather than as reduced.
+>
+> The lesson is the one this file already teaches in its retraction: a claim
+> phrased over a *category* ("the float source modifiers") is not supported by
+> evidence gathered on *instances* of it. Name the forms you actually tested.
 
-Measured 2026-09-07 under the G17P drm-shim, on the integration branch plus the
-commits named in "What changed". No hardware.
+Every row of the original matrix compiles, including the ones marked **no**,
+and so do device atomics. The measurement that produced the matrix is preserved
+verbatim further down, because the *method* is what makes it re-runnable, and
+because the retraction it carries is still worth reading before theorising
+about a wrong value on this ISA.
+
+**Two of the entries this file listed as the next texture gaps to do -- the
+bindless texture-heap descriptor shape, and `textureGrad`'s gradient staging --
+were already closed when they were measured on 2026-09-10 and had been for some
+time.** They are kept in this file only as history; do not plan work from them.
+The lesson is the one the retraction below already teaches: run the probes
+before believing the document, this one included.
+
+**Every vkQuake pipeline compiles: 385 of 385, 248 of 248 unique pipelines**, up
+from 67 of 385, with no packer refusal anywhere in the run. See "vkQuake" below
+for the exact reproduction.
+
+Measured 2026-09-07 and re-measured 2026-09-10 under the G17P drm-shim. No
+hardware: nothing in this file says any of it *renders*.
 
 ## Current matrix
 
@@ -68,12 +119,26 @@ and every textured draw:
 | `texture(tex, uv, -1.0)` — **negative** LOD bias                    | yes‡    |
 | `texture(tex, uv, vcolor.x)` — per-lane LOD bias                    | yes‡    |
 | `textureLod(tex, uv, 2.0)` / `textureLod(tex, uv, vcolor.x)`        | yes‡    |
+| `textureLod(samplerCube, dir, lod)`                                 | yes††   |
 | `textureGrad(tex, uv, dFdx(uv), dFdy(uv))`                          | yes‡    |
 | `texture(sampler2DArray, vec3(uv, layer))`                          | see below |
 | `texture(samplerCube, n)`                                           | see below |
 | `textureGather(tex, uv, comp)`                                      | yes‡    |
-| `texture(sampler2DShadow, ...)`                                     | **no**§ |
-| `textureGrad` on a 2D **array**                                      | **no**§  |
+| `texture(sampler2DShadow, ...)`                                     | yes     |
+| `textureGrad` on a 2D **array**                                      | yes     |
+| `textureOffset(tex, uv, ivec2(1,1))`                                | yes¶    |
+| `textureLodOffset` / `textureGradOffset` / `textureGatherOffset`    | yes¶    |
+| `textureOffset(tex, uv, ivec2(1,1), 0.5)` — offset **and** bias      | yes¶    |
+| `textureOffset(sampler2DArray, ...)`                                | yes¶    |
+| `textureLod(sampler2DShadow, ...)` — a comparison at a fixed level   | yes¶    |
+| `textureGather(sampler2DShadow, uv, ref)` — a comparison gather      | yes¶    |
+| `texture(sampler2DArrayShadow, ...)`                                | yes¶††  |
+| `textureGather(sampler2DArray, ...)`                                | yes¶    |
+| `textureGrad(sampler3D, ...)` / `texture(sampler3D, uvw, bias)`      | yes¶    |
+| `texture(samplerCubeShadow, ...)`                                   | yes¶    |
+| `texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))`                   | yes¶    |
+| `textureGather(samplerCube, n)`                                     | **no**¶ |
+| `textureQueryLod(tex, uv)`                                          | **no**¶ |
 
 \* This row was **no** until the 32-bit reciprocal was encoded; see below.
 \*\* These rows were **no** until the 32-bit tied `fcmpsel` was encoded; see
@@ -102,6 +167,138 @@ lowering, not the ISA).
 § Shadow compare (f143) and the immediate-array-layer form (f77 = 1) are now
 *grounded* — the byte tables are below — but not implemented.
 
+¶ Measured 2026-09-10. See "The coordinate offset and the depth comparison are
+orthogonal to everything" below for the byte tables and the sweep. The
+`no` rows there are the texture-side gaps that remain, and each one says what
+is grounded and what is not.
+
+†† Closed 2026-09-10 in the second pass; see "Six application refusals closed
+2026-09-10" below. The shadow-array row passed here *only* with immediate
+descriptors, which is what a single-texture probe gets -- a shader with more
+than one texture instruction refused until that pass, so this row was true of
+the probe and false of every application.
+
+## What real application shaders still reach (census, 2026-09-10)
+
+The corpora in this tree are clean, so a refusal inventory has to come from
+somewhere else. 460 modules reached the compiler, one process each, through the
+Honeykrisp ICD under the G17P drm-shim (`ASAHI_SHIM_CHIP=g17p`,
+`ASAHI_SHIM_VALIDATE_G17P_STREAM=1`, `AGX_MESA_DEBUG=shaders`), no hardware:
+
+| corpus | reached the compiler | refusing |
+| --- | --- | --- |
+| in-tree `isa/probes` + `vulkan/tests` + `probes/game` | 197 | 0 |
+| Hyprland 0.56.1 built-in shaders, all feature flags off | 14 | 0 |
+| three.js r180 ShaderLib, plain / textured+lit / mediump | 108 | 0 |
+| PixiJS 8.6.6 filters, mediump and highp | 18 | 0 |
+| GTK 4.16.7 `gsk/gpu`, 16 vertex+fragment pipelines | 16 | 0 |
+| Qt Quick 6.8.1 `shaders_ng` (scenegraph, shapes, particles) | 68 | 2 |
+| DXVK 2.5.3, 25 graphics + 14 compute | 39 | 14 |
+
+A further 21 modules never reached the driver: they need build defines or
+extensions the census did not supply, and glslang rejected them. They are
+counted nowhere above, in either column.
+
+That the in-tree corpus is clean is an independent re-measurement of the
+status line at the top of this file, not a restatement of it.
+
+The GLES corpora reach Vulkan the way ANGLE takes a WebGL shader there:
+`glslangValidator -V -R` hoists the global uniforms into a block, and
+`--shift-*-binding` gives each descriptor class its own binding range.
+three.js is assembled the way `WebGLProgram.js` does it — `#include`
+resolution, the generated prefix, `replaceLightNums`, `unrollLoops` — because
+the assembled string is what the browser actually compiles.
+
+**Every remaining refusal is in a translation layer or a vector-graphics
+shader, and none is in a WebGL/compositor/toolkit corpus.** After the two fixes
+below, 16 of the 460 refuse, in five canonical shapes:
+
+| n | site | shape | modules |
+| --- | --- | --- | --- |
+| 7 | `:6004` | `image_write [... fmt=0]` | DXVK integer clear/copy kernels |
+| 5 | `:6004` | `image_write [... fmt=4]` | DXVK float clear kernels |
+| 2 | `:5998` | `texture_load [... chan=4 mask=0x1 s5=16:null]` | DXVK MS depth/stencil resolve |
+| 1 | `:9920` | `fcmpsel [d32 s0=16:imm48 s1=32:reg.cache s2=16:imm1 s3=16:imm0 cond=1]` | Qt `shapecurve.frag` |
+| 1 | `:5689` | `if_fcmp [s0=32:reg.abs s1=32:reg.abs cond=0]` | Qt `conicalgradient.frag` |
+
+### The storage-image write was gated on the wrong thing
+
+`agx_emit_image_store()` chose the AGX3B encoding from
+`nir_intrinsic_format()`, admitting three formats and failing every other one
+closed — including a format-less image, which is what
+`shaderStorageImageWriteWithoutFormat` gives and what all thirteen of DXVK's
+clear and copy kernels declare. Apple's own bytes say the bit is not about the
+surface format at all; Metal cannot put a format in a shader. Four kernels
+differing only in the texture's data type:
+
+    texture2d<float>  d71054000040000000040000883a0900   f70:1 f71:2
+    texture2d<uint>   d71054000040000000040000881a0900   f70:0 f71:2
+    texture2d<int>    d71054000040000000040000881a0900   f70:0 f71:2
+    texture2d<half>   d71054000040000000040000882a0900   f70:1 f71:1
+
+`int` and `uint` are byte-identical: **f70 separates float data from integer
+data**, and f71 is the data width. Selecting on the stored type reproduces the
+three formats that already worked and covers the rest.
+
+That is one of three gates stacked on this path, so it unblocked one kernel
+(`dxvk_clear_buffer_f`) on its own. The other two are now grounded but **not
+implemented**:
+
+    2D           d71054000040000000040000883a0900   f72:1
+    3D           d71054000040000000080000883a0900   f72:3
+    2D array     d71054002000000000040000883a0900   f72:1 f73:2 f79:4
+    2D, waiting  d72054002040000100040000883a0900   f60:1 f79:4 f91:1
+
+so `f72` is the image dimension and `f73` the array layer, each with its own
+extra coordinate stage in Apple's prologue; and an image write that waits on a
+producer moves f59 to f60. `agx3_emit_storage_image_write()` still refuses
+`dim != AGX_DIM_2D` and any `wait_mask & ~1`, which is what the remaining
+twelve DXVK modules hit.
+
+### FSEL's negated comparator (closed)
+
+`fcmpsel` refused any `neg` on a compare source, which is how Qt's
+`radialgradient.frag` failed closed. Apple encodes it as **f65**, in the same
+encoding point as the unmodified compare, at both result widths:
+
+    32-bit result   a <  b   02011f03820a03c08006
+                    a < -b   02011f03820a03c88006
+    16-bit result   a <  b   02011d03820b0320800a
+                    a < -b   02011d03820b0328800a
+
+There is no matching bit on the *first* comparator: `-a < b` comes back as
+`02031d01820b0228800a`, which is f65 again with the operands swapped and the
+relation flipped to `gt`. So a negated first source has to be canonicalised by
+swapping.
+
+> **UPDATE.** That canonicalisation is now performed rather than refused --
+> see "The width, kind and modifier axes are one encoding point" below. The
+> row above is the whole proof: the swap was *observed here* and then declined,
+> which is this file's recurring failure mode. Fresh kernels add the
+> corroborating controls (`-a >= -c` byte-identical to `a <= c`;
+> `-a < fabs(c)` carrying the abs onto the swapped slot), and
+> `agx3_alu_fcmp_select_reg_imm_neg()` has been folded back into
+> `agx3_alu_fcmp_select_reg_imm()` so there is one encoder again.
+
+The same run also witnesses something this file records as open. The 16-bit
+`h_abs` kernel (`select(x, y, abs(a) < b)`, half result) is
+`02011d03830b0320800a00000100` — **f47 with a 16-bit destination**, which
+`agx3_alu_fcmp_select_reg_imm()` refuses outright (`abs_compare && dest_16`).
+The correction at the top of this file lists that shape as a live CTS gap; it
+is encodable, and only the gate is in the way. Not changed here, because no
+shader in this census reaches it.
+
+### Still needing an oracle
+
+`if_fcmp` with both sources absolute (Qt's `conicalgradient.frag`) is *not*
+grounded. Asked for it in MSL as `if (abs(a) < abs(b)) { ... }`, Apple's
+compiler returns a **select**, not a branch — `fsel ep30 size14`, f47 and f64
+set — so that run says what FSEL does with two absolute comparators and
+nothing about the control-flow compare. A witness needs an `if` whose body has
+a side effect Apple cannot if-convert. Until then the packer is right to refuse
+it, and the alternative fix worth considering is the NIR side: not folding
+`fabs` into a comparison that becomes control flow.
+
 ## The rule, as it stands now
 
 There is no per-shader SSBO access limit, no atomic limit, and no missing
@@ -114,7 +311,51 @@ agx3_pack_binary.c:4288: no grounded AGX3 encoding for texture_sample
 agx3_pack_binary.c:6567: no grounded AGX3 encoding for fmul
 ```
 
-Known-missing, in the order they are worth doing:
+**The two bullets this list used to open with -- the bindless texture-heap
+descriptor shape and `textureGrad`'s gradient staging -- are CLOSED, and were
+closed before they were re-measured on 2026-09-10.** The heap form encodes as
+the uniform descriptor pair (`f103`/`f132` = 3), the gradient stages its four
+scalars into banks 8/10/12/14, and `f34_bindless_grad`-shaped shaders compile.
+They are struck here rather than deleted because they were quoted onward as
+open work.
+
+Known-missing on the texture side, measured 2026-09-10 by driving a 40-shape
+exploration corpus through the drm-shim and reading the packer's own refusal
+line:
+
+- **A cube gather** (`textureGather(samplerCube, ...)`). Grounded --
+  `texturecube::gather(s, dir)` is `05800ca490001000010000001200`, the plain
+  gather with the cube dimension f76 = 4 -- but a cube sample must first run
+  three `cem_calc` instructions and publish the face, and that path does not
+  admit a gather today.
+
+- **`textureQueryLod`.** No witness at all; it is a different instruction, not
+  a mode of `smp`.
+
+- **`textureGatherOffsets`** (four independent offsets). Each lowered gather is
+  fine in isolation, but the shader reaches the packer through the
+  *indexed-sampler* fallback with a **register** descriptor pair, and the
+  offset is only witnessed on the immediate and uniform pairs. Kept refused
+  rather than encoded from an inference.
+
+- **An array depth comparison gather** (`textureGather(sampler2DArrayShadow,
+  ...)`). Grounded but *not* by composing what is already implemented, which is
+  why it is still refused. Apple's `depth2d_array::gather_compare(s, uv,
+  layer, ref)` is `05800ca490002db4010000001200`: f143 on top of the plain
+  array gather, using the **f77 = 1 register-layer** form with f31/f37 = 3.
+  Its `sample_compare` sibling `1d800ca090002db4010000001200` uses the same
+  f77 = 1. But this packer's `shadow && array` path emits the **f77 = 2
+  packed-layer** form instead. Both forms are real and both are witnessed;
+  which one an array comparison should use is not settled here, and encoding a
+  gather through the f77 = 2 path would be an inference, not a witness.
+
+- **An array sample with both an immediate level/bias and an offset.** f43 is
+  one shared immediate slot and the array LOD already claims it. Apple stages
+  the offset separately and selects f141 = 2
+  (`05800cb8b000451b010010001202`); that staging has no slot plan here, so the
+  collision refuses rather than dropping a value.
+
+Known-missing elsewhere:
 
 - **The float saturate modifier.** `clamp(x, 0.0, 1.0)` on a value that is
   itself a product reaches the packer as `fmul.sat`, and the generic ALU
@@ -124,17 +365,14 @@ Known-missing, in the order they are worth doing:
   the plain add does not set f14. That is a witness, not a swept field
   assignment — nothing here varied f14 against a second shape — so it is
   recorded as a starting point, not as an encoding.
+  (`f16_saturate_texture` compiles today: the shape that reaches the packer
+  from that probe is no longer `fmul.sat`.)
 
-- **The bindless texture-heap descriptor shape.** A sample whose texture and
-  sampler come from the bindless heap rather than the combined-sampler
-  descriptor names a *uniform* heap base in source 2; `agx3_emit_texture_sample`
-  requires that source to be the immediate zero. This is what actually blocks
-  the LOD-bias and gradient probes today; see below.
-
-- **`textureGrad`'s gradient staging.** The instruction mode is grounded
-  (f139 = 5) but the four gradient scalars have to be published into operand
-  banks 8/10/12/14 through the ten-byte `copy.ep1` form, and only the
-  four-byte `copy.ep0` coordinate staging is implemented.
+- **A mixed-width `fcmpsel`.** `textureGrad(samplerCube, ...)` lowers cube to
+  2D array through a compare whose sources are 32-bit and whose destination is
+  16-bit, and that shape refuses in the ALU fallback, not the texture path:
+  `no grounded AGX3 encoding for fcmpsel [d16:reg8 s0=32:reg6.abs.cache
+  s1=32:reg2.cache s2=16:imm1 s3=16:imm0 cond=5 chan=1]`.
 
 ## The source modifiers and the 32-bit rounding modes
 
@@ -258,6 +496,959 @@ refusing in vkQuake. Two causes, both worth remembering:
   exports. **Read the shader dump, not just the pass/fail line**, when a probe
   passes that should not.
 
+## The width, kind and modifier axes are one encoding point (three.js, 2026-09-10)
+
+**Measured on hardware.** Chromium loading the three.js examples that render
+blank -- `shadowmap_pointlight`, `lights_spotlight`, `animation_keyframes` --
+with `AGX_MESA_DEBUG=shaders` printed **307 shader refusals in one run**,
+alongside 696 `VK_ERROR_FEATURE_NOT_PRESENT`, 604 "cannot encode fragment" and
+92 "cannot encode vertex". Normalising register and immediate numbers, the 307
+reduce to **six shapes**:
+
+```
+113x  fcmpsel [d16:reg s0=32:reg.abs.discard s1=16:imm s2=16:imm s3=16:imm cond=1 chan=1]
+ 84x  fadd    [d32:reg s0=16:reg s1=32:reg.neg cond=0 chan=1]
+ 80x  fcmpsel [d16:reg s0=32:reg.neg s1=32:reg.neg s2=16:reg s3=16:imm cond=5 chan=1]
+ 19x  bitop   [d32:reg s0=32:reg.neg s1=16:imm cond=0 chan=1]
+  9x  bitop   [d32:reg s0=32:reg.discard s1=16:imm cond=0 chan=1]
+  2x  texture_load [d32:reg s0=32:reg.discard s1=32:reg.discard s2=64:uni16
+                    s3=32:reg.discard s4=16:imm s5=16:null0 cond=0 chan=4 mask=0xf]
+```
+
+### The finding: one structural gap, not six
+
+Every one of the five ALU shapes is an operand **width**, an operand **kind**
+(register or immediate) or a source **modifier** -- and on this ISA all three
+are ordinary fields of *one* encoding point, freely composable. The packer
+modelled them as *separate encoders* with disjoint admission gates, so a shape
+standing on two axes at once had no home in either. That is the whole bug.
+
+Grounded with `metal-nt -arch applegpu_g17p`, one kernel per cell, every vector
+recovered by re-composing through `tools/decomp.c`. `float a`, `half b`:
+
+```
+ a + b        09011c0400c0            f35=4 f43=1   f18=0 f26=2
+ a - b        09011c0400c8            the same, plus f48
+ b - a        09041c0100c8            f35=0 f43=2   f18=4 f26=1, plus f48
+ a + fabs(b)  09011c04020000800200    f47
+ fabs(a) + b  09011c04020000800100    f30
+ b - fabs(a)  09041c01020800800200    f47 and f48 on one instruction
+-a - b        09041c0101080280        f48 and f31 on one instruction
+ b * -a       09041d0100c8            the same pair on f32mul
+ saturate(a+b)      09011c0401000082  f14 with f43 = 1
+ saturate(b-a)      09041c0101080082  f14, f48 and a narrow slot together
+ fma(a, c, h)       09011e05810800c0  f52=8 f60=1, the ADDEND narrow
+ fma(a, c, -h)      09011e05910800c0  the same, plus f65
+ fma(h, c, a)       09081e01810402c0  f18=8 f26=1, the multiplicand narrow
+```
+
+So `f43` is slot A's width sitting beside slot A's modifiers `f47`/`f48`;
+`f26` is slot B's beside `f30`/`f31`; `f60` is the ffma addend's beside
+`f64`/`f65`; and `f14` saturates whatever the widths are. **Nothing here is a
+separate form.** `agx3_falu_mods` now carries the widths next to the modifier
+bits for exactly this reason, and `agx3_try_float_modifier()` admits a 16-bit
+operand on any half.
+
+#### The KIND axis on the FMA multiplier slot (2026-09-10, glmark2 terrain)
+
+Widening `agx3_try_float_modifier()` along the *width* axis left the *kind*
+axis exactly as it was: `agx3_mod_src_any_width()` still demanded a register,
+so an FMA whose multiplier is an immediate **and** whose other operands carry
+`abs` fell through to `AGX3_REFUSE`. `glmark2 -b terrain` is refused on it --
+`vec4 h = 1.0 - abs(x) - abs(y);` in `terrain-noise.frag`:
+
+```
+agx3_pack_binary.c:10181: no grounded AGX3 encoding for ffma
+  [d32:reg2 s0=16:imm#32 s1=32:reg10.abs.discard s2=32:reg2.abs.discard
+   cond=0 nest=0 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+Kind is `f42`, and it sits on the same encoding point as everything else:
+`f42=2` reads the `f35` register slot, `f42=1` reads the `f34` minifloat, and
+neither disturbs `f30`/`f31` on the `f18` slot or `f64`/`f65` on the `f52`
+addend. Apple composes the cells (`.tmp/g17p-terrain-fma-imm-abs/fmaimm.metal`,
+recovered through `tools/decomp.c`):
+
+```
+ fma(a,b,c)                 09011e05810802c0            f42=2 f35=4
+ fma(0.5,b,c)               09010ea1810402c2            f42=1 f34=32
+ fma(0.5,fabs(b),c)         09010ea18304020200800100    plus f30
+ fma(0.5,fabs(b),fabs(c))   09010ea18b04020200800100    plus f30 and f64
+ fma(-0.5,b,c)              09011ea1810402c2            f34=160, NOT a neg bit
+ fma(0.5,fabs(b),-fabs(c))  09010ea19b04020200800100    plus f30, f64 and f65
+```
+
+Orthogonality is grounded for `f32add`/`f32mul`/`f32fma`/`fsel` and the
+bitwise ops -- it is **not** a general property of the ISA, so it is a cheap
+first hypothesis and not a licence to skip the witness. Every remaining cell
+this form's encoder admits therefore has its own kernel (`fmaimm2.metal`):
+
+```
+ saturate(fma(0.5,fabs(b),fabs(c)))  09010ea18b04020200820100   f14 beside f30/f64
+ saturate(fma(0.5,b,c))              09010ea1820402020082       f14 alone, ep4
+ fma(0.5,half b,c)                   09040ea1810002c2           f26=1, odd half
+ fma(0.5,b,half c)                   09010ea1810400c2           f60=1
+ fma(0.5,fabs(half b),fabs(c))       09040ea18b00020200800100   f26, f30 and f64
+```
+
+The last row is the interesting one: kind, width and two modifiers on a single
+instruction, composed by Apple.
+
+One bit is deliberately *not* admitted. `f31`, the multiplicand's negate, is
+never emitted beside an immediate multiplier -- asked for one, Apple folds the
+sign into the minifloat and leaves the abs bits alone:
+
+```
+ fma(0.5,-fabs(b),c)   09011ea18304020200800100   f34=160 and f30, no f31
+ fma(0.5,-b,fabs(c))   09011ea1890402c2           f34=160 and f64, no f31
+```
+
+`k * -b == -k * b`, so the packer folds it the same way and the encoder
+refuses `src1_neg`. Admitting an unwitnessed bit because its neighbours
+compose is exactly the inference this file exists to prevent.
+
+Two things worth keeping. A negated immediate multiplier is the minifloat's own
+sign bit -- there is no `f35` register slot in this form to hang a modifier on,
+so `agx3_falu_fma_mul_imm_mod()` refuses `src0_abs`/`src0_neg` and the packer
+folds the sign into the constant, as Apple does. And adding the `abs` bits
+moves the instruction from encoding point 3 (8 bytes) to point 5 (12 bytes);
+the encoder walks ep 0..5 and takes the first that composes, so the plain form
+keeps the short encoding.
+
+The refusal printer also gained a `#` for immediate operands here: `s0=16:imm32`
+reads as a 32-bit immediate when it is a 16-bit slot holding minifloat 32, and a
+width and a kind that print as one token are the same false-bug factory as a
+field left out entirely.
+
+The same is true of `fsel`. Its comparator widths are `f43`/`f60`, its absolute
+bits `f47`/`f64`, its negate `f65`, and its second comparator's *kind* `f59`
+with the value in `f51` (immediate) or `f52` (register):
+
+```
+ select(v.x, v.y, a >= c)          12051d07850302c0   f35=4 f52=6 f110=5
+ select(v.x, v.y, a >= -c)         12051d07850302c8   plus f65
+ select(v.x, v.y, -a >= c)         12071d05850303c8   operands EXCHANGED,
+                                                      f110 5 -> 6, plus f65
+ select(v.x, v.y, -a >= -c)        12051d07850303c0   relation flip alone
+ select(v.x, v.y, a <= c)          12051d07850303c0   byte-identical
+ select(v.x, v.y, fabs(a) >= c)    12051d0787030200800200800100
+ select(v.x, v.y, fabs(a) >= -c)   12051d0787030208800200800100   f47 AND f65
+ select(v.x, v.y, a >= (0.0h-b))   12051d06850302c8   f60=1 AND f65
+ select(v.x, v.y, a >= 0.5f)       12050da1850302c2   f59=1, f51=32
+ select(v.x, v.y, -a >= 0.5f)      12051da1850303c2   f51=160, f110=6
+ (fabs(a) <  c)    ? 1.0h : 0.0h   1203190523b00300208000800100
+ (fabs(a) < 0.5f)  ? 1.0h : 0.0h   120309a123b00302208000800100   f59=1, f51=32
+```
+
+Three of these retire standing in-tree claims:
+
+- **`-a >= -c` and `a <= c` are one instruction, byte for byte.** Double
+  negation is the relation flip and nothing else, on the general
+  register-select form as well as on the both-immediates one where it was
+  already recorded.
+- **ABS and NEG DO compose**, on *both* fourteen-byte endpoint families.
+  `agx3_alu_fcmp_select_imm_width_internal()` said "Mixing the negate with the
+  absolute modifiers is still not witnessed: ABS moves to a longer endpoint
+  that has no f65", and `agx3_alu_fcmp_select_reg_imm()` refused the same pair.
+  Both notes are wrong and both are retracted. With register selects,
+  `fabs(a) >= -c` is `12051d0787030208800200800100`. With immediate selects,
+  where abs escalates the form:
+
+        (fabs(a) <  c) ? 1.0h : 0.0h   1203190523b00300208000800100
+        (fabs(a) < -c) ? 1.0h : 0.0h   1203190523b00308208000800100
+        (fabs(a) < -c) ? 1.0f : 0.0f   02011b0523b00308208000800100
+        (-a < fabs(c)) ? 1.0h : 0.0h   1205190323b00208208000800100
+
+  one field apart, and the last row is the swap with the abs travelling with
+  the operand it belonged to -- f35/f52 exchange 2/4 -> 4/2 and f110 flips
+  lt -> gt, which is what this encoder now produces for that input.
+- **An immediate comparator is not restricted to zero.** The gate demanded
+  `value == 0`; against the register row directly above it, the immediate row
+  changes only `f59` and the operand field. A modifier on that slot is constant
+  folding -- a minifloat's sign is bit 7 -- which is how Apple spells
+  `-a >= 0.5f` as `a <= -0.5f`.
+
+And of `bitop`. The second operand's kind is `f37` on the register form's own
+encoding point, with the constant in `f29`:
+
+```
+ a & c              0b051f01000000800000   f16=4 f37=2 f38=2
+ a & 0xff           0b011fff100200800000   f29=255 f37=1 f38=2
+ a | 0xff           0b011fff120a00800000
+ a ^ 0xff           0b011eff120a00800000
+ a & 0x7f           0b010fff100200800000   f29=127
+ a ^ 1              0b010e81120a00800000   f29=1
+ (ushort)a & 0xff   13021fff100200800000   f10=1 f24=1, f38 STILL 2
+ (ushort)a | 0x80   13021f81020a00800000
+```
+
+The narrow rows settle `f38`: a 16-bit result narrows `f10` and `f24` and
+**not** `f38`, because an immediate operand declares width 2 whatever the
+destination is -- the same rule the compare-select's immediate slot follows.
+
+### What was done, shape by shape
+
+1. **113x, `fcmpsel` with an absolute comparator against a minifloat.** An
+   admission gate, not an encoder: it demanded an immediate comparator of
+   exactly zero. Relaxed to any minifloat byte, with `abs`/`neg` on that slot
+   folded into the constant.
+
+   One caution on the bytes: the destination block has **two** placements on
+   this endpoint family and Apple emits both. Four `fsel` vectors in
+   `test/agx3_compose_corpus_vectors.c` put the destination at f3 with its
+   width at f11 (ep33); the two fresh kernels above put it at f17/f25 (ep28).
+   `tools/decomp.c` gives them **the same operand field vector**, so they are
+   two encodings of one instruction. This encoder deliberately tries the
+   corpus placement first -- preferring the kernels' one instead regressed
+   those four corpus vectors.
+
+2. **84x, `fadd` of a half and a negated float.** `agx3_falu_mods` gained
+   `src0_16`/`src1_16`/`addend_16` (f43/f26/f60) and
+   `agx3_try_float_modifier()` admits a narrow operand on any half. Every row
+   of the `f32add` / `f32mul` / `f32fma` ladder above reproduces byte for
+   byte, including the three that carry two modifiers at once.
+
+3. **80x, `fcmpsel` with both comparators negated.** Rewritten, not encoded:
+   the negate algebra (f65 for slot 1, operand exchange plus relation reversal
+   for slot 0, relation flip alone for both, sign fold for an immediate) now
+   lives in `agx3_alu_fcmp_select_reg_imm()` and `agx3_alu_fcmp_select()`, and
+   the block that used to refuse a negated comparator carries it through
+   instead. The both-negated form produces *exactly* the plain select's bytes,
+   which is the measured identity.
+
+4. **19x, a value move carrying a folded modifier.** `agx_optimizer_fmov()`
+   composes an `fneg`/`fabs` into its consumer, and a `MOV` -- Mesa's value
+   move -- has no field for one, because `agx_lower_pseudo()` turns it into a
+   `bitop`. The fix is upstream of the packer: at 32 bits that move now lowers
+   to `fadd(x{mods}, -0.0)`, which is what `agx_is_fmov()` matched in the
+   first place and what the modifier encoders already spell. A 16-bit move with
+   a modifier still refuses; no witness covers it.
+
+5. **9x, `bitop` against an immediate.** New encoder `agx3_alu_bit_imm()`,
+   grounded in the ladder above, wired in beside the register form.
+
+6. **2x, `texture_load`** with a 64-bit uniform descriptor and four discarded
+   register sources: **not closed.** See below.
+
+### Not closed, and why
+
+- **`texture_load [... s2=64:uni16 ... s5=16:null0 ... mask=0xf]`** (2 of 307).
+  It is the only one of the six that is not a modifier or a width, and the
+  refusal line as captured predates the printer fix that added `mask`, `fmt`
+  and `shift`, so the shape is under-determined: two different gates can print
+  it identically. Left fail-closed rather than guessed at.
+- **A 16-bit value move carrying a modifier.** The 32-bit lowering above has a
+  witnessed destination; the half one does not.
+- **`abs` or `neg` on the HALF slot of an `f32mul`.** The add rows cover both
+  slots; the multiply rows only cover a negate on the full slot.
+- **Both comparators at half width on one `fsel`.** Unchanged, and both entry
+  points still agree in refusing it.
+
+### One caution this cost
+
+Widening the source admission removed an *accident*: the destination checks in
+`agx3_try_float_modifier()` had been carried by the source checks, because a
+half operand failed them first and took the whole instruction with it. A vector
+or spilled destination reached the encoder the moment a narrow operand was
+admitted. The same held for register-only flags (`memory`, `kill`, `cache`,
+`discard`) on an *immediate* operand of a compare-select. Both are now stated
+explicitly. **When you relax one gate, check what it was silently standing in
+front of.**
+
+## Six application refusals closed 2026-09-10 (the second pass)
+
+Each of these failed a *real* application's shader closed, which on this driver
+is never a local failure: `hk_shader.c` returns `VK_ERROR_FEATURE_NOT_PRESENT`
+and the whole pipeline goes with it, and through Zink a dropped pipeline can
+latch `device_lost` permanently. Every one is reproduced under the G17P
+drm-shim (`.probe-lane` harness; `ASAHI_SHIM_CHIP=g17p`, that exact string) and
+every encoding is Apple's own from `metal-nt -arch applegpu_g17p`, decomposed
+with `tools/decomp.c` so a reported field vector is a fact about the encoder.
+
+The pattern that keeps repeating is worth naming once more: **five of the six
+were admission gates, not missing encoders.** The bytes were already
+reachable; a boolean stood in front of them, and in every case the boolean was
+recording what had been *measured* rather than what had been *ruled out*.
+
+### 1. `fcmpsel` with a negated FIRST comparator
+
+`-a > b` was refused while `a > b` compiled. f65 names the second comparator
+and only the second, so there is no bit for the first one -- but there is an
+identity. Apple spells `-a > b` as `b < -a`: the operands exchange places and
+the relation reverses. One kernel per relation, the reproducer's own shape (a
+32-bit result selecting 1 and 0):
+
+```
+ a >  b    02011d03228102c02080    f35=0 f52=2 f110=2
+-a >  b    02031d01228103c82080    f35=2 f52=0 f110=1 f65
+-a <  b    02031d01228102c82080    f35=2 f52=0 f110=2 f65
+-a >= b    02031d01268103c82080    f35=2 f52=0 f110=6 f65
+-a <= b    02031d01268102c82080    f35=2 f52=0 f110=5 f65
+-a == b    02031d01268100c82080    f35=2 f52=0 f110=0 f65
+ a < -b    02011d03228103c82080    f35=0 f52=2 f110=1 f65
+-a < -b    02011d03228102c02080    byte-identical to `a > b`, NO f65
+```
+
+The last two are what turn the rewrite from a reading into a fact. `a < -b`
+sets f65 with the operands in place, so f65 really is slot 1's. And `-a < -b`
+comes back as the plain `a > b` instruction with no f65 at all, so negating
+both sides is the relation flip alone -- the same algebra the swap relies on.
+
+The old gate also pinned the condition to `lt`, the result to 16 bits and the
+two selected immediates to 255 and 0, which was the shape that happened to
+have been measured. The rows above vary each of those independently.
+`dot(view - world, normal) > 0.0` is the idiom that found it.
+
+Still refused: the negate mixed with an absolute source. ABS is a *longer*
+endpoint that carries no f65, so admitting the pair would drop one of the two
+modifiers rather than encode both.
+
+### 2. `texture(sampler2DArrayShadow, vec4)` in a multi-texture shader
+
+The in-tree probe `f40_texture_shadow_array.frag` passed and SuperTuxKart's
+`sunlightshadow.frag` did not, which looked like the constant layer and
+constant reference in the probe. **It was neither.** A shader with exactly one
+texture instruction is claimed by `agx_nir_lower_g17p_combined_sampler()`,
+which assigns *immediate* descriptor indices; a shader with several falls back
+to `agx_nir_lower_g17p_indexed_samplers()` and arrives at the packer with
+descriptors in registers. Two gates then refused, one in the packer
+(`array && !immediate`) and its mirror in the composer.
+
+The descriptor operand class is orthogonal to both the comparison and the
+packed array layer. One fragment shader sampling `array<depth2d_array<float>,
+8>` through a runtime index against the same shader with a fixed
+`depth2d_array`:
+
+```
+fixed     1d800ca090002004010000001200                 ep3, 14 B
+indexed   1dc00ca09c002004930380011200802000000000     ep4, 20 B
+```
+
+They differ in exactly the four descriptor fields and the wider endpoint those
+imply -- the texture gains f97 = 24 with f103/f104 going 1 -> 3/2, the sampler
+gains f126 = 28 with f132/f133 going 1 -> 3/2. **f143 (the comparison) and
+f77 = 2 (the packed layer) are byte-identical across the pair.** Reading the
+descriptors out of `device` rather than `constant` memory gives the same
+instruction, so this is the shape either way.
+
+New probe: `f51_texture_shadow_array_multi.frag`, four samples of one cascade.
+
+### 3. `textureLod(samplerCube, dir, lod)`
+
+`texture(samplerCube, dir)` compiled and the explicit-level form did not. The
+whole difference was one clause in `g17p_sample_shape()`, which admitted an
+explicit per-lane level on a cube **array** and not on a plain cube. Neither
+the packer nor the composer ever objected: `agx3_tex_core.c` has listed
+`AGX3_TEX_LOD_REGISTER` among a cube's admissible LOD shapes all along, and
+`test-agx3-tex-core.c` has pinned the resulting instruction as "native cube
+register level" all along.
+
+Apple's own `texturecube<float>::sample(s, dir, level(reg))`:
+
+```
+05800cb8b0000003000010000100
+```
+
+which is that in-tree row field for field. Roughness-indexed probe lookups are
+what image-based lighting does; SuperTuxKart reaches it through
+`utils/SpecularIBL.frag`. New probe: `f50_texturelod_cube.frag`.
+
+### 4. `short(half)` -- the float-to-16-bit-integer convert from a half source
+
+`flt2int` is one form with three independent axes: f10 is the result width,
+f24 the source width, f41 the signed/unsigned mode. The in-tree encoder was a
+hardcoded ten-byte array with the source welded to f32:
+
+```
+short(float a)     270756020204b0c80200    f10=1 f24=2 f41=3
+short(half  a)     270756020204a8c80200    f10=1 f24=1 f41=3
+ushort(half a)     270756020204a8080300    f10=1 f24=1 f41=2
+ushort(float a)    270756020204b0080300    f10=1 f24=2 f41=2
+int(half a)        270756000200ac480300    f10=2 f24=1 f41=5
+short(half a[2i+1])270754030206a8c80200    odd half source and destination
+```
+
+The first two differ in exactly one field, which is what identifies f24 as the
+source-width selector rather than an unrelated instruction. Rewriting the
+encoder through the composer reproduces all three existing goldens unchanged.
+
+`int(clamp(x, 1.0, 32.0))` used as a loop bound becomes this once the
+arithmetic around it is half precision, which is what Hyprland's
+`motion_blur.glsl` does.
+
+### 5. `if (abs(a) == abs(b))` -- an absolute source on the control-flow compare
+
+Qt Quick's `conicalgradient.frag`. Exactly as on `fsel`, ABS is not a bit on
+the short form: Apple moves from a six-byte encoding point to a fourteen-byte
+one, ep0 to ep2, and f14 and f31 are the two sources' bits. Every other field
+keeps its number.
+
+```
+if (a < b)                  0a013a0303c0                    ep0,  6 B
+if (fabs(a) < b)            0a013b0303000300000000800100    ep2, 14 B  f14
+if (a < fabs(b))            0a013b0303000300000000800200    ep2, 14 B  f31
+if (fabs(a) < fabs(b))      0a013b0303000300000000800300    both
+if (fabs(a) > fabs(b))      0a013b0303000200000000800300    f46 = 2
+if (fabs(a) == fabs(b))     0a013b0307000000000000800300    f46 absent
+```
+
+**How to ask this question at all.** The earlier attempt recorded that MSL
+could not answer it, because Metal if-converts a conditional assignment into
+an `fsel` and the experiment then measures a different instruction. Put a
+`device` atomic in the branch body and it cannot: the compare stays a compare.
+That is the whole trick, and it is worth reusing for any control-flow shape.
+
+f38..f43 are this form's six producer wait slots, so Apple's kernels above
+wait on slot 6 because their operands come from a load. New probe:
+`f53_if_absolute_compare.frag`.
+
+### 6. `f47` (absolute compare source) with a 16-bit destination
+
+Listed in this file as a live CTS gap. The gate that refused it was
+`abs_compare && dest_16` in `agx3_alu_fcmp_select_reg_imm()`, and it was
+guarding a real bug one block below: the absolute immediate-select branch
+deposited a **fixed** 32-bit width into f25 rather than the requested one, so
+admitting a half result would have encoded a full one.
+
+Both are fixed together, and Apple's own bytes -- already quoted in this file
+for the 32-bit case -- carry the pair:
+
+```
+(fabs(a) < b) ? 1.0h : 0.0h   1203190523b00300208000800100   f25 = 1
+(fabs(a) < b) ? 1.0f : 0.0f   02011b0523b00300208000800100   f25 = 2
+```
+
+Eight of the 84 real Apple `fsel` instructions in
+`test/agx3_compose_corpus_vectors.c` say the same thing on the other endpoint
+family, setting f11 = 1 together with f47/f64 -- for instance
+`42d725d923810300208000000300` (ep33) and `3a8525db23820300800800000300`
+(ep34). The encoder emits the ep28/ep29 family for these; both round-trip
+through the production tables, and Apple's compiler uses both.
+
+`mediump` code reaches this shape whenever it writes a comparison on an
+absolute value.
+
+### One thing that is NOT closed, found on the way
+
+`clamp()` written entirely in half precision still refuses:
+
+```
+fcmpsel [d16:reg1 s0=16:reg1 s1=16:reg4 s2=16:reg1 s3=16:reg4 cond=7]
+```
+
+That is the tied-operand `fmin`/`fmax` pair at 16 bits with the NaN-ordering
+relation, a different encoder from any of the six above, and it is not
+grounded here. `int16_t(float16_t)` on its own compiles; `int16_t(clamp(h, a,
+b))` does not. The same run also turned up `convert [d16 s0=16:imm7
+s1=16:reg]`, the `int2flt` mirror of gap 4 -- a **half** source on the
+integer-to-float conversion -- which is one field on a form whose 32-bit twin
+`agx3_alu_i32_to_f16()` is already in tree, and is not done here either.
+
+## Five gaps closed 2026-09-10, measured under the G17P drm-shim
+
+Reproduced with a two-arm harness: the same client, the same binary, the same
+host, changing only `ASAHI_SHIM_CHIP`. **`g17p` selects G17P only for that
+exact string** -- anything else, unset included, silently falls through to
+`params_g13g` and your "test" becomes a second control. The AGX2 arm needs the
+`params_g13g` repair described under "The control arm" below.
+
+Every encoding below is Apple's own, obtained with `metal-nt -arch
+applegpu_g17p`, decomposed with `tools/decomp.c` (which re-composes and
+compares, so a reported field vector is a fact about the encoder), and each
+field pinned by a sweep that varies **one field at a time** against a control.
+
+### The rsqrt family's source modifiers
+
+`f32rsqrt` and `f32sqrtstep` take f30 (absolute value) and f31 (negate) in the
+same bit positions the funop family uses -- but their encoders had no
+parameters for them, so `sqrt(abs(x))` and `inversesqrt(abs(x))` were refused
+outright. One kernel per modifier, each a single-field difference:
+
+```
+o[i] = rsqrt(a[i])          af 01 56 00 02 00 b0 40 00 00
+o[i] = rsqrt(-a[i])         af 01 56 00 02 00 b0 40 01 00   f31
+o[i] = rsqrt(fabs(a[i]))    af 01 56 00 02 00 b0 c0 00 00   f30
+o[i] = rsqrt(-fabs(a[i]))   af 01 56 00 02 00 b0 c0 01 00   both
+o[i] = sqrt(a[i])           2f 01 56 04 03 00 92 40 00 00
+o[i] = sqrt(fabs(a[i]))     2f 01 56 04 03 00 92 c0 00 00   f30
+```
+
+`-fabs` setting both is what makes the two separable. NEG is deliberately not
+wired on the square-root step: `sqrt` of a negative is NaN, no witness
+exercises it, and an unwitnessed bit is worse than a refusal. The half forms
+have no modifier witness either and stay closed.
+
+`f32rcp` already carried both and needed no change -- verified, not assumed.
+
+**A trap worth naming.** The first attempt still refused, because the handler
+validated its source with `agx3_vary_reg32()`, which itself returns false for
+`.abs`. A helper can be the thing rejecting the modifier you just added.
+
+### `packHalf2x16`: the multiply's destination width is independent
+
+Refused: `fmul [d16:reg2 s0=32:reg2.discard s1=16:imm32]`. f10 selects the
+**destination** width and f26 the source's, independently, exactly as on
+`f32rcp`. Apple emits the mixed-width multiply directly:
+
+```
+o[i] = a[i] * 0.5f        (float o)   19 a1 15 03 80 c0   f10 = 2
+o[i] = half(a[i] * 0.5f)  (half  o)   11 a1 15 03 80 c0   f10 = 1
+o[i] = half(a[i] * 2.0f)              11 c1 15 03 80 c0   f17 = 64
+```
+
+So the **optimizer was right and the packer was wrong**. `agx_optimizer.c`'s
+FMUL exception in `agx_optimizer_fmov_rev()` folds the `f2f16` into the
+multiply and produces exactly this shape; a proposed fix to block that fold, or
+to widen the 16-bit source, would have papered over a form the hardware has.
+
+Two blockers had to come out, not one: an *earlier* `fmul_mixed_half` block
+claimed any 16-bit-destination FMUL and then refused it because the operand was
+an immediate, so the minifloat path below it was unreachable. It now requires
+both operands to be registers.
+
+> Beware f35 here. It sits next to f10 and it moved between the two witnesses,
+> which invites reading it as a second width selector. It is the **source
+> register**: `agx3_alu_fmul_minifloat_mod()` says `{35, src}`, and it differed
+> only because register allocation differed. Two samples and a plausible story
+> is precisely the trap the retraction below documents.
+
+### The `iadd` widening fix was partial
+
+Refused: `iadd [d32:reg2 s0=16:reg2.discard s1=16:imm7]` -- a 16-bit register
+plus an immediate, widened to 32 bits. The register+register form encoded, so
+the earlier fix looked complete; **it was partial, not regressed.** The
+encoder was already right (`test-agx3-iadd-core.c` had carried the exact bytes
+for a year); only the packer gate was missing.
+
+```
+int(short x) + 1     9f 01 56 00 02 02 00 08 15 0c   f15 = 1
+int(short x) + 2     9f 01 56 00 02 04 00 08 15 0c   f15 = 2
+int(short x) + 7     9f 01 56 00 02 0e 00 08 15 0c   f15 = 7
+int(short x) + 17    9f 01 56 00 02 22 00 08 15 0c   f15 = 17
+uint(ushort x) + 7   9f 01 56 00 02 0e 00 08 15 04   f43 clear
+```
+
+f15 is the slot-A immediate, f43 slot B's sign-extension.
+
+**A bare 16-bit integer source is SIGN-extended.** That is not a guess and not
+a coin flip: `agx_optimizer_signext()` fuses a SIGNEXT into the add by dropping
+it and *asserting* the surviving source carries no ABS, and `agx_pack.c`
+spells the same rule for AGX2 as `zext = abs || immediate`. Getting this
+backwards is a silent miscompile, so it is worth stating where the rule lives.
+
+This is the **highest-frequency codegen refusal in a real Vulkan CTS run**.
+
+### The negated integer source was a shifted subtract
+
+Reported as `iadd [d32:reg4 s0=32:reg0 s1=32:reg0.neg]` and read as a
+degenerate `x + (-x)` that should have folded to zero. **It is not.** The
+refusal printer did not show `shift`, and the instruction is `shift = 3`:
+`x - (x << 3)`, the strength-reduced form of `x * -7`. There is no optimizer
+bug and nothing folds to zero.
+
+There is also no integer negate field to find. Apple compiles `a - b` and
+`a + (-b)` to byte-identical `isub`; the missing piece was the **shift on slot
+B**, f54, which the subtract carries exactly as the add does:
+
+```
+o[i] = a[i] - (c[i] << 0)   1f 01 56 00 02 00 10 a8 17 05   f54 absent
+o[i] = a[i] - (c[i] << 1)   1f 01 56 00 02 00 10 e8 16 05   f54 = 1
+o[i] = a[i] - (c[i] << 2)   1f 01 56 00 02 00 10 a8 16 15   f54 = 2
+o[i] = a[i] - (c[i] << 3)   1f 01 56 00 02 00 10 e8 16 15   f54 = 3
+o[i] = a[i] - (c[i] << 4)   1f 01 56 00 02 00 10 a8 16 05   f54 = 4
+```
+
+Apple stops emitting this form at N = 5, so the shift is capped at four rather
+than extrapolated. The ADD keeps its existing shifted path
+(`agx3_iadd_encode`) untouched: re-routing a shape that already encodes is
+what cost two hardware probes before.
+
+**`mask`, `format` and `shift` are now printed by the refusal reporter.** Two
+of the five gaps here were misdiagnosed from an operand list that omitted
+them, which is a full round trip each time.
+
+### Register spilling was capped at scalars
+
+`stack_store [d0:none0 s0=32:reg16.discard s1=16:imm0 mask=0xf fmt=2]`. AGX3's
+grounded thread-private-storage form moves **one 32-bit component per
+instruction** (`agx3_translate_static_spill()` admits `mask == 1` only), so any
+*vector* spill or scratch access failed the whole shader closed -- regardless
+of what the shader computed. That silently capped shader complexity across the
+entire driver, which makes it the widest-reaching gap of the five.
+
+Closing it needed no new encoding. `mask` is always contiguous from component
+zero (both producers build it with `BITFIELD_MASK`), components live in
+consecutive registers and their stack slots are consecutive, so N scalar
+accesses at `offset + 4*c` are exactly equivalent. `agx3_split_vector_stack_access()`
+runs after register allocation -- which covers **both** producers, real spills
+from `agx_lower_spill()` and NIR scratch from `agx_emit_{load,store}_scratch()`
+-- and before the last-use pass, so each component's hints are computed against
+the instructions that actually survive.
+
+A second blocker sat behind it: the gate refused `data.discard`, which is set
+on essentially every real spill, since a spilled value is dead after its store.
+f27, which `src_kill` drives, *is* that last-use bit -- the same field the ALU
+forms set for `AGX3_ALU_HINT_DISCARD` -- so it is carried now rather than
+refused. `.cache` stays refused: this form models no cache hint, and claiming a
+live register is dead is a silent miscompile.
+
+**Still open on this path**, but no longer un-scouted: a *dynamic*-offset
+vector access (`stack_load [d32:reg16 s0=32:reg4.discard mask=0xf]`, a
+runtime-indexed scratch array) is the register-indexed `ldtps`/`sttps` family.
+`agx3_local_tps_core.c` already models it -- `struct agx3_tps_desc` carries
+`index`, `byte_offset` **and** `mask` -- so this needs no splitting and no new
+form, only wiring to `STACK_LOAD`/`STACK_STORE` in both the packer and the
+slot pass. What it does need is the rest of the field map.
+
+Apple witnesses, from kernels with a runtime trip count *and* a runtime index
+so nothing can be unrolled (the earlier attempt at this used a constant-folded
+index and produced 64 `ldtps` with *static* offsets, which looks like the
+dynamic form and is not):
+
+| MSL array   | bytes                        | f10 | f54 | f56 | f57 |
+| ----------- | ---------------------------- | --- | --- | --- | ---- |
+| `float[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half2[]`   | `6f005404040a490101000300`   | 1   | 3   | 2   | 4    |
+| `half[]`    | `6f005403040a410101800200`   | 1   | 1   | 1   | 4    |
+| `half4[]`   | `6f00540a060a470102800300`   | 1   | 15  | 3   | 8    |
+| `float2[]`  | `6f00540a060a590102800300`   | 2   | 3   | 3   | 8    |
+| `float4[]`  | `6f00540e0c0a570104000200`   | 2   | 15  | -   | 16   |
+
+`float[]` and `half2[]` are **byte-identical**, which is what decodes the
+family: f10 is the ELEMENT WIDTH (1 = 16-bit, 2 = 32-bit) and f54 the
+component mask *in those units*. A four-byte access is spelled as two 16-bit
+elements, so a scalar `float` and a `half2` are the same instruction. Read
+f54 as a 32-bit-word mask instead and `float[]` looks like an outlier that
+falsifies the whole reading; it is not an outlier, it is the clue.
+
+f2 is the data register and f16 the index register, both swept across the
+kernels above.
+
+#### The three unknown fields are now resolved
+
+- **f57 is `byte_offset`.** Proven with three `float[32]` arrays in one kernel,
+  128 bytes apart: their accesses come back with f57 = **4, 132, 260** — steps
+  of exactly 128, over a four-byte frame header. In single-array kernels f57
+  was 4, 8 and 16, which looked like it was tracking the *element size*; it was
+  not, the array simply starts at an element-aligned base. One array cannot
+  distinguish those two readings. Two do.
+- **f56 is `shift`,** the scaling applied to the index: half → 1, four-byte →
+  2, eight-byte → 3. Sixteen-byte elements come back with f56 = 0 and a
+  pre-scaled index, so shift is witnessed at 0..3 and never 4.
+- **f41 is `frame_region`, and it is 1** in every dynamic-index witness (the
+  static-offset spills use 2).
+- The component mask f54 is witnessed at **1, 3, 7 and 15** — `float3` and
+  `half3` supply the 7 — so every contiguous mask Mesa can produce is covered.
+
+`byte_offset = 0` composes, and the existing `tps_ok()` gate already admits
+every combination above (mask 1..15, shift 0..3, frame_region 1..6).
+
+#### What actually blocks it: f66 is welded into the baseline
+
+`tps_baseline()` pins **f66 = 1** on every load, as if it were a form constant.
+It is not. Apple varies it, and *every* dynamic-index load witnessed here has
+f66 = **0**:
+
+```
+in-tree corpus vector   6f 00 54 00 00 0a 49 01 01 40 03 00   f66 = 1, index 0
+Apple float4 v[64]      6f 00 54 0e 0c 0a 57 01 04 00 02 00   f66 = 0, index 12
+Apple half3  v[64]      6f 00 54 06 06 0a 4d 01 02 80 03 00   f66 = 0, index 6
+```
+
+So the in-tree encoder **cannot emit any of these instructions**: composing the
+correct field vector yields byte 9 with an extra 0x40 every time. That, not the
+three fields above, is the real blocker — and it is the same defect shape as
+the ALU wait/lifetime bits described under "Standing defect" below, and as the
+texture guards that folded LOD mode into a predicate: *an orthogonal field
+modelled as part of a form*.
+
+What f66 selects is **not determined**. It is not index-present (the f66 = 1
+vector has index r0, which is a real register), not the slot (both use slot 6),
+and not obviously the offset. Six witnesses all sit on one side of it, so
+nothing here separates the two values.
+
+**This is where the work stops.** The three fields it was sent to resolve are
+resolved; a fourth, previously unrecorded, is not. Adding a knob for f66 would
+reproduce these six witnesses byte-exactly while guessing the policy for every
+shape not among them — and the consumer is *register spilling*, where a wrong
+field corrupts arbitrary shader state rather than one value and would present
+as unrelated failures across every future run. Determine what selects f66
+first; the encoding is otherwise ready and needs no new form.
+
+### Closed: `.abs` on a comparison source (`fcmpsel`)
+
+`(abs(a) < b) ? 1.0h : 0.0h` refuses:
+
+```
+fcmpsel [d32:reg8 s0=32:reg0.abs.discard s1=16:imm32 s2=32:reg2.discard
+         s3=16:imm0 cond=5]
+```
+
+It is tempting to assume this is another f30-style modifier bit, as it was for
+the rsqrt family. **It is not, and that is the useful finding.** Adding `.abs`
+changes the *endpoint and the instruction length*:
+
+```
+o[i] = (a[i]       < b[i]) ? 1.0h : 0.0h
+   12 03 19 05 22 b0 03 c0 20 80                    form 134 fsel ep20, 10 B
+o[i] = (fabs(a[i]) < b[i]) ? 1.0h : 0.0h
+   12 03 19 05 23 b0 03 00 20 80 00 80 01 00        form 142 fsel ep28, 14 B
+o[i] = (fabs(a[i]) > b[i]) ? 1.0h : 0.0h
+   12 03 19 05 23 b0 02 00 20 80 00 80 01 00        form 142 fsel ep28, 14 B
+o[i] = (fabs(a[i]) < b[i]) ? 1.0f : 0.0f
+   02 01 1b 05 23 b0 03 00 20 80 00 80 01 00        form 144 fsel ep30, 14 B
+o[i] = (-a[i]      < b[i]) ? 1.0h : 0.0h
+   12 05 19 03 22 b0 02 c8 20 80                    form 134 fsel ep20, 10 B
+```
+
+So NEG stays on the ten-byte endpoint (f35/f52 swap, f65 and f110 move) while
+ABS moves to a fourteen-byte one carrying f47. ep28/ep30 are therefore modelled
+as forms in their own right, one sweep per field, rather than by adding a bit
+to ep20 -- which would have composed cleanly and encoded a different
+instruction.
+
+**This was the largest single codegen gap on the part.** A complete Vulkan 1.0
+CTS run reports 1,514 g17p-only refusals against zero on the AGX2 arm, and they
+reduce to this one shape:
+
+```glsl
+float f = uintBitsToFloat(b.data[i]);
+b.data[i] = (abs(f) > 1.0e30) ? 1u : 0u;
+```
+
+`isinf()` lowers to the same instruction. `isnan()` has no `abs` and always
+passed, which is what identifies the modifier rather than float classification
+as the cause. dEQP's own `isOk()` helper uses `abs()`, so the event count is
+far larger than the number of distinct causes -- `glsl.builtin` alone
+contributes 638, all `isinf`. It is also the shape `textureGrad(samplerCube,
+...)` reaches through cube-to-2D lowering.
+
+Field map for ep28/ep30, each pinned by one kernel per field:
+
+| field | meaning                                             |
+| ----- | --------------------------------------------------- |
+| f17   | destination register (swept 2/3/6/8)                |
+| f26   | destination cache hint                              |
+| f35 / f52 | comparison source 0 / 1 registers               |
+| f44 / f46 | source 0 cache / last-use                       |
+| f61 / f63 | source 1 cache / last-use                       |
+| f47 / f64 | source 0 / 1 ABSOLUTE VALUE (separable)         |
+| f68 / f85 | the two minifloat selects                       |
+| f107  | scoreboard wait slot 6                              |
+| f110  | condition (0 eq, 1 lt, 2 gt, 5 ge)                  |
+
+The half-destination (ep28) and 32-bit-destination (ep30) endpoints each
+*refuse* the other's width vector, so scanning the range cannot silently pick
+the wrong one.
+
+**Does one mechanism serve `.abs` and `.neg` here? No — and the answer is
+worth stating, because the symptom invites the opposite conclusion.** Every
+Vulkan 1.0 refusal being "a source modifier" makes it look like one hole. It
+is not: within this single opcode family, NEG is a bit on the short endpoint
+and ABS is a different, longer endpoint. Across families it is wider still —
+`.abs` on the rsqrt family is f30 on the same form, `.neg` on an integer add
+is not a modifier at all but a rewrite to `isub`. Four disjoint mechanisms,
+one symptom.
+
+An absolute source is routed to the long-endpoint encoder unconditionally.
+The short-endpoint encoder takes no abs parameter, so letting an absolute
+source fall through to it would encode the comparison *without* the
+modifier — a wrong result rather than a refusal. That is worth guarding
+deliberately: the fail-closed property only holds if nothing downstream can
+quietly accept the operand and drop the bit.
+
+### `fcmpsel` is a regular four-operand form -- build to that, not to shapes
+
+Closing `.abs` on the immediate-select `fcmpsel` cleared **32 of 1,514** Vulkan
+1.0 refusals (2.1%): `glsl.builtin` 638 -> 622, `glsl.conversions` 180 -> 180,
+`glsl.texture_gather` 664 -> 664. The fix is real -- `m_abscmp` and `m_isinf`
+go REFUSED -> PASS, `m_isnan` is unchanged, g13g stays at 0 -- it is simply
+much narrower than the symptom class it belongs to. "Every refusal reduces to
+a source modifier" described the symptom; it did not predict the cure.
+
+**A falling refusal count only proves the shader now compiles.** Whether the
+32 emit *correct* code is unverifiable without hardware. Do not let "cleared"
+become "correct".
+
+The two survivors are ~98% of that measurement and they are not two more
+shapes -- they are two cells of one table this encoder does not express:
+
+```
+180x glsl.conversions, dEQP isOk() at mediump:
+  fcmpsel [d16:regN s0=32:regX.discard s1=32:regY.abs.discard
+           s2=16:regZ.discard s3=16:imm0 cond=5]
+isinf residue in glsl.builtin:
+  fcmpsel [d32:reg4 s0=16:imm0 s1=32:reg2.abs.cache
+           s2=32:reg4.discard s3=32:reg2.cache cond=1]
+```
+
+Both carry a **register** in a select slot; the in-tree family
+(`agx3_alu_fcmp_select_imm_*`) requires *both* selects to be immediates.
+
+Apple's own bytes show the form is completely regular. Four operands -- two
+compared, two selected -- and each carries an independent **(kind, width,
+value)** triple:
+
+| operand      | kind | width | value if register | value if immediate |
+| ------------ | ---- | ----- | ----------------- | ------------------ |
+| compare 0    | f42  | f43   | f35               | -                  |
+| compare 1    | f59  | f60   | f52               | -                  |
+| select true  | f76  | f77   | f70               | f68                |
+| select false | f93  | f94   | f87               | f85                |
+
+Kind is **1 = immediate, 3 = register**, and it is what selects which value
+field is live. Witnessed by holding everything else fixed and changing only
+the select operands' class:
+
+```
+(a < b) ? c : d          02 83 07 87 22 0c 03 c0 20 10
+    f76 = 3, f93 = 3, f70 = 12, f87 = 16      (registers)
+(fabs(a) < b) ? c : d    02 83 07 87 23 0c 03 00 20 10 00 80 01 00
+    the same, plus f47                        (ep27 -> ep35)
+(fabs(a) < b) ? 1.0h : 0.0h  12 03 19 05 23 b0 03 00 20 80 00 80 01 00
+    f76 = 1, f93 = 1, f68 = 48, f85 = 0       (immediates)
+0.0f < fabs(a) ? c : d   02 83 07 81 26 0c 00 c2 20 08
+    f59 = 1                                   (immediate COMPARE source)
+```
+
+and the ABS endpoint shift is the same +8 as before: the immediate-select pair
+is ep20..27 / ep28..35, the register-select pair ep27 / ep35.
+
+So the remaining work is **one regular encoder over that table**, not a fix per
+refusal shape. Given `compute.pipeline` alone reports 2,790 g17p refusals, a
+point fix per cell is the wrong shape of solution.
+
+MSL cannot supply the two survivor cells: Metal promotes half selects to
+32-bit (`half r = (fabs(a)<b) ? c : d` with half `c`/`d` still emits
+f77 = f94 = 2) and folds a register/immediate select mix away rather than
+emitting `fcmpsel` at all. The 16-bit-destination cell comes from *mediump*
+lowering, which MSL has no direct spelling for.
+
+**It does not need to.** `test/agx3_compose_corpus_vectors.c` already holds
+**84 real Apple `fsel` instructions for AGX3b**, with exact field vectors and
+bytes, and `test-agx3-compose-corpus.c` already requires the composer to
+reproduce every one byte-exactly. Both survivor cells are in it:
+
+```
+16-bit destination (f11 = 1), 8 vectors, e.g. ep33
+  42 d7 25 d9 23 81 03 00 20 80 00 00 03 00
+  f11=1 f77=1 f94=1  (16-bit dest and 16-bit selects)
+  f47=1 f64=1        (both compare sources absolute)
+  f76=1 f93=1 f68=1  (immediate selects)
+
+immediate compare source (f59 = 1), 32 vectors, e.g. ep27
+  e2 95 27 81 22 7a 02 02 20 7c
+  f59=1              (compare source 1 is an immediate)
+  f76=3 f70=122, f93=3 f87=124   (register selects)
+```
+
+Operand-kind coverage across those 84 vectors, by slot:
+
+| slot         | kind 1 (imm) | kind 2 | kind 3 (reg) |
+| ------------ | ------------ | ------ | ------------ |
+| compare 0    | 0            | 84     | 0            |
+| compare 1    | 32           | 52     | 0            |
+| select true  | 12           | 48     | 24           |
+| select false | 4            | 56     | 24           |
+
+Decoding those 84 completes the table. Each kind selects which value field is
+live, and the numbering **differs between the compare slots and the select
+slots** - the per-slot hazard this file warns about, seen again:
+
+| slot         | kind 1        | kind 2             | kind 3       |
+| ------------ | ------------- | ------------------ | ------------ |
+| compare 0/1  | immediate f51 | register f35 / f52 | -            |
+| select true  | immediate f68 | f86                | register f70 |
+| select false | immediate f85 | f86 (+f97)         | register f87 |
+
+Two things fall out. First, on a compare slot **kind 2 is the register** and
+kind 1 the immediate, while on a select slot the register is kind **3**, so a
+single "kind" enum shared across all four slots would be wrong. Second, every
+immediate compare source in the corpus has f51 = **0** (32 of 32), which is
+exactly the `s0=16:imm0` the surviving `isinf` shape carries.
+
+**Neither survivor needs kind 2.** The 16-bit-destination cell is a register
+select (kind 3) plus an immediate one (kind 1); the immediate-compare-source
+cell is kind 1 on the compare slot plus register selects. Kind 2 is the
+majority class in the corpus and remains unidentified - plausibly a uniform -
+and it is not on the path to either survivor, so it does not block this work
+and should not be guessed at to make the table look finished.
+
+The right shape of the work is therefore **one general encoder over the
+operand table, validated against all 84 corpus vectors**, rather than a fix per
+refusal cell. That matters because `compute.pipeline` alone reports 2,790
+refusals whose shapes are not yet inventoried.
+
+### Not an encoding gap: `device_load` at `reg192`
+
+A complete Vulkan 1.0 CTS run reports 32 refusals in `glsl.atomic_operations`
+of one `device_load` shape whose index register is `reg192`, which looks like
+an under-witnessed bound: `agx3_translate_mem()` and `agx3_mem_core.c` both
+refuse an index register above 191 with no recorded rationale, and Apple's
+1,494-instruction corpus only witnesses index registers up to **50**.
+
+It is not an extrapolation. Composing `lddev` and `stdev` directly, sweeping
+only the index field:
+
+```
+lddev f16 = 184   67 10 44 00 01 5c 20 00 51 01 00 40 46 00
+lddev f16 = 186   67 10 44 00 01 5d 20 00 51 01 00 40 46 00
+lddev f16 = 188   67 10 44 00 01 5e 20 00 51 01 00 40 46 00
+lddev f16 = 190   67 10 44 00 01 5f 20 00 51 01 00 40 46 00
+lddev f16 = 191   67 10 44 00 81 5f 20 00 51 01 00 40 46 00
+lddev f16 = 192   refused
+stdev f16 = 190   e7 00 54 00 00 5f 21 00 11 00 00 90 11 00
+stdev f16 = 192   refused
+```
+
+Both forms top out at 191: the field cannot name a higher index register, so
+the packer's cap is the hardware's. **These refusals therefore belong to
+register allocation, not to the encoder.** Either the allocator has to keep a
+memory operation's index operand inside the low 192 halves, or address
+legalization has to move a high index into a low register first. Closing it in
+the packer is impossible; there is no encoding to add.
+
+### The control arm
+
+`params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
+`num_clusters_total = 0`, which makes `agx_chip_from_params()` return
+`AGX_CHIP_UNKNOWN` and the device refuse to open. Without the real T8103
+identity there is no AGX2 arm at all, and every G17P result is unfalsifiable.
+Every non-architectural field is held equal to `params_g17p` deliberately, so
+the two arms differ only by generation.
+
+### Not verified
+
+- **No hardware.** Nothing here ran on a G17P. Every claim is an encoding
+  claim, checked byte-for-byte against Apple's compiler and against the
+  in-tree encoder, and nothing more.
+- `EXT_vertex_input_dynamic_state`: **confirmed repaired by the mixed-width
+  `iadd` encoding**, though not by the measurement first attempted here. A
+  dynamic-vertex-input harness written for it compiled no shader at all under
+  the shim (3 lines of `AGX_MESA_DEBUG=shaders` output against 204 for an
+  ordinary graphics pipeline) and passed with the fix reverted, so it proved
+  nothing. A separate lane built the missing coverage — nothing in the tree
+  exercised `VK_DYNAMIC_STATE_VERTEX_INPUT_EXT` — and first proved the path was
+  *reached*: under `shaders,internal` the dynamic variant's VS prolog carries
+  the whole narrow chain (`load_constant_agx format=r16_uint`,
+  `unpack_32_2x16_split_y`, `u2u16`, `f2f32`, `iadd`) and the static variant
+  carries none of it. Then, with the fix applied and reverted:
+
+  | dynamic attribute format | before | after |
+  | ------------------------ | ------ | ----- |
+  | `R8G8B8A8_UNORM`         | passes | passes |
+  | **`R16G16_SINT`**        | **prolog fails to compile** | **passes** |
+  | `R16G16_SFLOAT`          | passes | passes |
+
+  The trigger is `i2i32`/`u2u32` on a 16-bit source, not sub-32-bit formats in
+  general: the float path goes through `f2f32` and never forms the mixed-width
+  add. "Sub-32-bit vertex formats fail" was too broad in both directions.
+  **A harness that reaches no code proves nothing in either direction** — the
+  reverted-fix arm passing should have been read as a broken measurement, not
+  as evidence.
+- The immediate-zero-minuend `isub` (`-a`) has no reproducer here: the obvious
+  `uint(-int(x))` shader encodes on both arms already.
+
 ## vkQuake
 
 vkQuake is patched with a `-shader-sweep` switch that creates every pipeline in
@@ -324,6 +1515,109 @@ variants.
 Closing it is the same work as `f05_texture_bias` and `f12_texture_grad`:
 either teach that pass to keep the op, or ground the bindless-heap sample
 form.
+
+### The black world is not a packer refusal: it is a refused texture upload
+
+The sweep above qualifies *pipeline creation*, and it is clean. On hardware
+vkQuake still rendered its whole world black while the HUD, the alias models
+and the view model stayed visible, and separately aborted in
+`vk_queue_submit_add_command_buffer` on a command buffer that was neither
+INITIAL, EXECUTABLE nor PENDING. Both are one cause, and it is downstream of
+the compiler.
+
+vkQuake's world surfaces are a base texture multiplied by a lightmap that a
+compute pass rebuilds every frame (`update_lightmap.comp`). That pass reads
+its per-texel surface index from a `VK_FORMAT_R32_UINT` texture, which
+`TexMgr_LoadImage32` uploads with `vkCmdCopyBufferToImage` like every other
+texture — onto the staging command buffer that `R_StagingAllocate` hands out
+and that batches uploads until the staging buffer fills.
+
+`hk_g17p_buffer_to_image_copy_supported()` carried an eight-entry format
+allowlist that did not include `R32_UINT`, so that one copy was refused with
+`VK_ERROR_FEATURE_NOT_PRESENT`. Nothing reports it: `vkCmd*` returns void,
+and `vk_command_buffer_set_error()` only logs when the application installed a
+debug-utils messenger, which no game does. The refusal invalidates the shared
+staging command buffer, so the whole batch of uploads in flight is dropped and
+the subsequent submit is the one that trips the assertion.
+
+The gate was un-admitted, not unencodable. Everything below it is generic
+`vk_meta_copy_buffer_to_image`, which renders the staged texels through a
+native single-slice EOT view; what it needs from a format is colour-attachment
+support. `R32_UINT` has it — `ail_pixel_format[PIPE_FORMAT_R32_UINT]` is
+renderable, so `hk_get_format_features()` already advertised
+`COLOR_ATTACHMENT`, `TRANSFER_DST` and `BLIT_DST` for it. The driver
+advertised the copy and then refused it.
+
+Measured offline under the G17P drm-shim with
+`ASAHI_SHIM_VALIDATE_G17P_STREAM=1`, with vkQuake's own
+`update_lightmap.comp` compiled straight from `Shaders/`:
+
+| arm | `vkCreateComputePipelines` | upload command buffer | dispatch command buffer |
+| --- | --- | --- | --- |
+| before | ok | **`hk_cmd_meta.c:1895` FEATURE_NOT_PRESENT** | ok |
+| after  | ok | ok | ok |
+
+`G17P compute resources: txf=1 preamble=0 texture=0 sampler=1 scratch=0/0` —
+the real kernel passes `hk_g17p_compute_shader_supported()` on both arms, so
+the native compute admission gate was never the problem and neither was the
+packer.
+
+`g17p-vulkan-vkquake-world-gen`, `g17p-vulkan-vkquake-lightmap` and
+`g17p-vulkan-vkquake-world-compute` (`tests/g17p_vulkan_vkquake_*.comp`,
+`run_g17p_vkquake_world_compute_record.sh`) reproduce both kernels at their real
+resource shape and separate the staging command buffer from the per-frame one,
+so a refusal is attributed to the one that carries it rather than poisoning
+the measurement — a command buffer records no further error once it is
+INVALID. Under the shim they qualify compile and record; on hardware they
+also submit and compare the generated indirect commands, the generated index
+buffer and every lightmap texel against exact expected values.
+
+`HK_DEBUG_RECORD=1` turns on `vk_instance::enable_debug_logging`, which is
+what makes every `vk_command_buffer_set_error()` in the recording path name
+its file and line. There are about ninety of them across `hk_cmd_draw.c`,
+`hk_cmd_dispatch.c`, `hk_cmd_buffer.c` and `hk_cmd_meta.c` and they are all
+silent without it. Any "the application draws nothing and then asserts at
+submit" report should start there.
+
+## CLOSED: fcmpsel refused a negated source outside one witnessed shape
+
+**Closed 2026-09-10.** f65 turns out to be an ordinary field, orthogonal to
+the relation, the result width and the two selected immediates, and a negated
+FIRST source is the operand swap with the relation reversed. The byte ladder
+and the two controls that establish it are under "Six application refusals
+closed 2026-09-10" above. What follows is the original finding, kept because
+its reduction is the method and its closing paragraph is the posture this file
+keeps recommending.
+
+
+Found while reducing the above; it is **not** what broke vkQuake, whose real
+kernels compile. A vkQuake-shaped variant refused, and it reduces to one
+token:
+
+```glsl
+o.values[gl_GlobalInvocationID.x] = ( i.a > i.b) ? 1u : 0u;  /* compiles */
+o.values[gl_GlobalInvocationID.x] = (-i.a > i.b) ? 1u : 0u;  /* REFUSED  */
+```
+
+```
+agx3_pack_binary.c:7877: no grounded AGX3 encoding for fcmpsel
+  [d32:reg2 s0=32:reg4 s1=32:reg2.neg s2=16:imm1 s3=16:imm0
+   cond=1 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+There *is* a negate encoder, `agx3_alu_fcmp_select_imm_width_neg_second`, but
+`neg_second` admits it only for the exact witnessed shape: the negate on
+source 0, `AGX_FCOND_LT`, a 16-bit destination, both comparators 32-bit, and
+select immediates exactly 255 and 0. Here the negate landed on source 1, the
+destination is 32-bit and the immediates are 1 and 0, so the plain encoder is
+chosen and then refuses any modifier. The comment above `neg_second`
+deliberately declines to generalize, and that is the right posture: widening
+it needs an `applegpu_g17p` witness per shape, starting with the negate on
+source 1 (which the encoder can already reach by reversing the condition, as
+it does today) and a 32-bit destination.
+
+`dot(view - world, normal) > 0.0` is the shape that found it, and it is
+ordinary enough that other applications will hit it.
 
 ## Native Gallium's texel fetch: closed without AGX2 addressing
 
@@ -740,6 +2034,298 @@ rather than being encoded from an unwitnessed shape. `f29_texture_gather` and
   Mesa's f112 = 4 fragment samples are hardware-proven (the desktop renders),
   so this is recorded, not changed.
 
+## The coordinate offset and the depth comparison are orthogonal to everything
+
+Measured 2026-09-10. Every byte below is Apple's own, from the Metal 27.1
+offline AIR native translator targeting our exact part, and every field vector
+was recovered by re-composing the bytes through the production tables
+(`tools/decomp.c`) rather than by reading a disassembler's field names. The
+harness is `README-metal-witness.md`; the `.metal` sources and `.nat` outputs
+are in `.tmp/g17p-texgrad-evidence` alongside the earlier gradient work.
+
+```sh
+xcrun metal   -mmacosx-version-min=26.0 -c tex2.metal -o tex2.air
+xcrun metallib tex2.air -o tex2.metallib
+xcrun metal-nt -arch applegpu_g17p -N tex2.mtlp-json \
+               -platform_version macos 26.0 26.0 tex2.metallib -o out.nat
+```
+
+Each fragment entry is declared `fragment void` and stores to a `device`
+buffer, because a render pipeline compiled with no attachment information
+optimises a colour-only fragment away to an 80-byte stub and every variant you
+are trying to tell apart comes back byte-identical.
+
+### The offset is three fields, and it composes with every other property
+
+Each row below differs from its offset-free control by exactly
+**f43 = (y << 4) | x, f51 = 1, f141 = 1** — and by nothing else. That is what
+makes the offset orthogonal rather than a per-mode form.
+
+```
+control                                    with int2(1,1)
+t.sample(s, uv)                            05800cb8b0000102018810001200
+t.sample(s, uv, level(2.0f))               05800cb8b0001b02018810081200
+t.sample(s, uv, level(in.dx.x))            05800cb8b0001102018810001200
+t.sample(s, uv, bias(0.5f))                05800cb8b0000b03018810021200
+t.sample(s, uv, bias(in.dx.x))             05800cb8b0008102018810001200
+t.sample(s, uv, gradient2d(dx, dy))        05800cb8b0000902008810001200
+t.gather(s, uv)                            05800ca490000102018800001200
+t.gather(s, uv, component::y)              05800cac90000102018800001200
+arr.sample(s, uv, layer)                   05800cb8b0001bb7018810001200
+arr.sample(s, uv, layer, gradient2d)       05800cb8b0000db7008810001200
+arr.gather(s, uv, layer)                   05800ca490001bb7018800001200
+depth.sample_compare(s, uv, ref)           1d800ca090002102018800001200
+depth.gather_compare(s, uv, ref)           05800ca490002102018800001200
+heap t.sample(s, uv)                       05a00cb8b8000102938b90011200802000000000
+heap t.sample(s, uv, gradient2d)           05a00cb8b8000902928b90011200802000000000
+```
+
+The value sweep is the same in every one of those modes — measured on the
+plain sample, on `level(2.0f)` and on the gather:
+
+```
+int2(1,1)   f43 = 17
+int2(2,0)   f43 = 2
+int2(0,2)   f43 = 32
+```
+
+so f43 is the signed nibble pair `(y << 4) | x`. That is exactly what
+`agx_nir_lower_texture()` already builds for `nir_tex_src_backend2`:
+
+```c
+nir_def *nibble  = nir_iand_imm(b, nir_channel(b, offset, c), 0xF);
+nir_def *shifted = nir_ishl_imm(b, nibble, 4 * c);
+```
+
+### f43 is one shared slot, and the array immediate LOD claims it first
+
+The one exception to the orthogonality, and the reason this is a guard rather
+than a free pass. An *array* sample with an immediate level or bias puts that
+immediate in f43 with f51 = 1, so an offset has nowhere to go:
+
+```
+t.sample(s, uv, 3u, bias(0.5f))                05800cb8b000051b010010001202
+t.sample(s, uv, 3u, bias(0.5f), int2(1,1))     05800cb8b000451b010010001202
+```
+
+The two differ in **one bit**: f141 goes from absent to **2**, not 1, and f43
+still holds the bias. f141 is a two-bit selector, and f141 = 2 publishes the
+offset through a separate twelve-byte staged operand — the offsetted kernel is
+twelve bytes longer than its control. That staging has no slot plan here, so
+`agx3_tex_encode_sample()` refuses the combination rather than silently
+dropping one of the two values. The *register*-layer array form leaves f43 free
+and takes the offset normally, which is the form Mesa actually emits.
+
+### The comparison is one field too
+
+Same method, one `depth2d<float>` fragment per row. Each differs from the
+corresponding colour sample by f143 = 1, the one-component f75, and the dropped
+f74 mask-group bit — and by nothing else, so the comparison is orthogonal to
+f139 exactly as the offset is:
+
+```
+depth.sample_compare(s, uv, 0.5f)                1d800ca090002000010000001200
+                          ... level(0.0f)        1d800ca090002900010000001200  f139 2
+                          ... level(2.0f)        1d800ca090002900010000081200  f139 2, f29 128
+                          ... bias(0.5f)         1d800ca090002700010000021200  f139 1, f29 32
+                          ... level(in.dx.x)     1d800ca090002001010000001200  f139 4
+                          ... bias(in.dx.x)      1d800ca090002400010000001200  f139 3
+                          ... gradient2d(dx,dy)  1d800ca090002401000000001200  f139 5
+depth.gather_compare(s, uv, 0.5f)                05800ca490002000010000001200  f144 1
+```
+
+A comparison gather returns four texels, so it carries the full f75 mask the
+ordinary gather does; every other comparison returns one. `sample_compare` with
+a *register* reference is byte-identical to the constant-reference form — the
+value is staged into bank 4 either way — which is why the reference never
+appears in the instruction.
+
+The array and cube comparisons are a different shape: they use separately
+packed layer / CEM operands (f77 = 2, f76 = 4) rather than the register-layer
+form the sweep above was taken on, and they were only witnessed with an
+implicit LOD, so they keep it.
+
+### What was actually blocking the offset: the NIR shape gate, not the ISA
+
+Worth recording because the packer's offset encoding had existed for some time
+and was **completely unreachable**. `agx_nir_lower_g17p_combined_sampler()`
+counts a sample's NIR sources against an expected total, and that total had no
+term for `nir_tex_src_offset`. Any shader with a coordinate offset therefore
+failed the shape test, the pass disowned the whole shader, and it fell back to
+the heap-descriptor form — which then refused. A bare
+
+```glsl
+uFragColor = textureOffset(tex, texcoord.xy, ivec2(1, 1));
+```
+
+reported `agx3_pack_binary.c: no grounded AGX3 encoding for texture_sample
+[... s2=64:uni16 ...]`, and the `s2=64:uni16` is the tell: source 2 is the heap
+base, so the combined-sampler lowering had already given up. This is the same
+failure mode as "What actually blocked both probes" above, one pass over.
+
+The gate runs *before* `agx_nir_lower_texture()` in the fragment path and after
+it elsewhere, so it accepts either the raw `nir_tex_src_offset` or the packed
+`nir_tex_src_backend2` and requires the value to be compile-time constant --
+only a constant can reach an immediate field.
+
+### The 3D dimension, and where the gradient's extra pair goes
+
+f76 = 3 is orthogonal to f139 exactly as the 2D dimension is. Five texture3d
+fragments differing only in the LOD argument:
+
+```
+t.sample(s, uvw)                  05800cb8b0008001010010001200
+t.sample(s, uvw, bias(0.5f))      05800cb8b0003b00010010021200   f139 1, f29 32
+t.sample(s, uvw, bias(in.dx.x))   05800cb8b0009001010010001200   f139 3
+t.sample(s, uvw, level(in.dx.x))  05800cb8b0008821010010001200   f139 4
+t.sample(s, uvw, gradient3d(...)) 05800cb8b0009c01000010001200   f139 5
+```
+
+The per-lane forms need no new staging: the `level(reg)` kernel publishes its
+scalar with f5 = 6, the same bank-6 publication `agx3_tex_stage_lod()` already
+emits for 2D.
+
+`gradient3d` stages **six** scalars where the 2D gradient stages four, and the
+extra pair continues the same interleave into banks 16 and 18. Read off two
+literal-gradient kernels, where each staged value is the constant itself and
+therefore names its own slot:
+
+```
+gradient2d((1,2), (4,8))                banks 8/10/12/14    = 1 / 4 / 2 / 8
+gradient3d((1,2,4), (8,16,32))          banks 8/10/12/14/16/18
+                                          = 1 / 8 / 2 / 16 / 4 / 32
+gradient3d((64,128,0.25), (0.5,.75,1.5)) = 64 / 0.5 / 128 / 0.75 / 0.25 / 1.5
+```
+
+so the run is (ddx.x, ddy.x, ddx.y, ddy.y, ddx.z, ddy.z) -- the 2D order with
+one more pair, and exactly the order `agx_emit_tex()`'s collect already builds.
+The 2D row is the control that validates the reading method.
+
+A cube *comparison* needed nothing but the NIR gate:
+`agx3_tex_encode_sample()` already produced `1d800ca090003000010000001200`
+(f76 = 4 plus f143) and the packer already published the reference before the
+CEM bracket. A cube *gather* is grounded as an instruction
+(`05800ca490001000010000001200`) but still refuses: a cube sample must first
+run three `cem_calc` instructions and publish its face, and that path does not
+admit a gather.
+
+### `glsl.texture_gather`: what the refusals are, and one candidate not yet proven
+
+A Vulkan 1.0 CTS sweep reported 332 `texture_sample` refusals in
+`glsl.texture_gather`, all sharing `s1=16:imm0, s2=64:uni16, cond=0, chan=4`
+and varying in `s5`. Measured against this tree on 2026-09-10, one probe per
+cell:
+
+| variant           | 2D             | 2D array       | cube          |
+| ----------------- | -------------- | -------------- | ------------- |
+| basic             | encodes        | **encodes now**| refuses       |
+| offset (constant) | **encodes now**| **encodes now**| not witnessed |
+| offset (dynamic)  | **refuses**    | **refuses**    | not witnessed |
+| offsets (four)    | refuses        | refuses        | not witnessed |
+
+**`s2=64:uni16` is the tell**: source 2 is the bindless heap base, so both
+`agx_nir_lower_g17p_combined_sampler()` and the indexed-sampler fallback
+declined the shader before the packer ever saw it. Every refusal in that sweep
+carries it, so none of them is an encoding gap in the sample instruction --
+they are all shape-gate rejections.
+
+- **A dynamic gather offset is a real, distinct gap.** `textureGatherOffset`
+  admits a non-constant offset (unlike `textureOffset`), and f43 is an
+  immediate field, so only a constant can reach it. There is no witness for a
+  register-offset form and **there cannot be one from Metal**: MSL requires the
+  offset argument to be a compile-time constant, so Apple's compiler cannot be
+  made to emit whatever the hardware would use. This one needs hardware or a
+  captured Apple binary, not the witness harness.
+
+- **`textureGatherOffsets`** (four independent offsets) reaches the packer
+  through the indexed-sampler fallback with a **register** descriptor pair, and
+  the offset is only witnessed on the immediate and uniform pairs.
+
+- **A cube gather** is grounded as an instruction but needs the `cem_calc`
+  face-publication path to admit a gather.
+
+#### The format axis, and how to confirm it in one run
+
+The sweep found `rgba8` (182 events) and `rgba8ui` (150) refusing while
+`rgba8i` and `depth32f` never do, at a ~13-20% rate inside each cell -- so a
+further axis decides it. **Not proven here**, because the probe harness cannot
+reach it, but there is one mechanism that fits every column:
+
+`hk_shader.c` runs `agx_nir_lower_custom_border()` when
+`HK_FEAT_CUSTOM_BORDER` is set, i.e. when the app enables
+`customBorderColors`. Its `lower()` returns early for `tex->is_shadow`, and
+otherwise clones the tex twice and emits two *query* texops
+(`has_custom_border_color_agx`, `custom_border_color_agx`). Query texops are
+not in the set `g17p_sample_shape()` accepts.
+
+That predicts exactly what the table shows: `depth32f` is a comparison, takes
+the early return, and never refuses (1076 cases, zero); the rate inside a cell
+tracks how many variants use `clamp_to_border`; and it is a shader-key axis, so
+it is invisible to a probe corpus that never enables the feature.
+
+**Confirming it costs one CTS run:** `HK_PERFTEST=noborder` disables exactly
+that pass (`hk_device.c`, `HK_PERF_NOBORDER`). If the 332 events go away, the
+axis is the border lowering and the fix belongs in the shape gate, not in the
+encoder. If they do not, this candidate is wrong and should be struck.
+
+A theory that did *not* survive: the combined-sampler pass takes only one tex
+instruction per shader (`if (sample || !g17p_sample_shape(...))`), which looked
+like it would disown any multi-texture shader. Probed directly -- two samples,
+two gathers, a gather plus a texel fetch, a sample plus `textureSize` -- and
+all four encode, because the indexed-sampler fallback picks them up. The
+one-sample restriction is real and is not the cause.
+
+### texelFetchOffset was reaching an encoder with no offset field
+
+`agx_nir_lower_g17p_texture_early()` folds a txf offset into the coordinate --
+`texelFetchOffset(s, P, lod, offset)` is *defined* as `texelFetch(s, P + offset,
+lod)`, so the fold is exact rather than an approximation, and it is the only
+option: Metal cannot express a `read()` with an offset, so no witness for such
+a field can exist.
+
+Gallium selected that pass (`agx_state.c`, gated on `AGX_CHIP_G17P`).
+**Honeykrisp did not** -- `hk_shader.c` called the generic
+`agx_nir_lower_texture_early()` unconditionally. So on the Vulkan path the
+offset survived into a `texture_load` carrying a 32-bit immediate source, which
+`agx_validate_sources()` does not model. In a debug build that is
+`exit(1)`; in a release build the validator is compiled out entirely and the
+fetch encoder, which has no offset field, is reached instead. Now gated the
+same way Gallium gates it.
+
+### Two shapes used to abort; both now fail closed
+
+`agx_validate_sources()` exempts a 32-bit immediate from its 16-bit rule only
+for `AGX_OPCODE_TEXTURE_SAMPLE` with `!I->shadow`, and `agx_validate()` ends in
+`exit(1)`. Two shapes fell outside:
+
+```
+texelFetchOffset(tex, ivec2(uv), 0, ivec2(1,1))
+     67 = texture_load 45, #0, u8:u9, 1, #0, #17, xyzw, #0x0, 2d, slot 0
+
+textureOffset(sampler2DShadow, vec3(uv, 0.5), ivec2(1,1))
+     22 = collect 8, #17
+```
+
+The first is gone at the source: the fold above means no `texture_load` ever
+carries an offset on G17P. The second stays a refusal, but an honest one --
+`agx_emit_tex()` now materializes the immediate into a register before the
+collect, so what reaches the packer is ordinary IR and what comes back is
+`no grounded AGX3 encoding for texture_sample` rather than a dead process.
+
+### What is checked
+
+`test-agx3-tex-core.c` replays every row above byte for byte through
+`agx3_tex_encode_sample()`: 27 of 27 are exact against Apple's own bytes once
+the destination register and the group terminator f156 are set to what Apple's
+kernel used. `test-agx3-pack-binary.cpp` checks the packer end of it — that an
+offset survives every LOD mode, that the emitted sample instruction differs
+from its offset-free twin by exactly the field triple, that a comparison
+survives every LOD mode, and that a comparison gather keeps the four-texel
+mask. Probes `f33`-`f42` cover the same shapes from GLSL through the shim.
+
+**None of this is hardware-validated.** Every claim here is that our encoder
+produces the same bytes Apple's compiler produces for the same source shape.
+
 ## What changed earlier, and how it was measured
 
 Two compiler fixes, both grounded byte-exactly against Apple's own machine
@@ -750,6 +2336,12 @@ code (see "Getting Apple's own G17P encoding", below):
    all and every compute shader that sums `gl_LocalInvocationID`'s three
    16-bit components was refused outright. f24 is slot A's width and f39 is
    slot B's, on both encodings; f28 and f43 are their sign-extensions.
+
+   **This fix was PARTIAL — see "The `iadd` widening fix was partial" below.**
+   It closed the register+register form only. The register+**immediate** form,
+   `iadd d32, h_a, #k`, still had no path and stayed refused for another three
+   days, and it is the single highest-frequency codegen refusal in a real
+   Vulkan CTS run.
 
 2. **32-bit reciprocal and reciprocal square root.** `RCP` and `RSQRT`
    accepted only 16-bit operands, so a float divide or a `normalize()` — both
@@ -790,13 +2382,30 @@ Each line prints `ENCODES` or `REFUSED` with the `VkResult`; the exit status is
 the number of refusals. Add `AGX_MESA_DEBUG=shaders` to see which instruction
 the packer refused.
 
-As of this revision the compute probe reports 24 of 24 encoding and the
-fragment probe 25 of 28. The three refusals are `f05_texture_bias` and
-`f12_texture_grad`, both on the bindless-heap descriptor shape, and
-`f16_saturate_texture` on `fmul.sat`. Stock vkcube's own fragment SPIR-V
+As of 2026-09-10 the compute probe reports **25 of 25** encoding and the
+fragment probe **64 of 64**, with `AGX_MESA_DEBUG=shaders` printing no refusal
+line at all. That includes the sixteen probes added with the offset,
+comparison, 3D and texel-fetch work (`f33`-`f48`) and the four added with the
+second refusal pass (`f50`-`f53`, and `r25` on the compute side).
+
+Two files in `probes/*.frag` are **not** in that count and never were:
+`f34_hyprland_blur1` and `f34_hyprland_blur2` need `-DTEX_BINDING=1` and a
+descriptor layout that matches what they declare, and without one they abort
+inside `hk_nir_lower_descriptors.c` long before the packer runs -- which is
+upstream of everything this file is about. Drive those two through the census
+harness (`census.py`, which derives `PROBE_BINDINGS` per shader), not through
+the fixed-layout probe. `f05_texture_bias`, `f12_texture_grad` and
+`f16_saturate_texture`, which this file previously recorded as the three
+outstanding refusals, all encode. Stock vkcube's own fragment SPIR-V
 (`.tmp/g17p-wide-imad-evidence/vk-repro/cube.frag.spv`) encodes; it did before
 this revision too, so vkcube's reported failure is not this file's matrix and
 has not been reproduced here.
+
+**The refusal line is the authority, not the probe's pass/fail.** Two traps make
+a corpus that reads clean say nothing: Zink does not fail a draw whose pipeline
+it could not build (it logs "pipeline creation failed; dropping draws" and
+`glGetError()` returns success), and under the no-op shim nothing executes, so a
+framebuffer readback cannot tell a dropped draw from a working one.
 
 Two traps, both of which produced wrong answers before being caught:
 
@@ -1081,3 +2690,131 @@ is a different opcode byte (0x1f, not 0x9f) and carries `imm * 4` across bytes
   s3=32:reg2.discard cond=1]` (glitch). These are *mixed-width* selects -- a
   32-bit compare source with 16-bit immediate operands -- which the tied and
   untied 32-bit `fcmpsel` work above does not cover.
+
+### Re-measured against the production variants (2026-09-10)
+
+The three "Open" rows above are closed. The sweep that closed them was run on
+the shaders Hyprland actually compiles, not on the all-features-off baseline:
+`CShaderLoader::getDefines()` emits all fourteen `USE_*` flags for every
+program, and each renderer picks its own set at runtime: `renderBorder`
+(OpenGL.cpp:2197) takes `getDecoFeatures()`, which is
+`SH_FEAT_ROUNDING | SH_FEAT_CM` plus tonemap, alt-tonemap, SDR-mod or ICC, or
+just `SH_FEAT_ROUNDING | globalFeatures()` when the work buffer needs no
+colour management; `renderRoundedShadow` (2361) takes CM alone;
+`renderInnerGlow` (2476) takes `globalFeatures()` alone; `renderRect` (1081)
+takes rounding only when the rectangle is rounded. Forty-five variants
+covering all of those were compiled one per process through Zink ->
+Honeykrisp under the G17P drm-shim with `AGX_MESA_DEBUG=shaders`, alongside
+the same `gl_SampleMask` negative control this file's earlier sweep used,
+which fired.
+
+**Every decoration variant encodes**, including all nine border ones
+(plain, CM, CM+tonemap, CM+alt-tonemap, CM+SDR-mod, CM+tonemap+SDR-mod,
+CM+ICC, mirror, CM+mirror), all four shadow ones, both inner-glow ones, all
+three rounded-quad ones, and blur1/blur2/blurprepare/blurfinish/ext/glitch/
+rgbamatte and eleven surface variants.
+
+One variant does not, and it is a new row rather than one of the old ones:
+
+    surface.frag, USE_ROUNDING=1 USE_MOTION_BLUR=1
+    agx3_pack_binary.c:9914: no grounded AGX3 encoding for
+      convert [d16:reg3 s0=16:imm5 s1=16:reg1 cond=0 chan=1 mask=0x0 fmt=0
+               shift=0]
+
+That is `motion_blur.glsl`'s loop bound --
+`int samples = int(clamp(float(requestedSamples), 1.0, 64.0))` compared
+against a 16-bit loop counter -- reaching the packer as a 16-bit `convert`
+whose mode operand is the immediate, which no witness covers. Motion blur is
+off in the Omarchy configuration, so this refuses a variant the desktop does
+not currently build; it is recorded here so it is not rediscovered as a
+mystery later.
+
+The measurement trap this file records still holds exactly as written: the
+refused motion-blur shader still printed `OK (centre 0,0,0,0)` from the
+probe's own readback, because Zink logged
+`vkCreateGraphicsPipelines failed (VK_ERROR_FEATURE_NOT_PRESENT)` and dropped
+the draw, and under the no-op shim nothing writes the target either way. The
+packer's refusal line was the only thing that reported it.
+
+**What this rules out.** A refused shader makes Zink drop the draw, so the
+border would be *missing*, not discontinuous. Since no border variant is
+refused, "the border renders but with weird disconnects" is not a packer
+refusal, and the shader-encoding side of the Hyprland border is closed. The
+remaining place a border can break is the draw path: `renderBorder` issues one
+`glScissor` + `glDrawArrays` per rectangle of the damage-intersected border
+ring, so an ordinary border is four adjacent scissor rectangles that share
+their edges. `src/asahi/vulkan/tests/g17p_vulkan_scissor_ring.c` is the oracle
+for that, and its header records which existing scissor assertions do and do
+not constrain it: the two packed-byte tests cannot, and the one GL test whose
+expected values could (`test-g17p-gl-premult-pingpong.c`) has no recorded
+hardware run.
+
+## Two refusals found by compiling Mesa's own BVH builders (2026-09-10)
+
+These came from turning on `VK_KHR_acceleration_structure` and letting the
+common Mesa acceleration-structure build shaders
+(`src/vulkan/runtime/bvh/*.comp` plus the vendored radix sort) compile under
+the G17P drm-shim.  They are the first refusals found by compiling *Mesa's
+own* internal compute shaders rather than an application's; both are subgroup
+and control-flow shapes that no graphics workload in the probe corpus reaches.
+
+### 1. `shuffle` with a constant lane outside {0, 3, 5} -- CLOSED
+
+```
+agx3_pack_binary.c:6800: no grounded AGX3 encoding for shuffle
+  [d32:reg12 s0=32:reg12.discard s1=16:imm31 cond=0 chan=1 mask=0x0 fmt=0 shift=0]
+```
+
+`agx3_emit_simd_broadcast()` accepts an immediate lane only for the three
+witnessed values 0, 3 and 5.  The radix sort's first kernel broadcasts lane
+**31** (the last lane of a 32-wide subgroup, the standard end-of-scan read),
+so the very first build shader refused.
+
+**No new encoding was invented to close this.**  The register-lane and
+uniform-lane shuffle forms are already grounded for an arbitrary lane, so the
+fix is to stop turning an encodable shader into an unencodable one:
+
+- `agx_compile.c`, `nir_intrinsic_read_invocation`: on AGX3b, a constant lane
+  outside the witnessed set is materialised into a register instead of being
+  passed as an immediate.
+- `agx_optimizer.c`, the immediate inliner: it folded that mov straight back
+  in, so `AGX_OPCODE_SHUFFLE` source 1 is now excluded from inlining for the
+  same lanes.
+
+Both changes fire only on AGX3b and only for lane values that previously
+refused the whole shader, so they cannot regress anything that compiled
+before.  Suite unchanged at 183 ok / 1 expected fail / 0 fail.
+
+**What is still not closed:** the *immediate*-lane form for arbitrary lanes.
+Closing that needs a `metal-nt` witness of `simd_broadcast(x, N)` for several
+N, which would also settle whether the lane field is a plain immediate or a
+LUT.  Until then the register form carries it at the cost of one mov.
+
+### 2. Unconditional `break` nested deeper than 2 -- OPEN
+
+```
+agx3_pack_binary.c:5802: no grounded AGX3 encoding for break
+  [d0:none0 cond=0 chan=0 mask=0x0 fmt=0 shift=0]
+```
+
+`agx_lower_pseudo.c` already rewrites an AGX3 unconditional break as
+`break_if_icmp(r0l == r0l, nest)`, which is a fully grounded sequence -- but
+only for `I->nest <= 2`, because that is where the witnesses stop.  The radix
+sort's scan kernel breaks out from deeper than that and reaches the packer
+refusal.
+
+This is the blocker for `VK_KHR_ray_query` on G17P: the traversal itself is
+software and needs nothing unwitnessed, but the acceleration structure cannot
+be built until the builder's own shaders compile.
+
+**The experiment that closes it.** The nesting depth is an operand of the
+already-encodable `break_if_icmp`, so this is very likely a wider immediate
+rather than a different instruction -- but "likely" is exactly what this file
+exists to refuse.  Compile MSL with a loop break at nesting depth 1, 2, 3, 4
+and 5 through
+`metal-nt -arch applegpu_g17p -N x.mtlp-json -platform_version macos 27.0 27.0`,
+decode the resulting `break_if` at each depth, and check whether the depth
+lands in the same field and simply grows.  If it does, raising the `nest > 2`
+gate in `agx_lower_pseudo.c` is the whole fix; if the deeper forms use a
+different encoding, that encoding is what the witness gives you.  Five kernels,
+no hardware.

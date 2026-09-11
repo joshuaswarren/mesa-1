@@ -90,21 +90,7 @@ hk_device_finish_meta(struct hk_device *dev)
    vk_meta_device_finish(&dev->vk, &dev->meta);
 }
 
-struct hk_meta_save {
-   struct vk_vertex_input_state _dynamic_vi;
-   struct vk_sample_locations_state _dynamic_sl;
-   struct vk_dynamic_graphics_state dynamic;
-   struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
-   struct hk_addr_range vb0;
-   struct hk_descriptor_set *desc0;
-   bool has_push_desc0;
-   enum agx_visibility_mode occlusion;
-   struct hk_push_descriptor_set push_desc0;
-   VkQueryPipelineStatisticFlags pipeline_stats_flags;
-   uint8_t push[HK_MAX_PUSH_SIZE];
-};
-
-static void
+void
 hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
               VkPipelineBindPoint bind_point)
 {
@@ -164,7 +150,7 @@ hk_meta_init_render(struct hk_cmd_buffer *cmd,
    }
 }
 
-static void
+void
 hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
             VkPipelineBindPoint bind_point)
 {
@@ -1677,6 +1663,23 @@ hk_copy_requires_gfx(struct hk_image *img)
    return img->vk.samples > 1 && img->planes[0].layout.compressed;
 }
 
+/* The VkFormat of the plane an aspect selects. Single-plane images are their
+ * own plane; a multi-planar image's aspect picks one of the ycbcr planes,
+ * which is the format the copy will actually render into. */
+static VkFormat
+hk_g17p_copy_plane_format(const struct hk_image *image, VkImageAspectFlags aspect)
+{
+   const struct vk_format_ycbcr_info *ycbcr =
+      vk_format_get_ycbcr_info(image->vk.format);
+   if (!ycbcr)
+      return image->vk.format;
+
+   const uint8_t plane = hk_image_aspects_to_plane(image, aspect);
+   if (plane >= ycbcr->n_planes)
+      return VK_FORMAT_UNDEFINED;
+   return ycbcr->planes[plane].format;
+}
+
 static bool
 hk_g17p_copy_buffer_to_image_supported(
    struct hk_device *dev, const struct hk_image *image,
@@ -1684,10 +1687,22 @@ hk_g17p_copy_buffer_to_image_supported(
 {
    for (unsigned i = 0; i < info->regionCount; ++i) {
       const VkBufferImageCopy2 *region = &info->pRegions[i];
+      /* The gate needs colour-attachment support, which is what
+       * hk_get_format_features() reports from ail_pixel_format[].renderable.
+       * For a multi-planar destination the core selects the plane format and
+       * this is the aspect's own plane; ask about that one. */
+      const VkFormat plane_vk_format = hk_g17p_copy_plane_format(
+         image, region->imageSubresource.aspectMask);
+      const enum pipe_format plane_pipe =
+         hk_format_to_pipe_format(plane_vk_format);
+      const bool plane_renderable =
+         plane_pipe != PIPE_FORMAT_NONE &&
+         ail_pixel_format[plane_pipe].renderable;
       if (!hk_g17p_buffer_to_image_copy_supported(
       &(const struct hk_g17p_buffer_to_image_copy){
          .chip = dev->dev.chip,
          .format = image->vk.format,
+         .plane_format_renderable = plane_renderable,
          .layout = info->dstImageLayout,
          .image_type = image->vk.image_type,
          .samples = image->vk.samples,

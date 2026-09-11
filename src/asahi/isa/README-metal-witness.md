@@ -34,6 +34,35 @@ or `"label"` siblings are all parse errors.  Render pipelines use the
 `{"vertex_function": "<name>", "fragment_function": "<name>"}` pair of bare
 strings.
 
+#### Verified working invocation, MetalToolchain v27.1.5194.15 (2026-09-10)
+
+The entry above is only the innermost object.  It must be wrapped in a
+`pipelines` table, and three other things bite:
+
+    printf '{"pipelines":{"compute_pipelines":[{"compute_function":"K"}]}}' \
+        > p.mtlp-json                          # the .mtlp-json SUFFIX is load-bearing:
+                                               # any other name -> "malformed flatbuffer magic"
+    xcrun metal -c w.metal -o w.air
+    xcrun metallib w.air -o w.metallib
+    "$MT/metal-nt" -arch applegpu_g17p \
+        -platform_version macos 27.0 27.0 \     # without this the target is AIR 2.5/2.8
+        -N p.mtlp-json w.metallib -o out.bin    # and metallib is AIR 2.9 -> refused
+
+* A bare top-level `{"compute_function": ...}` or `{"compute_pipelines": ...}`
+  is `unknown field`; `{"pipelines":[...]}` is `wrong number of unnamed fields
+  in table vector`.  `pipelines` is a TABLE, not a vector -- use `{`, not `[`.
+  The four keys inside it are `compute_pipelines`, `render_pipelines`,
+  `tile_render_pipelines`, `mesh_render_pipelines` (strings recoverable from
+  `usr/metal/<n>/bin/air-pack`).
+* `-std=metalN.M` does NOT lower the emitted AIR version; only
+  `-platform_version` moves the target.  macos 26.0 gives AIR 2.8, which is
+  still too old; 27.0 works.
+* The output is a `Mach-O 64-bit GPU executable applegpu` whose code lives in
+  `__TEXT,__compute` for a compute pipeline -- NOT `__text`.  Extract with
+  `otool -s __TEXT __compute out.bin`.
+* `xcrun metal -arch applegpu_g17p -c` looks like a shortcut but dead-ends in
+  `Plugin interface not implemented: AIRNTEmitObject`.
+
 ### A render pipeline's fragment shader is dead code unless it has a side effect
 
 `metal-nt` compiles a render pipeline with no attachment information, so a
@@ -100,3 +129,166 @@ lddev signal slot = bits 70..72; lddev uniform base = byte4 = base/4.
   baseline: an all-zero field vector does not satisfy the form's predicates.
 - m1n1 `proxyclient/experiments/g17p_grid_helper_code.py` -- a captured 16 KiB
   Apple code image, 8 shaders, all of which disassemble cleanly to `end`.
+
+## Witness: the multisample texel-fetch sample index (2026-09-10)
+
+Question: does AGX3 accept a per-sample operand on a texture fetch, or is
+multisample sampling simply absent on G17P?  Answer: it accepts one.
+
+MSL `texture2d_ms<float, access::read> t; out[0] = t.read(gid, N);` compiled for
+`applegpu_g17p`, one constant N per kernel, plus a `texture2d` single-sample
+control and a register-sourced index.  Round-tripped through `decomp`:
+
+    N=0   051700000000   form 305 smp ep0 size6 : ... 119:3 132:3 133:1
+    N=1   051700000200   form 305 smp ep0 size6 : ... 119:3 126:2 132:3 133:1
+
+The two differ in exactly ONE byte and the field vectors differ in exactly one
+field.  **Field 126 carries the sample index, scaled by two** -- absent (0) at
+N=0, `126:2` at N=1.  That 2x is the ordinary half-register operand scaling,
+the same convention as `AGX_ABI_VIN_ATTRIB(i) = 2 * (8 + i)`.
+
+Two things this does NOT say, deliberately:
+
+* N=2, N=3 and the register-sourced index select a LONGER form (`smp ep1`,
+  size 8; `decomp` labels it form 360).  Its sample field was not isolated --
+  the standing per-form hazard above applies, so do not assume it is also 126.
+* Our compiler does not use this operand at all.  `agx_emit_image_load()`
+  packs the sample into the coordinate vector instead -- `agx_emit_collect_to`
+  of `{ms_index, layer}` into an extra 32-bit coordinate component
+  (agx_compile.c) -- and `agx_nir_lower_g17p_indexed_samplers` admits exactly
+  that shape.  That path is already in production for `vkCmdResolveImage` and
+  is covered by `test_indexed_multisample_fetch()`.  Both encodings evidently
+  work; this witness is a second, independent way in, not a correction.
+
+## Witness: the end-of-tile store CAN keep the samples (2026-09-10)
+
+Question: is G17P's end-of-tile store pinned to a 2D target -- i.e. can a
+multisample colour surface never be stored unresolved, so a multisample image
+can be created but never populated or read back? Answer: no. Apple's own
+builtin end-of-tile factory emits a second program per selector that stores the
+tile unresolved.
+
+`test/probes/g17p-native-rt0-eot.btnf.hex` is a flatbuffer whose root field 2 =
+5 selects that factory. Its one attachment table lives at file offset 0x70 with
+seven single-byte fields at 0x74..0x7a:
+
+    0x74 partition   0x75 internal format   0x76 texture type
+    0x77 (unused)    0x78 extra flags       0x79 components   0x7a (unused)
+
+Field 0x76 is the `Texture dimension` enum from `genxml/cmdbuf.xml`. Poking one
+byte and rerunning `metal-nt` walks it:
+
+    0 -> 48 bytes (1D)          4 -> 68 bytes (2D MULTISAMPLE)
+    2 -> 68 bytes (2D)          5,6 -> 80 bytes
+    3 -> 84 bytes (2D array)    8 -> 84 bytes (2D multisample array)
+    1,7 -> metal-nt SIGSEGVs (not renderable)
+
+The 2D and 2D-multisample programs differ in **three bytes**, and `decomp`
+round-trips that to exactly two encoder fields:
+
+    2D    PACK_IMGWIR 5:4 ... | IMGWBLK ... 29:3 30:1 32:1 ...
+    2DMS  PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:2 32:1 ...
+    2DA   PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:1 31:2 32:1 ...
+    2DMSA PACK_IMGWIR 5:6 ... | IMGWBLK ... 29:3 30:2 31:2 32:1 ...
+
+**IMGWBLK field 30 is the dimension class** (2D = 1, multisample = 2) and field
+31 is the array flag. No instruction is added for the multisample form: the two
+grid-coordinate SR reads are unchanged and nothing computes a sample index,
+because the block store covers every sample of the tile. The array form, by
+contrast, really does add a PACK_IMGWIR and a `get_sr` for the layer.
+
+Sweeping internal format (0x75) x components (0x79) shows the transform is
+uniform across all five selectors the driver uses, byte for byte:
+
+    byte 43 (PACK_IMGWIR wire width)  0x04 -> 0x06
+    byte 60                           0xa8 -> 0x28
+    byte 61 (selector | dim)          0x?5 -> 0x?2   (?  = 7,1,3,5,9)
+
+The attachment table carries no sample count -- the count comes from the
+tilebuffer geometry and the PBE descriptor, which is consistent with a block
+store that writes the whole imageblock. The distinct 84-byte signed builtins
+(RGBA16_SINT, RGBA32_SINT) were not swept, so they have no multisample witness
+and the packer refuses them.
+
+The matching write descriptor comes from the UMD rather than the compiler:
+`AGX::PBEStateEncoderGen9<kAGXRevHAL200>::StateFields::StateFields` derives its
+dimension nibble as `2 + ((flags >> 16) & 2)` (and 3 / 8 on the array path),
+and deposits `(samples >> 2) & 3` at word0[57:56] -- the two-bit `Sample Count`
+enum, 2x=0 4x=1 8x=2. Width and height stay logical. Cross-check: the same
+function's `level | (levels-1) << 44` write into word2 and its word0 bit 58 /
+word1 bit 63 extension markers are exactly what `agx_pbe_agx3_2d_mip_pack`
+already encodes from independent evidence.
+
+## Witness: AGX3 per-sample fragment execution is an unrolled shader (2026-09-10)
+
+`.tmp/g17p-msaa-grounding/` compiles the same MSL fragment function at
+`raster_sample_count` 1, 2 and 4 (the key is a `render_pipelines` entry field of
+that name). For a shader that reads `[[sample_id]]`, Apple's `applegpu_g17p`
+text grows 234 -> 290 -> 422 bytes and the number of tile-store sequences goes
+1 -> 2 -> 4, with the sample index folded in as an immediate. So per-sample
+execution on AGX3 is **unrolled inside the fragment program**, not an external
+sample loop as on AGX2 -- which is why `agx_linker.c`'s AGX2 loop does not
+transfer and `sampleRateShading` is a compiler gap rather than a hardware one.
+
+Separately, the *per-pixel* program for the same shader is 210 bytes at 1x and
+214 at 2x and 4x (2x and 4x byte-identical), so the ordinary fragment epilogue
+also changes under multisampling. That difference is unexplained and is not a
+claim about our own epilogue being wrong.
+
+## Witness: a loop break deeper than two levels is CNDCF, not a longer CNDLT (2026-09-10)
+
+Question: AGX3's exec-mask stack ops CNDST/CNDLT/CNDEND carry a level count,
+and the packer refused any loop break escaping more than the loop itself plus
+one enclosing `if`. Does Apple widen CNDLT's count, or emit a different unwind?
+Answer: neither -- there is a **separate instruction**, `cndcf`, whose count
+field is sixteen bits wide, and CNDLT is simply its compact count-2 form.
+
+`.tmp/g17p-deep-break-evidence/deepbreak.metal` breaks out of a `for` loop from
+inside 1..7 nested ifs. Every condition reads a distinct element of a
+`device const uint *` and every level stores before the next opens, so neither
+the conditions nor the blocks can be folded. `probe2.metal` adds four controls.
+Decoded with `tools/decomp.c` against the in-tree compose tables:
+
+    enclosing ifs   native break instruction        bytes
+    1               (none -- loop rotated; the      -
+                     exit test IS the loop's cndlt)
+    2               cndcf slot1 count3              8f 05 54 03 00 01
+    3               cndcf slot1 count4              8f 05 54 04 00 01
+    4               cndcf slot1 count5              8f 05 54 05 00 01
+    5               cndcf slot1 count6              8f 05 54 06 00 01
+    6               cndcf slot1 count7              8f 05 54 07 00 01
+    7               cndcf slot1 count8              8f 05 54 08 00 01
+
+`cndcf` is `length="6"`, `f12` at bits 24:39 (the count), `f1` at 40:42 (the
+flag slot), `f0` at bit 43 (invert) -- the same count/slot/invert triple CNDLT
+carries in a four-byte form with `f12` pinned to 2 at bits 24:25.
+
+Four controls pin the semantics:
+
+* **Sense.** Negating the innermost condition (`p_inv`) leaves the cndcf bytes
+  identical and changes only the compare. The break's sense is in the compare,
+  not in the count.
+* **Invert.** A break in an `else` arm (`p_else`) is `8f 05 54 03 00 09`: same
+  count, `f0` set. Apple folds the else into the cndcf rather than emitting a
+  `cndef`.
+* **Scope.** The same two-if break inside an INNER loop, with an outer loop and
+  an outer `if` still open (`p_inner`), is still **count 3** -- the count is the
+  number of levels open inside the *innermost* loop, loop included. That is
+  exactly how Mesa's per-loop `loop_nesting` counter is defined.
+* **Depth 1 never needs it.** With work after the `if` so the loop cannot be
+  rotated (`p_mid`), Apple still emits only CNDLT: two levels is the loop's own
+  cost and the compact form covers it.
+
+So the native level count is Mesa's `nest + 1` at every depth, because a loop
+owns two architectural levels where Mesa's model counts one. `agx3_cf_cndcf()`
+reproduces all eight witnessed encodings byte for byte
+(`test-agx3-cf-core.c: test_deep_break_levels`).
+
+Two smaller facts fell out and are worth not rediscovering:
+
+* A compute pipeline's `.nat` is a **container**: `__TEXT,__compute` of the
+  outer Mach-O holds one Mach-O per pipeline, and each of *those* carries the
+  machine code in `__TEXT,__text`. The extractor is
+  `.tmp/g17p-deep-break-evidence/extract.py`.
+* `cndend`'s own count (`f10`) is sixteen bits too, at the same bit position as
+  `cndcf`'s. Only 1 and 2 are witnessed and encoded.

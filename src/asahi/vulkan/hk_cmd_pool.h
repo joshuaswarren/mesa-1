@@ -39,6 +39,7 @@ struct hk_vdm_allocation {
 
 struct agx_device;
 struct agx_ptr;
+struct hk_device;
 
 bool hk_g17p_vdm_low_window_enabled(const struct agx_device *dev);
 
@@ -67,6 +68,10 @@ VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool force_usc,
 void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, struct list_head *bos);
 void hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool,
                                   struct list_head *bos);
+bool hk_g17p_upload_quarantine_enabled(const struct hk_device *dev);
+void hk_g17p_quarantine_command_uploads(
+   struct hk_device *dev, struct list_head *main_bos,
+   struct list_head *usc_bos, struct list_head *vdm_allocations);
 VkResult hk_cmd_bo_ensure_vdm_alias(struct hk_cmd_pool *pool,
                                     struct hk_cmd_bo *bo);
 

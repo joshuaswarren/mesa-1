@@ -9,6 +9,7 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
 #include "drm-uapi/asahi_drm.h"
+#include "util/log.h"
 #include "util/u_debug.h"
 
 struct hk_vdm_slab {
@@ -127,16 +128,15 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, bool usc, struct hk_cmd_bo **bo_out)
 }
 
 static void
-hk_cmd_bo_destroy(struct hk_cmd_pool *pool, struct hk_cmd_bo *bo)
+hk_cmd_bo_destroy(struct hk_device *dev, struct hk_cmd_bo *bo)
 {
-   struct hk_device *dev = hk_cmd_pool_device(pool);
    if (bo->g17p_vdm_alias) {
       agx_bo_bind(&dev->dev, NULL, bo->g17p_vdm_alias, bo->bo->size, 0,
                   DRM_ASAHI_BIND_UNBIND);
       hk_g17p_vdm_alias_free(&dev->dev, bo->g17p_vdm_alias, bo->bo->size);
    }
    agx_bo_unreference(&dev->dev, bo->bo);
-   vk_free(&pool->vk.alloc, bo);
+   vk_free(&dev->vk.alloc, bo);
 }
 
 static struct hk_vdm_slab *
@@ -253,9 +253,58 @@ hk_cmd_pool_free_vdm(struct hk_cmd_pool *pool,
    free(allocation);
 }
 
+bool
+hk_g17p_upload_quarantine_enabled(const struct hk_device *dev)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_UPLOAD_QUARANTINE", false);
+
+   return dev->dev.chip == AGX_CHIP_G17P && enabled;
+}
+
+void
+hk_g17p_quarantine_command_uploads(
+   struct hk_device *dev, struct list_head *main_bos,
+   struct list_head *usc_bos, struct list_head *vdm_allocations)
+{
+   assert(hk_g17p_upload_quarantine_enabled(dev));
+
+   const unsigned bo_count = list_length(main_bos) + list_length(usc_bos);
+   const unsigned vdm_count = list_length(vdm_allocations);
+
+   simple_mtx_lock(&dev->vdm.lock);
+   list_splicetail(main_bos, &dev->vdm.quarantined_bos);
+   list_inithead(main_bos);
+   list_splicetail(usc_bos, &dev->vdm.quarantined_bos);
+   list_inithead(usc_bos);
+   list_splicetail(vdm_allocations,
+                   &dev->vdm.quarantined_vdm_allocations);
+   list_inithead(vdm_allocations);
+   simple_mtx_unlock(&dev->vdm.lock);
+
+   if (bo_count || vdm_count)
+      mesa_logi_once("G17P command-upload quarantine active; retained until "
+                     "device destruction");
+}
+
 void
 hk_device_finish_vdm_slabs(struct hk_device *dev)
 {
+   list_for_each_entry_safe(struct hk_cmd_bo, bo,
+                            &dev->vdm.quarantined_bos, link) {
+      list_del(&bo->link);
+      hk_cmd_bo_destroy(dev, bo);
+   }
+   list_inithead(&dev->vdm.quarantined_bos);
+
+   list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
+                            &dev->vdm.quarantined_vdm_allocations, link) {
+      list_del(&allocation->link);
+      free(allocation);
+   }
+   list_inithead(&dev->vdm.quarantined_vdm_allocations);
+
    list_for_each_entry_safe(struct hk_vdm_slab, slab, &dev->vdm.slabs, link) {
       list_del(&slab->link);
       util_vma_heap_finish(&slab->heap);
@@ -302,14 +351,15 @@ hk_CreateCommandPool(VkDevice _device,
 static void
 hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
 {
+   struct hk_device *dev = hk_cmd_pool_device(pool);
    list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos, link)
-      hk_cmd_bo_destroy(pool, bo);
+      hk_cmd_bo_destroy(dev, bo);
 
    list_inithead(&pool->free_bos);
    pool->num_free_bos = 0;
 
    list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_usc_bos, link)
-      hk_cmd_bo_destroy(pool, bo);
+      hk_cmd_bo_destroy(dev, bo);
 
    list_inithead(&pool->free_usc_bos);
    pool->num_free_usc_bos = 0;
@@ -347,7 +397,7 @@ hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
    list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
       list_del(&bo->link);
       if (pool->num_free_bos > HK_CMD_POOL_BO_MAX) {
-         hk_cmd_bo_destroy(pool, bo);
+         hk_cmd_bo_destroy(hk_cmd_pool_device(pool), bo);
       } else {
          list_addtail(&bo->link, &pool->free_bos);
          pool->num_free_bos++;
@@ -361,7 +411,7 @@ hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool, struct list_head *bos)
    list_for_each_entry_safe(struct hk_cmd_bo, bo, bos, link) {
       list_del(&bo->link);
       if (pool->num_free_usc_bos > HK_CMD_POOL_BO_MAX) {
-         hk_cmd_bo_destroy(pool, bo);
+         hk_cmd_bo_destroy(hk_cmd_pool_device(pool), bo);
       } else {
          list_addtail(&bo->link, &pool->free_usc_bos);
          pool->num_free_usc_bos++;

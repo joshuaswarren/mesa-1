@@ -24,6 +24,7 @@
 #include "hk_native_sampler.h"
 #include "hk_queue.h"
 #include "vk_device.h"
+#include "vk_acceleration_structure.h"
 #include "vk_meta.h"
 #include "vk_queue.h"
 
@@ -77,6 +78,14 @@ struct hk_device {
    struct hk_descriptor_table sampled_images;
 
    struct vk_meta_device meta;
+
+   /* VK_KHR_acceleration_structure.  radix_sort is created on first use
+    * behind radix_sort_lock, because building it compiles a dozen compute
+    * pipelines that most devices never need. */
+   struct vk_acceleration_structure_build_args accel_struct_args;
+   struct radix_sort_vk *radix_sort;
+   bool radix_sort_failed;
+   simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
 
    struct {
@@ -93,6 +102,12 @@ struct hk_device {
    struct {
       simple_mtx_t lock;
       struct list_head slabs;
+
+      /* Opt-in command-upload lifetime falsifier. These lists retain complete
+       * upload BOs and VDM slab leases after command-buffer reset, preventing
+       * either address from being recycled before device destruction. */
+      struct list_head quarantined_bos;
+      struct list_head quarantined_vdm_allocations;
    } vdm;
 
    /* Native G17P indirect compute grid helper.  A compact indirect helper

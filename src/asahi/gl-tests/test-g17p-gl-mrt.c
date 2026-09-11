@@ -188,7 +188,8 @@ main(int argc, char **argv)
    for (unsigned i = 0; i < 2; ++i) {
       glBindTexture(GL_TEXTURE_2D, textures[i]);
       const GLenum format =
-         wboit ? (i == 0 ? GL_RGBA16F : GL_R8) : GL_RGBA8;
+         wboit ? (i == 0 ? GL_RGBA16F : GL_R8)
+               : (i == 0 ? GL_RGB8 : GL_RGBA8);
       glTexStorage2D(GL_TEXTURE_2D, 1, format, WIDTH, HEIGHT);
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i,
                              GL_TEXTURE_2D, textures[i], 0);
@@ -208,7 +209,7 @@ main(int argc, char **argv)
    glClearBufferfv(GL_COLOR, 0, clear0);
    glClearBufferfv(GL_COLOR, 1, clear1);
    glFinish();
-   static const uint8_t clear0_pixel[4] = {16, 32, 48, 64};
+   static const uint8_t clear0_pixel[4] = {16, 32, 48, 255};
    static const uint8_t clear1_pixel[4] = {80, 96, 112, 128};
    static const uint8_t wboit_clear1_pixel[4] = {80, 0, 0, 255};
    if (wboit) {
@@ -257,7 +258,7 @@ main(int argc, char **argv)
    glDrawArrays(GL_TRIANGLES, 0, 3);
    glFinish();
 
-   static const uint8_t drawn0[4] = {64, 32, 128, 64};
+   static const uint8_t drawn0[4] = {64, 32, 128, 255};
    static const uint8_t drawn1[4] = {32, 64, 16, 128};
    static const float wboit_drawn0[4] = {0.25f, 0.125f, 0.5f, 0.25f};
    static const uint8_t wboit_drawn1[4] = {112, 0, 0, 255};
@@ -295,7 +296,7 @@ main(int argc, char **argv)
    if (!exact)
       return EXIT_FAILURE;
    printf("g17p-gl-mrt: PASS — %s clear/reload/store %s\n",
-          wboit ? "RGBA16F+R8 WBOIT blend" : "dual RGBA8",
+          wboit ? "RGBA16F+R8 WBOIT blend" : "RGB8+RGBA8",
           noop ? "submitted" : "pixels exact");
    return EXIT_SUCCESS;
 }

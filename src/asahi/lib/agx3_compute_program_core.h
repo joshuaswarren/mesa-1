@@ -115,6 +115,10 @@ struct agx3_compute_program_upload {
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
 #define AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE \
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
+/* Word 0 of the indirect compute helper record, exported so a decoder or an
+ * oracle compares against the encoder rather than a retyped copy. */
+#define AGX3_G17P_NATIVE_INDIRECT_HELPER_WORD0 UINT32_C(0x10080000)
+
 #define AGX3_G17P_NATIVE_INDIRECT_HELPER_SIZE 28u
 #define AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE \
    (AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE + \

@@ -394,6 +394,28 @@ test_native_imad_immediate_addend(void)
         .multiplier_16=true, .multiplier_kill=true,
         .addend_is_immediate=true, .addend_immediate=1, .wait_mask=1},
        {0x9f,0x10,0x54,0x00,0x03,0x00,0x10,0x08,0x00,0x26,0x0a,0x00}},
+      /* Current Metal 32023.255, applegpu_g17p, exact
+       * `out[i] = a[i] * b[i] + c[i]` ushort MAD. */
+      {{.dest=2, .dest_16=true,
+        .src_a=3, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=2,
+        .multiplier_16=true, .multiplier_kill=true,
+        .src_c=4, .src_c_16=true, .src_c_kill=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x02,0x02,0x06,0x08,0x20,0x00,0x2e,0x2a,0x00}},
+      /* Current Metal 32023.255, applegpu_g17p, exact widening
+       * `uint(ushort) * uint(ushort)` product. */
+      {{.dest=0, .src_a=0, .src_a_16=true, .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=1,
+        .multiplier_16=true, .multiplier_kill=true,
+        .no_addend=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x00,0x02,0x00,0x04,0x00,0x10,0x26,0x0a,0x00}},
+      /* Same current-toolchain witness over signed short inputs. */
+      {{.dest=0, .src_a=0, .src_a_16=true, .src_a_sign_extend=true,
+        .src_a_kill=true,
+        .multiplier_is_register=true, .multiplier_reg=1,
+        .multiplier_16=true, .multiplier_sign_extend=true,
+        .multiplier_kill=true, .no_addend=true, .wait_mask=32},
+       {0x9f,0x00,0x56,0x00,0x02,0x00,0x04,0x00,0x10,0x26,0x1e,0x00}},
    };
    for (unsigned i=0; i<sizeof(narrow)/sizeof(narrow[0]); ++i) {
       CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow[i].d,out,&len));
@@ -408,13 +430,125 @@ test_native_imad_immediate_addend(void)
    narrow_bad = narrow[3].d;
    narrow_bad.no_addend = false;
    narrow_bad.src_c = 2;
-   narrow_bad.src_c_16 = true;
+   narrow_bad.src_c_16 = false;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+
+   narrow_bad = narrow[8].d;
+   narrow_bad.src_a_16 = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[8].d;
+   narrow_bad.multiplier_16 = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+   narrow_bad = narrow[8].d;
+   narrow_bad.multiplier_sign_extend = false;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
+}
+
+/*
+ * Narrow imad operands widened into a 32-bit product.
+ *
+ * A bare narrow operand is SIGN-extended -- the convention
+ * agx_optimizer_signext() enforces by dropping a SIGNEXT and asserting the
+ * survivor carries no ABS. Both the addend (slot C, width f54, sign f58) and
+ * the multiplicand (slot A, width f24, sign f28) can be narrow, and both were
+ * refused: the packer gates required an explicit modifier, and the encoder
+ * additionally allowed slot A's sign-extension only for a 64-bit result.
+ *
+ * Apple, one kernel per variable, everything else held fixed.
+ */
+static void
+test_native_imad_narrow_operands(void)
+{
+   uint8_t out[AGX3_IADD_MAX_LENGTH];
+   uint8_t len = 0;
+
+   /* o[i] = a[i]*b[i] + int(short c[i]) -- narrow addend, sign-extended. */
+   {
+      static const uint8_t want[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08,
+                                     0x00, 0x40, 0xd0, 0x2e, 0x6a, 0x00};
+      /* Field vector: f16 = 4 (slot A), slot B a register at 0, f46 = 8
+       * (slot C), f27/f42/f57 the three last-use hints, f65 the slot-6
+       * wait, f54 = 1 and f58 = 1 the addend's width and sign. */
+      struct agx3_imad_desc d = {
+         .dest = 0, .src_a = 4, .src_a_kill = true,
+         .multiplier_is_register = true, .multiplier_reg = 0,
+         .multiplier_kill = true,
+         .src_c = 8, .src_c_16 = true, .src_c_sign_extend = true,
+         .src_c_kill = true, .wait_mask = 1u << 5,
+      };
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want) && memcmp(out, want, len) == 0);
+
+      /* ushort: the same instruction with f58 clear. */
+      static const uint8_t want_u[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08,
+                                       0x00, 0x40, 0xd0, 0x2e, 0x2a, 0x00};
+      d.src_c_sign_extend = false;
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want_u) && memcmp(out, want_u, len) == 0);
+
+      /* A 32-bit addend moves f54 from 1 to 2. */
+      static const uint8_t want_32[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x08,
+                                        0x00, 0x40, 0xd0, 0x2f, 0x2a, 0x00};
+      d.src_c_16 = false;
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want_32) && memcmp(out, want_32, len) == 0);
+   }
+
+   /* o[i] = int(short a[i])*129 + int(short c[i]) -- narrow multiplicand.
+    * f28 is set with a 32-BIT result, which the encoder used to refuse. */
+   {
+      static const uint8_t want[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x02,
+                                     0x04, 0x02, 0x10, 0x2a, 0x66, 0x00};
+      /* f16 = 1 (slot A, an odd half because it is 16-bit), f24 = 1 and
+       * f28 = 1 its width and sign, f30 = 129 the immediate multiplier,
+       * slot C at 0 with f54 = 1 and f58 = 1. */
+      struct agx3_imad_desc d = {
+         .dest = 0, .src_a = 1, .src_a_16 = true, .src_a_sign_extend = true,
+         .src_a_kill = true, .multiplier = 129,
+         .src_c = 0, .src_c_16 = true, .src_c_sign_extend = true,
+         .src_c_kill = true, .wait_mask = 1u << 5,
+      };
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want) && memcmp(out, want, len) == 0);
+
+      static const uint8_t want_u[] = {0x9f, 0x00, 0x56, 0x00, 0x02, 0x02,
+                                       0x04, 0x02, 0x10, 0x2a, 0x22, 0x00};
+      d.src_a_sign_extend = false;
+      d.src_c_sign_extend = false;
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want_u) && memcmp(out, want_u, len) == 0);
+   }
+
+   /* Still closed: a 32-bit multiplicand widens nothing, and a narrow
+    * REGISTER multiplier with a 32-bit result has no witness. */
+   {
+      struct agx3_imad_desc d = {
+         .dest = 0, .src_a = 0, .src_a_sign_extend = true, .multiplier = 3,
+         .no_addend = true,
+      };
+      len = 0;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   }
+   {
+      struct agx3_imad_desc d = {
+         .dest = 0, .src_a = 0, .multiplier_is_register = true,
+         .multiplier_reg = 2, .multiplier_16 = true,
+         .multiplier_sign_extend = true, .no_addend = true,
+      };
+      len = 0;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   }
 }
 
 int
 main(void)
 {
+   test_native_imad_narrow_operands();
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
       const struct vec *v = &vectors[i];
       uint8_t out[AGX3_IADD_MAX_LENGTH];

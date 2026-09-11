@@ -98,6 +98,22 @@ hk_agx3_g17p_direct_color_resolve_supported(
           hk_agx3_g17p_rt0_tile_layout_supported(tib);
 }
 
+bool
+hk_agx3_g17p_multisample_store_supported(struct agx_tilebuffer_layout *tib,
+                                         unsigned color_attachment_count,
+                                         bool store_source,
+                                         unsigned target_samples)
+{
+   /* The mirror image of the direct resolve: this is the one path that keeps
+    * the samples. It needs storeOp = STORE, a target whose sample count is
+    * exactly the tile's, and the same bounded single-target tile layout the
+    * native EOT substitution covers. */
+   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+          color_attachment_count == 1 && store_source &&
+          target_samples == tib->nr_samples &&
+          hk_agx3_g17p_rt0_tile_layout_supported(tib);
+}
+
 static bool
 hk_agx3_g17p_graphics_state_tail(
    const struct hk_agx3_g17p_graphics_program_desc *desc,
@@ -216,12 +232,17 @@ hk_agx3_g17p_combined_sampler_pointers(
 {
    if (!heap || !pointers || heap->descriptor_set_va == 0 ||
        heap->sampler_heap_va == 0 || (heap->texture_offset_B & 7) != 0 ||
-       heap->sampler_element_size_B != 32 ||
-       heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX)
+       heap->sampler_element_size_B != 32)
       return false;
 
+   /* The software descriptor ABI uses zero for a null sampler. Native heap
+    * entry zero is the reserved robust sampler, while application samplers
+    * retain the legacy +28 bias. Saturating this rebase keeps both encodings
+    * on the same native entry and cannot underflow into unmapped memory. */
    const uint32_t native_index =
-      heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+      heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX
+         ? 0
+         : heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
    if (native_index >= heap->sampler_count)
       return false;
 
@@ -351,6 +372,7 @@ hk_agx3_g17p_rt0_bg_program_generate(
           desc->sampler_pointer_va ||
           (clear_push_halfs != HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
@@ -455,6 +477,8 @@ hk_agx3_g17p_rt0_bg_program_generate(
        (desc->op == HK_AGX3_G17P_RT0_BG_CLEAR &&
         written >
            (desc->clear_push_halfs == HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+            : desc->clear_push_halfs == HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
             : desc->clear_push_halfs == HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE

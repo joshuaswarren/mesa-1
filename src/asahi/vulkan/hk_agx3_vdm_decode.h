@@ -25,8 +25,12 @@ extern "C" {
  * layouts are rejected before any fields are consumed. */
 #define HK_AGX3_SHADER_BINARY_VERSION 14u
 
-/* Native VS witnesses export position plus sixteen float4 user locations. */
-#define HK_AGX3_G17P_MAX_USER_WORDS 64u
+/* The default public limit is the largest hardware witness promoted for normal
+ * applications.  The candidate limit adds one float4 for ANGLE's internal
+ * transform-feedback copy of gl_Position; it remains opt-in until the
+ * position-plus-seventeen-float4 image oracle passes on G17P. */
+#define HK_AGX3_G17P_DEFAULT_USER_WORDS 64u
+#define HK_AGX3_G17P_MAX_USER_WORDS 68u
 
 bool hk_agx3_shader_binary_version_supported(uint32_t version);
 
@@ -58,8 +62,9 @@ struct hk_agx3_g17p_vertex_compile_info {
 };
 
 /* Build the exact G17P VertexProgramVariant fields for a hardware vertex
- * shader with position and up to the witnessed sixteen ordinary float4 user
- * locations. System outputs and preambles are separate state shapes. */
+ * shader with position and up to the opt-in candidate's seventeen ordinary
+ * float4 user locations. System outputs and preambles are separate state
+ * shapes. */
 bool hk_agx3_g17p_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,

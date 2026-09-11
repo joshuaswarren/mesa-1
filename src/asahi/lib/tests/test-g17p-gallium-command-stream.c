@@ -382,10 +382,32 @@ check_multi_viewport_state(void)
    assert(!memcmp(&decoded.viewports[1], &fields.viewports[1],
                   sizeof(fields.viewports[1])));
 
+   /* Both selector composers emit the same fixed leading word, and the
+    * validator compares against that exported constant rather than a retyped
+    * copy of it. Pin the derivation from this side too: if the encoder ever
+    * changes the word, this fails here instead of the oracle reporting a
+    * correct driver as a corrupt command stream. */
    uint8_t indices[8];
    assert(agx_g17p_ppp_indices_base_pack(19 * 16, 21 * 12, 16, indices));
-   assert(load_le32(indices) == UINT32_C(0x100));
+   assert(load_le32(indices) == AGX_G17P_DRAW_STATE_SELECTOR_WORD0);
    assert(load_le32(indices + 4) == UINT32_C(0x00050003));
+
+   uint8_t single[8];
+   assert(agx_g17p_ppp_indices_pack(19 * 16, 21 * 12, single));
+   assert(load_le32(single) == AGX_G17P_DRAW_STATE_SELECTOR_WORD0);
+   assert(load_le32(single + 4) == UINT32_C(0x00140012));
+
+   /* The word is exact, not merely "bit 8 set": nearby values are not what the
+    * encoder emits, so an accept-set derived from it still refuses them. */
+   assert(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 != UINT32_C(0x00000000));
+   assert(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 != UINT32_C(0x00000101));
+   assert(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 != UINT32_C(0x00000300));
+   assert(AGX_G17P_DRAW_STATE_SELECTOR_WORD0 != UINT32_C(0x01000100));
+
+   /* The varying record's fixed word is exported by the same header and is
+    * what the 20-byte varyings slot is validated against. */
+   assert(load_le32((const uint8_t *)state + AGX_G17P_BIND_GROUP_BYTES +
+                    viewport.length) == AGX_G17P_VARYING_RECORD_WORD0);
 
    /* Every size/count boundary fails closed before touching live streams. */
    assert(!agx_g17p_upload_bind_state(

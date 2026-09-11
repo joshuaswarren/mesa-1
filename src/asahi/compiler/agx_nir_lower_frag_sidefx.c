@@ -9,9 +9,10 @@
 
 /* Fragment shaders with side effects require special handling to ensure the
  * side effects execute as intended. By default, they require late depth
- * testing, to ensure the side effects happen even for killed pixels. To handle,
- * the driver inserts a dummy `gl_FragDepth = gl_Position.z` in shaders that
- * don't otherwise write their depth, forcing a late depth test.
+ * testing, to ensure the side effects happen even for killed pixels. Trigger
+ * an all-live sample test after the side effects instead of synthesizing a
+ * FragDepth write. Besides avoiding needless position interpolation, this is
+ * the native operation for running tests without changing depth.
  *
  * For side effects with force early testing forced, the sample mask is written
  * at the *beginning* of the shader.
@@ -20,23 +21,42 @@
 #define ALL_SAMPLES (0xFF)
 
 static void
-insert_z_write(nir_builder *b)
+insert_late_test(nir_builder *b)
 {
-   /* When forcing depth test to NEVER, force Z to NaN.  This works around the
-    * hardware discarding depth=NEVER.
-    *
-    * TODO: Check if Apple has a better way of handling this.
-    */
-   nir_def *bias = nir_bcsel(b, nir_ine_imm(b, nir_load_depth_never_agx(b), 0),
-                             nir_imm_float(b, NAN), nir_imm_float(b, -0.0));
+   nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
+   nir_sample_mask_agx(b, all_samples, all_samples);
+}
 
-   nir_def *z = nir_fadd(b, bias, nir_load_frag_coord_z(b));
+/*
+ * This pass runs from agx_preprocess_nir, which drivers may call more than once
+ * on the same shader: Honeykrisp preprocesses at shader creation
+ * (hk_preprocess_nir) and again while lowering (hk_lower_nir). The late test
+ * must be inserted exactly once. Two sample_mask instructions on the same path
+ * run the depth/stencil test twice per sample, which the sample_mask contract
+ * documented in agx_nir_lower_sample_mask.c forbids.
+ *
+ * The FragDepth lowering this pass replaced was self-idempotent, because it
+ * recorded FRAG_RESULT_DEPTH in outputs_written and the writes_zs check below
+ * caught the second run. A sample mask leaves no such trace in shader_info, so
+ * look for the instruction itself.
+ */
+static bool
+has_sample_mask(nir_shader *s)
+{
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
 
-   nir_store_output(b, z, nir_imm_int(b, 0),
-                    .io_semantics.location = FRAG_RESULT_DEPTH,
-                    .src_type = nir_type_float32);
+            if (nir_instr_as_intrinsic(instr)->intrinsic ==
+                nir_intrinsic_sample_mask_agx)
+               return true;
+         }
+      }
+   }
 
-   b->shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   return false;
 }
 
 static bool
@@ -52,7 +72,7 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
    *done = true;
 
    b->cursor = nir_before_instr(&intr->instr);
-   insert_z_write(b);
+   insert_late_test(b);
    return true;
 }
 
@@ -88,6 +108,12 @@ agx_nir_lower_frag_sidefx(nir_shader *s)
    if (writes_zs)
       return false;
 
+   /* If a previous run of this pass already inserted the late test, we're done.
+    * Running it again would test every sample twice.
+    */
+   if (has_sample_mask(s))
+      return false;
+
    bool done = false;
    nir_shader_intrinsics_pass(s, pass, nir_metadata_control_flow, &done);
 
@@ -96,7 +122,7 @@ agx_nir_lower_frag_sidefx(nir_shader *s)
       nir_function_impl *impl = nir_shader_get_entrypoint(s);
       nir_builder b = nir_builder_at(nir_after_impl(impl));
 
-      insert_z_write(&b);
+      insert_late_test(&b);
    }
 
    return true;

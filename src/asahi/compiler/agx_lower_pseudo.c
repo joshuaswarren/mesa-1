@@ -82,6 +82,21 @@ lower(agx_builder *b, agx_instr *I)
    case AGX_OPCODE_MOV:
       if (agx3 && I->src[0].type == AGX_INDEX_IMMEDIATE)
          return agx_mov_imm_to(b, I->dest[0], I->src[0].value);
+      /*
+       * A modifier on a move is agx_optimizer_fmov() having composed an fneg
+       * or fabs into the copy's source: agx_is_fmov() matches `fadd(x, -0.0)`,
+       * and agx_compose_float_src() carries its abs/neg across. The bitwise
+       * move below has no field for one, so the packer refused the whole
+       * shader for `-x` or `|x|` crossing a copy -- 19 of the 307 refusals in
+       * a three.js frame. Put the float move back instead: Apple spells a move
+       * as an add of the exact negative-zero minifloat, and that form carries
+       * both modifier bits (agx3_alu_fadd_minifloat_mod, agx3_alu_fadd_abs_*),
+       * so this is the pre-fold program rather than a new encoding.
+       */
+      if (agx3 && (I->src[0].abs || I->src[0].neg) &&
+          I->src[0].size == AGX_SIZE_32 &&
+          I->dest[0].size == AGX_SIZE_32)
+         return agx_fadd_to(b, I->dest[0], I->src[0], agx_negzero());
       return agx_bitop_to(b, I->dest[0], I->src[0], agx_zero(), UTIL_LUT2(a));
 
    case AGX_OPCODE_NOT:
@@ -121,18 +136,16 @@ lower(agx_builder *b, agx_instr *I)
 
    case AGX_OPCODE_BREAK:
       if (agx3) {
-         /* AGX3 has no witnessed unconditional break instruction. Break on
-          * the integer identity r0l == r0l instead, using the grounded
-          * compare+cndlt sequence without clobbering a post-RA register.
+         /* AGX3 has no unconditional break instruction. Break on the
+          * integer identity r0l == r0l instead, using the compare+cnd
+          * sequence without clobbering a post-RA register.
           *
-          * A depth-2 BREAK is the unfused form produced for a loop break in
-          * one enclosing if. agx_opt_break_if proves that folding away that
-          * if subtracts one from the nesting depth, so its always-true fused
-          * form is the same depth-1 BREAK_IF accepted here. Deeper forms stay
-          * fail-closed until an equivalent nested witness exists. */
-         if (I->nest > 2)
-            return NULL;
-
+          * NEST carries over unchanged: it is the number of exec-mask levels
+          * the break unwinds in Mesa's model either way, and agx_opt_break_if
+          * only subtracts one when it actually folds an enclosing if away.
+          * The packer turns that into the native level count (nest + 1,
+          * because a loop owns two architectural levels), which CNDCF
+          * encodes at any depth. */
          agx_index r0l = agx_register(0, AGX_SIZE_16);
          return agx_break_if_icmp(b, r0l, r0l, I->nest, false, AGX_ICOND_UEQ,
                                   I->target);

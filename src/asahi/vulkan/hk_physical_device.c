@@ -75,9 +75,21 @@ static void
 hk_get_device_extensions(const struct hk_instance *instance,
                          struct vk_device_extension_table *ext)
 {
+   /*
+    * VK_KHR_ray_query and everything it depends on.  Software traversal:
+    * grounded end to end in shader ALU and global loads, with no dependence
+    * on the partially mapped AGX3 intersect_ray SCS ABI -- but it has never
+    * executed on hardware, and an extension bit is a promise.  It stays off
+    * until the exact-result oracle passes on a real G17P.
+    */
+   const bool ray_query = hk_g17p_unverified_feature("ray_query");
+
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
+      .KHR_acceleration_structure = ray_query,
+      .KHR_deferred_host_operations = ray_query,
+      .KHR_ray_query = ray_query,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
@@ -409,6 +421,17 @@ hk_get_device_features(
       .timelineSemaphore = true,
       .bufferDeviceAddress = true,
       .bufferDeviceAddressCaptureReplay = true,
+
+      /* VK_KHR_acceleration_structure / VK_KHR_ray_query, gated with the
+       * extensions above.  Host-side builds stay off: they are unimplemented
+       * and a conformant application therefore never reaches them. */
+      .accelerationStructure = supported_extensions->KHR_acceleration_structure,
+      .accelerationStructureCaptureReplay = false,
+      .accelerationStructureIndirectBuild = false,
+      .accelerationStructureHostCommands = false,
+      .descriptorBindingAccelerationStructureUpdateAfterBind = false,
+      .rayQuery = supported_extensions->KHR_ray_query,
+      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -740,9 +763,17 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
       features->tessellationShader = false;
-      /* Per-sample main/epilog execution and native 2x/4x tile selectors are
-       * implemented. Keep the public core feature opt-in until the strict 4x
-       * SampleID/average-resolve image oracle has executed on G17P. */
+      /* The native 2x/4x BG/EOT tile selectors are implemented, but per-sample
+       * FRAGMENT execution is not: hk_shader.c unconditionally runs
+       * agx_nir_lower_g17p_1x_sample_shading() on every G17P fragment shader
+       * that sets uses_sample_shading, and agx_linker.c fails closed on a
+       * nonzero nr_samples_shaded because the AGX2 external sample loop is not
+       * AGX3 machine code.  At the default one rasterization sample that
+       * collapse is exact, so the promise is keepable there; at 2x/4x
+       * (HK_G17P_MSAA=1) gl_SampleID would silently read 0.
+       *
+       * So do NOT run the 4x SampleID oracle expecting a pass: it is blocked on
+       * a grounded AGX3 per-sample fragment path, not on hardware time. */
       features->sampleRateShading =
          hk_g17p_unverified_feature("sample_rate_shading");
       /* IA vertex/primitive recording, including reset/reuse/unavailable
@@ -758,9 +789,24 @@ hk_get_device_features(
          instance->vertex_stores &&
          (hk_g17p_unverified_feature("graphics_shader_side_effects") ||
           hk_g17p_unverified_feature("graphics_memory"));
-      features->fragmentStoresAndAtomics =
-         hk_g17p_unverified_feature("graphics_shader_side_effects") ||
-         hk_g17p_unverified_feature("graphics_memory");
+      /* Qualified on hardware: g17p-vulkan-fragment-side-effects renders
+       * 1024/1024 exact pixels, 0 cleared, 0 wrong, with 0/256 mixed 2x2
+       * quads and 0/32 mixed 8x4 SIMD groups, and its fragment stores,
+       * atomics, untouched vertex fields, guard words and three-second
+       * stability all verify exactly. No GPU faults.
+       *
+       * The earlier 513/1024 that kept this gated was measured against a
+       * build predating 53aac78d1aa, which replaced the FragDepth write in
+       * agx_nir_lower_frag_sidefx with a late test and deleted the depth path
+       * that failure ran through. That change also lost the pass's
+       * idempotence -- Honeykrisp preprocesses every shader twice and a
+       * sample mask leaves no trace in shader_info -- so every side-effecting
+       * fragment shader emitted sample_mask twice, which
+       * agx_nir_lower_sample_mask documents as incorrect. Both are fixed.
+       *
+       * Dawn requires this feature; without it Chromium's WebGPU silently
+       * falls back to SwiftShader. */
+      features->fragmentStoresAndAtomics = true;
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->shaderResourceMinLod = false;
@@ -803,7 +849,14 @@ hk_get_device_features(
        * descriptor does not bounds-check against the Vulkan image view.
        * Hardware qualification returned adjacent in-image texels for both
        * X- and Y-out-of-range coordinates, violating the zero RGB guarantee
-       * shared by robustImageAccess and robustImageAccess2. */
+       * shared by robustImageAccess and robustImageAccess2.
+       *
+       * That failure has since been addressed in software: the explicit
+       * view-bounds lowering in hk_nir_lower_robust_image.c (and the matching
+       * combined-sampler bounds in agx_nir_lower_g17p_combined_sampler.c)
+       * clamp against the view rather than the allocation.  The bit stays
+       * opt-in only because g17p-vulkan-robust-image2 has not been re-run on
+       * hardware since; this is a pending re-probe, not an unfixed defect. */
       features->robustImageAccess =
          hk_g17p_unverified_feature("robust_images");
       features->robustImageAccess2 =
@@ -833,6 +886,66 @@ hk_get_device_properties(const struct agx_device *dev,
    const VkSampleCountFlagBits other_sample_counts =
       dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
 
+   /* Multisample depth and stencil ATTACHMENTS. Unlike colour, these never go
+    * through the tilebuffer or an end-of-tile program: the ISP owns them and
+    * the ZLS loads and stores them from addresses and strides the AIL layout
+    * already computes per sample. Nothing in the G17P path is written against
+    * one sample -- ISP_ZLS_PIXELS is logical width and height, the Z stride is
+    * layer_stride_B / AIL_PAGESIZE straight out of the layout, and
+    * ppp_multisamplectl is shared with colour, which 2x already exercises on
+    * hardware. So this is a verification gap, not an implementation one, and
+    * it gets a probe rather than a rewrite.
+    *
+    * It is also what makes the colour advertisement COHERENT. ES 3.0 requires
+    * DEPTH_COMPONENT16/24, DEPTH24_STENCIL8 and STENCIL_INDEX8 renderbuffers
+    * to support up to MAX_SAMPLES, and MAX_SAMPLES is a single global value
+    * derived from colour. Advertising colour 2x/4x while depth stays 1x
+    * therefore describes an implementation that cannot be ES 3.0 conformant,
+    * which is consistent with WebGL2 context creation failing under
+    * HK_G17P_MSAA=1 alone while WebGL1 keeps working. Moving the two together
+    * is the single-variable experiment for that.
+    */
+   const VkSampleCountFlagBits ds_sample_counts =
+      dev->chip == AGX_CHIP_G17P
+         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_depth")
+               ? sample_counts
+               : VK_SAMPLE_COUNT_1_BIT)
+         : sample_counts;
+
+   /* Sampling a multisample DEPTH image is a different data path again: the
+    * ZLS already stores the surface, and the AGX3 texture descriptor already
+    * carries a sample count, but nothing has read one back. This name exists
+    * so a consumer that walks the sample-count limits one at a time -- Dawn
+    * does -- can be pushed through the whole list in one boot to find out
+    * what it asks for next. It has NO oracle behind it, so it is a question,
+    * not a promotion: do not flip this default on a passing Dawn start-up.
+    */
+   const VkSampleCountFlagBits sampled_ds_sample_counts =
+      dev->chip == AGX_CHIP_G17P
+         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_depth_sampled")
+               ? sample_counts
+               : VK_SAMPLE_COUNT_1_BIT)
+         : sample_counts;
+
+   /* A multisample colour image is only sampleable if it can first be stored
+    * unresolved, which needs the native multisample end-of-tile program and
+    * the multisample PBE descriptor. Both are byte-witnessed from Apple's own
+    * encoders, but the pair has never executed, so the promise stays behind
+    * the named one-boot probe -- run g17p-vulkan-msaa-store-fetch4 (and its
+    * 2x sibling) and flip the default only if they pass.
+    *
+    * Storage and integer colour do NOT move with either. The G17P tilebuffer
+    * gate (agx_g17p_rt0_tile_layout_supported) still admits more than one
+    * sample only for RGBA8/BGRA8 UNORM colour, so a multisample integer
+    * render target cannot be built at all.
+    */
+   const VkSampleCountFlagBits sampled_color_sample_counts =
+      dev->chip == AGX_CHIP_G17P
+         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_store")
+               ? sample_counts
+               : VK_SAMPLE_COUNT_1_BIT)
+         : sample_counts;
+
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
 
@@ -842,10 +955,18 @@ hk_get_device_properties(const struct agx_device *dev,
     * giving a theoretical limit of 119. We round down to 116 to give a sensible
     * limit in vec4s.
     */
-   /* The legacy pipeline can address 119 components. HAL200 is currently
-    * qualified through Apple's position + sixteen-float4 (68 total UVS word)
-    * program, giving Vulkan's required 64 user interface components. Keep the
-    * public limit paired with the encoder and VDM-state bounds. */
+   /* The legacy pipeline can address 119 components. HAL200 is promoted
+    * through Apple's position + sixteen-float4 (68 total UVS word) program,
+    * giving Vulkan's required 64 user interface components.  ANGLE 151 needs
+    * one additional float4 for its transform-feedback copy of gl_Position;
+    * expose that 68-user/72-total candidate only for its hardware oracle. */
+   /* ANGLE needs one float4 beyond the sixteen-float4 witness for its internal
+    * transform-feedback copy of gl_Position.  Without it eglCreateContext for
+    * ES 3.0 fails with EGL_BAD_ATTRIBUTE, Chromium's GPU process exits during
+    * initialisation, and WebGL/WebGPU are unavailable entirely -- measured on
+    * G17P, where the 64-word limit reports gl=disabled/angle=none and the
+    * 68-word limit brings WebGL, WebGL2 and WebGPU all up.  It is the default
+    * so no browser needs a bespoke environment to get hardware acceleration. */
    unsigned max_vgt_output_components =
       dev->chip == AGX_CHIP_G17P ? HK_AGX3_G17P_MAX_USER_WORDS : 116;
 
@@ -880,6 +1001,22 @@ hk_get_device_properties(const struct agx_device *dev,
       .bufferImageGranularity = 0x400,
       .sparseAddressSpaceSize = HK_SPARSE_ADDR_SPACE_SIZE,
       .maxBoundDescriptorSets = HK_MAX_SETS,
+      /* VK_KHR_acceleration_structure limits.  The counts are the
+       * specification's own 24/29-bit encoding maxima, which is what bounds
+       * us: the geometry, instance and primitive ids all live in packed
+       * fields.  Scratch alignment is 128 because the common builder's
+       * shaders address scratch as uvec4. */
+      .maxGeometryCount = (1u << 24) - 1,
+      .maxInstanceCount = (1u << 24) - 1,
+      .maxPrimitiveCount = (1u << 29) - 1,
+      .maxPerStageDescriptorAccelerationStructures = HK_MAX_DESCRIPTORS,
+      .maxPerStageDescriptorUpdateAfterBindAccelerationStructures =
+         HK_MAX_DESCRIPTORS,
+      .maxDescriptorSetAccelerationStructures = HK_MAX_DESCRIPTORS,
+      .maxDescriptorSetUpdateAfterBindAccelerationStructures =
+         HK_MAX_DESCRIPTORS,
+      .minAccelerationStructureScratchOffsetAlignment = 128,
+
       .maxPerStageDescriptorSamplers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorUniformBuffers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorStorageBuffers = HK_MAX_DESCRIPTORS,
@@ -950,14 +1087,14 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxFramebufferWidth = 16384,
       .maxFramebufferLayers = 2048,
       .framebufferColorSampleCounts = color_sample_counts,
-      .framebufferDepthSampleCounts = other_sample_counts,
+      .framebufferDepthSampleCounts = ds_sample_counts,
       .framebufferNoAttachmentsSampleCounts = other_sample_counts,
-      .framebufferStencilSampleCounts = other_sample_counts,
+      .framebufferStencilSampleCounts = ds_sample_counts,
       .maxColorAttachments = HK_MAX_RTS,
-      .sampledImageColorSampleCounts = other_sample_counts,
+      .sampledImageColorSampleCounts = sampled_color_sample_counts,
       .sampledImageIntegerSampleCounts = other_sample_counts,
-      .sampledImageDepthSampleCounts = other_sample_counts,
-      .sampledImageStencilSampleCounts = other_sample_counts,
+      .sampledImageDepthSampleCounts = sampled_ds_sample_counts,
+      .sampledImageStencilSampleCounts = sampled_ds_sample_counts,
       .storageImageSampleCounts = other_sample_counts,
       .maxSampleMaskWords = 1,
       .timestampComputeAndGraphics = true,
@@ -1493,7 +1630,14 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* HAL200 advanced blend epilogs currently complete without a fault but
-       * write zero instead of the blended colour. */
+       * write zero instead of the blended colour.
+       *
+       * NOTE: this is contradicted by the hardware ledger, whose row R06e
+       * records coherent conjoint non-premultiplied MULTIPLY as exact on G17P
+       * (checksum 0c9eca2eebc81b25).  Both cannot be current.  The next
+       * advanced-blend boot must adjudicate before either is trusted; until
+       * then keep the extension withheld, because withholding a working
+       * feature is recoverable and shipping a black one is not. */
       if (!hk_g17p_unverified_feature("advanced_blend"))
          supported_extensions.EXT_blend_operation_advanced = false;
 

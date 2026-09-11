@@ -19,13 +19,37 @@
 
 bool drm_shim_driver_prefers_first_render_node = true;
 
+/*
+ * T8103 / M1, the AGX2 identity Honeykrisp is already conformant on.  This is
+ * the control arm for G17P work: run the same client twice, changing only
+ * ASAHI_SHIM_CHIP, and any difference is attributable to the AGX3 paths.
+ *
+ * Only the architectural identity differs from params_g17p below - generation,
+ * variant, chip id, ISA, HAL, core topology, soft faults and the 39-bit user
+ * VA range.  Everything else is held equal deliberately so the diff isolates
+ * the generation.  A stub here (the previous zero num_clusters_total) makes
+ * agx_chip_from_params return AGX_CHIP_UNKNOWN and the device fails to open,
+ * which is why the fields are spelled out.
+ */
 static const struct drm_asahi_params_global params_g13g = {
+   .features = 0,
    .gpu_generation = 13,
    .gpu_variant = 'G',
    .gpu_revision = 0,
+   .chip_id = 0x8103,
+   .num_dies = 1,
+   .num_clusters_total = 1,
+   .num_cores_per_cluster = 8,
+   .core_masks = {0xff},
    .vm_start = 0x4000,
    .vm_end = 0x7fffff8000ull,
+   .vm_kernel_min_size = 0x20000000,
+   .max_commands_per_submission = 1,
+   .max_attachments = 16,
+   .max_frequency_khz = 1278000,
    .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 2,
+   .gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY,
 };
 
 /*
@@ -71,6 +95,7 @@ shim_params(void)
 struct asahi_bo {
    struct shim_bo base;
    uint32_t offset;
+   uint32_t gem_flags;
 };
 
 static struct asahi_bo *
@@ -102,7 +127,26 @@ static struct {
 } shim_mappings;
 
 static unsigned invalid_vm_binds;
+
+/* Executable-window accounting.
+ *
+ * A G17P Ioto program is a couple of hundred bytes, but the smallest BO that
+ * can hold one costs a 16KiB page plus a 16KiB guard page of the 4GiB USC
+ * exec window. Counting the binds that land in that window is the only
+ * host-side measure of how fast a recording eats it, and it is exactly what
+ * ran out on hardware, so a test can hold the driver to a budget here rather
+ * than having to drive a laptop to 4GiB of address space. */
+#define SHIM_G17P_USC_WINDOW_BASE UINT64_C(0x10000000000)
+#define SHIM_G17P_USC_WINDOW_SIZE UINT64_C(0x100000000)
+
+/* Mirrors AGX_G17P_RENDER_AUX_ALIAS_* in agx_va_runtime_hole.h. */
+#define SHIM_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
+#define SHIM_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002020000)
+
+static unsigned usc_window_binds;
+static uint64_t usc_window_bytes;
 static bool failed_submit_once;
+static unsigned submit_calls;
 static unsigned queue_progress_queue_creates;
 static unsigned queue_progress_queue_destroys;
 static unsigned queue_progress_submits;
@@ -145,6 +189,39 @@ check_vm_bind_lifetime(void)
    }
 
    fprintf(stderr, "shim: all VM_BIND operations had nonzero ranges\n");
+}
+
+/*
+ * ASAHI_SHIM_G17P_MAX_USC_BINDS caps how many distinct executable-window
+ * mappings the run may establish. Recording an Ioto program per draw out of
+ * its own BO blows any useful budget immediately; sub-allocating them out of
+ * arena chunks costs a handful of binds for a whole frame.
+ */
+static void __attribute__((destructor))
+check_usc_window_pressure(void)
+{
+   const char *budget = getenv("ASAHI_SHIM_G17P_MAX_USC_BINDS");
+   if (!budget)
+      return;
+
+   fprintf(stderr,
+           "shim: G17P USC window binds=%u bytes=%llu (budget %s)\n",
+           usc_window_binds, (unsigned long long)usc_window_bytes, budget);
+
+   char *end = NULL;
+   const unsigned long limit = strtoul(budget, &end, 0);
+   if (end == budget || (end && *end != '\0')) {
+      fprintf(stderr, "shim: bad ASAHI_SHIM_G17P_MAX_USC_BINDS '%s'\n",
+              budget);
+      _Exit(EXIT_FAILURE);
+   }
+
+   if (usc_window_binds > limit) {
+      fprintf(stderr,
+              "shim: G17P executable window pressure: %u binds exceeds the "
+              "budget of %lu\n", usc_window_binds, limit);
+      _Exit(EXIT_FAILURE);
+   }
 }
 
 static void __attribute__((destructor))
@@ -283,6 +360,10 @@ merge_stream_stats(const struct asahi_g17p_stream_stats *stats)
    matrix_stats.draws += stats->draws;
    matrix_stats.indexed_draws += stats->indexed_draws;
    matrix_stats.state_updates += stats->state_updates;
+   matrix_stats.barriers += stats->barriers;
+   matrix_stats.inter_draw_barriers += stats->inter_draw_barriers;
+   matrix_stats.unbarriered_state_republications +=
+      stats->unbarriered_state_republications;
    matrix_stats.stencil_state_updates += stats->stencil_state_updates;
    matrix_stats.links += stats->links;
    matrix_stats.viewport_count =
@@ -356,6 +437,50 @@ check_matrix_coverage(void)
    }
 
    fprintf(stderr, "shim: complete G17P production stream matrix coverage\n");
+}
+
+/*
+ * Assert where the inter-draw VDM barrier landed.
+ *
+ * ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS is "<barriers>" or
+ * "<barriers>:<draws>".  It checks both directions at once:
+ *
+ *  - the expected number of barriers that separate two draws actually
+ *    appeared, so a fix that silently stopped emitting is caught; and
+ *  - unbarriered_state_republications is zero, so a barrier emitted in the
+ *    wrong place cannot satisfy the count.  That second number is computed
+ *    from the stream itself rather than from the expectation, which is what
+ *    makes this an ordering check and not a tally.
+ */
+static void __attribute__((destructor))
+check_inter_draw_barriers(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS");
+   if (!value)
+      return;
+
+   char *rest = NULL;
+   const unsigned expected = strtoul(value, &rest, 10);
+   const bool have_draws = rest && *rest == ':';
+   const unsigned expected_draws =
+      have_draws ? strtoul(rest + 1, NULL, 10) : 0;
+
+   if (matrix_stats.inter_draw_barriers != expected ||
+       matrix_stats.unbarriered_state_republications != 0 ||
+       (have_draws && matrix_stats.draws != expected_draws)) {
+      fprintf(stderr,
+              "shim: G17P inter-draw barriers %u/%u, unbarriered state "
+              "republications %u/0, draws %u/%s\n",
+              matrix_stats.inter_draw_barriers, expected,
+              matrix_stats.unbarriered_state_republications,
+              matrix_stats.draws, have_draws ? rest + 1 : "any");
+      _Exit(EXIT_FAILURE);
+   }
+
+   fprintf(stderr,
+           "shim: G17P emitted %u inter-draw VDM barriers across %u draws "
+           "with no unbarriered state republication\n",
+           matrix_stats.inter_draw_barriers, matrix_stats.draws);
 }
 
 static void __attribute__((destructor))
@@ -737,6 +862,11 @@ add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
       .object_offset = op->offset,
       .bo = bo,
    };
+   if (op->addr >= SHIM_G17P_USC_WINDOW_BASE &&
+       op->addr - SHIM_G17P_USC_WINDOW_BASE < SHIM_G17P_USC_WINDOW_SIZE) {
+      usc_window_binds++;
+      usc_window_bytes += op->range;
+   }
    if (getenv("ASAHI_SHIM_TRACE_G17P_STREAM"))
       fprintf(stderr, "shim: map %#llx..%#llx handle %u offset %#llx\n",
               (unsigned long long)op->addr,
@@ -849,6 +979,7 @@ asahi_ioctl_gem_create(int fd, unsigned long request, void *arg)
 
    assert(UINT64_MAX - asahi.next_offset > create->size);
    bo->offset = asahi.next_offset;
+   bo->gem_flags = create->flags;
    asahi.next_offset += create->size;
 
    create->handle = drm_shim_bo_get_handle(shim_fd, &bo->base);
@@ -953,6 +1084,23 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
          return -EINVAL;
       }
 
+      /* T8140 installs four pair/generation AXFB aliases in every
+       * render-capable client root, and that range lies inside G17P's USC
+       * heap. The kernel refuses a bind that lands on them; a run that gets
+       * its allocator geometry wrong here produces thousands of rejected
+       * binds on hardware and nothing at all under a no-op shim. */
+      if (params == &params_g17p &&
+          start < SHIM_G17P_RENDER_AUX_ALIAS_END &&
+          SHIM_G17P_RENDER_AUX_ALIAS_START < end) {
+         fprintf(stderr,
+                 "shim: gem_bind: Invalid map range %#llx..%#llx "
+                 "(overlaps the kernel render-aux alias %#llx..%#llx)\n",
+                 (unsigned long long)start, (unsigned long long)end,
+                 (unsigned long long)SHIM_G17P_RENDER_AUX_ALIAS_START,
+                 (unsigned long long)SHIM_G17P_RENDER_AUX_ALIAS_END);
+         return -EINVAL;
+      }
+
       if (shim_vm.valid && start < shim_vm.kernel_end &&
           shim_vm.kernel_start < end) {
          fprintf(stderr,
@@ -975,10 +1123,97 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+/* A submission's ordering is carried entirely by the barrier fields in each
+ * command header and by which ioctl the in/out syncobjs ride on. Both are
+ * write-only from userspace: the kernel is the only thing that has ever read
+ * them, so a mistake in what Honeykrisp asks for and a kernel that does not
+ * honour the request look identical from a readback that comes back stale.
+ * Set ASAHI_SHIM_SUBMIT_LOG to a path and every submit ioctl is appended to
+ * it, one line per command, exactly as the kernel would parse it. */
+static void
+asahi_log_submit(const struct drm_asahi_submit *submit)
+{
+   const char *path = getenv("ASAHI_SHIM_SUBMIT_LOG");
+   if (!path)
+      return;
+
+   FILE *log = fopen(path, "a");
+   if (!log)
+      return;
+
+   static unsigned ioctl_index;
+   fprintf(log, "submit %u in_syncs=%u out_syncs=%u bytes=%u\n", ioctl_index++,
+           submit->in_sync_count, submit->out_sync_count, submit->cmdbuf_size);
+
+   const uint8_t *cmdbuf = (const uint8_t *)(uintptr_t)submit->cmdbuf;
+   uint32_t offset = 0;
+   while (offset + sizeof(struct drm_asahi_cmd_header) <= submit->cmdbuf_size) {
+      struct drm_asahi_cmd_header header;
+      memcpy(&header, cmdbuf + offset, sizeof(header));
+
+      const char *name = header.cmd_type == DRM_ASAHI_CMD_RENDER    ? "render"
+                         : header.cmd_type == DRM_ASAHI_CMD_COMPUTE ? "compute"
+                         : header.cmd_type == DRM_ASAHI_SET_VERTEX_ATTACHMENTS
+                            ? "set-vertex-attachments"
+                         : header.cmd_type == DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS
+                            ? "set-fragment-attachments"
+                         : header.cmd_type == DRM_ASAHI_SET_COMPUTE_ATTACHMENTS
+                            ? "set-compute-attachments"
+                            : "unknown";
+
+      fprintf(log, "  cmd %s type=%u size=%u vdm_barrier=%u cdm_barrier=%u",
+              name, header.cmd_type, header.size, header.vdm_barrier,
+              header.cdm_barrier);
+
+      /* The declared control-stream extent is the other write-only field the
+       * kernel acts on. Print it: a stream whose declared end is far past the
+       * records it actually contains is indistinguishable from a correct one
+       * until the hardware reads the gap. */
+      if (header.cmd_type == DRM_ASAHI_CMD_COMPUTE &&
+          header.size >= sizeof(struct drm_asahi_cmd_compute)) {
+         struct drm_asahi_cmd_compute compute;
+         memcpy(&compute, cmdbuf + offset + sizeof(header), sizeof(compute));
+         fprintf(log, " cdm_base=0x%llx cdm_end=0x%llx cdm_len=%llu",
+                 (unsigned long long)compute.cdm_ctrl_stream_base,
+                 (unsigned long long)compute.cdm_ctrl_stream_end,
+                 (unsigned long long)(compute.cdm_ctrl_stream_end -
+                                      compute.cdm_ctrl_stream_base));
+      } else if (header.cmd_type == DRM_ASAHI_CMD_RENDER &&
+                 header.size >= sizeof(struct drm_asahi_cmd_render)) {
+         struct drm_asahi_cmd_render render;
+         memcpy(&render, cmdbuf + offset + sizeof(header), sizeof(render));
+         fprintf(log, " vdm_base=0x%llx",
+                 (unsigned long long)render.vdm_ctrl_stream_base);
+      }
+      fprintf(log, "\n");
+
+      offset += sizeof(header) + header.size;
+   }
+   if (offset != submit->cmdbuf_size)
+      fprintf(log, "  ragged walk ended at %u of %u\n", offset,
+              submit->cmdbuf_size);
+
+   fclose(log);
+}
+
+/* 0 (default) silent, 1 report, 2 reject. See asahi_g17p_stream_validator.h. */
+static unsigned
+g17p_strict_descriptors(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_STRICT_DESCRIPTORS");
+
+   if (value == NULL || value[0] == '\0')
+      return 0;
+
+   return (unsigned)strtoul(value, NULL, 10);
+}
+
 static int
 asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
+   submit_calls++;
+   asahi_log_submit(submit);
    if (queue_progress_lifecycle_case()) {
       const struct drm_asahi_sync *syncs =
          (const void *)(uintptr_t)submit->syncs;
@@ -998,6 +1233,12 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
    if (getenv("ASAHI_SHIM_FAIL_SUBMIT_ONCE") && !failed_submit_once) {
       failed_submit_once = true;
+      errno = EIO;
+      return -1;
+   }
+
+   const char *fail_submit_at = getenv("ASAHI_SHIM_FAIL_SUBMIT_AT");
+   if (fail_submit_at && strtoul(fail_submit_at, NULL, 10) == submit_calls) {
       errno = EIO;
       return -1;
    }
@@ -1025,6 +1266,22 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+
+         /* G17P creates a per-job render-storage view from the fixed HAL200
+          * context aperture.  Unlike ordinary client-VM shader and resource
+          * mappings, its source GEM must therefore be visible outside the
+          * private VM.  Mirror that kernel requirement so a private context
+          * allocation fails on the host with the same ENOENT class instead
+          * of reaching hardware first. */
+         const struct asahi_vm_mapping *context =
+            find_mapping(fd, UINT64_C(0x1000000000), UINT64_C(0x10000));
+         if (!context ||
+             (asahi_bo(context->bo)->gem_flags & DRM_ASAHI_GEM_VM_PRIVATE)) {
+            fprintf(stderr,
+                    "shim: G17P render context is absent from shared job view\n");
+            return -ENOENT;
+         }
+
          if (submit->in_sync_count > 0 && submit->out_sync_count == 2)
             synchronized_render_submits++;
          if (getenv("ASAHI_SHIM_G17P_EXPECT_MULTIVIEW") ||
@@ -1036,6 +1293,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .owned = shim_gpu_owned,
             .span = shim_gpu_span,
             .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+            .strict_descriptors = g17p_strict_descriptors(),
          };
          struct asahi_g17p_stream_stats stats;
          const struct asahi_g17p_stream_config config = {
@@ -1059,9 +1317,11 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          merge_stream_stats(&stats);
          fprintf(stderr,
                  "shim: G17P VDM validated: %u draws, %u indexed, %u state "
-                 "updates, %u links\n",
+                 "updates, %u links, %u barriers (%u inter-draw, %u "
+                 "unbarriered republications)\n",
                  stats.draws, stats.indexed_draws, stats.state_updates,
-                 stats.links);
+                 stats.links, stats.barriers, stats.inter_draw_barriers,
+                 stats.unbarriered_state_republications);
       } else if (header->cmd_type == DRM_ASAHI_CMD_COMPUTE) {
          if (header->size < offsetof(struct drm_asahi_cmd_compute,
                                      cdm_ctrl_stream_end) +
@@ -1079,6 +1339,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             .owned = shim_gpu_owned,
             .span = shim_gpu_span,
             .verbose = getenv("ASAHI_SHIM_TRACE_G17P_STREAM") != NULL,
+            .strict_descriptors = g17p_strict_descriptors(),
          };
          struct asahi_g17p_compute_stats stats;
          if (!asahi_g17p_compute_validate(&memory, &compute, &stats))
