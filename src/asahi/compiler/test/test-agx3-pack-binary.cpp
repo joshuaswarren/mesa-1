@@ -5629,7 +5629,28 @@ TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
       EXPECT_EQ(pack(b), want);
    }
 
-   /* A repeated mask register is not a complete sample domain. */
+   /* Register allocation is free to reuse one mask register for stores that
+    * kill it, and on the real four-sample reload it does. A mask recomputed
+    * between the stores is a different mask, so that shape is admitted --
+    * refusing it refused the only shader this protocol exists for. */
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      for (unsigned i = 0; i < 4; ++i) {
+         agx_mov_imm_to(b, agx_register(8, AGX_SIZE_16), 1u << i);
+         agx_index mask = agx_register(8, AGX_SIZE_16);
+         mask.kill = true;
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0,
+                     false);
+      }
+      agx_stop(b);
+      EXPECT_FALSE(pack(b).empty());
+   }
+
+   /* A repeated mask register with nothing redefining it is one mask twice,
+    * not a complete sample domain. */
    {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_FRAGMENT;
