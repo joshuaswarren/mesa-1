@@ -944,6 +944,82 @@ test_g17s_minimal_compute_program(void)
    return 0;
 }
 
+static int
+test_g17g_graphics_no_resource_programs(void)
+{
+   /* M5 25G76 programs from the native triangle's complete context image.
+    * These exact programs also rendered three consecutive Linux frames.
+    * Bundle SHA256: 915c3c1e1bf7c679bd95f552a1a6a41d4eba86048a3a746a2d3a2ecbb1aa708c.
+    * Vertex VA0x10000160000 and fragment VA0x10000170700. */
+   static const uint8_t vertex[] = {
+      0x07,0x00,0x00,0x0c,0x00,0x00,0x00,0x00,
+      0x87,0x04,0x48,0x0e,0x00,0x00,0x00,0x00,0x00,0x01,
+      0x87,0x00,0x00,0x0d,0x00,0x00,0x00,0x00,0x00,0x00,
+      0x1c,0x80,0x02,0x00,0x00,0x00,0x00,0x00,
+      0x34,0x81,0x01,0x00,0x20,0x00,0xa0,0x02,
+      0x0c,0x80,0x02,0x00,0x08,0x00,0x00,0x00,
+      0x27,0x04,0x04,0x1a,0x21,0x00,0xa3,0x02,0x88,0x80,0x00,0x00,
+      0x1c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
+      0x27,0x04,0x04,0x00,0x30,0x00,0xa4,0x12,
+      0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t fragment[] = {
+      0x17,0x00,0x00,0x2c,0x00,0x00,0x18,0x08,
+      0xc7,0x03,0x40,0x0e,0x00,0x00,0x00,0x00,0x00,0x01,
+      0x07,0x00,0x00,0x0d,0x00,0x00,0x00,0x00,0x00,0x00,
+      0x1c,0x80,0x02,0x00,0x00,0x00,0x00,0x00,
+      0x34,0x81,0x01,0x00,0x20,0x00,0xa0,0x02,
+      0x0c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
+      0x27,0x04,0x04,0x1a,0x21,0x00,0xa3,0x02,0x88,0x80,0x00,0x00,
+      0x1c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
+      0x27,0x04,0x04,0x00,0x30,0x00,0xa4,0x12,
+      0x9f,0x17,0x00,0x04,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+   CHECK(sizeof(vertex) == AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE);
+   CHECK(sizeof(fragment) == AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE);
+   for (unsigned stage = 0; stage < 2; ++stage) {
+      const uint8_t *expected = stage ? fragment : vertex;
+      const size_t size = stage ? sizeof(fragment) : sizeof(vertex);
+      struct agx_ioto_state_tail_output tail = {
+         .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
+      };
+      memcpy(tail.bytes, expected, tail.length);
+      uint8_t output[96], before[96];
+      memset(output, 0xa5, sizeof(output));
+      size_t written = 19;
+      CHECK(agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160000), &tail, stage, output, sizeof(output), &written));
+      CHECK(written == size && memcmp(output, expected, size) == 0);
+      for (size_t i = size; i < sizeof(output); ++i)
+         CHECK(output[i] == 0xa5);
+      memcpy(before, output, sizeof(output));
+      written = 19;
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160001), &tail, stage, output, sizeof(output), &written));
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         0, &tail, stage, output, sizeof(output), &written));
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0xffffffffffc0), &tail, stage, output, sizeof(output), &written));
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160000), &tail, stage, output, size - 1, &written));
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160000), NULL, stage, output, sizeof(output), &written));
+      tail.bytes[8] = 7;
+      tail.bytes[9] = 0;
+      memset(tail.bytes + 14, 0, 4);
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160000), &tail, stage, output, sizeof(output), &written));
+      CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 19);
+      memcpy(tail.bytes, expected, tail.length);
+      static const uint8_t neo_speclm[] = {0x77,0x00,0x2a,0x41,0,0,0,0};
+      memcpy(tail.bytes, neo_speclm, sizeof(neo_speclm));
+      CHECK(!agx_ioto_g17g_no_resource_program_compose(
+         UINT64_C(0x10000160000), &tail, stage, output, sizeof(output), &written));
+      CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 19);
+   }
+   return 0;
+}
+
 int
 main(void)
 {
@@ -958,6 +1034,7 @@ main(void)
    CHECK(test_g17p_resource_program() == 0);
    CHECK(test_g17p_fragment_resource_program() == 0);
    CHECK(test_g17s_minimal_compute_program() == 0);
+   CHECK(test_g17g_graphics_no_resource_programs() == 0);
    printf("agx_ioto_program_core: %llu checks passed\n",
           (unsigned long long)checks);
    return 0;

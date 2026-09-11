@@ -24,6 +24,8 @@ extern "C" {
 #define AGX_IOTO_G17P_DEFAULT_PROFILE_SUFFIX_SIZE  10u
 #define AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE     90u
 #define AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE 86u
+#define AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE 84u
+#define AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE 90u
 #define AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE       140u
 #define AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE 158u
 #define AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE 170u
@@ -136,6 +138,17 @@ bool agx_ioto_g17p_no_resource_program_compose(
 bool agx_ioto_g17p_fragment_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_partitions, void *output, size_t capacity, size_t *written);
+
+/* Native M5/G17G no-resource vertex and single-colour fragment programs.
+ * The type-0 packed state is validated with the M5 grammar; runtime SPECLM
+ * bits are retained because their semantic field mapping is not complete.
+ * M5 uses a 52-byte profile loader, with operand4 for fragment and operand8
+ * for vertex, followed by the stage-specific release/termination sequence.
+ * This does not admit resource loads, multisampling, MRT or a Mesa device.
+ * On failure, output and *written remain unchanged. */
+bool agx_ioto_g17g_no_resource_program_compose(
+   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
+   bool fragment, void *output, size_t capacity, size_t *written);
 
 /* Compose a G17P resource program around a body emitted by the HAL200 ESL
  * scheduler. Resource loads and their drain padding precede the packed shader

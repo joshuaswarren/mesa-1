@@ -142,7 +142,8 @@ g17p_ldshdr_has_shader_va(const uint8_t *ldshdr)
 }
 
 static bool
-g17p_type0_tail_valid(const struct agx_ioto_state_tail_output *packed_tail)
+type0_tail_records_valid(enum agx_chip chip,
+                         const struct agx_ioto_state_tail_output *packed_tail)
 {
    if (!packed_tail || packed_tail->length != AGX_IOTO_STATE_TAIL_TYPE0_SIZE)
       return false;
@@ -162,14 +163,20 @@ g17p_type0_tail_valid(const struct agx_ioto_state_tail_output *packed_tail)
       struct agx_ioto_record record;
       size_t consumed = 0;
       if (!agx_ioto_validate_kind(
-             AGX_CHIP_G17P, kinds[i], packed_tail->bytes + offset,
+             chip, kinds[i], packed_tail->bytes + offset,
              packed_tail->length - offset, &record, &consumed) ||
           consumed != sizes[i])
          return false;
       offset += consumed;
    }
 
-   return offset == packed_tail->length &&
+   return offset == packed_tail->length;
+}
+
+static bool
+g17p_type0_tail_valid(const struct agx_ioto_state_tail_output *packed_tail)
+{
+   return type0_tail_records_valid(AGX_CHIP_G17P, packed_tail) &&
           g17p_ldshdr_has_shader_va(packed_tail->bytes + AGX_IOTO_SPECLM_SIZE);
 }
 
@@ -554,6 +561,52 @@ agx_ioto_g17p_no_resource_program_compose(
 
    memcpy(output, staged, sizeof(staged));
    *written = sizeof(staged);
+   return true;
+}
+
+bool
+agx_ioto_g17g_no_resource_program_compose(
+   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
+   bool fragment, void *output, size_t capacity, size_t *written)
+{
+   const size_t size = fragment
+      ? AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
+      : AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE;
+   if (!output || !written ||
+       !type0_tail_records_valid(AGX_CHIP_G17G, packed_tail) ||
+       program_va == 0 || program_va > UINT64_C(0x1000000000000) - size ||
+       (program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 || capacity < size)
+      return false;
+
+   const uint8_t *ldshdr = packed_tail->bytes + AGX_IOTO_SPECLM_SIZE;
+   if (!(g17p_load_le16(ldshdr) & UINT16_C(0xffc0)) &&
+       !g17p_load_le16(ldshdr + 6) && !g17p_load_le16(ldshdr + 8))
+      return false;
+
+   uint8_t staged[AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE] = {0};
+   memcpy(staged, packed_tail->bytes, packed_tail->length);
+   size_t offset = packed_tail->length;
+   /* The M5 vertex witness matches this independently recovered HAL300
+    * loader exactly. The M5 fragment witness changes its third LDIMM's
+    * immediate from8 to4; this is not the later fourth LDIMM. */
+   if (!agx_ioto_g17s_minimal_profile_loader_pack(staged + offset,
+                                                sizeof(staged) - offset))
+      return false;
+   if (fragment)
+      staged[offset + 20] = 4;
+   offset += AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
+   if (fragment) {
+      static const uint8_t pixrel[] = {0x9f, 0x17, 0x00, 0x04, 0x00, 0x00};
+      memcpy(staged + offset, pixrel, sizeof(pixrel));
+      offset += sizeof(pixrel);
+   }
+   staged[offset] = 0x0e;
+   offset += AGX_IOTO_PROGRAM_TERMINATE_SIZE;
+   if (offset != size)
+      return false;
+
+   memcpy(output, staged, size);
+   *written = size;
    return true;
 }
 
