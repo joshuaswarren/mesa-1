@@ -928,9 +928,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    const char *product = agx_chip_exact_product_name(dev->chip);
    if (product) {
-      snprintf(dev->name, sizeof(dev->name), "Apple %s (G%d%c %02X)",
-               product, dev->params.gpu_generation, dev->params.gpu_variant,
-               dev->params.gpu_revision + 0xA0);
+      /* Report the marketing name the machine is actually sold as, with no
+       * encoding suffix.  The generation/variant/revision triple is still
+       * printed by the probe logging above for anyone debugging silicon, but
+       * it does not belong in the name every application and About box shows
+       * the user. */
+      snprintf(dev->name, sizeof(dev->name), "Apple %s GPU", product);
    } else {
       const char *variant = " Unknown";
       switch (dev->params.gpu_variant) {
