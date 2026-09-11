@@ -82,14 +82,54 @@
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
+/*
+ * One draw per G17P graphics control stream.
+ *
+ * Concatenating ordinary draws in a single VDM root is an assumption this
+ * driver made, not a contract established against the hardware, and on G17P it
+ * does not hold: a stream carrying a second draw faults the firmware on the
+ * pixel data master. Opening a terminal on the Hyprland desktop killed the GPU
+ * within three seconds, and the failed session rebuild then costs a reboot.
+ *
+ * This was measured, not inferred. With the compositor and one `foot` window:
+ *
+ *   default (one draw per stream)                    pass
+ *   streams concatenating draws                      GPU lost in ~3s
+ *
+ * and the ZINK_DEBUG=sync workaround it replaces reduces, through
+ * ZINK_SYNC_SITES, to exactly this: the load-bearing site is zink_draw(), and
+ * *either* half of it -- the all-commands barrier or zink_batch_no_rp() --
+ * suffices on its own, because in Honeykrisp both end the graphics control
+ * stream. The three zink_context.c copy sites and the mesh/dispatch sites are
+ * not load-bearing; each was masked off with the desktop still passing.
+ *
+ * Note what this is *not*. It is not a missing barrier: an inter-draw VDM
+ * barrier was tried and did not fix it, and neither did widening it to every
+ * draw. It is not stale incremental state either -- ASAHI_MESA_DEBUG=dirty
+ * republishes every state block on every draw and the desktop still died 0/3.
+ * And it is not the retained-render path: HK_G17P_SPLIT_TRACE counted zero
+ * mid-render-pass splits across a whole failing run, so the partial BG/EOT
+ * programs were never on the failing route. What is left is the stream
+ * boundary itself, which is what this restores.
+ *
+ * Set HK_G17P_CONCAT_DRAWS=1 to restore concatenation, for measuring the cost
+ * of this split or for re-testing it once the native multi-draw stream shape is
+ * actually established against Metal.
+ */
 static bool
-hk_g17p_split_direct_draws_enabled(const struct hk_device *dev)
+hk_g17p_one_draw_per_stream(const struct hk_device *dev)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_G17P_SPLIT_DIRECT_DRAWS", false);
+   static int concat = -1;
+   if (concat < 0) {
+      concat = debug_get_bool_option("HK_G17P_CONCAT_DRAWS", false);
 
-   return dev->dev.chip == AGX_CHIP_G17P && enabled;
+      /* The old opt-in spelling, kept working so existing A/B scripts that
+       * asked for the split still get it. */
+      if (debug_get_bool_option("HK_G17P_SPLIT_DIRECT_DRAWS", false))
+         concat = 0;
+   }
+
+   return dev->dev.chip == AGX_CHIP_G17P && !concat;
 }
 
 static bool
@@ -5083,15 +5123,17 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
 
-   /* ZINK_DEBUG=sync closes and restarts dynamic rendering around every API
-    * draw.  CmdEndRendering therefore terminates the active VDM command;
-    * Honeykrisp's following CmdPipelineBarrier is a graphics no-op.  Reuse the
-    * established retained-render split here so this A/B tests that exact
-    * per-draw VDM command boundary with partial BG/EOT load/store semantics. */
-   if (hk_g17p_split_direct_draws_enabled(dev) &&
-       !agx_is_indirect(draw->b) && cmd->current_cs.gfx &&
-       cmd->current_cs.gfx->stats.cmds > 0)
+   /* Give every G17P draw its own graphics control stream. See
+    * hk_g17p_one_draw_per_stream() for why a stream may not carry two.
+    * Ending the stream here reuses the established retained-render transition,
+    * so the continuation loads the tilebuffer through the partial BG program
+    * exactly as a mid-render-pass split already did. */
+   if (hk_g17p_one_draw_per_stream(dev) && cmd->current_cs.gfx &&
+       cmd->current_cs.gfx->stats.cmds > 0) {
+      hk_g17p_note_gfx_split(cmd, "one-draw-per-stream",
+                             cmd->current_cs.gfx->stats.cmds, 0);
       hk_cmd_buffer_end_graphics(cmd);
+   }
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
    const struct vk_dynamic_graphics_state *dyn =
@@ -5125,6 +5167,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (!succ) {
          perf_debug(cmd, "Splitting control stream due to depth bias");
 
+         hk_g17p_note_gfx_split(cmd, "depth-bias-representation",
+                                cs->stats.cmds, cs->end - cs->current);
          hk_cmd_buffer_end_graphics(cmd);
          cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
 
@@ -5144,6 +5188,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (hk_g17p_launch_trace_enabled())
          fprintf(stderr, "G17P VDM root full: starting a retained render\n");
 
+      hk_g17p_note_gfx_split(cmd, "vdm-root-full", cs->stats.cmds,
+                             cs->end - cs->current);
       hk_cmd_buffer_end_graphics(cmd);
       cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
       if (!cs)

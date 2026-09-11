@@ -427,18 +427,15 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   )
 
   # Hyprland's renderBorder issues four adjacent scissored draws into one
-  # render pass, changing only the scissor between them -- the exact shape
-  # that faulted the GMMU on hardware and that ZINK_DEBUG=sync cured. Assert
-  # the three inter-draw VDM barriers are present and that no draw
-  # republishes render state without one in front of it.
-  #
-  # Both halves matter. Without the count, a driver that stopped emitting
-  # passes; without the unbarriered-republication check, a barrier emitted in
-  # the wrong place still satisfies the count. Reverting the emitter yields
-  # "0/3 barriers, 3/0 unbarriered", so this test can fail.
+  # render pass, changing only the scissor between them -- the exact shape that
+  # faulted the GMMU on hardware. G17P now gives each of those draws its own
+  # control stream, so there are four barriers and none of them is *inter*-draw:
+  # each one opens a stream. Pinning 0:4 is what keeps a future change from
+  # quietly putting two draws back in one stream, which is the thing that lost
+  # the device within three seconds of opening a terminal.
   g17p_interdraw_barrier_env = environment(g17p_image_copy_3d_environment)
   g17p_interdraw_barrier_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '3:4')
+    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
   test(
     'hk_g17p_interdraw_vdm_barrier',
     g17p_scissor_ring,
@@ -449,21 +446,25 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # The same four draws with HK_G17P_SPLIT_DIRECT_DRAWS=1, which reproduces
-  # what ZINK_DEBUG=sync does to the graphics side: one control stream per
-  # draw. Each stream opens with its own barrier, so the barrier count is
-  # identical (4) while the render passes are not (4 versus 1). That is the
-  # whole performance argument, and pinning it here keeps a future change
-  # from quietly turning the cheap fix back into the expensive one.
-  g17p_split_draw_barrier_env = environment(g17p_image_copy_3d_environment)
-  g17p_split_draw_barrier_env.set('HK_G17P_SPLIT_DIRECT_DRAWS', '1')
-  g17p_split_draw_barrier_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
+  # The same four draws with HK_G17P_CONCAT_DRAWS=1, the opt-in that puts them
+  # back in one stream. That shape is not safe on hardware, but it is the only
+  # one in which an inter-draw barrier can exist at all, so it is where the
+  # emitter stays covered: three inter-draw barriers, four total, and no draw
+  # republishing render state without one in front of it.
+  #
+  # Both halves matter. Without the count, a driver that stopped emitting
+  # passes; without the unbarriered-republication check, a barrier emitted in
+  # the wrong place still satisfies the count. Reverting the emitter yields
+  # "0/3 barriers, 3/0 unbarriered", so this test can fail.
+  g17p_concat_draw_barrier_env = environment(g17p_image_copy_3d_environment)
+  g17p_concat_draw_barrier_env.set('HK_G17P_CONCAT_DRAWS', '1')
+  g17p_concat_draw_barrier_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '3:4')
   test(
-    'hk_g17p_interdraw_vdm_barrier_split_control',
+    'hk_g17p_interdraw_vdm_barrier_concat_control',
     g17p_scissor_ring,
     args : ['ring', '--record-only'],
-    env : g17p_split_draw_barrier_env,
+    env : g17p_concat_draw_barrier_env,
     depends : _dev_icd,
     suite : ['asahi', 'g17p-interdraw-barrier'],
     timeout : 30,
