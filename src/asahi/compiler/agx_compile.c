@@ -5369,7 +5369,9 @@ agx_nir_lower_imul64_filter(const nir_instr *instr, const void *_)
       return false;
 
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
-   return alu->op == nir_op_imul && alu->def.bit_size == 64;
+   return (alu->op == nir_op_imul || alu->op == nir_op_umul_2x32_64 ||
+           alu->op == nir_op_imul_2x32_64) &&
+          alu->def.bit_size == 64;
 }
 
 static nir_def *
@@ -5399,6 +5401,15 @@ agx_nir_lower_imul64_instr(nir_builder *b, nir_instr *instr, void *_)
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    nir_def *x = nir_ssa_for_alu_src(b, alu, 0);
    nir_def *y = nir_ssa_for_alu_src(b, alu, 1);
+   if (alu->op == nir_op_umul_2x32_64 || alu->op == nir_op_imul_2x32_64) {
+      nir_def *hi = agx_nir_umul_high32(b, x, y);
+      if (alu->op == nir_op_imul_2x32_64) {
+         /* Convert the unsigned high word to the signed product. */
+         hi = nir_isub(b, hi, nir_iand(b, nir_ishr_imm(b, x, 31), y));
+         hi = nir_isub(b, hi, nir_iand(b, nir_ishr_imm(b, y, 31), x));
+      }
+      return nir_pack_64_2x32_split(b, nir_imul(b, x, y), hi);
+   }
    nir_def *xl = nir_unpack_64_2x32_split_x(b, x);
    nir_def *xh = nir_unpack_64_2x32_split_y(b, x);
    nir_def *yl = nir_unpack_64_2x32_split_x(b, y);
@@ -7502,7 +7513,9 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    /* Record API/source arithmetic before backend lowering introduces its own
     * 64-bit address and invocation-ID calculations. */
    const bool source_iadd64 = agx_nir_has_alu64(nir, nir_op_iadd);
-   const bool source_imul64 = agx_nir_has_alu64(nir, nir_op_imul);
+   const bool source_imul64 = agx_nir_has_alu64(nir, nir_op_imul) ||
+                              agx_nir_has_alu64(nir, nir_op_umul_2x32_64) ||
+                              agx_nir_has_alu64(nir, nir_op_imul_2x32_64);
 
    if ((key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
         key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
