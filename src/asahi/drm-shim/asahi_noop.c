@@ -1123,17 +1123,6 @@ asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
    return 0;
 }
 
-/* 0 (default) silent, 1 report, 2 reject. See asahi_g17p_stream_validator.h. */
-static unsigned
-g17p_strict_descriptors(void)
-{
-   const char *value = getenv("ASAHI_SHIM_G17P_STRICT_DESCRIPTORS");
-
-   if (value == NULL || value[0] == '\0')
-      return 0;
-
-   return (unsigned)strtoul(value, NULL, 10);
-
 /* A submission's ordering is carried entirely by the barrier fields in each
  * command header and by which ioctl the in/out syncobjs ride on. Both are
  * write-only from userspace: the kernel is the only thing that has ever read
@@ -1205,6 +1194,18 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
               submit->cmdbuf_size);
 
    fclose(log);
+}
+
+/* 0 (default) silent, 1 report, 2 reject. See asahi_g17p_stream_validator.h. */
+static unsigned
+g17p_strict_descriptors(void)
+{
+   const char *value = getenv("ASAHI_SHIM_G17P_STRICT_DESCRIPTORS");
+
+   if (value == NULL || value[0] == '\0')
+      return 0;
+
+   return (unsigned)strtoul(value, NULL, 10);
 }
 
 static int
