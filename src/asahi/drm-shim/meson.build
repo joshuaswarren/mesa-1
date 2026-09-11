@@ -426,14 +426,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # Hyprland's renderBorder issues four adjacent scissored draws into one
-  # render pass, changing only the scissor between them -- the exact shape that
-  # faulted the GMMU on hardware. G17P now gives each of those draws its own
-  # control stream, so there are four barriers and none of them is *inter*-draw:
-  # each one opens a stream. Pinning 0:4 is what keeps a future change from
-  # quietly putting two draws back in one stream, which is the thing that lost
-  # the device within three seconds of opening a terminal.
+  # Retain the one-draw-per-stream diagnostic baseline explicitly. It must
+  # never be required by the default batching tests below.
   g17p_interdraw_barrier_env = environment(g17p_image_copy_3d_environment)
+  g17p_interdraw_barrier_env.set('HK_G17P_DRAW_SPLIT', 'every')
   g17p_interdraw_barrier_env.set(
     'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '0:4')
   test(
@@ -446,18 +442,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # The same four draws with HK_G17P_CONCAT_DRAWS=1, the opt-in that puts them
-  # back in one stream. That shape is not safe on hardware, but it is the only
-  # one in which an inter-draw barrier can exist at all, so it is where the
-  # emitter stays covered: three inter-draw barriers, four total, and no draw
-  # republishing render state without one in front of it.
-  #
-  # Both halves matter. Without the count, a driver that stopped emitting
-  # passes; without the unbarriered-republication check, a barrier emitted in
-  # the wrong place still satisfies the count. Reverting the emitter yields
-  # "0/3 barriers, 3/0 unbarriered", so this test can fail.
+  # Explicit cache-invalidation diagnostic, independently of stream splitting.
   g17p_concat_draw_barrier_env = environment(g17p_image_copy_3d_environment)
   g17p_concat_draw_barrier_env.set('HK_G17P_CONCAT_DRAWS', '1')
+  g17p_concat_draw_barrier_env.set('HK_G17P_INTERDRAW_BARRIER', '1')
   g17p_concat_draw_barrier_env.set(
     'ASAHI_SHIM_G17P_EXPECT_INTERDRAW_BARRIERS', '3:4')
   test(
@@ -489,13 +477,8 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
 
   # What each draw-split policy does to the shape of the stream.
   #
-  # The invariant the G17P fix rests on is that a graphics control stream
-  # publishes render state once: a stream carrying a second *publication*
-  # loses the device. How many draw *bodies* ride on that one publication is a
-  # separate axis, and the cheap one -- a body-only draw writes no state at
-  # all. These three pin both axes, against sixteen identical draws in one
-  # render pass, because a stream-count check alone cannot tell a policy that
-  # concatenates bodies from one that also concatenates publications.
+  # Diagnostic policies are checked separately from the default, including
+  # their counts of both draw bodies and state publications.
   g17p_split_shape_every_env = environment(g17p_image_copy_3d_environment)
   g17p_split_shape_every_env.set('G17P_REPEAT_DRAW_COUNT', '16')
   g17p_split_shape_every_env.set('HK_G17P_DRAW_SPLIT', 'every')
@@ -510,10 +493,7 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # Splitting on render-state republication instead. Sixteen body-only draws
-  # publish state once, so they collapse into one stream -- and that stream
-  # still carries exactly one state update, which is what makes this narrowing
-  # the same rule as the unconditional split rather than a weakening of it.
+  # The republication diagnostic permits unchanged-state draw bodies to batch.
   g17p_split_shape_republish_env = environment(g17p_image_copy_3d_environment)
   g17p_split_shape_republish_env.set('G17P_REPEAT_DRAW_COUNT', '16')
   g17p_split_shape_republish_env.set('HK_G17P_DRAW_SPLIT', 'republish')
@@ -528,9 +508,7 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
-  # The draws-per-stream cap composes with the policy and bounds the second
-  # axis: four streams of four bodies, each still publishing state once. Four
-  # is the deepest stream measured safe on hardware; eight lost the device.
+  # Explicit diagnostic depth cap: four streams of four bodies.
   g17p_split_shape_cap_env = environment(g17p_image_copy_3d_environment)
   g17p_split_shape_cap_env.set('G17P_REPEAT_DRAW_COUNT', '16')
   g17p_split_shape_cap_env.set('HK_G17P_DRAW_SPLIT', 'republish')
@@ -545,6 +523,77 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     suite : ['asahi', 'g17p-draw-split'],
     timeout : 30,
   )
+
+  # Performance invariant: 128 draws in one render pass must remain in one
+  # stream with NO opt-in batching flag. Alternating all four direct/indirect,
+  # indexed/nonindexed forms also checks body framing after the first draw.
+  foreach mode : ['direct', 'indirect', 'mixed-indexed', 'stencil', 'mixed-stencil']
+    batching_env = environment(g17p_image_copy_3d_environment)
+    batching_env.set('G17P_REPEAT_DRAW_COUNT', '128')
+    batching_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE',
+                     mode in ['stencil', 'mixed-stencil'] ? '1:128:128:1' : '1:128:1:1')
+    if mode == 'indirect'
+      batching_env.set('G17P_REPEAT_INDIRECT', '1')
+    elif mode in ['mixed-indexed', 'mixed-stencil']
+      batching_env.set('G17P_REPEAT_INDIRECT', '2')
+    endif
+    if mode in ['stencil', 'mixed-stencil']
+      batching_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
+    endif
+    test('hk_g17p_batching_' + mode, g17p_repeat_draw,
+         env : batching_env, depends : [_dev_icd, libasahi_noop_drm_shim],
+         suite : ['asahi', 'g17p-batching'], timeout : 30)
+  endforeach
+
+  # Cross the real VDM-root capacity with all four draw forms and fresh native
+  # state on every draw. This packet mix fits 182 draws per root, so 4096 draws
+  # require 23 retained renders, each with only its stream-head barrier.
+  batching_capacity_env = environment(g17p_image_copy_3d_environment)
+  batching_capacity_env.set('G17P_REPEAT_DRAW_COUNT', '4096')
+  batching_capacity_env.set('G17P_REPEAT_INDIRECT', '2')
+  batching_capacity_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
+  batching_capacity_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '23:4096:4096:23')
+  test('hk_g17p_batching_capacity', g17p_repeat_draw,
+       env : batching_capacity_env, depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-batching'], timeout : 30)
+
+  batching_bias_env = environment(g17p_image_copy_3d_environment)
+  batching_bias_env.set('G17P_REPEAT_DRAW_COUNT', '4096')
+  batching_bias_env.set('G17P_REPEAT_INDIRECT', '2')
+  batching_bias_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
+  batching_bias_env.set('G17P_REPEAT_INTEGER_DEPTH_BIAS', '1')
+  batching_bias_env.set('ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS', '1')
+  batching_bias_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '23:4096:4096:23')
+  test('hk_g17p_batching_capacity_integer_bias', g17p_repeat_draw,
+       env : batching_bias_env, depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-batching'], timeout : 30)
+
+  split_bias_env = environment(g17p_image_copy_3d_environment)
+  split_bias_env.set('G17P_REPEAT_DRAW_COUNT', '16')
+  split_bias_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
+  split_bias_env.set('G17P_REPEAT_INTEGER_DEPTH_BIAS', '1')
+  split_bias_env.set('HK_G17P_STATE_PUBLICATIONS_PER_STREAM', '4')
+  split_bias_env.set('ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS', '1')
+  split_bias_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '4:16:16:4')
+  test('hk_g17p_split_integer_bias', g17p_repeat_draw,
+       env : split_bias_env, depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-draw-split'], timeout : 30)
+
+  batching_repeat_env = environment(g17p_image_copy_3d_environment)
+  batching_repeat_env.set('G17P_REPEAT_DRAW_COUNT', '128')
+  batching_repeat_env.set('G17P_REPEAT_INDIRECT', '2')
+  batching_repeat_env.set('G17P_REPEAT_SUBMITS', '32')
+  batching_repeat_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '32:4096:32:32')
+  test('hk_g17p_batching_retained_submits', g17p_repeat_draw,
+       env : batching_repeat_env, depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-batching'], timeout : 30)
+
+  batching_scissor_env = environment(g17p_image_copy_3d_environment)
+  batching_scissor_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:4:4:1')
+  test('hk_g17p_batching_scissor_ring', g17p_scissor_ring,
+       args : ['ring', '--record-only'], env : batching_scissor_env,
+       depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-batching'], timeout : 30)
 
   # Whether a readback copy is ordered after the render that produced it is
   # carried entirely by drm_asahi_cmd_header::vdm_barrier and by which ioctl

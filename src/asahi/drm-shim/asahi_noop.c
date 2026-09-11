@@ -498,13 +498,10 @@ check_inter_draw_barriers(void)
  * Assert the shape a draws-per-stream policy produced.
  *
  * ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE is
- * "<graphics streams>:<draws>:<state updates>".  All three are needed: the
- * stream count is what a split policy changes, the draw count proves no draw
- * was dropped on the way, and the state-update count is the invariant the
- * G17P fix actually rests on -- a stream may publish render state once.  A
- * policy that concatenates draw bodies while still publishing state per draw
- * would pass a stream-count check on its own and is exactly the thing that
- * loses the device.
+ * "<graphics streams>:<draws>:<state updates>[:<barriers>]". Draw counts
+ * prevent dropped draws from passing; state counts distinguish changed and
+ * reused state. The optional barrier count also rejects a per-draw cache
+ * invalidation masquerading as efficient batching.
  */
 static void __attribute__((destructor))
 check_stream_shape(void)
@@ -514,8 +511,11 @@ check_stream_shape(void)
       return;
 
    unsigned expected_streams = 0, expected_draws = 0, expected_states = 0;
-   if (sscanf(value, "%u:%u:%u", &expected_streams, &expected_draws,
-              &expected_states) != 3) {
+   unsigned expected_barriers = 0;
+   const int fields = sscanf(value, "%u:%u:%u:%u", &expected_streams,
+                             &expected_draws, &expected_states,
+                             &expected_barriers);
+   if (fields < 3) {
       fprintf(stderr,
               "shim: ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE wants "
               "<streams>:<draws>:<state updates>, got '%s'\n",
@@ -525,12 +525,16 @@ check_stream_shape(void)
 
    if (validated_graphics_streams != expected_streams ||
        matrix_stats.draws != expected_draws ||
-       matrix_stats.state_updates != expected_states) {
+       matrix_stats.state_updates != expected_states ||
+       (fields == 4 && matrix_stats.barriers != expected_barriers)) {
       fprintf(stderr,
               "shim: G17P stream shape %u/%u streams, %u/%u draws, %u/%u "
               "state updates\n",
               validated_graphics_streams, expected_streams, matrix_stats.draws,
               expected_draws, matrix_stats.state_updates, expected_states);
+      if (fields == 4)
+         fprintf(stderr, "shim: G17P barriers %u/%u\n",
+                 matrix_stats.barriers, expected_barriers);
       _Exit(EXIT_FAILURE);
    }
 
@@ -1354,6 +1358,12 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
 
          struct drm_asahi_cmd_render render = {0};
          memcpy(&render, header + 1, MIN2(sizeof(render), header->size));
+
+         if (getenv("ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS") &&
+             !(render.flags & DRM_ASAHI_RENDER_DBIAS_IS_INT)) {
+            fprintf(stderr, "shim: G17P render lost integer depth-bias mode\n");
+            return -EINVAL;
+         }
 
          /* G17P creates a per-job render-storage view from the fixed HAL200
           * context aperture.  Unlike ordinary client-VM shader and resource

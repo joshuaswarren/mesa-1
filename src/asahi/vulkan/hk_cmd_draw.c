@@ -82,90 +82,17 @@
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
-/*
- * How many draws, and how many render-state publications, a G17P graphics
- * control stream may carry.
- *
- * One draw per stream is the shipping rule and it is what made the Hyprland
- * desktop usable, but it is expensive: a stream boundary is a whole retained
- * render, a tilebuffer store and reload, and glmark2 [ideas] pays roughly an
- * order of magnitude for it. This is the harness that was built to narrow it,
- * and the record of the narrowings that were tried and do not hold.
- *
- * The result, stated first because it is a negative one: **the rule cannot
- * currently be narrowed.** Any stream carrying more than one draw faults, and
- * it faults *intermittently*, which is what makes this expensive to get wrong.
- * A single surviving run means nothing here. Measured on neo, glmark2 [ideas],
- * one knob apart, logging held constant:
- *
- *   1 draw per stream       4-5 FPS   survives, run after run
- *   2 draws per stream      8 FPS     survived one full run
- *   4 draws per stream     13-15 FPS  survived one full run, faulted on others
- *   1 publication + <=4
- *     bodies per stream    10 FPS     survived one full run, faulted the next
- *   8 draws per stream        --      VK_ERROR_DEVICE_LOST
- *   unbounded                 --      device lost in ~3s on the desktop
- *
- * The two middle rows are the trap. Taken as single samples they say 2 and 4
- * deep are safe and worth 2-3x; repeated, they say the fault is a rate whose
- * probability rises with depth, and the repeats are the only reason this is
- * not in the tree as a fix. The fault names the benchmark process cleanly
- * (recovery cause command-word is the owner PID, sources=1), so it is ours and
- * not the separate empty-attribution fault also seen on this machine.
- *
- * Four narrowings were tried against hardware and none of them holds:
- *
- *  - splitting only on draws that republish render state. Body-only draws --
- *    ones that reuse what the previous draw latched and write no state at all
- *    -- ride along, which keeps the invariant the shipping rule provides (one
- *    publication per stream) exactly rather than weakening it. It still
- *    faulted, which is the finding that rules out state tearing as the whole
- *    story: a stream with one publication and several bodies is not safe.
- *  - capping the number of draw bodies per stream. Faults at 8, and at 4 on
- *    repeat.
- *  - capping the number of render-state publications per stream. Same.
- *  - rotating the three-bit active-context selector, so consecutive
- *    publications land in different hardware render-state contexts.
- *    HK_G17P_VDM_CONTEXTS=8 loses the device with a *different* signature --
- *    dVDM_CSD, unit 0xa7, reading an unmapped address inside the +8..+32 MiB
- *    draw-state aperture. The selector rebases context-relative addresses and
- *    the payloads are only mapped for context 0, so a rotated context reads
- *    memory that was never bound. Making rotation usable means establishing
- *    the per-context base; that is unfinished RE, not a knob, and it is the
- *    most promising route left.
- *
- * Three explanations for the depth were ruled out rather than argued away:
- *
- *  - it is not the 32 KiB VDM root filling. A republishing draw writes 119
- *    bytes -- HK_G17P_DRAW_COUNTERS measures it -- and
- *    hk_g17p_vdm_needs_render_split() first fires at 188 draws, which the
- *    drm-shim reproduces exactly. The failing depth is twenty times lower.
- *  - it is not a missing barrier. Honeykrisp already emits an inter-draw VDM
- *    barrier ahead of every state republication, and it faults anyway.
- *  - it is not the retained-render transition, which the surviving runs cross
- *    on every stream boundary.
- *
- * Note the counting trap, because it makes the republish policy look worthless
- * when it is measured wrong. Ending a stream marks all state dirty for the
- * next one, so under `every` *every* draw republishes by construction and a
- * body-only draw cannot exist: measured that way glmark2 reports zero
- * body-only draws in every scene. Let streams carry more than one draw and the
- * same scenes report 35% to 53% body-only. Any measurement of that ratio taken
- * under the unconditional split is circular.
- *
- * HK_G17P_DRAW_SPLIT selects the policy (`every`, the default and the shipping
- * rule; `republish`; `never`). HK_G17P_DRAWS_PER_STREAM and
- * HK_G17P_STATE_PUBLICATIONS_PER_STREAM cap the two axes independently.
- * HK_G17P_CONCAT_DRAWS=1 still spells `never`, the control that reproduces the
- * fault. HK_G17P_DRAW_COUNTERS=1 reports draws, republications, splits and
- * bytes per draw at exit without the per-split trace's one line per draw.
+/* G17P batches draws in one graphics stream. Explicit split policies and
+ * depth caps are diagnostic controls only. The historical depth experiments
+ * and their intermittent faults are retained in commit fb8fd6b881d; they do
+ * not establish a hardware limit of one draw or publication per stream.
  */
 enum hk_g17p_draw_split {
    /* Every draw after the first starts a new stream. */
    HK_G17P_DRAW_SPLIT_EVERY,
    /* Only a draw that republishes render state starts a new stream. */
    HK_G17P_DRAW_SPLIT_REPUBLISH,
-   /* Never split; the control that reproduces the fault. */
+   /* Batch draws until a real render dependency or capacity boundary. */
    HK_G17P_DRAW_SPLIT_NEVER,
 };
 
@@ -189,7 +116,7 @@ hk_g17p_draw_split_policy(const struct hk_device *dev)
       else if (debug_get_bool_option("HK_G17P_CONCAT_DRAWS", false))
          policy = HK_G17P_DRAW_SPLIT_NEVER;
       else
-         policy = HK_G17P_DRAW_SPLIT_EVERY;
+         policy = HK_G17P_DRAW_SPLIT_NEVER;
 
       /* The old opt-in spelling, kept working so existing A/B scripts that
        * asked for the unconditional split still get it. */
@@ -203,10 +130,8 @@ hk_g17p_draw_split_policy(const struct hk_device *dev)
 /*
  * How many render-state publications one stream may carry.
  *
- * This is the axis the hardware actually bounds: each publication overwrites
- * the same context-0 state, so the depth of publications is what can tear.
- * Draw bodies that publish nothing ride along for free and are not counted.
- * Zero means no cap, which only makes sense with the `never` control.
+ * Diagnostic limit on state publications, independently of draw bodies.
+ * Zero is the default and means no artificial cap.
  */
 static unsigned
 hk_g17p_state_publications_per_stream(const struct hk_device *dev)
@@ -224,9 +149,8 @@ hk_g17p_state_publications_per_stream(const struct hk_device *dev)
 
 /*
  * Hard cap on draw *bodies* per graphics control stream, independent of the
- * publication cap above.  Zero means no cap.  This is the axis the hardware
- * A/B swept (4 deep survives, 8 loses the device), so it stays available as
- * the control that reproduces those points exactly.
+ * publication cap above. Zero means no artificial cap. Historical depth
+ * experiments are documented in fb8fd6b881d, including intermittent faults.
  */
 static unsigned
 hk_g17p_draws_per_stream(const struct hk_device *dev)
@@ -4424,32 +4348,12 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
    uint8_t *out = cs->current;
 
-   /* Reaching here means this draw republishes render state: the early return
-    * above is the only exit for a draw that reuses the state the previous one
-    * latched.  On AGX3 that republication is not just a set of immediate
-    * words like AGX2's VDM_STATE -- it installs a fresh vertex-program
-    * template, a fresh HAL200 bind tail, and a fresh draw-state context
-    * selector, all of which are *pointers* the VDM dereferences.  Overwriting
-    * that indirection while the previous draw is still walking it is a
-    * read-after-write on the state path, and it presents as a GMMU read fault
-    * rather than a wrong pixel.
-    *
-    * AGX2 needs nothing here and is deliberately left alone: its draws carry
-    * their state inline, so there is no shared indirection to tear.
-    *
-    * This is the narrow form of what ZINK_DEBUG=sync buys.  On the graphics
-    * side that flag's only effect is CmdEndRendering per draw, which starts a
-    * new control stream, and every control stream opens with exactly this
-    * barrier word in hk_cs_init_graphics().  So sync already relies on a
-    * barrier before each draw -- it just pays for a full tilebuffer store and
-    * background reload to get one.  Emit the four bytes and skip the split.
-    *
-    * cs->stats.cmds is the number of draw bodies already written to this
-    * stream, so a zero means hk_cs_init_graphics() has just emitted the
-    * stream-head barrier and there is nothing yet to order against.
-    */
+   /* Native captures concatenate state publications without this cache
+    * invalidation. Retain the old barrier only as a diagnostic control;
+    * immutable per-draw state does not require a per-draw cache flush. */
    struct agx_vdm_barrier_core interdraw_barrier;
    if (cs->stats.cmds > 0 &&
+       debug_get_bool_option("HK_G17P_INTERDRAW_BARRIER", false) &&
        agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
       memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
       out += interdraw_barrier.length;
@@ -4968,7 +4872,13 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
     */
-   if ((gfx->dirty & (HK_DIRTY_PROVOKING | HK_DIRTY_VARYINGS)) ||
+   /* Any dirty G17P draw must publish HAL200 state. In particular, stencil,
+    * depth and line-width changes do not necessarily dirty the VS or root.
+    * Letting those changes fall through to hk_flush_ppp_state() emits the
+    * legacy aggregate layout into an otherwise native stream. The initial
+    * draw hid this because all shader state was dirty on stream creation. */
+   if (dev->dev.chip == AGX_CHIP_G17P ||
+       (gfx->dirty & (HK_DIRTY_PROVOKING | HK_DIRTY_VARYINGS)) ||
        IS_DIRTY(RS_RASTERIZER_DISCARD_ENABLE) || linked_vs_dirty || vgt_dirty ||
        gfx->descriptors.root_dirty || gfx->draw_id_ptr || gfx->draw_params ||
        IS_DIRTY(RS_DEPTH_BIAS_ENABLE) || IS_DIRTY(RS_DEPTH_BIAS_FACTORS) ||
@@ -5413,6 +5323,24 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (!cs)
       return NULL;
 
+   /* Select the root before applying per-render state. A retained render
+    * starts with an unset depth-bias mode even when API state is unchanged.
+    * Native G17P uses a 32 KiB VDM root; its in-stream link packet is not yet
+    * established, so use the retained-render transition at that boundary. */
+   if (hk_g17p_vdm_needs_render_split(
+          dev->dev.chip, cs->stats.cmds, cs->end - cs->current,
+          AGX_VDM_STREAM_LINK_LENGTH)) {
+      if (hk_g17p_launch_trace_enabled())
+         fprintf(stderr, "G17P VDM root full: starting a retained render\n");
+
+      hk_g17p_note_gfx_split(cmd, "vdm-root-full", cs->stats.cmds,
+                             cs->end - cs->current);
+      hk_cmd_buffer_end_graphics(cmd);
+      cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
+      if (!cs)
+         return NULL;
+   }
+
    /* Annoyingly,
     * VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT is
     * render pass state on Imaginapple but draw state in Vulkan. In practice,
@@ -5423,9 +5351,9 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * Note we only do this dance with depth bias is actually enabled to avoid
     * senseless control stream splits with DXVK.
     */
-   const bool dbias_selected =
-      (IS_DIRTY(RS_DEPTH_BIAS_FACTORS) || IS_DIRTY(RS_DEPTH_BIAS_ENABLE)) &&
-      dyn->rs.depth_bias.enable;
+   /* A split later in this function may need to reapply unchanged API state
+    * to a fresh render, including the opt-in publication-depth diagnostic. */
+   const bool dbias_selected = dyn->rs.depth_bias.enable;
    const bool dbias_is_int =
       dbias_selected &&
       ((dyn->rs.depth_bias.representation ==
@@ -5444,29 +5372,12 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                                 cs->stats.cmds, cs->end - cs->current);
          hk_cmd_buffer_end_graphics(cmd);
          cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
+         if (!cs)
+            return NULL;
 
          succ = u_tristate_set(&cs->cr.dbias_is_int, dbias_is_int);
          assert(succ && "can always set tri-state on a new control stream");
       }
-   }
-
-   /* Native G17P concatenates ordinary draws in one 0x8000-byte VDM root.
-    * Its in-stream link packet is not yet established on hardware, so cross
-    * that uncommon capacity boundary with the already-correct retained-render
-    * transition rather than silently dropping the linked suffix.
-    */
-   if (hk_g17p_vdm_needs_render_split(
-          dev->dev.chip, cs->stats.cmds, cs->end - cs->current,
-          AGX_VDM_STREAM_LINK_LENGTH)) {
-      if (hk_g17p_launch_trace_enabled())
-         fprintf(stderr, "G17P VDM root full: starting a retained render\n");
-
-      hk_g17p_note_gfx_split(cmd, "vdm-root-full", cs->stats.cmds,
-                             cs->end - cs->current);
-      hk_cmd_buffer_end_graphics(cmd);
-      cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
-      if (!cs)
-         return NULL;
    }
 
    hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
@@ -6041,14 +5952,24 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                               VK_ERROR_FEATURE_NOT_PRESENT);
                   return;
                }
-               memcpy(out, encoded.bytes, encoded.length);
-               cs->current = out + encoded.length;
+               /* The selector completes the native bind tail. With unchanged
+                * state, indirect draws need the same body-only framing as
+                * direct draws; a bare selector would be parsed as a header. */
+               size_t emitted;
+               if (!agx_vdm_hal200_draw_emit(
+                      dev->dev.chip, encoded.bytes, encoded.length,
+                      g17p_native_bind_tail_emitted, out,
+                      (uint8_t *)cs->end - out, &emitted)) {
+                  vk_command_buffer_set_error(&cmd->vk,
+                                              VK_ERROR_FEATURE_NOT_PRESENT);
+                  return;
+               }
+               cs->current = out + emitted;
                if (hk_g17p_launch_trace_enabled())
                   hk_g17p_trace_line(draw.indexed
                                         ? "hal200-indexed-indirect-draw"
                                         : "hal200-indirect-draw",
-                                     draw.b.ptr, encoded.bytes,
-                                     encoded.length);
+                                     draw.b.ptr, out, emitted);
             } else if (draw.indexed) {
                const struct agx_vdm_hal200_indexed_draw_fields fields = {
                   .primitive = (uint8_t)topology,
