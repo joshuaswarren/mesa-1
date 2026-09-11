@@ -2,7 +2,15 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Apple RIA Gen1/Gen5 BVH8 node-header child-layout decoding.
+ * Apple RIA Gen1/Gen5 BVH8 node-header child-layout decoding, plus the Gen1
+ * quantisation frame in both directions.
+ *
+ * G17P's hardware ray-traversal unit walks this format directly, so an
+ * acceleration structure we build has to be written in it.  The child-layout
+ * accessors below are decode-only; the quantisation frame is the one part
+ * that also encodes, because it is the part a builder cannot avoid getting
+ * exactly right -- see the rounding note on
+ * agx_rt_bvh_gen1_quantize_child_bounds().
  *
  * These accessors are an independent implementation of the six pure
  * RIANodeHeaderGen5 child-layout accessors in AGXMetalG17X.  They were
@@ -408,8 +416,9 @@ struct agx_rt_bvh_gen1_quantized_bounds {
 };
 
 /* Apple returns these six seven-bit components in descending bit order.  The
- * geometric axis/min-max names are intentionally left out until independently
- * correlated; the field extraction itself is exact. */
+ * axis and min/max roles ARE now correlated -- see
+ * agx_rt_bvh_gen1_child_bounds() below -- and are grouped
+ * (min.x, min.y, min.z, max.x, max.y, max.z), not interleaved per axis. */
 static inline bool
 agx_rt_bvh_gen1_quantized_child_bounds(
    const struct agx_rt_bvh_gen1_header *header, unsigned child,
@@ -426,6 +435,400 @@ agx_rt_bvh_gen1_quantized_child_bounds(
    bounds->component[4] = (uint32_t)((word >> 29) & 0x7fu);
    bounds->component[5] = (uint32_t)((word >> 22) & 0x7fu);
    return true;
+}
+
+/*
+ * The quantisation frame.
+ *
+ * A Gen1 node stores its children's bounds as six seven-bit numbers in a grid
+ * whose origin and per-axis step live in the node header itself.  Measured
+ * from Apple's own dequantiser inside extractDataFromBVH<RIANodeHeaderGen1>
+ * (AGXMetalG17P), and confirmed independently on the encode side by the
+ * shipped gen-2 build kernels:
+ *
+ *   origin.x = words[1][0:15]   origin.y = words[2][0:15]
+ *   origin.z = words[3][0:15]   -- each a bfloat16, i.e. the top half of a
+ *                                  binary32, so the float is bits << 16
+ *   exp.x    = words[0][8:15]   exp.y    = words[4][8:15]
+ *   exp.z    = words[4][0:7]    -- each a RAW binary32 exponent byte, so the
+ *                                  step is bitcast<float>(exp << 23)
+ *
+ * Apple reconstructs BOTH corners with the same origin, the same step and the
+ * same fused multiply-add: there is no +1, no half-ULP bias and no asymmetry
+ * on the decode side.  The asymmetry lives entirely in the encoder, which
+ * floors the minimum triple and ceils the maximum triple.
+ *
+ * exp == 0 gives a step of +0.0, which is the legal degenerate-axis encoding.
+ *
+ * Gen5 uses this identical frame with exactly one field moved: its exp.x is at
+ * words[7][0:7].  Only Gen1 is encodable here.
+ */
+struct agx_rt_bvh_gen1_quantization_frame {
+   float origin[3];
+   uint8_t exponent[3];
+};
+
+static inline float
+agx_rt_bvh_bitcast_u32_to_f32(uint32_t bits)
+{
+   float value;
+
+   memcpy(&value, &bits, sizeof(value));
+   return value;
+}
+
+static inline uint32_t
+agx_rt_bvh_bitcast_f32_to_u32(float value)
+{
+   uint32_t bits;
+
+   memcpy(&bits, &value, sizeof(bits));
+   return bits;
+}
+
+/*
+ * Floating-point helpers done with bit arithmetic rather than <math.h>, so
+ * this header keeps its promise to depend only on the freestanding C library
+ * and stays linkable from Vulkan, Gallium and the D3D12 frontend without
+ * dragging in libm.  Both rounding helpers are restricted to the
+ * non-negative, in-range domain the quantiser actually uses.
+ */
+static inline bool
+agx_rt_bvh_is_finite(float value)
+{
+   return (agx_rt_bvh_bitcast_f32_to_u32(value) & UINT32_C(0x7f800000)) !=
+          UINT32_C(0x7f800000);
+}
+
+static inline bool
+agx_rt_bvh_in_trunc_range(float value)
+{
+   return value >= 0.0f && value < 2147483648.0f;
+}
+
+static inline float
+agx_rt_bvh_floor_nonneg(float value)
+{
+   if (!agx_rt_bvh_in_trunc_range(value))
+      return value;
+
+   return (float)(uint32_t)value;
+}
+
+static inline float
+agx_rt_bvh_ceil_nonneg(float value)
+{
+   if (!agx_rt_bvh_in_trunc_range(value))
+      return value;
+
+   const float truncated = (float)(uint32_t)value;
+
+   return truncated == value ? truncated : truncated + 1.0f;
+}
+
+/* The exponent byte of the smallest power of two at least `value`, for a
+ * strictly positive finite `value`.  Zero if that power is below the
+ * normal range. */
+static inline unsigned
+agx_rt_bvh_ceil_pow2_exponent(float value)
+{
+   const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(value);
+   const uint32_t exponent = (bits >> 23) & 0xffu;
+
+   if (exponent == 0)
+      return 0; /* subnormal: below the representable step range */
+
+   /* An exact power of two is already the answer; anything else needs the
+    * next one up. */
+   return (bits & UINT32_C(0x7fffff)) ? exponent + 1u : exponent;
+}
+
+/* The per-axis grid step.  A raw binary32 exponent byte, so exp 127 is 1.0f
+ * and exp 0 is +0.0f rather than a subnormal. */
+static inline float
+agx_rt_bvh_gen1_axis_step(uint8_t exponent)
+{
+   return agx_rt_bvh_bitcast_u32_to_f32((uint32_t)exponent << 23);
+}
+
+static inline bool
+agx_rt_bvh_gen1_quantization_frame_unpack(
+   const struct agx_rt_bvh_gen1_header *header,
+   struct agx_rt_bvh_gen1_quantization_frame *frame)
+{
+   if (!header || !frame)
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      const uint32_t half = (uint32_t)(header->words[1 + axis] & 0xffffu);
+      frame->origin[axis] = agx_rt_bvh_bitcast_u32_to_f32(half << 16);
+   }
+
+   frame->exponent[0] = (uint8_t)((header->words[0] >> 8) & 0xffu);
+   frame->exponent[1] = (uint8_t)((header->words[4] >> 8) & 0xffu);
+   frame->exponent[2] = (uint8_t)(header->words[4] & 0xffu);
+   return true;
+}
+
+static inline bool
+agx_rt_bvh_gen1_quantization_frame_pack(
+   struct agx_rt_bvh_gen1_header *header,
+   const struct agx_rt_bvh_gen1_quantization_frame *frame)
+{
+   if (!header || !frame)
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(frame->origin[axis]);
+
+      /* The decoder drops the low sixteen mantissa bits, so only a value that
+       * is already exactly representable may be written here.  Fitting the
+       * frame is what rounds; this only deposits. */
+      if (bits & 0xffffu)
+         return false;
+
+      header->words[1 + axis] = (header->words[1 + axis] & ~UINT64_C(0xffff)) |
+                                (uint64_t)(bits >> 16);
+   }
+
+   header->words[0] = (header->words[0] & ~(UINT64_C(0xff) << 8)) |
+                      ((uint64_t)frame->exponent[0] << 8);
+   header->words[4] = (header->words[4] & ~UINT64_C(0xffff)) |
+                      ((uint64_t)frame->exponent[1] << 8) |
+                      (uint64_t)frame->exponent[2];
+   return true;
+}
+
+/* Decode one child's bounds to world space.  Apple's exact arithmetic. */
+static inline bool
+agx_rt_bvh_gen1_child_bounds(const struct agx_rt_bvh_gen1_header *header,
+                             unsigned child, float minimum[3], float maximum[3])
+{
+   struct agx_rt_bvh_gen1_quantization_frame frame;
+   struct agx_rt_bvh_gen1_quantized_bounds bounds;
+
+   if (!minimum || !maximum)
+      return false;
+   if (!agx_rt_bvh_gen1_quantization_frame_unpack(header, &frame))
+      return false;
+   if (!agx_rt_bvh_gen1_quantized_child_bounds(header, child, &bounds))
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      const float step = agx_rt_bvh_gen1_axis_step(frame.exponent[axis]);
+
+      minimum[axis] = frame.origin[axis] + (float)bounds.component[axis] * step;
+      maximum[axis] =
+         frame.origin[axis] + (float)bounds.component[3 + axis] * step;
+   }
+
+   return true;
+}
+
+/* The node's own box.  Apple reconstructs it as origin .. origin + 128 * step,
+ * so the grid has 128 cells per axis while a component only reaches 127. */
+static inline bool
+agx_rt_bvh_gen1_node_bounds(const struct agx_rt_bvh_gen1_header *header,
+                            float minimum[3], float maximum[3])
+{
+   struct agx_rt_bvh_gen1_quantization_frame frame;
+
+   if (!minimum || !maximum)
+      return false;
+   if (!agx_rt_bvh_gen1_quantization_frame_unpack(header, &frame))
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      const float step = agx_rt_bvh_gen1_axis_step(frame.exponent[axis]);
+
+      minimum[axis] = frame.origin[axis];
+      maximum[axis] = frame.origin[axis] + 128.0f * step;
+   }
+
+   return true;
+}
+
+/* Round one coordinate down to bfloat16.  Truncating the mantissa moves a
+ * positive value toward -inf already, but moves a negative one toward +inf,
+ * which would put the origin above the box and make the minimum side
+ * unrepresentable.  Negative values therefore round away from zero. */
+static inline float
+agx_rt_bvh_gen1_origin_round_down(float value)
+{
+   const uint32_t bits = agx_rt_bvh_bitcast_f32_to_u32(value);
+   uint32_t half = bits >> 16;
+
+   if ((bits & UINT32_C(0x80000000)) && (bits & 0xffffu))
+      ++half;
+
+   return agx_rt_bvh_bitcast_u32_to_f32(half << 16);
+}
+
+/*
+ * Choose a frame that covers [minimum, maximum] on every axis with the
+ * tightest step that keeps every quantised component inside 0..127.
+ *
+ * Fails rather than producing a frame that cannot contain the box: a
+ * non-finite coordinate, an inverted box, or an extent too large for the
+ * exponent range.
+ */
+static inline bool
+agx_rt_bvh_gen1_quantization_frame_fit(
+   const float minimum[3], const float maximum[3],
+   struct agx_rt_bvh_gen1_quantization_frame *frame)
+{
+   if (!minimum || !maximum || !frame)
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      if (!agx_rt_bvh_is_finite(minimum[axis]) ||
+          !agx_rt_bvh_is_finite(maximum[axis]))
+         return false;
+      if (!(minimum[axis] <= maximum[axis]))
+         return false;
+
+      const float origin = agx_rt_bvh_gen1_origin_round_down(minimum[axis]);
+
+      if (!agx_rt_bvh_is_finite(origin) || origin > minimum[axis])
+         return false;
+
+      const float extent = maximum[axis] - origin;
+      unsigned exponent;
+
+      if (extent <= 0.0f) {
+         /* A degenerate axis: step +0.0 puts both corners on the origin. */
+         frame->origin[axis] = origin;
+         frame->exponent[axis] = 0;
+         continue;
+      }
+
+      /* Smallest power of two at least extent / 127. */
+      exponent = agx_rt_bvh_ceil_pow2_exponent(extent / 127.0f);
+
+      if (exponent < 1)
+         exponent = 1;
+      else if (exponent > 254)
+         return false;
+
+      /* Verify rather than trust the exponent arithmetic: bump the step until
+       * the maximum corner actually quantises inside the grid.  This settles
+       * the boundary cases frexpf alone does not. */
+      for (;;) {
+         const float step = agx_rt_bvh_gen1_axis_step((uint8_t)exponent);
+
+         if (step > 0.0f &&
+             agx_rt_bvh_ceil_nonneg((maximum[axis] - origin) / step) <= 127.0f)
+            break;
+
+         if (++exponent > 254)
+            return false;
+      }
+
+      frame->origin[axis] = origin;
+      frame->exponent[axis] = (uint8_t)exponent;
+   }
+
+   return true;
+}
+
+/*
+ * Quantise one child box against a frame.
+ *
+ * The minimum triple floors and the maximum triple ceils, so the encoded box
+ * always contains the real one.  That asymmetry is the whole correctness
+ * argument: the decoder applies one affine map to both corners, so rounding
+ * either corner the wrong way yields a box strictly smaller than the true one
+ * and silently drops intersections.
+ */
+static inline bool
+agx_rt_bvh_gen1_quantize_child_bounds(
+   const struct agx_rt_bvh_gen1_quantization_frame *frame,
+   const float minimum[3], const float maximum[3],
+   struct agx_rt_bvh_gen1_quantized_bounds *bounds)
+{
+   if (!frame || !minimum || !maximum || !bounds)
+      return false;
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      const float step = agx_rt_bvh_gen1_axis_step(frame->exponent[axis]);
+
+      if (!agx_rt_bvh_is_finite(minimum[axis]) ||
+          !agx_rt_bvh_is_finite(maximum[axis]))
+         return false;
+      if (!(minimum[axis] <= maximum[axis]))
+         return false;
+      if (minimum[axis] < frame->origin[axis])
+         return false;
+
+      if (!(step > 0.0f)) {
+         /* Degenerate axis: the frame carries no extent, so the box must not
+          * need any. */
+         if (minimum[axis] != frame->origin[axis] ||
+             maximum[axis] != frame->origin[axis])
+            return false;
+
+         bounds->component[axis] = 0;
+         bounds->component[3 + axis] = 0;
+         continue;
+      }
+
+      const float low =
+         agx_rt_bvh_floor_nonneg((minimum[axis] - frame->origin[axis]) / step);
+      const float high =
+         agx_rt_bvh_ceil_nonneg((maximum[axis] - frame->origin[axis]) / step);
+
+      if (low < 0.0f || high > 127.0f)
+         return false;
+
+      bounds->component[axis] = (uint32_t)low;
+      bounds->component[3 + axis] = (uint32_t)high;
+   }
+
+   return true;
+}
+
+/* Deposit six quantised components into a child's word, preserving the low
+ * twenty-two bits, which carry the leaf lane counts rather than bounds. */
+static inline bool
+agx_rt_bvh_gen1_header_set_quantized_child_bounds(
+   struct agx_rt_bvh_gen1_header *header, unsigned child,
+   const struct agx_rt_bvh_gen1_quantized_bounds *bounds)
+{
+   static const unsigned shift[6] = {57, 50, 43, 36, 29, 22};
+
+   if (!header || !bounds || child >= 8)
+      return false;
+
+   uint64_t word = header->words[child] & ((UINT64_C(1) << 22) - 1);
+
+   for (unsigned i = 0; i < 6; ++i) {
+      if (bounds->component[i] > 0x7fu)
+         return false;
+
+      word |= (uint64_t)(bounds->component[i] & 0x7fu) << shift[i];
+   }
+
+   header->words[child] = word;
+   return true;
+}
+
+/* Encode one child's world-space box against the header's own frame. */
+static inline bool
+agx_rt_bvh_gen1_header_encode_child_bounds(
+   struct agx_rt_bvh_gen1_header *header, unsigned child,
+   const float minimum[3], const float maximum[3])
+{
+   struct agx_rt_bvh_gen1_quantization_frame frame;
+   struct agx_rt_bvh_gen1_quantized_bounds bounds;
+
+   if (!agx_rt_bvh_gen1_quantization_frame_unpack(header, &frame))
+      return false;
+   if (!agx_rt_bvh_gen1_quantize_child_bounds(&frame, minimum, maximum,
+                                              &bounds))
+      return false;
+
+   return agx_rt_bvh_gen1_header_set_quantized_child_bounds(header, child,
+                                                            &bounds);
 }
 
 /* Unpack explicitly instead of casting mapped GPU memory.  This accepts

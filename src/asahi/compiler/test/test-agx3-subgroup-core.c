@@ -4,6 +4,7 @@
  */
 
 #include "asahi/compiler/agx3_subgroup_core.h"
+#include "util/macros.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -150,6 +151,63 @@ test_shuffle_vectors(void)
                                                &length));
          }
       }
+   }
+
+   /*
+    * Apple's own applegpu_g17p words for the immediate-lane family, one
+    * kernel per lane (.tmp/g17p-rtgaps-evidence/{bcast,shuf,quadud}.metal).
+    * The lane is f29 and nothing else moves with it, on all six mnemonics --
+    * which is why `subgroupBroadcast(v, 31)`, the read that ends every
+    * subgroup scan, needs no materialising mov any more.
+    */
+   static const struct {
+      bool quad;
+      enum agx3_subgroup_shuffle_op op;
+      uint16_t dest, src, lane;
+      bool src_live, dest_hint;
+      uint8_t length;
+      uint8_t bytes[10];
+   } immediate[] = {
+      {false, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 0, 0, 0, false, false, 10,
+       {0x47, 0x04, 0x56, 0x00, 0x02, 0x00, 0x00, 0x2c, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 0, 0, 31, false, false, 10,
+       {0x47, 0x04, 0x56, 0x00, 0x02, 0x00, 0x3e, 0x2c, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 0, 0, 63, false, false, 10,
+       {0x47, 0x04, 0x56, 0x00, 0x02, 0x00, 0x7e, 0x2c, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_XOR, 0, 0, 63, false, false, 10,
+       {0xc7, 0x04, 0x56, 0x00, 0x02, 0x00, 0x7e, 0x2c, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_UP, 0, 0, 0, false, false, 10,
+       {0x47, 0x05, 0x56, 0x00, 0x02, 0x00, 0x00, 0x2c, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_UP, 4, 0, 31, true, true, 10,
+       {0x47, 0x05, 0x56, 0x04, 0x03, 0x00, 0x3e, 0x2c, 0x02, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_DOWN, 4, 0, 31, true, true, 10,
+       {0xc7, 0x05, 0x56, 0x04, 0x03, 0x00, 0x3e, 0x2c, 0x02, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 0, 0, 3, false, false, 10,
+       {0x47, 0x00, 0x56, 0x00, 0x02, 0x00, 0x06, 0x2c, 0x04, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_XOR, 0, 0, 3, false, false, 10,
+       {0xc7, 0x00, 0x56, 0x00, 0x02, 0x00, 0x06, 0x2c, 0x04, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_UP, 4, 0, 3, true, true, 10,
+       {0x47, 0x01, 0x56, 0x04, 0x03, 0x00, 0x06, 0x2c, 0x02, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_DOWN, 4, 0, 3, true, true, 10,
+       {0xc7, 0x01, 0x56, 0x04, 0x03, 0x00, 0x06, 0x2c, 0x02, 0x00}},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(immediate); ++i) {
+      const struct agx3_subgroup_shuffle_desc w = {
+         .quad = immediate[i].quad,
+         .op = immediate[i].op,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = immediate[i].dest,
+         .src = immediate[i].src,
+         .lane = immediate[i].lane,
+         .wait_mask = 1u << 5,
+         .dest_hint = immediate[i].dest_hint,
+         .src_live = immediate[i].src_live,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &w, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, immediate[i].bytes,
+                        immediate[i].length));
    }
    return 0;
 }
@@ -582,27 +640,23 @@ test_rejection(void)
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.wait_mask = 0;
-   s.lane_kind = (enum agx3_subgroup_lane_kind)1;
+   /* An immediate lane is now the whole seven-bit field on every one of the
+    * six mnemonics, so the shapes this used to refuse all encode. What still
+    * fails closed is a lane the field cannot hold, a wait outside the six
+    * witnessed slots, and the whole immediate form on AGX3c. */
+   s.lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE;
+   s.lane = 0x80;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
-   s.quad = true;
-   s.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
-   s.lane = 4;
+   s.lane = 0x7f;
    CHECK(
-      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
-   s.op = AGX3_SUBGROUP_SHUFFLE_XOR;
-   s.lane = 0;
+      agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    CHECK(
-      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
-   s.lane = 1;
-   s.wait_mask = 1;
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &s, out, &length));
+   s.wait_mask = 1u << 6;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.wait_mask = 0;
-   s.op = AGX3_SUBGROUP_SHUFFLE_UP;
-   s.lane = 1;
-   CHECK(
-      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.quad = false;
    s.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
    s.lane = 3;

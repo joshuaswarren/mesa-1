@@ -3013,8 +3013,17 @@ agx3_alu_rcp(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
              enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 128 ||
-       src >= 128 || (!dest_half && (dest & 1)) || (!src_half && (src & 1)) ||
+   /* 192, not 128. The register fields of this form are range-limited by
+    * Apple's own encoder tables -- f2 and f18 both accept [0, 191], 192
+    * distinct encodings with no aliasing, and refuse 192 -- and the composer
+    * enforces that, so the gate here only has to agree with it. At 128 it did
+    * not: AGX_NUM_REGS is 256 half-registers, so a shader under any real
+    * register pressure gets a reciprocal whose destination is above 128, and
+    * hk_shader.c turns a packer refusal into VK_ERROR_FEATURE_NOT_PRESENT for
+    * the whole pipeline. Three of the ten distinct programs three.js compiles
+    * for its first few examples died on `rcp [d32:reg140 s0=32:reg86.abs]`. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 192 ||
+       src >= 192 || (!dest_half && (dest & 1)) || (!src_half && (src & 1)) ||
        (wait_mask & ~UINT16_C(0x3f)) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE)
       return false;

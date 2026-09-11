@@ -2396,11 +2396,23 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* G17P already has native BG/EOT programs for the supported render-target
-    * clear path, but no precompiled fill_uint4 for the compute replacement
-    * below. Do not discard the working graphics representation and record an
-    * unsupported compute command instead. Once that precompiled shader is
-    * available, the normal optimization becomes eligible again.
+   /* Two reasons to keep the graphics representation on G17P rather than
+    * replace it with the image clears below.
+    *
+    * The first is capability: G17P has native BG/EOT programs for the
+    * supported render-target clear path, but had no precompiled fill_uint4
+    * for the compute replacement. That one retires itself once the shader is
+    * available.
+    *
+    * The second is correctness, and it does not retire. A direct colour
+    * resolve is performed by this render's OWN end-of-tile program -- it is
+    * selected precisely when storeOp is not STORE, so the multisample
+    * attachment is never stored and the pass's only output is the resolve
+    * target. Clearing the attachment as an image then writes a surface
+    * nobody reads and leaves the resolve target untouched, which is exactly
+    * why a clear-only multisample pass resolved to 00 00 00 00 while a pass
+    * with any draw in it was correct. Whether fill_uint4 happens to be
+    * available cannot be allowed to decide that.
     *
     * BeginRendering retained the attachments, initialized TA/PPP and selected
     * the BG clear; EndRendering selected the final EOT. process_empty_tiles
@@ -2408,8 +2420,12 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
     * common finalizer will append the native VDM terminator without uploading
     * any ordinary vertex or fragment program.
     */
+   const bool g17p_output_only_through_eot =
+      dev->dev.chip == AGX_CHIP_G17P && render->g17p_direct_color_resolve;
+
    if (dev->dev.chip == AGX_CHIP_G17P && cs->cr.process_empty_tiles &&
-       !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4)) {
+       (g17p_output_only_through_eot ||
+        !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))) {
       /* Normally supplied by the first draw. A clear has no application
        * sample-location state; use the attachment sample count and leave
        * has_sample_locations uncommitted, just like other meta operations.
@@ -2443,10 +2459,10 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
       if (hk_g17p_launch_trace_enabled()) {
          fprintf(stderr, "G17P clear-only graphics: %ux%u samples=%u "
                          "sample_control=%#x process_empty_tiles=1 "
-                         "scissor=%u zbias=%u\n",
+                         "scissor=%u zbias=%u direct_resolve=%u\n",
                  cs->cr.width, cs->cr.height, MAX2(cs->tib.nr_samples, 1),
                  cs->ppp_multisamplectl, cs->scissor.size,
-                 cs->depth_bias.size);
+                 cs->depth_bias.size, g17p_output_only_through_eot);
       }
       return false;
    }

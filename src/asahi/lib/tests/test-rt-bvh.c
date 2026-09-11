@@ -882,6 +882,290 @@ test_unknown_bits_do_not_affect_addressing(void)
            "all 2^11 unknown-bit combinations leave child addressing unchanged");
 }
 
+
+static float
+random_coordinate(uint64_t *state, float centre, float spread)
+{
+   /* Deliberately NOT a round number: the mantissa is filled from the PRNG so
+    * the value almost never lands on a quantisation boundary. */
+   const uint32_t bits = (uint32_t)(next_random(state) >> 32);
+   const float unit = (float)(bits >> 8) / (float)(1u << 24);
+
+   return centre + (unit - 0.5f) * spread;
+}
+
+static void
+test_gen1_quantization_frame_roundtrip(void)
+{
+   struct agx_rt_bvh_gen1_header header;
+   struct agx_rt_bvh_gen1_quantization_frame frame, decoded;
+
+   memset(&header, 0, sizeof(header));
+
+   /* Fill every bit the frame does not own, so a packer that clobbers a
+    * neighbouring field is caught rather than passing silently. */
+   for (unsigned i = 0; i < 8; ++i)
+      header.words[i] = UINT64_C(0xa5a5a5a5a5a5a5a5);
+
+   frame.origin[0] = -8.0f;
+   frame.origin[1] = 0.5f;
+   frame.origin[2] = 1024.0f;
+   frame.exponent[0] = 127;
+   frame.exponent[1] = 120;
+   frame.exponent[2] = 135;
+
+   require(agx_rt_bvh_gen1_quantization_frame_pack(&header, &frame),
+           "an exactly-representable frame packs");
+   require(agx_rt_bvh_gen1_quantization_frame_unpack(&header, &decoded),
+           "a frame unpacks");
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      require(decoded.origin[axis] == frame.origin[axis],
+              "the frame origin survives a pack/unpack round trip");
+      require(decoded.exponent[axis] == frame.exponent[axis],
+              "the frame exponent survives a pack/unpack round trip");
+   }
+
+   require(agx_rt_bvh_gen1_axis_step(127) == 1.0f,
+           "exponent 127 is a step of one");
+   require(agx_rt_bvh_gen1_axis_step(128) == 2.0f,
+           "exponent 128 is a step of two");
+   require(agx_rt_bvh_gen1_axis_step(0) == 0.0f,
+           "exponent zero is the degenerate step");
+
+   /* The frame must not disturb the fields that share its words. */
+   struct agx_rt_bvh_gen1_header reference;
+   memset(&reference, 0, sizeof(reference));
+   for (unsigned i = 0; i < 8; ++i)
+      reference.words[i] = UINT64_C(0xa5a5a5a5a5a5a5a5);
+
+   require((header.words[0] & ~(UINT64_C(0xff) << 8)) ==
+              (reference.words[0] & ~(UINT64_C(0xff) << 8)),
+           "packing exp.x leaves the rest of word 0 alone");
+   require((header.words[4] & ~UINT64_C(0xffff)) ==
+              (reference.words[4] & ~UINT64_C(0xffff)),
+           "packing exp.y/exp.z leaves the rest of word 4 alone");
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      require((header.words[1 + axis] & ~UINT64_C(0xffff)) ==
+                 (reference.words[1 + axis] & ~UINT64_C(0xffff)),
+              "packing an origin leaves the rest of its word alone");
+   }
+   require(header.words[5] == reference.words[5] &&
+              header.words[6] == reference.words[6] &&
+              header.words[7] == reference.words[7],
+           "packing a frame does not touch words 5 to 7");
+
+   /* A value the decoder could not reproduce must be refused, not truncated. */
+   frame.origin[0] = 1.0f + (1.0f / 65536.0f);
+   require(!agx_rt_bvh_gen1_quantization_frame_pack(&header, &frame),
+           "an origin with low mantissa bits set is refused, not truncated");
+}
+
+static void
+test_gen1_dequantization_is_apples(void)
+{
+   struct agx_rt_bvh_gen1_header header;
+   float minimum[3], maximum[3];
+
+   memset(&header, 0, sizeof(header));
+
+   /* origin = (0, 0, 0), step = 1 on every axis. */
+   header.words[0] = (uint64_t)127u << 8;
+   header.words[4] = ((uint64_t)127u << 8) | 127u;
+
+   struct agx_rt_bvh_gen1_quantized_bounds bounds = {{3, 5, 7, 11, 13, 17}};
+
+   require(agx_rt_bvh_gen1_header_set_quantized_child_bounds(&header, 2,
+                                                             &bounds),
+           "quantised components deposit");
+
+   require(agx_rt_bvh_gen1_child_bounds(&header, 2, minimum, maximum),
+           "a child's bounds decode");
+
+   /* Grouped (min.xyz, max.xyz), not interleaved per axis. */
+   require(minimum[0] == 3.0f && minimum[1] == 5.0f && minimum[2] == 7.0f,
+           "components 0..2 are the minimum corner in x, y, z order");
+   require(maximum[0] == 11.0f && maximum[1] == 13.0f && maximum[2] == 17.0f,
+           "components 3..5 are the maximum corner in x, y, z order");
+
+   /* The node's own box spans 128 cells, not 127. */
+   float node_min[3], node_max[3];
+   require(agx_rt_bvh_gen1_node_bounds(&header, node_min, node_max),
+           "the node's own box decodes");
+   require(node_max[0] == 128.0f && node_max[1] == 128.0f &&
+              node_max[2] == 128.0f,
+           "the node box is origin plus 128 steps");
+}
+
+static void
+test_gen1_quantization_contains_off_grid_boxes(void)
+{
+   uint64_t state = UINT64_C(0x0123456789abcdef);
+   unsigned tightened = 0;
+
+   for (unsigned trial = 0; trial < 20000; ++trial) {
+      struct agx_rt_bvh_gen1_header header;
+      struct agx_rt_bvh_gen1_quantization_frame frame;
+      float node_min[3], node_max[3];
+
+      /* A node box at an awkward offset and an awkward size.  The centres are
+       * irrational-looking on purpose so neither corner nor extent lands on a
+       * power of two. */
+      const float centre = (trial & 1) ? -37.317f : 91.733f;
+      const float spread = 1.0f + (float)(trial % 53) * 0.7717f;
+
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         const float a = random_coordinate(&state, centre, spread);
+         const float b = random_coordinate(&state, centre, spread);
+
+         node_min[axis] = a < b ? a : b;
+         node_max[axis] = a < b ? b : a;
+      }
+
+      if (!agx_rt_bvh_gen1_quantization_frame_fit(node_min, node_max, &frame))
+         continue;
+
+      memset(&header, 0, sizeof(header));
+      require(agx_rt_bvh_gen1_quantization_frame_pack(&header, &frame),
+              "a fitted frame is always exactly representable");
+
+      for (unsigned child = 0; child < 8; ++child) {
+         float child_min[3], child_max[3];
+
+         for (unsigned axis = 0; axis < 3; ++axis) {
+            const float a = random_coordinate(
+               &state, (node_min[axis] + node_max[axis]) * 0.5f,
+               node_max[axis] - node_min[axis]);
+            const float b = random_coordinate(
+               &state, (node_min[axis] + node_max[axis]) * 0.5f,
+               node_max[axis] - node_min[axis]);
+
+            child_min[axis] = a < b ? a : b;
+            child_max[axis] = a < b ? b : a;
+
+            /* Keep the child inside the node, as a real builder would. */
+            if (child_min[axis] < node_min[axis])
+               child_min[axis] = node_min[axis];
+            if (child_max[axis] > node_max[axis])
+               child_max[axis] = node_max[axis];
+         }
+
+         if (!agx_rt_bvh_gen1_header_encode_child_bounds(&header, child,
+                                                         child_min, child_max))
+            continue;
+
+         float decoded_min[3], decoded_max[3];
+         require(agx_rt_bvh_gen1_child_bounds(&header, child, decoded_min,
+                                              decoded_max),
+                 "an encoded child decodes");
+
+         for (unsigned axis = 0; axis < 3; ++axis) {
+            const float step = agx_rt_bvh_gen1_axis_step(frame.exponent[axis]);
+
+            /* Containment.  This is the whole correctness property: rounding
+             * either corner the wrong way shrinks the box and silently drops
+             * intersections. */
+            require(decoded_min[axis] <= child_min[axis],
+                    "the decoded minimum never rises above the true minimum");
+            require(decoded_max[axis] >= child_max[axis],
+                    "the decoded maximum never falls below the true maximum");
+
+            /* Tightness: conservative, but only by one grid cell per side, so
+             * a lazily-correct encoder that just writes 0 and 127 fails. */
+            require(decoded_min[axis] > child_min[axis] - step - step,
+                    "the decoded minimum is within one grid cell");
+            require(decoded_max[axis] < child_max[axis] + step + step,
+                    "the decoded maximum is within one grid cell");
+
+            if (decoded_min[axis] < child_min[axis] ||
+                decoded_max[axis] > child_max[axis])
+               ++tightened;
+         }
+      }
+   }
+
+   /* Guard against the check above passing vacuously on grid-aligned data:
+    * the point of this test is that the boxes are OFF the grid, so the great
+    * majority of corners must actually have been rounded outward. */
+   require(tightened > 100000,
+           "the randomized boxes really are off-grid (rounding was exercised)");
+}
+
+static void
+test_gen1_quantization_rounding_direction(void)
+{
+   struct agx_rt_bvh_gen1_header header;
+   struct agx_rt_bvh_gen1_quantization_frame frame;
+   float decoded_min[3], decoded_max[3];
+
+   memset(&header, 0, sizeof(header));
+
+   /* origin 0, step 1: a box from 2.5 to 6.5 must become 2..7, never 3..6
+    * and never a round-to-nearest 2..6 or 3..7. */
+   frame.origin[0] = frame.origin[1] = frame.origin[2] = 0.0f;
+   frame.exponent[0] = frame.exponent[1] = frame.exponent[2] = 127;
+   require(agx_rt_bvh_gen1_quantization_frame_pack(&header, &frame),
+           "the unit frame packs");
+
+   const float child_min[3] = {2.5f, 2.5f, 2.5f};
+   const float child_max[3] = {6.5f, 6.5f, 6.5f};
+
+   require(agx_rt_bvh_gen1_header_encode_child_bounds(&header, 0, child_min,
+                                                      child_max),
+           "an off-grid box encodes");
+   require(agx_rt_bvh_gen1_child_bounds(&header, 0, decoded_min, decoded_max),
+           "the off-grid box decodes");
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      require(decoded_min[axis] == 2.0f,
+              "an off-grid minimum floors rather than rounds to nearest");
+      require(decoded_max[axis] == 7.0f,
+              "an off-grid maximum ceils rather than rounds to nearest");
+   }
+
+   /* Negative coordinates exercise the bfloat16 origin rounding, where
+    * truncating the mantissa moves the value the WRONG way. */
+   const float negative_min[3] = {-1.0009765625f, -3.5f, -0.1f};
+   const float negative_max[3] = {4.25f, 0.0f, 7.7f};
+   struct agx_rt_bvh_gen1_quantization_frame negative_frame;
+
+   require(agx_rt_bvh_gen1_quantization_frame_fit(negative_min, negative_max,
+                                                  &negative_frame),
+           "a box straddling zero fits a frame");
+
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      require(negative_frame.origin[axis] <= negative_min[axis],
+              "the fitted origin never rises above the box minimum");
+   }
+
+   /* A degenerate axis must encode, and must decode back to a flat box. */
+   const float flat_min[3] = {1.0f, 2.0f, 3.0f};
+   const float flat_max[3] = {1.0f, 2.0f, 3.0f};
+   struct agx_rt_bvh_gen1_quantization_frame flat_frame;
+   struct agx_rt_bvh_gen1_quantized_bounds flat_bounds;
+
+   require(agx_rt_bvh_gen1_quantization_frame_fit(flat_min, flat_max,
+                                                  &flat_frame),
+           "a zero-extent box fits a frame");
+   require(agx_rt_bvh_gen1_quantize_child_bounds(&flat_frame, flat_min,
+                                                 flat_max, &flat_bounds),
+           "a zero-extent box quantises");
+   for (unsigned i = 0; i < 6; ++i) {
+      require(flat_bounds.component[i] == 0,
+              "a degenerate axis quantises to the origin cell");
+   }
+
+   /* An inverted box is a caller bug and must be refused, not silently
+    * normalised. */
+   const float inverted_min[3] = {5.0f, 0.0f, 0.0f};
+   const float inverted_max[3] = {1.0f, 1.0f, 1.0f};
+   struct agx_rt_bvh_gen1_quantization_frame ignored;
+
+   require(!agx_rt_bvh_gen1_quantization_frame_fit(inverted_min, inverted_max,
+                                                   &ignored),
+           "an inverted box is refused");
+}
+
 int
 main(void)
 {
@@ -896,6 +1180,10 @@ main(void)
    test_gen1_unpack_and_control();
    test_gen1_leaf_layout();
    test_gen1_quantized_bounds();
+   test_gen1_quantization_frame_roundtrip();
+   test_gen1_dequantization_is_apples();
+   test_gen1_quantization_contains_off_grid_boxes();
+   test_gen1_quantization_rounding_direction();
    test_gen1_hw_triangle_leaf();
    test_gen1_hw_aabb_leaf();
    test_gen1_randomized_assembly_equivalence();

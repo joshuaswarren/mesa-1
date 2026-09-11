@@ -1408,6 +1408,145 @@ memory operation's index operand inside the low 192 halves, or address
 legalization has to move a high index into a low register first. Closing it in
 the packer is impossible; there is no encoding to add.
 
+### Before widening a register gate, check that the field does not alias
+
+The mirror image of the `device_load` case above: a gate set *below* the
+field's real cap. `agx3_alu_rcp()` refused a destination or source at or above
+128. Sweeping the field the same way says otherwise:
+
+```
+f32rcp ep0 f2  (dest)  accepts [0..191], 192 distinct encodings, 0 aliased
+f32rcp ep0 f18 (src)   accepts [0..191], 192 distinct encodings, 0 aliased
+```
+
+191 again, which is the number the memory forms stop at too. `AGX_NUM_REGS` is
+256 halves, so any shader under real register pressure gets a reciprocal above
+128, and a packer refusal comes back from `hk_shader.c` as
+`VK_ERROR_FEATURE_NOT_PRESENT` for the whole pipeline. Three of the ten
+distinct programs three.js compiles for `webgl_geometry_cube`,
+`webgl_animation_keyframes` and `webgl_materials_physical_clearcoat` died
+there.
+
+**The "0 aliased" column is the part that makes widening safe, and it has to be
+measured rather than assumed.** "The composer accepted it" is not the same
+claim as "the field encodes it". A gate widened onto bits that go nowhere does
+not refuse -- it writes the *wrong register*, which is a wrong-pixels bug
+rather than a compile failure, and the failure mode that this whole file exists
+to avoid. So sweep the value and compare the emitted bytes pairwise: an
+accepted value that produces the same bytes as a smaller one is a silent
+mis-encode, not a wider field.
+
+The same scan says the opposite thing about the half copy, and that gate is
+therefore correct and left alone:
+
+```
+copy ep0 (4 bytes)  f2 (dest)  accepted 173, distinct 128, aliased 45
+                               dest=256 encodes 03 05 01 00
+                               dest=0   encodes 03 05 01 00   <- identical
+copy ep1 (10 bytes) f2 (dest)  accepted 256, distinct 256, aliased 0
+```
+
+`AGX3_COPY_REG16_DEST_HALVES = 128` is right for `copy` ep0: the field is seven
+bits, exactly as the header says, and the composer's acceptance of values at or
+above 256 is an artefact, not permission. Do not raise it.
+
+#### Open: the widening move above half 128
+
+`bitop d32, s16, #0` -- the zero-extending move, emitted as a half copy plus a
+clear of the upper half -- refuses when its destination is at or above half
+128, because `agx3_copy_encode_reg16()` uses `copy` ep0. The ten-byte ep1 form
+addresses [0..255] with no aliasing, so the shape *is* reachable, and
+`AGX3_COPY_MAX_LENGTH` is already 10.
+
+> **CORRECTION (2026-09-11).** An earlier revision of this section said there
+> was "no Apple witness for a ten-byte copy in this tree". **That was wrong.**
+> `agx3_compose_corpus_vectors.c` carries 16 of them at agx3b, against 84 of
+> the four-byte form. Check the corpus before claiming a form is unwitnessed;
+> that is the same lesson this file already teaches about the matrix.
+
+What the corpus does **not** witness is the axis that matters. Every ten-byte
+half copy Apple emits has `f2 = 0` and `f16 = 0`; the only field that
+distinguishes them from the short form is **`f39 = 1`**, which never appears at
+ep0 at all:
+
+```
+ten-byte half copy   03000700020000006000   f9=2 f10=1 f23=2 f24=1 f39=1
+four-byte half copy  93052120               f9=2 f10=1 f23=2 f24=1
+                                            f2=18 f16=5 f11=1 f30=1
+```
+
+So Apple reaches for ep1 to get `f39`, not to get a bigger destination, and
+across every witness the destination register field sits at zero. `f2` and
+`f16` are only ever nonzero at ep0. The composer will deposit `f2` distinctly
+for [0..255] at ep1 -- the alias scan above says so -- but "the bits move" is
+not "the bits mean the destination register at this encoding point", and that
+is precisely the distinction the aliasing section exists to enforce. Guessing
+wrong writes the wrong register rather than refusing.
+
+**That measurement has been made, and Apple will not give you one.** Three
+`applegpu_g17p` kernels written to force half register-to-register movement
+under a memory wait -- a rotate of eight live halves across a load, thirty-two
+live halves shifted by one, and a conditionally selected half -- emit exactly
+one `copy` between them, and it is the fixed prologue instruction every kernel
+starts with:
+
+```
++0  copy_ep1  03000700020000006000    f2=0 f16=0 f39=1
+```
+
+byte-identical to the corpus witnesses. Every other half move in those kernels
+goes through `f16add`, which they use 25, 31 and 27 times against `copy` once.
+That is why all 16 corpus witnesses have `f2 = 0`: **Apple does not move half
+registers with a ten-byte copy at all**, so no amount of kernel writing will
+witness a nonzero destination on that form. Recorded here so nobody spends the
+hour again.
+
+Which reframes the fix. The question is not "how do we witness `copy` ep1 with
+a big destination" but **what does Apple use instead**, and the histogram
+answers it: `f16add dst, src, #0h`. A zero-addend half add is the same move the
+`copy` + `clr` pair is emulating, it is witnessed densely and at ordinary
+register numbers, and metal-nt produces more of it on demand. Measuring that
+form's destination field range, and using it for the low half when the
+destination is at or above 128, is the next step -- and it needs no new witness
+class at all.
+
+A hardware oracle -- emit at ep1 with a known destination, read the register
+back -- would also answer the original question, but is no longer the cheapest
+route.
+
+It was the last refusal left in `webgl_materials_physical_clearcoat` after the
+reciprocal gate was corrected.
+
+### Measuring the packer against an application's real shaders
+
+The refusal cells in this file were found by writing probe shaders for shapes
+somebody suspected. The suspicion is the weak link: a shape nobody thought of
+is a shape nobody probes. Capturing the programs an application *actually
+links* removes it, and needs no hardware.
+
+`neo-gpu-harness/scripts/threejs_shader_dump.py` hooks `createShader`,
+`shaderSource`, `attachShader` and `linkProgram` through
+`Page.addScriptToEvaluateOnNewDocument` -- before any page script, because
+three.js compiles its first program during module evaluation -- and records
+every linked vertex/fragment PAIR. 336 three.js WebGL examples yield **1285
+distinct programs**. `threejs_shader_probe.py` compiles each pair and drives it
+through `g17p-vulkan-graphics-probe` under the drm-shim (`PROBE_PAIRS=1`, and
+`PROBE_BINDINGS` derived per program from the SPIR-V, because a pipeline layout
+missing a binding the shader uses aborts inside `hk_nir_lower_descriptors.c`,
+upstream of the packer, and reads as a refusal if you are not looking).
+
+Measured 2026-09-11:
+
+| driver | programs encoding | examples with >= 1 refusal |
+| --- | --- | --- |
+| the package then deployed on the target | 1119 / 1285 | 78 of 336 |
+| `agx3` at `71684d595f8` | 1235 / 1285 | 21 of 336 |
+
+The corpus is three.js's GLSL minimally rewritten for glslang, not ANGLE's
+SPIR-V; the script documents each rewrite and why it is a fact about glslang
+rather than about the driver. **An encoding claim is all this is. No pixel of
+any of these pages has been looked at.**
+
 ### The control arm
 
 `params_g13g` in `src/asahi/drm-shim/asahi_noop.c` was a six-field stub with
@@ -2790,7 +2929,13 @@ Closing that needs a `metal-nt` witness of `simd_broadcast(x, N)` for several
 N, which would also settle whether the lane field is a plain immediate or a
 LUT.  Until then the register form carries it at the cost of one mov.
 
-### 2. Unconditional `break` nested deeper than 2 -- OPEN
+### 2. Unconditional `break` nested deeper than 2 -- CLOSED (b5397bb9dc0)
+
+> **Closed.**  The experiment below was run and the answer was neither of the
+> two options it offered: a deep break is not a wider immediate on `CNDLT`,
+> it is a different instruction, `cndcf`, carrying a sixteen-bit level count.
+> The rest of this subsection is the question as it stood, kept because the
+> method is what made it answerable.
 
 ```
 agx3_pack_binary.c:5802: no grounded AGX3 encoding for break
@@ -2818,3 +2963,109 @@ lands in the same field and simply grows.  If it does, raising the `nest > 2`
 gate in `agx_lower_pseudo.c` is the whole fix; if the deeper forms use a
 different encoding, that encoding is what the witness gives you.  Five kernels,
 no hardware.
+
+## The two gaps above, measured again on the real driver path (2026-09-10)
+
+Both of the refusals in the previous section were found in a **compiler-only**
+harness that fed SPIR-V straight to `agx_compile_shader_nir()` and substituted
+opaque device loads for `load_push_constant` and `load_num_workgroups`.  Run
+again through the production driver -- a `vkGetAccelerationStructureBuildSizesKHR`
+call under the G17P drm-shim, which is what actually invokes
+`hk_init_radix_sort()` -- **neither refusal happens**, on `agx3` at
+`6cdec595dcb` and with `AGX_MESA_DEBUG=shaders` printing no refusal line at
+all.  The sort's eight compute pipelines compile and the sizing call returns
+`accelerationStructureSize=152 buildScratch=65780`.
+
+Two different reasons, worth telling apart:
+
+* the **`shuffle` lane** was genuinely refused by the *encoder*, but
+  `agx_compile.c` and `agx_optimizer.c` had already been taught to keep the
+  constant in a register for the unwitnessed lanes, so the shader compiled --
+  at the cost of one `mov` per broadcast.  The gap was real; the blockage was
+  not.
+* the **`if_icmp` on `r132`** does not occur at all.  Substituting opaque
+  loads for the push constants and the workgroup count lengthened live ranges
+  that the real driver satisfies from uniforms, and pushed the allocator above
+  half 128.  It was an artifact of the harness.
+
+Both are still ordinary coverage holes that other shaders will reach, so both
+are now closed against Apple's own bytes rather than left standing.
+
+### The immediate lane is f29, seven bits, no LUT
+
+Section 1 above asked for "a `metal-nt` witness of `simd_broadcast(x, N)` for
+several N, which would also settle whether the lane field is a plain immediate
+or a LUT."  It is a plain immediate.  One kernel per lane, everything else
+held fixed (`.tmp/g17p-rtgaps-evidence/{bcast,shuf,quadud}.metal`):
+
+| MSL                        | applegpu_g17p                | form       |
+| -------------------------- | ---------------------------- | ---------- |
+| `simd_broadcast(a, 0)`     | `470456000200002c0400`       | simdbcast  |
+| `simd_broadcast(a, 1)`     | `470456000200022c0400`       | f29 = 1    |
+| `simd_broadcast(a, 5)`     | `4704560002000a2c0400`       | f29 = 5    |
+| `simd_broadcast(a, 31)`    | `4704560002003e2c0400`       | f29 = 31   |
+| `simd_broadcast(a, 32)`    | `470456000200402c0400`       | f29 = 32   |
+| `simd_broadcast(a, 63)`    | `4704560002007e2c0400`       | f29 = 63   |
+| `simd_shuffle_xor(a, 63)`  | `c704560002007e2c0400`       | simdbfly   |
+| `simd_shuffle_up(a, 31)`   | `4705560403003e2c0200`       | simdshftup |
+| `simd_shuffle_down(a, 31)` | `c705560403003e2c0200`       | simdshftdn |
+| `quad_broadcast(a, 3)`     | `470056000200062c0400`       | quadshfl   |
+| `quad_shuffle_xor(a, 3)`   | `c70056000200062c0400`       | quadbfly   |
+| `quad_shuffle_up(a, 3)`    | `470156040300062c0200`       | quadshftup |
+| `quad_shuffle_down(a, 3)`  | `c70156040300062c0200`       | quadshftdn |
+
+The lane lands in f29 unchanged on all six mnemonics.  The field is seven bits
+-- setting the eighth spills into f16, the source register -- so lanes 0..127
+encode, which is every lane a subgroup can name.  Every one of those words
+also sets **f49**, the slot-6 wait for the device load feeding it, including
+the quad butterfly, which the encoder previously refused to give a wait at all
+and which therefore had to spend a whole synchronous identity prelude retiring
+its producer first.
+
+All thirteen reproduce byte-exactly out of `agx3_subgroup_encode_shuffle()`
+and are pinned in `test-agx3-subgroup-core.c`.
+
+### A comparison source is an eight-bit HALF index, not a narrow class
+
+The obvious hypothesis for the `r132` refusal was the `cndcf` pattern -- that
+a register index at or above 128 is a *different operand class* rather than a
+field that is too narrow.  **That hypothesis is wrong**, and one `metal-nt`
+kernel settles it.  Ninety simultaneously live loaded values with a branch in
+the middle (`.tmp/g17p-rtgaps-evidence/{hireg2,hifcmp,hiimm}.metal`):
+
+```
+if (x88 >  x89)        0a9722950485                  icmp ep0  f2=150 f17=148
+if (x88 <  17u)        0a9922901583                  icmp ep0  f2=152 f16=17
+if (x88 != 0u)         0a992380060007830000          icmp ep1  f2=152
+if (fx88 <  fx89)      0a9722950385                  fcmp ep0  f2=150 f19=148
+if (fx88 < -fx89)      0a972295038d                  fcmp ep0  f32=1  (negate)
+if (|fx88| < |fx89|)   0a97239503000305000000200300  fcmp ep2  f14=1 f31=1
+if (fx88 == fx89)      0a972395060000850000          fcmp ep1
+if (fx88 <  0.0f)      0a9922810383                  fcmp ep0  f2=152
+if (fx88 <  1.0f)      0a9922b10383                  fcmp ep0  f18=48
+```
+
+Same field, same selectors (`f9`/`f10`/`f24`/`f25` for the integer forms,
+`f9`/`f10`/`f26`/`f27` for the float ones), just a larger value -- and the
+loads and multiply-adds interleaved with them in the same kernel write it
+higher still (`lddev` f2=178, `imadd` f2=182).  The generated composer, which
+comes from Apple's own encoder tables, takes f2/f17/f19 up to 255 and refuses
+256, and every value round-trips through `decomp.c` unchanged.
+
+So the source is a **half**-register index with eight bits: all 128
+architectural 32-bit registers are addressable, and the `>= 128` gates in
+`agx3_cf_core.c` and `agx3_cf_reg32()` were halving the usable register file
+for any shader that branches.  They now stop at 256.
+
+The `|a| < |b|` row also exposed a live defect: `AGX3_CF_MAX_LENGTH` was 10,
+the length of `fcmp.ep1`, while `agx3_cf_fcmp_reg_abs()` composes `fcmp.ep2`
+at **fourteen** bytes.  Every caller sizes its buffer by that macro, so an
+absolute-valued comparison -- Qt Quick's `conicalgradient.frag`, among others
+-- wrote four bytes past the end of a stack array.  Nothing caught it because
+the overrun lands in padding on the paths that reach it; building a caller
+with a stack protector aborts immediately.
+
+**Not changed:** the same `< 128` gate in `d12_agx3_cf_reg32()` on the D3D12
+side.  The witness applies there too, but that surface pins 128/255/256 as
+invalid across many instruction families in
+`d12_agx3_isa_core_tests.c`, so widening it is its own piece of work.

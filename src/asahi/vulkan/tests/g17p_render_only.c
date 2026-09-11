@@ -1103,9 +1103,27 @@ main(
    /* Identical draws with nothing recorded in between. Honeykrisp takes the
     * unchanged-state early return for every one after the first, so they are
     * body-only draws that reuse the render state the first draw latched --
-    * the case that must NOT collect an inter-draw VDM barrier. */
-   for (unsigned repeat = 1; repeat < G17P_REPEAT_DRAW; ++repeat)
-      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+    * the case that must NOT collect an inter-draw VDM barrier.
+    *
+    * G17P_REPEAT_DRAW_COUNT raises the count without a second binary, so a
+    * host-side sweep can ask how a stream's shape and byte cost grow with the
+    * number of draws it carries.  Combine it with ASAHI_MESA_DEBUG=dirty to
+    * make every repeat republish render state, which is what a real Zink
+    * workload does and what a body-only repeat deliberately does not. */
+   {
+      unsigned repeats = G17P_REPEAT_DRAW;
+      const char *requested = getenv("G17P_REPEAT_DRAW_COUNT");
+
+      if (requested) {
+         const unsigned long parsed = strtoul(requested, NULL, 10);
+
+         if (parsed >= 1 && parsed <= 4096)
+            repeats = (unsigned)parsed;
+      }
+
+      for (unsigned repeat = 1; repeat < repeats; ++repeat)
+         vkCmdDraw(command_buffer, 3, 1, 0, 0);
+   }
 #endif
 #endif
 #if defined(G17P_TINY_RENDER_RECORD)

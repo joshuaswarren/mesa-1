@@ -283,7 +283,7 @@ agx3_fuse_colour_parts(const struct agx3_colour_link_info *main,
       return false;
    memcpy(code + offset, bytes, len); offset += len;
    if (!agx3_tile_store(AGX_ISA_ENCODING_AGX3B, epilog->store_reg, AGX3_TILE_W8,
-                       15, 0, AGX3_TILE_COV_1X, 0, bytes, &len) || len != 12)
+                       15, 0, AGX3_TILE_SAMPLE_1X, 0, bytes, &len) || len != 12)
       return false;
    memcpy(code + offset, bytes, len); offset += len;
    if (!agx3_pixel_release(AGX_ISA_ENCODING_AGX3B, 12, true, 0, bytes, &len) ||

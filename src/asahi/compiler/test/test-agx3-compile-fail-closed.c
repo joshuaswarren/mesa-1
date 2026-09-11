@@ -471,8 +471,16 @@ check_g17p_subgroup_quad_compute(bool valid_lane)
    nir_def *lane = nir_load_subgroup_invocation(&b);
    nir_def *horizontal = nir_quad_swap_horizontal(&b, lane);
    nir_def *vertical = nir_quad_swap_vertical(&b, lane);
+   /*
+    * The lane is f29 on the quad forms exactly as on the SIMD ones, and
+    * Apple's own compiler encodes quad_broadcast(a, 4) as f29 = 4 -- a lane
+    * past the end of a quad is undefined behaviour in the source language,
+    * not something the ISA refuses. What the field genuinely cannot hold is
+    * a lane above seven bits, because the eighth spills into the source
+    * register, so that is what this checks.
+    */
    nir_def *broadcast =
-      nir_quad_broadcast(&b, lane, nir_imm_int(&b, valid_lane ? 3 : 4));
+      nir_quad_broadcast(&b, lane, nir_imm_int(&b, valid_lane ? 3 : 0x80));
    nir_def *sum = nir_iadd(&b, nir_iadd(&b, horizontal, vertical), broadcast);
    nir_store_global(&b, sum, nir_imm_int64(&b, 0x2000),
                     .align_mul = sizeof(uint32_t));

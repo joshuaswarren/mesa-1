@@ -267,17 +267,13 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
          continue;
 
       /*
-       * AGX3's immediate-lane shuffle is grounded only for the witnessed
-       * lanes 0, 3 and 5; any other constant lane has no encoding at all,
-       * while the register-lane form takes an arbitrary lane.  Inlining the
-       * constant here turns an encodable shader into a refused one, so leave
-       * the mov standing for the lanes that need it.  Mesa's own subgroup
-       * scan and radix-sort shaders broadcast lane 31, so this is the
-       * difference between compiling them and not.
+       * AGX3's immediate-lane shuffle holds the lane in a seven-bit field,
+       * so every lane a subgroup can name folds in.  Only an out-of-range
+       * constant -- undefined behaviour, but not a reason to refuse a shader
+       * -- has to keep its mov and go through the register-lane form.
        */
       if (I->op == AGX_OPCODE_SHUFFLE && s == 1 && ctx->key &&
-          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && def->imm != 0 &&
-          def->imm != 3 && def->imm != 5)
+          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && def->imm > 0x7f)
          continue;
 
       if ((I->op == AGX_OPCODE_IMAGE_WRITE ||

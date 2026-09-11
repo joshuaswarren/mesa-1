@@ -389,6 +389,12 @@ struct hk_cs {
    bool agx3_active_context_selector_valid;
    uint32_t agx3_raw_active_context_selector;
 
+   /* Render-state publications this G17P graphics stream has recorded.
+    * Every one of them overwrites the same context-0 state, so this -- not
+    * the draw count and not the bytes used -- is the depth that decides
+    * whether the stream faults. See hk_cmd_draw.c. */
+   unsigned g17p_state_publications;
+
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
     * samplers (especially for GL/DX11-era engines).
