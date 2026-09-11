@@ -119,3 +119,51 @@ poly counters, changes the draw path at the same time.
 - Large buffers are uploaded by `R_StagingUploadBuffer`, which chunks by
   `staging_buffer_size` and issues a `vkCmdCopyBuffer` per chunk with non-zero
   `srcOffset` and `dstOffset`. Alias models use the same path at smaller sizes.
+
+## Known G17P behaviour when running it
+
+### The world is drawn with indirect draws, and `r_indirect 0` is the workaround
+
+With the default `r_indirect 1`, every BSP world surface is missing on G17P --
+not shaded black, never rasterized. `r_indirect 0` renders the world correctly,
+with textures, lightmaps and light falloff, at playable speed. The HUD, the
+weapon viewmodel, entity models, sprites and particles are correct either way,
+because they are drawn directly.
+
+That single cvar is the whole difference, so when a vkQuake frame is reported as
+"black world" the first thing to establish is which way `r_indirect` was set --
+and, because of the trap above, whether the cvar was applied at all. Two of the
+three other cvars reach the same code path: `r_gpulightmapupdate 0` and
+`scr_speeds 1` also disable indirect drawing, so either of them will "fix" the
+world for a reason that has nothing to do with lightmaps or statistics.
+
+vkQuake's indirect path has a compute shader write both the packed 20-byte
+`VkDrawIndexedIndirectCommand` records and the triangle indices, then issues
+`vkCmdDrawIndexedIndirect(buffer, offset, 1, 0)` -- drawCount 1, stride 0 --
+once per material. Note that `hk_CmdPipelineBarrier2` discards
+`pDependencyInfo` and simply ends both control streams, which is not obviously
+the same guarantee as making those compute writes visible to the VDM's indirect
+and index fetches.
+
+### Rectangular black blocks are not vkQuake's bug
+
+Intermittent frames show pure-black, axis-aligned rectangular blocks in a
+regular grid. They are **not** an application artefact and should not be
+attributed to vkQuake or to the world/indirect path above:
+
+- they cover the HUD and the status bar as well as world surfaces; and
+- they extend **outside the vkQuake window**, onto the top bar and the screen
+  edges.
+
+What is corrupted is therefore the composited screen, not vkQuake's own surface.
+Anything scanout- or compositor-shaped is the place to look.
+
+Do not reach for `HK_G17P_DRAW_SPLIT=never` to chase them. On this workload it
+raises a real fault -- `G17P fault report checkpoint=recovery-blamed-cause`,
+`blamed-qid=1/4`, `data-master=1/2`, followed by
+`G17P render: stamp lanes at timeout` -- and takes the compositor session down
+within a few frames. It is a diagnostic, not a configuration, and a short
+sample through it is worse than no sample: a six-frame reading suggested it
+cleared the blocks, and a larger one gave 0 of 12 frames blocked *with* the
+default split against 1 of 5 *without*. The blocks are rare enough that any
+conclusion from a handful of frames is noise.
