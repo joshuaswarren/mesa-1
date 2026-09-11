@@ -560,7 +560,7 @@ agx3_alu_fadd_stage(enum agx_isa_encoding enc, uint16_t staging_dest,
 bool
 agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t src, uint8_t immediate, uint16_t addend,
-                           bool negate_addend, enum agx3_alu_hint src_hint,
+                           bool negate_addend, bool saturate, enum agx3_alu_hint src_hint,
                            enum agx3_alu_hint addend_hint, bool dest_cache,
                            uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
@@ -579,13 +579,13 @@ agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
       {2,dest},{11,dest_cache},{18,src},{34,immediate},{52,addend},
       {27,src_hint==AGX3_ALU_HINT_CACHE},{29,src_hint==AGX3_ALU_HINT_DISCARD},
       {61,addend_hint==AGX3_ALU_HINT_CACHE},{63,addend_hint==AGX3_ALU_HINT_DISCARD},
-      {65,negate_addend},
+      {65,negate_addend},{14,saturate},
    };
-   unsigned n=10;
+   unsigned n=11;
    for(unsigned slot=0;slot<6;slot++)
       if(wait_mask & (1u<<slot))fields[n++]=(struct agx3_field_kv){97+slot,1};
    for(unsigned ep=2;ep<=4;ep++)
-      if(agx3_bind_compose(enc,"f32fma",ep,base,negate_addend ? 11 : 10,
+      if(agx3_bind_compose(enc,"f32fma",ep,base,(negate_addend || saturate) ? 11 : 10,
                            fields,n,out,len))
          return true;
    return false;
@@ -599,7 +599,7 @@ agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                        uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_fma_minifloat_mod(enc, dest, src, immediate, addend, false,
+   return agx3_alu_fma_minifloat_mod(enc, dest, src, immediate, addend, false, false,
                                      src_hint, addend_hint, dest_cache,
                                      wait_mask, out, len);
 }

@@ -12687,7 +12687,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * dependencies in the instruction, including the extended two-wait
           * form; do not serialize independent texture operations. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
-             !I->saturate && I->nr_dests == 1 && I->nr_srcs == 3 &&
+             I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1) {
             const bool imm_first = I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index imm = I->src[imm_first ? 0 : 1];
@@ -12704,7 +12704,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (reg.kill || add.kill || (reg.cache && reg.discard) ||
                    (add.cache && add.discard) ||
                    !agx3_alu_fma_minifloat_mod(enc,I->dest[0].value,reg.value,
-                       imm.value,add.value,add.neg,agx3_post_ra_hint(reg),
+                       imm.value,add.value,add.neg,I->saturate,agx3_post_ra_hint(reg),
                        agx3_post_ra_hint(add),I->dest[0].cache,wait,bytes,&len) ||
                    !agx3_append(emission,bytes,len))
                   AGX3_REFUSE(I);

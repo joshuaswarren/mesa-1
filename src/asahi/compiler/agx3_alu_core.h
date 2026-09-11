@@ -436,7 +436,7 @@ bool agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
  * register addend. The addend modifier remains fused and rounds only once. */
 bool agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                                 uint16_t src, uint8_t immediate,
-                                uint16_t addend, bool negate_addend,
+                                uint16_t addend, bool negate_addend, bool saturate,
                                 enum agx3_alu_hint src_hint,
                                 enum agx3_alu_hint addend_hint,
                                 bool dest_cache, uint16_t wait_mask,

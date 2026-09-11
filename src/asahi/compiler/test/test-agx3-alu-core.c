@@ -1898,6 +1898,15 @@ test_f16_to_int32(void)
 static void
 test_native_fma_minifloat(void)
 {
+   /* M4 applegpu_g16g offline compiler: saturate(fma(-8, src.x, src.y)).
+    * Native text+0x52, multiplier 0xe0, result saturation field14. */
+   {
+      uint8_t out[16], len;
+      assert(agx3_alu_fma_minifloat_mod(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 224, 2, false, true,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false, 0x20, out, &len));
+      exact(out, len, "09011ee1820202020082");
+   }
    {
       static const struct {
          uint16_t dest, src, addend;
@@ -1920,7 +1929,7 @@ test_native_fma_minifloat(void)
          assert(agx3_alu_fma_minifloat_mod(
             AGX_ISA_ENCODING_AGX3B, negative_addend[i].dest,
             negative_addend[i].src, negative_addend[i].immediate,
-            negative_addend[i].addend, true, negative_addend[i].src_hint,
+            negative_addend[i].addend, true, false, negative_addend[i].src_hint,
             negative_addend[i].addend_hint, false, 0, out, &len));
          exact(out, len, negative_addend[i].bytes);
       }
