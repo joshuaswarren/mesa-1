@@ -5123,6 +5123,32 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
 
+   /* Every stage hk_flush_shaders() reads has to actually be bound.  Binding
+    * VK_NULL_HANDLE for a stage is how CmdBindShadersEXT *unbinds* it, and it
+    * is also what a client gets when we refuse to compile that stage's shader
+    * -- so this is the point where a compiler refusal would otherwise walk
+    * into the draw path.
+    *
+    * The fragment stage already has an answer: hk_cmd_bind_graphics_shader()
+    * substitutes dev->null_fs for a null bind.  Apply it to a stage that was
+    * never bound at all, so the substitution does not depend on the client
+    * having called CmdBindShadersEXT for it.
+    *
+    * The vertex stage has no such substitute, and hk_bound_hw_vs() indexes
+    * ->variants[] off the bound API shader: with none bound that is a wild
+    * pointer a few bytes above zero, which hk_flush_shaders() dereferences
+    * for its UVS layout and then publishes to the VDM.  Fail the draw closed
+    * instead.
+    */
+   if (gfx->shaders[MESA_SHADER_FRAGMENT] == NULL)
+      hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_FRAGMENT, NULL);
+
+   if (gfx->shaders[MESA_SHADER_VERTEX] == NULL) {
+      mesa_loge("draw with no vertex shader bound; dropping it");
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return NULL;
+   }
+
    /* Give every G17P draw its own graphics control stream. See
     * hk_g17p_one_draw_per_stream() for why a stream may not carry two.
     * Ending the stream here reuses the established retained-render transition,

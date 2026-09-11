@@ -1465,6 +1465,26 @@ create_gfx_program_separable(struct zink_context *ctx, struct zink_shader **stag
          util_queue_fence_wait(&stages[i]->precompile.fence);
          if (!stages[i]->precompile.obj.mod)
             return zink_create_gfx_program(ctx, stages, vertices_per_patch, hash, is_mesh);
+         /*
+          * Without EXT_shader_object the separable program is linked from
+          * per-stage GPL libraries, and precompile.gpl is the handle this
+          * function later hands to vkCreateGraphicsPipelines in pLibraries.
+          * The check above cannot stand in for it: obj.mod is a
+          * VkShaderModule, whose creation never compiles anything and so
+          * never fails, while the GPL library *does* compile -- and a driver
+          * that cannot encode the shader fails there, leaving precompile.gpl
+          * VK_NULL_HANDLE.
+          *
+          * Linking a null library is how a compiler refusal escapes into a
+          * real pipeline: the link either dereferences it or silently yields
+          * a pipeline with that stage missing, which is then bound and drawn.
+          * Fall back to the ordinary program, which compiles the stage on the
+          * pipeline-creation path where the refusal is reported and the draw
+          * is dropped.
+          */
+         if (!screen->info.have_EXT_shader_object &&
+             !stages[i]->precompile.gpl)
+            return zink_create_gfx_program(ctx, stages, vertices_per_patch, hash, is_mesh);
       }
    }
 

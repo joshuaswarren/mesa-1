@@ -269,6 +269,26 @@ zink_pipeline_bind_failed(struct zink_context *ctx)
    }
 }
 
+/*
+ * The shader-object route has the same failure mode as the pipeline route and
+ * needs the same guard, but it is quieter and therefore worse. When
+ * vkCreateShadersEXT refuses a stage, zink_shader_spirv_compile() hands back a
+ * VK_NULL_HANDLE object, and CmdBindShadersEXT reads VK_NULL_HANDLE as
+ * "unbind this stage" rather than as an error. The draw is then recorded and
+ * submitted with a stage missing -- so a compiler refusal, which must fail
+ * closed, instead reaches the hardware. Refuse the bind the way the pipeline
+ * route already refuses a null VkPipeline.
+ */
+static bool
+zink_gfx_objects_complete(const struct zink_gfx_program *prog)
+{
+   u_foreach_bit(stage, prog->stages_present) {
+      if (prog->objects[stage] == VK_NULL_HANDLE)
+         return false;
+   }
+   return true;
+}
+
 template <zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>
 static bool
 update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode)
@@ -296,6 +316,10 @@ update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum 
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
       ctx->shobj_draw = false;
    } else {
+      if (!zink_gfx_objects_complete(ctx->curr_program)) {
+         zink_pipeline_bind_failed(ctx);
+         return false;
+      }
       if (BATCH_CHANGED || shaders_changed || !ctx->shobj_draw) {
          VkShaderStageFlagBits stages[] = {
             VK_SHADER_STAGE_VERTEX_BIT,
@@ -1024,6 +1048,10 @@ update_mesh_pipeline(struct zink_context *ctx, struct zink_batch_state *bs)
          VKCTX(CmdBindPipeline)(bs->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
       ctx->shobj_draw = false;
    } else {
+      if (!zink_gfx_objects_complete(ctx->mesh_program)) {
+         zink_pipeline_bind_failed(ctx);
+         return false;
+      }
       if (BATCH_CHANGED || shaders_changed || !ctx->shobj_draw) {
          VkShaderStageFlagBits stages[] = {
             VK_SHADER_STAGE_VERTEX_BIT,
@@ -1108,6 +1136,15 @@ zink_draw_mesh_tasks(struct pipe_context *pctx, const struct pipe_grid_info *inf
    bool pipeline_changed = need_rp_update || ctx->mesh_dirty || ctx->dirty_mesh_stages || BATCH_CHANGED ?
                            update_mesh_pipeline<BATCH_CHANGED>(ctx, bs) :
                            false;
+
+   /* update_mesh_pipeline() reports an unbindable program by setting this and
+    * returning "pipeline unchanged", which on its own does not stop the draw.
+    * The ordinary draw path has always consumed the flag here; the mesh path
+    * never did, so a refused mesh or fragment stage was recorded anyway. */
+   if (ctx->pipeline_bind_failed) {
+      ctx->pipeline_bind_failed = false;
+      return;
+   }
 
    emit_dynamic_state<ZINK_DYNAMIC_STATE3, BATCH_CHANGED>(ctx, pipeline_changed, ctx->vp_state.mesh_num_viewports);
 
