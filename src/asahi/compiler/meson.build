@@ -332,6 +332,7 @@ if with_tests
       'agx3_alu_core_test',
       files(
         'agx3_alu_core.c',
+        'agx3_falu_mod_core.c',
         'agx3_compose/agx3_compose.c',
         'agx3_compose/agx3b_tables.c',
         'agx3_compose/agx3c_tables.c',

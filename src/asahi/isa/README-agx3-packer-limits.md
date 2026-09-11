@@ -269,7 +269,16 @@ encoding point as the unmodified compare, at both result widths:
 There is no matching bit on the *first* comparator: `-a < b` comes back as
 `02031d01820b0228800a`, which is f65 again with the operands swapped and the
 relation flipped to `gt`. So a negated first source has to be canonicalised by
-swapping, and stays refused until something does that.
+swapping.
+
+> **UPDATE.** That canonicalisation is now performed rather than refused --
+> see "The width, kind and modifier axes are one encoding point" below. The
+> row above is the whole proof: the swap was *observed here* and then declined,
+> which is this file's recurring failure mode. Fresh kernels add the
+> corroborating controls (`-a >= -c` byte-identical to `a <= c`;
+> `-a < fabs(c)` carrying the abs onto the swapped slot), and
+> `agx3_alu_fcmp_select_reg_imm_neg()` has been folded back into
+> `agx3_alu_fcmp_select_reg_imm()` so there is one encoder again.
 
 The same run also witnesses something this file records as open. The 16-bit
 `h_abs` kernel (`select(x, y, abs(a) < b)`, half result) is
@@ -486,6 +495,194 @@ refusing in vkQuake. Two causes, both worth remembering:
   The dump showed a fragment shader consisting of one texture sample and four
   exports. **Read the shader dump, not just the pass/fail line**, when a probe
   passes that should not.
+
+## The width, kind and modifier axes are one encoding point (three.js, 2026-09-10)
+
+**Measured on hardware.** Chromium loading the three.js examples that render
+blank -- `shadowmap_pointlight`, `lights_spotlight`, `animation_keyframes` --
+with `AGX_MESA_DEBUG=shaders` printed **307 shader refusals in one run**,
+alongside 696 `VK_ERROR_FEATURE_NOT_PRESENT`, 604 "cannot encode fragment" and
+92 "cannot encode vertex". Normalising register and immediate numbers, the 307
+reduce to **six shapes**:
+
+```
+113x  fcmpsel [d16:reg s0=32:reg.abs.discard s1=16:imm s2=16:imm s3=16:imm cond=1 chan=1]
+ 84x  fadd    [d32:reg s0=16:reg s1=32:reg.neg cond=0 chan=1]
+ 80x  fcmpsel [d16:reg s0=32:reg.neg s1=32:reg.neg s2=16:reg s3=16:imm cond=5 chan=1]
+ 19x  bitop   [d32:reg s0=32:reg.neg s1=16:imm cond=0 chan=1]
+  9x  bitop   [d32:reg s0=32:reg.discard s1=16:imm cond=0 chan=1]
+  2x  texture_load [d32:reg s0=32:reg.discard s1=32:reg.discard s2=64:uni16
+                    s3=32:reg.discard s4=16:imm s5=16:null0 cond=0 chan=4 mask=0xf]
+```
+
+### The finding: one structural gap, not six
+
+Every one of the five ALU shapes is an operand **width**, an operand **kind**
+(register or immediate) or a source **modifier** -- and on this ISA all three
+are ordinary fields of *one* encoding point, freely composable. The packer
+modelled them as *separate encoders* with disjoint admission gates, so a shape
+standing on two axes at once had no home in either. That is the whole bug.
+
+Grounded with `metal-nt -arch applegpu_g17p`, one kernel per cell, every vector
+recovered by re-composing through `tools/decomp.c`. `float a`, `half b`:
+
+```
+ a + b        09011c0400c0            f35=4 f43=1   f18=0 f26=2
+ a - b        09011c0400c8            the same, plus f48
+ b - a        09041c0100c8            f35=0 f43=2   f18=4 f26=1, plus f48
+ a + fabs(b)  09011c04020000800200    f47
+ fabs(a) + b  09011c04020000800100    f30
+ b - fabs(a)  09041c01020800800200    f47 and f48 on one instruction
+-a - b        09041c0101080280        f48 and f31 on one instruction
+ b * -a       09041d0100c8            the same pair on f32mul
+ saturate(a+b)      09011c0401000082  f14 with f43 = 1
+ saturate(b-a)      09041c0101080082  f14, f48 and a narrow slot together
+ fma(a, c, h)       09011e05810800c0  f52=8 f60=1, the ADDEND narrow
+ fma(a, c, -h)      09011e05910800c0  the same, plus f65
+ fma(h, c, a)       09081e01810402c0  f18=8 f26=1, the multiplicand narrow
+```
+
+So `f43` is slot A's width sitting beside slot A's modifiers `f47`/`f48`;
+`f26` is slot B's beside `f30`/`f31`; `f60` is the ffma addend's beside
+`f64`/`f65`; and `f14` saturates whatever the widths are. **Nothing here is a
+separate form.** `agx3_falu_mods` now carries the widths next to the modifier
+bits for exactly this reason, and `agx3_try_float_modifier()` admits a 16-bit
+operand on any half.
+
+The same is true of `fsel`. Its comparator widths are `f43`/`f60`, its absolute
+bits `f47`/`f64`, its negate `f65`, and its second comparator's *kind* `f59`
+with the value in `f51` (immediate) or `f52` (register):
+
+```
+ select(v.x, v.y, a >= c)          12051d07850302c0   f35=4 f52=6 f110=5
+ select(v.x, v.y, a >= -c)         12051d07850302c8   plus f65
+ select(v.x, v.y, -a >= c)         12071d05850303c8   operands EXCHANGED,
+                                                      f110 5 -> 6, plus f65
+ select(v.x, v.y, -a >= -c)        12051d07850303c0   relation flip alone
+ select(v.x, v.y, a <= c)          12051d07850303c0   byte-identical
+ select(v.x, v.y, fabs(a) >= c)    12051d0787030200800200800100
+ select(v.x, v.y, fabs(a) >= -c)   12051d0787030208800200800100   f47 AND f65
+ select(v.x, v.y, a >= (0.0h-b))   12051d06850302c8   f60=1 AND f65
+ select(v.x, v.y, a >= 0.5f)       12050da1850302c2   f59=1, f51=32
+ select(v.x, v.y, -a >= 0.5f)      12051da1850303c2   f51=160, f110=6
+ (fabs(a) <  c)    ? 1.0h : 0.0h   1203190523b00300208000800100
+ (fabs(a) < 0.5f)  ? 1.0h : 0.0h   120309a123b00302208000800100   f59=1, f51=32
+```
+
+Three of these retire standing in-tree claims:
+
+- **`-a >= -c` and `a <= c` are one instruction, byte for byte.** Double
+  negation is the relation flip and nothing else, on the general
+  register-select form as well as on the both-immediates one where it was
+  already recorded.
+- **ABS and NEG DO compose**, on *both* fourteen-byte endpoint families.
+  `agx3_alu_fcmp_select_imm_width_internal()` said "Mixing the negate with the
+  absolute modifiers is still not witnessed: ABS moves to a longer endpoint
+  that has no f65", and `agx3_alu_fcmp_select_reg_imm()` refused the same pair.
+  Both notes are wrong and both are retracted. With register selects,
+  `fabs(a) >= -c` is `12051d0787030208800200800100`. With immediate selects,
+  where abs escalates the form:
+
+        (fabs(a) <  c) ? 1.0h : 0.0h   1203190523b00300208000800100
+        (fabs(a) < -c) ? 1.0h : 0.0h   1203190523b00308208000800100
+        (fabs(a) < -c) ? 1.0f : 0.0f   02011b0523b00308208000800100
+        (-a < fabs(c)) ? 1.0h : 0.0h   1205190323b00208208000800100
+
+  one field apart, and the last row is the swap with the abs travelling with
+  the operand it belonged to -- f35/f52 exchange 2/4 -> 4/2 and f110 flips
+  lt -> gt, which is what this encoder now produces for that input.
+- **An immediate comparator is not restricted to zero.** The gate demanded
+  `value == 0`; against the register row directly above it, the immediate row
+  changes only `f59` and the operand field. A modifier on that slot is constant
+  folding -- a minifloat's sign is bit 7 -- which is how Apple spells
+  `-a >= 0.5f` as `a <= -0.5f`.
+
+And of `bitop`. The second operand's kind is `f37` on the register form's own
+encoding point, with the constant in `f29`:
+
+```
+ a & c              0b051f01000000800000   f16=4 f37=2 f38=2
+ a & 0xff           0b011fff100200800000   f29=255 f37=1 f38=2
+ a | 0xff           0b011fff120a00800000
+ a ^ 0xff           0b011eff120a00800000
+ a & 0x7f           0b010fff100200800000   f29=127
+ a ^ 1              0b010e81120a00800000   f29=1
+ (ushort)a & 0xff   13021fff100200800000   f10=1 f24=1, f38 STILL 2
+ (ushort)a | 0x80   13021f81020a00800000
+```
+
+The narrow rows settle `f38`: a 16-bit result narrows `f10` and `f24` and
+**not** `f38`, because an immediate operand declares width 2 whatever the
+destination is -- the same rule the compare-select's immediate slot follows.
+
+### What was done, shape by shape
+
+1. **113x, `fcmpsel` with an absolute comparator against a minifloat.** An
+   admission gate, not an encoder: it demanded an immediate comparator of
+   exactly zero. Relaxed to any minifloat byte, with `abs`/`neg` on that slot
+   folded into the constant.
+
+   One caution on the bytes: the destination block has **two** placements on
+   this endpoint family and Apple emits both. Four `fsel` vectors in
+   `test/agx3_compose_corpus_vectors.c` put the destination at f3 with its
+   width at f11 (ep33); the two fresh kernels above put it at f17/f25 (ep28).
+   `tools/decomp.c` gives them **the same operand field vector**, so they are
+   two encodings of one instruction. This encoder deliberately tries the
+   corpus placement first -- preferring the kernels' one instead regressed
+   those four corpus vectors.
+
+2. **84x, `fadd` of a half and a negated float.** `agx3_falu_mods` gained
+   `src0_16`/`src1_16`/`addend_16` (f43/f26/f60) and
+   `agx3_try_float_modifier()` admits a narrow operand on any half. Every row
+   of the `f32add` / `f32mul` / `f32fma` ladder above reproduces byte for
+   byte, including the three that carry two modifiers at once.
+
+3. **80x, `fcmpsel` with both comparators negated.** Rewritten, not encoded:
+   the negate algebra (f65 for slot 1, operand exchange plus relation reversal
+   for slot 0, relation flip alone for both, sign fold for an immediate) now
+   lives in `agx3_alu_fcmp_select_reg_imm()` and `agx3_alu_fcmp_select()`, and
+   the block that used to refuse a negated comparator carries it through
+   instead. The both-negated form produces *exactly* the plain select's bytes,
+   which is the measured identity.
+
+4. **19x, a value move carrying a folded modifier.** `agx_optimizer_fmov()`
+   composes an `fneg`/`fabs` into its consumer, and a `MOV` -- Mesa's value
+   move -- has no field for one, because `agx_lower_pseudo()` turns it into a
+   `bitop`. The fix is upstream of the packer: at 32 bits that move now lowers
+   to `fadd(x{mods}, -0.0)`, which is what `agx_is_fmov()` matched in the
+   first place and what the modifier encoders already spell. A 16-bit move with
+   a modifier still refuses; no witness covers it.
+
+5. **9x, `bitop` against an immediate.** New encoder `agx3_alu_bit_imm()`,
+   grounded in the ladder above, wired in beside the register form.
+
+6. **2x, `texture_load`** with a 64-bit uniform descriptor and four discarded
+   register sources: **not closed.** See below.
+
+### Not closed, and why
+
+- **`texture_load [... s2=64:uni16 ... s5=16:null0 ... mask=0xf]`** (2 of 307).
+  It is the only one of the six that is not a modifier or a width, and the
+  refusal line as captured predates the printer fix that added `mask`, `fmt`
+  and `shift`, so the shape is under-determined: two different gates can print
+  it identically. Left fail-closed rather than guessed at.
+- **A 16-bit value move carrying a modifier.** The 32-bit lowering above has a
+  witnessed destination; the half one does not.
+- **`abs` or `neg` on the HALF slot of an `f32mul`.** The add rows cover both
+  slots; the multiply rows only cover a negate on the full slot.
+- **Both comparators at half width on one `fsel`.** Unchanged, and both entry
+  points still agree in refusing it.
+
+### One caution this cost
+
+Widening the source admission removed an *accident*: the destination checks in
+`agx3_try_float_modifier()` had been carried by the source checks, because a
+half operand failed them first and took the whole instruction with it. A vector
+or spilled destination reached the encoder the moment a narrow operand was
+admitted. The same held for register-only flags (`memory`, `kill`, `cache`,
+`discard`) on an *immediate* operand of a compare-select. Both are now stated
+explicitly. **When you relax one gate, check what it was silently standing in
+front of.**
 
 ## Six application refusals closed 2026-09-10 (the second pass)
 

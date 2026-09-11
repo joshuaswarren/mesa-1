@@ -439,12 +439,42 @@ agx3_fcond_reverse(enum agx_fcond cond)
    }
 }
 
+/*
+ * An immediate carrying no register-only flag. `memory`, `kill`, `cache` and
+ * `discard` are liveness and location, which an immediate operand has none
+ * of; honouring the constant while dropping them would encode a different
+ * instruction's scoreboard state, so they fail closed instead.
+ */
+static bool
+agx3_plain_immediate(agx_index x)
+{
+   return x.type == AGX_INDEX_IMMEDIATE && !x.memory && !x.kill && !x.cache &&
+          !x.discard;
+}
+
 /* A source usable by the modifier long forms: a plain 32-bit register. */
 static bool
 agx3_mod_src_ok(agx_index s)
 {
    return agx3_src_is_register(s) && !s.memory && s.size == AGX_SIZE_32 &&
           (s.value & 1) == 0 && s.value < 256;
+}
+
+/*
+ * The same, admitting a 16-bit operand on any half. The slot's width is a
+ * field of the encoding point that carries its modifier bits (f43 with
+ * f47/f48, f26 with f30/f31, f60 with f64/f65), so a narrow operand and a
+ * modifier are not competing forms -- see the byte ladder above
+ * struct agx3_falu_mods. Modelling them as separate encoders is what refused
+ * `half + (-float)`, which is on both axes at once.
+ */
+static bool
+agx3_mod_src_any_width(agx_index s)
+{
+   return agx3_src_is_register(s) && !s.memory && s.value < 256 &&
+          agx_channels(s) == 1 &&
+          ((s.size == AGX_SIZE_32 && (s.value & 1) == 0) ||
+           s.size == AGX_SIZE_16);
 }
 
 /*
@@ -470,19 +500,27 @@ agx3_try_float_modifier(struct util_dynarray *emission,
       return 0; /* the compact no-modifier packer handles it */
 
    const unsigned want = is_fma ? 3 : 2;
+   /* The destination checks used to be carried by the source ones: a half
+    * operand failed agx3_mod_src_ok() and took the whole instruction with it,
+    * so a vector or spilled destination never reached the encoder. Admitting
+    * a narrow operand removes that accident, so state them. */
    if (I->nr_dests < 1 || I->dest[0].type == AGX_INDEX_NULL ||
+       !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+       agx_channels(I->dest[0]) != 1 ||
        I->dest[0].size != AGX_SIZE_32 || (I->dest[0].value & 1) != 0 ||
        I->dest[0].value >= 256 || I->nr_srcs != want)
       return -1;
    for (unsigned s = 0; s < want; ++s)
-      if (!agx3_mod_src_ok(I->src[s]))
+      if (!agx3_mod_src_any_width(I->src[s]))
          return -1;
 
    struct agx3_falu_mods m = {
       .src0_abs = I->src[0].abs,
       .src0_neg = I->src[0].neg,
+      .src0_16 = I->src[0].size == AGX_SIZE_16,
       .src1_abs = I->src[1].abs,
       .src1_neg = I->src[1].neg,
+      .src1_16 = I->src[1].size == AGX_SIZE_16,
       .saturate = I->saturate,
    };
 
@@ -512,6 +550,7 @@ agx3_try_float_modifier(struct util_dynarray *emission,
    else {
       m.addend_abs = I->src[2].abs;
       m.addend_neg = I->src[2].neg;
+      m.addend_16 = I->src[2].size == AGX_SIZE_16;
       if (enc == AGX_ISA_ENCODING_AGX3B) {
          struct agx3_falu_runtime runtime = {
             .dest_cache = I->dest[0].cache,
@@ -7851,12 +7890,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             const uint16_t src[]={compare.value,0,I->src[swap?3:2].value,I->src[swap?2:3].value};
             const bool compare_abs[]={false,false};
+            const bool compare_neg[]={I->src[zero_first?1:0].neg,
+                                      I->src[zero_first?0:1].neg};
             const bool immediate[]={true,true};
             const enum agx3_alu_hint hints[]={agx3_post_ra_hint(compare),AGX3_ALU_HINT_NONE,
                AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
             bool invalid=I->saturate || agx_channels(compare)!=1;
-            for(unsigned i=0;i<4;i++)invalid|=I->src[i].abs || I->src[i].neg || I->src[i].kill ||
-               (I->src[i].cache && I->src[i].discard);
+            for(unsigned i=0;i<4;i++)invalid|=I->src[i].abs || (i>=2 && I->src[i].neg) ||
+               I->src[i].kill || (I->src[i].cache && I->src[i].discard);
             if(invalid)AGX3_REFUSE(I);
             uint16_t fsel_wait=wait;
             if(fsel_wait!=0 && fsel_wait!=32) {
@@ -7865,7 +7906,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
             if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,true,
-                 compare_abs,immediate,hints,
+                 compare_abs,compare_neg,immediate,hints,
                  condition,I->dest[0].size==AGX_SIZE_16,I->dest[0].cache,fsel_wait,bytes,&len) ||
                !agx3_append(emission,bytes,len))AGX3_REFUSE(I);
             continue;
@@ -7873,7 +7914,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* Native FSEL selects retained 16/32-bit register values or a register
           * and an immediate directly. Preserve each operand's lifetime hints
-          * without materializing a separate comparison result. */
+          * without materializing a separate comparison result.
+          *
+          * A negated comparator rides through to the encoder rather than
+          * failing the shader closed: f65 names the second comparator, and
+          * every other placement is an operand exchange or a relation flip
+          * that agx3_alu_fcmp_select_reg_imm() performs. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests==1 && I->nr_srcs==4 &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory && agx_channels(I->dest[0])==1 &&
@@ -7901,17 +7947,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index operands[]={I->src[zero_first?1:0],I->src[zero_first?0:1],
                                        I->src[swap?3:2],I->src[swap?2:3]};
             uint16_t src[4]; enum agx3_alu_hint hints[4]; bool immediate[2];
-            bool compare_abs[2], compare_neg[2]={false,false};
+            bool compare_abs[2]; bool compare_neg[2];
             bool invalid=I->saturate;
             for(unsigned i=0;i<4;i++) {
                const agx_index x=operands[i];
                const bool imm=x.type==AGX_INDEX_IMMEDIATE;
-               /* The second compare source may be negated: that is f65, the
-                * one field Apple's own `a < -b` moves. The first source has
-                * no such bit, and a negated selected value is not a modifier
-                * on this instruction at all, so both still fail closed. */
-               invalid|=(x.neg && i!=1) || (i>=2 && x.abs) || x.kill ||
-                  x.memory ||
+               /* ADMITTED: abs and neg on EITHER comparator (i < 2). f65 is
+                * the one negate field and it names the second comparator, but
+                * the first is reachable too -- Apple spells `-a < b` by
+                * exchanging the operands and flipping the relation, and
+                * agx3_alu_fcmp_select_reg_imm() performs that rewrite rather
+                * than handing it back. This gate used to read `x.neg && i!=1`,
+                * admitting slot 1 only; slot 0 was refused on the strength of
+                * having seen the swap and declined to do it.
+                *
+                * REFUSED: abs or neg on a SELECTED value (i >= 2). Those slots
+                * carry a value, not an arithmetic operand -- there is no
+                * modifier field on them at all, and a select may carry an
+                * integer. Also refused: a killed or spilled operand, a vector
+                * operand, conflicting lifetime hints, an out-of-range
+                * immediate, and a selected register whose width does not match
+                * the destination. */
+               invalid|=(i>=2 && (x.abs || x.neg)) || x.kill || x.memory ||
                   agx_channels(x)!=1 ||
                   (x.cache && x.discard) ||
                   (imm ? x.value>255 : (!agx3_src_is_register(x) ||
@@ -7927,9 +7984,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                fsel_wait=0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            if(!agx3_alu_fcmp_select_reg_imm_neg(enc,I->dest[0].value,src,compare_zero,
-                 compare_abs,compare_neg,immediate,hints,condition,
-                 I->dest[0].size==AGX_SIZE_16,
+            if(!agx3_alu_fcmp_select_reg_imm(enc,I->dest[0].value,src,compare_zero,
+                 compare_abs,compare_neg,immediate,hints,condition,I->dest[0].size==AGX_SIZE_16,
                  I->dest[0].cache,fsel_wait,bytes,&len) ||
                !agx3_append(emission,bytes,len))AGX3_REFUSE(I);
             continue;
@@ -8038,14 +8094,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool c0_imm = c0.type == AGX_INDEX_IMMEDIATE;
             const bool c1_imm = c1.type == AGX_INDEX_IMMEDIATE;
 
-            /* At most one compare source may be an immediate, and every
-             * immediate compare source witnessed carries zero. Apple spells
-             * `k < b` by reversing the relation so the immediate lands in
-             * slot 1, the only slot whose kind field is witnessed taking the
-             * immediate value. */
+            /* At most one compare source may be an immediate, and it is a
+             * minifloat byte -- not only zero, which was the limit of what
+             * had been measured rather than a property of the field. Apple
+             * spells `k < b` by reversing the relation so the immediate lands
+             * in slot 1, the only slot whose kind field is witnessed taking
+             * the immediate value, and a modifier on that slot is folded into
+             * the constant by the encoder. */
             if (!(c0_imm && c1_imm) &&
-                (!c0_imm || (c0.value == 0 && !c0.abs && !c0.neg)) &&
-                (!c1_imm || (c1.value == 0 && !c1.abs && !c1.neg)) &&
+                (!c0_imm || (c0.value <= 0xff && agx3_plain_immediate(c0))) &&
+                (!c1_imm || (c1.value <= 0xff && agx3_plain_immediate(c1))) &&
                 (c0_imm || agx3_src_is_register(c0)) &&
                 (c1_imm || agx3_src_is_register(c1))) {
                const agx_index sel_t = I->src[2], sel_f = I->src[3];
@@ -8080,11 +8138,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .cmp0 = cmp0.value,
                   .cmp0_hint = agx3_post_ra_hint(cmp0),
                   .cmp0_abs = cmp0.abs,
+                  .cmp0_neg = cmp0.neg,
                   .cmp0_16 = cmp0.size == AGX_SIZE_16,
                   .cmp1_is_immediate = reverse ? c0_imm : c1_imm,
                   .cmp1 = cmp1.value,
                   .cmp1_hint = agx3_post_ra_hint(cmp1),
                   .cmp1_abs = cmp1.abs,
+                  .cmp1_neg = cmp1.neg,
                   .cmp1_16 = cmp1.size == AGX_SIZE_16,
                   .sel0_kind = tv_imm ? AGX3_FSEL_SEL_IMMEDIATE
                                       : AGX3_FSEL_SEL_REGISTER,
@@ -8098,8 +8158,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                };
 
                const bool operands_ok =
-                  !cmp0.neg && !cmp1.neg && !tv.neg && !fv.neg && !tv.abs &&
+                  !tv.neg && !fv.neg && !tv.abs &&
                   !fv.abs && !cmp0.kill && !cmp1.kill &&
+                  !tv.kill && !fv.kill && !tv.memory && !fv.memory &&
+                  (!tv_imm || agx3_plain_immediate(tv)) &&
+                  (!fv_imm || agx3_plain_immediate(fv)) &&
                   !(cmp0.cache && cmp0.discard) &&
                   !(cmp1.cache && cmp1.discard) &&
                   (tv_imm || agx3_src_is_register(tv)) &&
@@ -9507,6 +9570,51 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_alu_bit_reg(enc,op,I->dest[0].value,src,hints,wait,
                                      bytes,&len) ||
                    !agx3_append(emission,bytes,len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+         }
+
+         /*
+          * The same bitwise operation against an IMMEDIATE. The operand kind
+          * is a field of the encoding point the register form already uses
+          * (f37, with the constant in f29), so `x & 0xff`, `x | mask` and
+          * `x ^ mask` are that instruction with one field changed -- not a
+          * separate form, and not something to fail a shader closed over.
+          * AND/OR/XOR all commute, so an immediate in either source slot
+          * lands in the one slot whose kind field takes it.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             agx_channels(I->dest[0]) == 1 &&
+             (I->dest[0].size == AGX_SIZE_16 ||
+              I->dest[0].size == AGX_SIZE_32)) {
+            const unsigned tt = I->truth_table & 0xfu;
+            const bool immediate_first =
+               I->src[0].type == AGX_INDEX_IMMEDIATE;
+            const agx_index imm = I->src[immediate_first ? 0 : 1];
+            const agx_index reg = I->src[immediate_first ? 1 : 0];
+            const bool narrow = I->dest[0].size == AGX_SIZE_16;
+            if ((tt == AGX3_SEL_TT_AND || tt == AGX3_SEL_TT_OR ||
+                 tt == AGX3_SEL_TT_XOR) &&
+                imm.type == AGX_INDEX_IMMEDIATE && imm.value <= 0xff &&
+                !imm.abs && !imm.neg && !imm.memory &&
+                agx3_src_is_register(reg) && !reg.memory && !reg.abs &&
+                !reg.neg && !reg.kill && agx_channels(reg) == 1 &&
+                !(reg.cache && reg.discard) &&
+                reg.size == I->dest[0].size) {
+               const enum agx3_alu_op op = tt == AGX3_SEL_TT_AND
+                                              ? AGX3_ALU_BAND
+                                              : tt == AGX3_SEL_TT_OR
+                                                   ? AGX3_ALU_BOR
+                                                   : AGX3_ALU_BXOR;
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               if (!agx3_alu_bit_imm(enc, op, narrow, I->dest[0].value,
+                                     reg.value, (uint8_t)imm.value,
+                                     agx3_post_ra_hint(reg), wait, bytes,
+                                     &len) ||
+                   !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                continue;
             }

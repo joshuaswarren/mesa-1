@@ -28,13 +28,39 @@
 extern "C" {
 #endif
 
+/*
+ * A slot's WIDTH is a field of the same encoding point as its modifier bits,
+ * not a different instruction: f43 belongs to the f35 slot exactly as f47 and
+ * f48 do, f26 to the f18 slot alongside f30 and f31, and f60 to the ffma
+ * addend alongside f64 and f65. Apple composes every combination. One kernel
+ * per cell, `float a`, `half b`, recovered through tools/decomp.c:
+ *
+ *    a + b        09011c0400c0   f35=4 f43=1  f18=0 f26=2
+ *    a - b        09011c0400c8   the same, plus f48
+ *    b - a        09041c0100c8   f35=0 f43=2  f18=4 f26=1, plus f48
+ *    a + fabs(b)  09011c04020000800200   f47
+ *    fabs(a) + b  09011c04020000800100   f30
+ *    b - fabs(a)  09041c01020800800200   f47 and f48 together
+ *   -a - b        09041c0101080280       f48 and f31 together
+ *    b * -a       09041d0100c8           the same pair on f32mul
+ *    fma(a,c,h)   09011e05810800c0       f52=8 f60=1, the addend narrow
+ *    fma(a,c,-h)  09011e05910800c0       the same, plus f65
+ *    fma(h,c,a)   09081e01810402c0       f18=8 f26=1, the multiplicand narrow
+ *
+ * so the width axis and the modifier axis are independent. Keeping them in
+ * separate encoders is what refused `half + (-float)`: it is on both axes and
+ * had no home in either.
+ */
 struct agx3_falu_mods {
    bool src0_abs; /* f47 on the f35 slot */
    bool src0_neg; /* f48 */
+   bool src0_16;  /* f43 */
    bool src1_abs; /* f30 on the f18 slot */
    bool src1_neg; /* f31 */
+   bool src1_16;  /* f26 */
    bool addend_abs; /* f64, ffma only */
    bool addend_neg; /* f65, ffma only */
+   bool addend_16;  /* f60, ffma only */
    bool saturate;   /* f14 */
 };
 

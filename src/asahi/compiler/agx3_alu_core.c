@@ -1174,6 +1174,48 @@ agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
 }
 
 bool
+agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
+                 uint16_t dest, uint16_t src, uint8_t immediate,
+                 enum agx3_alu_hint hint, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len ||
+       (op != AGX3_ALU_BAND && op != AGX3_ALU_BOR && op != AGX3_ALU_BXOR) ||
+       dest >= 256 || (!narrow && (dest & 1)) || src >= 256 ||
+       (!narrow && (src & 1)) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   const struct agx3_alu_form *f = &agx3_alu_forms[op][0];
+   struct agx3_field_kv base[20], ov[12];
+   unsigned nb = 0, n = 0;
+   for (unsigned i = 0; i < f->nbase; ++i) {
+      unsigned field = f->base[i].f;
+      bool wait = false;
+      for (unsigned j = 0; j < f->nwait; ++j)
+         wait |= field == f->wait[j];
+      /* f27 and f41 are the two sources' last-use hints and f37 the second
+       * operand's kind: all three are deposited below. f38 is that operand's
+       * width and stays 2 even for a narrow result, which is what Apple's own
+       * `(ushort)a & 0xff` shows. */
+      if (field != 27 && field != 41 && field != 37 && !wait)
+         base[nb++] = (struct agx3_field_kv){
+            field, narrow && (field == 10 || field == 24) ? 1 : f->base[i].v};
+   }
+   ov[n++] = (struct agx3_field_kv){2, dest};
+   ov[n++] = (struct agx3_field_kv){16, src};
+   ov[n++] = (struct agx3_field_kv){25, hint == AGX3_ALU_HINT_CACHE};
+   ov[n++] = (struct agx3_field_kv){27, hint == AGX3_ALU_HINT_DISCARD};
+   ov[n++] = (struct agx3_field_kv){37, 1};
+   ov[n++] = (struct agx3_field_kv){29, immediate};
+   for (unsigned i = 0; i < f->nwait; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv){f->wait[i], 1};
+   return agx3_bind_compose(enc, f->mnemonic, f->ep, base, nb, ov, n, out,
+                            len);
+}
+
+bool
 agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  uint16_t dest, const uint16_t src[2],
                  const enum agx3_alu_hint hints[2], uint16_t wait_mask,
@@ -1377,6 +1419,19 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
       dest_cache, wait_mask, false, out, len);
 }
 
+/* Reverse a comparison so its two operands can exchange places. */
+static unsigned
+agx3_fcond_reversed(unsigned condition)
+{
+   switch (condition) {
+   case 1: return 2;  /* lt -> gt */
+   case 2: return 1;  /* gt -> lt */
+   case 5: return 6;  /* ge -> le */
+   case 6: return 5;  /* le -> ge */
+   default: return condition; /* eq is its own reverse */
+   }
+}
+
 /*
  * The same compare-select with an ABSOLUTE VALUE on either comparison source.
  *
@@ -1411,35 +1466,104 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  * cannot silently pick the wrong one.
  */
 bool
-agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
+agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !d || !out || !len)
+   if (enc != AGX_ISA_ENCODING_AGX3B || !in || !out || !len)
       return false;
+
+   struct agx3_fsel_desc d = *in;
 
    /* Select-slot kind 2 is unidentified. Fail closed rather than deposit a
     * value into a field whose meaning is not known. */
-   if (d->sel0_kind == AGX3_FSEL_SEL_UNKNOWN2 ||
-       d->sel1_kind == AGX3_FSEL_SEL_UNKNOWN2)
+   if (d.sel0_kind == AGX3_FSEL_SEL_UNKNOWN2 ||
+       d.sel1_kind == AGX3_FSEL_SEL_UNKNOWN2)
       return false;
-   if ((d->sel0_kind != AGX3_FSEL_SEL_IMMEDIATE &&
-        d->sel0_kind != AGX3_FSEL_SEL_REGISTER) ||
-       (d->sel1_kind != AGX3_FSEL_SEL_IMMEDIATE &&
-        d->sel1_kind != AGX3_FSEL_SEL_REGISTER))
+   if ((d.sel0_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d.sel0_kind != AGX3_FSEL_SEL_REGISTER) ||
+       (d.sel1_kind != AGX3_FSEL_SEL_IMMEDIATE &&
+        d.sel1_kind != AGX3_FSEL_SEL_REGISTER))
       return false;
 
-   if (d->condition != 0 && d->condition != 1 && d->condition != 2 &&
-       d->condition != 5 && d->condition != 6)
+   if (d.condition != 0 && d.condition != 1 && d.condition != 2 &&
+       d.condition != 5 && d.condition != 6)
       return false;
-   if (d->wait_mask != 0 && d->wait_mask != 32)
+   if (d.wait_mask != 0 && d.wait_mask != 32)
       return false;
-   if (d->dest >= 256 || (!d->dest_16 && (d->dest & 1)))
+   if (d.dest >= 256 || (!d.dest_16 && (d.dest & 1)))
+      return false;
+
+   /*
+    * Normalise the comparison modifiers.
+    *
+    * f65 is the only negate the encoding has and it names the SECOND
+    * comparator. Every other placement reduces to it by algebra that Apple's
+    * own compiler performs, so the shapes below are rewrites rather than
+    * refusals. Witnessed with metal-nt -arch applegpu_g17p on a select whose
+    * true value is a REGISTER -- the shape this entry point exists for --
+    * one kernel per cell, each vector recovered by re-composing here:
+    *
+    *    a >= c      12051d07850302c0   f35=4 f52=6 f110=5
+    *    a >= -c     12051d07850302c8   f35=4 f52=6 f110=5 f65
+    *   -a >= c      12071d05850303c8   f35=6 f52=4 f110=6 f65
+    *   -a >= -c     12051d07850303c0   f35=4 f52=6 f110=6
+    *    a <= c      12051d07850303c0   byte-identical to the row above
+    *
+    * so a negated first comparator exchanges the operands and reverses the
+    * relation, and negating both sides is the relation flip on its own. The
+    * last two rows are the same instruction, which is what makes the
+    * double-negation rewrite a measurement rather than an assumption.
+    *
+    * An immediate comparator carries its sign in bit 7 of the minifloat, so a
+    * modifier on that slot is constant folding: Apple spells `-a >= 0.5f` as
+    * `a <= -0.5f`, 12051da1850303c2 with f51 = 160 and f110 = 6 against
+    * 12050da1850302c2 with f51 = 32 and f110 = 5 for `a >= 0.5f`.
+    */
+   if (d.cmp1_is_immediate) {
+      if (d.cmp1 > 0xff)
+         return false;
+      if (d.cmp1_abs) {
+         d.cmp1 &= 0x7f;
+         d.cmp1_abs = false;
+      }
+      if (d.cmp1_neg) {
+         d.cmp1 ^= 0x80;
+         d.cmp1_neg = false;
+      }
+      if (d.cmp0_neg) {
+         d.condition = agx3_fcond_reversed(d.condition);
+         d.cmp1 ^= 0x80;
+         d.cmp0_neg = false;
+      }
+   } else if (d.cmp0_neg && d.cmp1_neg) {
+      d.condition = agx3_fcond_reversed(d.condition);
+      d.cmp0_neg = d.cmp1_neg = false;
+   } else if (d.cmp0_neg) {
+      const uint16_t reg = d.cmp0;
+      const enum agx3_alu_hint hint = d.cmp0_hint;
+      const bool abs = d.cmp0_abs, narrow = d.cmp0_16;
+      d.cmp0 = d.cmp1;
+      d.cmp0_hint = d.cmp1_hint;
+      d.cmp0_abs = d.cmp1_abs;
+      d.cmp0_16 = d.cmp1_16;
+      d.cmp1 = reg;
+      d.cmp1_hint = hint;
+      d.cmp1_abs = abs;
+      d.cmp1_16 = narrow;
+      d.condition = agx3_fcond_reversed(d.condition);
+      d.cmp0_neg = false;
+      d.cmp1_neg = true;
+   }
+
+   /* Every path above clears it; nothing may reach the deposit with a negate
+    * on the slot that has no field for one. */
+   if (d.cmp0_neg)
       return false;
 
    /* An immediate compare slot still declares width 2 (see the base vector
     * below), so only a register slot carries a half width. */
-   const bool cmp0_16 = d->cmp0_16;
-   const bool cmp1_16 = d->cmp1_is_immediate ? false : d->cmp1_16;
+   const bool cmp0_16 = d.cmp0_16;
+   const bool cmp1_16 = d.cmp1_is_immediate ? false : d.cmp1_16;
 
    /* Mixed width is ordinary -- a highp value compared against a mediump one
     * is what GLSL produces all day -- but no witness has both comparators at
@@ -1451,20 +1575,20 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
    /* A 32-bit source is a register pair and must start on an even half; a
     * 16-bit source is a single half and may sit on an odd one.  Pinning both
     * to even is what refused every mediump comparator that reached here. */
-   if (d->cmp0 >= 256 || (!cmp0_16 && (d->cmp0 & 1)))
+   if (d.cmp0 >= 256 || (!cmp0_16 && (d.cmp0 & 1)))
       return false;
-   if (!d->cmp1_is_immediate && (d->cmp1 >= 256 || (!cmp1_16 && (d->cmp1 & 1))))
+   if (!d.cmp1_is_immediate && (d.cmp1 >= 256 || (!cmp1_16 && (d.cmp1 & 1))))
       return false;
-   if (d->cmp1_is_immediate && d->cmp1 > 0xff)
+   if (d.cmp1_is_immediate && d.cmp1 > 0xff)
       return false;
-   if (d->sel0 >= 256 || d->sel1 >= 256)
+   if (d.sel0 >= 256 || d.sel1 >= 256)
       return false;
-   if (d->sel0_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel0 & 1))
+   if (d.sel0_kind == AGX3_FSEL_SEL_REGISTER && !d.sel_16 && (d.sel0 & 1))
       return false;
-   if (d->sel1_kind == AGX3_FSEL_SEL_REGISTER && !d->sel_16 && (d->sel1 & 1))
+   if (d.sel1_kind == AGX3_FSEL_SEL_REGISTER && !d.sel_16 && (d.sel1 & 1))
       return false;
-   if ((unsigned)d->cmp0_hint > AGX3_ALU_HINT_CACHE ||
-       (unsigned)d->cmp1_hint > AGX3_ALU_HINT_CACHE)
+   if ((unsigned)d.cmp0_hint > AGX3_ALU_HINT_CACHE ||
+       (unsigned)d.cmp1_hint > AGX3_ALU_HINT_CACHE)
       return false;
 
    /* f43 and f60 are the two comparators' width fields, exactly as in
@@ -1472,50 +1596,87 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *d,
     * the same "fsel" endpoint family.  An immediate slot always declares
     * width 2. */
    const struct agx3_field_kv base[] = {
-      {10, 2}, {11, d->dest_16 ? 1 : 2},
+      {10, 2}, {11, d.dest_16 ? 1 : 2},
       {42, AGX3_FSEL_CMP_REGISTER}, {43, cmp0_16 ? 1 : 2},
       {60, cmp1_16 ? 1 : 2},
-      {77, d->sel_16 ? 1 : 2}, {94, d->sel_16 ? 1 : 2},
+      {77, d.sel_16 ? 1 : 2}, {94, d.sel_16 ? 1 : 2},
    };
 
    struct agx3_field_kv f[20];
    unsigned n = 0;
-   f[n++] = (struct agx3_field_kv){3, d->dest};
-   f[n++] = (struct agx3_field_kv){12, d->dest_cache};
+   f[n++] = (struct agx3_field_kv){3, d.dest};
+   f[n++] = (struct agx3_field_kv){12, d.dest_cache};
 
-   f[n++] = (struct agx3_field_kv){35, d->cmp0};
+   f[n++] = (struct agx3_field_kv){35, d.cmp0};
    f[n++] = (struct agx3_field_kv){44,
-                                   d->cmp0_hint == AGX3_ALU_HINT_CACHE};
+                                   d.cmp0_hint == AGX3_ALU_HINT_CACHE};
    f[n++] = (struct agx3_field_kv){46,
-                                   d->cmp0_hint == AGX3_ALU_HINT_DISCARD};
-   f[n++] = (struct agx3_field_kv){47, d->cmp0_abs};
+                                   d.cmp0_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){47, d.cmp0_abs};
 
-   f[n++] = (struct agx3_field_kv){59, d->cmp1_is_immediate
+   f[n++] = (struct agx3_field_kv){59, d.cmp1_is_immediate
                                           ? AGX3_FSEL_CMP_IMMEDIATE
                                           : AGX3_FSEL_CMP_REGISTER};
-   f[n++] = (struct agx3_field_kv){d->cmp1_is_immediate ? 51 : 52, d->cmp1};
+   f[n++] = (struct agx3_field_kv){d.cmp1_is_immediate ? 51 : 52, d.cmp1};
    f[n++] = (struct agx3_field_kv){61,
-                                   d->cmp1_hint == AGX3_ALU_HINT_CACHE};
+                                   d.cmp1_hint == AGX3_ALU_HINT_CACHE};
    f[n++] = (struct agx3_field_kv){63,
-                                   d->cmp1_hint == AGX3_ALU_HINT_DISCARD};
-   f[n++] = (struct agx3_field_kv){64, d->cmp1_abs};
+                                   d.cmp1_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){64, d.cmp1_abs};
+   f[n++] = (struct agx3_field_kv){65, d.cmp1_neg};
 
-   f[n++] = (struct agx3_field_kv){76, d->sel0_kind};
+   f[n++] = (struct agx3_field_kv){76, d.sel0_kind};
    f[n++] = (struct agx3_field_kv){
-      d->sel0_kind == AGX3_FSEL_SEL_REGISTER ? 70 : 68, d->sel0};
-   f[n++] = (struct agx3_field_kv){93, d->sel1_kind};
+      d.sel0_kind == AGX3_FSEL_SEL_REGISTER ? 70 : 68, d.sel0};
+   f[n++] = (struct agx3_field_kv){93, d.sel1_kind};
    f[n++] = (struct agx3_field_kv){
-      d->sel1_kind == AGX3_FSEL_SEL_REGISTER ? 87 : 85, d->sel1};
+      d.sel1_kind == AGX3_FSEL_SEL_REGISTER ? 87 : 85, d.sel1};
 
-   f[n++] = (struct agx3_field_kv){110, d->condition};
-   f[n++] = (struct agx3_field_kv){107, d->wait_mask == 32};
+   f[n++] = (struct agx3_field_kv){110, d.condition};
+   f[n++] = (struct agx3_field_kv){107, d.wait_mask == 32};
 
-   /* The endpoints are mutually exclusive on their fixed bits -- each refuses
-    * another's operand-kind and width vector -- so scanning cannot silently
-    * land on the wrong one. Absolute sources sit on the longer endpoints. */
-   for (unsigned ep = 20; ep < 36; ++ep) {
-      if (agx3_bind_compose(enc, "fsel", ep, base, 7, f, n, out, len))
-         return true;
+   /*
+    * The destination block has TWO placements on this endpoint family, and
+    * they are alternative encodings of one instruction rather than two
+    * instructions: dest f3 -> f17, its width f11 -> f25, its cache hint
+    * f12 -> f26, with f0 and f24 fixed. Apple emits both --
+    *
+    *   (fabs(a) < 0.5f) ? 1.0h : 0.0h   120309a123b00302208000800100   ep28
+    *   corpus vector 224                42d725d923810300208000000300   ep33
+    *
+    * decompose to the same operand fields, differing only in that block, and
+    * the second is one of the 84 real `fsel` instructions in
+    * test/agx3_compose_corpus_vectors.c. So the placement is a free choice;
+    * pick f3/f11 first, which is what every shape that already composed here
+    * used, and fall back to the shifted block for the shapes it cannot reach.
+    *
+    * What the first row does settle is that an IMMEDIATE comparator is not a
+    * separate form: against (fabs(a) < c) ? 1.0h : 0.0h, which is
+    * 1203190523b00300208000800100, it changes only f59 (2 -> 1) and the
+    * operand field (f52 -> f51, holding the minifloat 32). Refusing every
+    * non-zero immediate comparator recorded what had been measured, not what
+    * the field can hold.
+    */
+   struct agx3_field_kv alt_base[9];
+   unsigned nab = 0;
+   alt_base[nab++] = (struct agx3_field_kv){0, 1};
+   alt_base[nab++] = (struct agx3_field_kv){24, 2};
+   alt_base[nab++] = (struct agx3_field_kv){25, d.dest_16 ? 1 : 2};
+   alt_base[nab++] = (struct agx3_field_kv){42, AGX3_FSEL_CMP_REGISTER};
+   alt_base[nab++] = (struct agx3_field_kv){43, cmp0_16 ? 1 : 2};
+   alt_base[nab++] = (struct agx3_field_kv){60, cmp1_16 ? 1 : 2};
+   alt_base[nab++] = (struct agx3_field_kv){77, d.sel_16 ? 1 : 2};
+   alt_base[nab++] = (struct agx3_field_kv){94, d.sel_16 ? 1 : 2};
+
+   for (unsigned pass = 0; pass < 2; ++pass) {
+      const bool shifted = pass == 1;
+      f[0] = (struct agx3_field_kv){shifted ? 17 : 3, d.dest};
+      f[1] = (struct agx3_field_kv){shifted ? 26 : 12, d.dest_cache};
+      for (unsigned ep = 20; ep < 36; ++ep) {
+         if (agx3_bind_compose(enc, "fsel", ep, shifted ? alt_base : base,
+                               shifted ? nab : 7, f, n, out, len))
+            return true;
+      }
    }
    return false;
 }
@@ -2228,31 +2389,66 @@ agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
 }
 
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
-                                  const uint16_t src[4], bool compare_zero,
-                                  const bool compare_abs[2],
-                                  const bool immediate[2],
-                                  const enum agx3_alu_hint hints[4], unsigned condition,
-                                  bool dest_16, bool dest_cache, uint16_t wait_mask,
-                                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
-{
-   static const bool no_neg[2] = {false, false};
-   return agx3_alu_fcmp_select_reg_imm_neg(enc, dest, src, compare_zero,
-                                           compare_abs, no_neg, immediate,
-                                           hints, condition, dest_16,
-                                           dest_cache, wait_mask, out, len);
-}
-
-bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
-                                  const uint16_t src[4], bool compare_zero,
-                                  const bool compare_abs[2],
+                                  const uint16_t src_in[4], bool compare_zero,
+                                  const bool compare_abs_in[2],
                                   const bool compare_neg[2],
                                   const bool immediate[2],
-                                  const enum agx3_alu_hint hints[4], unsigned condition,
+                                  const enum agx3_alu_hint hints_in[4], unsigned condition,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src ||
-       !compare_abs || !compare_neg || !immediate || !hints || dest>=256 ||
+   if (!src_in || !compare_abs_in || !compare_neg || !immediate || !hints_in)
+      return false;
+
+   /*
+    * Normalise the comparison's negates before anything else looks at the
+    * operands. f65 is the only negate field and it names the SECOND
+    * comparator, so the other placements are rewrites, each one witnessed
+    * with metal-nt -arch applegpu_g17p on a select whose true value is a
+    * register -- the shape this encoder exists for -- and recovered field by
+    * field through tools/decomp.c:
+    *
+    *    a >= c      12051d07850302c0   f35=4 f52=6 f110=5
+    *    a >= -c     12051d07850302c8   f35=4 f52=6 f110=5 f65
+    *   -a >= c      12071d05850303c8   f35=6 f52=4 f110=6 f65
+    *   -a >= -c     12051d07850303c0   f35=4 f52=6 f110=6
+    *    a <= c      12051d07850303c0   byte-identical to the row above
+    *
+    * The last two rows being one instruction is what makes the double-negate
+    * rewrite a measurement rather than an assumption. f65 also composes with
+    * an absolute comparator, which an earlier note recorded as unwitnessed:
+    * `select(v.x, v.y, fabs(a) >= -c)` is 12051d0787030208800200800100, f47
+    * and f65 together on the same fourteen-byte endpoint.
+    */
+   uint16_t src[4] = {src_in[0], src_in[1], src_in[2], src_in[3]};
+   enum agx3_alu_hint hints[4] = {hints_in[0], hints_in[1], hints_in[2],
+                                  hints_in[3]};
+   bool compare_abs[2] = {compare_abs_in[0], compare_abs_in[1]};
+   bool negate_second = compare_neg[1];
+   if (compare_zero) {
+      /* -0.0 and +0.0 compare equal, so a negate on the immediate slot is a
+       * no-op and a negate on the other one is the relation reversal. */
+      negate_second = false;
+      if (compare_neg[0])
+         condition = agx3_fcond_reversed(condition);
+   } else if (compare_neg[0] && compare_neg[1]) {
+      condition = agx3_fcond_reversed(condition);
+      negate_second = false;
+   } else if (compare_neg[0]) {
+      const uint16_t reg = src[0];
+      const enum agx3_alu_hint hint = hints[0];
+      const bool abs = compare_abs[0];
+      src[0] = src[1];
+      hints[0] = hints[1];
+      compare_abs[0] = compare_abs[1];
+      src[1] = reg;
+      hints[1] = hint;
+      compare_abs[1] = abs;
+      condition = agx3_fcond_reversed(condition);
+      negate_second = true;
+   }
+
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest>=256 ||
        (!dest_16 && (dest&1)) ||
        (condition!=0 && condition!=1 && condition!=2 && condition!=5 && condition!=6) ||
        (wait_mask!=0 && wait_mask!=32) ||
@@ -2300,15 +2496,37 @@ bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
     *   16-bit result  a <  b   02011d03820b0320800a   ... 63:1      69:11 ...
     *                  a < -b   02011d03820b0328800a   ... 63:1 65:1 69:11 ...
     *
-    * There is no matching bit on the FIRST source: `-a < b` comes back as
-    * 02031d01820b0228800a, which is f65 again with the operands swapped and
-    * the relation flipped to gt (f110:2). So a negated first source has to be
-    * canonicalised by the caller, and stays refused here.
+    * Three further refusals stood here, each recording what had been measured
+    * rather than what the encoding rules out. All three are now witnessed, so
+    * the normalisation at the top of this function performs them instead:
     *
-    * The abs bits escalate the encoding point (a 14-byte form); the negate
-    * does not. Mixing them is not witnessed, so it fails closed. */
-   if (compare_neg[0] || (compare_neg[1] && (compare_zero || abs_compare)))
-      return false;
+    *  - A negated FIRST source. The note above already said `-a < b` comes
+    *    back as 02031d01820b0228800a, "f65 again with the operands swapped and
+    *    the relation flipped" -- which IS the rewrite, observed, and then
+    *    declined. `select(v.x, v.y, -a >= c)` says the same on the
+    *    register-select form (12071d05850303c8 against 12051d07850302c0).
+    *
+    *  - The negate mixed with an ABSOLUTE source, on either endpoint family.
+    *    Immediate selects, where abs escalates to the fourteen-byte form:
+    *
+    *      (fabs(a) <  c) ? 1.0h : 0.0h   1203190523b00300208000800100
+    *      (fabs(a) < -c) ? 1.0h : 0.0h   1203190523b00308208000800100   f65
+    *      (fabs(a) < -c) ? 1.0f : 0.0f   02011b0523b00308208000800100   ep30
+    *      (-a < fabs(c)) ? 1.0h : 0.0h   1205190323b00208208000800100
+    *
+    *    one field apart, and the last row is the swap again: f35 and f52
+    *    exchange (2/4 -> 4/2), f110 flips lt -> gt, and the abs travels with
+    *    the operand it belonged to. Register selects say it too:
+    *    select(v.x, v.y, fabs(a) >= -c) is 12051d0787030208800200800100.
+    *
+    *  - The negate against an exact immediate ZERO. `-a < 0.0f` and `a > 0.0f`
+    *    are one instruction, 1203098122b002c22080 both -- so the negate is the
+    *    relation reversal and nothing else, which is what -0.0 comparing equal
+    *    to +0.0 requires.
+    *
+    * What still fails closed is anything the composer itself refuses: the
+    * field vector is deposited and agx3_bind_compose() either finds an
+    * endpoint carrying every field or returns false. */
 
    struct agx3_field_kv base[12];
    unsigned nbase=0;
@@ -2334,7 +2552,7 @@ bool agx3_alu_fcmp_select_reg_imm_neg(enum agx_isa_encoding enc, uint16_t dest,
       {35,src[0]},{compare_zero?51:52,src[1]},
       {immediate[0]?68:69,src[2]},{immediate[1]?85:86,src[3]},
       {110,condition},{107,wait_mask==32},{47,compare_abs[0]},
-      {64,compare_abs[1]},{65,compare_neg[1]},
+      {64,compare_abs[1]},{65,negate_second},
    };
    const unsigned cache[]={44,61,78,95},discard[]={46,63,80,97};
    unsigned n=11;

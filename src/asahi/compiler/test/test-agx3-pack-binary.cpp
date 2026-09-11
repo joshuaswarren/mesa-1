@@ -882,7 +882,15 @@ TEST_F(AGX3PackBinary, HalfUVRefusesUngroundedModes)
       if (mode == 7) wide.size = AGX_SIZE_16;
       agx_instr *mul = agx_fmul_to(b, agx_register(2, AGX_SIZE_32), wide, half);
       mul->saturate = mode == 8;
-      EXPECT_TRUE(pack(b, false).empty());
+      /* f14 is the saturate bit and it sits on the same encoding point as the
+       * slot widths, so `saturate(a * b)` over a mixed pair is one
+       * instruction: Apple's own is 09011d0401000082, f14 = 1 with f43 = 1.
+       * The modifier rows above it stay refused -- no witness puts abs or neg
+       * on a MULTIPLY's half slot. */
+      if (mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -952,7 +960,13 @@ TEST_F(AGX3PackBinary, WebGLAbsScaleMixedWidthRefusesUngroundedModes)
       agx_instr *mul = agx_fmul_to(b, dest, wide, half);
       mul->saturate = mode == 12;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+      /* Saturation is f14 on the same encoding point as the slot widths and
+       * the modifier bits: Apple's saturate(a * b) over a mixed pair is
+       * 09011d0401000082. Everything else here is still out of domain. */
+      if (mode == 12)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -1028,6 +1042,11 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    agx_stop(b);
    EXPECT_GT(pack(b).size(), 4u);
 
+   /* An absolute comparator against a NON-ZERO minifloat. The refusal here
+    * was the admission gate, not the encoding: against Apple's own
+    * (fabs(a) < c) ? 1.0h : 0.0h, 1203190523b00300208000800100, the
+    * immediate form 120309a123b00302208000800100 changes only f59 (the
+    * second slot's kind) and the operand field (f52 -> f51). */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    compare = agx_register(2, AGX_SIZE_32);
    compare.abs = true;
@@ -1035,7 +1054,7 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
                   agx_immediate(0x30), agx_immediate(255), agx_immediate(0),
                   AGX_FCOND_EQ);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectCanonicalizesExactly)
@@ -1240,7 +1259,33 @@ TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectRefusesUngroundedForms)
                                      if_false, condition);
       I->saturate = form == SATURATE;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /*
+       * Eight of these were recording what had been measured rather than what
+       * the encoding refuses, and each now has an Apple witness:
+       *
+       *   FULL_DEST       the result width is a field, f11 / f25
+       *   COMPARE_HALF    the comparator widths are f43 and f60, and f65
+       *                   composes with them: 12051d06850302c8
+       *   COMPARE_ABS     f47 with a minifloat comparator:
+       *                   120309a123b00302208000800100
+       *   COMPARE_ABS_NEG f47 and f65 on one instruction:
+       *                   12051d0787030208800200800100
+       *   THRESHOLD_ABS   a minifloat's sign is bit 7, so |k| and -k are
+       *   THRESHOLD_NEG   constant folding, which is how Apple spells
+       *                   `-a < 0.5f` as `a > -0.5f`: 120319a122b002c22080
+       *   NAN_CONDITION_* ltn/gtn are the ordered relation with the two
+       *                   selected values exchanged, which this path already
+       *                   did for a zero comparator
+       */
+      const bool grounded =
+         form == FULL_DEST || form == COMPARE_HALF || form == COMPARE_ABS ||
+         form == COMPARE_ABS_NEG || form == THRESHOLD_ABS ||
+         form == THRESHOLD_NEG || form == NAN_CONDITION_LT ||
+         form == NAN_CONDITION_GT;
+      if (grounded)
+         EXPECT_FALSE(pack(b).empty());
+      else
+         EXPECT_TRUE(pack(b, false).empty());
    }
 }
 
@@ -1305,8 +1350,15 @@ TEST_F(AGX3PackBinary, AlphaCoverageBoundarySelectMatchesNative)
    EXPECT_EQ(build(COMPARE_NEG, false),
              std::vector<uint8_t>(negated, negated + sizeof(negated)));
 
+   /* An absolute comparator against a minifloat, and an absolute value taken
+    * on that minifloat, are both grounded now: f47 composes with an immediate
+    * comparator (120309a123b00302208000800100) and a minifloat's sign is bit
+    * 7, so |k| is constant folding rather than an encoding question. */
+   EXPECT_FALSE(build(COMPARE_ABS, false).empty());
+   EXPECT_FALSE(build(THRESHOLD_ABS, false).empty());
+
    for (unsigned bad = COMPARE_ABS; bad <= SATURATE; ++bad) {
-      if (bad == COMPARE_NEG)
+      if (bad == COMPARE_NEG || bad == COMPARE_ABS || bad == THRESHOLD_ABS)
          continue;
       SCOPED_TRACE(bad);
       EXPECT_TRUE(build((enum modifier)bad, true).empty());
@@ -1491,7 +1543,19 @@ TEST_F(AGX3PackBinary, F32PlusHalfRefusesUngroundedModes)
       agx_instr *add = agx_fadd_to(b, dest, f32, f16);
       add->saturate = mode == 8;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* A modifier on a mixed-width add is Apple's own instruction, not a
+       * different one: the slot widths f43/f26 and the modifier bits
+       * f47/f48/f30/f31 belong to one encoding point and compose freely.
+       * `a - b`, `b - a`, `a + fabs(b)` and `saturate(a + b)` over a
+       * float/half pair are 09011c0400c8, 09041c0100c8, 09011c04020000800200
+       * and 09011c0401000082. Modes 4..7 are lifetime and alignment, which
+       * stay refused. */
+      if (mode >= 1 && mode <= 3)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else if (mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -1508,12 +1572,15 @@ TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
    const auto code = pack(b);
    ASSERT_EQ(code.size(), 14u);
 
+   /* abs and neg on the same mixed-width source used to be refused as
+    * unwitnessed. Apple's `b - fabs(a)` is 09041c01020800800200: f47 and f48
+    * together, with f43 = 2 and f26 = 1. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    f32 = agx_register(8, AGX_SIZE_32);
    f32.abs = f32.neg = true;
    agx_fadd_to(b, agx_register(8, AGX_SIZE_32), f32, f16);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
@@ -2150,7 +2217,14 @@ TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselRefusesUngroundedModes)
                                        if_false, AGX_FCOND_GE);
       fsel->saturate = mode == 9;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* The result width (mode 1) and an immediate selected value (mode 8)
+       * are independent fields of this endpoint, not separate instructions:
+       * Apple's own `select(v.x, v.y, a >= 0.5f)` is 12050da1850302c2, whose
+       * f51 carries the minifloat and whose f11 carries the half result. */
+      if (mode == 1 || mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -2215,7 +2289,13 @@ TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatRefusesModifiers)
          compare.cache = compare.discard = true;
       agx_fcmpsel_to(b, dest, threshold, compare, if_true, if_false,
                      AGX_FCOND_GE);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* The result width is its own field (f11, or f25 on the shifted
+       * destination block) and composes with an absolute comparator; the
+       * ledger already carried the pair. */
+      if (mode == 1)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -2246,14 +2326,15 @@ TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
 
    const uint16_t src[] = {34, 20, 24, 0};
    const bool compare_abs[] = {true, true};
+   const bool compare_neg[] = {false, false};
    const bool immediate[] = {false, true};
    const enum agx3_alu_hint hints[] = {
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE};
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    ASSERT_TRUE(agx3_alu_fcmp_select_reg_imm(
-      AGX_ISA_ENCODING_AGX3B, 26, src, false, compare_abs, immediate,
-      hints, AGX_FCOND_EQ, false, true, 0, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 26, src, false, compare_abs, compare_neg,
+      immediate, hints, AGX_FCOND_EQ, false, true, 0, bytes, &len));
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
    std::vector<uint8_t> want;
@@ -9655,8 +9736,18 @@ TEST_F(AGX3PackBinary, FselZeroNativeLifetimeAndCompareOrder)
    }
 }
 
-TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
+TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselEncodesBySwap)
 {
+   /* `-a == c` with both selected values in registers. f65 names the SECOND
+    * comparator only, so Apple spells this by exchanging the operands and
+    * reversing the relation -- equality being its own reverse. The exchange
+    * itself is witnessed on the register-select form:
+    *
+    *    a >= c    12051d07850302c0
+    *   -a >= c    12071d05850303c8   operands exchanged, f110 5 -> 6, f65
+    *
+    * so the shape that used to fail Chromium's pipeline closed is the
+    * plain select with one field set. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index a = agx_register(2, AGX_SIZE_32);
    a.neg = a.cache = true;
@@ -9667,7 +9758,7 @@ TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
    agx_fcmpsel_to(b, agx_register(10, AGX_SIZE_32), a, c, t, f,
                   AGX_FCOND_EQ);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
@@ -11871,4 +11962,174 @@ TEST_F(AGX3PackBinary, ComputedRgb10WriteUsesNativeStateOneProtocol)
    EXPECT_NE(std::search(code.begin(), code.end(), imgwci,
                          imgwci + sizeof(imgwci)),
              code.end());
+}
+
+
+/*
+ * The six shapes a three.js frame was refused on.
+ *
+ * Measured on hardware: Chromium loading shadowmap_pointlight, lights_spotlight
+ * and animation_keyframes with AGX_MESA_DEBUG=shaders printed 307 refusals in
+ * one run, which reduce to six once register and immediate numbers are
+ * normalised. Every one is a source modifier, an operand width, or an operand
+ * KIND -- three axes that are independent fields of a single AGX3 encoding
+ * point, and which the packer modelled as separate encoders. A shape sitting
+ * on two axes at once then had no home in either.
+ *
+ * Each case below is the refusal line verbatim, and each encoding is grounded
+ * in the byte ladders quoted at the encoders themselves.
+ */
+TEST_F(AGX3PackBinary, ThreeJsRefusedShapesEncode)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+
+   /* 113x  fcmpsel [d16:reg s0=32:reg.abs.discard s1=16:imm s2=16:imm
+    *                s3=16:imm cond=1 chan=1]
+    * An absolute comparator against a non-zero minifloat. The gate demanded
+    * an immediate comparator of exactly zero; f51 holds any minifloat. */
+   {
+      agx_builder *b = builder(enc);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      a.abs = true;
+      a.discard = true;
+      agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, agx_immediate(0x20),
+                     agx_immediate(0x30), agx_immediate(0), AGX_FCOND_LT);
+      agx_stop(b);
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t len = 0;
+      struct agx3_fsel_desc d = {};
+      d.dest = 2;
+      d.dest_16 = true;
+      d.cmp0 = 2;
+      d.cmp0_hint = AGX3_ALU_HINT_DISCARD;
+      d.cmp0_abs = true;
+      d.cmp1_is_immediate = true;
+      d.cmp1 = 0x20;
+      d.sel0_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel0 = 0x30;
+      d.sel1_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel1 = 0;
+      d.sel_16 = true;
+      d.condition = AGX_FCOND_LT;
+      ASSERT_TRUE(agx3_alu_fcmp_select(enc, &d, bytes, &len));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      std::vector<uint8_t> want;
+      append(want, bytes, len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* 84x  fadd [d32:reg s0=16:reg s1=32:reg.neg cond=0 chan=1]
+    * A half added to a negated full float. The width lives in f43/f26 and the
+    * negate in f48/f31, on one encoding point; the packer had one encoder for
+    * widths without modifiers and another for modifiers without widths. */
+   {
+      agx_builder *b = builder(enc);
+      agx_index f16 = agx_register(4, AGX_SIZE_16);
+      agx_index f32 = agx_register(0, AGX_SIZE_32);
+      f32.neg = true;
+      f32.discard = true;
+      f16.discard = true;
+      agx_fadd_to(b, agx_register(0, AGX_SIZE_32), f16, f32);
+      agx_stop(b);
+      /* Apple's own `b - a`, `float a`, `half b`: 09041c0100c8. The wait bit
+       * f57 belongs to the loads in that kernel, which this shape has not
+       * got, so the ladder row is reproduced through the encoder. */
+      struct agx3_falu_mods m = {};
+      m.src0_neg = true;
+      m.src1_16 = true;
+      struct agx3_falu_runtime rt = {};
+      rt.discard[0] = true;
+      rt.discard[1] = true;
+      rt.wait_mask = 0x20;
+      uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(
+         agx3_falu_add_mod_runtime(enc, 0, 0, 4, &m, &rt, bytes, &len));
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+                (std::vector<uint8_t>{0x09, 0x04, 0x1c, 0x01, 0x00, 0xc8}));
+      EXPECT_FALSE(pack(b).empty());
+   }
+
+   /* 80x  fcmpsel [d16:reg s0=32:reg.neg s1=32:reg.neg s2=16:reg s3=16:imm
+    *               cond=5 chan=1]
+    * Both comparators negated. Apple's own bytes for `-a >= -c` and `a <= c`
+    * are the same instruction, so this is the relation flip and nothing else;
+    * the encoder must produce exactly the plain select's bytes. */
+   {
+      auto build = [&](bool negated, enum agx_fcond cond) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(8, AGX_SIZE_32);
+         agx_index c = agx_register(16, AGX_SIZE_32);
+         a.neg = c.neg = negated;
+         agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, c,
+                        agx_register(6, AGX_SIZE_16), agx_immediate(0), cond);
+         agx_stop(b);
+         return pack(b);
+      };
+      const auto negated = build(true, AGX_FCOND_GE);
+      const auto flipped = build(false, AGX_FCOND_LE);
+      EXPECT_FALSE(negated.empty());
+      EXPECT_EQ(negated, flipped);
+
+      /* One negate is f65, with the operands and the relation left alone. */
+      agx_builder *b = builder(enc);
+      agx_index a = agx_register(8, AGX_SIZE_32);
+      agx_index c = agx_register(16, AGX_SIZE_32);
+      c.neg = true;
+      agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, c,
+                     agx_register(6, AGX_SIZE_16), agx_immediate(0),
+                     AGX_FCOND_GE);
+      agx_stop(b);
+      const auto second = pack(b);
+      const auto plain = build(false, AGX_FCOND_GE);
+      ASSERT_EQ(second.size(), plain.size());
+      unsigned differing = 0;
+      for (unsigned i = 0; i < second.size(); ++i)
+         differing += second[i] != plain[i];
+      EXPECT_EQ(differing, 1u);
+   }
+
+   /* 19x  bitop [d32:reg s0=32:reg.neg s1=16:imm cond=0 chan=1]
+    * A value move carrying a folded fneg or fabs. agx_lower_pseudo() now puts
+    * the float move back rather than handing the bitwise encoding a modifier
+    * it has no field for. */
+   {
+      for (unsigned k = 0; k < 3; ++k) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(8, AGX_SIZE_32);
+         a.neg = k != 1;
+         a.abs = k != 0;
+         agx_mov_to(b, agx_register(0, AGX_SIZE_32), a);
+         agx_stop(b);
+         agx_lower_pseudo(b->shader);
+         EXPECT_FALSE(pack(b).empty()) << "k=" << k;
+      }
+   }
+
+   /* 9x  bitop [d32:reg s0=32:reg.discard s1=16:imm cond=0 chan=1]
+    * A bitwise operation against an immediate. The operand kind is f37 on the
+    * register form's own encoding point, with the constant in f29. */
+   {
+      const unsigned tables[] = {AGX3_SEL_TT_AND, AGX3_SEL_TT_OR,
+                                 AGX3_SEL_TT_XOR};
+      for (unsigned i = 0; i < ARRAY_SIZE(tables); ++i) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(0, AGX_SIZE_32);
+         a.discard = true;
+         agx_bitop_to(b, agx_register(0, AGX_SIZE_32), a, agx_immediate(0xff),
+                      tables[i]);
+         agx_stop(b);
+         EXPECT_FALSE(pack(b).empty()) << "truth table " << tables[i];
+      }
+      /* Apple's own `a & 0xff`, with the load's wait on it. */
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(agx3_alu_bit_imm(enc, AGX3_ALU_BAND, false, 0, 0, 0xff,
+                                   AGX3_ALU_HINT_DISCARD, 0x20, bytes, &len));
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+                (std::vector<uint8_t>{0x0b, 0x01, 0x1f, 0xff, 0x10, 0x02, 0x00,
+                                      0x80, 0x00, 0x00}));
+   }
 }
