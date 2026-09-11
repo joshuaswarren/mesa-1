@@ -1258,6 +1258,9 @@ void hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
  * stream until it reaches value. */
 void hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
                             uint32_t value);
+void hk_native_meta_copy_query(struct hk_cmd_buffer *cmd, uint64_t destination,
+                               uint64_t source, uint64_t availability,
+                               VkQueryResultFlags flags);
 
 void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                          uint64_t attribs_read, struct agx_velem_key *keys);

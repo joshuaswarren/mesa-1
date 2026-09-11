@@ -237,6 +237,7 @@ hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
 enum hk_meta_object_key_type {
    HK_META_OBJECT_KEY_EVENT_WAIT = VK_META_OBJECT_KEY_DRIVER_OFFSET,
    HK_META_OBJECT_KEY_SPARSE_BUFFER_COPY,
+   HK_META_OBJECT_KEY_QUERY_COPY,
 };
 
 struct hk_meta_event_wait_info {
@@ -500,18 +501,21 @@ build_event_wait_shader(void)
 }
 
 static VkResult
-get_event_wait_pipeline(struct hk_device *dev, VkPipelineLayout *layout_out,
-                        VkPipeline *pipeline_out)
+get_native_meta_pipeline(struct hk_device *dev,
+                         enum hk_meta_object_key_type key, unsigned push_size,
+                         nir_shader *(*build_shader)(void),
+                         VkPipelineLayout *layout_out,
+                         VkPipeline *pipeline_out)
 {
-   const enum hk_meta_object_key_type key = HK_META_OBJECT_KEY_EVENT_WAIT;
    const VkPushConstantRange push_range = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       .offset = 0,
-      .size = sizeof(struct hk_meta_event_wait_info),
+      .size = push_size,
    };
 
    VkResult result = vk_meta_get_pipeline_layout(
-      &dev->vk, &dev->meta, NULL, &push_range, &key, sizeof(key), layout_out);
+      &dev->vk, &dev->meta, NULL, push_size ? &push_range : NULL,
+      &key, sizeof(key), layout_out);
    if (unlikely(result != VK_SUCCESS))
       return result;
 
@@ -524,7 +528,7 @@ get_event_wait_pipeline(struct hk_device *dev, VkPipelineLayout *layout_out,
 
    const VkPipelineShaderStageNirCreateInfoMESA nir_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA,
-      .nir = build_event_wait_shader(),
+      .nir = build_shader(),
    };
    const VkComputePipelineCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -558,7 +562,10 @@ hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
 
    VkPipelineLayout layout;
    VkPipeline pipeline;
-   VkResult result = get_event_wait_pipeline(dev, &layout, &pipeline);
+   VkResult result = get_native_meta_pipeline(
+      dev, HK_META_OBJECT_KEY_EVENT_WAIT,
+      sizeof(struct hk_meta_event_wait_info), build_event_wait_shader,
+      &layout, &pipeline);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);
       hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -578,6 +585,130 @@ hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
                           0, sizeof(args), &args);
    disp->CmdDispatch(command_buffer, 1, 1, 1);
 
+   hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+}
+
+struct hk_meta_query_copy_info {
+   uint64_t source, destination, availability;
+   uint32_t flags, pad;
+};
+
+static nir_def *
+load_query_available(nir_builder *b, nir_def *source, nir_def *availability)
+{
+   nir_if *has_available = nir_push_if(b, nir_ine_imm(b, availability, 0));
+   nir_def *status = nir_load_global(
+      b, 1, 32, availability, .align_mul = 4,
+      .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+   nir_def *with_available = nir_ine_imm(b, status, 0);
+   nir_push_else(b, has_available);
+   nir_def *value = nir_load_global(
+      b, 1, 64, source, .align_mul = 8,
+      .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+   nir_def *timestamp_available = nir_ine_imm(b, value, -1);
+   nir_pop_if(b, has_available);
+   return nir_if_phi(b, with_available, timestamp_available);
+}
+
+static nir_shader *
+build_query_copy_shader(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, NULL, "hk-meta-query-copy");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *source = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0));
+   nir_def *destination =
+      nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 8));
+   nir_def *availability =
+      nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 16));
+   nir_def *flags = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 24));
+
+   nir_def *wait = nir_test_mask(&b, flags, VK_QUERY_RESULT_WAIT_BIT);
+   nir_if *waiting = nir_push_if(&b, wait);
+   nir_loop *loop = nir_push_loop(&b);
+   nir_break_if(&b, load_query_available(&b, source, availability));
+   nir_pop_loop(&b, loop);
+   nir_pop_if(&b, waiting);
+
+   nir_def *available = load_query_available(&b, source, availability);
+   nir_def *wide = nir_test_mask(&b, flags, VK_QUERY_RESULT_64_BIT);
+   nir_if *write_result = nir_push_if(
+      &b, nir_ior(&b, available,
+                  nir_test_mask(&b, flags, VK_QUERY_RESULT_PARTIAL_BIT)));
+   nir_def *value = nir_load_global(
+      &b, 1, 64, source, .align_mul = 8,
+      .access = ACCESS_COHERENT | ACCESS_VOLATILE);
+   nir_if *wide_result = nir_push_if(&b, wide);
+   nir_store_global(&b, value, destination, .align_mul = 8);
+   nir_push_else(&b, wide_result);
+   nir_store_global(&b, nir_u2u32(&b, value), destination, .align_mul = 4);
+   nir_pop_if(&b, wide_result);
+   nir_pop_if(&b, write_result);
+
+   nir_if *write_available = nir_push_if(
+      &b, nir_test_mask(&b, flags,
+                        VK_QUERY_RESULT_WITH_AVAILABILITY_BIT));
+   nir_if *wide_available = nir_push_if(&b, wide);
+   nir_store_global(&b, nir_b2i64(&b, available),
+                    nir_iadd_imm(&b, destination, 8), .align_mul = 8);
+   nir_push_else(&b, wide_available);
+   nir_store_global(&b, nir_b2i32(&b, available),
+                    nir_iadd_imm(&b, destination, 4), .align_mul = 4);
+   nir_pop_if(&b, wide_available);
+   nir_pop_if(&b, write_available);
+   return b.shader;
+}
+
+void
+hk_native_meta_copy_query(struct hk_cmd_buffer *cmd, uint64_t destination,
+                          uint64_t source, uint64_t availability,
+                          VkQueryResultFlags flags)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const unsigned word_size = (flags & VK_QUERY_RESULT_64_BIT) ? 8 : 4;
+   if (!agx_native_graphics(&dev->dev) || !source || !destination ||
+       (source & 7) || (availability & 3) ||
+       (destination & (word_size - 1))) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   struct hk_cs *cs =
+      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.cs, true);
+   if (!cs)
+      return;
+   hk_cdm_cache_flush(dev, cs);
+
+   struct hk_meta_save save;
+   hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+   VkPipelineLayout layout;
+   VkPipeline pipeline;
+   VkResult result = get_native_meta_pipeline(
+      dev, HK_META_OBJECT_KEY_QUERY_COPY,
+      sizeof(struct hk_meta_query_copy_info), build_query_copy_shader,
+      &layout, &pipeline);
+   if (result == VK_SUCCESS) {
+      const struct hk_meta_query_copy_info args = {
+         source, destination, availability, flags, 0,
+      };
+      const struct vk_device_dispatch_table *disp = &dev->vk.dispatch_table;
+      VkCommandBuffer cb = vk_command_buffer_to_handle(&cmd->vk);
+      disp->CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+      disp->CmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                             0, sizeof(args), &args);
+      disp->CmdDispatch(cb, 1, 1, 1);
+      if (cmd->current_cs.cs) {
+         hk_drm_attachment_set_add(
+            &cmd->current_cs.cs->compute_attachments, destination,
+            word_size *
+               ((flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) ? 2 : 1));
+      }
+   } else {
+      vk_command_buffer_set_error(&cmd->vk, result);
+   }
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
