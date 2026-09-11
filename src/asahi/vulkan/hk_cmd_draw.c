@@ -561,6 +561,13 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       return (struct hk_bg_eot){0};
    }
 
+   /* As in the generic BG/EOT path, compile an empty attachmentless program
+    * as 1x. This is only the local shader key: the render state's sample count
+    * remains deferred until a draw supplies it.
+    */
+   if (!key->tib.nr_samples)
+      key->tib.nr_samples = 1;
+
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
    const bool rgba8_mrt = mrt == AGX_G17P_MRT_RGBA8;
@@ -4848,6 +4855,15 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    if (dyn->ms.rasterization_samples && !gfx->render.tilebuffer.nr_samples) {
       agx_tilebuffer_set_samples(&gfx->render.tilebuffer,
                                  dyn->ms.rasterization_samples);
+
+      /* The provisional attachmentless layout was admitted at begin time;
+       * enforce the hardware contract again once the sample count is known.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P &&
+          !hk_agx3_g17p_rt0_tile_layout_supported(&gfx->render.tilebuffer)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
 
       cs->tib = gfx->render.tilebuffer;
    }

@@ -84,6 +84,16 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
+
+   /* Attachmentless rendering learns its sample count at draw time. An empty
+    * pass may end before that happens. Validate its physical layout as 1x,
+    * without changing the deferred sample count in the render state. The
+    * physical validator still rejects any other occupied render target.
+    */
+   if (physical.nr_samples == 0 && physical.sample_size_B == 0 &&
+       physical.logical_format[0] == PIPE_FORMAT_NONE)
+      physical.nr_samples = 1;
+
    return agx_g17p_rt0_tile_layout_supported(&physical);
 }
 

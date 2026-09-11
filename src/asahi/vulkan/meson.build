@@ -667,6 +667,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    g17p_attachmentless_record = executable(
+      'g17p-attachmentless-record',
+      files('tests/g17p_attachmentless_record.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     g17p_offscreen_triangle = executable(
       'g17p-offscreen-triangle',
       files('tests/g17p_offscreen_triangle.c'),

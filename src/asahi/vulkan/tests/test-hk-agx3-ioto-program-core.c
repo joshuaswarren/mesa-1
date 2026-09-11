@@ -1948,6 +1948,24 @@ test_g17p_single_layer_rt0_layout(void)
    empty_tib.sample_size_B = 8;
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
 
+   empty_tib = agx_build_tilebuffer_layout(empty, 0, 0, false);
+   const struct agx_tilebuffer_layout deferred = empty_tib;
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+   CHECK(memcmp(&empty_tib, &deferred, sizeof(empty_tib)) == 0);
+   empty_tib.sample_size_B = 8;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+   empty_tib = deferred;
+   empty_tib.logical_format[1] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+   empty_tib = deferred;
+   empty_tib.spilled[0] = true;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+   empty_tib = deferred;
+   agx_tilebuffer_set_samples(&empty_tib, 1);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+   empty_tib.nr_samples = 8;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&empty_tib));
+
    enum pipe_format rgba[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R8G8B8A8_UNORM,
    };
@@ -1955,6 +1973,9 @@ test_g17p_single_layer_rt0_layout(void)
       agx_build_tilebuffer_layout(rgba, 1, 1, false);
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+
+   tib.nr_samples = 0;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format bgra[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_B8G8R8A8_UNORM,
