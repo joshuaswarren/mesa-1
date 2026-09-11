@@ -1483,14 +1483,36 @@ not "the bits mean the destination register at this encoding point", and that
 is precisely the distinction the aliasing section exists to enforce. Guessing
 wrong writes the wrong register rather than refusing.
 
-Closing it therefore needs one more measurement, and it is a cheap one: a
-`metal-nt` kernel that emits a ten-byte half copy with a **nonzero**
-destination. `f39` looks like a scoreboard wait outside the six the short form
-carries in `f30`-`f35`, which is consistent with the retire-then-copy fallback
-`agx3_copy_encode_reg16()` already has, so a half copy that must wait on a high
-slot while writing a live register is the shape to ask Apple for. A hardware
-oracle -- emit at ep1 with a known destination, read the register back --
-answers the same question.
+**That measurement has been made, and Apple will not give you one.** Three
+`applegpu_g17p` kernels written to force half register-to-register movement
+under a memory wait -- a rotate of eight live halves across a load, thirty-two
+live halves shifted by one, and a conditionally selected half -- emit exactly
+one `copy` between them, and it is the fixed prologue instruction every kernel
+starts with:
+
+```
++0  copy_ep1  03000700020000006000    f2=0 f16=0 f39=1
+```
+
+byte-identical to the corpus witnesses. Every other half move in those kernels
+goes through `f16add`, which they use 25, 31 and 27 times against `copy` once.
+That is why all 16 corpus witnesses have `f2 = 0`: **Apple does not move half
+registers with a ten-byte copy at all**, so no amount of kernel writing will
+witness a nonzero destination on that form. Recorded here so nobody spends the
+hour again.
+
+Which reframes the fix. The question is not "how do we witness `copy` ep1 with
+a big destination" but **what does Apple use instead**, and the histogram
+answers it: `f16add dst, src, #0h`. A zero-addend half add is the same move the
+`copy` + `clr` pair is emulating, it is witnessed densely and at ordinary
+register numbers, and metal-nt produces more of it on demand. Measuring that
+form's destination field range, and using it for the low half when the
+destination is at or above 128, is the next step -- and it needs no new witness
+class at all.
+
+A hardware oracle -- emit at ep1 with a known destination, read the register
+back -- would also answer the original question, but is no longer the cheapest
+route.
 
 It was the last refusal left in `webgl_materials_physical_clearcoat` after the
 reciprocal gate was corrected.
