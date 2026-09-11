@@ -774,6 +774,24 @@ main(void)
    const VkDeviceSize triangle_offset = 0;
    const VkDeviceSize fullscreen_offset = 3 * 2 * sizeof(float);
 
+   /* Record only the first N of the three draws. Two failures can stack here
+    * -- a per-sample depth test that never varies, and a pass whose colour
+    * never reaches its resolve target -- and they look the same in the final
+    * invariant. Dropping draws separates them: with N=0 both passes are
+    * clear-only, so pass 1 must resolve to the clear and nothing about depth
+    * is involved yet. Diagnostic only; the default records all three and the
+    * invariant below is unchanged. */
+   unsigned max_draws = 3;
+   {
+      const char *limit = getenv("G17P_MSAA_DEPTH_MAX_DRAWS");
+      if (limit) {
+         max_draws = (unsigned)atoi(limit);
+         if (max_draws > 3)
+            max_draws = 3;
+         fprintf(stderr, TEST_NAME ": recording %u of 3 draws\n", max_draws);
+      }
+   }
+
    for (unsigned pass = 0; pass < 2; ++pass) {
       if (pass == 1) {
          /* Pass 2 clears colour to A, so a sample whose depth test fails
@@ -792,7 +810,7 @@ main(void)
       };
       vkCmdBeginRenderPass(command_buffer, &pass_begin,
                            VK_SUBPASS_CONTENTS_INLINE);
-      for (unsigned d = 0; d < 3; ++d) {
+      for (unsigned d = 0; d < max_draws; ++d) {
          if (draws[d].pass != pass)
             continue;
          const VkDeviceSize offset =
