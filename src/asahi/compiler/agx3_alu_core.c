@@ -162,7 +162,7 @@ agx3_alu_fmul_minifloat_narrow(
        src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
        immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       (wait_mask & ~UINT16_C(0x3f)))
+       (wait_mask & ~UINT16_C(0x3f)) || src_abs)
       return false;
 
    /* f10 is the DESTINATION width and f26 the source's; they are independent,
@@ -179,10 +179,10 @@ agx3_alu_fmul_minifloat_narrow(
     *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
     *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
     *
-    * The ABS deposit below is witnessed on the 32-bit destination only, so a
-    * narrowing multiply with an absolute source stays refused. */
-   if (dest_half && src_abs)
-      return false;
+    * The recovered six-byte endpoint fixes bits 32:33. There is no grounded
+    * fused ABS form: hardware testing showed that mutating bit 33 executes
+    * incorrectly. Callers must lower ABS through fadd_abs_negzero followed by
+    * this plain multiply. */
 
    /* Fresh Apple mul_scale: 0983150180c0 is loaded f32 * minifloat0x02
     * (1/32), wait6. mul_reuse: 0983050380c0 retains its half2 source.
@@ -206,23 +206,6 @@ agx3_alu_fmul_minifloat_narrow(
    if (!agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, encoded,
                           &encoded_len))
       return false;
-
-   /* Fresh Apple G17P kernels encode abs(x) * {0.5, 1.5, 2.0} by setting
-    * bit33 of this same six-byte endpoint. A texture-dependent abs(x) * 2.0
-    * independently keeps that bit with destination retention and wait slot1:
-    *
-    *   plain/discard abs*2     09 c1 15 01 82 00
-    *   live-source abs*2       09 c1 05 83 82 00
-    *   cached/wait1 abs*2      09 c1 35 01 82 20
-    *
-    * Apple's recovered composer still fixes bit33 to zero, so deposit this
-    * one newly witnessed modifier after composing the otherwise byte-exact
-    * form. Keep AGX3c closed: these are applegpu_g17p witnesses only. */
-   if (src_abs) {
-      if (encoded_len != 6 || (encoded[4] & 0x02))
-         return false;
-      encoded[4] |= 0x02;
-   }
 
    memcpy(out, encoded, encoded_len);
    *len = encoded_len;

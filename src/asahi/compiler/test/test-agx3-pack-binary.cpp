@@ -2427,7 +2427,7 @@ TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
    }
 }
 
-TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
+TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatUsesGroundedPair)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index src = agx_abs(agx_register(2, AGX_SIZE_32));
@@ -2436,9 +2436,41 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
                agx_immediate(0x40));
    agx_stop(b);
 
-   std::vector<uint8_t> want = {
-      0x09, 0xc1, 0x05, 0x83, 0x82, 0x00,
-   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_fadd_abs_negzero(
+      AGX_ISA_ENCODING_AGX3B, 0, 2, true, AGX3_ALU_HINT_CACHE, 0,
+      bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x40, false, false,
+      AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQtHiQStage6)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(64, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fmul_to(b, dest, agx_abs(agx_register(2, AGX_SIZE_32)),
+               agx_immediate(0x40));
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_fadd_abs_negzero(
+      AGX_ISA_ENCODING_AGX3B, 64, 2, true, AGX3_ALU_HINT_NONE, 0,
+      bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 64, 64, 0x40, true, false,
+      AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+   append(want, bytes, len);
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
    append(want, end.bytes, end.length);
@@ -2448,10 +2480,11 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 0; variant < 10; ++variant) {
-      /* Absolute and scalar-half sources now have exact native witnesses.
-       * So does variant 1, a 32-bit source narrowed into a half destination:
-       * f10 selects the destination width independently of f26, and Apple
-       * emits the mixed-width multiply directly. See
+      /* Absolute f32 sources have an exact grounded two-instruction lowering;
+       * scalar-half sources have an exact native witness. So does variant 1,
+       * a 32-bit source narrowed into a half destination: f10 selects the
+       * destination width independently of f26, and Apple emits the
+       * mixed-width multiply directly. See the focused tests above and
        * FmulMinifloatNarrowsIntoHalfDestination below. */
       if (variant == 1 || variant == 5 || variant == 8)
          continue;

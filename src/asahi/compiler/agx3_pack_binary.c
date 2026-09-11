@@ -9631,9 +9631,33 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   enc, I->dest[0].value, reg.value, imm.value, reg.neg,
                   I->saturate, agx3_post_ra_hint(reg), wait, bytes, &len);
             } else if (multiply) {
+               /* The recovered six-byte minifloat endpoint fixes bits 32:33.
+                * Treating bit 33 as an ABS modifier produced wrong values on
+                * G17P: abs(0.027...) * 2.0 saturated above 1.0 while the
+                * identical plain multiply was exact. Use two independently
+                * Apple-grounded instructions instead. FABS writes the final
+                * destination as a retained intermediate; the plain FMUL then
+                * consumes it in place. This adds no register, spill, wait, or
+                * serialization and preserves the source's real lifetime. */
+               if (reg.abs) {
+                  uint8_t abs_bytes[AGX3_ALU_MAX_LENGTH], abs_len = 0;
+                  uint8_t mul_bytes[AGX3_ALU_MAX_LENGTH], mul_len = 0;
+                  if (I->dest[0].size != AGX_SIZE_32 ||
+                      !agx3_alu_fadd_abs_negzero(
+                         enc, I->dest[0].value, reg.value, true,
+                         agx3_post_ra_hint(reg), wait, abs_bytes, &abs_len) ||
+                      !agx3_alu_fmul_minifloat_mod(
+                         enc, I->dest[0].value, I->dest[0].value, imm.value,
+                         I->dest[0].cache, false, AGX3_ALU_HINT_DISCARD, 0,
+                         mul_bytes, &mul_len) ||
+                      !agx3_append(emission, abs_bytes, abs_len) ||
+                      !agx3_append(emission, mul_bytes, mul_len))
+                     AGX3_REFUSE(I);
+                  continue;
+               }
                encoded = agx3_alu_fmul_minifloat_narrow(
                   enc, I->dest[0].value, reg.value, imm.value,
-                  I->dest[0].cache, reg.abs,
+                  I->dest[0].cache, false,
                   I->dest[0].size == AGX_SIZE_16, agx3_post_ra_hint(reg),
                   wait, bytes, &len);
             } else if (reg.abs) {
