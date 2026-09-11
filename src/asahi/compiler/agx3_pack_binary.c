@@ -118,17 +118,23 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
                     x.discard ? ".discard" : "");
    }
 
-   /* mask, format and shift decide gates that the operand list cannot show.
+   /* mask, format, shift and nest decide gates that the operand list cannot
+    * show. A control-flow refusal turns entirely on `nest` -- a break out of
+    * one enclosing block and a break out of five printed identically without
+    * it, which is precisely the diagnosis this lane had to redo. (`cond` is
+    * the icond/fcond union; which one it is follows from the opcode.)
     * A vector spill differs from a scalar one only in `mask`; and a shifted
     * integer subtract (`a - (b << N)`, which is how a multiply by a small
     * negative constant is strength-reduced) looks exactly like a plain
     * negated add without `shift`. Omitting them costs a wrong diagnosis. */
    fprintf(stderr,
            "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
-           "[%s%s%s cond=%u chan=%u mask=0x%x fmt=%u shift=%u]%s%s\n",
+           "[%s%s%s cond=%u nest=%u chan=%u mask=0x%x fmt=%u "
+           "shift=%u]%s%s\n",
            line, agx_opcodes_info[I->op].name, shape,
            I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
-           (unsigned)I->fcond, I->nr_dests ? agx_channels(I->dest[0]) : 0u,
+           (unsigned)I->fcond, (unsigned)I->nest,
+           I->nr_dests ? agx_channels(I->dest[0]) : 0u,
            (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift,
            why ? " -- " : "", why ? why : "");
 }
@@ -3584,7 +3590,13 @@ agx3_emit_cnd(struct util_dynarray *emission, enum agx_isa_encoding enc,
    case AGX_OPCODE_WHILE_FCMP:
    case AGX_OPCODE_BREAK_IF_ICMP:
    case AGX_OPCODE_BREAK_IF_FCMP:
-      ok = agx3_cf_cndlt(enc, flag_slot, invert, bytes, &len);
+      /* cndlt IS the two-level cndcf, in a compact four-byte form. A loop
+       * owns two architectural levels, so a break with nothing else open --
+       * and the loop's own continue test -- lands on it; a break that also
+       * has enclosing ifs open needs the wide form's larger count. */
+      ok = count <= 2
+              ? agx3_cf_cndlt(enc, flag_slot, invert, bytes, &len)
+              : agx3_cf_cndcf(enc, flag_slot, invert, count, bytes, &len);
       break;
    case AGX_OPCODE_ELSE_ICMP:
    case AGX_OPCODE_ELSE_FCMP:
@@ -3730,13 +3742,23 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * flow fail-closed. */
       if (wait_mask != 0)
          return -1;
-      /* CNDLT's native operation owns two architectural exec-mask levels.
-       * Mesa's ordinary fused loop break arrives with nest=1; a break from
-       * the loop's final nested block arrives with nest=2 and uses the same
-       * compare+CNDLT transition before the shared backedge/CNDEND(2) footer.
-       * Deeper exits need an independently grounded unwind sequence. */
-      if ((is_if && I->nest != 1) ||
-          (is_break_if && (I->nest == 0 || I->nest > 2)))
+      /* A loop owns two architectural exec-mask levels -- Mesa's nest=1
+       * break and the loop's own continue test both spend them, which is
+       * CNDLT, and the shared backedge footer pops them with CNDEND(2).
+       * Every enclosing `if` the break also escapes adds one more level, and
+       * the lane has to stay inactive until all of them are popped. Apple
+       * spells that with CNDCF, whose count is exactly the number of levels
+       * open inside the innermost loop:
+       *
+       *   nest (levels in Mesa's model, loop counted once)  1  2  3  4 ...
+       *   native levels open inside the loop                2  3  4  5 ...
+       *
+       * so the native count is nest + 1 at every depth. Witnessed byte for
+       * byte against `metal-nt -arch applegpu_g17p` for two through seven
+       * nested ifs; see agx3_cf_cndcf()'s comment for the bytes. */
+      if (is_if && I->nest != 1)
+         return -1;
+      if (is_break_if && I->nest == 0)
          return -1;
 
       bool invert = I->invert_cond;
@@ -3758,8 +3780,8 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * the complementary lanes that must leave the loop. */
       if (is_break_if)
          invert = !invert;
-      if (!agx3_emit_cnd(emission, enc, I->op, flag_slot, invert,
-                         is_if ? 1 : 2))
+      const unsigned levels = is_break_if ? I->nest + 1 : (is_if ? 1 : 2);
+      if (!agx3_emit_cnd(emission, enc, I->op, flag_slot, invert, levels))
          return -1;
       return 1;
    }
@@ -3805,8 +3827,10 @@ agx3_try_control_flow(struct util_dynarray *emission,
                 : -1;
    }
 
-   /* An unconditional break is deliberately not included: no AGX3 witness
-    * exists, and agx_lower_pseudo preserves it so it reaches this refusal. */
+   /* agx_lower_pseudo rewrites every AGX3 unconditional break into the
+    * always-true BREAK_IF above, at any nesting depth, so one reaching here
+    * means that pass did not run. Keep the guard rather than emitting an
+    * exec-mask transition with no compare in front of it. */
    if (I->op == AGX_OPCODE_BREAK)
       return -1;
 

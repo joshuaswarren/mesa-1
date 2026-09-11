@@ -309,6 +309,28 @@ agx3_cf_cndlt(enum agx_isa_encoding enc, unsigned slot, bool invert,
 }
 
 bool
+agx3_cf_cndcf(enum agx_isa_encoding enc, unsigned slot, bool invert,
+              unsigned level_count, uint8_t out[AGX3_CF_MAX_LENGTH],
+              uint8_t *len)
+{
+   if (!slot_ok(slot) || level_count < 2 || level_count > 0xffff)
+      return false;
+
+   const struct agx3_field_kv base_c[] = {KV(2, 3), KV(3, 28)};
+   const struct agx3_field_kv ov[] = {KV(0, invert ? 1 : 0), KV(1, slot),
+                                      KV(12, level_count)};
+
+   /* AGX3b is one form; AGX3c splits the same operation into a compact ep0
+    * and a wide ep1, and only ep1 carries the larger level counts. Try the
+    * compact point first so a shallow break keeps the short encoding. */
+   if (agx3b(enc))
+      return agx3_bind_compose(enc, "cndcf", 0, NULL, 0, ov, 3, out, len);
+
+   return agx3_bind_compose(enc, "cndcf", 0, base_c, 2, ov, 3, out, len) ||
+          agx3_bind_compose(enc, "cndcf", 1, base_c, 2, ov, 3, out, len);
+}
+
+bool
 agx3_cf_cndef(enum agx_isa_encoding enc, uint8_t out[AGX3_CF_MAX_LENGTH],
               uint8_t *len)
 {

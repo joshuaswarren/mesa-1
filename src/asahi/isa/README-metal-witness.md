@@ -234,3 +234,61 @@ Separately, the *per-pixel* program for the same shader is 210 bytes at 1x and
 214 at 2x and 4x (2x and 4x byte-identical), so the ordinary fragment epilogue
 also changes under multisampling. That difference is unexplained and is not a
 claim about our own epilogue being wrong.
+
+## Witness: a loop break deeper than two levels is CNDCF, not a longer CNDLT (2026-09-10)
+
+Question: AGX3's exec-mask stack ops CNDST/CNDLT/CNDEND carry a level count,
+and the packer refused any loop break escaping more than the loop itself plus
+one enclosing `if`. Does Apple widen CNDLT's count, or emit a different unwind?
+Answer: neither -- there is a **separate instruction**, `cndcf`, whose count
+field is sixteen bits wide, and CNDLT is simply its compact count-2 form.
+
+`.tmp/g17p-deep-break-evidence/deepbreak.metal` breaks out of a `for` loop from
+inside 1..7 nested ifs. Every condition reads a distinct element of a
+`device const uint *` and every level stores before the next opens, so neither
+the conditions nor the blocks can be folded. `probe2.metal` adds four controls.
+Decoded with `tools/decomp.c` against the in-tree compose tables:
+
+    enclosing ifs   native break instruction        bytes
+    1               (none -- loop rotated; the      -
+                     exit test IS the loop's cndlt)
+    2               cndcf slot1 count3              8f 05 54 03 00 01
+    3               cndcf slot1 count4              8f 05 54 04 00 01
+    4               cndcf slot1 count5              8f 05 54 05 00 01
+    5               cndcf slot1 count6              8f 05 54 06 00 01
+    6               cndcf slot1 count7              8f 05 54 07 00 01
+    7               cndcf slot1 count8              8f 05 54 08 00 01
+
+`cndcf` is `length="6"`, `f12` at bits 24:39 (the count), `f1` at 40:42 (the
+flag slot), `f0` at bit 43 (invert) -- the same count/slot/invert triple CNDLT
+carries in a four-byte form with `f12` pinned to 2 at bits 24:25.
+
+Four controls pin the semantics:
+
+* **Sense.** Negating the innermost condition (`p_inv`) leaves the cndcf bytes
+  identical and changes only the compare. The break's sense is in the compare,
+  not in the count.
+* **Invert.** A break in an `else` arm (`p_else`) is `8f 05 54 03 00 09`: same
+  count, `f0` set. Apple folds the else into the cndcf rather than emitting a
+  `cndef`.
+* **Scope.** The same two-if break inside an INNER loop, with an outer loop and
+  an outer `if` still open (`p_inner`), is still **count 3** -- the count is the
+  number of levels open inside the *innermost* loop, loop included. That is
+  exactly how Mesa's per-loop `loop_nesting` counter is defined.
+* **Depth 1 never needs it.** With work after the `if` so the loop cannot be
+  rotated (`p_mid`), Apple still emits only CNDLT: two levels is the loop's own
+  cost and the compact form covers it.
+
+So the native level count is Mesa's `nest + 1` at every depth, because a loop
+owns two architectural levels where Mesa's model counts one. `agx3_cf_cndcf()`
+reproduces all eight witnessed encodings byte for byte
+(`test-agx3-cf-core.c: test_deep_break_levels`).
+
+Two smaller facts fell out and are worth not rediscovering:
+
+* A compute pipeline's `.nat` is a **container**: `__TEXT,__compute` of the
+  outer Mach-O holds one Mach-O per pipeline, and each of *those* carries the
+  machine code in `__TEXT,__text`. The extractor is
+  `.tmp/g17p-deep-break-evidence/extract.py`.
+* `cndend`'s own count (`f10`) is sixteen bits too, at the same bit position as
+  `cndcf`'s. Only 1 and 2 are witnessed and encoded.

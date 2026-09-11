@@ -9706,6 +9706,17 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    EXPECT_EQ(memcmp(code.data()+38,pop_native,sizeof(pop_native)),0);
 }
 
+/*
+ * agx_lower_pseudo spells an AGX3 unconditional break as the always-true
+ * identity r0l == r0l; this pins the cached/killed normalization of that
+ * identity, and the level count NEST 2 turns into.
+ *
+ * A loop owns two architectural exec-mask levels, so a break that escapes the
+ * loop plus one enclosing block has to stay inactive for three -- CNDCF with
+ * count 3, which is Apple's byte-exact form for that shape. CNDLT is the same
+ * operation pinned to count 2 and covers only the NEST 1 break, which
+ * HalfCompareGnomeLoopBreakAndBothBranchFixups above asserts.
+ */
 TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -9737,7 +9748,8 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
                                   AGX3_CF_ICOND_EQ, 1, src, live, 0,
                                   bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 1, true, bytes, &len));
+   ASSERT_TRUE(
+      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, 3, bytes, &len));
    append(want, bytes, len);
    const size_t branch_offset = want.size();
    ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
@@ -9751,6 +9763,89 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
+}
+
+/*
+ * The same break, but escaping enclosing ifs as well. Apple's compiler emits
+ * CNDCF with a level count equal to the number of architectural levels open
+ * inside the loop: the loop's two plus one per enclosing if, i.e. NEST + 1.
+ * Witnessed byte for byte for two through seven nested ifs -- see
+ * agx3_cf_cndcf()'s comment and test-agx3-cf-core.c.
+ */
+TEST_F(AGX3PackBinary, IdentityBreakEscapingNestedIfsUsesNativeLevelCount)
+{
+   for (unsigned ifs = 1; ifs <= 5; ++ifs) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_push_exec(b, 1);
+      agx_block *body = agx_test_block(b->shader);
+      agx_block *after = agx_test_block(b->shader);
+      agx_builder lb = agx_init_builder(b->shader, agx_after_block(body));
+      agx_index cond = agx_register(3, AGX_SIZE_16);
+      for (unsigned i = 0; i < ifs; ++i)
+         agx_if_icmp(&lb, cond, agx_immediate(0), 1, AGX_ICOND_UEQ, true,
+                     NULL);
+      agx_index r0l = agx_register(0, AGX_SIZE_16);
+      r0l.cache = true;
+      r0l.kill = true;
+      agx_break_if_icmp(&lb, r0l, r0l, ifs + 1, false, AGX_ICOND_UEQ, after);
+      for (unsigned i = 0; i < ifs; ++i)
+         agx_pop_exec(&lb, 1);
+      agx_jmp_exec_any(&lb, body);
+      agx_pop_exec(&lb, 1);
+      agx_builder ab = agx_init_builder(b->shader, agx_after_block(after));
+      agx_stop(&ab);
+
+      uint8_t bytes[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      std::vector<uint8_t> want;
+      ASSERT_TRUE(
+         agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 6, false, 2, bytes, &len));
+      append(want, bytes, len);
+      const size_t body_offset = want.size();
+
+      const struct agx3_cf_source_hints plain = {false, false};
+      for (unsigned i = 0; i < ifs; ++i) {
+         ASSERT_TRUE(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
+                                                AGX3_CF_ICOND_EQ, 0, 3, 0,
+                                                plain, 0, bytes, &len));
+         append(want, bytes, len);
+         ASSERT_TRUE(
+            agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 0, true, 1, bytes, &len));
+         append(want, bytes, len);
+      }
+
+      const uint16_t src[] = {0, 0};
+      const struct agx3_cf_source_hints live[] = {{false, false},
+                                                  {false, false}};
+      ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
+                                     AGX3_CF_ICOND_EQ, 1, src, live, 0, bytes,
+                                     &len));
+      append(want, bytes, len);
+      /* NEST is ifs + 1, so the native level count is ifs + 2. */
+      ASSERT_TRUE(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, ifs + 2,
+                                bytes, &len));
+      append(want, bytes, len);
+
+      for (unsigned i = 0; i < ifs; ++i) {
+         ASSERT_TRUE(
+            agx3_cf_cndend(AGX_ISA_ENCODING_AGX3B, 1, bytes, &len));
+         append(want, bytes, len);
+      }
+
+      const size_t branch_offset = want.size();
+      ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
+      ASSERT_TRUE(agx3_cf_patch_branch(AGX_ISA_ENCODING_AGX3B, false, bytes,
+                                       (int64_t)body_offset -
+                                          (int64_t)branch_offset));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_cf_cndend(AGX_ISA_ENCODING_AGX3B, 2, bytes, &len));
+      append(want, bytes, len);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+
+      EXPECT_EQ(pack(b), want) << "ifs=" << ifs;
+   }
 }
 
 TEST_F(AGX3PackBinary, HalfZeroGnomeSamplerIndexSurvivesBranch)

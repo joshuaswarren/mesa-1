@@ -11,6 +11,8 @@
 #include "agx3_cf_core.h"
 #include "agx3_cf_core_vectors.c"
 
+#include "util/macros.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -400,6 +402,75 @@ test_float_minifloat_compare(void)
    }
 }
 
+/*
+ * A loop break that also escapes enclosing ifs. Apple's own compiler spells
+ * it CNDCF with a level count, where CNDLT is the compact count-2 form.
+ *
+ * Every row below is Apple's byte-exact `metal-nt -arch applegpu_g17p` output
+ * for MSL that breaks out of a `for` loop from inside N nested ifs, each
+ * condition reading a distinct element of a `device const uint *` so nothing
+ * can be folded, and each level storing before the next opens
+ * (.tmp/g17p-deep-break-evidence/deepbreak.metal, probe2.metal).
+ */
+static void
+test_deep_break_levels(void)
+{
+   const struct {
+      unsigned slot, count;
+      bool invert;
+      const char *hex;
+      const char *witness;
+   } native[] = {
+      {1, 3, false, "8f0554030001", "break inside 2 nested ifs"},
+      {1, 4, false, "8f0554040001", "break inside 3 nested ifs"},
+      {1, 5, false, "8f0554050001", "break inside 4 nested ifs"},
+      {1, 6, false, "8f0554060001", "break inside 5 nested ifs"},
+      {1, 7, false, "8f0554070001", "break inside 6 nested ifs"},
+      {1, 8, false, "8f0554080001", "break inside 7 nested ifs"},
+      {1, 3, true, "8f0554030009", "break from an else arm (invert)"},
+      {2, 3, false, "8f0554030002", "break out of an INNER loop"},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(native); ++i) {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      checks++;
+      if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, native[i].slot,
+                         native[i].invert, native[i].count, out, &len) ||
+          !hex_is(out, len, native[i].hex)) {
+         fprintf(stderr, "FAIL cndcf slot=%u invert=%u count=%u (%s)\n",
+                 native[i].slot, (unsigned)native[i].invert, native[i].count,
+                 native[i].witness);
+         failures++;
+      }
+   }
+
+   /* A one-level exit is not a loop break: a loop owns two levels, so the
+    * shallowest break is count 2 and that is CNDLT's encoding point. Flag
+    * slots stay inside the witnessed 0..5 range. */
+   {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 0, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 1, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 6, false, 3, out, &len));
+      REJECT(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX2, 1, false, 3, out, &len));
+   }
+
+   /* The AGX3c constants are structural (cndlt/cndst siblings); assert only
+    * that the operation exists and that its count reaches the same depths,
+    * since no AGX3c capture covers it. */
+   for (unsigned count = 3; count <= 8; ++count) {
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      checks++;
+      if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3C, 1, false, count, out, &len)) {
+         fprintf(stderr, "FAIL agx3c cndcf count=%u\n", count);
+         failures++;
+      }
+   }
+}
+
 int
 main(void)
 {
@@ -411,6 +482,7 @@ main(void)
    test_half_comparisons();
    test_half_zero_lifetime();
    test_half_immediate_compare();
+   test_deep_break_levels();
    for (size_t i = 0; i < cf_vec_count; ++i) {
       const struct cf_vec *v = &cf_vecs[i];
       const enum agx_isa_encoding e =
