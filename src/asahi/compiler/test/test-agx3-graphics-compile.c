@@ -924,6 +924,43 @@ build_fs_flat(void)
    return fs_finish(&b);
 }
 
+static bool
+test_g17g_native_flat_colour(void)
+{
+   /* M5/25G76 native fragment at 0x100000003c0, executed by the Linux
+    * three-frame test. This includes the leading pack marker and complete
+    * pixel transaction, rather than just a syntactically valid tile store. */
+   static const uint8_t native[] = {
+      0x27,0x00,0x00,0x22,0x25,0x81,0xb9,0x02,0x09,0x88,0x82,0x40,
+      0x27,0x00,0x00,0x53,0x25,0x81,0xa9,0x02,0x09,0x8c,0x82,0x40,
+      0x07,0x30,0x00,0x05,0x00,0x00,0x67,0x40,0x00,0x05,0x00,0x00,
+      0x27,0x01,0x05,0x08,0x21,0x01,0xad,0x02,0x00,0x00,0x61,0x5c,
+      0x00,0x00,0x67,0x10,0x00,0x04,0x00,0x00,0x0e,0x00,0x00,0x00,
+   };
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+      .no_preamble = true,
+   };
+   nir_shader *nir = build_fs_flat();
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   ok = ok && part.binary && part.info.binary_size == sizeof(native) &&
+        part.info.main_offset == 0 && !part.info.has_preamble &&
+        !part.info.push_count && !part.info.scratch_size &&
+        memcmp(part.binary, native, sizeof(native)) == 0;
+   if (!ok || getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "M5 native flat colour: size=%u gprs=%u staging=%u/%u bytes=",
+              part.info.binary_size, part.info.nr_gprs,
+              part.info.agx3_staging_known, part.info.agx3_staging_halfs);
+      for (unsigned i = 0; part.binary && i < part.info.binary_size; ++i)
+         fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
+      fprintf(stderr, "\n");
+   }
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
 /* Fragment shader reading a perspective-interpolated vec4 varying. */
 static nir_shader *
 build_fs_interpolated(void)
@@ -5290,6 +5327,12 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--m5-flat-colour-only")) {
+      const bool ok = test_g17g_native_flat_colour();
+      fprintf(stderr, "M5 native flat-colour transaction: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--zink-minifloat-abs-fma-only")) {
       const struct agx3_graphics_case c = {
          "fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
@@ -5475,6 +5518,9 @@ main(int argc, char **argv)
                  test_custom_border_samplers(true, 0) &&
                  test_custom_border_samplers(true, 1) &&
                  test_custom_border_samplers(true, 2);
+
+   if (!test_g17g_native_flat_colour())
+      all_ok = false;
 
    if (!test_g17p_quad_control_modes())
       all_ok = false;

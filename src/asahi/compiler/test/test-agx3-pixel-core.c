@@ -61,8 +61,9 @@ main(void)
    expect("AGX3b colour entry",
           agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, b, &len), b, len,
           "870254000600");
-   expect_refused("AGX3c colour entry",
-                  agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3C, b, &len));
+   expect("M5 native colour entry",
+          agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3C, b, &len), b, len,
+          "073000050000");
    expect_refused("AGX2 colour entry",
                   agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX2, b, &len));
 

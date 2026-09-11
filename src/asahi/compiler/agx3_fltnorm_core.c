@@ -126,8 +126,15 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
    *len = 0;
 
-   if (!enc_ok(enc) || d->dest >= 256 ||
-       (d->first_instruction && enc != AGX_ISA_ENCODING_AGX3B))
+   /* M5's native flat-colour program also marks its leading FLTNORM with
+    * f68. Its second immediate pack leaves the bit clear. */
+   if (!enc_ok(enc) || d->dest >= 256)
+      return false;
+   if (enc == AGX_ISA_ENCODING_AGX3C && d->first_instruction &&
+       (!d->two_lanes || d->snorm || d->is_16bit ||
+        d->srgb != AGX3_FLTNORM_SRGB_NONE ||
+        d->src[0].kind != AGX3_FLTNORM_SRC_IMMEDIATE ||
+        d->src[1].kind != AGX3_FLTNORM_SRC_IMMEDIATE))
       return false;
    if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;

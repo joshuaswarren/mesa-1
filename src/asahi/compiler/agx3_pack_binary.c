@@ -4456,6 +4456,41 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
    return phase == 4 ? write : NULL;
 }
 
+/* The M5/25G76 native constant RGBA8 fragment packs both pairs before its
+ * entry/wait/store/release bracket. Qualify only that immediate, single-RT,
+ * straight-line shape here; this is not admission of M5 sampled or blended
+ * fragment transactions. The complete 60-byte witness is in the compiler
+ * regression test and has completed repeated draws on J813. */
+static const agx_instr *
+agx3_g17g_deferred_colour_wait(agx_context *ctx)
+{
+   const agx_instr *write = NULL;
+   unsigned phase = 0;
+   if (list_length(&ctx->blocks) != 1)
+      return NULL;
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_STOP)
+         continue;
+      if (phase == 0 && I->op == AGX_OPCODE_WAIT_PIX && I->writeout == 12) {
+         write = I;
+      } else if ((phase == 1 || phase == 2) &&
+                 I->op == AGX_OPCODE_FLTNORM_AGX3 && I->nr_srcs == 2 &&
+                 I->src[0].type == AGX_INDEX_IMMEDIATE &&
+                 I->src[1].type == AGX_INDEX_IMMEDIATE) {
+         /* The encoder still validates both immediate operands. */
+      } else if (phase == 3 && I->op == AGX_OPCODE_ST_TILE &&
+                 I->format == AGX_FORMAT_U8NORM && I->mask == 15 &&
+                 !I->pixel_offset && !I->explicit_coords) {
+         /* One terminal store to the captured RGBA8 tile partition. */
+      } else {
+         return NULL;
+      }
+      phase++;
+   }
+   return phase == 4 ? write : NULL;
+}
+
 /* G17P allocates two pixel classes per colour-tile partition.  Fresh native
  * two-RGBA8 and RGBA16F+R8 shaders agree on the same partition protocol even
  * though their byte offsets differ: partition 1 uses read/write/combined
@@ -5183,6 +5218,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_pixel_protocol && !g17p_mrt.valid
          ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
          : NULL;
+   const agx_instr *g17g_deferred_write =
+      enc == AGX_ISA_ENCODING_AGX3C && ctx->stage == MESA_SHADER_FRAGMENT &&
+      !ctx->key->fs.ignore_tib_dependencies
+         ? agx3_g17g_deferred_colour_wait(ctx) : NULL;
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
    ctx->agx3_colour_link.colour_partitions =
@@ -5978,7 +6017,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                continue;
             }
-            if (I == g17p_deferred_write) {
+            if (I == g17p_deferred_write || I == g17g_deferred_write) {
                /* The scoreboard has already retired these dependencies here.
                 * Keep that retirement at the original instruction, independent
                 * of where the pixel fence is emitted. */
@@ -6007,7 +6046,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_FLTNORM_AGX3) {
-            const bool first = enc == AGX_ISA_ENCODING_AGX3B &&
+            const bool first = (enc == AGX_ISA_ENCODING_AGX3B ||
+                                g17g_deferred_write != NULL) &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
                !ctx->key->fs.ignore_tib_dependencies &&
                emission->size == initial_size;
@@ -6098,6 +6138,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0))
                   AGX3_REFUSE(I);
             }
+            if (I->op == AGX_OPCODE_ST_TILE && g17g_deferred_write) {
+               uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len = 0;
+               if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
+                   !agx3_append(emission, entry, entry_len) ||
+                   !agx3_emit_pixel(emission, enc, g17g_deferred_write, 0))
+                  AGX3_REFUSE(I);
+            }
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last))
                AGX3_REFUSE(I);
 
@@ -6107,6 +6154,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!g17p_colour_open ||
                    !agx3_pixel_release(enc, 0xc, true, 0, release,
                                       &release_len) ||
+                   !agx3_append(emission, release, release_len))
+                  AGX3_REFUSE(I);
+            }
+            if (g17g_deferred_write && I->op == AGX_OPCODE_ST_TILE && last) {
+               uint8_t release[AGX3_PIXEL_MAX_LENGTH], release_len = 0;
+               if (!agx3_pixel_release(enc, 12, true, 0, release, &release_len) ||
                    !agx3_append(emission, release, release_len))
                   AGX3_REFUSE(I);
             }

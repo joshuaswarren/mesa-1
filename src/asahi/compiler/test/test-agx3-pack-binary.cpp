@@ -7090,6 +7090,8 @@ TEST_F(AGX3PackBinary, G17PFltnormStartIsPositionNotFirstUniformRead)
    d.src[0] = {AGX3_FLTNORM_SRC_IMMEDIATE, 16, false};
    d.first_instruction = true;
    uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH], len;
+   /* M5's newly qualified entry marker covers immediate pairs, not this
+    * unwitnessed single-lane leading instruction. */
    EXPECT_FALSE(agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3C, &d, bytes, &len));
 }
 

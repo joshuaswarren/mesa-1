@@ -71,13 +71,16 @@ agx3_pixel_colour_entry(enum agx_isa_encoding enc,
    memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
    *len = 0;
 
-   /* G17P is AGX3b. The pair below is Apple's normalized composer input for
-    * the exact 87 02 54 00 06 00 entry gate. */
-   if (enc != AGX_ISA_ENCODING_AGX3B)
+   /* G17P: 87 02 54 00 06 00. The M5/25G76 native flat-colour
+    * fragment uses the same fields with the AGX3c opcode selectors:
+    * 07 30 00 05 00 00, immediately before its class-12 wait. */
+   if (!enc_ok(enc))
       return false;
 
    const struct agx3_field_kv fields[] = {KV(14, 512), KV(15, 1)};
-   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields), NULL, 0,
+   const struct agx3_field_kv base_c[] = {KV(16, 3), KV(17, 122)};
+   if (!agx3_bind_compose(enc, "pixwait", 0, is_b(enc) ? NULL : base_c,
+                          is_b(enc) ? 0 : NELEM(base_c), fields, NELEM(fields),
                           out, len)) {
       memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
       *len = 0;
