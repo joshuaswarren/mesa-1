@@ -85,7 +85,9 @@ enum agx_dbg {
 #define MAX_BO_CACHE_BUCKET (22) /* 2^22 = 4MB */
 
 /* Fencepost problem, hence the off-by-one */
-#define NR_BO_CACHE_BUCKETS (MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1)
+#define NR_BO_CACHE_FLAG_BUCKETS 16
+#define NR_BO_CACHE_BUCKETS \
+   ((MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1) * NR_BO_CACHE_FLAG_BUCKETS)
 
 /* Forward decl only, do not pull in all of NIR */
 struct nir_shader;
@@ -313,8 +315,9 @@ struct agx_device {
        */
       struct list_head lru;
 
-      /* The BO cache is a set of buckets with power-of-two sizes.  Each bucket
-       * is a linked list of free panfrost_bo objects.
+      /* Power-of-two size classes, subdivided by allocation-flag hash.
+       * Exact flags are still checked when fetching; collisions only affect
+       * lookup cost. Each bucket is a list of free agx_bo objects.
        */
       struct list_head buckets[NR_BO_CACHE_BUCKETS];
 
