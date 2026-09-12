@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include "agx_chip.h"
 
-/* The initial opaque, position-only draw profile captured on M5/25G76.
+/* The opaque triangle profile, initially captured on M5/25G76 without PSIZ.
  * Each range is a complete PPP payload with its own VDM pointer. */
 #define AGX_PPP_HAL300_GRAPHICS_RECORDS 9u
 #define AGX_PPP_HAL300_GRAPHICS_BYTES 172u
@@ -16,6 +16,7 @@ struct agx_ppp_hal300_graphics_fields {
    uint64_t fragment_program;
    unsigned cull_mode;
    bool front_face_ccw;
+   bool point_size_output;
 };
 
 struct agx_ppp_hal300_graphics_core {

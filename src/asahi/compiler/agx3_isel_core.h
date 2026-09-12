@@ -10,7 +10,10 @@
  * agx_lower_pseudo() turns *every* AGX_OPCODE_ICMP into an icmpsel -- without
  * this encoder no shader containing any integer comparison can be compiled.
  *
- * Everything here is probe-witnessed, not inferred. A ladder of 12 MSL
+ * The GPU0 forms below are probe-witnessed. GPU1 additionally has a separate
+ * 32-bit iseli32 encoder derived from the AGX3c tables; its field mapping and
+ * encoding regression do not by themselves establish hardware correctness.
+ * A ladder of 12 MSL
  * kernels differing only in the comparison operator was compiled by Apple's
  * own offline translator (`metal-nt -arch applegpu_g16g`, the AGX3b encoding
  * G17P uses) and decoded through Apple's own encoder tables. The condition

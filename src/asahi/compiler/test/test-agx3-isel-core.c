@@ -238,14 +238,14 @@ main(void)
    d.sel_false = 16;
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
 
-   /* Immediates wider than a byte, and AGX3c, are not witnessed. */
+   /* Immediates wider than a byte stay gated on both encodings. */
    d.true_kind = AGX3_ISEL_IMMEDIATE;
    d.false_kind = AGX3_ISEL_IMMEDIATE;
    d.sel_true = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
    d.sel_true = 1;
    d.sel_false = 0;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX2, &d, out, &len));
 
    /* Waits: slot 1 is f98, slot 6 is f103, and the two differ. */
@@ -295,6 +295,27 @@ main(void)
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
    d.cmp0 = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   /* Zink's M5 robust vertex fetch: r8 = vertex_id > limit ? 0 : r0.
+    * Bytes are independently composed from the AGX3c iseli32 table. They
+    * are an encoding regression, not a native execution witness.
+    */
+   struct agx3_isel_desc m5 = {
+      .dest = 16, .cmp0 = 4, .cmp1 = 10, .cond = AGX3_ISEL_ICOND_ULT,
+      .true_kind = AGX3_ISEL_IMMEDIATE, .false_kind = AGX3_ISEL_REGISTER,
+      .sel_true = 0, .sel_false = 0, .explicit_hints = true,
+      .cache = {false, true, false, false},
+      .discard = {true, false, false, true}, .wait_mask = 2,
+   };
+   const uint8_t m5_expected[] = {
+      0x82, 0x05, 0x2f, 0x8b, 0x22, 0x80, 0x05, 0x40, 0x80, 0x00,
+   };
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
+   CHECK(len == sizeof(m5_expected) && !memcmp(out, m5_expected, len));
+   m5.cache[0] = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
+   m5.cache[0] = false;
+   m5.dest_16 = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
    printf("%u checks, %u failures\n", checks, failures);
    return failures ? 1 : 0;
 }

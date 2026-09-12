@@ -736,6 +736,14 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       if (!table)
          return (struct hk_bg_eot){0};
       ranges[0] = (struct agx3_ioto_uniform_range){0, 6, table};
+      if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false)) {
+         fprintf(stderr, "M5 EOT resources: table=%" PRIx64 " pbe=%" PRIx64
+                         " descriptor=", table, pbe);
+         const uint8_t *bytes = (const uint8_t *)&view->planes[0].eot;
+         for (unsigned i = 0; i < sizeof(view->planes[0].eot); ++i)
+            fprintf(stderr, "%02x", bytes[i]);
+         fputc('\n', stderr);
+      }
    } else if (op == AGX_BG_CLEAR) {
       if (shader->info.push_count != AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
           shader->info.uses_txf)
@@ -3680,32 +3688,85 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
       struct hk_linked_shader *linked = gfx->linked[MESA_SHADER_FRAGMENT];
       const VkViewport *vp = &dyn->vp.viewports[0];
       const VkRect2D *scissor = &dyn->vp.scissors[0];
-      /* First M5 application profile: a full-frame, opaque, position-only
-       * triangle. Keep the captured state constants local to this bounded
-       * profile until the corresponding dynamic fields are decoded. */
+      const bool position = hw_vs && hw_vs->info.uvs.size == 4 &&
+                            hw_vs->info.uvs.osel.opaque[0] == 0;
+      const bool position_psiz = hw_vs && hw_vs->info.uvs.size == 5 &&
+                                hw_vs->info.uvs.osel.opaque[0] == 0x40000;
+      const bool full_height =
+         (vp->y == 0 && vp->height == render->cr.height) ||
+         (vp->y == render->cr.height && vp->height == -(float)render->cr.height);
+      /* Zink may enable polygon offset with all factors zero. The bounded
+       * no-depth profile can retain its native disabled bias state in that
+       * case; nonzero factors still require the general raster-state path. */
+      const bool zero_depth_bias = !dyn->rs.depth_bias.enable ||
+         (dyn->rs.depth_bias.constant_factor == 0.0f &&
+          dyn->rs.depth_bias.slope_factor == 0.0f &&
+          dyn->rs.depth_bias.clamp == 0.0f);
+      /* Bounded M5 opaque triangles with no fragment inputs. The optional
+       * point-size word is reflected in both VDM and PPP output state.
+       * Provoking vertex cannot affect a shader with no input coefficients.
+       * Full-frame viewport orientation is emitted by hk_flush_vp_state.
+       */
       if (!hw_vs || !fs || !linked || linked->b.cf.nr_bindings ||
           linked->b.cf.nr_cf || linked->b.cf.reads_z || gfx->varyings ||
-          hw_vs->info.uvs.size != 4 || hw_vs->info.uvs.osel.opaque[0] ||
-          gfx->object_type != AGX_OBJECT_TYPE_TRIANGLE || gfx->provoking != 0 ||
+          (!position && !position_psiz) ||
+          gfx->object_type != AGX_OBJECT_TYPE_TRIANGLE ||
           render->color_att_count != 1 || render->depth_att.iview ||
           render->stencil_att.iview || render->layer_count != 1 ||
           render->view_mask || render->tilebuffer.nr_samples != 1 ||
           (linked->b.fragment_control.opaque[0] >> 29) != AGX_PASS_TYPE_OPAQUE ||
           fs->info.fs.writes_memory || hk_rast_discard(cmd) ||
           dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
-          dyn->rs.line.width != 1.0f || dyn->rs.depth_bias.enable ||
+          dyn->rs.line.width != 1.0f || !zero_depth_bias ||
           dyn->rs.depth_clamp_enable || dyn->vp.depth_clip_negative_one_to_one ||
           !vk_rasterization_state_depth_clip_enable(&dyn->rs) ||
           dyn->ds.depth.bounds_test.enable || gfx->occlusion.mode ||
           dyn->vp.viewport_count != 1 || dyn->vp.scissor_count != 1 ||
-          vp->x != 0 || vp->y != 0 || vp->width != render->cr.width ||
-          vp->height != render->cr.height || vp->minDepth != 0 ||
+          vp->x != 0 || !full_height || vp->width != render->cr.width ||
+          vp->minDepth != 0 ||
           vp->maxDepth != 1 || scissor->offset.x || scissor->offset.y ||
           scissor->extent.width != render->cr.width ||
           scissor->extent.height != render->cr.height ||
           render->area.offset.x || render->area.offset.y ||
           render->area.extent.width != render->cr.width ||
           render->area.extent.height != render->cr.height) {
+         if (hk_g17p_launch_trace_enabled())
+            fprintf(stderr, "M5 PPP profile: uvs=%u osel=%#x provoking=%u object=%u "
+                    "depth=%u stencil=%u varyings=%#llx cf=%u/%u/%u "
+                    "viewport=%g,%g,%g,%g,%g,%g negative_one=%u "
+                    "scissor=%d,%d,%u,%u area=%d,%d,%u,%u\n",
+                    hw_vs ? hw_vs->info.uvs.size : 0,
+                    hw_vs ? hw_vs->info.uvs.osel.opaque[0] : 0,
+                    gfx->provoking, gfx->object_type,
+                    render->depth_att.iview != NULL, render->stencil_att.iview != NULL,
+                    (unsigned long long)gfx->varyings,
+                    linked ? linked->b.cf.nr_bindings : 0,
+                    linked ? linked->b.cf.nr_cf : 0,
+                    linked ? linked->b.cf.reads_z : 0,
+                    vp->x, vp->y, vp->width, vp->height, vp->minDepth, vp->maxDepth,
+                    dyn->vp.depth_clip_negative_one_to_one,
+                    scissor->offset.x, scissor->offset.y,
+                    scissor->extent.width, scissor->extent.height,
+                    render->area.offset.x, render->area.offset.y,
+                    render->area.extent.width, render->area.extent.height);
+         if (hk_g17p_launch_trace_enabled())
+            fprintf(stderr, "M5 PPP flags: position=%u psiz=%u full_height=%u "
+                    "color=%u layers=%u viewmask=%u samples=%u pass=%u/%u "
+                    "writes=%u discard=%u polygon=%u line=%g bias=%u/%g/%g/%g clamp=%u "
+                    "clip=%u bounds=%u query=%u viewports=%u scissors=%u size=%u,%u\n",
+                    position, position_psiz, full_height,
+                    render->color_att_count, render->layer_count, render->view_mask,
+                    render->tilebuffer.nr_samples,
+                    linked ? linked->b.fragment_control.opaque[0] >> 29 : 0,
+                    AGX_PASS_TYPE_OPAQUE, fs ? fs->info.fs.writes_memory : 0,
+                    hk_rast_discard(cmd), dyn->rs.polygon_mode, dyn->rs.line.width,
+                    dyn->rs.depth_bias.enable, dyn->rs.depth_bias.constant_factor,
+                    dyn->rs.depth_bias.slope_factor, dyn->rs.depth_bias.clamp,
+                    dyn->rs.depth_clamp_enable,
+                    vk_rasterization_state_depth_clip_enable(&dyn->rs),
+                    dyn->ds.depth.bounds_test.enable, gfx->occlusion.mode,
+                    dyn->vp.viewport_count, dyn->vp.scissor_count,
+                    render->cr.width, render->cr.height);
          mesa_loge("M5 draw exceeds the native opaque position-only PPP profile");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
@@ -3715,6 +3776,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
          .fragment_program = hk_upload_usc_words(cmd, fs, linked),
          .cull_mode = dyn->rs.cull_mode,
          .front_face_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
+         .point_size_output = position_psiz,
       };
       struct agx_ppp_hal300_graphics_core state;
       if (!agx_ppp_hal300_graphics_core_pack(dev->dev.chip, &fields, &state)) {

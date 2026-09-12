@@ -192,9 +192,18 @@ hk_agx3_g17g_vertex_program_info(
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
    struct agx_vdm_state_update_program_info *program)
 {
+   const bool position = compiler_info && compiler_info->position_only &&
+                         compiler_info->uvs_size == 4;
+   /* Dynamic-topology pipelines retain the default point-size output even
+    * for triangle draws. Use the shared UVS footprint encoding for that
+    * fifth word; keep user varyings and layer/viewport output gated here.
+    */
+   const bool position_psiz = compiler_info && !compiler_info->position_only &&
+      compiler_info->uvs_size == 5 && compiler_info->psiz_off == 4 &&
+      compiler_info->layer_viewport_off == 5 && compiler_info->clip_off == 5 &&
+      compiler_info->uvs_written == 0;
    if (chip != AGX_CHIP_G17G || !compiler_info ||
-       !compiler_info->position_only || compiler_info->uvs_size != 4 ||
-       compiler_info->user_size != 0) {
+       (!position && !position_psiz) || compiler_info->user_size != 0) {
       if (program)
          memset(program, 0, sizeof(*program));
       return false;

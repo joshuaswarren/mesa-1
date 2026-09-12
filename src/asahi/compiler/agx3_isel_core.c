@@ -205,6 +205,55 @@ encode_explicit(const struct agx3_isel_desc *d,
                            base, sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
+/* GPU1 separates integer and floating-point selects. These field locations
+ * come from its own iseli32 encoder table, not the GPU0 isel layout. Keep
+ * narrower comparands/results gated until they have independent validation.
+ */
+static bool
+encode_gpu1_32(const struct agx3_isel_desc *d,
+              uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
+{
+   if (d->dest_16 || d->cmp_16)
+      return false;
+   const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
+   const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
+   for (unsigned i = 0; i < 4; ++i) {
+      if (d->cache[i] && d->discard[i])
+         return false;
+   }
+   if ((d->cmp1_immediate && (d->cache[1] || d->discard[1])) ||
+       (ti && (d->cache[2] || d->discard[2])) ||
+       (fi && (d->cache[3] || d->discard[3])))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(11, ti != fi),
+      KV(23, 2), KV(24, 2), KV(38, d->cmp1_immediate ? 1 : 2),
+      KV(39, d->cmp1_immediate ? 1 : 2),
+      KV(53, ti ? 1 : 2), KV(54, 2), KV(67, fi ? 1 : 2), KV(68, 2),
+      KV(72, 3), KV(73, 97),
+   };
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   /* A GPU1 GPR destination is f2/kind2; f3/kind3 names a uniform. */
+   ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
+   ov[n++] = (struct agx3_field_kv)KV(16, d->cmp0);
+   ov[n++] = (struct agx3_field_kv)KV(d->cmp1_immediate ? 30 : 31, d->cmp1);
+   ov[n++] = (struct agx3_field_kv)KV(ti ? 45 : 46, d->sel_true);
+   ov[n++] = (struct agx3_field_kv)KV(fi ? 59 : 60, d->sel_false);
+   ov[n++] = (struct agx3_field_kv)KV(82, d->cond);
+   static const unsigned cache_fields[] = {25, 40, 55, 69};
+   static const unsigned discard_fields[] = {27, 42, 57, 71};
+   for (unsigned i = 0; i < 4; ++i) {
+      ov[n++] = (struct agx3_field_kv)KV(cache_fields[i], d->cache[i]);
+      ov[n++] = (struct agx3_field_kv)KV(discard_fields[i], d->discard[i]);
+   }
+   for (unsigned i = 0; i < 6; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(74 + i, (d->wait_mask >> i) & 1);
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "iseli32", 3,
+                           base, sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
+
 bool
 agx3_isel_encode(enum agx_isa_encoding encoding,
                  const struct agx3_isel_desc *d,
@@ -213,9 +262,7 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
    if (d == NULL || out == NULL || len == NULL)
       return false;
 
-   /* The probes are AGX3b. AGX3c spells this `iseli32`/`iseli16` with its own
-    * forms, which no probe here covers. */
-   if (encoding != AGX_ISA_ENCODING_AGX3B)
+   if (encoding != AGX_ISA_ENCODING_AGX3B && encoding != AGX_ISA_ENCODING_AGX3C)
       return false;
 
    /* The register comparands share a width; immediates carry no register. */
@@ -232,6 +279,9 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
    if (!operand_ok(d->true_kind, d->sel_true, d->dest_16) ||
        !operand_ok(d->false_kind, d->sel_false, d->dest_16))
       return false;
+
+   if (encoding == AGX_ISA_ENCODING_AGX3C)
+      return encode_gpu1_32(d, out, len);
 
    if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints)
       return encode_explicit(d, out, len);

@@ -205,6 +205,15 @@ test_g17p_vertex_program_info(void)
    };
    CHECK(encoded.length == sizeof(m5_native_triangle_state));
    CHECK(memcmp(encoded.bytes, m5_native_triangle_state, encoded.length) == 0);
+   struct hk_agx3_g17p_vertex_compile_info m5_psiz = compiler_info;
+   m5_psiz.position_only = false;
+   m5_psiz.layer_viewport_off = m5_psiz.clip_off = m5_psiz.uvs_size = 5;
+   CHECK(hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_psiz, &m5));
+   CHECK(m5.template_info.raw_vs_output_count_0 == 5);
+   CHECK(!m5.template_info.pre_hal300_flag_group_nonzero);
+   m5_psiz.clip_off = m5_psiz.uvs_size = 6;
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_psiz, &m5));
+   CHECK(program_info_is_cleared(&m5));
    struct hk_agx3_g17p_vertex_compile_info m5_invalid = compiler_info;
    m5_invalid.has_preamble = true;
    CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_invalid, &m5));
