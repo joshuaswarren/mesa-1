@@ -7963,6 +7963,50 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Scalar-half comparisons selecting full values are a native FSEL
+          * form of their own.  Vertex-format normalization produces this for
+          * `fabs(half) < half ? float : float`; widening the comparison would
+          * change mediump rounding and is unnecessary. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
+             agx3_fcond_witnessed_select(I->fcond) &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             agx3_half_reg(I->src[0]) && agx3_half_reg(I->src[1]) &&
+             agx3_vary_reg32(I->src[2]) && agx3_vary_reg32(I->src[3]) &&
+             agx_channels(I->src[2]) == 1 && agx_channels(I->src[3]) == 1) {
+            const unsigned selected[] = {
+               I->invert_cond ? 3u : 2u, I->invert_cond ? 2u : 3u};
+            const uint16_t src[] = {
+               I->src[0].value, I->src[1].value,
+               I->src[selected[0]].value, I->src[selected[1]].value};
+            const enum agx3_alu_hint hints[] = {
+               agx3_post_ra_hint(I->src[0]),
+               agx3_post_ra_hint(I->src[1]),
+               agx3_post_ra_hint(I->src[selected[0]]),
+               agx3_post_ra_hint(I->src[selected[1]])};
+            const bool src_abs[] = {I->src[0].abs, I->src[1].abs};
+            bool invalid = I->src[0].neg || I->src[1].neg;
+            for (unsigned i = 0; i < 4; ++i)
+               invalid |= I->src[i].memory || I->src[i].kill ||
+                          (I->src[i].cache && I->src[i].discard) ||
+                          (i >= 2 && (I->src[i].abs || I->src[i].neg));
+
+            uint16_t fsel_wait = wait;
+            if (fsel_wait != 0 && fsel_wait != 32) {
+               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (invalid ||
+                !agx3_alu_fcmp_select_f16_f16_f32(
+                   enc, I->dest[0].value, src, hints, src_abs, I->fcond,
+                   I->dest[0].cache, fsel_wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* update_lightmap forms a half boolean mask by comparing f32 against
           * a minifloat constant.  Equality is commutative, so normalize the
           * immediate to Apple's second compare slot without changing the

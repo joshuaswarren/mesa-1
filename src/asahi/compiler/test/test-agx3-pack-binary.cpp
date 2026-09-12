@@ -2174,6 +2174,23 @@ TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
    EXPECT_EQ(pack(b), std::vector<uint8_t>(native, native + sizeof(native)));
 }
 
+TEST_F(AGX3PackBinary, HalfComparisonSelectsFullRegisters)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(0, AGX_SIZE_16);
+   agx_index c = agx_register(9, AGX_SIZE_16);
+   agx_index if_true = agx_register(10, AGX_SIZE_32);
+   agx_index if_false = agx_register(4, AGX_SIZE_32);
+   a.abs = a.discard = true;
+   c.cache = true;
+   if_true.discard = if_false.discard = true;
+   agx_fcmpsel_to(b, agx_register(4, AGX_SIZE_32), a, c, if_true, if_false,
+                  AGX_FCOND_LT);
+   agx_stop(b);
+
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselShapes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

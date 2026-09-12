@@ -1380,6 +1380,34 @@ test_float_compare_select(void)
       AGX_ISA_ENCODING_AGX3B, 4, mixed_src, mixed_hints, 0, true, 0,
       out, &len));
    exact(out, len, "2289278a05860000");
+   const uint16_t half_half_src[] = {8, 9, 0, 4};
+   const enum agx3_alu_hint half_half_hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   const bool no_abs[] = {false, false};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, no_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f08800413c0");
+   const bool first_abs[] = {true, false};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, first_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800100");
+   const bool second_abs[] = {false, true};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, second_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800200");
+   const bool both_abs[] = {true, true};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, both_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800300");
+   assert(!agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3C, 0, half_half_src, half_half_hints, first_abs,
+      1 /* lt */, false, 32, out, &len));
    const uint16_t lightmap_src[] = {46, 52, 26, 36};
    const enum agx3_alu_hint lightmap_hints[] = {
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
