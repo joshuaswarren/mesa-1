@@ -110,6 +110,13 @@ test_submit_command_limit(void)
 static void
 test_g17p_zls_pixels_follow_backing_storage(void)
 {
+   /* Native M5 color has no ZLS dimensions; D32 clear/store is ff00ff.
+    * Keep the G17P representation unchanged below. */
+   assert(hk_drm_m5_zls_pixels(256, 256, 0, 0, 0, 0) == 0);
+   assert(hk_drm_m5_zls_pixels(256, 256, 0x100000c8000,
+                              0x10000108000, 0, 0) == 0x00ff00ff);
+   assert(hk_drm_m5_zls_pixels(256, 256, 0x100000c8000, 0, 0, 0) ==
+          0x00ff00ff);
    /* All 303 colour-only records in the valid G17P corpus have a zero
     * dimension register beside four null depth/stencil addresses.  This is
     * true for both the main and partial render phases. */

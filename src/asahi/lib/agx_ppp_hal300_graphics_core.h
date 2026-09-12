@@ -14,9 +14,14 @@
 
 struct agx_ppp_hal300_graphics_fields {
    uint64_t fragment_program;
+   uint64_t varying_table;
+   unsigned cf_binding_count;
    unsigned cull_mode;
    bool front_face_ccw;
    bool point_size_output;
+   bool color_varying;
+   bool flat_varying;
+   bool depth_less_write;
 };
 
 struct agx_ppp_hal300_graphics_core {
@@ -25,7 +30,9 @@ struct agx_ppp_hal300_graphics_core {
    uint8_t lengths[AGX_PPP_HAL300_GRAPHICS_RECORDS];
 };
 
-/* No depth/stencil attachment, user varyings, queries, discard, or MSAA.
+/* Opaque triangles, optionally one float4 smooth/flat color and D32 LESS/write.
+ * No stencil, queries, discard, or MSAA. Attachment storage and clear/load/store
+ * setup are separate; packing this state alone does not enable depth rendering.
  * Caller must validate those semantic restrictions before using this profile.
  * On failure out is untouched. */
 bool agx_ppp_hal300_graphics_core_pack(

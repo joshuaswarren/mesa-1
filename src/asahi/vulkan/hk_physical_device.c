@@ -746,6 +746,10 @@ hk_get_device_features(
       features->geometryStreams = false;
       features->transformFeedback = false;
       features->shaderTessellationAndGeometryPointSize = false;
+      /* No HAL300 attachment-feedback-loop path is implemented. Reporting
+       * it also makes Zink mark ordinary D32 attachments as feedback images,
+       * which correctly disables their native ZLS compression. */
+      features->attachmentFeedbackLoopLayout = false;
    }
 
    if (dev->chip == AGX_CHIP_G17P) {
@@ -1512,6 +1516,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    struct vk_device_extension_table supported_extensions;
    hk_get_device_extensions(instance, &supported_extensions);
+
+   if (pdev->dev.chip == AGX_CHIP_G17G)
+      supported_extensions.EXT_attachment_feedback_loop_layout = false;
 
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* HAL200 advanced blend epilogs currently complete without a fault but

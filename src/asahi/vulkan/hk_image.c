@@ -256,7 +256,11 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
     *
     * Cost is performance only. Delete this together with that descriptor.
     */
-   if (hk_descriptor_generation_is_agx3(
+   /* M5 D32 is stored through ZLS, without a color PBE. Its compressed
+    * clear/store path is witnessed by the native color/depth reference. */
+   const bool m5_depth_zls = dev->chip == AGX_CHIP_G17G &&
+                              format == VK_FORMAT_D32_SFLOAT;
+   if (!m5_depth_zls && hk_descriptor_generation_is_agx3(
           agx_chip_descriptor_generation(dev->chip))) {
       perf_debug_dev(dev, "No compression: no AGX3 PBE descriptor yet");
       return false;
@@ -955,6 +959,14 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
 
       bool compressed =
          hk_map_compression(dev, pCreateInfo, plane, image->vk.drm_format_mod);
+      if (dev->dev.chip == AGX_CHIP_G17G && format == VK_FORMAT_D32_SFLOAT &&
+          debug_get_bool_option("HK_G17P_RENDER_TRACE", false)) {
+         fprintf(stderr, "M5 depth layout: size=%ux%u tiling=%u flags=%#x usage=%#x "
+                         "modifier=%#" PRIx64 " compressed=%u debug=%#x\n",
+                 pCreateInfo->extent.width, pCreateInfo->extent.height,
+                 pCreateInfo->tiling, pCreateInfo->flags, pCreateInfo->usage,
+                 image->vk.drm_format_mod, compressed, dev->dev.debug);
+      }
 
       image->planes[plane].layout = (struct ail_layout){
          .policy = ail_layout_policy_for_descriptor_generation(

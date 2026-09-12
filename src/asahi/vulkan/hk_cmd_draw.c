@@ -3705,6 +3705,27 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
                             hw_vs->info.uvs.osel.opaque[0] == 0;
       const bool position_psiz = hw_vs && hw_vs->info.uvs.size == 5 &&
                                 hw_vs->info.uvs.osel.opaque[0] == 0x40000;
+      const struct agx_varyings_fs *cf = linked ? &linked->b.cf : NULL;
+      const struct agx_cf_binding *color =
+         cf && cf->nr_bindings >= 1 && cf->nr_bindings <= 2
+            ? &cf->bindings[cf->nr_bindings - 1] : NULL;
+      const bool color_varying = hw_vs && color &&
+         hw_vs->info.uvs.user_size == 4 &&
+         ((hw_vs->info.uvs.size == 8 && hw_vs->info.uvs.osel.opaque[0] == 0) ||
+          (hw_vs->info.uvs.size == 9 && hw_vs->info.uvs.osel.opaque[0] == 0x40000)) &&
+         color->slot == VARYING_SLOT_VAR0 && color->offset == 0 && color->count == 4 &&
+         (color->smooth ? (color->perspective && cf->nr_bindings == 2 && cf->nr_cf == 5)
+                        : (!color->perspective && cf->nr_bindings == 1 && cf->nr_cf == 4)) &&
+         !cf->reads_z && hk_g17p_smooth_varyings_supported(cmd, linked) &&
+         gfx->varyings && gfx->linked_varyings.counts_16.opaque[0] == 0 &&
+         gfx->linked_varyings.counts_32.opaque[0] == (color->smooth ? 4 : 0x400);
+      const bool no_varyings = cf && !cf->nr_bindings && !cf->nr_cf &&
+                               !cf->reads_z && !gfx->varyings &&
+                               (position || position_psiz);
+      const bool depth_less_write = render->depth_att.iview &&
+         render->depth_att.vk_format == VK_FORMAT_D32_SFLOAT &&
+         dyn->ds.depth.test_enable && dyn->ds.depth.write_enable &&
+         dyn->ds.depth.compare_op == VK_COMPARE_OP_LESS;
       const bool full_height =
          (vp->y == 0 && vp->height == render->cr.height) ||
          (vp->y == render->cr.height && vp->height == -(float)render->cr.height);
@@ -3715,16 +3736,14 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
          (dyn->rs.depth_bias.constant_factor == 0.0f &&
           dyn->rs.depth_bias.slope_factor == 0.0f &&
           dyn->rs.depth_bias.clamp == 0.0f);
-      /* Bounded M5 opaque triangles with no fragment inputs. The optional
-       * point-size word is reflected in both VDM and PPP output state.
-       * Provoking vertex cannot affect a shader with no input coefficients.
+      /* Native M5 references cover opaque triangles with no inputs or one
+       * smooth/flat float4 color, optionally with D32 LESS/write state.
        * Full-frame viewport orientation is emitted by hk_flush_vp_state.
+       * Depth attachment storage/clears remain separately validated at submit.
        */
-      if (!hw_vs || !fs || !linked || linked->b.cf.nr_bindings ||
-          linked->b.cf.nr_cf || linked->b.cf.reads_z || gfx->varyings ||
-          (!position && !position_psiz) ||
+      if (!hw_vs || !fs || !linked || (!no_varyings && !color_varying) ||
           gfx->object_type != AGX_OBJECT_TYPE_TRIANGLE ||
-          render->color_att_count != 1 || render->depth_att.iview ||
+          render->color_att_count != 1 || (render->depth_att.iview && !depth_less_write) ||
           render->stencil_att.iview || render->layer_count != 1 ||
           render->view_mask || render->tilebuffer.nr_samples != 1 ||
           (linked->b.fragment_control.opaque[0] >> 29) != AGX_PASS_TYPE_OPAQUE ||
@@ -3782,16 +3801,28 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
                     dyn->ds.depth.bounds_test.enable, gfx->occlusion.mode,
                     dyn->vp.viewport_count, dyn->vp.scissor_count,
                     render->cr.width, render->cr.height);
-         mesa_loge("M5 draw exceeds the native opaque position-only PPP profile");
+         if (hk_g17p_launch_trace_enabled())
+            fprintf(stderr, "M5 PPP color_valid=%u depth_valid=%u depth_format=%u "
+                            "depth_test=%u write=%u compare=%u counts=%#x/%#x\n",
+                    color_varying, depth_less_write, render->depth_att.vk_format,
+                    dyn->ds.depth.test_enable, dyn->ds.depth.write_enable,
+                    dyn->ds.depth.compare_op, gfx->linked_varyings.counts_32.opaque[0],
+                    gfx->linked_varyings.counts_16.opaque[0]);
+         mesa_loge("M5 draw exceeds the native color/depth PPP profile");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
 
       const struct agx_ppp_hal300_graphics_fields fields = {
          .fragment_program = hk_upload_usc_words(cmd, fs, linked),
+         .varying_table = gfx->varyings,
+         .cf_binding_count = cf->nr_bindings,
          .cull_mode = dyn->rs.cull_mode,
          .front_face_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
-         .point_size_output = position_psiz,
+         .point_size_output = hw_vs->info.uvs.osel.opaque[0] == 0x40000,
+         .color_varying = color_varying,
+         .flat_varying = color_varying && !color->smooth,
+         .depth_less_write = depth_less_write,
       };
       struct agx_ppp_hal300_graphics_core state;
       if (!agx_ppp_hal300_graphics_core_pack(dev->dev.chip, &fields, &state)) {
@@ -4736,7 +4767,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          size_t linkage_size =
             AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
 
-         const bool native_vit = dev->dev.chip == AGX_CHIP_G17P;
+         const bool native_vit = dev->dev.chip == AGX_CHIP_G17P ||
+                                 dev->dev.chip == AGX_CHIP_G17G;
          struct agx_ptr t =
             hk_pool_usc_alloc(cmd, linkage_size, native_vit ? 64 : 16);
          if (!t.cpu)
@@ -4748,7 +4780,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
          gfx->varyings = native_vit ? t.gpu : agx_usc_addr(&dev->dev, t.gpu);
          if (native_vit && hk_g17p_launch_trace_enabled())
-            hk_g17p_trace_line("hal200-varying-table", t.gpu, t.cpu,
+            hk_g17p_trace_line(dev->dev.chip == AGX_CHIP_G17G
+                                 ? "hal300-varying-table" : "hal200-varying-table", t.gpu, t.cpu,
                                linkage_size);
       } else {
          gfx->varyings = 0;

@@ -2079,7 +2079,7 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* G17P already has native BG/EOT programs for the supported render-target
+   /* G17P and M5 have native BG/EOT programs for the supported render-target
     * clear path, but no precompiled fill_uint4 for the compute replacement
     * below. Do not discard the working graphics representation and record an
     * unsupported compute command instead. Once that precompiled shader is
@@ -2091,7 +2091,8 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
     * common finalizer will append the native VDM terminator without uploading
     * any ordinary vertex or fragment program.
     */
-   if (dev->dev.chip == AGX_CHIP_G17P && cs->cr.process_empty_tiles &&
+   if ((dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) &&
+       cs->cr.process_empty_tiles &&
        !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4)) {
       /* Normally supplied by the first draw. A clear has no application
        * sample-location state; use the attachment sample count and leave
@@ -2124,9 +2125,10 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
       }
 
       if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr, "G17P clear-only graphics: %ux%u samples=%u "
+         fprintf(stderr, "%s clear-only graphics: %ux%u samples=%u "
                          "sample_control=%#x process_empty_tiles=1 "
                          "scissor=%u zbias=%u\n",
+                 dev->dev.chip == AGX_CHIP_G17G ? "M5" : "G17P",
                  cs->cr.width, cs->cr.height, MAX2(cs->tib.nr_samples, 1),
                  cs->ppp_multisamplectl, cs->scissor.size,
                  cs->depth_bias.size);

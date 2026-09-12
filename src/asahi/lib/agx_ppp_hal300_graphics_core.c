@@ -14,6 +14,17 @@ agx_ppp_hal300_graphics_core_pack(
        !fields->fragment_program || fields->cull_mode > 3)
       return false;
 
+   if (fields->color_varying) {
+      if (!fields->varying_table || (fields->varying_table & 63) ||
+          fields->varying_table >= (UINT64_C(1) << 48) ||
+          !fields->cf_binding_count || fields->cf_binding_count > 2 ||
+          (fields->flat_varying && fields->cf_binding_count != 1))
+         return false;
+   } else if (fields->varying_table || fields->cf_binding_count ||
+              fields->flat_varying) {
+      return false;
+   }
+
    struct agx_vdm_state_vertex_pipeline_pair program;
    if (!agx_vdm_state_vertex_pipeline_pair_pack(
           chip, fields->fragment_program, 0, &program))
@@ -25,14 +36,26 @@ agx_ppp_hal300_graphics_core_pack(
     * OUTPUT record is exactly five words, with no overlapping face header.
     * Viewport and scissor-base updates are independently emitted by caller.
     */
+   /* Native color/flat-depth captures on M5/25G76 independently validate
+    * counts32 = 4/0x400, absolute 48-bit VIT addresses, and the D32 LESS/write
+    * face group. The VIT count occupies bits16..22 above address bits32..47.
+    * The fragment program still uses an Ioto pair, not this address format.
+    */
    const uint32_t records[][7] = {
-      {0x10100000, 0, 0, 0, 0},
-      {0x01000000, 0, 0, 0, 0, 0, 0},
+      {0x10100000,
+       fields->color_varying ? (fields->flat_varying ? 0x400 : 4) : 0,
+       0, 0, 0},
+      {0x01000000, (uint32_t)(fields->varying_table >> 32) |
+                      (fields->cf_binding_count << 16),
+       (uint32_t)fields->varying_table, 0, 0, 0, 0},
       {0x00000001, 0x000007aa, 0xe2e00000, 0xf0c00000,
        0x00023020, 0x0001ffff},
-      {0x0c280000, fields->point_size_output ? 0x40000 : 0, 0, 0,
-       fields->point_size_output ? 5 : 4},
-      {0x020000e0, 0x00040200, 0x07200f00, 0x07200f00,
+      {0x0c280000, (fields->point_size_output ? 0x40000 : 0) |
+                      (fields->color_varying ? 0x10000 : 0), 0, 0,
+       4 + (fields->point_size_output ? 1 : 0) + (fields->color_varying ? 4 : 0)},
+      {0x020000e0, fields->depth_less_write ? 0x00000200 : 0x00040200,
+       fields->depth_less_write ? 0x01000f00 : 0x07200f00,
+       fields->depth_less_write ? 0x01000f00 : 0x07200f00,
        0x0e000000, 0x0e000000, 0},
       {0x02000062, 0x00000200, 0x07e00000, 0x07e00000, 0x0001ffff},
       {0x00840002, 0, 0x80},

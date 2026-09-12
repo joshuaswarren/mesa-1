@@ -46,6 +46,22 @@ hk_drm_g17p_zls_pixels(uint32_t width, uint32_t height,
 }
 
 uint32_t
+hk_drm_m5_zls_pixels(uint32_t width, uint32_t height,
+                      uint64_t depth_base, uint64_t depth_meta,
+                      uint64_t stencil_base, uint64_t stencil_meta)
+{
+   if (!hk_drm_g17p_has_zls_storage(depth_base, depth_meta, stencil_base,
+                                    stencil_meta))
+      return 0;
+
+   /* Native M5 D32 256x256 publishes 0x00ff00ff, unlike the G17P
+    * 15-bit packing (0x007f80ff). Live M5 admission remains 256x256. */
+   assert(width >= 1 && width <= 0x10000);
+   assert(height >= 1 && height <= 0x10000);
+   return (width - 1) | ((height - 1) << 16);
+}
+
+uint32_t
 hk_drm_g17p_depth_clear(uint32_t depth_clear,
                         uint64_t depth_base, uint64_t depth_meta,
                         uint64_t stencil_base, uint64_t stencil_meta)

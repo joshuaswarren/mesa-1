@@ -69,6 +69,68 @@ main(void)
    CHECK(memcmp(&out, &before, sizeof(out)) == 0);
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, NULL, &out));
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, NULL));
+
+   /* Independently captured smooth-color and flat-color/D32 draws. Both
+    * native outputs passed the 60928-pixel oracle after these snapshots.
+    * The flat reference has one CF binding, exactly as Zink gears does. */
+   const uint32_t color_words[] = {
+      0x10100000, 4, 0, 0, 0,
+      0x01000000, 0x00020100, 0x4c0, 0, 0x01000000, 0x5c1c, 0,
+      1, 0x7aa, 0xe2e00000, 0xf0c00000, 0x23020, 0x1ffff,
+      0x0c280000, 0x50000, 0, 0, 9,
+      0x020000e0, 0x40200, 0x07200f00, 0x07200f00, 0x0e000000, 0x0e000000, 0,
+      0x02000062, 0x200, 0x07e00000, 0x07e00000, 0x1ffff,
+      0x00840002, 0, 0x80, 0x00800000, 0x480, 0x400, 0, 0,
+   };
+   const uint32_t flat_depth_words[] = {
+      0x10100000, 0x400, 0, 0, 0,
+      0x01000000, 0x00010100, 0x480, 0, 0x01000000, 0x6e1c, 0,
+      1, 0x7aa, 0xe2e00000, 0xf0c00000, 0x23020, 0x1ffff,
+      0x0c280000, 0x50000, 0, 0, 9,
+      0x020000e0, 0x200, 0x01000f00, 0x01000f00, 0x0e000000, 0x0e000000, 0,
+      0x02000062, 0x200, 0x07e00000, 0x07e00000, 0x1ffff,
+      0x00840002, 0, 0x80, 0x00800000, 0x480, 0x400, 0, 0,
+   };
+   CHECK(sizeof(color_words) == sizeof(out.bytes));
+   CHECK(sizeof(flat_depth_words) == sizeof(out.bytes));
+   f = (struct agx_ppp_hal300_graphics_fields) {
+      .fragment_program = UINT64_C(0x10000170700),
+      .varying_table = UINT64_C(0x100000004c0),
+      .cf_binding_count = 2,
+      .point_size_output = true,
+      .color_varying = true,
+   };
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   for (unsigned i = 0; i < sizeof(out.bytes); ++i)
+      CHECK(out.bytes[i] == (uint8_t)(color_words[i / 4] >> (8 * (i % 4))));
+   f.fragment_program = UINT64_C(0x100001b8700);
+   f.varying_table = UINT64_C(0x10000000480);
+   f.cf_binding_count = 1;
+   f.flat_varying = true;
+   f.depth_less_write = true;
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   for (unsigned i = 0; i < sizeof(out.bytes); ++i)
+      CHECK(out.bytes[i] == (uint8_t)(flat_depth_words[i / 4] >> (8 * (i % 4))));
+
+   const struct agx_ppp_hal300_graphics_core color_before = out;
+   f.varying_table++;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.varying_table = UINT64_C(1) << 48;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.varying_table = 0;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.varying_table = UINT64_C(0x10000000480);
+   f.cf_binding_count = 0;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.cf_binding_count = 2;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.flat_varying = false;
+   f.cf_binding_count = 3;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.cf_binding_count = 1;
+   f.color_varying = false;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   CHECK(memcmp(&out, &color_before, sizeof(out)) == 0);
    puts("M5 native PPP graphics records: PASS");
    return 0;
 }
