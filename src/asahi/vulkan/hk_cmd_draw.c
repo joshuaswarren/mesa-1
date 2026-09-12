@@ -5964,6 +5964,10 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    perf_debug(cmd, "Binding passthrough GS for%s\n", xfb_outputs ? " XFB" : "");
 
    gs = hk_meta_shader(dev, hk_nir_passthrough_gs, key, key_size);
+   if (!gs) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
    gs->is_passthrough = true;
    hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, gs);
 }
@@ -6108,6 +6112,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    /* TODO: Try to reduce draw overhead of this */
    hk_handle_passthrough_gs(cmd, *draw);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return NULL;
 
    hk_flush_shaders(cmd);
 
