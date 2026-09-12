@@ -1839,6 +1839,47 @@ test_g17g_combined_sampler_scope(void)
 }
 
 static bool
+test_g17g_indexed_read_scope(void)
+{
+   /* One positive image-to-buffer fetch and independent rejection axes. */
+   for (unsigned variant = 0; variant < 7; variant++) {
+      nir_builder b = nir_builder_init_simple_shader(
+         variant == 1 ? MESA_SHADER_FRAGMENT : MESA_SHADER_COMPUTE,
+         &agx_nir_options, "M5 indexed read scope");
+      nir_def *image = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 64), .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = variant == 2 ? nir_texop_txl : nir_texop_txf;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->is_array = variant != 3;
+      tex->dest_type = variant == 4 ? nir_type_float32 : nir_type_uint32;
+      tex->coord_components = tex->is_array ? 3 : 2;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+         nir_imm_ivec3(&b, 3, 7, 0));
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod,
+         nir_imm_int(&b, variant == 5 ? 1 : 0));
+      tex->is_sparse = variant == 6;
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_export_agx(&b, nir_channel(&b, &tex->def, 0), .base = 0);
+      const bool lowered = agx_nir_lower_g17g_indexed_reads(b.shader);
+      bool ok = lowered == (variant == 0);
+      if (lowered) {
+         const int index = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+         ok &= index >= 0 &&
+            nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0;
+         if (index >= 0)
+            ok &= nir_src_bit_size(tex->src[index].src) == 64;
+      }
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
+static bool
 replace_query_descriptor_load(nir_builder *b, nir_intrinsic_instr *intr,
                               void *data)
 {
@@ -5649,6 +5690,7 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--sampler-root-only")) {
       const bool ok = test_g17g_combined_sampler_scope() &&
+                      test_g17g_indexed_read_scope() &&
                       test_combined_sampler_root() &&
                       test_combined_sampler_scope() &&
                       test_combined_sampler_integer_scope();
@@ -5792,6 +5834,7 @@ main(int argc, char **argv)
    }
 
    if (!test_g17g_texture_queries() || !test_g17g_combined_sampler_scope() ||
+       !test_g17g_indexed_read_scope() ||
        !test_combined_sampler_scope() || !test_combined_sampler_root() ||
        !test_combined_sampler_integer_scope()) {
       fputs("combined sampler lowering consumed a non-sampler bias\n", stderr);

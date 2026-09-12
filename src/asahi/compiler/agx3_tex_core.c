@@ -67,6 +67,17 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
       return false;
 
+   /* Native M5 argument-buffer reads witness a zero-LOD RGBA32 fetch
+    * from a uniform or register heap index, with sampler zero. Keep the
+    * other indirect axes closed until their operand layouts are grounded. */
+   if (enc == AGX_ISA_ENCODING_AGX3C &&
+       (tk != AGX3_TEX_OPERAND_IMMEDIATE ||
+        sk != AGX3_TEX_OPERAND_IMMEDIATE) &&
+       (d->width != AGX3_TEX_W32 || d->mask != 15 || d->lod_x64 ||
+        d->register_lod || sk != AGX3_TEX_OPERAND_IMMEDIATE ||
+        d->sampler_value || d->texture_kill))
+      return false;
+
    /* The level. f29 is 12 bits of 1/64 fixed point; the per-lane form has no
     * immediate at all, and is witnessed on AGX3b only. */
    if (d->lod_x64 > 2047 || (d->register_lod && d->lod_x64) ||
@@ -75,7 +86,7 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
-   const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0x7f : 0x3f;
+   const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
           (d->wait_mask & ~waits) == 0 && one_or_zero(d->wait_mask);
 }
@@ -171,15 +182,11 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(62 + i, 1);
 
-   /*
-    * Immediate operands are ep3; register and uniform operands are ep4. Only
-    * AGX3b is witnessed for the non-immediate kinds, so AGX3c refuses them
-    * rather than assuming its encoding points line up.
-    */
-   if (!immediate_operands && enc != AGX_ISA_ENCODING_AGX3B)
-      return false;
+   /* M5's native argument-buffer reads use compact ep1. It carries both
+    * index kinds and wait slot eight; G17P's indirect form is ep4. */
    const int ep =
-      enc == AGX_ISA_ENCODING_AGX3B ? (immediate_operands ? 3 : 4) : 0;
+      enc == AGX_ISA_ENCODING_AGX3B ? (immediate_operands ? 3 : 4)
+                                  : (immediate_operands ? 0 : 1);
    if (!agx3_bind_compose(enc, "smp", ep, base, nb, ov, n, out, len)) {
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;

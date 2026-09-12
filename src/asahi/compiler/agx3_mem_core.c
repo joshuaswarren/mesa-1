@@ -165,5 +165,17 @@ agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
    struct agx3_field_kv ov[32];
    unsigned n = common_overrides(d, /*off*/ 74, /*shift*/ 73, /*mask*/ 71, ov);
 
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      /* Native indexed-buffer copies use ep1 when a store waits on slot8.
+       * Keep compact encodings first; extended forms preserve the same
+       * normalized address, element mask, and producer dependencies. */
+      static const uint8_t forms[] = {0, 1, 3, 4, 2, 5};
+      for (unsigned i = 0; i < sizeof(forms); ++i) {
+         if (agx3_bind_compose(enc, "stdev", forms[i], base, nbase,
+                               ov, n, out, len))
+            return true;
+      }
+      return false;
+   }
    return agx3_bind_compose(enc, "stdev", 0, base, nbase, ov, n, out, len);
 }

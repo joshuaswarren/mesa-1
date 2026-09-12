@@ -56,12 +56,13 @@ surface. This exercised Mesa-generated shaders, the AGX3c robust-fetch integer
 select, position plus point-size UVS layout, and the inverted full-frame Zink
 viewport. No native reference shader was substituted.
 
-OpenGL readback did **not** pass. Subsequent compiler work now records the
-fragment-copy draw, including M5 array sampling and the custom-border
-conditional shader. The image-to-buffer compute shader passes integer
-addressing and bounds checks but still rejects its texture-read instruction.
-Application compute submissions also require M5 SKSM integration in the
-kernel adapter. Zink can report these Vulkan failures
+OpenGL readback did **not** pass. The fragment-copy draw is now hardware
+validated, including M5 array sampling and its conditional shader. The
+complete image-to-buffer compute shader now compiles after adding native
+indexed texture reads and extended-wait buffer stores. Command recording
+stops at `legacy USC compute launch rejected for G17G`: M5 needs native
+compute Ioto construction and application SKSM integration in the kernel
+adapter before that shader can run. Zink can report these Vulkan failures
 while `glFinish` and `glGetError` appear successful, so always inspect the
 compiler/submission log and verify the pixels independently. The rendering
 result does not establish general OpenGL support, glxgears, or display-server

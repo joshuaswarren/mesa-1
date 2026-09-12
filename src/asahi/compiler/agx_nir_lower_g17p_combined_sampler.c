@@ -653,6 +653,39 @@ agx_nir_lower_g17g_indexed_samplers(nir_shader *shader)
    return agx_nir_lower_g17p_indexed_samplers(shader);
 }
 
+bool
+agx_nir_lower_g17g_indexed_reads(nir_shader *shader)
+{
+   if (!shader || shader->info.stage != MESA_SHADER_COMPUTE)
+      return false;
+
+   unsigned reads = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_bindless_image_load)
+               return false;
+            if (instr->type != nir_instr_type_tex)
+               continue;
+            const nir_tex_instr *tex = nir_instr_as_tex(instr);
+            const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+            if (tex->op != nir_texop_txf ||
+                tex->sampler_dim != GLSL_SAMPLER_DIM_2D || !tex->is_array ||
+                tex->is_shadow || tex->dest_type != nir_type_uint32 ||
+                lod < 0 || !nir_src_is_const(tex->src[lod].src) ||
+                nir_src_as_uint(tex->src[lod].src) != 0)
+               return false;
+            reads++;
+         }
+      }
+   }
+   /* Common code validates the complete descriptor/coordinate shape and
+    * replaces the AGX2 handle with a zero-extended software heap index. */
+   return reads > 0 && agx_nir_lower_g17p_indexed_samplers(shader);
+}
+
 static bool
 g17p_cube_sample_shape(const nir_tex_instr *tex)
 {

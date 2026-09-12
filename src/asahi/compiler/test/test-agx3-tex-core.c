@@ -2220,6 +2220,42 @@ test_m5_array_sample(void)
    return 0;
 }
 
+static int
+test_m5_indexed_reads(void)
+{
+   /* Native Metal 27.1 m5-texture-read-reference: uniform array layer zero
+    * folds to a plain 2D read; lane-indexed array reads stage their layer. */
+   struct agx3_tex_fetch_desc d = {
+      .width = AGX3_TEX_W32, .mask = 15, .slot = 1,
+      .wait_mask = 1, .coord_kill = true, .final = true,
+      .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 16,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f061a00418060280800"));
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 0;
+   d.array = true;
+   d.wait_mask = 128;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f061a004580e0080028"));
+   CHECK(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3C, 4, 8, 0,
+                                  false, true, bytes, &length));
+   CHECK(hex_eq(bytes, length, "3700002a2507aa0a000040308100"));
+   d.lod_x64 = 64;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
+   d.lod_x64 = 0;
+   d.mask = 1;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
+   d.mask = 15;
+   d.sampler_value = 1;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
+   d.sampler_value = 0;
+   d.texture_value = 1;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2233,7 +2269,7 @@ main(void)
        test_sample_fail_closed() || test_array_fetch() || test_3d_fetch() ||
        test_bindless_operand_kinds() || test_indexed_sample_witnesses() ||
        test_sample_mask_domain() || test_indexed_fetch_native() ||
-       test_gradient_and_register_bias())
+       test_gradient_and_register_bias() || test_m5_indexed_reads())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

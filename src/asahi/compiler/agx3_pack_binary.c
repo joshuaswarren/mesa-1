@@ -995,6 +995,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    const bool ms_2d = I->dim == AGX_DIM_2D_MS;
    const bool ms_array = I->dim == AGX_DIM_2D_MS_ARRAY;
    const bool three_d = I->dim == AGX_DIM_3D;
+   const bool m5_indexed = enc == AGX_ISA_ENCODING_AGX3C && !immediate;
    const bool bindless_image = I->op == AGX_OPCODE_IMAGE_LOAD && !immediate &&
       agx3_tex_plain_reg(I->src[3]) && I->src[3].size == AGX_SIZE_64 &&
       agx_channels(I->src[3]) == 1 && !(I->src[3].value & 1) &&
@@ -1032,7 +1033,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
          (ms_array && agx3_tex_plain_uniform64(I->src[2])) ||
          bindless_image) ||
        (immediate ? I->src[3].value > 15 :
-        (enc != AGX_ISA_ENCODING_AGX3B ||
+        ((enc != AGX_ISA_ENCODING_AGX3B && !m5_indexed) ||
          (I->src[3].type != AGX_INDEX_REGISTER && I->src[3].type != AGX_INDEX_UNIFORM) ||
          (I->src[3].size != AGX_SIZE_64 &&
           !(ms_array && I->src[3].size == AGX_SIZE_32)) ||
@@ -1048,6 +1049,13 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                                     : (I->mask != 1 && I->mask != 15)) ||
        I->offset || I->shadow ||
        I->query_lod || I->gather != AGX_GATHER_NONE || I->sparse)
+      return false;
+
+   if (m5_indexed &&
+       (I->op != AGX_OPCODE_TEXTURE_LOAD || !stage_coordinates ||
+        !immediate_lod || I->src[1].value || I->mask != 15 ||
+        I->dest[0].size != AGX_SIZE_32 ||
+        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY)))
       return false;
 
    /* A read/write image stages its read coordinates at halves16/18, keeping
@@ -1071,7 +1079,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       }
 
       const unsigned plain_coords =
-         (ms_2d || ms_array) ? 2 : agx_channels(I->src[0]);
+         (ms_2d || ms_array || (m5_indexed && I->dim == AGX_DIM_2D_ARRAY))
+            ? 2 : agx_channels(I->src[0]);
       for (unsigned i = 0; i < plain_coords; i++) {
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
@@ -1087,7 +1096,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       /* The lowered MS-array coordinate packs sample in the low half and
        * layer in the high half of its third word. Native publishes that word
        * through the same PACK_SMPIR array operand as ordinary array fetches. */
-      if (ms_array) {
+      if (ms_array || (m5_indexed && I->dim == AGX_DIM_2D_ARRAY)) {
          uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
          if (!agx3_tex_stage_array_layer(
                 enc, I->src[0].value + 4, staging_slot, 0,
@@ -1120,7 +1129,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
          I->src[3].type == AGX_INDEX_UNIFORM ? AGX3_TEX_OPERAND_UNIFORM :
                                              AGX3_TEX_OPERAND_REGISTER,
       .texture_value = immediate ? 0 : I->src[3].value,
-      .texture_kill = !immediate && I->src[3].type == AGX_INDEX_REGISTER &&
+      .texture_kill = !immediate && !m5_indexed &&
+         I->src[3].type == AGX_INDEX_REGISTER &&
          (I->src[3].discard || I->src[3].kill),
       .slot = slot,
       .wait_mask = stage_coordinates ? (1u << (staging_slot - 1)) : wait_mask,

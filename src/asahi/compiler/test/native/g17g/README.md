@@ -26,6 +26,10 @@ register choices may change with a different toolchain.
 - IMAD probes cover register and immediate multiplier/addend forms.
 - Half-select probes cover unsigned 32-bit comparisons producing half
   results, including nested bounds conditions and mixed selected operands.
+- Texture-read probes cover uniform and register heap indices with explicit
+  zero LOD and integer array-layer staging.
+- Buffer-store probes retain the same value across two writes through a
+  dynamically loaded pointer, exposing the store's extended dependency form.
 
 The Vulkan draw-plus-blit hardware result qualifies the bounded fragment
 copy path. Native compute compilation of these probes is not evidence that

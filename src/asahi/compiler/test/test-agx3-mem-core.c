@@ -18,6 +18,27 @@ main(void)
 {
    unsigned pass = 0, fail = 0;
 
+   /* Native M5 m5_copy_indexed_buffers: the first store keeps its value
+    * and base live for the next store, discards its index, and waits slot8. */
+   {
+      const uint8_t expected[] = {
+         0x0f,0x08,0x03,0x0e,0xe1,0x0e,0x00,0x80,0x00,0x20,
+      };
+      const struct agx3_mem_desc d = {
+         .data = 0, .width = AGX3_MEM_W32, .mask = 15,
+         .base = 8, .idx_kind = AGX3_MEM_IDX_REG,
+         .idx_reg = 14, .idx_kill = true, .shift = 4, .wait_mask = 128,
+      };
+      uint8_t out[AGX3_MEM_MAX_LENGTH], len = 0;
+      if (!agx3_mem_encode_store(AGX_ISA_ENCODING_AGX3C, &d, out, &len) ||
+          len != sizeof(expected) || memcmp(out, expected, sizeof(expected))) {
+         fprintf(stderr, "FAIL M5 register-base store extended wait\n");
+         fail++;
+      } else {
+         pass++;
+      }
+   }
+
    /* AGX3c table composition of a descriptor load at uniform12+244,
     * preserving four words and both producer waits1+4. The compact ep0
     * cannot represent that dependency set; native form order selects ep1. */

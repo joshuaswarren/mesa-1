@@ -1220,6 +1220,16 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
             ralloc_free(candidate);
          }
       }
+   } else if (dev->dev.chip == AGX_CHIP_G17G &&
+              nir->info.stage == MESA_SHADER_COMPUTE) {
+      nir_shader *candidate = nir_shader_clone(NULL, nir);
+      if (candidate && agx_nir_lower_g17g_indexed_reads(candidate)) {
+         ralloc_free(nir);
+         nir = candidate;
+         shader->info.agx3_indexed_sampler_valid = true;
+      } else {
+         ralloc_free(candidate);
+      }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
               nir->info.stage == MESA_SHADER_COMPUTE) {
       nir_shader *candidate = nir_shader_clone(NULL, nir);
