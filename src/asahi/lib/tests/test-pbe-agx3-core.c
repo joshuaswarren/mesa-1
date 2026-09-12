@@ -77,6 +77,45 @@ check_exact_gen9_linear_vector(void)
 }
 
 static int
+check_gen10_linear(void)
+{
+   /* HAL300 linear BGRA8 render target from the J813 GLX gears run. The
+    * rendered image is byte-identical to the qualified tiled attachment. */
+   struct agx_pbe_agx3_2d_fields f = {
+      .layout = 0, .channels = 0x28, .type = 0,
+      .swizzle_r = 2, .swizzle_g = 1, .swizzle_b = 0, .swizzle_a = 3,
+      .width = 256, .height = 256, .buffer = UINT64_C(0x5ffdd3c000),
+      .stride_B = 1024,
+   };
+   static const uint8_t hardware[32] = {
+      0x02, 0x0a, 0xc6, 0xff, 0x80, 0x7f, 0, 0,
+      0x00, 0x3c, 0xdd, 0xff, 0x05, 0xf0, 0x03, 0,
+   };
+   struct agx_pbe_agx3_descriptor p;
+   struct agx_pbe_agx3_2d_fields d;
+   CHECK(agx_pbe_agx3_2d_pack(10, &f, &p));
+   CHECK(memcmp(p.bytes, hardware, sizeof(hardware)) == 0);
+   CHECK(agx_pbe_agx3_2d_unpack(10, hardware, sizeof(hardware), &d));
+   CHECK(same_fields(10, &d, &f));
+
+   /* Gen10 retains address bits44..47 independently of the linear pitch. */
+   f.buffer = UINT64_C(0xf123456789a0);
+   f.stride_B = 1u << 20;
+   CHECK(agx_pbe_agx3_2d_pack(10, &f, &p));
+   CHECK(agx_pbe_agx3_2d_unpack(10, p.bytes, sizeof(p.bytes), &d));
+   CHECK(same_fields(10, &d, &f));
+   f.stride_B += 16;
+   CHECK(!agx_pbe_agx3_2d_pack(10, &f, &p));
+   f.stride_B = 1023;
+   CHECK(!agx_pbe_agx3_2d_pack(10, &f, &p));
+   uint8_t reserved[32];
+   memcpy(reserved, hardware, sizeof(reserved));
+   reserved[15] |= 0x10; /* Linear pitch must not alias tiled layer mode. */
+   CHECK(!agx_pbe_agx3_2d_unpack(10, reserved, sizeof(reserved), &d));
+   return 0;
+}
+
+static int
 check_exact_generation_vectors(void)
 {
    const struct agx_pbe_agx3_2d_fields fields = {
@@ -422,6 +461,7 @@ main(void)
 {
    if (check_exact_generation_vectors() || check_exact_gen9_array_vector() ||
        check_exact_gen9_linear_vector() ||
+       check_gen10_linear() ||
        check_exhaustive_format_axes() ||
        check_dimension_and_address_bits() || check_fail_closed_axes() ||
        check_gen9_single_layer_packet() || check_gen9_native_mips())

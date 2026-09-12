@@ -86,15 +86,15 @@ fields_valid(uint32_t generation,
 
    const uint32_t maximum_dimension = UINT32_C(1) << dimension_bits;
    const bool linear = fields->layout == AGX_PBE_LAYOUT_LINEAR;
+   const bool gen10 = generation == AGX_PBE_AGX3_GENERATION_10;
    const bool stride_valid =
       linear ? fields->stride_B >= 16 && !(fields->stride_B & 0xf) &&
-                  fields->stride_B - 16 < (UINT32_C(1) << 21)
+                  fields->stride_B - 16 < (UINT32_C(1) << (gen10 ? 20 : 21))
              : fields->stride_B == 0;
    const bool address_valid =
       fields->buffer && !(fields->buffer & 0xf) &&
-      !(fields->buffer >> (linear ? 44 : 48));
-   return (!linear || generation == AGX_PBE_AGX3_GENERATION_9) &&
-          (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
+      !(fields->buffer >> (linear && !gen10 ? 44 : 48));
+   return (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
            fields->layout == AGX_PBE_LAYOUT_GPU) &&
           channel_is_uncompressed(fields->channels) && fields->type <= 5 &&
           fields->swizzle_r <= 3 && fields->swizzle_g <= 3 &&
@@ -138,6 +138,10 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    const bool layer_flag = generation == AGX_PBE_AGX3_GENERATION_10 &&
                            fields->page_aligned_layers;
    uint64_t word1 = fields->buffer >> 4;
+   /* HAL300 StateFields 0x3e1a14..0x3e1a90 inserts stride-in-16-byte-units
+    * minus one at word1[59:44]. getStride at 0x566c3c divides bytes by 16.
+    * This shares the shifted-byte expression with Gen9, but retains four
+    * more address bits and one fewer stride bit. */
    if (fields->layout == AGX_PBE_LAYOUT_LINEAR)
       word1 |= (uint64_t)(fields->stride_B - 16) << 40;
    else
@@ -227,8 +231,9 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
          : (UINT64_C(1) << 54) - 1;
 
    const uint8_t layout = (word0 >> 4) & 0x3;
+   const bool gen10 = generation == AGX_PBE_AGX3_GENERATION_10;
    const uint64_t word1_mask = layout == AGX_PBE_LAYOUT_LINEAR
-      ? (UINT64_C(1) << 61) - 1
+      ? (UINT64_C(1) << (gen10 ? 60 : 61)) - 1
       : ((UINT64_C(1) << 44) - 1) |
            (generation == AGX_PBE_AGX3_GENERATION_10 ? UINT64_C(1) << 60 : 0);
    if ((word0 & 0xf) != AGX_PBE_DIMENSION_2D ||
@@ -246,8 +251,13 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
    fields->height =
       ((word0 >> height_shift) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
    if (layout == AGX_PBE_LAYOUT_LINEAR) {
-      fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
-      fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;
+      if (gen10) {
+         fields->buffer = (word1 & ((UINT64_C(1) << 44) - 1)) << 4;
+         fields->stride_B = (((word1 >> 44) & 0xffff) + 1) * 16;
+      } else {
+         fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
+         fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;
+      }
    } else {
       fields->buffer = (word1 & ((UINT64_C(1) << 44) - 1)) << 4;
       fields->page_aligned_layers = (word1 >> 60) & 1;

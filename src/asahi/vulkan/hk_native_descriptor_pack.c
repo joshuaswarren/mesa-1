@@ -211,7 +211,7 @@ hk_pack_native_pbe(unsigned generation,
                       legacy->layers > 1;
    if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
-        (generation != 9 || legacy->level != 0 || legacy->levels != 1 ||
+        (legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
        (legacy->layout != AGX_LAYOUT_LINEAR &&
         legacy->layout != AGX_LAYOUT_TWIDDLED &&

@@ -20,7 +20,7 @@ extern "C" {
 #define AGX_PBE_AGX3_GENERATION_10     10u
 
 /* This is intentionally the subset whose complete byte geometry is recovered:
- * uncompressed, non-sparse, single-level 2D images in ordinary Gen9 linear or
+ * uncompressed, non-sparse, single-level 2D images in ordinary Gen9/10 linear or
  * Gen9/10 twiddled/GPU memory, plus Gen9's exact tiled 2D-array extension.
  * Gen9's ordinary single-layer packet has no layer-mode bit regardless of
  * allocation padding; the inherited page-aligned-layer input is ignored on
@@ -39,7 +39,7 @@ struct agx_pbe_agx3_2d_fields {
    uint16_t width;
    uint16_t height;
    uint64_t buffer;
-   /* Gen9 linear row pitch in bytes. Zero for tiled layouts. */
+   /* Linear row pitch in bytes. Zero for tiled layouts. */
    uint32_t stride_B;
    /* Legacy layout metadata: encoded only for Gen10, not ordinary Gen9 2D. */
    bool page_aligned_layers;
