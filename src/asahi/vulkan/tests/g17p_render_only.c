@@ -132,6 +132,7 @@ VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
+VK_FN(vkUnmapMemory);
 #ifdef G17P_OCCLUSION_QUERY
 VK_FN(vkCreateQueryPool);
 VK_FN(vkCmdResetQueryPool);
@@ -186,6 +187,9 @@ try_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
                 uint32_t allowed, VkMemoryPropertyFlags required)
 {
    for (uint32_t i = 0; i < properties->memoryTypeCount; ++i) {
+      if (getenv("AGX_RENDER_UNCACHED") &&
+          (properties->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
+         continue;
       if ((allowed & (1u << i)) &&
           (properties->memoryTypes[i].propertyFlags & required) == required)
          return i;
@@ -197,11 +201,9 @@ static uint32_t
 find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
                  uint32_t allowed, VkMemoryPropertyFlags required)
 {
-   for (uint32_t i = 0; i < properties->memoryTypeCount; ++i) {
-      if ((allowed & (1u << i)) &&
-          (properties->memoryTypes[i].propertyFlags & required) == required)
-         return i;
-   }
+   uint32_t type = try_memory_type(properties, allowed, required);
+   if (type != UINT32_MAX)
+      return type;
 
    die("required Vulkan memory type is unavailable");
    return UINT32_MAX;
@@ -558,6 +560,7 @@ main(
    LOAD_DEVICE(device, vkCreateFence);
    LOAD_DEVICE(device, vkQueueSubmit);
    LOAD_DEVICE(device, vkWaitForFences);
+   LOAD_DEVICE(device, vkUnmapMemory);
 #ifdef G17P_OCCLUSION_QUERY
    LOAD_DEVICE(device, vkCreateQueryPool);
    LOAD_DEVICE(device, vkCmdResetQueryPool);
@@ -578,9 +581,14 @@ main(
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+   const bool alternate_geometry = getenv("AGX_RENDER_ALTERNATE") != NULL;
+   static const float clipped_vertices[][2] = {
+      {4.0f, 4.0f}, {6.0f, 4.0f}, {4.0f, 6.0f},
+   };
+   const size_t vertex_bytes = sizeof(vertices) * (alternate_geometry ? 2 : 1);
    const VkBufferCreateInfo vertex_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(vertices),
+      .size = vertex_bytes,
       .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
@@ -604,10 +612,13 @@ main(
    check(vkBindBufferMemory(device, vertex_buffer, vertex_memory, 0),
          "vkBindBufferMemory(vertex)");
    void *vertex_map = NULL;
-   check(vkMapMemory(device, vertex_memory, 0, sizeof(vertices), 0,
+   check(vkMapMemory(device, vertex_memory, 0, vertex_bytes, 0,
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+   if (alternate_geometry)
+      memcpy((uint8_t *)vertex_map + sizeof(vertices), clipped_vertices,
+             sizeof(clipped_vertices));
 
 #ifdef G17P_CONDITIONAL_RENDERING
    const VkBufferCreateInfo conditional_info = {
@@ -1005,6 +1016,21 @@ main(
    check(vkCreateCommandPool(device, &pool_info, NULL, &command_pools[0]),
          "vkCreateCommandPool");
 #endif
+   unsigned frame_index = 0;
+   unsigned frame_count = 1;
+   const char *repeat_env = getenv("AGX_RENDER_REPEAT");
+   if (repeat_env) {
+      char *end = NULL;
+      const unsigned long requested = strtoul(repeat_env, &end, 10);
+      if (!*repeat_env || *end || requested < 1 || requested > 64)
+         die("AGX_RENDER_REPEAT must be between 1 and 64");
+      frame_count = requested;
+   }
+   /* Allocate and record a fresh command buffer on every iteration. Reusing
+    * old pixels or a fixed native descriptor cannot satisfy the sentinel
+    * check below after the application has erased the previous result.
+    */
+next_render_frame:;
    VkCommandBufferAllocateInfo command_allocate = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -1070,7 +1096,8 @@ main(
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &side_set, 0, NULL);
 #endif
-   const VkDeviceSize vertex_offset = 0;
+   const VkDeviceSize vertex_offset =
+      alternate_geometry && (frame_index & 1) ? sizeof(vertices) : 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -1334,13 +1361,17 @@ main(
             : (r == 0 && g == 0 && b == 0 && a == 0xff);
       if (pixel_matches)
 #else
-      if (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
+      if (alternate_geometry && (frame_index & 1)
+             ? (r == 0 && g == 0 && b == 0 && a == 0xff)
+             : (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff))
 #endif
          exact++;
    }
    fprintf(stderr,
            "g17p-render-only: pixels exact=%u/%u first=%#010x\n",
            exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
+   fprintf(stderr, "g17p-render-only: frame=%u/%u pixels_exact=%u/%u\n",
+           frame_index + 1, frame_count, exact, IMAGE_WIDTH * IMAGE_HEIGHT);
    for (unsigned y = 0; y < IMAGE_HEIGHT; y += 4) {
       char row[IMAGE_WIDTH / 2 + 1];
       for (unsigned x = 0; x < IMAGE_WIDTH; x += 2) {
@@ -1350,10 +1381,34 @@ main(
       row[IMAGE_WIDTH / 2] = 0;
       fprintf(stderr, "g17p-render-only: |%s|\n", row);
    }
+   const char *output_path = getenv("AGX_RENDER_OUTPUT");
+   if (output_path) {
+      FILE *output = fopen(output_path, "wb");
+      if (!output)
+         die("cannot open render output");
+      const size_t written = fwrite(pixels, 1, IMAGE_BYTES, output);
+      const int closed = fclose(output);
+      if (written != IMAGE_BYTES || closed != 0)
+         die("cannot write complete render output");
+   }
+   if (getenv("AGX_RENDER_HOLD") && frame_index + 1 == frame_count) {
+      fprintf(stderr, "g17p-render-only: HOLD pid=%ld pixels_exact=%u/%u; "
+                      "resources retained for inspection\n",
+              (long)getpid(), exact, IMAGE_WIDTH * IMAGE_HEIGHT);
+      fflush(stderr);
+      for (;;)
+         sleep(60);
+   }
    if (exact != IMAGE_WIDTH * IMAGE_HEIGHT)
       die("render target differs from exact conditional result");
    if (memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
       die("vertex source changed during query render");
+
+   if (++frame_index < frame_count) {
+      memset(pixels, 0xa5, IMAGE_BYTES);
+      vkUnmapMemory(device, image_memory);
+      goto next_render_frame;
+   }
 
 #ifdef G17P_OCCLUSION_QUERY
    sleep(3);
