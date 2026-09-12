@@ -207,13 +207,13 @@ encode_explicit(const struct agx3_isel_desc *d,
 
 /* GPU1 separates integer and floating-point selects. These field locations
  * come from its own encoder table, not the GPU0 isel layout. Native M5
- * ushort kernels witness odd/even half results and half comparisons to zero.
+ * ushort kernels witness odd/even half results and half comparisons to 0/1.
  */
 static bool
 encode_gpu1(const struct agx3_isel_desc *d,
               uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
 {
-   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 != 0 ||
+   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > 1 ||
                      d->cond != AGX3_ISEL_ICOND_EQ))
       return false;
    const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
@@ -236,7 +236,7 @@ encode_gpu1(const struct agx3_isel_desc *d,
       /* Native half comparands/results retain f11=0 for mixed selections. */
       KV(11, !d->dest_16 && !d->cmp_16 && ti != fi),
       KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
-      /* Native ushort == 0 / != 0 sets f28 with its half comparator. */
+      /* Native ushort equality sets f28 with its half comparator. */
       KV(28, d->cmp_16), KV(38, d->cmp1_immediate ? 1 : 2),
       KV(39, d->cmp1_immediate ? 1 : 2),
       KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),

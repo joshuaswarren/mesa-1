@@ -354,6 +354,28 @@ main(void)
          .cmp0=14,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
          .sel_true=4,.sel_false=6,.discard={true,false,true,true}},
        {0x22,0x0e,0x0f,0x80,0x86,0x04,0x07,0x02,0x82,0x06},10},
+      /* applegpu_g17g m5_half_compare_one_select32: equality to one,
+       * with both mixed word selections, register pairs and a half boolean. */
+      {"native M5 half EQ one word immediate/register wait8", {
+         .dest=0,.cmp_16=true,.cmp0=12,.cmp1=1,.cmp1_immediate=true,
+         .cond=AGX3_ISEL_ICOND_EQ,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.sel_false=0,.discard={true,false,false,true},.wait_mask=128},
+       {0x22,0x00,0x07,0x6a,0x27,0x00,0xa4,0x02,0x41,0x00,0x46,0x44,0x00,0x18},14},
+      {"native M5 half EQ one word register/immediate", {
+         .dest=2,.cmp_16=true,.cmp0=13,.cmp1=1,.cmp1_immediate=true,
+         .cond=AGX3_ISEL_ICOND_EQ,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=2,.sel_false=1,.discard={true,false,true,false}},
+       {0x12,0x0c,0x0f,0x80,0x86,0x02,0x1f,0x02,0x22,0x81},10},
+      {"native M5 half EQ one word register/register", {
+         .dest=4,.cmp_16=true,.cmp0=14,.cmp1=1,.cmp1_immediate=true,
+         .cond=AGX3_ISEL_ICOND_EQ,.sel_true=4,.sel_false=6,
+         .discard={true,false,true,true}},
+       {0x22,0x0e,0x0f,0x80,0x86,0x04,0x17,0x02,0x82,0x06},10},
+      {"native M5 half EQ one boolean", {.dest=6,.dest_16=true,.cmp_16=true,
+         .cmp0=15,.cmp1=1,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .true_kind=AGX3_ISEL_IMMEDIATE,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.discard={true}},
+       {0x32,0x0e,0x0d,0x80,0x26,0x81,0x1f,0x02,0x22,0x80},10},
       {"native M5 half8 ULT live", {.dest=8,.dest_16=true,.cmp0=0,.cmp1=2,
          .cond=AGX3_ISEL_ICOND_ULT,.true_kind=AGX3_ISEL_IMMEDIATE,
          .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.cache={true,true},.wait_mask=128},
@@ -400,7 +422,7 @@ main(void)
       CHECK(len == half_vectors[i].length && !memcmp(out,half_vectors[i].bytes,len));
    }
    m5 = half_vectors[0].d;
-   m5.cmp1 = 1;
+   m5.cmp1 = 2;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5.cmp1 = 0;
    m5.cond = AGX3_ISEL_ICOND_ULT;
