@@ -328,6 +328,50 @@ libagx_texture_levels_gen9(constant struct agx_texture_gen9_packed *ptr)
       return (d.last_level - d.first_level) + 1;
 }
 
+/* Gen10 widens width/height to 15 bits and moves samples to bits 58..59.
+ * Decode through its own GenXML schema; Gen9 and legacy extracts alias
+ * different dimensions even for an ordinary 256x256 image. */
+uint3
+libagx_txs_gen10(constant struct agx_texture_gen10_packed *ptr, uint16_t lod,
+                unsigned nr_comps, bool is_1d, bool is_2d,
+                bool is_cube, bool is_array)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+   if (d.address == AGX_ZERO_PAGE_ADDRESS)
+      return 0;
+
+   uint3 size = (uint3)(d.width, d.height, d.depth);
+   lod += d.first_level;
+   if (is_2d && is_array && d.layout == AGX_LAYOUT_LINEAR)
+      size.z = d.depth_linear;
+   if (is_1d && is_array)
+      size.y = size.z;
+
+   size.x = max(size.x >> lod, 1u);
+   if (nr_comps - (uint)is_array >= 2)
+      size.y = max(size.y >> lod, 1u);
+   if (nr_comps - (uint)is_array >= 3)
+      size.z = max(size.z >> lod, 1u);
+   if (is_cube)
+      size.y = size.x;
+   return size;
+}
+
+uint
+libagx_texture_samples_gen10(constant struct agx_texture_gen10_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+   return d.address == AGX_ZERO_PAGE_ADDRESS ? 0 : 2u << d.samples;
+}
+
+uint
+libagx_texture_levels_gen10(constant struct agx_texture_gen10_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+   return d.address == AGX_ZERO_PAGE_ADDRESS ? 0
+                                          : (d.last_level - d.first_level) + 1;
+}
+
 uint
 libagx_lower_txf_robustness_gen9(constant struct agx_texture_gen9_packed *ptr,
                             bool check_lod, ushort lod, bool check_min_lod,

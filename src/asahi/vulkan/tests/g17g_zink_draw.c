@@ -48,8 +48,9 @@ static GLuint shader(GLenum stage, const char *source)
 int main(int argc, char **argv)
 {
     const int submit_only = argc == 2 && !strcmp(argv[1], "--submit-only");
-    if (argc > 1 && !submit_only) {
-        fprintf(stderr, "Usage: %s [--submit-only]\n", argv[0]);
+    const int blit_only = argc == 2 && !strcmp(argv[1], "--blit-only");
+    if (argc > 1 && !submit_only && !blit_only) {
+        fprintf(stderr, "Usage: %s [--submit-only|--blit-only]\n", argv[0]);
         return 2;
     }
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -131,7 +132,26 @@ int main(int argc, char **argv)
         fprintf(stderr, "M5_ZINK_READBACK_REQUESTED\n");
     }
     unsigned exact = 0;
-    if (!submit_only) {
+    if (blit_only) {
+        GLuint image, framebuffer;
+        glGenTextures(1, &image);
+        glBindTexture(GL_TEXTURE_2D, image);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 256, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_TEXTURE_2D, image, 0);
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            fail("blit framebuffer");
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, 256, 256, 0, 0, 256, 256,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        fprintf(stderr, "M5_ZINK_BLIT_RECORDED pixels_untested=1\n");
+        glFinish();
+        if (glGetError() != GL_NO_ERROR) fail("blit completion");
+        fprintf(stderr, "M5_ZINK_BLIT_GL_FINISH_RETURNED pixels_untested=1\n");
+    } else if (!submit_only) {
         unsigned char *pixels = malloc(256 * 256 * 4);
         if (!pixels) fail("readback allocation");
         memset(pixels, 0xa5, 256 * 256 * 4);
@@ -145,11 +165,12 @@ int main(int argc, char **argv)
     }
     if (getenv("AGX_GL_HOLD")) {
         fprintf(stderr, "M5_ZINK_HOLD pid=%ld pixels_exact=%u/65536 pixels_tested=%d\n",
-                (long)getpid(), exact, !submit_only);
+                (long)getpid(), exact, !submit_only && !blit_only);
         for (;;) sleep(60);
     }
-    if (!submit_only && exact != 65536) return 1;
-    fprintf(stderr, "%s\n", submit_only ? "M5_ZINK_SUBMIT_ONLY_DONE pixels_untested=1"
+    if (!submit_only && !blit_only && exact != 65536) return 1;
+    fprintf(stderr, "%s\n", blit_only ? "M5_ZINK_BLIT_ONLY_DONE pixels_untested=1"
+                           : submit_only ? "M5_ZINK_SUBMIT_ONLY_DONE pixels_untested=1"
                                          : "M5_ZINK_PIXEL_PASS");
     return 0;
 }

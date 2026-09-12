@@ -765,6 +765,7 @@ if with_tests
     executable(
       'agx3_graphics_compile_test',
       files('test/test-agx3-graphics-compile.c'),
+      libagx[1],
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],

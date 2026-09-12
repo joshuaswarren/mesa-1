@@ -110,11 +110,82 @@ add_runtime_vectors(void)
    rt.wait_mask = 0;
    fail += agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3B, 0, 255, 4,
                                       &m, &rt, out, &length);
-   fail += agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3C, 0, 2, 4,
+   fail += agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX2, 0, 2, 4,
                                       &m, &rt, out, &length);
    fail += length != 0xa5;
    for (unsigned i=0; i<sizeof(out); ++i) fail += out[i] != 0xa5;
    printf("native modified ADD: five Apple vectors plus commuted subtraction, live operands, waits and bounds: %u failures\n",fail);
+   return fail;
+}
+
+static unsigned
+m5_runtime_vectors(void)
+{
+   /* First three vectors are native G17G Metal kernels retaining the input
+    * operands in their output. They therefore wait for slot8 without
+    * discarding the sources. Remaining vectors exercise independent hints
+    * and all eight waits against the G17G instruction composer. */
+   const struct {
+      unsigned op;
+      uint16_t dest, src0, src1, addend;
+      struct agx3_falu_mods mods;
+      struct agx3_falu_runtime runtime;
+      uint8_t length, bytes[16];
+   } vectors[] = {
+      {0,0,4,2,0,{.src0_neg=true},{.wait_mask=128},12,
+       {0x29,0x02,0x24,0x0a,0x22,0x20,0xa0,0x02,0x02,0x00,0x12,0x00}},
+      {1,0,2,4,0,{.src0_neg=true,.src1_abs=true,.saturate=true},
+       {.wait_mask=128},14,
+       {0x29,0x00,0x25,0x30,0x22,0x80,0xa0,0x02,0x98,0x00,0x04,0x02,0x00,0x10}},
+      {2,0,4,2,6,{.src0_abs=true,.addend_neg=true},{.wait_mask=128},16,
+       {0x29,0x02,0x07,0x0a,0x20,0x20,0xa3,0x02,0x18,0x01,0x80,0x08,0x06,0x00,0x00,0xc0}},
+      {0,2,32,8,0,{.src1_neg=true},{.cache={false,true}},6,
+       {0x19,0x21,0x04,0x89,0x00,0x08}},
+      {0,2,32,8,0,{.src1_neg=true},{.cache={false,true},.wait_mask=255},12,
+       {0x39,0xfc,0x44,0x2a,0x22,0x20,0xa0,0x82,0x20,0x00,0x12,0x04}},
+      {1,8,32,6,0,{.src0_neg=true},
+       {.cache={true},.discard={false,true},.wait_mask=255},14,
+       {0x29,0x7e,0x65,0x30,0x22,0x80,0xa0,0x92,0x1c,0x08,0x10,0x00,0x00,0x10}},
+      {2,8,32,6,2,{.src0_abs=true,.addend_neg=true},
+       {.cache={true,false,true},.discard={false,true},.wait_mask=255},16,
+       {0x29,0x7e,0x47,0x1a,0x20,0x20,0xa3,0x92,0x38,0x08,0x90,0x08,0x02,0x04,0x00,0xc0}},
+   };
+   unsigned fail = 0;
+   for (unsigned i = 0; i < sizeof(vectors)/sizeof(vectors[0]); ++i) {
+      uint8_t out[16], length = 0;
+      bool ok;
+      if (vectors[i].op == 0)
+         ok = agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3C,
+            vectors[i].dest, vectors[i].src0, vectors[i].src1,
+            &vectors[i].mods, &vectors[i].runtime, out, &length);
+      else if (vectors[i].op == 1)
+         ok = agx3_falu_mul_mod_runtime(AGX_ISA_ENCODING_AGX3C,
+            vectors[i].dest, vectors[i].src0, vectors[i].src1,
+            &vectors[i].mods, &vectors[i].runtime, out, &length);
+      else
+         ok = agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX3C,
+            vectors[i].dest, vectors[i].src0, vectors[i].src1, vectors[i].addend,
+            &vectors[i].mods, &vectors[i].runtime, out, &length);
+      if (!ok || length != vectors[i].length ||
+          memcmp(out, vectors[i].bytes, length)) {
+         fprintf(stderr, "M5 float runtime vector %u failed\n", i);
+         fail++;
+      }
+   }
+   struct agx3_falu_mods mods = {.src1_neg=true};
+   struct agx3_falu_runtime rt = {.cache={true},.discard={true}};
+   uint8_t out[16], length = 0xa5;
+   memset(out, 0xa5, sizeof(out));
+   fail += agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3C,0,2,4,&mods,&rt,out,&length);
+   fail += agx3_falu_mul_mod_runtime(AGX_ISA_ENCODING_AGX3C,0,2,4,&mods,&rt,out,&length);
+   fail += agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX3C,0,2,4,6,&mods,&rt,out,&length);
+   rt.cache[0] = false;
+   fail += agx3_falu_add_mod_runtime(AGX_ISA_ENCODING_AGX3C,0,3,4,&mods,&rt,out,&length);
+   fail += agx3_falu_mul_mod_runtime(AGX_ISA_ENCODING_AGX3C,256,2,4,&mods,&rt,out,&length);
+   fail += agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX3C,0,2,4,7,&mods,&rt,out,&length);
+   fail += length != 0xa5;
+   for (unsigned i = 0; i < sizeof(out); ++i) fail += out[i] != 0xa5;
+   printf("M5 float runtime: native ADD/MUL/FMA, live inputs, hints and eight waits: %u failures\n", fail);
    return fail;
 }
 
@@ -243,7 +314,7 @@ runtime_vectors(void)
    rt.cache[0] = false;
    fail += agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX3B, 0, 2, 4, 255,
                                     &m, &rt, out, &len);
-   fail += agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX3C, 0, 2, 4, 6,
+   fail += agx3_falu_fma_mod_runtime(AGX_ISA_ENCODING_AGX2, 0, 2, 4, 6,
                                     &m, &rt, out, &len);
    fail += len != 0xa5;
    for (unsigned i = 0; i < sizeof(out); ++i)
@@ -401,7 +472,7 @@ fma_two_vectors(void)
 int
 main(void)
 {
-   unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors();
+   unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors() + m5_runtime_vectors();
    for (size_t i = 0; i < mod_vec_count; ++i) {
       const struct mod_vec *v = &mod_vecs[i];
       const enum agx_isa_encoding e =

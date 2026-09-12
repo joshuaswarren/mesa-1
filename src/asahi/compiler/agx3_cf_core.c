@@ -112,9 +112,18 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                            struct agx3_cf_source_hints hint, uint16_t wait_mask,
                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || src >= 256 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!agx3b(enc) && !gpu1) || !icond_ok(cond) || !slot_ok(slot) ||
+       src >= (gpu1 ? 128 : 256) ||
        !out || !len || (hint.cache && hint.discard) ||
        (wait_mask != 0 && wait_mask != 32))
+      return false;
+   /* M5 control flow arrives with a retired scoreboard. Ground the signed
+    * half/zero predicate needed by sampler-border selection independently
+    * of the wider immediate and compact-wait domains. */
+   if (gpu1 && (imm != 0 || wait_mask != 0 ||
+                (cond != AGX3_CF_ICOND_EQ && cond != AGX3_CF_ICOND_SLT &&
+                 cond != AGX3_CF_ICOND_SGT)))
       return false;
    /* Apple puts a non-zero constant on this encoding point only for equality
     * and the two signed relations; `ushort x < 2` becomes the compact
@@ -126,13 +135,13 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
     * This preserves equality and every relation to zero. Live witnesses
     * retain the source for the taken branch instead of discarding it. */
    const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,1), KV(14,1), KV(24,1), KV(25,1),
+      KV(9,2), KV(10,1), KV(14,1), KV(24,1), KV(25,1), KV(32,3), KV(33,82),
    };
    const struct agx3_field_kv fields[] = {
       KV(2,src), KV(16,imm), KV(42,cond), KV(31,slot), KV(11,hint.cache),
       KV(13,hint.discard), KV(39,wait_mask == 32),
    };
-   return agx3_bind_compose(enc,"icmp",1,base,5,fields,7,out,len);
+   return agx3_bind_compose(enc,"icmp",1,base,gpu1 ? 7 : 5,fields,7,out,len);
 }
 
 bool

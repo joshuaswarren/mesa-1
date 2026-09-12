@@ -91,8 +91,21 @@ lower_tex_crawl(nir_builder *b, nir_instr *instr, void *data)
                                : nir_imm_intN_t(b, 0, 16);
 
    nir_def *res;
-   const bool gen9 = data && *(const bool *)data;
-   if (gen9 && tex->op == nir_texop_txs &&
+   const unsigned generation = data ? *(const unsigned *)data : 0;
+   const bool gen9 = generation == 9;
+   const bool gen10 = generation == 10;
+   if (gen10 && tex->op == nir_texop_txs &&
+       tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
+      res = libagx_txs_gen10(b, ptr, lod, nir_imm_int(b, nr_comps),
+                    nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_1D),
+                    nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_2D),
+                    nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE),
+                    nir_imm_bool(b, tex->is_array));
+   } else if (gen10 && tex->op == nir_texop_query_levels) {
+      res = libagx_texture_levels_gen10(b, ptr);
+   } else if (gen10 && tex->op == nir_texop_texture_samples) {
+      res = libagx_texture_samples_gen10(b, ptr);
+   } else if (gen9 && tex->op == nir_texop_txs &&
        tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
       res = libagx_txs_gen9(b, ptr, lod, nir_imm_int(b, nr_comps),
                     nir_imm_bool(b, tex->sampler_dim == GLSL_SAMPLER_DIM_1D),
@@ -851,7 +864,7 @@ agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
    NIR_PASS(progress, s, nir_shader_instructions_pass, lower_regular_texture,
             nir_metadata_none, (void *)&gen9);
    NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
-            nir_metadata_control_flow, (void *)&gen9);
+            nir_metadata_control_flow, (void *)&generation);
 
    if (gen9) {
       /* HAL200's texture2d::read consumes a full uint LOD through the integer

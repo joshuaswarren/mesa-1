@@ -2173,10 +2173,57 @@ test_multisample_sample_stage(void)
    return 0;
 }
 
+static int
+test_m5_array_sample(void)
+{
+   /* Apple Metal toolchain 27.1, applegpu_g17g, explicit level(0) from a
+    * texture2d_array in an argument buffer. Native code uses uniform halves
+    * 16/20 for heap indices and PACK_SMPIR for the per-lane layer. */
+   static const uint8_t stage[] = {
+      0x37,0x02,0x00,0x0a,0x25,0x00,0xaa,0x0a,0x00,0x00,0x40,0x30,0x81,0x00,
+   };
+   static const uint8_t sample[] = {
+      0x0f,0x04,0x12,0x00,0x05,0x84,0x60,0x28,0x89,0x08,0x01,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x00,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length = 0;
+   CHECK(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3C, 2, 1, 0,
+                                    false, true, bytes, &length));
+   CHECK(length == sizeof(stage) && !memcmp(bytes, stage, sizeof(stage)));
+   struct agx3_tex_sample_desc d = {
+      .dest=0,.coord=0,.width=AGX3_TEX_W32,.mask=15,
+      .texture_kind=AGX3_TEX_OPERAND_UNIFORM,.texture_value=16,
+      .sampler_kind=AGX3_TEX_OPERAND_UNIFORM,.sampler_value=20,
+      .array=true,.lod=AGX3_TEX_LOD_LEVEL,.slot=1,.wait_mask=1,
+      .coord_kill=true,.final=true,
+   };
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C,&d,bytes,&length));
+   CHECK(length == sizeof(sample) && !memcmp(bytes,sample,sizeof(sample)));
+   d.array_layer=2;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C,&d,bytes,&length));
+   d.array_layer=0; d.lod_x64=64;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C,&d,bytes,&length));
+   d.lod_x64=0; d.texture_kind=AGX3_TEX_OPERAND_REGISTER;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C,&d,bytes,&length));
+   /* Per-thread argument-buffer indexing keeps both heap indices in GPRs.
+    * The native sample waits slot8 while returning on slot1. */
+   static const uint8_t indexed[] = {
+      0x0f,0x04,0x12,0x00,0x25,0x84,0xe0,0x08,0x01,0x28,0x01,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x00,
+   };
+   d.texture_value=0; d.sampler_kind=AGX3_TEX_OPERAND_REGISTER;
+   d.sampler_value=4; d.wait_mask=128;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C,&d,bytes,&length));
+   CHECK(length == sizeof(indexed) && !memcmp(bytes,indexed,sizeof(indexed)));
+   CHECK(!agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3C,128,1,0,
+                                     false,true,bytes,&length));
+   return 0;
+}
+
 int
 main(void)
 {
-   if (test_register_lod() || test_fetch_lod() ||
+   if (test_m5_array_sample() || test_register_lod() || test_fetch_lod() ||
        test_register_array_layer() || test_cube_coordinate_stage() ||
        test_multisample_fetch() ||
        test_multisample_sample_stage() ||

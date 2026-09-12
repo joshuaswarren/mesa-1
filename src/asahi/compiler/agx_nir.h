@@ -104,6 +104,12 @@ bool agx_nir_lower_g17p_indexed_storage(
 bool agx_nir_lower_g17p_combined_sampler(
    struct nir_shader *s, struct agx_g17p_combined_sampler_binding *binding);
 
+/* Gen10 shares the 32-byte texture/eight-byte sampler descriptor layout.
+ * Initially admit only a single 2D float sample at explicit level zero. */
+bool agx_nir_lower_g17g_combined_sampler(
+   struct nir_shader *s, struct agx_g17p_combined_sampler_binding *binding);
+bool agx_nir_lower_g17g_indexed_samplers(struct nir_shader *s);
+
 /* Turn the one statically indexed set-0 Gen9 texture used by the initial
  * G17P compute texel-fetch path into texture-state 0.  Sampler-state 0 remains
  * the device TXF sampler.  The caller must publish both native states through

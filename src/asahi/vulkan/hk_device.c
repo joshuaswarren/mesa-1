@@ -542,7 +542,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_dev;
 
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
       result = hk_descriptor_table_init(dev, &dev->sampled_images, 32,
                                         HK_MAX_DESCRIPTORS, HK_MAX_DESCRIPTORS);
       if (result != VK_SUCCESS)
@@ -659,7 +659,7 @@ fail_rodata:
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
 fail_sampled_images:
-   if (dev->dev.chip == AGX_CHIP_G17P)
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G)
       hk_descriptor_table_finish(dev, &dev->sampled_images);
 fail_samplers:
    hk_destroy_sampler_heap(dev, &dev->samplers);
@@ -716,7 +716,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    }
 
    hk_destroy_sampler_heap(dev, &dev->samplers);
-   if (dev->dev.chip == AGX_CHIP_G17P)
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G)
       hk_descriptor_table_finish(dev, &dev->sampled_images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);

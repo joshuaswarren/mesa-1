@@ -207,16 +207,21 @@ encode_explicit(const struct agx3_isel_desc *d,
 
 /* GPU1 separates integer and floating-point selects. These field locations
  * come from its own iseli32 encoder table, not the GPU0 isel layout. Keep
- * narrower comparands/results gated until they have independent validation.
+ * narrower comparands gated until they have independent validation. Native
+ * M5 ushort boolean kernels additionally witness odd/even half results.
  */
 static bool
 encode_gpu1_32(const struct agx3_isel_desc *d,
               uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
 {
-   if (d->dest_16 || d->cmp_16)
+   if (d->cmp_16)
       return false;
    const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
    const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
+   if (d->dest_16 &&
+       (d->cond != AGX3_ISEL_ICOND_ULT && d->cond != AGX3_ISEL_ICOND_UGT &&
+        d->cond != AGX3_ISEL_ICOND_EQ))
+      return false;
    for (unsigned i = 0; i < 4; ++i) {
       if (d->cache[i] && d->discard[i])
          return false;
@@ -227,11 +232,14 @@ encode_gpu1_32(const struct agx3_isel_desc *d,
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(9, 2), KV(10, 2), KV(11, ti != fi),
+      KV(9, 2), KV(10, d->dest_16 ? 1 : 2),
+      /* Native half selects retain f11=0 for mixed operand kinds too. */
+      KV(11, !d->dest_16 && ti != fi),
       KV(23, 2), KV(24, 2), KV(38, d->cmp1_immediate ? 1 : 2),
       KV(39, d->cmp1_immediate ? 1 : 2),
-      KV(53, ti ? 1 : 2), KV(54, 2), KV(67, fi ? 1 : 2), KV(68, 2),
-      KV(72, 3), KV(73, 97),
+      KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),
+      KV(67, fi ? 1 : 2), KV(68, d->dest_16 ? 1 : 2),
+      KV(72, 3), KV(73, d->dest_16 ? 96 : 97),
    };
    struct agx3_field_kv ov[24];
    unsigned n = 0;
@@ -248,10 +256,16 @@ encode_gpu1_32(const struct agx3_isel_desc *d,
       ov[n++] = (struct agx3_field_kv)KV(cache_fields[i], d->cache[i]);
       ov[n++] = (struct agx3_field_kv)KV(discard_fields[i], d->discard[i]);
    }
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < 8; ++i)
       ov[n++] = (struct agx3_field_kv)KV(74 + i, (d->wait_mask >> i) & 1);
-   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "iseli32", 3,
-                           base, sizeof(base) / sizeof(base[0]), ov, n, out, len);
+   const unsigned first = d->dest_16 ? 6 + (d->dest & 1) : 3;
+   const unsigned last = d->dest_16 ? 8 : 4;
+   for (unsigned ep = first; ep <= last; ++ep)
+      if (agx3_bind_compose(AGX_ISA_ENCODING_AGX3C,
+                            d->dest_16 ? "iseli16" : "iseli32", ep,
+                            base, sizeof(base) / sizeof(base[0]), ov, n, out, len))
+         return true;
+   return false;
 }
 
 bool
@@ -271,7 +285,7 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
        (!d->cmp1_immediate &&
         !(d->cmp_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1))))
       return false;
-   if (d->wait_mask >= (1u << 6))
+   if (d->wait_mask >= (1u << (encoding == AGX_ISA_ENCODING_AGX3C ? 8 : 6)))
       return false;
 
    if (d->dest_16 ? !reg16_ok(d->dest) : !reg32_ok(d->dest))

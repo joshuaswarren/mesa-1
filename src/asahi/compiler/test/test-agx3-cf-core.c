@@ -157,6 +157,25 @@ test_half_immediate_compare(void)
       }
    }
 
+   /* Independent AGX3c table vectors: a live odd half tested against zero,
+    * including the signed predicate used by border-sampler selection. */
+   const enum agx3_cf_icond m5_cond[] = {
+      AGX3_CF_ICOND_EQ, AGX3_CF_ICOND_SLT, AGX3_CF_ICOND_SGT,
+   };
+   const uint8_t m5_bytes[][10] = {
+      {0x0a,0x04,0x23,0x80,0x06,0x00,0x0f,0x02,0x02,0x00},
+      {0x0a,0x04,0x23,0x80,0x02,0x00,0x0f,0x02,0x02,0x00},
+      {0x0a,0x04,0x23,0x80,0x02,0x00,0x0e,0x02,0x02,0x00},
+   };
+   for (unsigned i=0;i<3;i++) {
+      uint8_t bytes[AGX3_CF_MAX_LENGTH], length=0;
+      checks++;
+      if (!agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3C,m5_cond[i],
+             0,5,0,(struct agx3_cf_source_hints){false,false},0,bytes,&length) ||
+          length != 10 || memcmp(bytes,m5_bytes[i],10))
+         failures++;
+   }
+
    /* The two unsigned ordered relations have no witness with a non-zero
     * constant on this encoding point -- Apple emits the compact six-byte form
     * instead -- and 256 changes the instruction entirely. */

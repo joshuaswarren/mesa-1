@@ -596,8 +596,25 @@ test_fadd_minifloat(void)
       if (!supported)
          assert(len == 99 && bytes[0] == 0xa5);
    }
-   assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 0, 32,
-                                  false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   /* Independently inspected AGX3c compact ADD retains these exact operand
+    * and wait bits, while requiring its own dispatch/opcode fields. */
+   const uint8_t m5_pixel_centre[] = {0x19,0xa1,0x14,0x07,0x80,0x00};
+   assert(agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C, 2, 6, 32,
+                                 false, AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+   assert(len == sizeof(m5_pixel_centre) && !memcmp(bytes,m5_pixel_centre,len));
+   for (unsigned i = 0; i < sizeof(witness) / sizeof(witness[0]); ++i) {
+      assert(agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C,
+                                    witness[i].dest, witness[i].src,
+                                    witness[i].imm, witness[i].dest_cache,
+                                    witness[i].hint, witness[i].wait, bytes, &len));
+      assert(len == 6 && !memcmp(bytes, witness[i].bytes, 6));
+   }
+   for (unsigned wait = 0; wait < 256; ++wait) {
+      bool supported = wait < 64 && (wait == 0 || wait == 3 || !(wait & (wait - 1)));
+      assert(agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 2, 32,
+                                    false, AGX3_ALU_HINT_DISCARD, wait,
+                                    bytes, &len) == supported);
+   }
    assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 1, 0, 32,
                                   false, AGX3_ALU_HINT_NONE, 0, bytes, &len));
    assert(!agx3_alu_fadd_minifloat(AGX_ISA_ENCODING_AGX3B, 0, 1, 32,
@@ -857,7 +874,22 @@ static void test_u16_to_f32(void)
       float f=(float)(uint16_t)u;uint32_t actual;memcpy(&actual,&f,4);
       assert(actual==expected);
    }
-   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,0,0,0,0,bytes,&len));
+   /* Independent AGX3c table compositions for the Zink copy shader's cast,
+    * an odd source half, and signed conversion waiting on producer slot8.
+    * These are encoding regressions, not hardware numerical witnesses. */
+   const uint8_t m5_cast[] = {0x37,0x02,0x00,0x02,0x22,0x80,0xaf,0x0a,0x20,0x00};
+   const uint8_t m5_odd[] = {0x27,0x03,0x00,0x02,0x22,0x80,0xaf,0x82,0x20,0x00};
+   const uint8_t m5_signed[] = {0x3f,0x03,0x00,0x02,0x22,0x80,0xaf,0x02,0x60,0x00};
+   assert(agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,6,2,
+                             AGX3_ALU_HINT_DISCARD,0,bytes,&len));
+   assert(len == sizeof(m5_cast) && !memcmp(bytes,m5_cast,len));
+   assert(agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,0,3,
+                             AGX3_ALU_HINT_DISCARD,32,bytes,&len));
+   assert(len == sizeof(m5_odd) && !memcmp(bytes,m5_odd,len));
+   assert(agx3_alu_s16_to_f32(AGX_ISA_ENCODING_AGX3C,2,3,
+                             AGX3_ALU_HINT_DISCARD,128,bytes,&len));
+   assert(len == sizeof(m5_signed) && !memcmp(bytes,m5_signed,len));
+   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,0,0,0,256,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX2,0,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,1,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,128,0,0,0,bytes,&len));
@@ -1791,6 +1823,21 @@ static void test_native_extract32(void)
       exact(bytes,length,golden[n][live]);
    }
    puts("Native EXTRACT32:10 exact Apple immediate/live/dead vectors PASS");
+   /* Independent M5 table vector from Zink's descriptor-address extract:
+    * discard low half-pair8, retain high half-pair10, wait for slot7. */
+   const uint16_t m5_src[2] = {8,10};
+   const enum agx3_alu_hint m5_hints[2] = {AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_CACHE};
+   assert(agx3_alu_extract_imm32(AGX_ISA_ENCODING_AGX3C,8,m5_src,2,m5_hints,
+                                false,64,bytes,&length));
+   exact(bytes,length,"2782401222a0a21280805c000808");
+   assert(!agx3_alu_extract_imm32(AGX_ISA_ENCODING_AGX3C,8,m5_src,2,m5_hints,
+                                 false,256,bytes,&length));
+   const enum agx3_alu_hint field_hints[2] = {AGX3_ALU_HINT_CACHE,AGX3_ALU_HINT_DISCARD};
+   assert(agx3_alu_bfeil(AGX_ISA_ENCODING_AGX3C,20,10,20,true,14,field_hints,
+                         0,bytes,&length));
+   exact(bytes,length,"a782005a2200a10a0885203400e0");
+   assert(!agx3_alu_bfeil(AGX_ISA_ENCODING_AGX3C,20,10,20,true,32,field_hints,
+                          0,bytes,&length));
 }
 
 static void test_native_asr32(void)
@@ -3060,7 +3107,17 @@ static void test_native_f32_minmax(void)
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
    };
-   assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3C, 2, rr, none, false, 0,
+   /* M5 uses a different four-operand fseli32 field layout. Zero can be
+    * selected directly; nonzero floating immediates remain rejected. */
+   assert(agx3_alu_fmax_f32_imm(AGX_ISA_ENCODING_AGX3C,2,2,0,
+                                AGX3_ALU_HINT_DISCARD,false,0,bytes,&len));
+   exact(bytes,len,"3202070a2300a00214808a4c0200");
+   const uint16_t m5_rr[4] = {0,2,0,2};
+   assert(agx3_alu_fmin_f32(AGX_ISA_ENCODING_AGX3C,2,m5_rr,none,false,129,bytes,&len));
+   exact(bytes,len,"3204470b2300a002900001400040");
+   assert(!agx3_alu_fmax_f32_imm(AGX_ISA_ENCODING_AGX3C,2,2,0x30,
+                                 AGX3_ALU_HINT_NONE,false,0,bytes,&len));
+   assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX2, 2, rr, none, false, 0,
                              bytes, &len));
    assert(!agx3_alu_fmax_f32(AGX_ISA_ENCODING_AGX3B, 256, rr, none, false, 0,
                              bytes, &len));

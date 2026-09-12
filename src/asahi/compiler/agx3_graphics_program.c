@@ -206,7 +206,7 @@ g17g_graphics_program_generate(
 {
    size_t bound;
    if (chip != AGX_CHIP_G17G || !desc || !program ||
-       !desc->shader_binary_size || desc->shader_binary_size > 512 ||
+       !desc->shader_binary_size ||
        !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
        desc->writes_sample_mask || desc->colour_partitions > 1 ||
@@ -227,7 +227,12 @@ g17g_graphics_program_generate(
    };
    struct agx_ioto_state ldshdr = {0}, spectpr = {0};
    ldshdr.f[0] = desc->shader_va;
-   const uint32_t span = ((desc->shader_binary_size + 63) & ~63u) >> 7;
+   /* LDSHDR carries a saturating fetch span, not the executable length.
+    * The shader container records the complete size. Keep the native
+    * two-bit span saturated for longer readback shaders and widen before
+    * rounding so a large size cannot wrap to a zero fetch span. */
+   const uint64_t span =
+      (((uint64_t)desc->shader_binary_size + 63) & ~UINT64_C(63)) >> 7;
    ldshdr.f[1] = MIN2(span, 3);
    ldshdr.f[5] = 3;
    ldshdr.f[6] = 107;

@@ -136,6 +136,18 @@ bool
 agx3_mem_encode_load(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
                      uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
 {
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      /* Native HAL300 chooses these forms in this order. ep0 alone cannot
+       * carry every dependency set: descriptor loads in Zink's image copy
+       * need the extended wait fields while keeping the same address and
+       * element mask. Each form validates its complete normalized fields. */
+      static const uint8_t forms[] = {0, 1, 3, 4, 2, 5};
+      for (unsigned i = 0; i < sizeof(forms); ++i) {
+         if (agx3_mem_encode_load_form(enc, d, forms[i], out, len))
+            return true;
+      }
+      return false;
+   }
    return agx3_mem_encode_load_form(enc, d, 0, out, len);
 }
 

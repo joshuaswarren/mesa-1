@@ -697,7 +697,14 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_rendering_state *render = &cmd->state.gfx.render;
-   const enum agx_bg_eot_op op = key->op[0];
+   /* DONT_CARE allows arbitrary initial tile contents. Reuse the qualified
+    * zero-clear program until an empty background program is available.
+    * Do not apply this to LOAD_OP_NONE, which has different preservation
+    * semantics, or to a render target that needs its previous contents. */
+   const bool clear_dont_care = !store && key->op[0] == AGX_BG_EOT_NONE &&
+      info->colorAttachmentCount == 1 &&
+      info->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+   const enum agx_bg_eot_op op = clear_dont_care ? AGX_BG_CLEAR : key->op[0];
    struct hk_image_view *view = render->color_att[0].iview;
    if (!view || info->colorAttachmentCount != 1 || key->tib.layered ||
        key->tib.nr_samples != 1 || key->tib.sample_size_B != 8 ||
@@ -711,6 +718,8 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       if (key->op[rt] != AGX_BG_EOT_NONE)
          goto unsupported;
    }
+   if (clear_dont_care)
+      key->op[0] = op;
    if (op == AGX_BG_CLEAR)
       key->reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
 
@@ -748,8 +757,10 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       if (shader->info.push_count != AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
           shader->info.uses_txf)
          goto unsupported;
+      const VkClearColorValue zero = {0};
       const uint64_t clear = hk_pool_upload(
-         cmd, &info->pColorAttachments[0].clearValue.color, 16, 16);
+         cmd, clear_dont_care ? &zero : &info->pColorAttachments[0].clearValue.color,
+         16, 16);
       if (!clear)
          return (struct hk_bg_eot){0};
       ranges[0] = (struct agx3_ioto_uniform_range){4, 8, clear};
@@ -814,7 +825,9 @@ hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
    };
 
 unsupported:
-   mesa_loge("M5 tile operation %u exceeds native RT0 support", op);
+   mesa_loge("M5 tile operation %u exceeds native RT0 support (store=%u load_op=%u)",
+             op, store, info->colorAttachmentCount == 1
+                ? info->pColorAttachments[0].loadOp : UINT32_MAX);
    vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
    return (struct hk_bg_eot){0};
 }
@@ -3717,7 +3730,9 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
           (linked->b.fragment_control.opaque[0] >> 29) != AGX_PASS_TYPE_OPAQUE ||
           fs->info.fs.writes_memory || hk_rast_discard(cmd) ||
           dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
-          dyn->rs.line.width != 1.0f || !zero_depth_bias ||
+          /* Line width is irrelevant for filled triangles; internal meta
+           * pipelines leave that unused dynamic state at zero. */
+          !zero_depth_bias ||
           dyn->rs.depth_clamp_enable || dyn->vp.depth_clip_negative_one_to_one ||
           !vk_rasterization_state_depth_clip_enable(&dyn->rs) ||
           dyn->ds.depth.bounds_test.enable || gfx->occlusion.mode ||

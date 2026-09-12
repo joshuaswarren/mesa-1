@@ -18,6 +18,28 @@ main(void)
 {
    unsigned pass = 0, fail = 0;
 
+   /* AGX3c table composition of a descriptor load at uniform12+244,
+    * preserving four words and both producer waits1+4. The compact ep0
+    * cannot represent that dependency set; native form order selects ep1. */
+   {
+      const uint8_t expected[] = {0x4f,0x0c,0x03,0x00,0x78,0xac,0x80,0xbe,0x00,0x20};
+      const struct agx3_mem_desc d = {
+         .data = 8, .width = AGX3_MEM_W32, .mask = 15,
+         .base_is_uniform = true, .base = 12,
+         .idx_kind = AGX3_MEM_IDX_IMM, .byte_off = 244,
+         .slot = 4, .wait_mask = 9,
+      };
+      uint8_t out[AGX3_MEM_MAX_LENGTH], len = 0;
+      if (agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3C, &d, 0, out, &len) ||
+          !agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3C, &d, out, &len) ||
+          len != sizeof(expected) || memcmp(out, expected, sizeof(expected))) {
+         fprintf(stderr, "FAIL M5 descriptor load extended waits\n");
+         fail++;
+      } else {
+         pass++;
+      }
+   }
+
    for (size_t i = 0; i < mem_vec_count; ++i) {
       const struct mem_vec *v = &mem_vecs[i];
       const enum agx_isa_encoding e =

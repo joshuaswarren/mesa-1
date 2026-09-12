@@ -124,11 +124,14 @@ agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
                             const struct agx3_isub_imm_desc *d,
                             uint8_t out[AGX3_IADD_MAX_LENGTH], uint8_t *len)
 {
-   if (!d || !out || !len || encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool gpu1 = encoding == AGX_ISA_ENCODING_AGX3C;
+   const unsigned slots = gpu1 ? 8 : 6;
+   if (!d || !out || !len ||
+       (encoding != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
        d->dest > 254 || (d->dest & 1) || d->src >= 256 ||
        (!d->src_16 && ((d->src & 1) || d->sign_extend)) ||
        d->immediate > 255 || (d->src_cache && d->src_kill) ||
-       (d->wait_mask & ~UINT16_C(0x3f)))
+       (d->wait_mask & ~((1u << slots) - 1)))
       return false;
 
    /* Native ushort/short/uint minus1/7/28/255, with paired live/dead
@@ -138,17 +141,20 @@ agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
     */
    const struct agx3_field_kv base[] = {
       KV(9,2), KV(10,2), KV(23,2), KV(24,d->src_16 ? 1 : 2),
-      KV(38,1), KV(39,1),
+      KV(38,1), KV(39,1), KV(44,3), KV(45,100),
    };
-   struct agx3_field_kv fields[13] = {
+   struct agx3_field_kv fields[14] = {
       KV(2,d->dest), KV(16,d->src), KV(30,d->immediate),
       KV(25,d->src_cache), KV(27,d->src_kill), KV(28,d->sign_extend),
    };
    unsigned n=6;
-   for (unsigned slot=0;slot<6;slot++)
+   /* HAL300 AGX3c isub32 retains the operand fields, with explicit GPR
+    * dispatch/opcode and eight dependencies in fields 46..53. */
+   for (unsigned slot=0;slot<slots;slot++)
       if(d->wait_mask & (1u<<slot))
-         fields[n++]=(struct agx3_field_kv)KV(45+slot,1);
-   return agx3_bind_compose(encoding,"isub",0,base,6,fields,n,out,len);
+         fields[n++]=(struct agx3_field_kv)KV((gpu1 ? 46 : 45)+slot,1);
+   return agx3_bind_compose(encoding,gpu1 ? "isub32" : "isub",0,
+                            base,gpu1 ? 8 : 6,fields,n,out,len);
 }
 
 bool
@@ -159,8 +165,18 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d == NULL || out == NULL || len == NULL)
       return false;
 
-   /* Only the AGX3b form is witnessed. */
-   if (encoding != AGX_ISA_ENCODING_AGX3B)
+   if (encoding != AGX_ISA_ENCODING_AGX3B &&
+       encoding != AGX_ISA_ENCODING_AGX3C)
+      return false;
+
+   const bool m5 = encoding == AGX_ISA_ENCODING_AGX3C;
+   /* M5's imadd32 has the same integer operand classes, with a separate
+    * fourteen-byte encoding and eight producer slots. Narrow and widening
+    * forms require independent M5 witnesses. */
+   if (m5 && (d->dest_16 || d->dest_64 || d->src_a_16 ||
+              d->multiplier_16 || d->src_c_16 || d->src_c_64 ||
+              d->src_a_sign_extend || d->multiplier_sign_extend ||
+              d->src_c_sign_extend))
       return false;
 
    if (d->dest_16 && d->dest_64)
@@ -218,7 +234,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
         d->src_a_sign_extend || d->multiplier_sign_extend ||
         d->src_c_sign_extend))
       return false;
-   if (d->wait_mask >= (1u << 6))
+   if (d->wait_mask >= (1u << (m5 ? 8 : 6)))
       return false;
 
    if (d->multiplier_is_register &&
@@ -268,7 +284,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          ? (sizeof(baseline_reg) / sizeof(baseline_reg[0]))
          : (sizeof(baseline_imm) / sizeof(baseline_imm[0]));
 
-   struct agx3_field_kv ov[24];
+   struct agx3_field_kv ov[28];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache);
@@ -300,11 +316,16 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    }
    if (d->src_c_sign_extend)
       ov[n++] = (struct agx3_field_kv)KV(58, 1);
-   for (unsigned i = 0; i < 6; ++i) {
+   if (m5) {
+      ov[n++] = (struct agx3_field_kv)KV(59, 3);
+      ov[n++] = (struct agx3_field_kv)KV(60, 84);
+   }
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i) {
       if (d->wait_mask & (1u << i))
-         ov[n++] = (struct agx3_field_kv)KV(60 + i, 1);
+         ov[n++] = (struct agx3_field_kv)KV((m5 ? 61 : 60) + i, 1);
    }
 
-   return agx3_bind_compose(encoding, "imadd", 0, baseline, nbaseline, ov, n,
+   return agx3_bind_compose(encoding, m5 ? "imadd32" : "imadd", 0,
+                            baseline, nbaseline, ov, n,
                             out, len);
 }

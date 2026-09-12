@@ -315,7 +315,59 @@ main(void)
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
    m5.cache[0] = false;
    m5.dest_16 = true;
+   m5.cmp_16 = true;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C, &m5, out, &len));
+   const struct isel_vec half_vectors[] = {
+      {"native M5 half8 ULT live", {.dest=8,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_ULT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.cache={true,true},.wait_mask=128},
+       {0x22,0x80,0x45,0x0a,0x23,0x00,0xac,0x12,0x80,0x80,0x54,0x18,0x00,0x38},14},
+      {"native M5 half9 UGT discard", {.dest=9,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_UGT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.discard={true,true}},
+       {0x4a,0x01,0x1d,0x03,0x22,0x81,0x04,0x00,0x20,0x80},10},
+      {"native M5 half10 ULT live", {.dest=10,.dest_16=true,.cmp0=4,.cmp1=6,
+         .cond=AGX3_ISEL_ICOND_ULT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.cache={true,true}},
+       {0x52,0x85,0x05,0x87,0x22,0x81,0x05,0x00,0x20,0x80},10},
+      {"native M5 half11 EQ discard", {.dest=11,.dest_16=true,.cmp0=4,.cmp1=6,
+         .cond=AGX3_ISEL_ICOND_EQ,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.discard={true,true}},
+       {0x5a,0x05,0x1d,0x07,0x26,0x81,0x07,0x00,0x20,0x80},10},
+      {"M5 image-copy guard", {.dest=1,.dest_16=true,.cmp0=2,.cmp1=12,
+         .cond=AGX3_ISEL_ICOND_ULT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=1,.discard={true,true},.wait_mask=64},
+       {0x22,0x02,0x45,0x0b,0x27,0x00,0xac,0x02,0x00,0x83,0x64,0x98,0x00,0x28},14},
+      {"native M5 chained guard", {.dest=8,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_ULT,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=5,.cache={true,true},.discard={false,false,true}},
+       {0x42,0x81,0x05,0x83,0x82,0x05,0x05,0x00,0x20,0x80},10},
+      {"native M5 half register/immediate", {.dest=9,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_ULT,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=4,.cache={true,true,true}},
+       {0x4a,0x81,0x05,0x83,0x02,0x84,0x05,0x00,0x20,0x80},10},
+      {"native M5 half register/register", {.dest=10,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_ULT,.sel_true=4,.sel_false=6,
+         .cache={true,true,true},.discard={false,false,false,true}},
+       {0x52,0x81,0x05,0x83,0x02,0x84,0x05,0x00,0x80,0x06},10},
+      {"native M5 half immediate/register", {.dest=11,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_ULT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.sel_false=4,.discard={true,true,false,true}},
+       {0x5a,0x01,0x1d,0x03,0x22,0x81,0x05,0x00,0x80,0x04},10},
+      {"M5 image-copy chained guard", {.dest=1,.dest_16=true,.cmp0=4,.cmp1=14,
+         .cond=AGX3_ISEL_ICOND_ULT,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.discard={true,true,true}},
+       {0x0a,0x05,0x1d,0x0f,0x82,0x01,0x05,0x00,0x20,0x80},10},
+   };
+   for (unsigned i=0; i<sizeof(half_vectors)/sizeof(half_vectors[0]); ++i) {
+      CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&half_vectors[i].d,out,&len));
+      CHECK(len == half_vectors[i].length && !memcmp(out,half_vectors[i].bytes,len));
+   }
+   m5 = half_vectors[0].d;
+   m5.wait_mask = 255;
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5.sel_true = 256;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    printf("%u checks, %u failures\n", checks, failures);
    return failures ? 1 : 0;
 }

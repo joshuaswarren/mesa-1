@@ -33,6 +33,7 @@
 #include "asahi/lib/agx_abi.h"
 #include "nir_builder.h"
 #include "nir_builtin_builder.h"
+#include "asahi/libagx/libagx.h"
 #include "util/format/u_formats.h"
 
 #include <stdio.h>
@@ -1795,6 +1796,142 @@ test_combined_sampler_root(void)
          binding.texture_offset_B == 64 && binding.sampler_index_offset_B == 104;
    ralloc_free(shader);
    return ok;
+}
+
+static bool
+test_g17g_combined_sampler_scope(void)
+{
+   /* Positive layout plus independent rejection axes: API LOD, descriptor
+    * set, sampler offset, implicit derivatives, and integer interpretation. */
+   for (unsigned variant = 0; variant < 6; variant++) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17G copy sampler scope");
+      nir_def *image = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 64), .desc_set = variant == 2 ? 1 : 0);
+      nir_def *sampler = nir_bindless_sampler_agx(
+         &b, nir_imm_int(&b, variant == 3 ? 104 : 96),
+         nir_imm_intN_t(&b, 3, 16), .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, variant == 4 ? 3 : 4);
+      tex->op = variant == 4 ? nir_texop_tex : nir_texop_txl;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = variant == 5 ? nir_type_uint32 : nir_type_float32;
+      tex->coord_components = 2;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                       nir_imm_vec2(&b, 0.5, 0.5));
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+      if (variant != 4)
+         tex->src[3] = nir_tex_src_for_ssa(
+            nir_tex_src_lod, nir_imm_float(&b, variant == 1 ? 1.0 : 0.0));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      fs_store_colour(&b, &tex->def);
+      struct agx_g17p_combined_sampler_binding binding = {0};
+      const bool lowered = agx_nir_lower_g17g_combined_sampler(b.shader, &binding);
+      const bool ok = lowered == (variant == 0) &&
+         (!lowered || (binding.texture_offset_B == 64 &&
+                       binding.sampler_index_offset_B == 104));
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
+static bool
+replace_query_descriptor_load(nir_builder *b, nir_intrinsic_instr *intr,
+                              void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_global_constant ||
+       !nir_src_is_const(intr->src[0]))
+      return false;
+   uint64_t address = nir_src_as_uint(intr->src[0]);
+   const unsigned size = intr->def.bit_size / 8;
+   if (address < 0x1000 || address - 0x1000 +
+       size * intr->def.num_components > 32 || size > 8)
+      return false;
+   nir_const_value values[NIR_MAX_VEC_COMPONENTS] = {0};
+   for (unsigned i = 0; i < intr->def.num_components; i++) {
+      uint64_t value = 0;
+      memcpy(&value, (uint8_t *)data + address - 0x1000 + i * size, size);
+      values[i] = nir_const_value_for_uint(value, intr->def.bit_size);
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_build_imm(
+      b, intr->def.num_components, intr->def.bit_size, values));
+   return true;
+}
+
+static bool
+test_g17g_texture_queries(void)
+{
+   for (unsigned variant = 0; variant < 4; variant++) {
+      /* Fixed Gen10 descriptor bits deliberately cross the 14-bit Gen9
+       * dimension boundary. The expected API values are independent of the
+       * generated query code. Test tiled/linear arrays, null, and LOD. */
+      uint64_t desc[4] = {
+         ((uint64_t)20000 << 28) | ((uint64_t)18002 << 43) |
+            ((uint64_t)3 << 58) | (variant == 1 ? 0 : 2u << 4),
+         (UINT64_C(0x200000000) >> 4) | (UINT64_C(6) << 46),
+         (UINT64_C(1) << 44) | (UINT64_C(3) << 48) | 10,
+         0,
+      };
+      if (variant == 2)
+         desc[1] = (AGX_ZERO_PAGE_ADDRESS >> 4) | (UINT64_C(6) << 46);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17G descriptor queries");
+      nir_def *ptr = nir_imm_int64(&b, 0x1000);
+      nir_def *size = libagx_txs_gen10(
+         &b, ptr, nir_imm_intN_t(&b, variant == 3 ? 2 : 0, 16),
+         nir_imm_int(&b, 3), nir_imm_false(&b), nir_imm_true(&b),
+         nir_imm_false(&b), nir_imm_true(&b));
+      nir_def *samples = libagx_texture_samples_gen10(&b, ptr);
+      nir_def *levels = libagx_texture_levels_gen10(&b, ptr);
+      nir_def *result = nir_vec4(&b, nir_channel(&b, size, 0),
+         nir_channel(&b, size, 1), nir_channel(&b, size, 2),
+         nir_ior(&b, nir_ishl_imm(&b, samples, 8), levels));
+      nir_store_output(&b, result, nir_imm_int(&b, 0),
+                       .write_mask = 15, .src_type = nir_type_uint32,
+                       .io_semantics.location = FRAG_RESULT_DATA0,
+                       .io_semantics.num_slots = 1);
+      for (unsigned i = 0; i < 4; i++) {
+         agx_preprocess_nir(b.shader);
+         NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+                  replace_query_descriptor_load, nir_metadata_control_flow,
+                  desc);
+      }
+      agx_preprocess_nir(b.shader);
+      bool found = false, ok = true;
+      const uint32_t expected[4] = {
+         variant == 2 ? 0 : variant == 3 ? 2500 : 10000,
+         variant == 2 ? 0 : variant == 3 ? 2250 : 9001,
+         variant == 2 ? 0 : variant == 1 ? 11 : 7,
+         variant == 2 ? 0 : 0x1003,
+      };
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_store_output)
+                  continue;
+               found = true;
+               for (unsigned c = 0; c < intr->num_components; c++) {
+                  const unsigned component = nir_intrinsic_component(intr) + c;
+                  ok &= nir_src_is_const(intr->src[0]) && component < 4 &&
+                     nir_src_comp_as_uint(intr->src[0], c) == expected[component];
+               }
+            }
+         }
+      }
+      if (!found || !ok)
+         nir_print_shader(b.shader, stderr);
+      ralloc_free(b.shader);
+      if (!found || !ok)
+         return false;
+   }
+   return true;
 }
 
 static bool
@@ -5511,10 +5648,16 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--sampler-root-only")) {
-      const bool ok = test_combined_sampler_root() &&
+      const bool ok = test_g17g_combined_sampler_scope() &&
+                      test_combined_sampler_root() &&
                       test_combined_sampler_scope() &&
                       test_combined_sampler_integer_scope();
       fprintf(stderr, "native sampler plus push-root lowering: %s\n", ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--g17g-texture-queries")) {
+      const bool ok = test_g17g_texture_queries();
+      fprintf(stderr, "G17G descriptor query values: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--bias-gradient-only")) {
@@ -5648,7 +5791,8 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_combined_sampler_scope() || !test_combined_sampler_root() ||
+   if (!test_g17g_texture_queries() || !test_g17g_combined_sampler_scope() ||
+       !test_combined_sampler_scope() || !test_combined_sampler_root() ||
        !test_combined_sampler_integer_scope()) {
       fputs("combined sampler lowering consumed a non-sampler bias\n", stderr);
       all_ok = false;

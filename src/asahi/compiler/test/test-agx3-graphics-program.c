@@ -53,6 +53,21 @@ test_g17g_programs(void)
       CHECK(output.length == (fragment ? 90 : 84));
       CHECK(memcmp(output.bytes, expected_tail[fragment], 28) == 0);
 
+      const uint32_t original_size = desc.shader_binary_size;
+      desc.shader_binary_size = 512;
+      CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+      const struct agx3_g17p_graphics_program saturated = output;
+      const uint32_t larger_sizes[] = {513, 790, 1024, 65536, UINT32_MAX};
+      for (unsigned i = 0; i < sizeof(larger_sizes)/sizeof(larger_sizes[0]); ++i) {
+         desc.shader_binary_size = larger_sizes[i];
+         CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+         CHECK(output.length == saturated.length &&
+               !memcmp(output.bytes, saturated.bytes, output.length));
+      }
+      desc.shader_binary_size = 0;
+      CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+      desc.shader_binary_size = original_size;
+
       struct agx3_ioto_uniform_range ranges[] = {
          {.start_halfs = 0, .size_halfs = 4, .address = 0x4000001000},
          {.start_halfs = 4, .size_halfs = 2, .address = 0x4000002000},

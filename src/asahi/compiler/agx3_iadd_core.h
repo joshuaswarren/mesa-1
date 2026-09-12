@@ -42,7 +42,7 @@
 extern "C" {
 #endif
 
-#define AGX3_IADD_MAX_LENGTH 12u
+#define AGX3_IADD_MAX_LENGTH 14u
 
 struct agx3_iadd_desc {
    /*

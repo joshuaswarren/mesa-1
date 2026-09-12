@@ -128,6 +128,8 @@ VK_FN(vkCmdDrawIndirectCount);
 VK_FN(vkCmdEndConditionalRenderingEXT);
 #endif
 VK_FN(vkCmdEndRenderPass);
+VK_FN(vkCmdPipelineBarrier);
+VK_FN(vkCmdBlitImage);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
 VK_FN(vkQueueSubmit);
@@ -555,7 +557,9 @@ main(
    LOAD_DEVICE(device, vkCmdDrawIndirectCount);
    LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
 #endif
-   LOAD_DEVICE(device, vkCmdEndRenderPass);
+    LOAD_DEVICE(device, vkCmdEndRenderPass);
+    LOAD_DEVICE(device, vkCmdPipelineBarrier);
+    LOAD_DEVICE(device, vkCmdBlitImage);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
    LOAD_DEVICE(device, vkQueueSubmit);
@@ -709,6 +713,7 @@ main(
 #endif
 
 
+   const bool blit_test = getenv("AGX_RENDER_BLIT") != NULL;
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
@@ -753,6 +758,31 @@ main(
    check(vkBindImageMemory(device, image, image_memory, 0),
          "vkBindImageMemory");
 
+   VkImage blit_image = VK_NULL_HANDLE;
+   VkDeviceMemory blit_memory = VK_NULL_HANDLE;
+   uint8_t *blit_pixels = NULL;
+   if (blit_test) {
+      VkImageCreateInfo copy_info = image_info;
+      copy_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+      check(vkCreateImage(device, &copy_info, NULL, &blit_image),
+            "vkCreateImage(blit)");
+      VkMemoryRequirements requirements;
+      vkGetImageMemoryRequirements(device, blit_image, &requirements);
+      const VkMemoryAllocateInfo allocation = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = find_memory_type(&memory_properties,
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+      check(vkAllocateMemory(device, &allocation, NULL, &blit_memory),
+            "vkAllocateMemory(blit)");
+      check(vkBindImageMemory(device, blit_image, blit_memory, 0),
+            "vkBindImageMemory(blit)");
+      check(vkMapMemory(device, blit_memory, 0, IMAGE_BYTES, 0,
+                        (void **)&blit_pixels), "vkMapMemory(blit)");
+      memset(blit_pixels, 0xa5, IMAGE_BYTES);
+   }
 
    const VkImageViewCreateInfo view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1026,6 +1056,8 @@ main(
          die("AGX_RENDER_REPEAT must be between 1 and 64");
       frame_count = requested;
    }
+   if (blit_test && (frame_count != 1 || alternate_geometry))
+      die("AGX_RENDER_BLIT requires one full-frame draw");
    /* Allocate and record a fresh command buffer on every iteration. Reusing
     * old pixels or a fixed native descriptor cannot satisfy the sentinel
     * check below after the application has erased the previous result.
@@ -1164,6 +1196,59 @@ next_render_frame:;
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+   VkCommandBuffer blit_command = VK_NULL_HANDLE;
+   if (blit_test) {
+      command_allocate.commandPool = command_pools[0];
+      check(vkAllocateCommandBuffers(device, &command_allocate, &blit_command),
+            "vkAllocateCommandBuffers(blit)");
+      check(vkBeginCommandBuffer(blit_command, &begin_info),
+            "vkBeginCommandBuffer(blit)");
+      const VkImageMemoryBarrier barriers[] = {
+         {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+         },
+         {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = blit_image,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+         },
+      };
+      vkCmdPipelineBarrier(blit_command,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, barriers);
+      const VkImageBlit region = {
+         .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+         .srcOffsets = {{0,0,0}, {IMAGE_WIDTH,IMAGE_HEIGHT,1}},
+         .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+         .dstOffsets = {{0,0,0}, {IMAGE_WIDTH,IMAGE_HEIGHT,1}},
+      };
+      vkCmdBlitImage(blit_command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     blit_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     1, &region, VK_FILTER_NEAREST);
+      const VkMemoryBarrier host_read = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+         .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+      };
+      vkCmdPipelineBarrier(blit_command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_read, 0, NULL, 0, NULL);
+      check(vkEndCommandBuffer(blit_command), "vkEndCommandBuffer(blit)");
+      fprintf(stderr, "g17p-render-only: separate blit command recorded; no submission yet\n");
+   }
    if (getenv("AGX_RENDER_RECORD_ONLY")) {
       printf("Apple %#x: %ux%u Vulkan draw recorded; no submission\n",
              properties.deviceID, IMAGE_WIDTH, IMAGE_HEIGHT);
@@ -1372,6 +1457,30 @@ next_render_frame:;
            exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
    fprintf(stderr, "g17p-render-only: frame=%u/%u pixels_exact=%u/%u\n",
            frame_index + 1, frame_count, exact, IMAGE_WIDTH * IMAGE_HEIGHT);
+   if (blit_test && exact == IMAGE_WIDTH * IMAGE_HEIGHT) {
+      VkFence blit_fence;
+      check(vkCreateFence(device, &fence_info, NULL, &blit_fence),
+            "vkCreateFence(blit)");
+      const VkSubmitInfo copy_submit = {
+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+         .commandBufferCount = 1,
+         .pCommandBuffers = &blit_command,
+      };
+      check(vkQueueSubmit(queue, 1, &copy_submit, blit_fence), "vkQueueSubmit(blit)");
+      check(vkWaitForFences(device, 1, &blit_fence, true, UINT64_C(5000000000)),
+            "vkWaitForFences(blit)");
+      unsigned copied = 0, sentinel = 0;
+      for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; ++i) {
+         copied += !memcmp(blit_pixels + 4*i, "\xff\x47\x0d\xff", 4);
+         sentinel += !memcmp(blit_pixels + 4*i, "\xa5\xa5\xa5\xa5", 4);
+      }
+      fprintf(stderr, "g17p-render-only: blit pixels exact=%u/%u sentinel=%u first=%02x%02x%02x%02x\n",
+         copied, IMAGE_WIDTH * IMAGE_HEIGHT, sentinel,
+         blit_pixels[0], blit_pixels[1], blit_pixels[2], blit_pixels[3]);
+      /* Retain and optionally export the actual destination for inspection. */
+      pixels = blit_pixels;
+      exact = copied;
+   }
    for (unsigned y = 0; y < IMAGE_HEIGHT; y += 4) {
       char row[IMAGE_WIDTH / 2 + 1];
       for (unsigned x = 0; x < IMAGE_WIDTH; x += 2) {

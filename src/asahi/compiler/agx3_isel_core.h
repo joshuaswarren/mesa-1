@@ -73,7 +73,7 @@
 extern "C" {
 #endif
 
-#define AGX3_ISEL_MAX_LENGTH 10u
+#define AGX3_ISEL_MAX_LENGTH 14u
 
 /* == enum agx_icond. Only the five Apple emits are encodable. */
 enum agx3_isel_icond {

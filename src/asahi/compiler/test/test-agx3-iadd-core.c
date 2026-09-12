@@ -306,6 +306,28 @@ test_native_immediate_subtract(void)
    CHECK(!agx3_isub_immediate_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
    d.src_cache=d.src_kill=false; d.wait_mask=64;
    CHECK(!agx3_isub_immediate_encode(AGX_ISA_ENCODING_AGX3B,&d,out,&len));
+
+   /* Independently composed HAL300 AGX3c isub32 vectors: dimension minus
+    * one, signed half widening, and cached source with dependency slot 7. */
+   static const struct {
+      struct agx3_isub_imm_desc d;
+      uint8_t bytes[12];
+   } m5[] = {
+      {{.dest=8,.src=8,.immediate=1,.src_kill=true},
+       {0x27,0x00,0x04,0x5a,0x25,0x00,0xa2,0x12,0x48,0x00,0x0b,0x00}},
+      {{.dest=2,.src=3,.immediate=255,.src_16=true,.sign_extend=true,
+        .wait_mask=128},
+       {0x3f,0x03,0x04,0x1a,0x21,0x00,0xa2,0x02,0xc0,0x3f,0x4b,0x00}},
+      {{.dest=0,.src=2,.immediate=28,.src_cache=true,.wait_mask=64},
+       {0x27,0x82,0x44,0x1a,0x21,0x00,0xa2,0x02,0x08,0x07,0x0b,0x00}},
+   };
+   for (unsigned i=0;i<sizeof(m5)/sizeof(m5[0]);i++) {
+      CHECK(agx3_isub_immediate_encode(AGX_ISA_ENCODING_AGX3C,
+                                      &m5[i].d,out,&len));
+      CHECK(len==12 && !memcmp(out,m5[i].bytes,12));
+   }
+   d=m5[0].d; d.wait_mask=256;
+   CHECK(!agx3_isub_immediate_encode(AGX_ISA_ENCODING_AGX3C,&d,out,&len));
 }
 
 static void
@@ -412,9 +434,49 @@ test_native_imad_immediate_addend(void)
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
 }
 
+static void
+test_m5_imad(void)
+{
+   const struct {
+      struct agx3_imad_desc d;
+      uint8_t bytes[14];
+   } vectors[] = {
+      /* Native M5: retain all loaded operands after each calculation. */
+      {{.src_a=4,.multiplier=37,.src_c=2,.wait_mask=128},
+       {0x2f,0x00,0x04,0x3a,0x21,0x00,0xa1,0x02,0x48,0x09,0x4a,0x00,0x02,0x00}},
+      {{.src_a=4,.multiplier_is_register=true,.multiplier_reg=6,
+        .src_c=2,.wait_mask=128},
+       {0x2f,0x00,0x04,0x3a,0x21,0x00,0xa1,0x02,0x88,0x81,0x40,0x00,0x02,0x00}},
+      {{.src_a=2,.multiplier=37,.addend_is_immediate=true,
+        .addend_immediate=1,.wait_mask=128},
+       {0x2f,0x02,0x04,0x1a,0x21,0x00,0xa1,0x02,0x48,0x09,0x0e,0x00,0x01,0x02}},
+      /* Image-copy addressing with independently consumed inputs. */
+      {{.dest=2,.src_a=8,.multiplier=32,.src_c=2,
+        .src_a_kill=true,.src_c_kill=true,.wait_mask=9},
+       {0x37,0x24,0x04,0x5a,0x21,0x00,0xa1,0x02,0x28,0x08,0xca,0x00,0x02,0x00}},
+   };
+   uint8_t out[AGX3_IADD_MAX_LENGTH], len = 0;
+   for (unsigned i = 0; i < sizeof(vectors)/sizeof(vectors[0]); ++i) {
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3C,&vectors[i].d,out,&len));
+      CHECK(len == 14 && !memcmp(out,vectors[i].bytes,14));
+   }
+   struct agx3_imad_desc d = vectors[0].d;
+   d.wait_mask = 255;
+   CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3C,&d,out,&len));
+   d.dest_64 = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C,&d,out,&len));
+   d.dest_64 = false;
+   d.src_a_16 = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C,&d,out,&len));
+   d.src_a_16 = false;
+   d.src_c_cache = d.src_c_kill = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C,&d,out,&len));
+}
+
 int
 main(void)
 {
+   test_m5_imad();
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
       const struct vec *v = &vectors[i];
       uint8_t out[AGX3_IADD_MAX_LENGTH];
@@ -576,7 +638,7 @@ main(void)
                                    .src_c = 4, .wait_mask = 1u << 6};
       CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
       bad.wait_mask = 0;
-      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX2, &bad, out, &len));
    }
 
    /* Native imad_live retains all three inputs; imad_chain caches its
