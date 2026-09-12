@@ -2347,7 +2347,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                            hw, nir->xfb_info, info->set_layout_count);
          if (result != VK_SUCCESS) {
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
-            ralloc_free(nir);
+            if (!last)
+               ralloc_free(nir);
             return result;
          }
       }
