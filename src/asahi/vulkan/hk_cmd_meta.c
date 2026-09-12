@@ -1652,6 +1652,17 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
       const uint32_t src_height = (uint32_t)region->srcOffsets[1].y;
       const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
       const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
+      struct hk_g17p_tile_address_config src_tile_config;
+      struct hk_g17p_tile_address_config dst_tile_config;
+      if (!hk_g17p_tile_address_config_init(
+             src_layout->stride_el[src_level], src_tile.width_el,
+             src_tile.height_el, &src_tile_config) ||
+          !hk_g17p_tile_address_config_init(
+             dst_layout->stride_el[dst_level], dst_tile.width_el,
+             dst_tile.height_el, &dst_tile_config)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+         return;
+      }
       const bool odd = src_width == (uint64_t)width * 2 + 1 ||
                        src_height == (uint64_t)height * 2 + 1;
 
@@ -1680,12 +1691,12 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
             .axis = axis.gpu,
             .dest_width_px = width,
             .dest_height_px = height,
-            .dest_stride_el = dst_layout->stride_el[dst_level],
-            .src_stride_el = src_layout->stride_el[src_level],
-            .dest_tile_width_el = dst_tile.width_el,
-            .dest_tile_height_el = dst_tile.height_el,
-            .src_tile_width_el = src_tile.width_el,
-            .src_tile_height_el = src_tile.height_el,
+            .dest_tiles_per_row = dst_tile_config.tiles_per_row,
+            .src_tiles_per_row = src_tile_config.tiles_per_row,
+            .dest_tile_width_log2 = dst_tile_config.tile_width_log2,
+            .dest_tile_height_log2 = dst_tile_config.tile_height_log2,
+            .src_tile_width_log2 = src_tile_config.tile_width_log2,
+            .src_tile_height_log2 = src_tile_config.tile_height_log2,
          };
 
          libagx_mipmap_unorm8x4_odd_struct(
@@ -1708,12 +1719,12 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
          .dest_height_px = height,
          .src_scale_x = src_width == width ? 1 : 2,
          .src_scale_y = src_height == height ? 1 : 2,
-         .dest_stride_el = dst_layout->stride_el[dst_level],
-         .src_stride_el = src_layout->stride_el[src_level],
-         .dest_tile_width_el = dst_tile.width_el,
-         .dest_tile_height_el = dst_tile.height_el,
-         .src_tile_width_el = src_tile.width_el,
-         .src_tile_height_el = src_tile.height_el,
+         .dest_tiles_per_row = dst_tile_config.tiles_per_row,
+         .src_tiles_per_row = src_tile_config.tiles_per_row,
+         .dest_tile_width_log2 = dst_tile_config.tile_width_log2,
+         .dest_tile_height_log2 = dst_tile_config.tile_height_log2,
+         .src_tile_width_log2 = src_tile_config.tile_width_log2,
+         .src_tile_height_log2 = src_tile_config.tile_height_log2,
       };
 
       libagx_mipmap_unorm8x4_struct(cmd, agx_2d(width, height),
@@ -2032,6 +2043,13 @@ hk_g17p_copy_uncompressed_buffer_to_image(
 
       const uint32_t level = region->imageSubresource.mipLevel;
       const struct ail_tile tile = layout->tilesize_el[level];
+      struct hk_g17p_tile_address_config tile_config;
+      if (!hk_g17p_tile_address_config_init(
+             layout->stride_el[level], tile.width_el, tile.height_el,
+             &tile_config)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+         return;
+      }
       const uint64_t base_src =
          hk_buffer_address_ro(buffer, region->bufferOffset);
       const struct libagx_copy_image_args args_template = {
@@ -2040,12 +2058,9 @@ hk_g17p_copy_uncompressed_buffer_to_image(
          .dest_x_el = plan.base_x_el,
          .dest_y_el = plan.base_y_el,
          .src_pitch_B = plan.buffer_row_stride_B,
-         .dest_stride_el = layout->stride_el[level],
-         .src_stride_el = plan.buffer_row_stride_B / plan.block_size_B,
-         .dest_tile_width_el = tile.width_el,
-         .dest_tile_height_el = tile.height_el,
-         .src_tile_width_el = 1,
-         .src_tile_height_el = 1,
+         .dest_tiles_per_row = tile_config.tiles_per_row,
+         .dest_tile_width_log2 = tile_config.tile_width_log2,
+         .dest_tile_height_log2 = tile_config.tile_height_log2,
          .blocksize_B = plan.block_size_B,
          .dest_tiled = true,
          .src_tiled = false,
@@ -2118,18 +2133,22 @@ hk_g17p_copy_compressed_buffer_to_image(
 
       const struct ail_layout *layout = &image->planes[0].layout;
       const struct ail_tile tile = layout->tilesize_el[level];
+      struct hk_g17p_tile_address_config tile_config;
+      if (!hk_g17p_tile_address_config_init(
+             layout->stride_el[level], tile.width_el, tile.height_el,
+             &tile_config)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+         return true;
+      }
       const struct libagx_copy_image_args args_template = {
          .width_el = plan.blocks_x,
          .height_el = plan.blocks_y,
          .dest_x_el = plan.base_x_el,
          .dest_y_el = plan.base_y_el,
          .src_pitch_B = plan.buffer_row_stride_B,
-         .dest_stride_el = layout->stride_el[level],
-         .src_stride_el = plan.buffer_row_stride_B / plan.block_size_B,
-         .dest_tile_width_el = tile.width_el,
-         .dest_tile_height_el = tile.height_el,
-         .src_tile_width_el = 1,
-         .src_tile_height_el = 1,
+         .dest_tiles_per_row = tile_config.tiles_per_row,
+         .dest_tile_width_log2 = tile_config.tile_width_log2,
+         .dest_tile_height_log2 = tile_config.tile_height_log2,
          .blocksize_B = plan.block_size_B,
          .dest_tiled = true,
          .src_tiled = false,
@@ -2206,18 +2225,22 @@ hk_g17p_copy_compressed_image_to_buffer(
 
       const struct ail_layout *layout = &image->planes[0].layout;
       const struct ail_tile tile = layout->tilesize_el[level];
+      struct hk_g17p_tile_address_config tile_config;
+      if (!hk_g17p_tile_address_config_init(
+             layout->stride_el[level], tile.width_el, tile.height_el,
+             &tile_config)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+         return true;
+      }
       const struct libagx_copy_image_args args_template = {
          .width_el = plan.blocks_x,
          .height_el = plan.blocks_y,
          .src_x_el = plan.base_x_el,
          .src_y_el = plan.base_y_el,
          .dest_pitch_B = plan.buffer_row_stride_B,
-         .dest_stride_el = plan.buffer_row_stride_B / plan.block_size_B,
-         .src_stride_el = layout->stride_el[level],
-         .dest_tile_width_el = 1,
-         .dest_tile_height_el = 1,
-         .src_tile_width_el = tile.width_el,
-         .src_tile_height_el = tile.height_el,
+         .src_tiles_per_row = tile_config.tiles_per_row,
+         .src_tile_width_log2 = tile_config.tile_width_log2,
+         .src_tile_height_log2 = tile_config.tile_height_log2,
          .blocksize_B = plan.block_size_B,
          .dest_tiled = false,
          .src_tiled = true,

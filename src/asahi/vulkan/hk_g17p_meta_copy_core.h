@@ -71,6 +71,19 @@ struct hk_g17p_uncompressed_copy_plan {
    uint64_t buffer_span_B;
 };
 
+struct hk_g17p_tile_address_config {
+   uint32_t tiles_per_row;
+   uint32_t tile_width_log2;
+   uint32_t tile_height_log2;
+};
+
+/* Reduce AIL's power-of-two tile geometry once on the CPU. Raw copy and mip
+ * kernels consume this form so every element uses shifts instead of integer
+ * division. */
+bool hk_g17p_tile_address_config_init(
+   uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
+   struct hk_g17p_tile_address_config *config);
+
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
  * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so

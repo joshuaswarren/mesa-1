@@ -5,6 +5,7 @@
 
 #include "hk_g17p_meta_copy_core.h"
 #include "util/compiler.h"
+#include "util/u_math.h"
 #include "vk_format.h"
 
 #include <limits.h>
@@ -64,6 +65,33 @@ hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
 
    out += remainder > 8u || (remainder == 8u && out < 128u);
    return out;
+}
+
+bool
+hk_g17p_tile_address_config_init(
+   uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
+   struct hk_g17p_tile_address_config *config)
+{
+   if (config)
+      memset(config, 0, sizeof(*config));
+
+   if (!config || !stride_el || !tile_width_el || !tile_height_el ||
+       (tile_width_el & (tile_width_el - 1)) ||
+       (tile_height_el & (tile_height_el - 1)))
+      return false;
+
+   const uint32_t width_log2 = util_logbase2(tile_width_el);
+   const uint32_t height_log2 = util_logbase2(tile_height_el);
+   if (width_log2 + height_log2 > 14)
+      return false;
+
+   *config = (struct hk_g17p_tile_address_config){
+      .tiles_per_row =
+         ((uint64_t)stride_el + tile_width_el - 1) >> width_log2,
+      .tile_width_log2 = width_log2,
+      .tile_height_log2 = height_log2,
+   };
+   return true;
 }
 
 bool

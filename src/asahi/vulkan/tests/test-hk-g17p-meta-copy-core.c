@@ -67,9 +67,87 @@ mip_oracle_hash(uint32_t src_width, uint32_t src_height,
    return hash;
 }
 
+static uint32_t
+tile_space_bits(uint32_t x)
+{
+   uint32_t accum = 0;
+   for (uint32_t i = 0; i < 14; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
+static uint32_t
+tile_offset_division(uint32_t x, uint32_t y, uint32_t stride_el,
+                     uint32_t tile_width_el, uint32_t tile_height_el,
+                     uint32_t block_size_B)
+{
+   const uint32_t tiles_per_row =
+      (stride_el + tile_width_el - 1) / tile_width_el;
+   const uint32_t tile_idx = (y / tile_height_el) * tiles_per_row +
+                             (x / tile_width_el);
+   const uint32_t morton = tile_space_bits(x & (tile_width_el - 1)) |
+                           (tile_space_bits(y & (tile_height_el - 1)) << 1);
+   return (tile_idx * tile_width_el * tile_height_el + morton) *
+          block_size_B;
+}
+
+static uint32_t
+tile_offset_shifted(uint32_t x, uint32_t y,
+                    const struct hk_g17p_tile_address_config *config,
+                    uint32_t block_size_B)
+{
+   const uint32_t tile_width_el = 1u << config->tile_width_log2;
+   const uint32_t tile_height_el = 1u << config->tile_height_log2;
+   const uint32_t tile_idx =
+      (y >> config->tile_height_log2) * config->tiles_per_row +
+      (x >> config->tile_width_log2);
+   const uint32_t morton = tile_space_bits(x & (tile_width_el - 1)) |
+                           (tile_space_bits(y & (tile_height_el - 1)) << 1);
+   return (tile_idx << (config->tile_width_log2 +
+                        config->tile_height_log2)) *
+             block_size_B +
+          morton * block_size_B;
+}
+
 int
 main(void)
 {
+   struct hk_g17p_tile_address_config tile_config;
+   CHECK(!hk_g17p_tile_address_config_init(0, 64, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 0, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 48, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 256, 128, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 64, 64, NULL));
+
+   static const struct {
+      uint32_t block_size_B;
+      uint32_t width_el;
+      uint32_t height_el;
+   } tile_shapes[] = {
+      {1, 128, 128}, {2, 128, 64}, {4, 64, 64}, {8, 64, 32},
+      {16, 32, 32},  {32, 32, 16}, {64, 16, 16}, {128, 16, 8},
+      {256, 8, 8},
+   };
+   uint64_t tile_cases = 0;
+   for (unsigned i = 0; i < sizeof(tile_shapes) / sizeof(tile_shapes[0]); ++i) {
+      const uint32_t w = tile_shapes[i].width_el;
+      const uint32_t h = tile_shapes[i].height_el;
+      const uint32_t strides[] = {1, w - 1, w, w + 1, 2 * w + 3};
+      for (unsigned s = 0; s < sizeof(strides) / sizeof(strides[0]); ++s) {
+         CHECK(hk_g17p_tile_address_config_init(strides[s], w, h,
+                                                 &tile_config));
+         for (uint32_t y = 0; y < 2 * h + 3; ++y) {
+            for (uint32_t x = 0; x < 2 * w + 3; ++x) {
+               CHECK(tile_offset_shifted(x, y, &tile_config,
+                                         tile_shapes[i].block_size_B) ==
+                     tile_offset_division(x, y, strides[s], w, h,
+                                          tile_shapes[i].block_size_B));
+               ++tile_cases;
+            }
+         }
+      }
+   }
+
    uint32_t axis[303];
    CHECK(!hk_g17p_build_mip_axis(0, 1, axis));
    CHECK(!hk_g17p_build_mip_axis(3, 2, axis));
@@ -872,6 +950,7 @@ main(void)
    CHECK(!hk_g17p_image_blit_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
       &bad_blit, 0, &no_blit));
-   printf("Honeykrisp G17P meta copy region/mip/layer checks passed (%u exhaustive layer cases)\n", tested);
+   printf("Honeykrisp G17P meta copy checks passed (%u layer and %llu tiled-address cases)\n",
+          tested, (unsigned long long)tile_cases);
    return 0;
 }
