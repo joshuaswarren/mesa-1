@@ -237,6 +237,80 @@ hk_g17p_compressed_image_to_buffer_copy_plan(
                                        true, plan);
 }
 
+static bool
+hk_g17p_uncompressed_upload_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+      return true;
+   default:
+      return false;
+   }
+}
+
+bool
+hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_uncompressed_copy_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   if (!copy || !plan || !hk_g17p_uncompressed_upload_format(copy->format) ||
+       copy->image_type != VK_IMAGE_TYPE_2D || copy->plane_count != 1 ||
+       copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+       !hk_g17p_buffer_to_image_copy_supported(copy))
+      return false;
+
+   const uint32_t block_B = vk_format_get_blocksize(copy->format);
+   if ((block_B != 1 && block_B != 4) || buffer_offset % block_B)
+      return false;
+
+   const uint32_t width = copy->copy_extent.width;
+   const uint32_t height = copy->copy_extent.height;
+   if (width > UINT32_MAX / height)
+      return false;
+
+   const uint32_t row_el =
+      copy->buffer_row_length ? copy->buffer_row_length : width;
+   const uint32_t image_height =
+      copy->buffer_image_height ? copy->buffer_image_height : height;
+   const uint32_t slice_count =
+      copy->layer_count == VK_REMAINING_ARRAY_LAYERS
+         ? copy->array_layers - copy->base_array_layer
+         : copy->layer_count;
+
+   uint64_t row_B, slice_B, span = 0, term;
+   if (!hk_u64_mul(row_el, block_B, &row_B) || row_B > UINT32_MAX ||
+       !hk_u64_mul(image_height, row_B, &slice_B) ||
+       !hk_u64_mul(slice_count - 1, slice_B, &span) ||
+       !hk_u64_mul(height - 1, row_B, &term) ||
+       !hk_u64_add(span, term, &span) ||
+       !hk_u64_mul(width, block_B, &term) ||
+       !hk_u64_add(span, term, &span) || buffer_offset > buffer_size ||
+       span > buffer_size - buffer_offset)
+      return false;
+
+   *plan = (struct hk_g17p_uncompressed_copy_plan){
+      .block_size_B = block_B,
+      .base_x_el = copy->image_offset.x,
+      .base_y_el = copy->image_offset.y,
+      .width_el = width,
+      .height_el = height,
+      .first_slice = copy->base_array_layer,
+      .slice_count = slice_count,
+      .buffer_row_stride_B = row_B,
+      .buffer_slice_stride_B = slice_B,
+      .buffer_span_B = span,
+   };
+   return true;
+}
+
 bool
 hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)

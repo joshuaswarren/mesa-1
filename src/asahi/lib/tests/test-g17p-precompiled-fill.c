@@ -71,11 +71,11 @@ main(void)
          CHECK(libagx_g17p[i] == NULL);
    }
 
-   /* G17P block-compressed uploads use one copy-image launch per slice.  If
-    * this precompiled entry disappears, Honeykrisp falls back to a command
-    * recording failure.  Pin its launch ABI and complete generated binary so
-    * the fast path cannot silently drift while the inventory test stays
-    * green. */
+   /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
+    * copy-image launch per slice.  If this precompiled entry disappears,
+    * Honeykrisp falls back to a command recording failure.  Pin its launch ABI
+    * and complete generated binary so the fast path cannot silently drift
+    * while the inventory test stays green. */
    const uint32_t *copy_image_blob =
       libagx_g17p[LIBAGX_COPY_IMAGE];
    CHECK(copy_image_blob != NULL);

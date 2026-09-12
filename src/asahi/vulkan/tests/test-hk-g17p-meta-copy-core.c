@@ -289,6 +289,56 @@ main(void)
    explicit_stride.buffer_image_height += 4;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&explicit_stride));
 
+   /* STK uploads hundreds of R8 and RGBA8/BGRA8 base levels immediately
+    * before generating their mip chains.  Resolve padded rows and array
+    * layers once so the driver can copy them through the raw tiled compute
+    * kernel instead of allocating one firmware render job per texture. */
+   struct hk_g17p_buffer_to_image_copy raw_upload = vkcube;
+   raw_upload.array_layers = 3;
+   raw_upload.base_array_layer = 1;
+   raw_upload.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   raw_upload.image_offset = (VkOffset3D){11, 13, 0};
+   raw_upload.copy_extent = (VkExtent3D){37, 29, 1};
+   raw_upload.buffer_row_length = 80;
+   raw_upload.buffer_image_height = 72;
+   struct hk_g17p_uncompressed_copy_plan raw_plan;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   CHECK(raw_plan.block_size_B == 4 && raw_plan.base_x_el == 11 &&
+         raw_plan.base_y_el == 13 && raw_plan.width_el == 37 &&
+         raw_plan.height_el == 29);
+   CHECK(raw_plan.first_slice == 1 && raw_plan.slice_count == 2 &&
+         raw_plan.buffer_row_stride_B == 320 &&
+         raw_plan.buffer_slice_stride_B == 23040 &&
+         raw_plan.buffer_span_B == 32148);
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32211, &raw_plan));
+   CHECK(raw_plan.buffer_span_B == 0);
+
+   raw_upload.format = VK_FORMAT_R8_UNORM;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 7, 8044, &raw_plan));
+   CHECK(raw_plan.block_size_B == 1 &&
+         raw_plan.buffer_row_stride_B == 80 &&
+         raw_plan.buffer_slice_stride_B == 5760 &&
+         raw_plan.buffer_span_B == 8037);
+   raw_upload.format = VK_FORMAT_B8G8R8A8_SRGB;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   raw_upload.format = VK_FORMAT_R8G8B8A8_UINT;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   raw_upload = vkcube;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 2, 262146, &raw_plan));
+   raw_upload.image_type = VK_IMAGE_TYPE_3D;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 0, UINT64_MAX, &raw_plan));
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      NULL, 0, 0, &raw_plan));
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &vkcube, 0, 0, NULL));
+
    struct hk_g17p_buffer_to_image_copy bad = vkcube;
    bad.format = VK_FORMAT_B8G8R8A8_UNORM;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&bad));

@@ -221,17 +221,18 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 120,
   )
 
-  # STK/GTK-style full BGRA8 mip generation. The base upload and final sample
-  # remain render jobs, but the two-level mip chain and three readbacks must be
-  # one compute stream. Regressing to graphics meta makes each mip a separate
-  # firmware render job and removes the two strong compute launches.
+  # STK/GTK-style full BGRA8 upload and mip generation. The base upload,
+  # two-level mip chain and three readbacks must be one compute stream; only
+  # the final sample remains graphics. Regressing either fast path adds one or
+  # more firmware render jobs, while regressing mip ordering removes the two
+  # strong compute launches.
   g17p_generated_mips_env = environment(g17p_queue_progress_environment)
   g17p_generated_mips_env.set('G17P_GENERATED_MIPS_SUBMIT_ONLY', '1')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS',
-                              '6,6,0,2')
+                              '7,7,0,2')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE',
-                              '2:18:18:2:0')
+                              '1:17:17:1:0')
   test(
     'hk_g17p_generated_mips_compute',
     g17p_generated_mips,
@@ -777,8 +778,14 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   }
   g17p_layered_mip_blit_env = environment(
     g17p_layered_mip_blit_environment)
+  # The twelve cube-layer base uploads are raw CDM copies; the six layered
+  # blits remain the general graphics path and the readback adds one CDM
+  # launch.
   g17p_layered_mip_blit_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '18')
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '6')
+  g17p_layered_mip_blit_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
+  g17p_layered_mip_blit_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,0')
   test(
     'hk_g17p_layered_mip_blit',
     g17p_vulkan_layered_mip_blit,

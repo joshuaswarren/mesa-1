@@ -54,6 +54,23 @@ struct hk_g17p_compressed_copy_plan {
    uint64_t buffer_span_B;
 };
 
+/* A raw linear-buffer to AIL-tiled upload.  This is intentionally narrower
+ * than the generic render-based copy path: it covers the byte-exact R8 and
+ * four-channel 8-bit texture shapes used by STK without interpreting their
+ * colour space or channel order. */
+struct hk_g17p_uncompressed_copy_plan {
+   uint32_t block_size_B;
+   uint32_t base_x_el;
+   uint32_t base_y_el;
+   uint32_t width_el;
+   uint32_t height_el;
+   uint32_t first_slice;
+   uint32_t slice_count;
+   uint64_t buffer_row_stride_B;
+   uint64_t buffer_slice_stride_B;
+   uint64_t buffer_span_B;
+};
+
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
  * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so
@@ -106,6 +123,14 @@ bool hk_g17p_compressed_image_to_buffer_copy_plan(
    const struct hk_g17p_buffer_to_image_copy *copy,
    VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
    struct hk_g17p_compressed_copy_plan *plan);
+
+/* Resolve an R8/RGBA8/BGRA8 upload into one raw compute copy per 2D array
+ * layer.  The returned byte span includes row and layer padding and is checked
+ * against the source buffer before any command is emitted. */
+bool hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_uncompressed_copy_plan *plan);
 
 /* HAL200's qualified tile programs are single-layer.  Convert one logical
  * slice of a valid 2D array, 3D volume, or 2D-array<->3D image copy without
