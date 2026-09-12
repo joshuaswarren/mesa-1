@@ -912,16 +912,57 @@ test_g17p_background_reload_staging(void)
  * FRAG_RESULT_DATA0 into a single sample-replicating store_local_pixel_agx.
  */
 static nir_shader *
-build_fs_flat(void)
+build_fs_flat_colour(float red, float green, float blue)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 flat triangle FS");
 
-   fs_store_colour(&b, nir_vec4(&b, nir_imm_float(&b, 0.25f),
-                                nir_imm_float(&b, 0.5f),
-                                nir_imm_float(&b, 0.75f),
+   fs_store_colour(&b, nir_vec4(&b, nir_imm_float(&b, red),
+                                nir_imm_float(&b, green),
+                                nir_imm_float(&b, blue),
                                 nir_imm_float(&b, 1.0f)));
    return fs_finish(&b);
+}
+
+static nir_shader *
+build_fs_flat(void)
+{
+   return build_fs_flat_colour(0.25f, 0.5f, 0.75f);
+}
+
+/* Export a different colour for a hardware test. The NIR compiler supplies
+ * every instruction; no captured shader bytes are used by this path. */
+static bool
+export_g17g_flat_variant(const char *path)
+{
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+      .no_preamble = true,
+   };
+   nir_shader *nir = build_fs_flat_colour(0.75f, 0.25f, 0.5f);
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   ok = ok && part.binary && part.info.binary_size == 60 &&
+        part.info.main_offset == 0 && !part.info.has_preamble &&
+        !part.info.push_count && !part.info.scratch_size &&
+        part.info.nr_gprs == 2 && part.info.agx3_staging_known &&
+        part.info.agx3_staging_halfs == 0;
+   if (ok) {
+      FILE *out = fopen(path, "wbx");
+      if (!out) {
+         ok = false;
+      } else {
+         ok = fwrite(part.binary, 1, part.info.binary_size, out) == part.info.binary_size;
+         if (fclose(out) != 0)
+            ok = false;
+      }
+   }
+   fprintf(stderr, "M5_GENERATED_FRAGMENT %s bytes=%u gprs=%u staging=%u/%u rgb=191,64,128\n",
+           ok ? "EXPORTED" : "FAILED", part.info.binary_size, part.info.nr_gprs,
+           part.info.agx3_staging_known, part.info.agx3_staging_halfs);
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
 }
 
 static bool
@@ -5327,6 +5368,8 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 3 && !strcmp(argv[1], "--m5-export-flat-variant"))
+      return export_g17g_flat_variant(argv[2]) ? 0 : 1;
    if (argc == 2 && !strcmp(argv[1], "--m5-flat-colour-only")) {
       const bool ok = test_g17g_native_flat_colour();
       fprintf(stderr, "M5 native flat-colour transaction: %s\n",
