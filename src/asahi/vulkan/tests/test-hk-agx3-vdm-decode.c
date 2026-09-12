@@ -148,7 +148,6 @@ test_g17p_vertex_program_info(void)
 {
    const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
       .hardware_vertex = true,
-      .position_only = true,
       .position_off = 0,
       .varyings_off = 4,
       .psiz_off = 4,
@@ -191,7 +190,6 @@ test_g17p_vertex_program_info(void)
     * field3=6 and field4 absent, mapping to VsStateConfig+0xc/+0x14.
     * This protects the actual producer semantics, not just byte packing. */
    struct hk_agx3_g17p_vertex_compile_info vs2_info = compiler_info;
-   vs2_info.position_only = false;
    vs2_info.uvs_written = BITFIELD64_BIT(VARYING_SLOT_VAR0);
    vs2_info.psiz_off = vs2_info.layer_viewport_off = vs2_info.clip_off = 6;
    vs2_info.uvs_size = 6;
@@ -203,7 +201,6 @@ test_g17p_vertex_program_info(void)
    /* Fresh native point-size pipeline has five f32 outputs (four position
     * plus point-size) and no secondary-width stream. */
    struct hk_agx3_g17p_vertex_compile_info point_info = compiler_info;
-   point_info.position_only = false;
    point_info.layer_viewport_off = point_info.clip_off = point_info.uvs_size = 5;
    CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &point_info, &program));
    CHECK(program.template_info.raw_vs_output_count_0 == 5);
@@ -215,7 +212,6 @@ test_g17p_vertex_program_info(void)
     * varyings (and optional point size).  Multiview's ViewIndex-to-Layer
     * lowering produces this exact position + packed-layer shape. */
    struct hk_agx3_g17p_vertex_compile_info layer_info = compiler_info;
-   layer_info.position_only = false;
    layer_info.clip_off = layer_info.uvs_size = 5;
    CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &layer_info,
                                           &program));

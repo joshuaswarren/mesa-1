@@ -121,6 +121,9 @@ hk_agx3_g17p_vertex_program_info(
    const bool writes_layer_viewport =
       compiler_info &&
       compiler_info->clip_off == compiler_info->layer_viewport_off + 1;
+   /* Derive this from the final UVS layout. Vulkan I/O lowering clears
+    * outputs_written before backend compilation, so a separate semantic bit
+    * can be stale even when the emitted position-only layout is complete. */
    const bool position_only =
       compiler_info && compiler_info->user_size == 0 && !writes_psiz &&
       !writes_layer_viewport;
@@ -136,8 +139,7 @@ hk_agx3_g17p_vertex_program_info(
        (compiler_info->clip_off != compiler_info->layer_viewport_off &&
         compiler_info->clip_off != compiler_info->layer_viewport_off + 1) ||
        compiler_info->uvs_size != compiler_info->clip_off ||
-       compiler_info->position_only != position_only ||
-       (compiler_info->position_only && compiler_info->uvs_written != 0) ||
+       (position_only && compiler_info->uvs_written != 0) ||
        compiler_info->user_size > HK_AGX3_G17P_MAX_USER_WORDS ||
        util_bitcount64(compiler_info->uvs_written) > compiler_info->user_size)
       return false;

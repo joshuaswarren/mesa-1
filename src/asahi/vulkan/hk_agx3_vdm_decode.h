@@ -47,7 +47,6 @@ hk_agx3_vdm_live_source_layout(
 
 struct hk_agx3_g17p_vertex_compile_info {
    bool hardware_vertex;
-   bool position_only;
    bool has_preamble;
    uint16_t nr_preamble_gprs;
    uint32_t preamble_scratch_size;
