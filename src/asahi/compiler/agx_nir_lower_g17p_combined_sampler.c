@@ -480,6 +480,17 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
    const int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
    const int sample =
       nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   /* The backend stages a dynamic uint level independently of the texture
+    * result for 2D and array fetches. Keep that SSA value through descriptor
+    * lowering; leaving the old base/byte-offset handle in place is not an
+    * encoding of the native texture heap index. 3D register LOD remains
+    * outside the backend's supported fetch forms. */
+   const bool valid_lod = lod >= 0 &&
+      (nir_src_is_const(tex->src[lod].src)
+         ? nir_src_as_uint(tex->src[lod].src) <= 63
+         : (!three_d && nir_src_num_components(tex->src[lod].src) == 1 &&
+            (nir_src_bit_size(tex->src[lod].src) == 16 ||
+             nir_src_bit_size(tex->src[lod].src) == 32)));
    const unsigned lowered_coord_components =
       coord >= 0 ? nir_src_num_components(tex->src[coord].src) : 0;
    return handle >= 0 && coord >= 0 &&
@@ -488,12 +499,7 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
              /* agx_nir_lower_texture packs sample and optional array layer
               * into the third 32-bit backend coordinate. */
              lowered_coord_components == 3)
-          : (tex->num_srcs == 3 && lod >= 0 && sample < 0 &&
-             nir_src_is_const(tex->src[lod].src) &&
-             /* PACK_SMPIR stages this integer into the native level bank.
-              * Its captured field is 12-bit x64, so whole Vulkan mip levels
-              * 0..63 fit exactly and larger constants remain refused. */
-             nir_src_as_uint(tex->src[lod].src) <= 63)) &&
+          : (tex->num_srcs == 3 && sample < 0 && valid_lod)) &&
       nir_src_bit_size(tex->src[coord].src) == 32 &&
       (multisample || lowered_coord_components ==
                          (lowered_buffer ? 2 : tex->coord_components));
@@ -700,8 +706,10 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                   nir_tex_instr_src_index(tex, nir_tex_src_lod);
                assert(lod >= 0);
                nir_src_rewrite(&tex->src[lod].src,
-                               nir_imm_intN_t(
-                                  &b, nir_src_as_uint(tex->src[lod].src), 32));
+                               nir_src_is_const(tex->src[lod].src)
+                                  ? nir_imm_intN_t(
+                                       &b, nir_src_as_uint(tex->src[lod].src), 32)
+                                  : nir_u2u32(&b, tex->src[lod].src.ssa));
             }
 
             nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));

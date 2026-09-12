@@ -2594,6 +2594,118 @@ test_indexed_fetch_sets(void)
    return ok;
 }
 
+static bool
+test_indexed_dynamic_fetch_lod(void)
+{
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_COMPUTE,
+   };
+   bool all_ok = true;
+
+   for (unsigned stage = 0; stage < ARRAY_SIZE(stages); ++stage) {
+      for (unsigned dimension = 0; dimension < 3; ++dimension) {
+         const bool array = dimension == 1;
+         const bool three_d = dimension == 2;
+
+         for (unsigned bits = 16; bits <= 32; bits += 16) {
+            nir_builder b = nir_builder_init_simple_shader(
+               stages[stage], &agx_nir_options, "indexed dynamic fetch LOD");
+            b.shader->info.workgroup_size[0] = 1;
+            b.shader->info.workgroup_size[1] = 1;
+            b.shader->info.workgroup_size[2] = 1;
+            nir_def *lod = nir_load_global_constant(
+               &b, 1, bits, nir_imm_int64(&b, 0x10000), .align_mul = 4);
+            nir_def *handle = nir_bindless_image_agx(
+               &b, nir_imm_int(&b, 72), .desc_set = 3);
+            nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+            tex->op = nir_texop_txf;
+            tex->sampler_dim =
+               three_d ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
+            tex->is_array = array;
+            tex->coord_components = array || three_d ? 3 : 2;
+            tex->dest_type = nir_type_float32;
+            tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+            tex->src[0] = nir_tex_src_for_ssa(
+               nir_tex_src_backend1,
+               array || three_d ? nir_imm_ivec3(&b, 3, 4, 1)
+                                : nir_imm_ivec2(&b, 3, 4));
+            tex->src[1] =
+               nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+            tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_builder_instr_insert(&b, &tex->instr);
+
+            if (stages[stage] == MESA_SHADER_VERTEX) {
+               for (unsigned c = 0; c < 4; ++c)
+                  nir_store_uvs_agx(&b, nir_channel(&b, &tex->def, c),
+                                    nir_imm_intN_t(&b, c, 16));
+               b.shader->info.outputs_written = VARYING_BIT_POS;
+            } else if (stages[stage] == MESA_SHADER_FRAGMENT) {
+               fs_store_colour(&b, &tex->def);
+            } else {
+               nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
+                                .align_mul = 16, .write_mask = 15);
+            }
+
+            bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+            if (three_d) {
+               /* Do not turn an unimplemented 3D register-LOD form into an
+                * accepted native descriptor path as a side effect. */
+               all_ok &= !ok &&
+                  nir_tex_instr_src_index(
+                     tex, nir_tex_src_texture_handle) >= 0;
+               ralloc_free(b.shader);
+               continue;
+            }
+
+            const int li =
+               nir_tex_instr_src_index(tex, nir_tex_src_lod);
+            const int ti =
+               nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+            ok &= li >= 0 && ti >= 0;
+            if (ok) {
+               nir_def *lowered_lod = tex->src[li].src.ssa;
+               ok &= lowered_lod->bit_size == 32 &&
+                     !nir_src_is_const(tex->src[li].src) &&
+                     nir_src_bit_size(tex->src[ti].src) == 64;
+               if (bits == 32) {
+                  ok &= lowered_lod == lod;
+               } else {
+                  nir_alu_instr *convert = nir_src_as_alu(tex->src[li].src);
+                  ok &= convert && convert->op == nir_op_u2u32 &&
+                        convert->src[0].src.ssa == lod;
+               }
+            }
+
+            if (ok) {
+               NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+                        lower_test_descriptor_set, nir_metadata_control_flow,
+                        NULL);
+               agx_preprocess_nir_g17p(b.shader);
+               struct agx_shader_key key = {
+                  .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                  .no_preamble = true,
+               };
+               struct agx_shader_part part = {0};
+               ok = agx_compile_shader_nir(b.shader, &key, &part) &&
+                    part.binary;
+               free(part.binary);
+            }
+
+            if (!ok)
+               fprintf(stderr,
+                       "dynamic indexed txf stage=%u array=%u bits=%u "
+                       "failed\n",
+                       stages[stage], array, bits);
+            all_ok &= ok;
+            ralloc_free(b.shader);
+         }
+      }
+   }
+
+   return all_ok;
+}
+
 /* vkCmdResolveImage lowers each multisample read to txf_ms after packing the
  * sample and array layer into backend coordinate 2. It has no API sampler;
  * native sampler zero is the device-wide texel-fetch sampler. */
@@ -5864,7 +5976,8 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-fetch-only")) {
-      const bool ok=test_indexed_fetch_sets() &&
+      const bool ok=test_indexed_dynamic_fetch_lod() &&
+                    test_indexed_fetch_sets() &&
                     test_indexed_multisample_fetch() &&
                     test_g17p_nonzero_fetch_lod_compile();
       printf("mixed indexed texture reads, multisample resolve, sets and arrays: %s\n",ok?"PASS":"FAIL");
@@ -6059,6 +6172,11 @@ main(int argc, char **argv)
 
    if (!test_indexed_multisample_fetch()) {
       fputs("indexed multisample resolve lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_indexed_dynamic_fetch_lod()) {
+      fputs("dynamic indexed texel-fetch LOD lowering mismatch\n", stderr);
       all_ok = false;
    }
 
