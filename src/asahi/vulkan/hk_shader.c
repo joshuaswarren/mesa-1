@@ -1333,6 +1333,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
       NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      if (dev->dev.chip == AGX_CHIP_G17G)
+         NIR_PASS(_, nir, agx_nir_fix_g17g_constant_interpolation);
       if (dev->dev.chip == AGX_CHIP_G17P) {
          NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                   hk_g17p_lower_flat_nonfan_triangles,
