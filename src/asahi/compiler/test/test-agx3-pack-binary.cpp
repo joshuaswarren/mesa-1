@@ -999,6 +999,24 @@ TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
+TEST_F(AGX3PackBinary, HalfMultiplyOddSourcesHasExactFmaFallback)
+{
+   uint8_t native[AGX3_ALU_MAX_LENGTH], len = 0;
+   const uint16_t src[] = {3, 5};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+   };
+
+   /* This is the exact post-RA CTS reflect() shape. The compact multiply
+    * cannot combine both odd half registers with its load wait. */
+   ASSERT_FALSE(agx3_alu_hmul(AGX_ISA_ENCODING_AGX3B, 6, src, hints,
+                              false, UINT16_C(0x5), native, &len));
+
+   ASSERT_TRUE(agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 6, src, UINT8_C(0x80), hints, false,
+      UINT16_C(0x5), native, &len));
+}
+
 TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -9000,6 +9018,25 @@ TEST_F(AGX3PackBinary, NativeBfeilExtractPreservesSourceLifetime)
       ASSERT_EQ(code.size(),16);
       EXPECT_EQ(memcmp(code.data(),expected[dynamic],12),0);
    }
+}
+
+TEST_F(AGX3PackBinary, HalfBfeilRetainsCachedDynamicShift)
+{
+   auto build = [this](bool cache_shift) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(10, AGX_SIZE_16);
+      value.discard = true;
+      agx_index shift = agx_register(16, AGX_SIZE_32);
+      shift.cache = cache_shift;
+      agx_bfeil_to(b, agx_register(4, AGX_SIZE_16), agx_immediate(0),
+                   value, shift, 0);
+      agx_stop(b);
+      return pack(b);
+   };
+
+   /* The dynamic-shift endpoint has no source-cache bit. NONE retains the
+    * shift register, so the cached and ordinary post-RA forms are exact. */
+   EXPECT_EQ(build(true), build(false));
 }
 
 TEST_F(AGX3PackBinary, BfeilKeepsNonzeroMergeBaseClosed)

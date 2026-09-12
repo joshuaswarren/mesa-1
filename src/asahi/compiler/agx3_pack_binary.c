@@ -9172,10 +9172,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                src[i]=x.value; hints[i]=agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            const bool encoded = I->saturate
+            bool encoded = I->saturate
                ? agx3_alu_hmul_saturate(enc,dst.value,src,hints,dst.cache,wait,
                                         bytes,&len)
                : agx3_alu_hmul(enc,dst.value,src,hints,dst.cache,wait,bytes,&len);
+
+            /* The compact multiply does not cover every pair of odd half
+             * registers.  The grounded three-source FMA does, and an exact
+             * multiply is the fused product plus negative zero: it preserves
+             * both the product rounding and signed zero.  Use this only when
+             * the ordinary non-saturating instruction cannot encode the
+             * assigned registers. */
+            if (!encoded && !I->saturate)
+               encoded = agx3_alu_hfma_addend_minifloat(
+                  enc, dst.value, src, UINT8_C(0x80), hints, dst.cache, wait,
+                  bytes, &len);
+
             if (!encoded || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;
@@ -10218,12 +10230,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(shift) != 1 || value.abs || value.neg ||
                 value.kill || shift.abs || shift.neg || shift.kill ||
                 (value.cache && value.discard) ||
-                (shift.cache && shift.discard) || shift.cache)
+                (shift.cache && shift.discard))
                AGX3_REFUSE(I);
             const uint16_t src[2] = {value.value, shift.value};
             const bool src_16[2] = {true, false};
             const enum agx3_alu_hint hints[2] = {
-               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
+               agx3_post_ra_hint(value),
+               /* This endpoint has a discard bit but no grounded cache bit
+                * for the shift count. NONE also retains the register, so a
+                * cached post-RA source loses no lifetime information. */
+               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift),
             };
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             if (!agx3_alu_srl_reg(enc, dest.value, true, dest.cache, src,
