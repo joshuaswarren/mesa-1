@@ -26,8 +26,10 @@ surface. This exercised Mesa-generated shaders, the AGX3c robust-fetch integer
 select, position plus point-size UVS layout, and the inverted full-frame Zink
 viewport. No native reference shader was substituted.
 
-OpenGL readback did **not** pass: the tile-load and meta image-copy shader
-paths were rejected before submission. Zink can report these Vulkan failures
+OpenGL readback did **not** pass: the empty-background selection and meta
+image-copy shader paths were rejected before submission. The first compiler
+gaps were a 16-bit integer-to-float conversion in the fragment copy shader and
+an integer multiply-add in the compute fallback. Zink can report these Vulkan failures
 while `glFinish` and `glGetError` appear successful, so always inspect the
 compiler/submission log and verify the pixels independently. The rendering
 result does not establish general OpenGL support, glxgears, or display-server
