@@ -9436,7 +9436,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
              I->op == AGX_OPCODE_POPCOUNT && I->nr_dests == 1 &&
              I->nr_srcs == 1) {
             const agx_index dest = I->dest[0], src = I->src[0];

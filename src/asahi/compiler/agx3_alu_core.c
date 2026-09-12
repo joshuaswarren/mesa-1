@@ -13,6 +13,29 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                   uint8_t *len)
 {
+   if (enc == AGX_ISA_ENCODING_AGX3C) {
+      /* G17G uint4/ushort4 popcount witnesses use cbs ep0. The separate
+       * live uint4 probe also witnesses cached sources and destinations.
+       * Only the observed slot-8 wait is admitted here; the caller retires
+       * other dependencies separately. */
+      if (!out || !len || dest >= 256 || src >= 256 ||
+          (!half && ((dest | src) & 1)) || (wait_mask & ~128u) ||
+          (hint != AGX3_ALU_HINT_DISCARD &&
+           !(hint == AGX3_ALU_HINT_CACHE && !half)))
+         return false;
+
+      const struct agx3_field_kv fields[] = {
+         {9, 2}, {10, half ? 1 : 2}, {2, dest}, {11, dest_cache},
+         {23, 2}, {24, half ? 1 : 2}, {16, src},
+         {25, hint == AGX3_ALU_HINT_CACHE},
+         {27, hint == AGX3_ALU_HINT_DISCARD},
+         {29, 3}, {30, 23}, {38, !!wait_mask},
+      };
+      return agx3_bind_compose(enc, "cbs", 0, fields,
+                                 sizeof(fields) / sizeof(fields[0]),
+                                 NULL, 0, out, len);
+   }
+
    /* Exact Apple G17P witnesses:
     *   ushort: 27 05 56 02 02 04 50 04
     *   uint:   27 05 56 00 02 00 5c 04
@@ -267,7 +290,8 @@ agx3_alu_fadd_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if (!out || !len || (!gpu1 && enc != AGX_ISA_ENCODING_AGX3B) || dest >= 256 ||
        src >= 256 || ((dest | src) & 1) || immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
@@ -285,6 +309,7 @@ agx3_alu_fadd_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, swap ? 2 : 1}, {26, 2},
       {42, swap ? 1 : 2}, {43, 2},
+      {50, 3}, {51, 48},
    };
    struct agx3_field_kv fields[13] = {
       {2, dest}, {swap ? 18 : 35, src}, {swap ? 34 : 17, immediate},
@@ -298,7 +323,7 @@ agx3_alu_fadd_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
          fields[n++] = (struct agx3_field_kv){52 + slot, 1};
 
    return agx3_bind_compose(enc, "f32add", saturate ? 2 : 1,
-                            base, 6, fields, n, out, len);
+                            base, gpu1 ? 8 : 6, fields, n, out, len);
 }
 
 bool

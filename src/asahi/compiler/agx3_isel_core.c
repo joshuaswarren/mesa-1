@@ -206,15 +206,15 @@ encode_explicit(const struct agx3_isel_desc *d,
 }
 
 /* GPU1 separates integer and floating-point selects. These field locations
- * come from its own iseli32 encoder table, not the GPU0 isel layout. Keep
- * narrower comparands gated until they have independent validation. Native
- * M5 ushort boolean kernels additionally witness odd/even half results.
+ * come from its own encoder table, not the GPU0 isel layout. Native M5
+ * ushort kernels witness odd/even half results and half comparisons to zero.
  */
 static bool
-encode_gpu1_32(const struct agx3_isel_desc *d,
+encode_gpu1(const struct agx3_isel_desc *d,
               uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
 {
-   if (d->cmp_16)
+   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 != 0 ||
+                     d->cond != AGX3_ISEL_ICOND_EQ))
       return false;
    const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
    const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
@@ -233,9 +233,11 @@ encode_gpu1_32(const struct agx3_isel_desc *d,
 
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, d->dest_16 ? 1 : 2),
-      /* Native half selects retain f11=0 for mixed operand kinds too. */
-      KV(11, !d->dest_16 && ti != fi),
-      KV(23, 2), KV(24, 2), KV(38, d->cmp1_immediate ? 1 : 2),
+      /* Native half comparands/results retain f11=0 for mixed selections. */
+      KV(11, !d->dest_16 && !d->cmp_16 && ti != fi),
+      KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
+      /* Native ushort == 0 / != 0 sets f28 with its half comparator. */
+      KV(28, d->cmp_16), KV(38, d->cmp1_immediate ? 1 : 2),
       KV(39, d->cmp1_immediate ? 1 : 2),
       KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),
       KV(67, fi ? 1 : 2), KV(68, d->dest_16 ? 1 : 2),
@@ -295,7 +297,7 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
       return false;
 
    if (encoding == AGX_ISA_ENCODING_AGX3C)
-      return encode_gpu1_32(d, out, len);
+      return encode_gpu1(d, out, len);
 
    if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints)
       return encode_explicit(d, out, len);

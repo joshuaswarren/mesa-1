@@ -38,12 +38,52 @@ test_native_popcount(void)
                             AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
    assert(len == sizeof(u32_live) && !memcmp(bytes, u32_live, len));
 
-   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX2, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
                              AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+}
+
+static void
+test_gpu1_popcount(void)
+{
+   /* Apple applegpu_g17g, uint4/ushort4 popcount and popcount(v) + v. */
+   static const struct {
+      uint16_t dest, src, wait;
+      bool half, live;
+      uint8_t bytes[10];
+   } witnesses[] = {
+      {0,0,128,false,false,{0x2f,0x00,0x00,0x80,0x32,0x30,0xaa,0x02,0x04,0x00}},
+      {2,2,0,false,false,{0x37,0x02,0x00,0x80,0x32,0x30,0xaa,0x02,0x04,0x00}},
+      {4,4,0,false,false,{0x27,0x00,0x00,0x80,0x32,0x70,0xaa,0x0a,0x04,0x00}},
+      {6,6,0,false,false,{0x37,0x02,0x00,0x80,0x32,0x70,0xaa,0x0a,0x04,0x00}},
+      {0,0,128,true,false,{0x2f,0x00,0x00,0x00,0x32,0x20,0xaa,0x02,0x04,0x00}},
+      {1,1,0,true,false,{0x27,0x01,0x00,0x01,0x32,0x20,0xaa,0x02,0x04,0x00}},
+      {2,2,0,true,false,{0x37,0x02,0x00,0x00,0x32,0x20,0xaa,0x02,0x04,0x00}},
+      {3,3,0,true,false,{0x37,0x03,0x00,0x01,0x32,0x20,0xaa,0x02,0x04,0x00}},
+      {14,0,128,false,true,{0x3f,0x00,0x00,0x80,0x3a,0x30,0xaa,0x1a,0x02,0x00}},
+      {12,4,0,false,true,{0x27,0x00,0x00,0x80,0x3a,0x70,0xaa,0x1a,0x02,0x00}},
+      {16,2,0,false,true,{0xa7,0x02,0x00,0x80,0x3a,0x30,0xaa,0x02,0x02,0x00}},
+      {10,6,0,false,true,{0x37,0x02,0x00,0x80,0x3a,0x70,0xaa,0x12,0x02,0x00}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C,
+         witnesses[i].dest, witnesses[i].src, witnesses[i].half,
+         witnesses[i].live ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD,
+         witnesses[i].live, witnesses[i].wait, bytes, &len));
+      assert(len == 10 && !memcmp(bytes, witnesses[i].bytes, len));
+   }
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 1, 0, false,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 256, false,
+      AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
+      AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, true,
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
 }
 
 static void
@@ -1053,8 +1093,10 @@ test_modified_minifloat_add(void)
                      assert((((bits >> 45) & 7) | (((bits >> 61) & 7) << 3)) == wait);
                      ++shapes;
                   }
-   assert(!agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3C, 0, 0, 0x80,
-                                     false, true, 0, 0, out, &len));
+   const uint8_t gpu1_sat[] = {0x09,0x01,0x14,0x81,0x01,0x02,0x00,0x02};
+   assert(agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3C, 0, 0, 0x80,
+                                    false, true, 0, 0, out, &len));
+   assert(len == sizeof(gpu1_sat) && !memcmp(out, gpu1_sat, len));
    assert(!agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3B, 1, 0, 0x80,
                                      false, true, 0, 0, out, &len));
    assert(!agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3B, 0, 1, 0x80,
@@ -3768,6 +3810,27 @@ static void test_native_high_float_registers(void)
    puts("Native full-bank FMUL/FMA:16 exact high-register/lifetime/wait vectors PASS");
 }
 
+static void test_gpu1_modified_add(void)
+{
+   const uint8_t expected[4][8] = {
+      {0x09,0x05,0x1c,0x81,0x01,0x02,0x00,0x02},
+      {0xf9,0xbd,0x54,0x81,0x01,0x33,0x00,0x82},
+      {0x09,0xa1,0x14,0x05,0x81,0x00,0x00,0x02},
+      {0x09,0xb1,0x14,0x05,0x80,0x08},
+   };
+   const uint16_t immediates[] = {0x80, 0x80, 0x20, 0x30};
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < 4; ++i) {
+      assert(agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3C,
+         i == 1 ? 190 : 0, i == 1 ? 188 : 4, immediates[i],
+         i == 3, i != 3, i == 1 ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD,
+         i == 1 ? 0x21 : 0, out, &len));
+      assert(len == (i == 3 ? 6 : 8) && !memcmp(out, expected[i], len));
+   }
+   assert(!agx3_alu_fadd_minifloat_mod(AGX_ISA_ENCODING_AGX3C,
+      0, 4, 0x80, false, true, AGX3_ALU_HINT_NONE, 0x40, out, &len));
+}
+
 static void test_gpu1_float_compare_select(void)
 {
    /* Native GPU1 fseli32.ep4 composer vectors: gears' 0 < x ? y : 0,
@@ -3807,6 +3870,8 @@ static void test_gpu1_float_compare_select(void)
 }
 
 int main(void){
+   test_gpu1_popcount();
+   test_gpu1_modified_add();
    test_gpu1_float_compare_select();
    test_native_popcount();
    test_native_minifloat_half_select();
