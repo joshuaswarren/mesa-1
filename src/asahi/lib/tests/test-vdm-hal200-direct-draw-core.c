@@ -239,6 +239,24 @@ check_native_indirect(void)
    assert(emitted == sizeof(nonindexed_expected));
    assert(!memcmp(stream, nonindexed_expected, emitted));
 
+   /* Hardware uses the full user-heap VA in this field. In particular, the
+    * 0x10_0000_0000 render-context base must not be subtracted as it is for
+    * PPP and VDM stream-link pointers. This is the exact address shape that
+    * exposed the regression in queued mixed direct/indirect rendering. */
+   const struct agx_vdm_hal200_indirect_draw_fields user_heap = {
+      .draw_state_context_offset = 0x48000,
+      .primitive = 6,
+      .indirect_buffer = UINT64_C(0x5ffdee0040),
+   };
+   static const uint32_t user_heap_expected[] = {
+      0x00048000, 0x64040600, 0x0000005f, 0xfdee0040,
+   };
+   assert(agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &user_heap,
+                                             &packed));
+   assert(packed.length == sizeof(user_heap_expected));
+   assert(!memcmp(packed.bytes, user_heap_expected,
+                  sizeof(user_heap_expected)));
+
    struct agx_vdm_hal200_indirect_draw_fields bad = indexed;
    bad.draw_state_context_offset |= 1;
    assert(!agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &bad, &packed));

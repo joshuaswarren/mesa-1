@@ -5891,22 +5891,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
-            /* G17P resolves the indirect-argument address in an Index List
-             * relative to the render-context base. Passing the main-heap VA
-             * verbatim makes hardware add 0x1000000000 a second time. This
-             * becomes visible when an indirect draw follows a direct draw in
-             * one stream. Index-buffer addresses use their separate native
-             * 48-bit absolute field and remain unchanged. */
-            const uint64_t indirect_buffer =
-               agx_is_indirect(draw.b)
-                  ? hk_g17p_vdm_compact(cmd, draw.b.ptr)
-                  : 0;
-            if (agx_is_indirect(draw.b) && !indirect_buffer) {
-               vk_command_buffer_set_error(&cmd->vk,
-                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
-               return;
-            }
-
             /* This context-relative PPP record selects the latest scissor
              * and depth-bias array entries. Header0x100 is PPP selector bit8,
              * not a direct-draw shape; +4 contains indices, not enable flags.
@@ -5941,7 +5925,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                       : 0,
                   .index_buffer = draw.index_buffer,
                   .index_buffer_range_B = draw.index_buffer_range_B,
-                  .indirect_buffer = indirect_buffer,
+                  /* Unlike PPP and stream-link pointers, the Index List
+                   * indirect-argument pointer is a native absolute 48-bit VA.
+                   * Compacting it by the render-context base makes hardware
+                   * read an unmapped address and silently skip the draw. */
+                  .indirect_buffer = draw.b.ptr,
                };
                struct agx_vdm_hal200_indirect_draw encoded;
                if (!agx_vdm_hal200_indirect_draw_pack(dev->dev.chip, &fields,
