@@ -1776,7 +1776,11 @@ dri_swrast_kms_init_screen(struct dri_screen *screen, bool driver_name_is_inferr
    struct pipe_screen *pscreen = NULL;
    screen->can_share_buffer = false;
 
-#if defined(HAVE_DRISW_KMS) && defined(HAVE_SWRAST)
+   /* The KMS winsys is also used by Zink on display-only devices. Keep the
+    * display fd even when this build has no software rasterizer: falling back
+    * to a window-system-only winsys loses the GEM namespace for GBM handles.
+    */
+#if defined(HAVE_DRISW_KMS) && (defined(HAVE_SWRAST) || defined(HAVE_ZINK))
    if (pipe_loader_sw_probe_kms(&screen->dev, screen->fd))
       pscreen = pipe_loader_create_screen(screen->dev, driver_name_is_inferred);
 #endif
