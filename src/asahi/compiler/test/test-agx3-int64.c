@@ -178,14 +178,47 @@ check_g17p_strength_reduced_mul(void)
    return true;
 }
 
+static bool
+check_g17g_add64(void)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "M5 full-width address addition");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *input = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *output = nir_load_preamble(&b, 1, 64, .base = 4);
+   nir_def *x = nir_load_global(&b, 1, 64, input, .align_mul = 8);
+   nir_def *y = nir_load_global(
+      &b, 1, 64, nir_iadd_imm(&b, input, 8), .align_mul = 8);
+   nir_store_global(&b, nir_iadd(&b, x, y), output, .align_mul = 8);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+      .reserved_preamble = 8,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary &&
+      part.info.binary_size > sizeof(end) && part.info.scratch_size == 0 &&
+      !memcmp((uint8_t *)part.binary + part.info.binary_size - sizeof(end),
+              end, sizeof(end)) && b.shader->options == &agx_nir_options;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
 int
 main(void)
 {
    if (!check_host_oracle() || !check_g17p_compile() ||
-       !check_g17p_strength_reduced_mul())
+       !check_g17p_strength_reduced_mul() || !check_g17g_add64())
       return 1;
 
    puts("agx3_int64: arithmetic, dynamic shifts and strength-reduced "
-        "multiplies compile for G17P");
+        "multiplies compile for G17P; full-width addition compiles for M5");
    return 0;
 }

@@ -6164,6 +6164,13 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
        * optimization rather than present in the source. */
       if (source_imul64)
          NIR_PASS(_, nir, agx_nir_lower_imul64);
+   } else if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C && source_iadd64) {
+      /* M5's generated geometry shaders also add full-width addresses.
+       * Apple G17G ulong addition uses low/add, carry and high/add; keep
+       * that lowering local instead of reaching an ungrounded IADD64. */
+      agx3_options = *original_options;
+      agx3_options.lower_int64_options |= nir_lower_iadd64;
+      nir->options = &agx3_options;
    }
 
    agx_optimize_nir(
@@ -6178,7 +6185,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p && source_imul64)
       NIR_PASS(_, nir, agx_nir_lower_imul64);
 
-   if (is_g17p)
+   if (is_agx3)
       nir->options = original_options;
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
