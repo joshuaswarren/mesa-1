@@ -73,8 +73,10 @@ main(void)
    }
 
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
-    * copy-image launch per slice.  If this precompiled entry disappears,
-    * Honeykrisp falls back to a command recording failure.  Pin its launch ABI
+    * copy-image launch per slice. Its native 2D grid avoids a quotient and
+    * remainder per element, trimming the binary from 4,056 to 3,798 bytes and
+    * register use from 28 to 26 GPRs. If this precompiled entry disappears,
+    * Honeykrisp falls back to a command recording failure. Pin its launch ABI
     * and complete generated binary so the fast path cannot silently drift
     * while the inventory test stays green. */
    const uint32_t *copy_image_blob =
@@ -89,9 +91,9 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 4056);
-   CHECK(copy_image_info->binary_size == 4056);
-   CHECK(copy_image_info->nr_gprs == 28);
+   CHECK(copy_image_info->main_size == 3798);
+   CHECK(copy_image_info->binary_size == 3798);
+   CHECK(copy_image_info->nr_gprs == 26);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 42);
    CHECK(copy_image_info->workgroup_size[0] == 32);
@@ -103,7 +105,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x3c9abc0bfdcf59e5));
+         UINT64_C(0x8a29ec092b4140ea));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);

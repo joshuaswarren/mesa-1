@@ -80,8 +80,8 @@ libagx_detile(global uint8_t *dest, global uint8_t *src,
  * 16-byte BC block is copied to or from one 16-byte RGBA32 pixel.
  *
  * CPU command recording validates every rectangle against the logical image
- * or placed footprint before this kernel is dispatched.  The id guard is a
- * second line of defence against an over-wide launch.
+ * or placed footprint before this kernel is dispatched.  The coordinate
+ * guard is a second line of defence against an over-wide launch.
  */
 static uint
 libagx_copy_image_offset(uint x, uint y, uint pitch_B, uint stride_el,
@@ -112,12 +112,11 @@ libagx_copy_image(global uint8_t *dest, global uint8_t *src,
                   uint src_tile_width_el, uint src_tile_height_el,
                   uint blocksize_B, uint dest_tiled, uint src_tiled)
 {
-   uint id = cl_global_id.x;
-   if (id >= width_el * height_el)
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= width_el || y >= height_el)
       return;
 
-   uint x = id % width_el;
-   uint y = id / width_el;
    uint dest_offset_B = libagx_copy_image_offset(
       dest_x_el + x, dest_y_el + y, dest_pitch_B, dest_stride_el,
       dest_tile_width_el, dest_tile_height_el, blocksize_B, dest_tiled);

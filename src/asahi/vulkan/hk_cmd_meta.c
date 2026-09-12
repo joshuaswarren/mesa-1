@@ -2062,7 +2062,7 @@ hk_g17p_copy_uncompressed_buffer_to_image(
           * transfer barrier supplies ordering before mip generation or
           * sampling, so do not serialize the upload batch itself. */
          libagx_copy_image_struct(
-            cmd, agx_1d(plan.width_el * plan.height_el), AGX_BARRIER_NONE,
+            cmd, agx_2d(plan.width_el, plan.height_el), AGX_BARRIER_NONE,
             args);
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
@@ -2148,7 +2148,7 @@ hk_g17p_copy_compressed_buffer_to_image(
           * loading. Keep the same weak inter-dispatch barrier as that path;
           * slices are independent. */
          libagx_copy_image_struct(
-            cmd, agx_1d(plan.blocks_x * plan.blocks_y), AGX_BARRIER_NONE,
+            cmd, agx_2d(plan.blocks_x, plan.blocks_y), AGX_BARRIER_NONE,
             args);
          if (vk_command_buffer_has_error(&cmd->vk))
             return true;
@@ -2230,7 +2230,7 @@ hk_g17p_copy_compressed_image_to_buffer(
          args.src = base_src + ail_get_layer_level_B(layout, src_slice, level);
 
          libagx_copy_image_struct(
-            cmd, agx_1d(plan.blocks_x * plan.blocks_y), AGX_BARRIER_NONE,
+            cmd, agx_2d(plan.blocks_x, plan.blocks_y), AGX_BARRIER_NONE,
             args);
          if (vk_command_buffer_has_error(&cmd->vk))
             return true;
