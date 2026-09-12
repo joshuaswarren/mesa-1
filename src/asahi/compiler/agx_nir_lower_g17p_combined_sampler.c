@@ -548,13 +548,17 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
     * uses -- refused the whole shader.
     */
    /* Admit exactly the dimensions agx3_emit_texture_fetch() encodes for an
-    * image load: 2D, 2D array and 3D.  Cube is genuinely not in that set, and
-    * multisample is excluded by the constant-zero sample index below.  The
-    * array and 3D coordinate staging is the same already-witnessed code the
-    * texture path uses; the predicate was narrower than the encoder. */
+    * image load: 2D, 2D array and 3D. Vulkan storage cube views are packed as
+    * 2D-array descriptors by hk_image_view, and agx_emit_image_load() already
+    * maps both cube forms onto AGX_DIM_2D_ARRAY. They therefore use the same
+    * qualified fetch as an ordinary array image; rejecting the original NIR
+    * dimension here only leaves its unencodable software descriptor handle in
+    * place. Multisample remains excluded by the constant-zero sample index
+    * below. */
    const enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
    if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
        !(image_dim == GLSL_SAMPLER_DIM_2D ||
+         image_dim == GLSL_SAMPLER_DIM_CUBE ||
          (image_dim == GLSL_SAMPLER_DIM_3D &&
           !nir_intrinsic_image_array(intr))) ||
        intr->def.num_components != 4 || intr->def.bit_size != 32 ||

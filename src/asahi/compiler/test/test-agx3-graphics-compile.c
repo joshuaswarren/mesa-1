@@ -1834,10 +1834,11 @@ test_indexed_storage_image_read(void)
     * metal-nt -arch applegpu_g17p emits byte-identical code for
     * texture2d<float>, texture2d<uint> and texture2d<int> read(), so the
     * component type is in the descriptor.  3D and 2D array are dimensions the
-    * same encoder already takes.  4 and 5 keep the negative coverage on what
-    * really is outside the set: a coherent access and a cube. */
-   for (unsigned mode = 0; mode < 6; ++mode) {
-      const bool expect_lowered = mode != 2 && mode != 5;
+    * same encoder already takes. Storage cube and cube-array descriptors are
+    * also 2D arrays, matching agx_emit_image_load()'s existing dimension
+    * transform. Mode 2 keeps the negative coverage on coherent access. */
+   for (unsigned mode = 0; mode < 7; ++mode) {
+      const bool expect_lowered = mode != 2;
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options,
          "indexed read-only storage image");
@@ -1858,10 +1859,10 @@ test_indexed_storage_image_read(void)
                                 zero, zero);
       nir_def *value = nir_bindless_image_load(
          &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
-         .image_dim = mode == 3   ? GLSL_SAMPLER_DIM_3D
-                      : mode == 5 ? GLSL_SAMPLER_DIM_CUBE
-                                  : GLSL_SAMPLER_DIM_2D,
-         .image_array = mode == 4,
+         .image_dim = mode == 3     ? GLSL_SAMPLER_DIM_3D
+                      : mode >= 5   ? GLSL_SAMPLER_DIM_CUBE
+                                    : GLSL_SAMPLER_DIM_2D,
+         .image_array = mode == 4 || mode == 6,
          .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
                              : PIPE_FORMAT_R8G8B8A8_UNORM,
          .access = ACCESS_RESTRICT | ACCESS_NON_WRITEABLE |
