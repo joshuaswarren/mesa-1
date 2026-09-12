@@ -545,11 +545,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
          suite : ['asahi', 'g17p-batching'], timeout : 30)
   endforeach
 
-  # Minimal reproduction for the G17P context-relative indirect-argument
+  # Minimal reproduction for the native absolute G17P indirect-argument
   # pointer: one direct draw followed by one non-indexed indirect draw in the
-  # same stream. The strict validator adds the render-context base
-  # unconditionally, so the old raw full VA resolves to an unowned rebased
-  # address while the compact offset resolves to the recorded argument BO.
+  # same stream. The strict validator must check the encoded VA directly;
+  # rebasing it as a compact PPP/stream-link payload rejects the owned BO.
   indirect_address_env = environment(g17p_image_copy_3d_environment)
   indirect_address_env.set('G17P_REPEAT_DRAW_COUNT', '2')
   indirect_address_env.set('G17P_REPEAT_INDIRECT', '2')

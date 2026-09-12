@@ -1231,11 +1231,9 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          return true;
 
       case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_NONINDEXED: {
-         uint64_t indirect_buffer;
-         if (!agx_g17p_vdm_payload_expand(
-                record.data.index_list_indirect_nonindexed.indirect_buffer,
-                16, &indirect_buffer) ||
-             !have_state || restart_seen ||
+         const uint64_t indirect_buffer =
+            record.data.index_list_indirect_nonindexed.indirect_buffer;
+         if (!have_state || restart_seen ||
              !memory->owned(memory->data, indirect_buffer, 16))
             return fail_at(cursor, "indirect draw arguments are not owned");
          local.draws++;
@@ -1252,11 +1250,8 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             &record.data.index_list_indirect_indexed;
          const size_t index_range =
             ((size_t)draw->index_buffer_size_word + 1) * 4;
-         uint64_t indirect_buffer;
-         if (!agx_g17p_vdm_payload_expand(draw->indirect_buffer, 20,
-                                          &indirect_buffer) ||
-             !have_state || restart_seen ||
-             !memory->owned(memory->data, indirect_buffer, 20) ||
+         if (!have_state || restart_seen ||
+             !memory->owned(memory->data, draw->indirect_buffer, 20) ||
              !memory->owned(memory->data, draw->index_buffer, index_range))
             return fail_at(cursor,
                            "indexed-indirect buffers are not owned");
