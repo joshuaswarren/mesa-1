@@ -30,6 +30,7 @@
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/simple_mtx.h"
+#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
 #include "layout.h"
@@ -630,6 +631,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
 
+   dev->g17p_compute_program_cache.report_stats =
+      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
+
    /* Precompile an empty fragment shader that can be used to handle API-level
     * null fragment shaders. We do this at device-time to make binds cheap.
     * Regardless, compiling this shader should be fast.
@@ -668,6 +672,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_meta:
    hk_device_finish_meta(dev);
+   hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
@@ -714,6 +719,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);

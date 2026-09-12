@@ -24,11 +24,153 @@
 #include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "util/log.h"
-#include "util/u_debug.h"
+#include "util/u_atomic.h"
 #include "pool.h"
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+struct hk_g17p_compute_program_cache_key {
+   uint32_t libagx_program;
+   uint32_t data_size;
+   uint64_t shader_va;
+   uint32_t shader_binary_size;
+   uint32_t scratch_size;
+   uint32_t compiler_d;
+   uint32_t threadgroup_memory_size_B;
+   uint16_t nr_gprs;
+   uint16_t range_start_halfs;
+   uint16_t range_size_halfs;
+   bool compiler_d_valid;
+   enum agx_ioto_g17p_compute_ldshdr_f1 kind;
+   struct agx3_cdm_direct_template_sources launch_sources;
+};
+
+struct hk_g17p_compute_program_cache_entry {
+   struct hk_g17p_compute_program_cache_entry *next;
+   struct hk_g17p_compute_program_cache_key key;
+   struct agx3_ioto_uniform_range range;
+   struct hk_agx3_g17p_compute_program program;
+};
+
+void
+hk_g17p_compute_program_cache_finish(struct hk_device *dev)
+{
+   if (dev->g17p_compute_program_cache.report_stats &&
+       (dev->g17p_compute_program_cache.hits ||
+        dev->g17p_compute_program_cache.misses)) {
+      fprintf(stderr,
+              "G17P compute program cache: hits=%" PRIu64
+              " misses=%" PRIu64 " hit-rate=%.1f%%\n",
+              dev->g17p_compute_program_cache.hits,
+              dev->g17p_compute_program_cache.misses,
+              100.0 * dev->g17p_compute_program_cache.hits /
+                 (dev->g17p_compute_program_cache.hits +
+                  dev->g17p_compute_program_cache.misses));
+   }
+
+   for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
+      struct hk_g17p_compute_program_cache_entry *entry =
+         p_atomic_read(&dev->g17p_compute_program_cache.templates[i]);
+      while (entry) {
+         struct hk_g17p_compute_program_cache_entry *next = entry->next;
+         free(entry);
+         entry = next;
+      }
+      dev->g17p_compute_program_cache.templates[i] = NULL;
+   }
+}
+
+static bool
+hk_g17p_compute_program_cache_key_equal(
+   const struct hk_g17p_compute_program_cache_key *a,
+   const struct hk_g17p_compute_program_cache_key *b)
+{
+   return a->libagx_program == b->libagx_program &&
+          a->data_size == b->data_size && a->shader_va == b->shader_va &&
+          a->shader_binary_size == b->shader_binary_size &&
+          a->scratch_size == b->scratch_size &&
+          a->compiler_d == b->compiler_d &&
+          a->threadgroup_memory_size_B == b->threadgroup_memory_size_B &&
+          a->nr_gprs == b->nr_gprs &&
+          a->range_start_halfs == b->range_start_halfs &&
+          a->range_size_halfs == b->range_size_halfs &&
+          a->compiler_d_valid == b->compiler_d_valid && a->kind == b->kind &&
+          a->launch_sources.max_total_threads_per_threadgroup ==
+             b->launch_sources.max_total_threads_per_threadgroup &&
+          a->launch_sources.extended_texture_write_mask_qword_1 ==
+             b->launch_sources.extended_texture_write_mask_qword_1 &&
+          a->launch_sources.ray_traversal_depth_nonzero ==
+             b->launch_sources.ray_traversal_depth_nonzero;
+}
+
+static bool
+hk_g17p_compute_program_cache_lookup(
+   struct hk_device *dev,
+   const struct hk_g17p_compute_program_cache_key *key,
+   const struct hk_agx3_g17p_compute_program_desc *desc,
+   void *program_map, size_t program_capacity,
+   struct hk_agx3_g17p_compute_program *program)
+{
+   if (key->libagx_program >= LIBAGX_NUM_PROGRAMS)
+      return false;
+
+   struct hk_g17p_compute_program_cache_entry *entry = p_atomic_read(
+      &dev->g17p_compute_program_cache.templates[key->libagx_program]);
+   for (; entry; entry = entry->next) {
+      if (hk_g17p_compute_program_cache_key_equal(&entry->key, key) &&
+          hk_agx3_g17p_compute_program_relocate_single_range_to(
+             AGX_CHIP_G17P, desc, &entry->range, &entry->program,
+             program_map, program_capacity, &program->length,
+             &program->launch)) {
+         if (dev->g17p_compute_program_cache.report_stats)
+            p_atomic_inc(&dev->g17p_compute_program_cache.hits);
+         return true;
+      }
+   }
+   return false;
+}
+
+static void
+hk_g17p_compute_program_cache_store(
+   struct hk_device *dev,
+   const struct hk_g17p_compute_program_cache_key *key,
+   const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct hk_agx3_g17p_compute_program *program)
+{
+   struct hk_g17p_compute_program_cache_entry *candidate =
+      malloc(sizeof(*candidate));
+   if (!candidate)
+      return;
+
+   candidate->key = *key;
+   candidate->range = desc->uniform_ranges[0];
+   candidate->program = *program;
+
+   if (dev->g17p_compute_program_cache.report_stats)
+      p_atomic_inc(&dev->g17p_compute_program_cache.misses);
+
+   void **head =
+      &dev->g17p_compute_program_cache.templates[key->libagx_program];
+   while (true) {
+      struct hk_g17p_compute_program_cache_entry *entry = p_atomic_read(head);
+      for (struct hk_g17p_compute_program_cache_entry *it = entry; it;
+           it = it->next) {
+         struct hk_agx3_g17p_compute_program relocated;
+         if (hk_g17p_compute_program_cache_key_equal(&it->key, key) &&
+             hk_agx3_g17p_compute_program_relocate_single_range(
+                AGX_CHIP_G17P, desc, &it->range, &it->program, &relocated)) {
+            free(candidate);
+            return;
+         }
+      }
+
+      candidate->next = entry;
+      if (p_atomic_cmpxchg_ptr(head, entry, candidate) == entry)
+         return;
+   }
+}
 
 void
 hk_cmd_buffer_begin_compute(struct hk_cmd_buffer *cmd,
@@ -391,7 +533,8 @@ hk_g17p_compute_uniform_ranges(
  */
 static bool
 hk_g17p_build_compute_program_raw(
-   struct hk_cmd_buffer *cmd, uint64_t shader_va,
+   struct hk_cmd_buffer *cmd, uint32_t cache_program, uint32_t cache_data_size,
+   uint64_t shader_va,
    uint32_t shader_binary_size, uint32_t scratch_size, uint16_t nr_gprs,
    bool compiler_d_valid, uint32_t compiler_d,
    uint32_t threadgroup_memory_size_B,
@@ -459,12 +602,50 @@ hk_g17p_build_compute_program_raw(
       .launch_sources = *launch_sources,
       .ldshdr_f1 = kind,
    };
-   if (!hk_agx3_g17p_compute_program_generate(dev->dev.chip, &desc, out)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-      return false;
+
+   /* STK reaches this through hk_dispatch_precomp_g17p: vk_meta reuses the
+    * libagx shader, but every upload has a fresh argument allocation. Cache
+    * the one-range structural program on the device (the same lifetime as
+    * bg_eot) and patch only that address and the local launch pointer. */
+   const bool cacheable =
+      cache_program != UINT32_MAX && range_count == 1 &&
+      ranges[0].size_halfs > 0 && ranges[0].size_halfs <= 128 &&
+      !(ranges[0].start_halfs & 1) && !(ranges[0].size_halfs & 1) &&
+      !(ranges[0].address & 3);
+   struct hk_g17p_compute_program_cache_key cache_key;
+   bool cache_hit = false;
+   if (cacheable) {
+      cache_key = (struct hk_g17p_compute_program_cache_key){
+         .libagx_program = cache_program,
+         .data_size = cache_data_size,
+         .shader_va = shader_va,
+         .shader_binary_size = shader_binary_size,
+         .scratch_size = scratch_size,
+         .compiler_d = compiler_d,
+         .threadgroup_memory_size_B = threadgroup_memory_size_B,
+         .nr_gprs = nr_gprs,
+         .range_start_halfs = ranges[0].start_halfs,
+         .range_size_halfs = ranges[0].size_halfs,
+         .compiler_d_valid = compiler_d_valid,
+         .kind = kind,
+         .launch_sources = *launch_sources,
+      };
+      cache_hit = hk_g17p_compute_program_cache_lookup(
+         dev, &cache_key, &desc, program_map,
+         HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, out);
    }
 
-   memcpy(program_map, out->bytes, out->length);
+   if (!cache_hit) {
+      if (!hk_agx3_g17p_compute_program_generate(dev->dev.chip, &desc, out)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return false;
+      }
+      if (cacheable)
+         hk_g17p_compute_program_cache_store(dev, &cache_key, &desc, out);
+   }
+
+   if (!cache_hit)
+      memcpy(program_map, out->bytes, out->length);
 
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, out->length);
@@ -519,7 +700,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       hk_cmd_buffer_retain_bo(cmd, s->bo);
 
    const bool ok = hk_g17p_build_compute_program_raw(
-      cmd, linked->b.bo->va->addr + linked->b.entry_offset, linked->b.size,
+      cmd, UINT32_MAX, 0,
+      linked->b.bo->va->addr + linked->b.entry_offset, linked->b.size,
       linked->b.scratch_size, linked->b.nr_gprs,
       s->b.info.agx3_staging_known,
       (uint32_t)s->b.info.agx3_staging_halfs * 2,
@@ -584,7 +766,9 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    uint64_t program_va;
    struct hk_agx3_g17p_compute_program program;
    if (!hk_g17p_build_compute_program_raw(
-          cmd, prog->ptr + prog->entry_offset, prog->info.main_size, 0,
+          cmd, (uint32_t)idx, (uint32_t)data_size,
+          prog->ptr + prog->entry_offset,
+          prog->info.main_size, 0,
           prog->info.nr_gprs, true,
           (uint32_t)prog->info.agx3_staging_halfs * 2, 0, &launch_sources,
           AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3, "precompiled", &range,

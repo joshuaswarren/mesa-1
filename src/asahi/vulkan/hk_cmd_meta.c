@@ -1819,23 +1819,42 @@ hk_g17p_copy_compressed_buffer_to_image(
          hk_buffer_address_ro(buffer, region->bufferOffset);
       const uint64_t base_dst = hk_image_base_address(image, 0);
 
+      const struct ail_layout *layout = &image->planes[0].layout;
+      const struct ail_tile tile = layout->tilesize_el[level];
+      const struct libagx_copy_image_args args_template = {
+         .width_el = plan.blocks_x,
+         .height_el = plan.blocks_y,
+         .dest_x_el = plan.base_x_el,
+         .dest_y_el = plan.base_y_el,
+         .src_pitch_B = plan.buffer_row_stride_B,
+         .dest_stride_el = layout->stride_el[level],
+         .src_stride_el = plan.buffer_row_stride_B / plan.block_size_B,
+         .dest_tile_width_el = tile.width_el,
+         .dest_tile_height_el = tile.height_el,
+         .src_tile_width_el = 1,
+         .src_tile_height_el = 1,
+         .blocksize_B = plan.block_size_B,
+         .dest_tiled = true,
+         .src_tiled = false,
+      };
+
       for (uint32_t slice = 0; slice < plan.slice_count; ++slice) {
          const uint32_t dst_slice = plan.first_slice + slice;
-         for (uint32_t by = 0; by < plan.blocks_y; ++by) {
-            for (uint32_t bx = 0; bx < plan.blocks_x; ++bx) {
-               const uint64_t src = base_src +
-                                    slice * plan.buffer_slice_stride_B +
-                                    by * plan.buffer_row_stride_B +
-                                    bx * plan.block_size_B;
-               const uint64_t dst = base_dst + ail_get_tiled_element_B(
-                  &image->planes[0].layout, level, plan.base_x_el + bx,
-                  plan.base_y_el + by, dst_slice);
-               vk_meta_copy_buffer_addresses(&cmd->vk, &dev->meta, src, dst,
-                                             plan.block_size_B);
-               if (vk_command_buffer_has_error(&cmd->vk))
-                  return true;
-            }
-         }
+         struct libagx_copy_image_args args = args_template;
+         args.dest = base_dst + ail_get_layer_level_B(layout, dst_slice, level);
+         args.src = base_src + slice * plan.buffer_slice_stride_B;
+
+         /* One precompiled kernel walks the complete rectangle in AIL's
+          * Morton order. The former nested loop dispatched a separate generic
+          * vk_meta copy for every 8- or 16-byte compressed block, repeatedly
+          * rebuilding and uploading the same Ioto program during STK texture
+          * loading. Keep the same weak inter-dispatch barrier as that path;
+          * slices are independent. */
+         libagx_copy_image_struct(
+            cmd, agx_1d(plan.blocks_x * plan.blocks_y), AGX_BARRIER_NONE,
+            args);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return true;
       }
    }
 
@@ -1888,23 +1907,36 @@ hk_g17p_copy_compressed_image_to_buffer(
       const uint64_t base_dst =
          hk_buffer_address_rw(buffer, region->bufferOffset);
 
+      const struct ail_layout *layout = &image->planes[0].layout;
+      const struct ail_tile tile = layout->tilesize_el[level];
+      const struct libagx_copy_image_args args_template = {
+         .width_el = plan.blocks_x,
+         .height_el = plan.blocks_y,
+         .src_x_el = plan.base_x_el,
+         .src_y_el = plan.base_y_el,
+         .dest_pitch_B = plan.buffer_row_stride_B,
+         .dest_stride_el = plan.buffer_row_stride_B / plan.block_size_B,
+         .src_stride_el = layout->stride_el[level],
+         .dest_tile_width_el = 1,
+         .dest_tile_height_el = 1,
+         .src_tile_width_el = tile.width_el,
+         .src_tile_height_el = tile.height_el,
+         .blocksize_B = plan.block_size_B,
+         .dest_tiled = false,
+         .src_tiled = true,
+      };
+
       for (uint32_t slice = 0; slice < plan.slice_count; ++slice) {
          const uint32_t src_slice = plan.first_slice + slice;
-         for (uint32_t by = 0; by < plan.blocks_y; ++by) {
-            for (uint32_t bx = 0; bx < plan.blocks_x; ++bx) {
-               const uint64_t src = base_src + ail_get_tiled_element_B(
-                  &image->planes[0].layout, level, plan.base_x_el + bx,
-                  plan.base_y_el + by, src_slice);
-               const uint64_t dst = base_dst +
-                                    slice * plan.buffer_slice_stride_B +
-                                    by * plan.buffer_row_stride_B +
-                                    bx * plan.block_size_B;
-               vk_meta_copy_buffer_addresses(&cmd->vk, &dev->meta, src, dst,
-                                             plan.block_size_B);
-               if (vk_command_buffer_has_error(&cmd->vk))
-                  return true;
-            }
-         }
+         struct libagx_copy_image_args args = args_template;
+         args.dest = base_dst + slice * plan.buffer_slice_stride_B;
+         args.src = base_src + ail_get_layer_level_B(layout, src_slice, level);
+
+         libagx_copy_image_struct(
+            cmd, agx_1d(plan.blocks_x * plan.blocks_y), AGX_BARRIER_NONE,
+            args);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return true;
       }
    }
 

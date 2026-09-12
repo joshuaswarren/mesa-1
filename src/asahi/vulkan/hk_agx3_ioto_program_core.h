@@ -327,6 +327,25 @@ bool hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program);
 
+/* Reuse a generated one-range program by replacing its sole absolute range
+ * address and rebinding the command-buffer-local program VA. The template is
+ * accepted only while the load schedule is provably unchanged. */
+bool hk_agx3_g17p_compute_program_relocate_single_range(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   struct hk_agx3_g17p_compute_program *program);
+
+/* Relocate directly into the caller's executable allocation. This is the
+ * recording fast path: unlike the convenience wrapper above, it does not
+ * materialize another maximum-size program object before the upload. */
+bool hk_agx3_g17p_compute_program_relocate_single_range_to(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   void *program_bytes, size_t capacity, uint16_t *program_length,
+   struct agx3_compute_program *launch);
+
 bool hk_agx3_g17p_native_compute_dispatch_append(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid,

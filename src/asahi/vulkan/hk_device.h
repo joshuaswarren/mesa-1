@@ -88,6 +88,15 @@ struct hk_device {
    simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
 
+   /* Device-lifetime templates for precompiled G17P meta compute programs.
+    * The libagx programs and their executable BOs have the same lifetime. */
+   struct {
+      void *templates[LIBAGX_NUM_PROGRAMS];
+      bool report_stats;
+      uint64_t hits;
+      uint64_t misses;
+   } g17p_compute_program_cache;
+
    struct {
       struct agx_bo *bo;
       uint64_t heap;
@@ -145,6 +154,8 @@ struct hk_device {
       struct util_dynarray counts;
    } external_bos;
 };
+
+void hk_g17p_compute_program_cache_finish(struct hk_device *dev);
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 

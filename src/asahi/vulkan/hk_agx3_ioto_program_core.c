@@ -678,6 +678,93 @@ hk_agx3_g17p_compute_program_generate(
 }
 
 bool
+hk_agx3_g17p_compute_program_relocate_single_range_to(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   void *program_bytes, size_t capacity, uint16_t *program_length,
+   struct agx3_compute_program *launch_out)
+{
+   /* Up to 128 halves fit in one GPU0 allocator round. Consequently a single
+    * range materializes its absolute base exactly once at the start of the
+    * program; later chunks use bounded byte offsets from that same base. */
+   if (chip != AGX_CHIP_G17P || !desc || !template_range ||
+       !template_program || !program_bytes || !program_length || !launch_out ||
+       desc->uniform_range_count != 1 || !desc->uniform_ranges ||
+       desc->uniform_ranges[0].size_halfs == 0 ||
+       desc->uniform_ranges[0].size_halfs > 128 ||
+       desc->uniform_ranges[0].start_halfs != template_range->start_halfs ||
+       desc->uniform_ranges[0].size_halfs != template_range->size_halfs ||
+       (desc->uniform_ranges[0].start_halfs & 1) ||
+       (desc->uniform_ranges[0].size_halfs & 1) ||
+       (desc->uniform_ranges[0].address & 3) ||
+       (template_range->address & 3) ||
+       template_program->length == 0 ||
+       template_program->length > sizeof(template_program->bytes) ||
+       template_program->length > capacity)
+      return false;
+
+   uint8_t old_low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t old_high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t new_low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t new_high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t old_low_len, old_high_len, new_low_len, new_high_len;
+   const uint64_t target_address = desc->uniform_ranges[0].address;
+   if (!agx_ioto_load_pack_ldimm(chip, 0,
+                                 (uint32_t)template_range->address,
+                                 old_low, &old_low_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 2,
+                                 (uint32_t)(template_range->address >> 32),
+                                 old_high, &old_high_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 0, (uint32_t)target_address,
+                                 new_low, &new_low_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 2,
+                                 (uint32_t)(target_address >> 32),
+                                 new_high, &new_high_len) ||
+       old_low_len != new_low_len || old_high_len != new_high_len ||
+       (size_t)old_low_len + old_high_len > template_program->length ||
+       memcmp(template_program->bytes, old_low, old_low_len) ||
+       memcmp(template_program->bytes + old_low_len, old_high,
+              old_high_len))
+      return false;
+
+   const struct agx3_g17p_native_compute_program_desc launch_desc = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .launch_sources = desc->launch_sources,
+   };
+   struct agx3_compute_program launch;
+   if (!agx3_g17p_native_compute_program_bind(&launch_desc, &launch))
+      return false;
+
+   /* Everything that can fail has been checked. Copy only the live program,
+    * not the 6 KiB maximum-size backing array. The old staging assignment
+    * cleared and copied that whole array on every meta-copy dispatch, turning
+    * a two-record address relocation into about 12 KiB of memory traffic. */
+   memcpy(program_bytes, template_program->bytes, template_program->length);
+   memcpy(program_bytes, new_low, new_low_len);
+   memcpy((uint8_t *)program_bytes + new_low_len, new_high, new_high_len);
+   *program_length = template_program->length;
+   *launch_out = launch;
+   return true;
+}
+
+bool
+hk_agx3_g17p_compute_program_relocate_single_range(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   struct hk_agx3_g17p_compute_program *program)
+{
+   if (!program)
+      return false;
+
+   return hk_agx3_g17p_compute_program_relocate_single_range_to(
+      chip, desc, template_range, template_program, program->bytes,
+      sizeof(program->bytes), &program->length, &program->launch);
+}
+
+bool
 hk_agx3_g17p_native_compute_dispatch_append(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid,
