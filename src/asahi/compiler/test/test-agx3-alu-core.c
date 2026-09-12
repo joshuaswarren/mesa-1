@@ -1856,6 +1856,38 @@ static void test_native_asr32(void)
       exact(bytes,length,golden[n][live]);
    }
    puts("Native ASR32:6 exact Apple immediate/live/dead vectors PASS");
+   /* Independent M5 native-composer vectors. The first discarded-source
+    * case is Xorg glamor's vertex-ID shift before integer-to-float conversion.
+    * Also cover retained sources, cached destinations, waits and high regs. */
+   const struct {
+      uint16_t dest, source;
+      unsigned shift;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *bytes;
+   } m5[] = {
+      {0,0,1,AGX3_ALU_HINT_DISCARD,false,0,"2700001a2600a30278804000"},
+      {0,0,31,AGX3_ALU_HINT_NONE,false,0,"2700001a2200a302f8874000"},
+      {4,6,7,AGX3_ALU_HINT_NONE,true,32,"2702003a2a00a38af8814000"},
+      {190,188,16,AGX3_ALU_HINT_CACHE,true,63,"b7fc08fa2a80a3ba3a844000"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+   for (unsigned n = 0; n < sizeof(m5) / sizeof(m5[0]); ++n) {
+      assert(agx3_alu_asr_imm32(AGX_ISA_ENCODING_AGX3C,
+                                m5[n].dest,m5[n].source,m5[n].shift,m5[n].hint,
+                                m5[n].dest_cache,m5[n].wait,bytes,&length));
+      exact(bytes,length,m5[n].bytes);
+   }
+   assert(!agx3_alu_asr_imm32(AGX_ISA_ENCODING_AGX3C,0,0,0,
+                              AGX3_ALU_HINT_NONE,false,0,bytes,&length));
+   assert(!agx3_alu_asr_imm32(AGX_ISA_ENCODING_AGX3C,0,0,32,
+                              AGX3_ALU_HINT_NONE,false,0,bytes,&length));
+   assert(!agx3_alu_asr_imm32(AGX_ISA_ENCODING_AGX3C,1,0,1,
+                              AGX3_ALU_HINT_NONE,false,0,bytes,&length));
+   assert(!agx3_alu_asr_imm32(AGX_ISA_ENCODING_AGX3C,0,0,1,
+                              AGX3_ALU_HINT_NONE,false,64,bytes,&length));
+   puts("M5 ASR32:4 native vectors and invalid operands PASS");
 }
 
 static void test_native_narrow_multiply(void)
@@ -3736,7 +3768,46 @@ static void test_native_high_float_registers(void)
    puts("Native full-bank FMUL/FMA:16 exact high-register/lifetime/wait vectors PASS");
 }
 
+static void test_gpu1_float_compare_select(void)
+{
+   /* Native GPU1 fseli32.ep4 composer vectors: gears' 0 < x ? y : 0,
+    * reversed comparison, reversed alternatives, and upper registers/waits.
+    * These check instruction encoding, not hardware shader semantics. */
+   const uint8_t expected[4][14] = {
+      {0x32,0x02,0x47,0x6a,0x23,0x00,0xa0,0x1a,0x14,0x80,0x0a,0x08,0x1a,0x00},
+      {0x32,0x02,0x07,0x6a,0x23,0x00,0xa0,0x1a,0x14,0x80,0x0a,0x48,0x1a,0x00},
+      {0x32,0x02,0x47,0x6b,0x23,0x00,0xa0,0x1a,0x14,0x80,0x4a,0x00,0x04,0x01},
+      {0xb2,0x84,0x4f,0xea,0x2b,0x80,0xa1,0x3a,0x30,0x80,0x0a,0x08,0x9a,0x40},
+   };
+   const bool no_abs[2] = {false, false};
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < 4; ++i) {
+      const uint16_t src[4] = {
+         i == 3 ? 188 : 14, 0, i == 2 ? 0 : i == 3 ? 186 : 26,
+         i == 2 ? 26 : 0,
+      };
+      const bool immediate[2] = {i == 2, i != 2};
+      const enum agx3_alu_hint hints[4] = {
+         i == 3 ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+      };
+      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
+         i == 3 ? 190 : 14, src, true, no_abs, immediate, hints,
+         i == 1 ? 1 : 2, false, i == 3, i == 3 ? 0x81 : 0, out, &len));
+      assert(len == sizeof(expected[i]) && !memcmp(out, expected[i], len));
+   }
+   uint16_t src[4] = {14, 0, 26, 0};
+   const bool immediate[2] = {false, true};
+   const enum agx3_alu_hint hints[4] = {0};
+   assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
+      14, src, true, no_abs, immediate, hints, 2, true, false, 0, out, &len));
+   src[3] = 1; /* A minifloat payload is not an integer result immediate. */
+   assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
+      14, src, true, no_abs, immediate, hints, 2, false, false, 0, out, &len));
+}
+
 int main(void){
+   test_gpu1_float_compare_select();
    test_native_popcount();
    test_native_minifloat_half_select();
    test_native_bit_andc();

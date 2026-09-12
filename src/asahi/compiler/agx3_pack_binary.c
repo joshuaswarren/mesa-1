@@ -7588,7 +7588,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          /* Native FSEL selects retained 16/32-bit register values or a register
           * and an immediate directly. Preserve each operand's lifetime hints
           * without materializing a separate comparison result. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests==1 && I->nr_srcs==4 &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory && agx_channels(I->dest[0])==1 &&
              (I->dest[0].size==AGX_SIZE_16 || I->dest[0].size==AGX_SIZE_32) &&
@@ -9183,7 +9184,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_ASR &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_ASR &&
              I->nr_dests == 1 && I->nr_srcs == 2 &&
              I->src[1].type == AGX_INDEX_IMMEDIATE &&
              I->src[1].value >= 1 && I->src[1].value <= 31 &&

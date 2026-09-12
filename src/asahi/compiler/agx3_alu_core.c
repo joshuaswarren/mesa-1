@@ -1706,13 +1706,17 @@ agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                    uint8_t *length)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !length ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || !out || !length ||
        dest >= 192 || source >= 192 || ((dest | source) & 1) ||
        shift < 1 || shift > 31 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~0x3fu))
       return false;
    const struct agx3_field_kv base[] = {
       {9,2},{10,2},{23,2},{24,2},{38,1},{39,2},
+      /* M5's native sra table requires the register-result selector and
+       * GPU1 operation tag; reusing AGX3b's zero defaults is invalid. */
+      {43,3},{44,167},
    };
    struct agx3_field_kv fields[13] = {
       {2,dest},{11,dest_cache},{16,source},{30,shift},
@@ -1721,7 +1725,54 @@ agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
    };
    for (unsigned i=0;i<6;i++)
       fields[7+i]=(struct agx3_field_kv){45+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"sra",0,base,6,fields,13,out,length);
+   return agx3_bind_compose(enc,"sra",0,base,gpu1 ? 8 : 6,fields,13,out,length);
+}
+
+/* GPU1 splits FSEL by result type. fseli32 preserves register payload bits;
+ * only zero is shared between Mesa's minifloat and integer immediate domains.
+ */
+static bool
+agx3_alu_fcmp_select_gpu1(uint16_t dest, const uint16_t src[4],
+                        bool compare_zero, const bool compare_abs[2],
+                        const bool immediate[2],
+                        const enum agx3_alu_hint hints[4], unsigned condition,
+                        bool dest_16, bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (dest_16 || dest >= 256 || (dest & 1) ||
+       compare_abs[0] || compare_abs[1] || (wait_mask & ~0xffu) ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6))
+      return false;
+   for (unsigned i = 0; i < 4; ++i) {
+      const bool imm = (i == 1 && compare_zero) ||
+                       (i >= 2 && immediate[i - 2]);
+      if (src[i] >= 256 || (imm ? src[i] != 0 : (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE ||
+          (imm && hints[i] != AGX3_ALU_HINT_NONE))
+         return false;
+   }
+   const struct agx3_field_kv base[] = {
+      {9,2},{10,2},{23,2},{24,2},{40,compare_zero ? 1 : 2},{41,2},
+      {57,immediate[0] ? 1 : 2},{58,2},{71,immediate[1] ? 1 : 2},
+      {72,2},{76,3},{77,76},
+   };
+   struct agx3_field_kv fields[23] = {
+      {2,dest},{11,dest_cache},{16,src[0]},
+      {compare_zero ? 32 : 33,src[1]},
+      {immediate[0] ? 49 : 50,src[2]},
+      {immediate[1] ? 63 : 64,src[3]},{86,condition},
+   };
+   const uint16_t cache[] = {25,42,59,73}, discard[] = {27,44,61,75};
+   unsigned n = 7;
+   for (unsigned i = 0; i < 4; ++i) {
+      fields[n++] = (struct agx3_field_kv){cache[i],hints[i] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){discard[i],hints[i] == AGX3_ALU_HINT_DISCARD};
+   }
+   for (unsigned i = 0; i < 8; ++i)
+      fields[n++] = (struct agx3_field_kv){78+i,!!(wait_mask & (1u << i))};
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "fseli32", 4,
+                            base, 12, fields, n, out, len);
 }
 
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
@@ -1732,6 +1783,11 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
                                   bool dest_16, bool dest_cache, uint16_t wait_mask,
                                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   if (!out || !len || !src || !compare_abs || !immediate || !hints)
+      return false;
+   if (enc == AGX_ISA_ENCODING_AGX3C)
+      return agx3_alu_fcmp_select_gpu1(dest, src, compare_zero, compare_abs,
+         immediate, hints, condition, dest_16, dest_cache, wait_mask, out, len);
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src ||
        !compare_abs || !immediate || !hints || dest>=256 ||
        (!dest_16 && (dest&1)) ||
