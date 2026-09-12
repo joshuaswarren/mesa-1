@@ -332,6 +332,22 @@ static struct agx_bg_eot_shader *
 agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
+   const bool g17g = cache->dev->chip == AGX_CHIP_G17G;
+   if (g17g) {
+      const enum pipe_format format = key->tib.logical_format[0];
+      if (key->op[0] != AGX_EOT_STORE || key->tib.nr_samples != 1 ||
+          key->tib.layered || key->tib.spilled[0] ||
+          agx_tilebuffer_offset_B(&key->tib, 0) != 0 ||
+          (format != PIPE_FORMAT_R8G8B8A8_UNORM &&
+           format != PIPE_FORMAT_B8G8R8A8_UNORM))
+         return NULL;
+
+      for (unsigned rt = 1; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] != AGX_BG_EOT_NONE)
+            return NULL;
+      }
+   }
+
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
                                                   &agx_nir_options, "agx_eot");
 
@@ -362,7 +378,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
       bool explicit = false;
       nir_def *coords = layer;
-      if (cache->dev->chip == AGX_CHIP_G17P) {
+      if (cache->dev->chip == AGX_CHIP_G17P || g17g) {
          /* AGX3's EOT imgwblk has no implicit pixel-coordinate form.  Apple's
           * G17P compiler reads the hardware grid X/Y SRs explicitly.  Array
           * stores append the hardware layer ID; dropping it here made every
@@ -406,7 +422,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .reserved_preamble = key->reserved_preamble,
-      .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
+      .no_preamble = cache->dev->chip == AGX_CHIP_G17P || g17g,
+      .g17g_rt0_eot_rgba8 = g17g,
    };
 
    if (cache->dev->chip == AGX_CHIP_G17P)

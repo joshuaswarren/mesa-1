@@ -3926,9 +3926,12 @@ enum agx3_g17p_rt0_eot_kind {
 };
 
 static enum agx3_g17p_rt0_eot_kind
-agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
+agx3_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
+   const bool g17g = enc == AGX_ISA_ENCODING_AGX3C &&
+                     ctx->key->g17g_rt0_eot_rgba8;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !g17g) ||
+       ctx->stage != MESA_SHADER_COMPUTE ||
        ctx->is_preamble || ctx->key->no_stop)
       return AGX3_G17P_RT0_EOT_NONE;
 
@@ -4008,6 +4011,23 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        stores != 1 || x_reg != coord_reg || y_reg != coord_reg + 2 ||
        zero_reg != offset_reg)
       return AGX3_G17P_RT0_EOT_NONE;
+
+   /* The G17G witness covers only the RGBA8 native factory key. Keep the
+    * other G17P format selectors outside this independently grounded path. */
+   if (g17g) {
+      if (store_format != AGX_FORMAT_U8NORM ||
+          ctx->key->g17p_rt0_eot_words || ctx->key->g17p_rt0_eot_rgb565 ||
+          ctx->key->g17p_rt0_eot_norm16_selector_95 ||
+          ctx->key->g17p_rt0_eot_i16_signed_two_words ||
+          ctx->key->g17p_rt0_eot_i32 ||
+          ctx->key->g17p_rt0_eot_i32_four_words ||
+          ctx->key->g17p_rt0_eot_i32_signed_four_words ||
+          ctx->key->g17p_rt0_eot_i32_selector_15 ||
+          ctx->key->g17p_rt0_eot_i32_selector_75)
+         return AGX3_G17P_RT0_EOT_NONE;
+
+      return AGX3_G17P_RT0_EOT_SELECTOR_75;
+   }
 
    if (ctx->key->g17p_rt0_eot_i16_signed_two_words &&
        (store_format != AGX_FORMAT_I16 ||
@@ -4910,7 +4930,30 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
 
    const enum agx3_g17p_rt0_eot_kind rt0_eot =
-      agx3_g17p_rt0_eot_kind(ctx, enc);
+      agx3_rt0_eot_kind(ctx, enc);
+   if (enc == AGX_ISA_ENCODING_AGX3C &&
+       rt0_eot == AGX3_G17P_RT0_EOT_SELECTOR_75) {
+      /* Genuine applegpu_g17g BTNF kind5/key0x10020300. See the adjacent
+       * probe README for reproducible native generation and binding ABI.
+       * Replace the complete proven graph, never a lone IMGWBLK operation. */
+      static const uint8_t g17g_rt0_eot[] = {
+         0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+         0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+         0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+         0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+         0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+         0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+         0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+         0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+         0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0xe0,
+         0x00,0x55,0x0e,0x00,0x00,0x00,
+      };
+      static_assert(sizeof(g17g_rt0_eot) == 78, "G17G EOT native length");
+      /* Native common0=3 GPR dwords and fields38/42 D=16. */
+      ctx->max_reg = MAX2(ctx->max_reg, 7);
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
+      return agx3_append(emission, g17g_rt0_eot, sizeof(g17g_rt0_eot));
+   }
    if (rt0_eot != AGX3_G17P_RT0_EOT_NONE) {
       static const uint8_t g17p_rgba16_sint_eot[] = {
          0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,

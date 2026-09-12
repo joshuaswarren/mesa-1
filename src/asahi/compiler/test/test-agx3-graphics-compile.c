@@ -3235,6 +3235,69 @@ test_indexed_compute_storage(void)
 }
 
 static bool
+test_g17g_eot_block_store(void)
+{
+   /* Independent applegpu_g17g native factory witness, not G17P bytes. */
+   static const uint8_t expected[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+      0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+      0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+      0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+      0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+      0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+      0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+      0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0xe0,
+      0x00,0x55,0x0e,0x00,0x00,0x00,
+   };
+   bool ok = true;
+   for (unsigned variant = 0; variant < 9; ++variant) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17G RT0 EOT");
+      nir_def *coords =
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+      if (variant == 4)
+         coords = nir_undef(&b, 1, 16);
+      else if (variant == 7)
+         coords = nir_vec3(&b, nir_channel(&b, coords, 0),
+                           nir_channel(&b, coords, 1), nir_imm_int(&b, 0));
+
+      nir_image_store_block_agx(
+         &b, nir_imm_intN_t(&b, variant == 2 ? 1 : 0, 16),
+         nir_imm_int(&b, variant == 3 ? 4 : 0), coords,
+         .format = variant == 5 ? PIPE_FORMAT_R8_SNORM :
+                   variant == 6 ? PIPE_FORMAT_R16_FLOAT : PIPE_FORMAT_R8_UNORM,
+         .image_dim = GLSL_SAMPLER_DIM_2D,
+         .image_array = variant == 7, .explicit_coord = variant != 4);
+      agx_preprocess_nir(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+         .no_preamble = true,
+         .g17g_rt0_eot_rgba8 = variant != 1,
+         .g17p_rt0_eot_words = variant == 8 ? 1 : 0,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+      bool pass = !compiled;
+      if (variant == 0) {
+         pass = compiled && part.info.binary_size == sizeof(expected) &&
+                part.info.main_offset == 0 &&
+                part.info.main_size == sizeof(expected) &&
+                part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+                part.info.agx3_staging_halfs == 8 &&
+                memcmp(part.binary, expected, sizeof(expected)) == 0;
+      }
+      if (!pass)
+         fprintf(stderr, "G17G native EOT variant %u failed: compiled=%u size=%u\n",
+                 variant, compiled, part.info.binary_size);
+      ok &= pass;
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+   return ok;
+}
+
+static bool
 test_g17p_eot_block_store(void)
 {
    /* Genuine applegpu-nt builtin EOT, key0x10020300, RTmask1. Native fragment
@@ -5659,6 +5722,9 @@ main(int argc, char **argv)
    }
 
    if (!test_g17p_eot_block_store())
+      all_ok = false;
+
+   if (!test_g17g_eot_block_store())
       all_ok = false;
 
    if (!test_g17p_background_reload_staging())

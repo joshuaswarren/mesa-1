@@ -23,10 +23,14 @@ On Linux J813 with the M5 application DRM adapter:
   present in the instruction corpus, including the widening copy-and-clear
   sequence. These instructions have byte-exact compiler tests; this is not a
   hardware execution qualification of the complete reload program.
-- Command recording fails with `VK_ERROR_FEATURE_NOT_PRESENT` while building
-  the tile-store program: M5 `block_image_store` encoding is still missing.
-  Shader compilation failure is propagated instead of dereferencing a null
-  shader.
+- The single-sample RGBA8 tile-store shader compiles to the exact 78-byte
+  native G17G builtin. Its independently generated text, resource metadata,
+  and rejection tests are documented in the compiler's native EOT probe.
+- Command recording now reaches vertex launch construction and fails with
+  `VK_ERROR_FEATURE_NOT_PRESENT`: the M5 vertex pipeline address is zero.
+  Native Ioto resource programs, vertex launch state, and background/EOT
+  launch integration remain incomplete. Shader compilation failure is
+  propagated instead of dereferencing a null shader.
 - No Honeykrisp Vulkan draw has completed. Hardware glxgears, repeated draws
   and combined GPU/DCP presentation remain unqualified.
 

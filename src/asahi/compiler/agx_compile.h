@@ -389,6 +389,10 @@ struct agx_shader_key {
     * independently grounded only for the two-word R32G32 UINT layout. */
    bool g17p_rt0_eot_i32_selector_75;
 
+   /* Exact G17G native single-sample, single-layer RGBA8 RT0 builtin.
+    * Its PBE table and tile byte offset occupy uniform halves 0..5. */
+   bool g17g_rt0_eot_rgba8;
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.
