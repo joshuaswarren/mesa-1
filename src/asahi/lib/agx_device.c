@@ -818,7 +818,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * is implemented; otherwise a newly-recognised chip can silently reach an
     * encoder from the wrong generation.
     */
-   if (!agx_params_driver_supported(&dev->params)) {
+   const bool m5_bringup =
+      debug_get_bool_option("ASAHI_M5_BRINGUP", false) &&
+      agx_params_m5_bringup_supported(&dev->params);
+   if (m5_bringup)
+      fprintf(stderr, "Experimental M5 HAL300 integration enabled; general rendering is unqualified\n");
+   if (!agx_params_driver_supported(&dev->params) && !m5_bringup) {
       if (dev->chip == AGX_CHIP_UNKNOWN) {
          fprintf(stderr,
                  "Unsupported Apple GPU architecture G%u (variant 0x%x, %u "
@@ -1330,8 +1335,13 @@ agx_open_device(void *memctx, struct agx_device *dev)
       dev->g17p_render_context_bo = context;
    }
 
+   /* AGX3 frontends load this address from runtime root state. M5 also
+    * needs allocator-owned storage: the legacy fixed address overlaps its
+    * compact, driver-owned TA arena. */
+   const bool dynamic_printf = dev->chip == AGX_CHIP_G17P ||
+                               dev->chip == AGX_CHIP_G17G;
    struct agx_bo *bo =
-      dev->chip == AGX_CHIP_G17P
+      dynamic_printf
          ? agx_bo_create(dev, LIBAGX_PRINTF_BUFFER_SIZE, 0, AGX_BO_WRITEBACK,
                          "Printf/abort")
          : agx_create_fixed_bo(
@@ -1343,19 +1353,18 @@ agx_open_device(void *memctx, struct agx_device *dev)
       return false;
    }
 
-   if (dev->chip == AGX_CHIP_G17P &&
+   if (dynamic_printf &&
        (bo->va == NULL || dev->main_heap_size < LIBAGX_PRINTF_BUFFER_SIZE ||
         bo->va->addr < dev->main_heap_base ||
         bo->va->addr - dev->main_heap_base >
            dev->main_heap_size - LIBAGX_PRINTF_BUFFER_SIZE)) {
-      fprintf(stderr, "G17P printf buffer escaped the allocator-owned heap");
+      fprintf(stderr, "AGX3 printf buffer escaped the allocator-owned heap");
       agx_bo_unreference(dev, bo);
       return false;
    }
 
    dev->printf_buffer_address =
-      dev->chip == AGX_CHIP_G17P ? bo->va->addr
-                                 : LIBAGX_PRINTF_BUFFER_ADDRESS;
+      dynamic_printf ? bo->va->addr : LIBAGX_PRINTF_BUFFER_ADDRESS;
 
    u_printf_init(&dev->printf, bo, agx_bo_map(bo));
 

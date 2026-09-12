@@ -270,6 +270,36 @@ test_independent_generation_axes(void)
    CHECK(!agx_params_driver_supported(&g17p));
    CHECK(!agx_params_driver_supported(NULL));
 
+   struct drm_asahi_params_global m5 = {
+      .gpu_generation = 17,
+      .gpu_variant = 'G',
+      .chip_id = 0x8142,
+      .num_dies = 1,
+      .num_clusters_total = 1,
+      .usc_generation = 3,
+      .gpu_hal_generation = DRM_ASAHI_GPU_HAL_300,
+   };
+   CHECK(!agx_params_driver_supported(&m5));
+   CHECK(agx_params_m5_bringup_supported(&m5));
+   m5.chip_id = 0x8140;
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   m5.chip_id = 0x8142;
+   m5.gpu_variant = 'P';
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   m5.gpu_variant = 'G';
+   m5.num_dies = 2;
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   m5.num_dies = 1;
+   m5.num_clusters_total = 2;
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   m5.num_clusters_total = 1;
+   m5.usc_generation = 2;
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   m5.usc_generation = 3;
+   m5.gpu_hal_generation = DRM_ASAHI_GPU_HAL_200;
+   CHECK(!agx_params_m5_bringup_supported(&m5));
+   CHECK(!agx_params_m5_bringup_supported(NULL));
+
    CHECK(agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G13G));
    CHECK(agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G14X));
    CHECK(!agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G17P));

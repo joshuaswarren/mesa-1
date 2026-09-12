@@ -892,6 +892,12 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    key.reserved_preamble = uniforms;
    /* XXX: locking? */
    struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&dev->bg_eot, &key);
+   if (!shader) {
+      mesa_loge("background/end-of-tile shader compilation failed for %s",
+                agx_chip_name(dev->dev.chip));
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return (struct hk_bg_eot){0};
+   }
 
    agx_usc_pack(&b, SHADER, cfg) {
       cfg.code = agx_usc_addr(&dev->dev, shader->ptr);

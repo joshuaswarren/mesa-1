@@ -40,7 +40,9 @@
 #define G17P_FRAGMENT_SPV g17p_wsi_triangle_frag_spv
 #endif
 
-#define T8140_DEVICE_ID 0x8140
+#ifndef AGX_TEST_DEVICE_ID
+#define AGX_TEST_DEVICE_ID 0x8140
+#endif
 #ifndef IMAGE_WIDTH
 #define IMAGE_WIDTH 32
 #endif
@@ -331,7 +333,7 @@ main(
    for (uint32_t p = 0; p < physical_count && !physical; ++p) {
       VkPhysicalDeviceProperties candidate;
       vkGetPhysicalDeviceProperties(physical_devices[p], &candidate);
-      if (candidate.deviceID != T8140_DEVICE_ID)
+      if (candidate.deviceID != AGX_TEST_DEVICE_ID)
          continue;
 
       uint32_t queue_count = 0;
@@ -356,7 +358,7 @@ main(
    }
    free(physical_devices);
    if (!physical)
-      die("no T8140 device has a graphics-and-transfer queue");
+      die("requested Apple device has no graphics-and-transfer queue");
 
    VkFormatProperties format_properties;
    vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM,
@@ -1101,6 +1103,11 @@ main(
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+   if (getenv("AGX_RENDER_RECORD_ONLY")) {
+      printf("Apple %#x: %ux%u Vulkan draw recorded; no submission\n",
+             properties.deviceID, IMAGE_WIDTH, IMAGE_HEIGHT);
+      return EXIT_SUCCESS;
+   }
 #ifdef G17P_TINY_RENDER_RECORD
    if (getenv("G17P_TINY_RENDER_SUBMIT") == NULL) {
       printf("g17p-tiny-render-record: 2x2 %s command buffer recorded\n",

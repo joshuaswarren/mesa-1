@@ -1,0 +1,51 @@
+# M5 Honeykrisp integration
+
+`ASAHI_M5_BRINGUP=1` enables experimental Linux device admission only for
+T8142/G17G with one die, one cluster, AGX3 USC and HAL300. M5 remains rejected
+by default. The opt-in does not establish general rendering support or Vulkan
+conformance; the experimental device reports conformance version 0.0.0.0.
+
+The driver uses allocator-owned printf storage because the AGX2 fixed address
+overlaps M5's compact driver-owned TA arena. Honeykrisp loads its actual
+address from the runtime root table.
+
+## Hardware results, 2026-09-12
+
+On Linux J813 with the M5 application DRM adapter:
+
+- `vulkaninfo --summary` enumerates Apple M5 (G17G C0), device ID 0x8142,
+  using Honeykrisp.
+- Vulkan instance/device creation, graphics-queue acquisition and idle
+  destruction succeed.
+- The existing render-only Vulkan fixture creates its graphics pipeline.
+- Command recording fails with `VK_ERROR_FEATURE_NOT_PRESENT` while building
+  the background reload program. Compilation rejects a 16-bit coordinate
+  move. The failure is propagated instead of dereferencing a null shader.
+- No Honeykrisp Vulkan draw has completed. Hardware glxgears, repeated draws
+  and combined GPU/DCP presentation remain unqualified.
+
+The separately qualified application triangle used captured runtime programs
+and resource state. Substituting a newly generated Mesa fragment shader into
+that workload also passed pixel validation. Those results do not establish a
+complete Honeykrisp draw.
+
+## Reproduce pipeline and recording checks
+
+Build the existing Vulkan fixture against the Vulkan headers:
+
+```sh
+cc -DAGX_TEST_DEVICE_ID=0x8142 -DIMAGE_WIDTH=256 -DIMAGE_HEIGHT=256 \
+   g17p_render_only.c -ldl -o m5-vulkan-render-only
+```
+
+Run with an isolated Honeykrisp ICD and `ASAHI_M5_BRINGUP=1
+AGX_RENDER_RECORD_ONLY=1`. This exercises real device/pipeline/recording code
+without submitting GPU work. The fixture returns failure when recording is
+unsupported. A successful record-only run would still not prove rendering.
+
+The tested kernel currently admits one restricted application draw per GPU
+session and requires complete resource ownership. Do not bypass those guards
+or reset the live GPU to turn an error into an apparent rendering success.
+
+Host regression checks: `asahi-agx-chip`, `asahi-agx-m5-va`,
+`asahi-agx-ioto-program-core`, and `hk_printf_root` all pass.

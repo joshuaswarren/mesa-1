@@ -858,7 +858,8 @@ hk_get_device_properties(const struct agx_device *dev,
       .apiVersion = hk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
       .vendorID = instance->force_vk_vendor ?: VK_VENDOR_ID_MESA,
-      .deviceID = dev->chip == AGX_CHIP_G17P ? dev->params.chip_id : 0,
+      .deviceID = (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G)
+                     ? dev->params.chip_id : 0,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
       /* Vulkan 1.0 limits */
@@ -1027,7 +1028,9 @@ hk_get_device_properties(const struct agx_device *dev,
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_HONEYKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 4, 0, 0},
+      .conformanceVersion = dev->chip == AGX_CHIP_G17G
+                               ? (VkConformanceVersion){0, 0, 0, 0}
+                               : (VkConformanceVersion){1, 4, 0, 0},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .shaderSignedZeroInfNanPreserveFloat16 = true,
