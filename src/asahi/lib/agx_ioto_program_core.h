@@ -155,6 +155,7 @@ enum agx_ioto_g17g_program_stage {
    AGX_IOTO_G17G_PROGRAM_FRAGMENT,
    AGX_IOTO_G17G_PROGRAM_EOT,
    AGX_IOTO_G17G_PROGRAM_BACKGROUND,
+   AGX_IOTO_G17G_PROGRAM_COMPUTE,
 };
 
 /* Compose a validated GPU1 uniform-load body using the native M5 ordering:
@@ -162,6 +163,7 @@ enum agx_ioto_g17g_program_stage {
  * Fragment uses the witnessed RT0 PIXREL; EOT uses the fragment profile
  * without PIXREL. Background uses its own captured release mask and requires
  * a shader with no preamble; background preamble/call protocols are not covered.
+ * Compute uses the captured operand4 loader without a pixel release.
  * Output and written remain unchanged on failure; input/output may alias. */
 bool agx_ioto_g17g_resource_program_compose(
    uint64_t program_va, const void *body, size_t body_size,

@@ -116,8 +116,23 @@ agx3_g17p_native_compute_program_bind(
    return true;
 }
 
+bool
+agx3_g17g_native_compute_program_bind(
+   const struct agx3_g17p_native_compute_program_desc *desc,
+   struct agx3_compute_program *program)
+{
+   struct agx3_compute_program staged;
+   if (!program || !agx3_g17p_native_compute_program_bind(desc, &staged))
+      return false;
+   staged.chip = AGX_CHIP_G17G;
+   staged.g17p_native_compute_live_bound = false;
+   staged.g17g_native_compute_live_bound = true;
+   *program = staged;
+   return true;
+}
+
 static bool
-agx3_g17p_native_compute_launch_pack(
+agx3_native_compute_launch_pack(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid,
    uint8_t packed[AGX3_CDM_DIRECT_LAUNCH_SIZE])
@@ -126,7 +141,8 @@ agx3_g17p_native_compute_launch_pack(
       return false;
 
    memset(packed, 0, AGX3_CDM_DIRECT_LAUNCH_SIZE);
-   if (!program || !grid || program->chip != AGX_CHIP_G17P ||
+   if (!program || !grid ||
+       (program->chip != AGX_CHIP_G17P && program->chip != AGX_CHIP_G17G) ||
        program->program_va == 0 ||
        program->program_va > UINT64_C(0xffffffffffff) ||
        (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
@@ -213,7 +229,7 @@ agx3_g17p_native_compute_dispatch_append_with_barrier(
       return false;
 
    uint8_t staged[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
-   if (!agx3_g17p_native_compute_launch_pack(program, grid, staged))
+   if (!agx3_native_compute_launch_pack(program, grid, staged))
       return false;
 
    const struct agx3_cdm_barrier_info barrier = {
@@ -237,6 +253,29 @@ agx3_g17p_native_compute_dispatch_append(
 {
    return agx3_g17p_native_compute_dispatch_append_with_barrier(
       program, grid, 0, sink);
+}
+
+bool
+agx3_g17g_native_compute_dispatch_append(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   if (!program || program->chip != AGX_CHIP_G17G ||
+       !program->g17g_native_compute_live_bound || !grid || !sink ||
+       !sink->data || sink->length > sink->capacity ||
+       AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE > sink->capacity - sink->length)
+      return false;
+   uint8_t staged[AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE];
+   const struct agx3_cdm_barrier_info barrier = {
+      .chip = AGX_CHIP_G17G, .flags = barrier_flags,
+   };
+   if (!agx3_native_compute_launch_pack(program, grid, staged) ||
+       !agx3_cdm_barrier_pack(&barrier, staged + AGX3_CDM_DIRECT_LAUNCH_SIZE))
+      return false;
+   memcpy(sink->data + sink->length, staged, sizeof(staged));
+   sink->length += sizeof(staged);
+   return true;
 }
 
 static void

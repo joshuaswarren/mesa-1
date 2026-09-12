@@ -87,6 +87,7 @@ VK_FN(vkGetPhysicalDeviceFormatProperties);
 VK_FN(vkCreateDevice);
 VK_FN(vkGetDeviceQueue);
 VK_FN(vkCreateBuffer);
+VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkGetBufferMemoryRequirements);
 VK_FN(vkCreateImage);
 VK_FN(vkGetImageMemoryRequirements);
@@ -517,6 +518,7 @@ main(
 
    LOAD_DEVICE(device, vkGetDeviceQueue);
    LOAD_DEVICE(device, vkCreateBuffer);
+   LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkGetBufferMemoryRequirements);
    LOAD_DEVICE(device, vkCreateImage);
    LOAD_DEVICE(device, vkGetImageMemoryRequirements);
@@ -714,6 +716,9 @@ main(
 
 
    const bool blit_test = getenv("AGX_RENDER_BLIT") != NULL;
+   const bool readback_test = getenv("AGX_RENDER_READBACK") != NULL;
+   if (blit_test && readback_test)
+      die("select one of AGX_RENDER_BLIT and AGX_RENDER_READBACK");
    const VkImageCreateInfo image_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
@@ -732,10 +737,8 @@ main(
    check(vkCreateImage(device, &image_info, NULL, &image), "vkCreateImage");
    VkMemoryRequirements image_requirements;
    vkGetImageMemoryRequirements(device, image, &image_requirements);
-   /* Host-visible so the render target can be inspected WITHOUT a copy
-    * command: this ICD does not implement vkCmdCopyImageToBuffer and fails
-    * vkEndCommandBuffer with -8 if one is recorded. Falls back to device-local
-    * if no host-visible type accepts the image. */
+   /* Inspect the source independently before testing an optional transfer.
+    * This prevents a successful copy of an undrawn image from passing. */
    uint32_t image_memory_type =
       try_memory_type(&memory_properties, image_requirements.memoryTypeBits,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -761,6 +764,9 @@ main(
    VkImage blit_image = VK_NULL_HANDLE;
    VkDeviceMemory blit_memory = VK_NULL_HANDLE;
    uint8_t *blit_pixels = NULL;
+   VkBuffer readback_buffer = VK_NULL_HANDLE;
+   VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+   uint8_t *readback_map = NULL;
    if (blit_test) {
       VkImageCreateInfo copy_info = image_info;
       copy_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -782,6 +788,32 @@ main(
       check(vkMapMemory(device, blit_memory, 0, IMAGE_BYTES, 0,
                         (void **)&blit_pixels), "vkMapMemory(blit)");
       memset(blit_pixels, 0xa5, IMAGE_BYTES);
+   }
+   if (readback_test) {
+      const VkBufferCreateInfo info = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         .size = IMAGE_BYTES + 32,
+         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+      check(vkCreateBuffer(device, &info, NULL, &readback_buffer), "vkCreateBuffer(readback)");
+      VkMemoryRequirements requirements;
+      vkGetBufferMemoryRequirements(device, readback_buffer, &requirements);
+      const VkMemoryAllocateInfo allocation = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = find_memory_type(&memory_properties,
+            requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+      check(vkAllocateMemory(device, &allocation, NULL, &readback_memory),
+            "vkAllocateMemory(readback)");
+      check(vkBindBufferMemory(device, readback_buffer, readback_memory, 0),
+            "vkBindBufferMemory(readback)");
+      check(vkMapMemory(device, readback_memory, 0, IMAGE_BYTES + 32, 0,
+                        (void **)&readback_map), "vkMapMemory(readback)");
+      memset(readback_map, 0xa5, IMAGE_BYTES + 32);
+      blit_pixels = readback_map + 16;
    }
 
    const VkImageViewCreateInfo view_info = {
@@ -1056,8 +1088,8 @@ main(
          die("AGX_RENDER_REPEAT must be between 1 and 64");
       frame_count = requested;
    }
-   if (blit_test && (frame_count != 1 || alternate_geometry))
-      die("AGX_RENDER_BLIT requires one full-frame draw");
+   if ((blit_test || readback_test) && (frame_count != 1 || alternate_geometry))
+      die("copy tests require one full-frame draw");
    /* Allocate and record a fresh command buffer on every iteration. Reusing
     * old pixels or a fixed native descriptor cannot satisfy the sentinel
     * check below after the application has erased the previous result.
@@ -1197,7 +1229,7 @@ next_render_frame:;
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
    VkCommandBuffer blit_command = VK_NULL_HANDLE;
-   if (blit_test) {
+   if (blit_test || readback_test) {
       command_allocate.commandPool = command_pools[0];
       check(vkAllocateCommandBuffers(device, &command_allocate, &blit_command),
             "vkAllocateCommandBuffers(blit)");
@@ -1227,18 +1259,34 @@ next_render_frame:;
             .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
          },
       };
+      const VkMemoryBarrier host_write = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+         .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      };
       vkCmdPipelineBarrier(blit_command,
          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, barriers);
+         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &host_write, 0, NULL,
+         blit_test ? 2 : 1, barriers);
       const VkImageBlit region = {
          .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
          .srcOffsets = {{0,0,0}, {IMAGE_WIDTH,IMAGE_HEIGHT,1}},
          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
          .dstOffsets = {{0,0,0}, {IMAGE_WIDTH,IMAGE_HEIGHT,1}},
       };
-      vkCmdBlitImage(blit_command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     blit_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                     1, &region, VK_FILTER_NEAREST);
+      if (blit_test) {
+         vkCmdBlitImage(blit_command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        blit_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &region, VK_FILTER_NEAREST);
+      } else {
+         const VkBufferImageCopy copy = {
+            .bufferOffset = 16,
+            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageExtent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
+         };
+         vkCmdCopyImageToBuffer(blit_command, image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_buffer, 1, &copy);
+      }
       const VkMemoryBarrier host_read = {
          .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
          .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1247,7 +1295,8 @@ next_render_frame:;
       vkCmdPipelineBarrier(blit_command, VK_PIPELINE_STAGE_TRANSFER_BIT,
          VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_read, 0, NULL, 0, NULL);
       check(vkEndCommandBuffer(blit_command), "vkEndCommandBuffer(blit)");
-      fprintf(stderr, "g17p-render-only: separate blit command recorded; no submission yet\n");
+      fprintf(stderr, "g17p-render-only: separate %s command recorded; no submission yet\n",
+              blit_test ? "blit" : "readback");
    }
    if (getenv("AGX_RENDER_RECORD_ONLY")) {
       printf("Apple %#x: %ux%u Vulkan draw recorded; no submission\n",
@@ -1457,7 +1506,7 @@ next_render_frame:;
            exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
    fprintf(stderr, "g17p-render-only: frame=%u/%u pixels_exact=%u/%u\n",
            frame_index + 1, frame_count, exact, IMAGE_WIDTH * IMAGE_HEIGHT);
-   if (blit_test && exact == IMAGE_WIDTH * IMAGE_HEIGHT) {
+   if ((blit_test || readback_test) && exact == IMAGE_WIDTH * IMAGE_HEIGHT) {
       VkFence blit_fence;
       check(vkCreateFence(device, &fence_info, NULL, &blit_fence),
             "vkCreateFence(blit)");
@@ -1474,9 +1523,16 @@ next_render_frame:;
          copied += !memcmp(blit_pixels + 4*i, "\xff\x47\x0d\xff", 4);
          sentinel += !memcmp(blit_pixels + 4*i, "\xa5\xa5\xa5\xa5", 4);
       }
-      fprintf(stderr, "g17p-render-only: blit pixels exact=%u/%u sentinel=%u first=%02x%02x%02x%02x\n",
-         copied, IMAGE_WIDTH * IMAGE_HEIGHT, sentinel,
+      fprintf(stderr, "g17p-render-only: %s pixels exact=%u/%u sentinel=%u first=%02x%02x%02x%02x\n",
+         blit_test ? "blit" : "readback", copied, IMAGE_WIDTH * IMAGE_HEIGHT, sentinel,
          blit_pixels[0], blit_pixels[1], blit_pixels[2], blit_pixels[3]);
+      if (readback_test) {
+         for (unsigned i = 0; i < 16; i++) {
+            if (readback_map[i] != 0xa5 || readback_map[16 + IMAGE_BYTES + i] != 0xa5)
+               die("readback changed guard bytes outside its destination");
+         }
+         fprintf(stderr, "g17p-render-only: readback guard bytes intact\n");
+      }
       /* Retain and optionally export the actual destination for inspection. */
       pixels = blit_pixels;
       exact = copied;

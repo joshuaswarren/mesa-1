@@ -117,6 +117,23 @@ test_g17g_programs(void)
       } else {
          CHECK(!agx3_g17g_tile_program_generate(AGX_CHIP_G17G, &desc, false,
                                                 &output));
+         /* Captured M5 compute profile: no imageblock or PIXREL, and the
+          * third loader LDIMM contains4. The native shader preamble is
+          * deliberately absent in this Mesa program, which ends directly. */
+         desc.uniform_ranges = NULL;
+         desc.uniform_range_count = 0;
+         desc.shader_va = UINT64_C(0x100000003c0);
+         desc.shader_binary_size = 64;
+         desc.compiler_d = 0;
+         CHECK(agx3_g17g_compute_program_generate(AGX_CHIP_G17G, &desc, &output));
+         CHECK(output.length == 84);
+         CHECK(!memcmp(output.bytes, expected_tail[0], 8));
+         CHECK(!memcmp(output.bytes + 8, expected_tail[1] + 8, 20));
+         CHECK(output.bytes[28 + 20] == 4);
+         static const uint8_t end[] = {14, 0, 0, 0};
+         CHECK(!memcmp(output.bytes + 80, end, sizeof(end)));
+         desc.fragment = true;
+         CHECK(!agx3_g17g_compute_program_generate(AGX_CHIP_G17G, &desc, &output));
       }
    }
    return 0;

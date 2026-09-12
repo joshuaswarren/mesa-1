@@ -622,7 +622,8 @@ agx_ioto_g17g_resource_program_compose(
        (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
         stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
         stage != AGX_IOTO_G17G_PROGRAM_EOT &&
-        stage != AGX_IOTO_G17G_PROGRAM_BACKGROUND))
+        stage != AGX_IOTO_G17G_PROGRAM_BACKGROUND &&
+        stage != AGX_IOTO_G17G_PROGRAM_COMPUTE))
       return false;
 
    size_t copy_offset;

@@ -921,11 +921,52 @@ test_g17p_usc_window_va_is_encoded_without_constants(void)
    return true;
 }
 
+static bool
+test_g17g_native_compute_join(void)
+{
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false, &sources));
+   struct agx3_g17p_native_compute_program_desc desc = {
+      .program_va = UINT64_C(0x10000090000),
+      .shader_va = UINT64_C(0x100000003c0),
+      .launch_sources = sources,
+   };
+   struct agx3_compute_program program;
+   CHECK(agx3_g17g_native_compute_program_bind(&desc, &program));
+   CHECK(program.chip == AGX_CHIP_G17G && program.g17g_native_compute_live_bound);
+   CHECK(!program.g17p_native_compute_live_bound);
+   const struct agx3_compute_direct_grid grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {1024, 1, 1}, .local_size = {64, 1, 1}, .dimensions = 1,
+   };
+   /* Captured M5 native add program, through its post-dispatch barrier.
+    * The enclosing command stream supplies the final terminate record. */
+   static const uint32_t expected[] = {
+      0x00080000, 0x01000000, 0x00002400, 0x40000001,
+      0x00000400, 1, 1, 0x40, 1, 1, 0x60000160,
+   };
+   uint8_t bytes[AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE + 2];
+   memset(bytes, 0xa5, sizeof(bytes));
+   struct agx3_compute_dispatch_sink sink = {
+      .data = bytes, .capacity = sizeof(bytes), .length = 1,
+   };
+   CHECK(agx3_g17g_native_compute_dispatch_append(&program, &grid, 0, &sink));
+   CHECK(sink.length == 1 + sizeof(expected));
+   for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
+      CHECK(load_le32(bytes + 1 + 4*i) == expected[i]);
+   CHECK(bytes[0] == 0xa5 && bytes[sink.length] == 0xa5);
+   sink.length = 0;
+   CHECK(!agx3_g17p_native_compute_dispatch_append(&program, &grid, &sink));
+   program.g17g_native_compute_live_bound = false;
+   CHECK(!agx3_g17g_native_compute_dispatch_append(&program, &grid, 0, &sink));
+   return true;
+}
+
 int
 main(void)
 {
    if (!test_prepare_and_launch() || !test_a18_pro_one_dimensional_launch() ||
-       !test_g17p_native_compute_join() ||
+       !test_g17p_native_compute_join() || !test_g17g_native_compute_join() ||
        !test_g17p_usc_window_va_is_encoded_without_constants() ||
        !test_g17p_direct_add3_program_join() ||
        !test_g17s_minimal_program_join() || !test_fail_closed())

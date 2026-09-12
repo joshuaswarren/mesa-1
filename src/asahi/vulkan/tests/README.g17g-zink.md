@@ -35,6 +35,15 @@ separate destination against the expected color and its prefilled sentinel.
 and retains both images for external inspection. This test is limited to
 one frame and does not use an image-to-buffer compute copy.
 
+`AGX_RENDER_READBACK=1` selects a separate image-to-buffer command instead
+of the fragment blit. It prefills the destination and 16-byte guards at
+both ends. After a successful hardware submission it checks every pixel
+and both guards. This mode is mutually exclusive with `AGX_RENDER_BLIT`.
+Use `AGX_RENDER_RECORD_ONLY=1` to validate command construction without
+submitting work. On M5 this now records both command buffers successfully,
+including a 342-byte compute shader and its native 148-byte Ioto program.
+Compute execution and returned readback pixels remain unqualified.
+
 This Vulkan draw-plus-blit test passed on M5 hardware on 2026-09-12. Both
 submissions retired both graphics queues. All 65,536 source and destination
 pixels matched `ff470dff`, and no destination pixels retained the `a5` fill.
@@ -59,10 +68,11 @@ viewport. No native reference shader was substituted.
 OpenGL readback did **not** pass. The fragment-copy draw is now hardware
 validated, including M5 array sampling and its conditional shader. The
 complete image-to-buffer compute shader now compiles after adding native
-indexed texture reads and extended-wait buffer stores. Command recording
-stops at `legacy USC compute launch rejected for G17G`: M5 needs native
-compute Ioto construction and application SKSM integration in the kernel
-adapter before that shader can run. Zink can report these Vulkan failures
+indexed texture reads and extended-wait buffer stores. M5-native compute
+Ioto and direct CDM construction now pass recording tests. The kernel
+application adapter still accepts only Render commands; compute needs
+SKSM queue integration, shared VM/resource ownership, and verified fence
+completion before that shader can run. Zink can report these Vulkan failures
 while `glFinish` and `glGetError` appear successful, so always inspect the
 compiler/submission log and verify the pixels independently. The rendering
 result does not establish general OpenGL support, glxgears, or display-server

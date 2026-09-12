@@ -47,6 +47,13 @@ bool agx3_g17g_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program);
 
+/* Scratch-free, no-preamble compute uses the same uniform-range interface
+ * and GPU1 shader state with its separately captured profile-loader suffix.
+ * This composes bytes only; dispatch and firmware submission are separate. */
+bool agx3_g17g_compute_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+
 /* No-preamble internal tile shaders: EOT has no PIXREL, background has the
  * distinct M5 release mask. Uniform ranges describe the compiled shader ABI. */
 bool agx3_g17g_tile_program_generate(

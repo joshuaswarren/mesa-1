@@ -91,6 +91,7 @@ struct agx3_compute_program {
    /* Set only after a runtime G17P Ioto program has been composed in the
     * allocation named by program_va. */
    bool g17p_native_compute_live_bound;
+   bool g17g_native_compute_live_bound;
 
    /* Only the live G17S minimal-resource preparation path sets this.  Keep
     * research composers and the zero-relocation witness out of a command
@@ -114,6 +115,8 @@ struct agx3_compute_program_upload {
 #define AGX3_G17P_DIRECT_ADD3_DISPATCH_SIZE \
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
 #define AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE \
+   (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
+#define AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE \
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
 #define AGX3_G17P_NATIVE_INDIRECT_HELPER_SIZE 28u
 #define AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE \
@@ -177,6 +180,16 @@ bool agx3_g17p_direct_add3_program_upload_prepare(
    struct agx3_compute_program *program);
 
 bool agx3_g17p_direct_add3_dispatch_ready(enum agx_chip chip);
+
+/* The captured M5 direct CDM record uses the same native program-pointer
+ * descriptor. Firmware must still deliver this stream through M5 SKSM. */
+bool agx3_g17g_native_compute_program_bind(
+   const struct agx3_g17p_native_compute_program_desc *desc,
+   struct agx3_compute_program *program);
+bool agx3_g17g_native_compute_dispatch_append(
+   const struct agx3_compute_program *program,
+   const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
 
 /* Append the output-positive 40-byte A18 Pro add3 launch and its flags=0
  * barrier.  The witnessed grid is fixed at 64 global threads in groups of

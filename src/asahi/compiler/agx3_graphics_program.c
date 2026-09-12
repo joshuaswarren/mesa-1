@@ -294,6 +294,15 @@ agx3_g17g_graphics_program_generate(
 }
 
 bool
+agx3_g17g_compute_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program)
+{
+   return desc && !desc->fragment && g17g_graphics_program_generate(
+      chip, desc, AGX_IOTO_G17G_PROGRAM_COMPUTE, program);
+}
+
+bool
 agx3_g17g_tile_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    bool store, struct agx3_g17p_graphics_program *program)
