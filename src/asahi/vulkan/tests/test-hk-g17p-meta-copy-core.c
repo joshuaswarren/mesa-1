@@ -77,6 +77,15 @@ tile_space_bits(uint32_t x)
 }
 
 static uint32_t
+tile_space_bits_7(uint32_t x)
+{
+   uint32_t accum = 0;
+   for (uint32_t i = 0; i < 7; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
+static uint32_t
 tile_offset_division(uint32_t x, uint32_t y, uint32_t stride_el,
                      uint32_t tile_width_el, uint32_t tile_height_el,
                      uint32_t block_size_B)
@@ -101,8 +110,8 @@ tile_offset_shifted(uint32_t x, uint32_t y,
    const uint32_t tile_idx =
       (y >> config->tile_height_log2) * config->tiles_per_row +
       (x >> config->tile_width_log2);
-   const uint32_t morton = tile_space_bits(x & (tile_width_el - 1)) |
-                           (tile_space_bits(y & (tile_height_el - 1)) << 1);
+   const uint32_t morton = tile_space_bits_7(x & (tile_width_el - 1)) |
+                           (tile_space_bits_7(y & (tile_height_el - 1)) << 1);
    return (tile_idx << (config->tile_width_log2 +
                         config->tile_height_log2)) *
              block_size_B +
@@ -117,6 +126,7 @@ main(void)
    CHECK(!hk_g17p_tile_address_config_init(64, 0, 64, &tile_config));
    CHECK(!hk_g17p_tile_address_config_init(64, 48, 64, &tile_config));
    CHECK(!hk_g17p_tile_address_config_init(64, 256, 128, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 256, 1, &tile_config));
    CHECK(!hk_g17p_tile_address_config_init(64, 64, 64, NULL));
 
    static const struct {

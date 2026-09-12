@@ -75,7 +75,7 @@ main(void)
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
     * copy-image launch per slice. Its native 2D grid and CPU-reduced tile
     * geometry eliminate per-element division, trimming the binary from 4,056
-    * to 2,798 bytes and register use from 28 to 26 GPRs. If this precompiled
+    * to 1,670 bytes and register use from 28 to 22 GPRs. If this precompiled
     * entry disappears, Honeykrisp falls back to a command recording failure.
     * Pin its launch ABI and complete generated binary so the fast path cannot
     * silently drift while the inventory test stays green. */
@@ -91,9 +91,9 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 2798);
-   CHECK(copy_image_info->binary_size == 2798);
-   CHECK(copy_image_info->nr_gprs == 26);
+   CHECK(copy_image_info->main_size == 1670);
+   CHECK(copy_image_info->binary_size == 1670);
+   CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 42);
    CHECK(copy_image_info->workgroup_size[0] == 32);
@@ -105,7 +105,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x4b4b671041ba441a));
+         UINT64_C(0x1807d7af823af8ae));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -113,8 +113,8 @@ main(void)
    /* The G17P UNORM8 mip kernel replaces one firmware render job per level
     * with a launch in the command buffer's merged compute stream. Its native
     * 2D grid and CPU-reduced tile geometry avoid all per-pixel division,
-    * trimming the binary from 6,506 to 4,992 bytes and register use from 52 to
-    * 50 GPRs.
+    * trimming the binary from 6,506 to 3,234 bytes and register use from 52 to
+    * 38 GPRs.
     * Pin the complete binary and argument ABI: losing this table entry
     * silently puts STK's thousands of startup mip renders back on the
     * graphics fallback. */
@@ -129,9 +129,9 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 4992);
-   CHECK(mipmap_info->binary_size == 4992);
-   CHECK(mipmap_info->nr_gprs == 50);
+   CHECK(mipmap_info->main_size == 3234);
+   CHECK(mipmap_info->binary_size == 3234);
+   CHECK(mipmap_info->nr_gprs == 38);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
    CHECK(mipmap_info->push_count == 28);
    CHECK(mipmap_info->workgroup_size[0] == 32);
@@ -143,14 +143,14 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0x610bcae17906c0bd));
+         UINT64_C(0xb105d8e80674aeec));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
 
    /* The odd-extent companion consumes CPU-precomputed Q8 axes and reduced
     * tile geometry. Its bounded 32-bit kernel is substantially smaller than
-    * the discarded divide-based prototype (5,252 bytes / 48 GPRs versus
+    * the discarded divide-based prototype (3,474 bytes / 36 GPRs versus
     * 14,854 / 66) while retaining the same 56-byte push ABI as the even
     * kernel. */
    const uint32_t *odd_mipmap_blob =
@@ -164,9 +164,9 @@ main(void)
       (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
    CHECK(odd_mipmap_info->preamble_offset == 0);
    CHECK(odd_mipmap_info->main_offset == 0);
-   CHECK(odd_mipmap_info->main_size == 5252);
-   CHECK(odd_mipmap_info->binary_size == 5252);
-   CHECK(odd_mipmap_info->nr_gprs == 48);
+   CHECK(odd_mipmap_info->main_size == 3474);
+   CHECK(odd_mipmap_info->binary_size == 3474);
+   CHECK(odd_mipmap_info->nr_gprs == 36);
    CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
    CHECK(odd_mipmap_info->push_count == 28);
    CHECK(odd_mipmap_info->workgroup_size[0] == 32);
@@ -178,7 +178,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0xb6214bdf3a6e3653));
+         UINT64_C(0xc1ff576c0980c0bb));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);

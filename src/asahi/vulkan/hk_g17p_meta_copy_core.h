@@ -77,9 +77,10 @@ struct hk_g17p_tile_address_config {
    uint32_t tile_height_log2;
 };
 
-/* Reduce AIL's power-of-two tile geometry once on the CPU. Raw copy and mip
- * kernels consume this form so every element uses shifts instead of integer
- * division. */
+/* Reduce AIL's power-of-two tile geometry once on the CPU. G17P transfer tiles
+ * are at most 128 elements per axis. Raw copy and mip kernels consume this
+ * form so every element uses shifts and a seven-bit Morton encoder instead of
+ * integer division and the generic fourteen-bit encoder. */
 bool hk_g17p_tile_address_config_init(
    uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
    struct hk_g17p_tile_address_config *config);

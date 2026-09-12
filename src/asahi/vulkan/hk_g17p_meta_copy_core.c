@@ -82,7 +82,7 @@ hk_g17p_tile_address_config_init(
 
    const uint32_t width_log2 = util_logbase2(tile_width_el);
    const uint32_t height_log2 = util_logbase2(tile_height_el);
-   if (width_log2 + height_log2 > 14)
+   if (width_log2 > 7 || height_log2 > 7)
       return false;
 
    *config = (struct hk_g17p_tile_address_config){

@@ -46,6 +46,15 @@ libagx_space_bits(uint x)
    return accum;
 }
 
+static uint
+libagx_space_bits_7(uint x)
+{
+   uint accum = 0;
+   for (uint i = 0; i < 7; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
 KERNEL(32)
 libagx_detile(global uint8_t *dest, global uint8_t *src,
               uint dest_pitch_B, uint width_el, uint height_el,
@@ -102,8 +111,10 @@ libagx_copy_image_offset(uint x, uint y, uint pitch_B, uint stride_el,
 }
 
 /* Variant for hot raw copies whose power-of-two tile geometry is reduced on
- * the CPU. This keeps division and bit-scan instructions out of every element
- * while preserving the generic helper for kernels with the existing ABI. */
+ * the CPU. G17P AIL transfer tiles have at most 128 elements per axis, so the
+ * specialized Morton encoder only expands seven bits. This keeps division,
+ * bit scans and seven dead bit-expansion steps out of every element while
+ * preserving the generic helper for kernels with the existing ABI. */
 static uint
 libagx_copy_image_offset_pow2(uint x, uint y, uint pitch_B,
                               uint tiles_per_row, uint tile_width_log2,
@@ -118,8 +129,8 @@ libagx_copy_image_offset_pow2(uint x, uint y, uint pitch_B,
    uint tile_idx = (y >> tile_height_log2) * tiles_per_row +
                    (x >> tile_width_log2);
    uint tile_area_el = 1u << (tile_width_log2 + tile_height_log2);
-   uint morton_el = libagx_space_bits(x & (tile_width_el - 1)) |
-                    (libagx_space_bits(y & (tile_height_el - 1)) << 1);
+   uint morton_el = libagx_space_bits_7(x & (tile_width_el - 1)) |
+                    (libagx_space_bits_7(y & (tile_height_el - 1)) << 1);
 
    return (tile_idx * tile_area_el + morton_el) * blocksize_B;
 }
