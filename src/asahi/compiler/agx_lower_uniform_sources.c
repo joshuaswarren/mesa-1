@@ -22,6 +22,10 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
 
    /* ALU cannot access 64-bit uniforms */
    bool is_64 = size == AGX_SIZE_64;
+   /* AGX3 memory bases address four-half uniform groups. A pointer packed
+    * at a two-half boundary must be copied to a GPR pair before use. */
+   bool memory_base = !high &&
+      (encoding == AGX_ISA_ENCODING_AGX2 || !(value & 3));
 
    switch (op) {
    case AGX_OPCODE_FLTNORM_AGX3:
@@ -52,10 +56,10 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       return !high && src_index == 0;
 
    case AGX_OPCODE_DEVICE_LOAD:
-      return src_index == 0 && !high;
+      return src_index == 0 && memory_base;
    case AGX_OPCODE_DEVICE_STORE:
    case AGX_OPCODE_ATOMIC:
-      return src_index == 1 && !high;
+      return src_index == 1 && memory_base;
    case AGX_OPCODE_LOCAL_LOAD:
       return src_index == 0;
    case AGX_OPCODE_LOCAL_STORE:
