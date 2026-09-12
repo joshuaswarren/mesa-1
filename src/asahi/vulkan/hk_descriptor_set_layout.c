@@ -49,7 +49,7 @@ hk_descriptor_stride_align_for_type(
       *stride = hk_storage_image_descriptor_layout(
                    agx_chip_descriptor_generation(pdev->dev.chip)).stride;
       if (pdev->dev.chip == AGX_CHIP_G17P)
-         *stride += 8;
+         *stride += HK_G17P_STORAGE_SW_SIZE;
       *alignment = 8;
       break;
 

@@ -316,6 +316,21 @@ check_gen9_bc_textures(void)
 int
 main(void)
 {
+   uint64_t atomic_sw = 0;
+   assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
+                                       &atomic_sw));
+   assert((atomic_sw & ((UINT64_C(1) << 27) - 1)) == 3);
+   assert(((atomic_sw >> 27) & 0xf) == 6);
+   assert(((atomic_sw >> 31) & 0xf) == 5);
+   assert(((atomic_sw >> 35) & ((UINT64_C(1) << 27) - 1)) == 0x80);
+   assert((atomic_sw >> 62) == 2);
+   assert(!hk_pack_g17p_image_atomic_sw(1, 64, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 48, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 64, 64, 0x4000, 3,
+                                        &atomic_sw));
+
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();

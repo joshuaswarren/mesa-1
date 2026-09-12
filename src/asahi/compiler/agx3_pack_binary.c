@@ -1250,9 +1250,11 @@ agx3_emit_image_coord(struct util_dynarray *emission,
           len == sizeof(bytes) && agx3_append(emission, bytes, len);
 }
 
-/* Two bounded public storage-image forms: noncoherent 2D RGBA8UI state0 fed
- * by one image load, and normalized formatted-float state1 fed by one
- * explicit-LOD sample. The PBE descriptor selects RGBA8 versus RGB10A2.
+/* Two bounded public storage-image forms: integer 2D state0 fed by an image
+ * load or atomic result, and normalized formatted-float state1 fed by one
+ * explicit-LOD sample. The native imgwci operation is the coherent image
+ * write form; NIR's coherent bit does not select a different instruction.
+ * The PBE descriptor selects RGBA8 versus RGB10A2.
  * The four slot2 COPYs route the packed vec4 into the exact imgwci data lanes.
  * The first COPY consumes the one-shot texture dependency when it is still
  * outstanding. An intervening bounds consumer may already have retired that
@@ -1294,7 +1296,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       !(I->src[4].cache && (I->src[4].discard || I->src[4].kill));
    if (enc != AGX_ISA_ENCODING_AGX3B || I->nr_dests != 0 ||
        I->nr_srcs != 5 ||
-       I->dim != AGX_DIM_2D || I->coherent ||
+       I->dim != AGX_DIM_2D ||
        (wait_mask & ~UINT16_C(0x3f)) != 0 ||
        !agx3_tex_plain_reg(I->src[0]) || I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != 4 || (I->src[0].value & 1) ||

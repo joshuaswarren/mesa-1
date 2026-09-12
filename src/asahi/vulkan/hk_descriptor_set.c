@@ -242,6 +242,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
          desc.pbe = view->planes[plane].storage;
          desc.texture_heap_index =
             view->planes[plane].storage_heap_index;
+         desc.atomic_sw = view->planes[plane].storage_atomic_sw;
       }
    }
 
@@ -258,6 +259,9 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_STORAGE_HEAP_INDEX_OFFSET + sizeof(uint64_t))
       memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
              &desc.texture_heap_index, sizeof(desc.texture_heap_index));
+   if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
+      memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
+             sizeof(desc.atomic_sw));
    if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64

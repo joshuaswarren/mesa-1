@@ -12093,7 +12093,7 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
       AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
 }
 
-TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShapes)
+TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
 {
    static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {
       0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
@@ -12119,8 +12119,9 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShape
          mode == 3);
       agx_stop(b);
 
-      const std::vector<uint8_t> code = pack(b, mode == 0);
-      if (mode == 0) {
+      const bool valid = mode == 0 || mode == 3;
+      const std::vector<uint8_t> code = pack(b, valid);
+      if (valid) {
          EXPECT_TRUE(b->shader->agx3_staging_known);
          EXPECT_EQ(b->shader->agx3_staging_halfs, 20);
          static const uint8_t read_coords[] = {

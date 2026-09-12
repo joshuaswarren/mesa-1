@@ -478,7 +478,7 @@ txs_for_image(nir_builder *b, nir_intrinsic_instr *intr,
 
 static nir_def *
 image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
-                    bool return_index)
+                    bool return_index, bool gen9)
 {
    /* First, calculate the address of the PBE descriptor */
    nir_def *desc_address =
@@ -504,6 +504,14 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
       return nir_channel(b, coord, 0);
    } else if (dim == GLSL_SAMPLER_DIM_BUF) {
       return libagx_buffer_texel_address(b, desc_address, coord, blocksize_B);
+   } else if (gen9) {
+      nir_def *sw_address =
+         nir_iadd_imm(b, desc_address, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE);
+      return libagx_image_texel_address_gen9(
+         b, desc_address, sw_address, coord, nir_u2u32(b, intr->src[2].ssa),
+         blocksize_B, nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
+         nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_MS), nir_imm_bool(b, layered),
+         nir_imm_bool(b, return_index));
    } else {
       return libagx_image_texel_address(
          b, desc_address, coord, nir_u2u32(b, intr->src[2].ssa), blocksize_B,
@@ -644,7 +652,9 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return true;
 
    case nir_intrinsic_bindless_image_texel_address:
-      nir_def_rewrite_uses(&intr->def, image_texel_address(b, intr, false));
+      nir_def_rewrite_uses(&intr->def,
+                           image_texel_address(b, intr, false,
+                                               data && *(const bool *)data));
       return true;
 
    case nir_intrinsic_is_sparse_texels_resident:
@@ -908,7 +918,8 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
    if (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS)
       return false;
 
-   nir_def *index_px = nir_u2u32(b, image_texel_address(b, intr, true));
+   nir_def *index_px =
+      nir_u2u32(b, image_texel_address(b, intr, true, false));
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 
    nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
