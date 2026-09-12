@@ -12007,7 +12007,15 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
    ASSERT_EQ(len, sizeof(native));
    EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
 
-   for (unsigned wait : {2u, 3u, 0x40u}) {
+   for (unsigned wait : {2u, 3u, 0x20u, 0x3fu}) {
+      d.wait_mask = wait;
+      ASSERT_TRUE(agx3_tex_encode_image_write_rgba8_2d(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+      ASSERT_EQ(len, sizeof(native));
+      EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
+   }
+
+   for (unsigned wait : {0x40u, 0x7fu}) {
       memset(bytes, 0xa5, sizeof(bytes));
       len = 0xa5;
       d.wait_mask = wait;

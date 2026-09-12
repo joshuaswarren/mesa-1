@@ -706,7 +706,8 @@ agx3_tex_encode_image_write_rgba8_2d(
       d->image_kind ? d->image_kind : AGX3_TEX_OPERAND_IMMEDIATE;
    const bool immediate = kind == AGX3_TEX_OPERAND_IMMEDIATE;
    const bool reg = kind == AGX3_TEX_OPERAND_REGISTER;
-   if (enc != AGX_ISA_ENCODING_AGX3B || (d->wait_mask & ~1u) != 0 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B ||
+       (d->wait_mask & ~UINT16_C(0x3f)) != 0 ||
        (!immediate && !reg) ||
        (immediate && (d->image_kill ||
           !((d->image_value == 0 && !d->normalized) ||

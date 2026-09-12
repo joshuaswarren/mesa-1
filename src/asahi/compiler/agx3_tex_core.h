@@ -400,7 +400,8 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * argument-buffer-indexed `texture2d<..., access::write>` witnesses. The
  * instruction consumes fixed coordinate/data staging lanes populated by the
  * caller and waits on staging slot 2. `wait_mask` is the upstream texture
- * dependency consumed by the first data-staging write, not an imgwci field.
+ * dependency consumed by the first data-staging write, not an imgwci field;
+ * it may name any of AGX3b's six producer slots.
  *
  * IMMEDIATE names the two descriptor-specialized states already used by the
  * public transfer paths: state 0/UINT and state 1/UNORM. REGISTER names an
