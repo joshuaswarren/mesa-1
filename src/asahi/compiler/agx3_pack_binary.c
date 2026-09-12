@@ -10218,12 +10218,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 agx_channels(shift) != 1 || value.abs || value.neg ||
                 value.kill || shift.abs || shift.neg || shift.kill ||
                 (value.cache && value.discard) ||
-                (shift.cache && shift.discard) || shift.cache)
+                (shift.cache && shift.discard))
                AGX3_REFUSE(I);
             const uint16_t src[2] = {value.value, shift.value};
             const bool src_16[2] = {true, false};
             const enum agx3_alu_hint hints[2] = {
-               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
+               agx3_post_ra_hint(value),
+               /* This endpoint has a discard bit but no grounded cache bit
+                * for the shift count. NONE also retains the register, so a
+                * cached post-RA source loses no lifetime information. */
+               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift),
             };
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             if (!agx3_alu_srl_reg(enc, dest.value, true, dest.cache, src,

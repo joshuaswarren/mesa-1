@@ -9002,6 +9002,25 @@ TEST_F(AGX3PackBinary, NativeBfeilExtractPreservesSourceLifetime)
    }
 }
 
+TEST_F(AGX3PackBinary, HalfBfeilRetainsCachedDynamicShift)
+{
+   auto build = [this](bool cache_shift) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(10, AGX_SIZE_16);
+      value.discard = true;
+      agx_index shift = agx_register(16, AGX_SIZE_32);
+      shift.cache = cache_shift;
+      agx_bfeil_to(b, agx_register(4, AGX_SIZE_16), agx_immediate(0),
+                   value, shift, 0);
+      agx_stop(b);
+      return pack(b);
+   };
+
+   /* The dynamic-shift endpoint has no source-cache bit. NONE retains the
+    * shift register, so the cached and ordinary post-RA forms are exact. */
+   EXPECT_EQ(build(true), build(false));
+}
+
 TEST_F(AGX3PackBinary, BfeilKeepsNonzeroMergeBaseClosed)
 {
    agx_builder *b=builder(AGX_ISA_ENCODING_AGX3B);
