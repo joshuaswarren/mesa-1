@@ -85,6 +85,13 @@ struct hk_agx3_g17p_graphics_program {
    uint16_t length;
 };
 
+bool hk_agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size);
+bool hk_agx3_g17g_basic_graphics_program_generate(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct hk_agx3_g17p_graphics_program *program);
+
 #define HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX 28u
 
 struct hk_agx3_g17p_combined_sampler_heap {

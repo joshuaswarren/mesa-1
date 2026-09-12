@@ -81,6 +81,26 @@ check_auxiliary_block(void)
 int
 main(void)
 {
+   uint8_t m5_lead[0x341], previous[0x341];
+   memset(m5_lead, 0xa5, sizeof(m5_lead));
+   if (!agx3_build_g17g_container_lead(m5_lead, sizeof(m5_lead)) ||
+       memcmp(m5_lead, (uint8_t[]){0x40, 3, 0, 0}, 4) ||
+       memcmp(m5_lead + 0x100, m5_lead + 0x200, 0x100) ||
+       memcmp(m5_lead + 0x100,
+              (uint8_t[]){0x5e,0,0x33,0x0e,0,0,0,0,0,0,6,0,6,0,6,0}, 16) ||
+       memcmp(m5_lead + 0x190,
+              (uint8_t[]){0x5e,0x40,0x11,0x0e,0,0,0,0,0,0,6,0,6,0,6,0}, 16) ||
+       memcmp(m5_lead + 0x1a0,
+              (uint8_t[]){7,0,0x10,0x0f,0,0,0x27,0,4,0,0x20,0,0xa5,0x0a,6,0}, 16) ||
+       memcmp(m5_lead + 0x1a0, m5_lead + 0x1b0, 16) ||
+       m5_lead[0x340] != 0xa5)
+      return fprintf(stderr, "M5 container lead mismatch\n"), 1;
+   memcpy(previous, m5_lead, sizeof(previous));
+   if (agx3_build_g17g_container_lead(m5_lead, 0x33f) ||
+       agx3_build_g17g_container_lead(NULL, sizeof(m5_lead)) ||
+       memcmp(previous, m5_lead, sizeof(previous)))
+      return fprintf(stderr, "M5 container bounds mismatch\n"), 1;
+
    /* Apple Metal 32023.917, applegpu_g17p, one device-buffer float2 load and
     * one position output.  The nested vertex __TEXT,__text starts with this
     * exact pre-entry program and puts its main entry at +0x40. */

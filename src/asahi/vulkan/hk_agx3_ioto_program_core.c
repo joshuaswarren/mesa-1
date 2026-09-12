@@ -178,8 +178,8 @@ hk_agx3_g17p_graphics_program_bound(
    return agx3_g17p_graphics_program_bound(chip, ranges, range_count, size);
 }
 
-bool
-hk_agx3_g17p_basic_graphics_program_generate(
+static bool
+hk_agx3_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program)
 {
@@ -201,12 +201,41 @@ hk_agx3_g17p_basic_graphics_program_generate(
       .imageblock = desc->imageblock,
    };
    struct agx3_g17p_graphics_program shared;
-   if (!agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared))
+   const bool built = chip == AGX_CHIP_G17G
+      ? agx3_g17g_graphics_program_generate(chip, &shared_desc, &shared)
+      : agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared);
+   if (!built)
       return false;
    memset(program, 0, sizeof(*program));
    memcpy(program->bytes, shared.bytes, shared.length);
    program->length = shared.length;
    return true;
+}
+
+bool
+hk_agx3_g17p_basic_graphics_program_generate(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct hk_agx3_g17p_graphics_program *program)
+{
+   return chip == AGX_CHIP_G17P &&
+          hk_agx3_basic_graphics_program_generate(chip, desc, program);
+}
+
+bool
+hk_agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size)
+{
+   return agx3_g17g_graphics_program_bound(chip, ranges, range_count, size);
+}
+
+bool
+hk_agx3_g17g_basic_graphics_program_generate(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct hk_agx3_g17p_graphics_program *program)
+{
+   return chip == AGX_CHIP_G17G &&
+          hk_agx3_basic_graphics_program_generate(chip, desc, program);
 }
 
 bool

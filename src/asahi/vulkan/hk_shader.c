@@ -1450,7 +1450,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        * backend runs.  Keep this architectural, not environment-selected:
        * an unhandled descriptor shape must fail closed in the main packer.
        */
-      .no_preamble = dev->dev.chip == AGX_CHIP_G17P,
+      .no_preamble = dev->dev.chip == AGX_CHIP_G17P ||
+                     dev->dev.chip == AGX_CHIP_G17G,
    };
 
    /* For now, sample shading is always dynamic. Indicate that. */
@@ -1514,7 +1515,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * geometry only changes how its input vertices were produced.  Build the
     * same byte-grounded VertexProgramVariant payload from the final UVS
     * layout, while leaving compute-only GS variants untouched. */
-   if (dev->dev.chip == AGX_CHIP_G17P && hw &&
+   if ((dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) && hw &&
        shader->b.info.stage == MESA_SHADER_VERTEX) {
       const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
@@ -1531,8 +1532,11 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          .uvs_size = shader->info.uvs.size,
          .user_size = shader->info.uvs.user_size,
       };
-      const bool state_ok = hk_agx3_g17p_vertex_program_info(
-         dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
+      const bool state_ok = dev->dev.chip == AGX_CHIP_G17G
+         ? hk_agx3_g17g_vertex_program_info(
+              dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update)
+         : hk_agx3_g17p_vertex_program_info(
+              dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
       if (!state_ok && hk_g17p_launch_trace_enabled())
          fprintf(stderr,
                  "G17P vertex state refused: sw=%u pos_only=%u pre=%u/%u/%u "

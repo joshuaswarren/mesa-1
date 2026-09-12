@@ -1425,10 +1425,11 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                     struct hk_linked_shader *linked)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const bool g17g = dev->dev.chip == AGX_CHIP_G17G;
 
    if (agx_chip_command_stream_generation(dev->dev.chip) ==
-       AGX_CS_GENERATION_HAL200) {
-      if (dev->dev.chip != AGX_CHIP_G17P ||
+       AGX_CS_GENERATION_HAL200 || g17g) {
+      if ((dev->dev.chip != AGX_CHIP_G17P && !g17g) ||
           !hk_g17p_basic_graphics_program_supported(cmd, s, linked)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return 0;
@@ -1452,8 +1453,12 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       size_t program_capacity;
-      if (!hk_agx3_g17p_graphics_program_bound(dev->dev.chip, ranges,
-                                              range_count, &program_capacity)) {
+      const bool bounded = g17g
+         ? hk_agx3_g17g_graphics_program_bound(dev->dev.chip, ranges,
+                                                range_count, &program_capacity)
+         : hk_agx3_g17p_graphics_program_bound(dev->dev.chip, ranges,
+                                                range_count, &program_capacity);
+      if (!bounded) {
          mesa_loge_once("G17P graphics program bound refused: stage=%u ranges=%zu",
                         (unsigned)s->info.stage, range_count);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -1527,8 +1532,12 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          },
       };
       struct hk_agx3_g17p_graphics_program program;
-      if (!hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,
-                                                        &program)) {
+      const bool generated = g17g
+         ? hk_agx3_g17g_basic_graphics_program_generate(dev->dev.chip, &desc,
+                                                         &program)
+         : hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, &desc,
+                                                         &program);
+      if (!generated) {
          mesa_loge_once(
             "G17P graphics program generation refused: stage=%u ranges=%zu "
             "binary=%u scratch=%u gprs=%u compiler_d=%u/%u sample_mask=%u "
@@ -1658,6 +1667,8 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    struct agx_precompiled_shader *prog = agx_get_precompiled(&dev->bg_eot, idx);
    if (!prog) {
+      mesa_loge("missing precompiled helper %u on %s (barrier=%u)",
+                idx, agx_chip_name(dev->dev.chip), barrier);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -1791,9 +1802,10 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       hk_drm_attachment_set_add(&cs->fragment_attachments, plane->addr, size);
    }
 
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
       /* The kext preserves a zero final VDM word when this selector is the
-       * UINT32_MAX sentinel.  This reproduces m1n1's direct-triangle prefix. */
+       * UINT32_MAX sentinel. Both the G17P and M5 native triangle packets
+       * have this final zero word. */
       cs->agx3_active_context_selector_valid = true;
       cs->agx3_raw_active_context_selector = UINT32_MAX;
    }

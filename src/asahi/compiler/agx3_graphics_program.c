@@ -180,6 +180,105 @@ agx3_g17p_graphics_program_generate(
 }
 
 bool
+agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size)
+{
+   size_t body, chunks;
+   if (!size || chip != AGX_CHIP_G17G ||
+       range_count > AGX3_G17P_GRAPHICS_MAX_RANGES ||
+       !agx3_ioto_uniform_program_body_bound(chip, ranges, range_count,
+                                             &body, &chunks) ||
+       chunks > AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS ||
+       body > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
+                 AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE)
+      return false;
+
+   *size = body + AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE;
+   return true;
+}
+
+bool
+agx3_g17g_graphics_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program)
+{
+   size_t bound;
+   if (chip != AGX_CHIP_G17G || !desc || !program ||
+       !desc->shader_binary_size || desc->shader_binary_size > 512 ||
+       !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
+       !desc->compiler_d_valid || desc->compiler_d > 256 ||
+       desc->writes_sample_mask || desc->colour_partitions > 1 ||
+       (!desc->fragment && desc->colour_partitions) ||
+       (desc->fragment &&
+        (desc->imageblock.sample_size_B != 8 ||
+         desc->imageblock.nr_samples != 1 ||
+         desc->imageblock.tile_size_px != 32 * 32)) ||
+       !agx3_g17g_graphics_program_bound(chip, desc->uniform_ranges,
+                                          desc->uniform_range_count, &bound))
+      return false;
+
+   /* Preserve the independently captured M5 physical imageblock spelling.
+    * Other tile sizes and sample counts need their own native evidence. */
+   static const uint8_t speclm[2][AGX_IOTO_SPECLM_SIZE] = {
+      {0x07,0x00,0x00,0x0c,0x00,0x00,0x00,0x00},
+      {0x17,0x00,0x00,0x2c,0x00,0x00,0x18,0x08},
+   };
+   struct agx_ioto_state ldshdr = {0}, spectpr = {0};
+   ldshdr.f[0] = desc->shader_va;
+   const uint32_t span = ((desc->shader_binary_size + 63) & ~63u) >> 7;
+   ldshdr.f[1] = MIN2(span, 3);
+   ldshdr.f[5] = 3;
+   ldshdr.f[6] = 107;
+   ldshdr.f[23] = 1;
+   spectpr.f[0] = 3;
+   spectpr.f[1] = 166;
+   spectpr.f[22] = (((desc->compiler_d + 3) >> 2) + 1) & ~1u;
+
+   struct agx_ioto_state_tail_output tail = {
+      .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
+   };
+   memcpy(tail.bytes, speclm[desc->fragment], AGX_IOTO_SPECLM_SIZE);
+   if (!agx_ioto_state_pack_ldshdr(
+          chip, &ldshdr, tail.bytes + AGX_IOTO_SPECLM_SIZE,
+          AGX_IOTO_LDSHDR_SIZE) ||
+       !agx_ioto_state_pack_spectpr(
+          chip, &spectpr, tail.bytes + AGX_IOTO_SPECLM_SIZE +
+                            AGX_IOTO_LDSHDR_SIZE, AGX_IOTO_SPECTPR_SIZE))
+      return false;
+
+   uint8_t body[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   struct agx_ioto_inflight_load loads[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   struct agx_ioto_inflight_load sort[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   struct agx_ioto_load_cache_entry cache[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   const struct agx3_ioto_uniform_program_desc load_desc = {
+      .program_va = desc->program_va,
+      .ranges = desc->uniform_ranges,
+      .range_count = desc->uniform_range_count,
+   };
+   const struct agx3_ioto_uniform_program_workspace workspace = {
+      .body = body, .body_capacity = sizeof(body),
+      .loads = loads, .load_capacity = ARRAY_SIZE(loads),
+      .sort = sort, .sort_capacity = ARRAY_SIZE(sort),
+      .cache = cache, .cache_capacity = ARRAY_SIZE(cache),
+   };
+   size_t body_size, copy_offset, written;
+   struct agx3_g17p_graphics_program staged = {0};
+   if (!agx3_ioto_uniform_program_body_generate(
+          chip, &load_desc, workspace, &body_size, &copy_offset) ||
+       !agx_ioto_g17g_resource_program_compose(
+          desc->program_va, body, body_size, &tail,
+          desc->fragment ? AGX_IOTO_G17G_PROGRAM_FRAGMENT
+                         : AGX_IOTO_G17G_PROGRAM_VERTEX,
+          staged.bytes, sizeof(staged.bytes), &written) ||
+       written > bound || written > UINT16_MAX)
+      return false;
+   staged.length = written;
+   *program = staged;
+   return true;
+}
+
+bool
 agx3_g17p_fragment_blend_constant_base(enum agx_chip chip,
                                         unsigned occupied_halfs,
                                         uint16_t *base)

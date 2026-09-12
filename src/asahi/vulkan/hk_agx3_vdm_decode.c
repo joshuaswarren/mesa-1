@@ -106,8 +106,8 @@ hk_agx3_vdm_live_source_layout(
              : AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED;
 }
 
-bool
-hk_agx3_g17p_vertex_program_info(
+static bool
+hk_agx3_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
    struct agx_vdm_state_update_program_info *program)
@@ -125,7 +125,8 @@ hk_agx3_g17p_vertex_program_info(
       compiler_info && compiler_info->user_size == 0 && !writes_psiz &&
       !writes_layer_viewport;
 
-   if (chip != AGX_CHIP_G17P || !compiler_info || !program ||
+   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+       !compiler_info || !program ||
        !compiler_info->hardware_vertex ||
        compiler_info->has_preamble || compiler_info->nr_preamble_gprs != 0 ||
        compiler_info->preamble_scratch_size != 0 ||
@@ -162,13 +163,43 @@ hk_agx3_g17p_vertex_program_info(
             .raw_vs_output_count_1_extra = false,
             .raw_vs_output_selector = 0,
             .raw_vs_output_flag_6 = false,
-            .pre_hal300_flag_group_nonzero = true,
+            .pre_hal300_flag_group_nonzero = chip == AGX_CHIP_G17P,
             .pre_hal300_flag_bit_4 = false,
             .variant = AGX_VDM_STATE_UPDATE_TEMPLATE_00,
             .raw_active_context_selector = UINT32_MAX,
          },
    };
    return true;
+}
+
+bool
+hk_agx3_g17p_vertex_program_info(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
+   struct agx_vdm_state_update_program_info *program)
+{
+   if (chip != AGX_CHIP_G17P) {
+      if (program)
+         memset(program, 0, sizeof(*program));
+      return false;
+   }
+   return hk_agx3_vertex_program_info(chip, compiler_info, program);
+}
+
+bool
+hk_agx3_g17g_vertex_program_info(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
+   struct agx_vdm_state_update_program_info *program)
+{
+   if (chip != AGX_CHIP_G17G || !compiler_info ||
+       !compiler_info->position_only || compiler_info->uvs_size != 4 ||
+       compiler_info->user_size != 0) {
+      if (program)
+         memset(program, 0, sizeof(*program));
+      return false;
+   }
+   return hk_agx3_vertex_program_info(chip, compiler_info, program);
 }
 
 bool

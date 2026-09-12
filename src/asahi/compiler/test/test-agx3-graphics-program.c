@@ -17,9 +17,83 @@
       }                                                                        \
    } while (0)
 
+static int
+test_g17g_programs(void)
+{
+   /* Native M5 triangle's complete state records, independently captured
+    * from the currently compiled shader. Runtime D remains unqualified
+    * until these generated programs execute with Mesa-owned resources. */
+   static const uint8_t expected_tail[2][28] = {
+      {0x07,0x00,0x00,0x0c,0x00,0x00,0x00,0x00,
+       0x87,0x04,0x48,0x0e,0x00,0x00,0x00,0x00,0x00,0x01,
+       0x87,0x00,0x00,0x0d,0x00,0x00,0x00,0x00,0x00,0x00},
+      {0x17,0x00,0x00,0x2c,0x00,0x00,0x18,0x08,
+       0xc7,0x03,0x40,0x0e,0x00,0x00,0x00,0x00,0x00,0x01,
+       0x07,0x00,0x00,0x0d,0x00,0x00,0x00,0x00,0x00,0x00},
+   };
+   for (unsigned fragment = 0; fragment < 2; ++fragment) {
+      struct agx3_g17p_graphics_program_desc desc = {
+         .program_va = UINT64_C(0x10000100000),
+         .shader_va = fragment ? UINT64_C(0x100000003c0)
+                              : UINT64_C(0x10000000480),
+         .shader_binary_size = fragment ? 60 : 128,
+         .nr_gprs = 16,
+         .compiler_d_valid = true,
+         .compiler_d = fragment ? 0 : 32,
+         .fragment = fragment,
+         .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+      };
+      struct agx3_g17p_graphics_program output;
+      size_t empty_bound;
+      CHECK(agx3_g17g_graphics_program_bound(AGX_CHIP_G17G, NULL, 0,
+                                              &empty_bound));
+      CHECK(empty_bound == 90);
+      CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc,
+                                                 &output));
+      CHECK(output.length == (fragment ? 90 : 84));
+      CHECK(memcmp(output.bytes, expected_tail[fragment], 28) == 0);
+
+      struct agx3_ioto_uniform_range ranges[] = {
+         {.start_halfs = 0, .size_halfs = 4, .address = 0x4000001000},
+         {.start_halfs = 4, .size_halfs = 2, .address = 0x4000002000},
+      };
+      desc.uniform_ranges = ranges;
+      desc.uniform_range_count = 2;
+      size_t bound;
+      CHECK(agx3_g17g_graphics_program_bound(AGX_CHIP_G17G, ranges, 2, &bound));
+      CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc,
+                                                 &output));
+      CHECK(output.length > 90 && output.length <= bound);
+      struct agx3_g17p_graphics_program baseline = output;
+      for (unsigned i = 0; i < 2; ++i) {
+         ranges[i].address += 64;
+         CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc,
+                                                    &output));
+         CHECK(output.length == baseline.length &&
+               memcmp(output.bytes, baseline.bytes, output.length) != 0);
+         ranges[i].address -= 64;
+      }
+
+      baseline = output;
+      desc.scratch_size = 4;
+      CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+      desc.scratch_size = 0;
+      desc.compiler_d_valid = false;
+      CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+      desc.compiler_d_valid = true;
+      desc.shader_va++;
+      CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));
+      desc.shader_va--;
+      CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17P, &desc, &output));
+      CHECK(memcmp(&output, &baseline, sizeof(output)) == 0);
+   }
+   return 0;
+}
+
 int
 main(void)
 {
+   CHECK(test_g17g_programs() == 0);
    /* Glamor's instanced rectangle needs six independent VS ranges: VBO
     * bases, clamps, draw parameters, UBO pointer, provoking vertex and clip
     * coefficient. The old five-range limit silently left its pipeline zero. */

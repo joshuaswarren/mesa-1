@@ -72,6 +72,7 @@ struct side_effect_output {
 VK_FN(vkGetInstanceProcAddr);
 VK_FN(vkGetDeviceProcAddr);
 VK_FN(vkCreateInstance);
+VK_FN(vkCreateDebugUtilsMessengerEXT);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceProperties);
 #if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
@@ -206,6 +207,18 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
    return UINT32_MAX;
 }
 
+static VKAPI_ATTR VkBool32 VKAPI_CALL
+render_debug_message(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                     VkDebugUtilsMessageTypeFlagsEXT types,
+                     const VkDebugUtilsMessengerCallbackDataEXT *data,
+                     void *user_data)
+{
+   (void)severity;
+   (void)types;
+   (void)user_data;
+   fprintf(stderr, "render debug: %s\n", data->pMessage);
+   return VK_FALSE;
+}
 
 int
 main(
@@ -291,13 +304,34 @@ main(
       .engineVersion = 1,
       .apiVersion = VK_API_VERSION_1_2,
    };
+   const bool debug_messages = getenv("AGX_RENDER_DEBUG") != NULL;
+   const char *debug_extension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
    const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &app_info,
+      .enabledExtensionCount = debug_messages ? 1 : 0,
+      .ppEnabledExtensionNames = &debug_extension,
    };
    VkInstance instance;
    check(vkCreateInstance(&instance_info, NULL, &instance),
          "vkCreateInstance");
+
+   if (debug_messages) {
+      LOAD_INSTANCE(instance, vkCreateDebugUtilsMessengerEXT);
+      const VkDebugUtilsMessengerCreateInfoEXT debug_info = {
+         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+         .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+         .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+         .pfnUserCallback = render_debug_message,
+      };
+      VkDebugUtilsMessengerEXT messenger;
+      check(vkCreateDebugUtilsMessengerEXT(instance, &debug_info, NULL,
+                                            &messenger),
+            "vkCreateDebugUtilsMessengerEXT");
+   }
 
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);

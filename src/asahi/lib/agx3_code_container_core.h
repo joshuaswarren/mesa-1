@@ -9,6 +9,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Native M5 leading block, including both complete GPU1 helper tables. */
+bool agx3_build_g17g_container_lead(void *image, size_t capacity);
+
 /* Write the 0x40-byte program immediately before a G17P container entry.
  * Apple's HAL200 compiler emits distinct vertex/compute, plain-fragment, and
  * sampled-fragment programs.  sampled_fragment is valid only for fragment. */

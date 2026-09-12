@@ -55,6 +55,8 @@ libasahi_lib_files = files(
   'agx_ppp_hal300_depth_bias_scissor_core.h',
   'agx_ppp_hal300_depth_stencil_core.c',
   'agx_ppp_hal300_depth_stencil_core.h',
+  'agx_ppp_hal300_graphics_core.c',
+  'agx_ppp_hal300_graphics_core.h',
   'agx_ppp_decode_core.c',
   'agx_ppp_decode_core.h',
   'agx_ppp_viewport_payload_core.c',
@@ -684,6 +686,20 @@ if with_tests
          'agx_ppp_hal200_graphics_core.c',
          'agx_vdm_state_core.c',
          'tests/test-ppp-hal200-graphics-core.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-ppp-hal300-graphics-core',
+    executable(
+      'asahi-ppp-hal300-graphics-core',
+      files(
+        'agx_ppp_hal300_graphics_core.c',
+        'agx_vdm_state_core.c',
+        'tests/test-ppp-hal300-graphics-core.c',
       ),
       include_directories : [inc_include, inc_src, inc_asahi],
     ),

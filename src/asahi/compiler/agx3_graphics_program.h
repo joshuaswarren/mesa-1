@@ -37,6 +37,16 @@ struct agx3_g17p_graphics_program {
    uint16_t length;
 };
 
+/* M5 shares the descriptor's address/range fields, but builds its own GPU1
+ * state and resource program. Initially bounded to scratch-free vertex or
+ * single-sample RGBA8 fragment programs with known compiler staging use. */
+bool agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size);
+bool agx3_g17g_graphics_program_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+
 enum agx3_g17p_rt0_bg_op {
    AGX3_G17P_RT0_BG_CLEAR,
    AGX3_G17P_RT0_BG_RELOAD,

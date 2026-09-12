@@ -18,6 +18,7 @@
 #include "agx_ppp_hal200_graphics_core.h"
 #include "agx_ppp_hal200_raster_core.h"
 #include "agx_ppp_hal300_depth_bias_scissor_core.h"
+#include "agx_ppp_hal300_graphics_core.h"
 #include "agx_ppp_viewport_payload_core.h"
 #include "agx_ppp_w_clamp_cull2_core.h"
 #include "agx_tilebuffer.h"
@@ -3551,6 +3552,75 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
    struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+
+   if (dev->dev.chip == AGX_CHIP_G17G) {
+      struct hk_linked_shader *linked = gfx->linked[MESA_SHADER_FRAGMENT];
+      const VkViewport *vp = &dyn->vp.viewports[0];
+      const VkRect2D *scissor = &dyn->vp.scissors[0];
+      /* First M5 application profile: a full-frame, opaque, position-only
+       * triangle. Keep the captured state constants local to this bounded
+       * profile until the corresponding dynamic fields are decoded. */
+      if (!hw_vs || !fs || !linked || linked->b.cf.nr_bindings ||
+          linked->b.cf.nr_cf || linked->b.cf.reads_z || gfx->varyings ||
+          hw_vs->info.uvs.size != 4 || hw_vs->info.uvs.osel.opaque[0] ||
+          gfx->object_type != AGX_OBJECT_TYPE_TRIANGLE || gfx->provoking != 0 ||
+          render->color_att_count != 1 || render->depth_att.iview ||
+          render->stencil_att.iview || render->layer_count != 1 ||
+          render->view_mask || render->tilebuffer.nr_samples != 1 ||
+          (linked->b.fragment_control.opaque[0] >> 29) != AGX_PASS_TYPE_OPAQUE ||
+          fs->info.fs.writes_memory || hk_rast_discard(cmd) ||
+          dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL ||
+          dyn->rs.line.width != 1.0f || dyn->rs.depth_bias.enable ||
+          dyn->rs.depth_clamp_enable || dyn->vp.depth_clip_negative_one_to_one ||
+          !vk_rasterization_state_depth_clip_enable(&dyn->rs) ||
+          dyn->ds.depth.bounds_test.enable || gfx->occlusion.mode ||
+          dyn->vp.viewport_count != 1 || dyn->vp.scissor_count != 1 ||
+          vp->x != 0 || vp->y != 0 || vp->width != render->cr.width ||
+          vp->height != render->cr.height || vp->minDepth != 0 ||
+          vp->maxDepth != 1 || scissor->offset.x || scissor->offset.y ||
+          scissor->extent.width != render->cr.width ||
+          scissor->extent.height != render->cr.height ||
+          render->area.offset.x || render->area.offset.y ||
+          render->area.extent.width != render->cr.width ||
+          render->area.extent.height != render->cr.height) {
+         mesa_loge("M5 draw exceeds the native opaque position-only PPP profile");
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
+      const struct agx_ppp_hal300_graphics_fields fields = {
+         .fragment_program = hk_upload_usc_words(cmd, fs, linked),
+         .cull_mode = dyn->rs.cull_mode,
+         .front_face_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      };
+      struct agx_ppp_hal300_graphics_core state;
+      if (!agx_ppp_hal300_graphics_core_pack(dev->dev.chip, &fields, &state)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
+      struct agx_ptr upload = hk_pool_vdm_alloc(cmd, sizeof(state.bytes), 64);
+      if (!upload.cpu)
+         return;
+      memcpy(upload.cpu, state.bytes, sizeof(state.bytes));
+
+      uint8_t records[AGX_PPP_HAL300_GRAPHICS_RECORDS * AGX_PPP_STATE_LENGTH];
+      uint8_t *cursor = records;
+      for (unsigned i = 0; i < AGX_PPP_HAL300_GRAPHICS_RECORDS; ++i) {
+         if (!agx_ppp_emit_state(dev->dev.chip, &cursor,
+                                  upload.gpu + state.offsets[i],
+                                  state.lengths[i])) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+      }
+      memcpy(*out, records, sizeof(records));
+      *out += sizeof(records);
+      if (hk_g17p_launch_trace_enabled())
+         hk_g17p_trace_line("hal300-graphics", upload.gpu, upload.cpu,
+                            sizeof(state.bytes));
+      return;
+   }
 
    bool hw_vs_dirty = IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(TESS_EVAL) ||
                       IS_SHADER_DIRTY(GEOMETRY);

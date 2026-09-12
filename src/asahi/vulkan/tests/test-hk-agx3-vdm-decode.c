@@ -187,6 +187,34 @@ test_g17p_vertex_program_info(void)
    CHECK(memcmp(encoded.bytes, m1n1_direct_triangle_prefix,
                 sizeof(m1n1_direct_triangle_prefix)) == 0);
 
+   struct agx_vdm_state_update_program_info m5;
+   CHECK(hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &compiler_info, &m5));
+   CHECK(!m5.template_info.pre_hal300_flag_group_nonzero);
+   CHECK(!m5.template_info.pre_hal300_flag_bit_4);
+   struct agx_vdm_state_update_draw_info m5_draw = draw;
+   m5_draw.template_info = m5.template_info;
+   m5_draw.template_info.pipeline = UINT64_C(0x10000160000);
+   CHECK(hk_agx3_encode_vdm_state_update_draw(AGX_CHIP_G17G, &m5_draw, &encoded));
+   /* Complete M5 native triangle VDM state at command-stream offset0x18. */
+   static const uint8_t m5_native_triangle_state[] = {
+      0x2e,0x00,0x00,0x40,0x00,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x01,0x00,0x58,0x00,0x00,
+      0x04,0x04,0x00,0x00,0x00,0x00,0x00,0x00,
+      0x00,0x00,0x00,0x00,
+   };
+   CHECK(encoded.length == sizeof(m5_native_triangle_state));
+   CHECK(memcmp(encoded.bytes, m5_native_triangle_state, encoded.length) == 0);
+   struct hk_agx3_g17p_vertex_compile_info m5_invalid = compiler_info;
+   m5_invalid.has_preamble = true;
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_invalid, &m5));
+   CHECK(program_info_is_cleared(&m5));
+   m5_invalid = compiler_info;
+   m5_invalid.user_size = 1;
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_invalid, &m5));
+   CHECK(program_info_is_cleared(&m5));
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17P, &compiler_info, &m5));
+   CHECK(program_info_is_cleared(&m5));
+
    /* Apple vs2 float2 varying witness: __GPU_LD_MD root.field1 gives
     * field3=6 and field4 absent, mapping to VsStateConfig+0xc/+0x14.
     * This protects the actual producer semantics, not just byte packing. */

@@ -197,25 +197,32 @@ agx3_build_container_lead(uint8_t *image)
 }
 
 static void
-agx3_build_container(uint8_t *image, size_t code_size, bool fragment,
+agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool fragment,
                      bool sampled_fragment)
 {
    memset(image, 0, agx3_container_size(code_size));
-   agx3_build_container_lead(image);
+   if (chip == AGX_CHIP_G17G) {
+      bool built = agx3_build_g17g_container_lead(image, AGX3_CONTAINER_LEAD);
+      assert(built);
+      (void)built;
+   } else {
+      agx3_build_container_lead(image);
+   }
 
    agx3_put_le32(image + AGX3_CONTAINER_LEAD,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
                     ALIGN_POT(code_size, 64));
 
    uint8_t *constant = image + AGX3_CONTAINER_LEAD + AGX3_CONTAINER_BLOCK_HDR;
-   agx3_build_container_constant_program(constant, fragment,
-                                         sampled_fragment);
+   agx3_build_container_constant_program(constant,
+                                          fragment || chip == AGX_CHIP_G17G,
+                                          sampled_fragment && chip != AGX_CHIP_G17G);
 }
 
 static bool
 agx3_uses_code_container(const struct agx_device *dev)
 {
-   return dev->chip == AGX_CHIP_G17P;
+   return dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G;
 }
 
 bool
@@ -227,7 +234,8 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    /* These literal loop fragments are AGX2 machine code. G17P exposes only
     * one sample and its Vulkan path folds sample shading before split-FS
     * lowering; fail closed if a caller ever bypasses that canonicalization. */
-   if (dev->chip == AGX_CHIP_G17P && nr_samples_shaded) {
+   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
+       nr_samples_shaded) {
       fprintf(stderr,
               "agx_fast_link: external sample loop is not AGX3 machine code\n");
       return false;
@@ -307,7 +315,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    assert(size > 0 && "must stop");
 
-   if (dev->chip == AGX_CHIP_G17P &&
+   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
        (main->info.stage == MESA_SHADER_VERTEX ||
         main->info.stage == MESA_SHADER_FRAGMENT) &&
        staging_known && !linked->g17p_compiler_d_valid) {
@@ -344,7 +352,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    if (container)
-      agx3_build_container(container_map, size, fragment,
+      agx3_build_container(dev->chip, container_map, size, fragment,
                            fragment && sampled_fragment);
 
    size_t offset = 0;
