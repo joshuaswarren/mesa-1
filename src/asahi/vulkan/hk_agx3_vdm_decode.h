@@ -70,8 +70,8 @@ bool hk_agx3_g17p_vertex_program_info(
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
    struct agx_vdm_state_update_program_info *program);
 
-/* Initial HAL300 path: position-only hardware vertex, no preamble or
- * user varyings. Pre-HAL300 flag bits are always absent. */
+/* HAL300 hardware vertex profiles: position, optional point size, and one
+ * float4 user color. No preamble. Pre-HAL300 flag bits are always absent. */
 bool hk_agx3_g17g_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,

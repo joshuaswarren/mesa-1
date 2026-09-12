@@ -225,6 +225,32 @@ test_g17p_vertex_program_info(void)
    CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17P, &compiler_info, &m5));
    CHECK(program_info_is_cleared(&m5));
 
+   /* Native M5 m5_color_vertex and m5_color_point_vertex metadata:
+    * root.field1.field3 = 8/9, field4 absent (all outputs are f32).
+    * Keep extra varyings, packed layer/viewport, and preambles rejected. */
+   struct hk_agx3_g17p_vertex_compile_info m5_color = compiler_info;
+   m5_color.position_only = false;
+   m5_color.uvs_written = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   m5_color.user_size = 4;
+   m5_color.psiz_off = m5_color.layer_viewport_off = m5_color.clip_off =
+      m5_color.uvs_size = 8;
+   CHECK(hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_color, &m5));
+   CHECK(m5.template_info.raw_vs_output_count_0 == 8);
+   CHECK(m5.template_info.raw_vs_output_count_2 == 0);
+   CHECK(!m5.template_info.pre_hal300_flag_group_nonzero);
+   m5_color.layer_viewport_off = m5_color.clip_off = m5_color.uvs_size = 9;
+   CHECK(hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_color, &m5));
+   CHECK(m5.template_info.raw_vs_output_count_0 == 9);
+   CHECK(m5.template_info.raw_vs_output_count_2 == 0);
+   CHECK(!m5.template_info.pre_hal300_flag_group_nonzero);
+   m5_color.clip_off = m5_color.uvs_size = 10;
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_color, &m5));
+   CHECK(program_info_is_cleared(&m5));
+   m5_color.clip_off = m5_color.uvs_size = 9;
+   m5_color.uvs_written |= BITFIELD64_BIT(VARYING_SLOT_VAR1);
+   CHECK(!hk_agx3_g17g_vertex_program_info(AGX_CHIP_G17G, &m5_color, &m5));
+   CHECK(program_info_is_cleared(&m5));
+
    /* Apple vs2 float2 varying witness: __GPU_LD_MD root.field1 gives
     * field3=6 and field4 absent, mapping to VsStateConfig+0xc/+0x14.
     * This protects the actual producer semantics, not just byte packing. */

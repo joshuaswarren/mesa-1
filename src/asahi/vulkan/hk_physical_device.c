@@ -734,6 +734,20 @@ hk_get_device_features(
 #endif
    };
 
+   if (dev->chip == AGX_CHIP_G17G) {
+      /* HAL300 currently admits ordinary vertex/fragment draws only.
+       * Advertising geometry shaders makes Zink convert legacy GL quads
+       * into a geometry pipeline, whose compute/raster lowering is not
+       * implemented on M5. Without that feature, Gallium converts quads
+       * into ordinary triangles before the GPU vertex/fragment pipeline.
+       */
+      features->geometryShader = false;
+      features->tessellationShader = false;
+      features->geometryStreams = false;
+      features->transformFeedback = false;
+      features->shaderTessellationAndGeometryPointSize = false;
+   }
+
    if (dev->chip == AGX_CHIP_G17P) {
       /* The first HAL200 path is intentionally one ordinary, single-sample
        * graphics pipeline. Keep optional feature reporting within that path

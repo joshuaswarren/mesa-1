@@ -5277,6 +5277,14 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
       !*needs_idx_robust && gfx->xfb_enabled &&
       gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough;
+   if (!ordinary_draw_path && !xfb_passthrough_path &&
+       dev->dev.chip == AGX_CHIP_G17G && hk_g17p_launch_trace_enabled())
+      fprintf(stderr, "M5 transformed draw: geometry=%u passthrough=%u "
+                      "tessellation=%u adjacency=%u index_robust=%u "
+                      "indexed=%u topology=%u xfb=%u\n",
+              geom, geom && gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough,
+              tess, adj, *needs_idx_robust, draw->indexed,
+              dyn->ia.primitive_topology, gfx->xfb_enabled);
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 

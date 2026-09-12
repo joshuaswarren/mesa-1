@@ -5,6 +5,7 @@
 
 #include "hk_agx3_vdm_decode.h"
 
+#include "compiler/shader_enums.h"
 #include "util/blob.h"
 #include "util/bitscan.h"
 
@@ -196,14 +197,27 @@ hk_agx3_g17g_vertex_program_info(
                          compiler_info->uvs_size == 4;
    /* Dynamic-topology pipelines retain the default point-size output even
     * for triangle draws. Use the shared UVS footprint encoding for that
-    * fifth word; keep user varyings and layer/viewport output gated here.
+    * fifth word; layer/viewport output remains a separate profile.
     */
    const bool position_psiz = compiler_info && !compiler_info->position_only &&
       compiler_info->uvs_size == 5 && compiler_info->psiz_off == 4 &&
       compiler_info->layer_viewport_off == 5 && compiler_info->clip_off == 5 &&
       compiler_info->uvs_written == 0;
+   /* Native applegpu_g17g color and color+point-size vertex pipelines report
+    * __GPU_LD_MD root.field1.field3 = 8/9 with field4 absent. This is the
+    * same all-f32 VsStateConfig footprint consumed by the shared encoder,
+    * with HAL300's pre-HAL300 flags absent. Fragment coefficient state is
+    * validated independently before any draw can be submitted.
+    */
+   const bool color = compiler_info && !compiler_info->position_only &&
+      compiler_info->user_size == 4 &&
+      compiler_info->uvs_written == BITFIELD64_BIT(VARYING_SLOT_VAR0) &&
+      compiler_info->psiz_off == 8 &&
+      (compiler_info->layer_viewport_off == 8 ||
+       compiler_info->layer_viewport_off == 9) &&
+      compiler_info->clip_off == compiler_info->layer_viewport_off;
    if (chip != AGX_CHIP_G17G || !compiler_info ||
-       (!position && !position_psiz) || compiler_info->user_size != 0) {
+       (!color && ((!position && !position_psiz) || compiler_info->user_size != 0))) {
       if (program)
          memset(program, 0, sizeof(*program));
       return false;
