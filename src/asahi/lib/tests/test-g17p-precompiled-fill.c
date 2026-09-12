@@ -52,6 +52,7 @@ main(void)
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
+          i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -68,6 +69,42 @@ main(void)
       else
          CHECK(libagx_g17p[i] == NULL);
    }
+
+   /* G17P block-compressed uploads use one copy-image launch per slice.  If
+    * this precompiled entry disappears, Honeykrisp falls back to a command
+    * recording failure.  Pin its launch ABI and complete generated binary so
+    * the fast path cannot silently drift while the inventory test stays
+    * green. */
+   const uint32_t *copy_image_blob =
+      libagx_g17p[LIBAGX_COPY_IMAGE];
+   CHECK(copy_image_blob != NULL);
+   if (!copy_image_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *copy_image_info =
+      (const void *)copy_image_blob;
+   const uint8_t *copy_image_binary =
+      (const uint8_t *)copy_image_blob + sizeof(*copy_image_info);
+   static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(copy_image_info->preamble_offset == 0);
+   CHECK(copy_image_info->main_offset == 0);
+   CHECK(copy_image_info->main_size == 4056);
+   CHECK(copy_image_info->binary_size == 4056);
+   CHECK(copy_image_info->nr_gprs == 28);
+   CHECK(copy_image_info->nr_preamble_gprs == 0);
+   CHECK(copy_image_info->push_count == 42);
+   CHECK(copy_image_info->workgroup_size[0] == 32);
+   CHECK(copy_image_info->workgroup_size[1] == 1);
+   CHECK(copy_image_info->workgroup_size[2] == 1);
+   CHECK(copy_image_info->local_size == 0);
+   CHECK(copy_image_info->imageblock_stride == 0);
+   CHECK(!copy_image_info->uses_txf);
+   CHECK(copy_image_info->agx3_staging_known);
+   CHECK(copy_image_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
+         UINT64_C(0x3c9abc0bfdcf59e5));
+   CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
 
    const uint32_t *byte_count_blob =
       libagx_g17p[LIBAGX_DRAW_INDIRECT_BYTE_COUNT];
