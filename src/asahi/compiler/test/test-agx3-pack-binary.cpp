@@ -7824,6 +7824,34 @@ TEST_F(AGX3PackBinary, FirefoxFloatIfMinifloatsMaterializeToGroundedRegisters)
    }
 }
 
+TEST_F(AGX3PackBinary, NegatedFloatRelationsMaterializeUnsupportedSigns)
+{
+   for (enum agx_fcond cond : {AGX_FCOND_EQ, AGX_FCOND_LTN, AGX_FCOND_GTN,
+                               AGX_FCOND_GE, AGX_FCOND_LE, AGX_FCOND_LT}) {
+      for (unsigned negated : {1u, 2u, 3u}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         b->shader->nir = rzalloc(mem_ctx, nir_shader);
+         b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+         agx_index a = agx_mov_imm(b, 32, 0x40000000);
+         agx_index c = agx_mov_imm(b, 32, 0x40400000);
+         a.neg = negated & 1;
+         c.neg = negated & 2;
+         agx_instr *cmp = agx_if_fcmp(b, a, c, 1, cond, false, NULL);
+         agx_stop(b);
+         agx_materialize_agx3_cf_constants(b->shader);
+
+         const bool native_negate = cond == AGX_FCOND_LT && negated != 3;
+         EXPECT_EQ(bool(cmp->src[0].neg), native_negate && bool(negated & 1));
+         EXPECT_EQ(bool(cmp->src[1].neg), native_negate && bool(negated & 2));
+         agx_ra(b->shader);
+         agx_lower_pseudo(b->shader);
+         agx_opt_register_cache(b->shader);
+         EXPECT_FALSE(pack(b).empty());
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, MemoryDependentControlFlowRetiresOutstandingLoad)
 {
    /* A load before divergent control flow is retired on the straight-line

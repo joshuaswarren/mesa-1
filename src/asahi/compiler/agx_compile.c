@@ -3947,7 +3947,19 @@ agx_materialize_agx3_cf_constants(agx_context *ctx)
          I->fcond == AGX_FCOND_GE || I->fcond == AGX_FCOND_LE;
       const bool has_abs = I->src[0].abs || I->src[1].abs;
       const bool has_neg = I->src[0].neg || I->src[1].neg;
-      if (has_abs && (unordered_relation || has_neg)) {
+      /* Register/register negate is grounded only for strict LT/GT with
+       * one negated source. Keep that form and the independently supported
+       * register/zero comparisons; materialize signs for the remaining
+       * equality, unordered and doubly-negated register predicates. */
+      const bool plain_register_pair =
+         I->src[0].type == AGX_INDEX_NORMAL &&
+         I->src[1].type == AGX_INDEX_NORMAL &&
+         I->src[0].size == AGX_SIZE_32 && I->src[1].size == AGX_SIZE_32;
+      const bool native_neg =
+         (I->fcond == AGX_FCOND_LT || I->fcond == AGX_FCOND_GT) &&
+         (I->src[0].neg != I->src[1].neg);
+      if ((has_abs && (unordered_relation || has_neg)) ||
+          (plain_register_pair && has_neg && !native_neg)) {
          for (unsigned s = 0; s < 2; ++s) {
             if (I->src[s].type != AGX_INDEX_NORMAL ||
                 I->src[s].size != AGX_SIZE_32 ||
