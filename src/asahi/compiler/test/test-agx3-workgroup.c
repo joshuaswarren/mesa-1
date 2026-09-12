@@ -34,18 +34,20 @@ main(void)
    b.shader->info.shared_size = 32 * sizeof(uint32_t);
 
    nir_def *lane = nir_load_local_invocation_index(&b);
-   nir_def *offset = nir_imul_imm(&b, lane, sizeof(uint32_t));
+   nir_def *reverse = nir_isub(&b, nir_imm_int(&b, 31), lane);
+   nir_def *offset = nir_imul_imm(&b, reverse, sizeof(uint32_t));
    nir_store_shared(&b, nir_iadd_imm(&b, lane, 0x1234), offset,
                     .align_mul = 4);
    nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
                .memory_scope = SCOPE_WORKGROUP,
                .memory_semantics = NIR_MEMORY_ACQ_REL,
                .memory_modes = nir_var_mem_shared);
-   nir_def *peer = nir_load_shared(&b, 1, 32, nir_imm_int(&b, 0),
+   nir_def *peer = nir_load_shared(&b, 1, 32,
+                                   nir_imul_imm(&b, lane, sizeof(uint32_t)),
                                    .align_mul = 4);
    nir_def *output = nir_load_preamble(&b, 1, 64, .base = 0);
    nir_store_global(&b, nir_iadd(&b, peer, lane), output, .align_mul = 4);
-   agx_preprocess_nir(b.shader);
+   agx_preprocess_nir_g17p(b.shader);
 
    struct agx_shader_key key = {
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,

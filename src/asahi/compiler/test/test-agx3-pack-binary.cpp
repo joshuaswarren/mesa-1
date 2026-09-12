@@ -2781,6 +2781,36 @@ TEST_F(AGX3PackBinary, RegisterSubtractDestinationDoesNotAliasInputs)
    EXPECT_EQ(subtracts, 1u);
 }
 
+TEST_F(AGX3PackBinary, G17POptimizerKeepsImmediateMinuendInRegister)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index lhs = agx_mov_imm(b, 32, 29);
+   agx_index rhs = agx_register(0, AGX_SIZE_32);
+   agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+   agx_iadd_to(b, result, lhs, agx_neg(rhs), 0);
+   agx_st_vary(b, agx_immediate(0), result);
+   agx_stop(b);
+
+   agx_optimizer_forward(b->shader);
+
+   unsigned subtracts = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_srcs != 2 || !I->src[1].neg)
+         continue;
+
+      ++subtracts;
+      EXPECT_EQ(I->src[0].type, AGX_INDEX_NORMAL);
+   }
+   EXPECT_EQ(subtracts, 1u);
+
+   agx_ra(b->shader);
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, RegisterAndDestinationDoesNotAliasInputs)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -12483,5 +12513,47 @@ TEST_F(AGX3PackBinary, ThreeJsRefusedShapesEncode)
       EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
                 (std::vector<uint8_t>{0x0b, 0x01, 0x1f, 0xff, 0x10, 0x02, 0x00,
                                       0x80, 0x00, 0x00}));
+   }
+}
+
+/* Chromium's animation_keyframes vertex shader needs 97 full registers and
+ * moves values in both directions across AGX3b iadd's r95 boundary. Pin the
+ * exact native half-pair identities, including the destination-cache hint
+ * exposed by the captured shader. */
+TEST_F(AGX3PackBinary, ChromiumHighRegisterMovesUseHalfPairIdentity)
+{
+   static const struct {
+      unsigned dest;
+      unsigned src;
+      bool dest_cache;
+      uint8_t bytes[20];
+   } moves[] = {
+      {8, 192, false,
+       {0x43, 0x40, 0x0f, 0x81, 0x02, 0x0b, 0x00, 0x00, 0x00, 0x00,
+        0x43, 0x40, 0x0f, 0x81, 0x0e, 0x0b, 0x00, 0x00, 0x00, 0x00}},
+      {192, 0, true,
+       {0x03, 0x00, 0x8f, 0x81, 0x02, 0x1a, 0x00, 0x00, 0x00, 0x00,
+        0x03, 0x00, 0x8f, 0x81, 0x0e, 0x1a, 0x00, 0x00, 0x00, 0x00}},
+      {254, 192, false,
+       {0xf3, 0x40, 0xcf, 0x81, 0x02, 0x1b, 0x00, 0x00, 0x00, 0x00,
+        0xf3, 0x40, 0xcf, 0x81, 0x0e, 0x1b, 0x00, 0x00, 0x00, 0x00}},
+   };
+
+   for (const auto &move : moves) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index src = agx_register(move.src, AGX_SIZE_32);
+      src.discard = true;
+      agx_index dest = agx_register(move.dest, AGX_SIZE_32);
+      dest.cache = move.dest_cache;
+      agx_bitop_to(b, dest, src, agx_immediate(0), AGX3_SEL_TT_MOV);
+      agx_stop(b);
+
+      std::vector<uint8_t> want(std::begin(move.bytes), std::end(move.bytes));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+
+      EXPECT_EQ(pack(b), want) << "dest=" << move.dest
+                               << " src=" << move.src;
    }
 }

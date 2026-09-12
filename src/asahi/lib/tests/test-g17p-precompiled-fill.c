@@ -197,7 +197,7 @@ main(void)
    CHECK(byte_count_info->main_offset == 0);
    CHECK(byte_count_info->main_size == 332);
    CHECK(byte_count_info->binary_size == 332);
-   CHECK(byte_count_info->nr_gprs == 12);
+   CHECK(byte_count_info->nr_gprs == 16);
    CHECK(byte_count_info->nr_preamble_gprs == 0);
    CHECK(byte_count_info->push_count == 16);
    CHECK(byte_count_info->workgroup_size[0] == 1);
@@ -209,7 +209,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0x54af89fd897c5ccd));
+         UINT64_C(0x4a38f5b56045209b));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -224,11 +224,11 @@ main(void)
       uint64_t hash;
    } robust_index[] = {
       {LIBAGX_DRAW_ROBUST_INDEX_0, 3030,
-       UINT64_C(0x2682982277209dfc)},
+       UINT64_C(0x8d7c6ab5123d9617)},
       {LIBAGX_DRAW_ROBUST_INDEX_1, 3082,
-       UINT64_C(0x673af284dd4e3784)},
+       UINT64_C(0xdfcd9d94c55ba91b)},
       {LIBAGX_DRAW_ROBUST_INDEX_2, 3080,
-       UINT64_C(0x68ae07cd3c59a05a)},
+       UINT64_C(0x2dcb365483a53e61)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -327,8 +327,8 @@ main(void)
       (const uint8_t *)ia_blob + sizeof(*ia_info);
    CHECK(ia_info->preamble_offset == 0);
    CHECK(ia_info->main_offset == 0);
-   CHECK(ia_info->main_size == 1360);
-   CHECK(ia_info->binary_size == 1360);
+   CHECK(ia_info->main_size == 1364);
+   CHECK(ia_info->binary_size == 1364);
    CHECK(ia_info->nr_gprs == 26);
    CHECK(ia_info->nr_preamble_gprs == 0);
    CHECK(ia_info->push_count == 28);
@@ -341,7 +341,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0x3d4ea3afaa2e9e27));
+         UINT64_C(0xf86f3a06246d7ee3));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -368,8 +368,8 @@ main(void)
        * `8f 05 54 03 00 09` at +0x2c8 -- slot 1, inverted, three levels --
        * which is byte-for-byte one of Apple's own applegpu_g17p encodings
        * (see agx3_cf_cndcf()). Nothing else in the program moved. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2940, 3068, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x25b99a6f3e0f6323)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2948, 3076, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0x726819b369700d85)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0x3b6988993fef71a1)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

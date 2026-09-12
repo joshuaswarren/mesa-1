@@ -201,6 +201,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    const struct hk_storage_image_descriptor_layout native =
       hk_storage_image_descriptor_layout(generation);
    bool supported = false;
+   bool texture_supported = false;
 
    if (info && info->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
@@ -233,23 +234,34 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
          view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
-      if (supported) {
+      /* A readable native texture does not require a writable PBE. In
+       * particular, linear storage views have a valid texture descriptor
+       * even when the native PBE packer cannot represent their layout.
+       * Keep imageLoad/imageSize bound to that view instead of replacing
+       * both halves with a null descriptor because stores are unsupported.
+       */
+      texture_supported = supported ||
+         (generation == 9 && view->plane_count == 1);
+      if (texture_supported) {
          /* Storage images are always single plane */
          assert(view->plane_count == 1);
          uint8_t plane = 0;
 
          desc.tex = view->planes[plane].ro_storage;
-         desc.pbe = view->planes[plane].storage;
          desc.texture_heap_index =
             view->planes[plane].storage_heap_index;
+      }
+      if (supported) {
+         const uint8_t plane = 0;
+         desc.pbe = view->planes[plane].storage;
          desc.atomic_sw = view->planes[plane].storage_atomic_sw;
       }
    }
 
-   if (!supported) {
+   if (!texture_supported)
       hk_set_null_native_texture(generation, &desc.tex);
+   if (!supported)
       hk_set_null_native_pbe(generation, &desc.pbe);
-   }
 
    uint8_t packed[HK_MAX_DESCRIPTOR_SIZE] = {0};
    memcpy(packed + native.texture, &desc.tex,

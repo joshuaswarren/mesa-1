@@ -221,6 +221,16 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (src.neg)
          continue;
 
+      /* G17P's native subtraction takes two registers. Instruction selection
+       * deliberately materializes an immediate minuend for `c - x`; folding
+       * it back here would leave immediate-plus-negated-register, whose iadd
+       * modifier means narrow sign extension rather than arithmetic negate.
+       */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IADD &&
+          ((s == 0 && I->src[1].neg) || (s == 1 && I->src[0].neg)))
+         continue;
+
       agx_instr *def = defs[src.value];
       if (!def || def->op != AGX_OPCODE_MOV_IMM)
          continue;

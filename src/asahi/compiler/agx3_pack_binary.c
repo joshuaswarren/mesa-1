@@ -1037,6 +1037,10 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
 }
 
 static bool
+agx3_retire_slots_noop(struct util_dynarray *emission,
+                       enum agx_isa_encoding enc, uint16_t mask);
+
+static bool
 agx3_tex_plain_reg(agx_index index)
 {
    return agx3_src_is_register(index) && !index.memory && !index.abs &&
@@ -1146,6 +1150,18 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       return false;
    if (stage_coordinates) {
       uint16_t staging_wait = wait_mask;
+      /* COPY carries one wait bit, while the image coordinates and heap
+       * index may have several independent producers. A runtime LOD's
+       * PACK_SMPIR can consume their combined mask; an immediate-level
+       * read has no such instruction. Retire only those operand producers
+       * before publishing its coordinates.
+       */
+      if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IMAGE_LOAD &&
+          !register_lod && util_bitcount(staging_wait) > 1) {
+         if (!agx3_retire_slots_noop(emission, enc, staging_wait))
+            return false;
+         staging_wait = 0;
+      }
       if (register_lod) {
          uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
          if (!agx3_tex_stage_typed_lod(
@@ -2416,11 +2432,9 @@ agx3_local_vector_shift(enum agx3_mem_width width, uint8_t mask)
    return shift;
 }
 
-/* Translate the shared-memory shape Mesa currently emits. Address arithmetic
- * is folded into the 16-bit base by agx_compile, leaving an immediate-zero
- * index. This is exactly the grounded Apple ldtg/sttg subset; a register index
- * is refused because Mesa's byte-addressed IR has not yet been legalized to
- * AGX3's scaled-index convention. */
+/* Translate the shared-memory shape Mesa currently emits. AGX3 preprocessing
+ * converts byte offsets to scalar-element indices, matching Apple's grounded
+ * ldtg/sttg register-index convention. */
 static bool
 agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
                      bool is_store, uint8_t slot, uint16_t wait_mask,
@@ -2464,9 +2478,24 @@ agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
    }
 
    const agx_index index = I->src[is_store ? 2 : 1];
-   if (index.type != AGX_INDEX_IMMEDIATE || index.size != AGX_SIZE_16 ||
-       index.value != 0 || index.memory || index.abs || index.neg)
+   if (index.size != AGX_SIZE_16 || index.memory || index.abs || index.neg)
       return false;
+   if (index.type == AGX_INDEX_IMMEDIATE && index.value < 256) {
+      d->index = index.value;
+   } else if (agx3_src_is_register(index) && index.value < 256) {
+      d->index_is_register = true;
+      /* The ldtg/sttg index is a 16-bit scalar, and its field names the
+       * source in half-register units just like the compiler IR. Native
+       * witnesses include odd indices (for example 5), so converting this
+       * to a full-register number selects the wrong half and collapses
+       * dynamic stores onto an unrelated value, commonly zero.
+       */
+      d->index = index.value;
+      d->index_kill = index.discard;
+   } else {
+      return false;
+   }
+
 
    /*
     * f11, `narrow_extend`, is an AGX3c field. The AGX3b `ldtg`/`sttg` forms
@@ -2920,10 +2949,6 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
     * encodings instead of being mistaken for register numbers. */
    return agx3_emit(emission, enc, S);
 }
-
-static bool
-agx3_retire_slots_noop(struct util_dynarray *emission,
-                       enum agx_isa_encoding enc, uint16_t mask);
 
 static bool
 agx3_subgroup_plain(agx_index index, enum agx_index_type type)
@@ -6909,9 +6934,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* Threadgroup memory. The scaled register-indexed axis stays closed;
-          * current Mesa IR reaches this path with its byte address in base and
-          * an immediate-zero index. */
+         /* Threadgroup memory. AGX3 preprocessing has converted the byte
+          * address to the element index consumed by the native ldtg/sttg
+          * forms. */
          if (I->op == AGX_OPCODE_LOCAL_LOAD ||
              I->op == AGX_OPCODE_LOCAL_STORE) {
             const bool is_store = I->op == AGX_OPCODE_LOCAL_STORE;
@@ -9797,6 +9822,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                continue;
             }
+         }
+
+         /* AGX3b's compact 32-bit move cannot address full registers above
+          * r95. Chromium's animation_keyframes vertex shader moves values in
+          * both directions across that boundary. The native 16-bit
+          * bitwise-immediate form addresses every half register, so preserve
+          * the exact 32-bit value as two ordered `x | 0` operations. Carry
+          * the producer wait on the first half; the second half belongs to
+          * the same dependency and needs no additional wait. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
+             (I->truth_table & 0xfu) == AGX3_SEL_TT_MOV &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->shift == 0 && agx3_vary_reg32(I->dest[0]) &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[0]) &&
+             agx_channels(I->src[0]) == 1 && !I->src[0].kill &&
+             !(I->src[0].cache && I->src[0].discard) &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].value == 0 && !I->src[1].memory &&
+             !I->src[1].abs && !I->src[1].neg &&
+             (I->dest[0].value >= 192 || I->src[0].value >= 192)) {
+            uint8_t low[AGX3_ALU_MAX_LENGTH], high[AGX3_ALU_MAX_LENGTH];
+            uint8_t low_len, high_len;
+            if (!agx3_alu_bit_imm(
+                   enc, AGX3_ALU_BOR, true, I->dest[0].value,
+                   I->src[0].value, 0, agx3_post_ra_hint(I->src[0]),
+                   wait, low, &low_len) ||
+                !agx3_alu_bit_imm(
+                   enc, AGX3_ALU_BOR, true, I->dest[0].value + 1,
+                   I->src[0].value + 1, 0,
+                   agx3_post_ra_hint(I->src[0]), 0, high, &high_len) ||
+                !agx3_append(emission, low, low_len) ||
+                !agx3_append(emission, high, high_len))
+               AGX3_REFUSE(I);
+            continue;
          }
 
          /*

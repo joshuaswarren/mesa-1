@@ -2059,6 +2059,53 @@ test_g17p_nonzero_fetch_lod_compile(void)
 }
 
 static bool
+test_g17p_storage_read_zero_lod_compile(void)
+{
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P storage image level zero");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *gid = nir_load_global_invocation_id(&b, 32);
+      nir_def *zero = nir_imm_int(&b, 0);
+      nir_def *coord = nir_vec4(&b, nir_channel(&b, gid, 0),
+                               nir_channel(&b, gid, 1), zero, zero);
+      const enum pipe_format format = mode == 2 ? PIPE_FORMAT_R8G8B8A8_UINT
+                                                : PIPE_FORMAT_R32_UINT;
+      nir_def *handle = mode == 0 ? nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 64), .desc_set = 0) : zero;
+      nir_def *value = mode == 0 ? nir_bindless_image_load(
+         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         .image_dim = GLSL_SAMPLER_DIM_2D, .format = format,
+         .access = ACCESS_NON_WRITEABLE) : nir_image_load(
+         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         .image_dim = GLSL_SAMPLER_DIM_2D, .format = format,
+         .access = ACCESS_NON_WRITEABLE);
+      nir_export_agx(&b, nir_channel(&b, value, 0), .base = 0);
+
+      bool ok = mode != 0 || agx_nir_lower_g17p_indexed_samplers(b.shader);
+      NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+               lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+      agx_preprocess_nir(b.shader);
+      const struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .promote_constants = true,
+         .reserved_preamble = 16,
+      };
+      struct agx_shader_part part = {0};
+      ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary &&
+            part.info.uses_txf && !contains_integer_lod_stage(&part);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
+static bool
 test_g17p_native_cube_sample(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -6004,9 +6051,15 @@ main(int argc, char **argv)
                       test_indexed_sampler_rebase_boundaries() &&
                       test_indexed_array_and_3d_compile() &&
                       test_indexed_compute_sample() &&
-                      test_indexed_storage_image_read();
+                      test_indexed_storage_image_read() &&
+                      test_g17p_storage_read_zero_lod_compile();
       printf("indexed graphics/compute sampler and image reads: %s\n",
              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--storage-read-lod-only")) {
+      const bool ok = test_g17p_storage_read_zero_lod_compile();
+      printf("storage-image level-zero compilation: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-storage-only")) {
@@ -6208,6 +6261,11 @@ main(int argc, char **argv)
 
    if (!test_indexed_storage_image_read()) {
       fputs("indexed storage-image read lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_storage_read_zero_lod_compile()) {
+      fputs("storage-image constant level zero used runtime LOD staging\n", stderr);
       all_ok = false;
    }
 

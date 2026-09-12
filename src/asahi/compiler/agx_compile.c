@@ -1535,9 +1535,11 @@ format_for_bitsize(unsigned bitsize)
 static void
 agx_emit_local_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
 {
-   agx_index base = agx_local_base(instr->src[0]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
-   assert(base.size == AGX_SIZE_16);
+   agx_index address = agx_local_base(instr->src[0]);
+   const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   agx_index index = agx3 ? address : agx_zero();
+   assert(address.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(instr->def.bit_size);
    unsigned nr = instr->def.num_components;
@@ -1551,9 +1553,11 @@ static void
 agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
 {
    agx_index value = agx_src_index(&instr->src[0]);
-   agx_index base = agx_local_base(instr->src[1]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
-   assert(base.size == AGX_SIZE_16);
+   agx_index address = agx_local_base(instr->src[1]);
+   const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   agx_index index = agx3 ? address : agx_zero();
+   assert(address.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(nir_src_bit_size(instr->src[0]));
    unsigned mask = BITFIELD_MASK(
@@ -1680,16 +1684,14 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
    } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-              intr->intrinsic == nir_intrinsic_image_load &&
-              dim == GLSL_SAMPLER_DIM_2D && !is_array &&
-              nir_intrinsic_format(intr) == PIPE_FORMAT_R8G8B8A8_UINT &&
+              dim == GLSL_SAMPLER_DIM_2D && !is_array && !sparse &&
               nir_src_is_const(intr->src[3]) &&
               nir_src_as_uint(intr->src[3]) == 0) {
-      /* The bounded G17P storage-image path is descriptor-specialized to a
-       * non-mipmapped 2D image. Keep its semantic LOD zero immediate through
-       * RA: the generic AGX2 image path otherwise materializes it as a
-       * runtime uniform, while native G17P encodes this read with the exact
-       * immediate-LOD0 SMP form. */
+      /* Match texelFetch's constant-level handling. Image reads also use
+       * native SMP, whose immediate level-zero form needs no PACK_SMPIR
+       * staging. This applies to heap-indexed storage images and all formats;
+       * neither the resource operand nor the component type changes the LOD.
+       */
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
    }
@@ -3766,8 +3768,26 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
    case nir_op_imsubshl_agx:
       return agx_emit_imadshl_agx(b, instr, dst, s0, s1, agx_neg(s2), s3);
    case nir_op_isub:
+      /* The native G17P subtract form takes two registers. Do not route an
+       * immediate minuend through iadd's narrow-source sign-extension bit:
+       * that bit is not arithmetic negation and would turn `c - x` into
+       * `c + x`.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32 && s0.type == AGX_INDEX_IMMEDIATE)
+         s0 = agx_mov_imm(b, 32, s0.value);
       return agx_iadd_to(b, dst, s0, agx_neg(s1), 0);
    case nir_op_ineg:
+      /* G17P's iadd operand modifier is a narrow-source sign extension, not
+       * an arithmetic negate. Materialize the zero minuend so post-RA
+       * instruction selection reaches the native register-register isub
+       * form instead of silently encoding `0 + x`.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32) {
+         agx_index zero = agx_mov_imm(b, 32, 0);
+         return agx_iadd_to(b, dst, zero, agx_neg(s0), 0);
+      }
       return agx_iadd_to(b, dst, i0, agx_neg(s0), 0);
    case nir_op_imul:
       return agx_imad_to(b, dst, s0, s1, i0, 0);
@@ -6177,7 +6197,12 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
 
    NIR_PASS(_, nir, nir_opt_sink, move_all);
    NIR_PASS(_, nir, nir_opt_move, move_all);
-   NIR_PASS(_, nir, agx_nir_lower_shared_bitsize);
+   /* Local-memory offsets are narrowed before the key-dependent optimizer so
+    * conversion lowering and cleanup remain part of the normal pipeline.
+    * G17P ordinary loads/stores use scalar-element indices; atomics retain
+    * their byte-addressed encoding.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_shared_bitsize, g17p);
 }
 
 void
