@@ -745,7 +745,7 @@ test_fmul_minifloat(void)
       if (!supported)
          assert(len == 99 && bytes[0] == 0xa5);
    }
-   assert(!agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 0, 2, 0,
+   assert(!agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX2, 0, 0, 2, 0,
                                   0, bytes, &len));
    assert(!agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX3B, 1, 0, 2, 0,
                                   0, bytes, &len));
@@ -3869,7 +3869,42 @@ static void test_gpu1_float_compare_select(void)
       14, src, true, no_abs, immediate, hints, 2, false, false, 0, out, &len));
 }
 
+static void
+test_gpu1_minifloat_scale(void)
+{
+   /* Apple G17G float4 scale, with dead and retained input vectors. */
+   static const struct {
+      uint16_t dest, src, immediate, wait;
+      bool discard;
+      uint8_t length, bytes[14];
+   } vectors[] = {
+      {0,0,0x20,128,true,14,
+       {0x29,0x00,0x05,0x10,0x22,0x80,0xac,0x02,0x0a,0x00,0x20,0x00,0x02,0x10}},
+      {2,2,0x38,0,true,6,{0x19,0xb9,0x15,0x03,0x80,0x00}},
+      {4,4,0x40,0,true,6,{0x29,0xc1,0x15,0x05,0x80,0x00}},
+      {6,6,0x02,0,true,6,{0x39,0x83,0x15,0x07,0x80,0x00}},
+      {8,0,0x20,128,false,14,
+       {0x29,0x00,0x05,0x10,0x22,0x80,0xac,0x12,0x0a,0x00,0x00,0x00,0x02,0x10}},
+      {10,2,0x38,0,false,6,{0x59,0xb9,0x05,0x03,0x80,0x00}},
+      {12,4,0x40,0,false,6,{0x69,0xc1,0x05,0x05,0x80,0x00}},
+      {14,6,0x02,0,false,6,{0x79,0x83,0x05,0x07,0x80,0x00}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX3C,
+         vectors[i].dest, vectors[i].src, vectors[i].immediate,
+         vectors[i].discard ? AGX3_ALU_HINT_DISCARD : AGX3_ALU_HINT_NONE,
+         vectors[i].wait, bytes, &len));
+      assert(len == vectors[i].length && !memcmp(bytes, vectors[i].bytes, len));
+   }
+   assert(!agx3_alu_fmul_minifloat(AGX_ISA_ENCODING_AGX3C, 0, 0, 32,
+      AGX3_ALU_HINT_DISCARD, 256, bytes, &len));
+   assert(!agx3_alu_fmul_minifloat_mod(AGX_ISA_ENCODING_AGX3C, 0, 0, 32,
+      false, true, AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+}
+
 int main(void){
+   test_gpu1_minifloat_scale();
    test_gpu1_popcount();
    test_gpu1_modified_add();
    test_gpu1_float_compare_select();

@@ -2280,12 +2280,11 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
 
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
-   for (unsigned variant = 0; variant < 10; ++variant) {
+   for (unsigned variant = 1; variant < 10; ++variant) {
       /* Absolute and scalar-half sources now have exact native witnesses. */
       if (variant == 5 || variant == 8)
          continue;
-      agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
-                                           : AGX_ISA_ENCODING_AGX3B);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
       agx_index src = variant == 2 ? agx_uniform(0, AGX_SIZE_32)
                                    : agx_register(0, AGX_SIZE_32);
@@ -2304,6 +2303,19 @@ TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
       mul->saturate = variant == 9;
       EXPECT_TRUE(pack(b, false).empty());
    }
+}
+
+TEST_F(AGX3PackBinary, M5MinifloatMultiplyMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_index src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_32), src, agx_immediate(0x38));
+   agx_stop(b);
+   const std::vector<uint8_t> expected = {
+      0x19,0xb9,0x15,0x03,0x80,0x00, 0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), expected);
 }
 
 TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)

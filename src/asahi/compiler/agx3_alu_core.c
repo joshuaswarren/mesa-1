@@ -154,10 +154,12 @@ agx3_alu_fmul_minifloat_mod(
    enum agx3_alu_hint hint, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if (!out || !len || (!gpu1 && enc != AGX_ISA_ENCODING_AGX3B) ||
+       (gpu1 && src_abs) || dest >= 256 ||
        src >= 256 || ((dest | src) & 1) || immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       (wait_mask & ~UINT16_C(0x3f)))
+       (wait_mask & ~(gpu1 ? UINT16_C(0xff) : UINT16_C(0x3f))))
       return false;
 
    /* Fresh Apple mul_scale: 0983150180c0 is loaded f32 * minifloat0x02
@@ -168,19 +170,29 @@ agx3_alu_fmul_minifloat_mod(
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {25, 1}, {26, 2},
       {42, 2}, {43, 2}, {60, 2}, {74, 2},
+      {78, 3}, {79, 62},
    };
-   struct agx3_field_kv fields[12] = {
+   struct agx3_field_kv fields[14] = {
       {2, dest}, {35, src}, {17, immediate}, {46, hint == AGX3_ALU_HINT_DISCARD},
       {44, hint == AGX3_ALU_HINT_CACHE}, {11, dest_cache},
    };
    unsigned n = 6;
-   for (unsigned slot = 0; slot < 6; ++slot)
+   for (unsigned slot = 0; slot < (gpu1 ? 8 : 6); ++slot)
       if (wait_mask & (1u << slot))
          fields[n++] = (struct agx3_field_kv){80 + slot, 1};
 
    uint8_t encoded[AGX3_ALU_MAX_LENGTH], encoded_len = 0;
-   if (!agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, encoded,
-                          &encoded_len))
+   bool composed = false;
+   /* Native G17G scale kernels use ep1 for ready inputs and ep3 when
+    * waiting on slot8. Preserve the G17P ep1-only admission. */
+   for (unsigned ep = 1; ep <= (gpu1 ? 3 : 1); ++ep) {
+      if (agx3_bind_compose(enc, "f32mul", ep, base, gpu1 ? 10 : 8,
+                             fields, n, encoded, &encoded_len)) {
+         composed = true;
+         break;
+      }
+   }
+   if (!composed)
       return false;
 
    /* Fresh Apple G17P kernels encode abs(x) * {0.5, 1.5, 2.0} by setting
