@@ -322,6 +322,32 @@ hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
 }
 
 bool
+hk_agx3_g17p_rodata_range(uint16_t base_halfs, uint16_t size_halfs,
+                          uint64_t bo_va, uint32_t offset_B,
+                          uint64_t bo_size_B,
+                          struct agx3_ioto_uniform_range *range)
+{
+   const uint32_t loaded_halfs = ((uint32_t)size_halfs + 1) & ~1u;
+
+   if (!range || !bo_va || !size_halfs || (base_halfs & 1) ||
+       loaded_halfs > 512 || base_halfs > 512 - loaded_halfs ||
+       offset_B > bo_size_B || bo_va > UINT64_MAX - offset_B)
+      return false;
+
+   const uint64_t loaded_bytes = (uint64_t)loaded_halfs * 2;
+   const uint64_t address = bo_va + offset_B;
+   if (loaded_bytes > bo_size_B - offset_B || (address & 3))
+      return false;
+
+   *range = (struct agx3_ioto_uniform_range){
+      .start_halfs = base_halfs,
+      .size_halfs = loaded_halfs,
+      .address = address,
+   };
+   return true;
+}
+
+bool
 hk_agx3_g17p_fragment_blend_constants_range(
    uint16_t start_halfs, uint64_t blend_constants_va,
    struct agx3_ioto_uniform_range *range)

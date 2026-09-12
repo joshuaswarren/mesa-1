@@ -939,9 +939,13 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
          valid = false;
       }
 
-      /* hk_g17p_compute_uniform_ranges() refuses an odd base or size. */
-      if (valid && ((rodata->base_uniform & 1) != 0 ||
-                    (rodata->size_16 & 1) != 0 || rodata->size_16 > 512)) {
+      /* G17P's dword loader covers an odd final half with the binary's zeroed
+       * alignment padding, but its destination base remains dword aligned. */
+      const uint32_t loaded_halfs = ((uint32_t)rodata->size_16 + 1) & ~1u;
+      if (valid && ((rodata->base_uniform & 1) != 0 || loaded_halfs > 512 ||
+                    rodata->base_uniform > 512 - loaded_halfs ||
+                    (uint64_t)loaded_halfs * 2 >
+                       (uint64_t)part.info.binary_size - rodata->offset)) {
          fprintf(stderr,
                  "AGX3 constant-data rodata range (base %u, size_16 %u) is "
                  "not bindable by hk_g17p_compute_uniform_ranges()\n",

@@ -1661,6 +1661,29 @@ test_g17p_root_range(void)
    CHECK(!hk_agx3_g17p_root_range(12, 0, 0, &range));
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
 
+   struct agx3_ioto_uniform_range rodata = {0};
+   CHECK(hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(rodata.start_halfs == 8 && rodata.size_halfs == 2 &&
+         rodata.address == UINT64_C(0x10000030004));
+   CHECK(hk_agx3_g17p_rodata_range(
+      12, 3, UINT64_C(0x10000030000), 8, 128, &rodata));
+   CHECK(rodata.start_halfs == 12 && rodata.size_halfs == 4 &&
+         rodata.address == UINT64_C(0x10000030008));
+   const struct agx3_ioto_uniform_range rodata_before = rodata;
+   CHECK(!hk_agx3_g17p_rodata_range(
+      9, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      510, 3, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 126, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030002), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+
    struct agx3_ioto_uniform_range blend = {0};
    CHECK(hk_agx3_g17p_fragment_blend_constants_range(
       4, UINT64_C(0x10000028040), &blend));

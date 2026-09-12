@@ -1682,23 +1682,17 @@ hk_g17p_graphics_uniform_ranges(
     * The data is read through the uniform, not the program counter, so it is
     * addressed in the shader's own BO even though graphics executes from the
     * linked binary. Same bounds checks as compute: the range must lie inside
-    * that BO, and both halves must be even.
+    * that BO. G17P loads dwords; an odd final half is covered by the zeroed
+    * alignment padding before the shader code.
     */
    if (count < HK_AGX3_G17P_GRAPHICS_MAX_RANGES && s->b.info.rodata.size_16 != 0) {
       const struct agx_rodata *rodata = &s->b.info.rodata;
-      const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
-
-      if (!s->bo || !s->bo->va || (rodata->base_uniform & 1) != 0 ||
-          (rodata->size_16 & 1) != 0 || rodata->size_16 > 512 ||
-          rodata->offset > s->bo->size ||
-          size_B > s->bo->size - rodata->offset)
+      if (!s->bo || !s->bo->va ||
+          !hk_agx3_g17p_rodata_range(
+             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
+             rodata->offset, s->bo->size, &ranges[count]))
          return hk_g17p_graphics_ranges_refused(range_count, count);
-
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = rodata->base_uniform,
-         .size_halfs = rodata->size_16,
-         .address = s->bo->va->addr + rodata->offset,
-      };
+      count++;
    } else if (s->b.info.rodata.size_16 != 0) {
       /* No room left in the program's range budget. */
       return hk_g17p_graphics_ranges_refused(range_count, count);

@@ -412,17 +412,12 @@ hk_g17p_internal_graphics_uniform_ranges(
 
    if (s->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &s->b.info.rodata;
-      const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
       if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || !s->bo || !s->bo->va ||
-          (rodata->base_uniform & 1) || (rodata->size_16 & 1) ||
-          rodata->offset > s->bo->size ||
-          size_B > s->bo->size - rodata->offset)
+          !hk_agx3_g17p_rodata_range(
+             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
+             rodata->offset, s->bo->size, &ranges[count]))
          return false;
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = rodata->base_uniform,
-         .size_halfs = rodata->size_16,
-         .address = s->bo->va->addr + rodata->offset,
-      };
+      count++;
    }
 
    *range_count = count;
@@ -480,20 +475,6 @@ hk_g17p_compute_uniform_ranges(
    if (!hk_agx3_g17p_root_range(root_uniform, s->info.set_count, root_ptr, &ranges[0]))
       return false;
 
-   /* Deliver the footprint the compiler finally settled on.
-    *
-    * `reserved_preamble = root + 4 * (1 + set_count)` (hk_shader.c:1255) is
-    * where the compiler STARTS; agx_opt_promote_constants() can raise
-    * `push_count` afterwards (agx_opt_promote_constants.c:149).  Measured on
-    * hardware this is currently a no-op -- push_count reads 8 for the probe,
-    * exactly 4 * (1 + 1) -- so this only matters for a shader whose constants
-    * were promoted.  Safe either way: push_count is in the same 16-bit
-    * uniform registers as size_halfs, and the bytes come from the root
-    * descriptor table, which is larger than the range.
-    */
-   if (s->b.info.push_count > root_uniform + ranges[0].size_halfs)
-      ranges[0].size_halfs = s->b.info.push_count - root_uniform;
-
    size_t count = 1;
    if (texture_pointers) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
@@ -503,18 +484,12 @@ hk_g17p_compute_uniform_ranges(
    }
    const struct agx_rodata *rodata = &s->b.info.rodata;
    if (rodata->size_16 != 0) {
-      const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
-      if (!s->bo || !s->bo->va || (rodata->base_uniform & 1) != 0 ||
-          (rodata->size_16 & 1) != 0 || rodata->size_16 > 512 ||
-          rodata->offset > s->bo->size ||
-          size_B > s->bo->size - rodata->offset)
+      if (!s->bo || !s->bo->va ||
+          !hk_agx3_g17p_rodata_range(
+             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
+             rodata->offset, s->bo->size, &ranges[count]))
          return false;
-
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = rodata->base_uniform,
-         .size_halfs = rodata->size_16,
-         .address = s->bo->va->addr + rodata->offset,
-      };
+      count++;
    }
 
    *range_count = count;
