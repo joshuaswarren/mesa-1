@@ -51,6 +51,8 @@ extern "C" {
  * bits, and booleans live in 16-bit halves. Apple's own corpus carries this
  * form (copy.ep0 with a register source and f24 = 1), including odd
  * destination halves, which need no separate encoding point here.
+ * The AGX3c corpus independently contains the same register/width selectors
+ * plus its f28=3/f29=35 pair, including odd halves and a scoreboard wait.
  *
  * Scoreboard waits ride on f30 + slot - 1, the same convention
  * agx3_tex_stage_copy() documents; a corpus copy with f30 set reproduces

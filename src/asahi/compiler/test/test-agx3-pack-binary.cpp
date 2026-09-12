@@ -7847,6 +7847,26 @@ TEST_F(AGX3PackBinary, LocalIndexZeroExtendUsesCopyAndClear)
    }
 }
 
+TEST_F(AGX3PackBinary, M5PixelCoordinateZeroExtendUsesCopyAndClear)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.cache = true;
+   agx_index source = agx_register(1, AGX_SIZE_16);
+   source.discard = true;
+   agx_bitop_to(b, dest, source, agx_zero(), AGX3_SEL_TT_MOV);
+   agx_stop(b);
+
+   /* The low-half COPY is corpus by835; the following CLR addresses only
+    * the high half, retaining the copied low 16 bits. */
+   const std::vector<uint8_t> want = {
+      0x03, 0x01, 0x29, 0x00,
+      0x03, 0x00, 0x00, 0x01,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), want);
+}
+
 /*
  * agx_lower_uniform_sources() materializes a move for every generic-ALU
  * uniform source. At 32 bits it reached agx3_copy_encode_uniform_to_reg32();

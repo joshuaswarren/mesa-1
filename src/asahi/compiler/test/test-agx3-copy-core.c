@@ -118,6 +118,39 @@ main(void)
                                     &l));
    }
 
+   /* Independent AGX3c corpus witnesses: by813, by835 and by836. */
+   {
+      const struct {
+         unsigned dest, src, wait;
+         bool discard;
+         uint8_t bytes[4];
+      } native[] = {
+         {16, 1, 1, false, {0x83, 0x01, 0x21, 0x20}},
+         {0, 1, 0, true, {0x03, 0x01, 0x29, 0x00}},
+         {1, 2, 0, true, {0x03, 0x02, 0x29, 0x01}},
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(native); ++i) {
+         uint8_t out[AGX3_COPY_MAX_LENGTH], length = 0;
+         CHECK(agx3_copy_encode_reg16(
+            AGX_ISA_ENCODING_AGX3C, native[i].dest, native[i].src, true,
+            false, native[i].discard, native[i].wait, out, &length));
+         CHECK(length == 4 && !memcmp(out, native[i].bytes, 4));
+      }
+      uint8_t out[AGX3_COPY_MAX_LENGTH], length = 0;
+      memset(out, 0xcd, sizeof(out));
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 128, 1,
+                                     true, false, false, 0, out, &length));
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 256,
+                                     true, false, false, 0, out, &length));
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 1,
+                                     true, true, true, 0, out, &length));
+      CHECK(!agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3C, 0, 1,
+                                     true, false, false, 1u << 6, out, &length));
+      CHECK(length == 0);
+      for (unsigned i = 0; i < sizeof(out); ++i)
+         CHECK(out[i] == 0xcd);
+   }
+
    /* Fresh Apple copy-live.nat and half-live.nat: ordinary live sources and
     * true dead sources, including odd halves, retain their distinct hints. */
    {

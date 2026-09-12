@@ -315,7 +315,8 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
 
       nir_store_output(
          &b, build_background_op(&b, key->op[rt], rt, nr, source_msaa, layered,
-                                 cache->dev->chip == AGX_CHIP_G17P),
+                                 cache->dev->chip == AGX_CHIP_G17P ||
+                                 cache->dev->chip == AGX_CHIP_G17G),
          nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(nr),
          .src_type = nir_type_uint32,
          .io_semantics.location = FRAG_RESULT_DATA0 + rt,

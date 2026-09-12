@@ -18,9 +18,15 @@ On Linux J813 with the M5 application DRM adapter:
 - Vulkan instance/device creation, graphics-queue acquisition and idle
   destruction succeed.
 - The existing render-only Vulkan fixture creates its graphics pipeline.
+- Background clear and reload shaders now compile. The reload path uses
+  32-bit coordinates and the AGX3c register COPY/CLR encodings independently
+  present in the instruction corpus, including the widening copy-and-clear
+  sequence. These instructions have byte-exact compiler tests; this is not a
+  hardware execution qualification of the complete reload program.
 - Command recording fails with `VK_ERROR_FEATURE_NOT_PRESENT` while building
-  the background reload program. Compilation rejects a 16-bit coordinate
-  move. The failure is propagated instead of dereferencing a null shader.
+  the tile-store program: M5 `block_image_store` encoding is still missing.
+  Shader compilation failure is propagated instead of dereferencing a null
+  shader.
 - No Honeykrisp Vulkan draw has completed. Hardware glxgears, repeated draws
   and combined GPU/DCP presentation remain unqualified.
 
@@ -48,4 +54,6 @@ session and requires complete resource ownership. Do not bypass those guards
 or reset the live GPU to turn an error into an apparent rendering success.
 
 Host regression checks: `asahi-agx-chip`, `asahi-agx-m5-va`,
-`asahi-agx-ioto-program-core`, and `hk_printf_root` all pass.
+`asahi-agx-ioto-program-core`, `hk_printf_root`, `agx3_copy_core`,
+`agx3_g17p_producers`, `agx3_compose_corpus`, `agx3_graphics_compile`, and
+`agx_tests` all pass.

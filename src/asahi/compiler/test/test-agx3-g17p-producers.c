@@ -102,6 +102,16 @@ test_stage(void)
    check("fdepth copy stage[0]<-r0 kill", "0b012f00420000001000", o, l, sok);
    sok = agx3_clr(B, 8, true, true, o, &l);
    check("cbits clr h8 hint", "43002000", o, l, sok);
+
+   /* Independent AGX3c corpus vectors by812, by814, by876 and by1419. */
+   sok = agx3_clr(AGX_ISA_ENCODING_AGX3C, 2, true, false, o, &l);
+   check("M5-family clr h2", "13000000", o, l, sok);
+   sok = agx3_clr(AGX_ISA_ENCODING_AGX3C, 17, true, true, o, &l);
+   check("M5-family clr h17 hint", "83002001", o, l, sok);
+   sok = agx3_clr(AGX_ISA_ENCODING_AGX3C, 26, false, false, o, &l);
+   check("M5-family clr r13", "db000000", o, l, sok);
+   sok = agx3_clr(AGX_ISA_ENCODING_AGX3C, 12, false, true, o, &l);
+   check("M5-family clr r6 hint", "6b002000", o, l, sok);
 }
 
 /* -------------------------------------------------------------- fltnorm */
