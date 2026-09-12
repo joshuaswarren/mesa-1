@@ -421,10 +421,9 @@ agx3_mod_src_ok(agx_index s)
 }
 
 /*
- * Route a modifier-carrying float add/mul/fma through the long-form modifier
- * encoder. Returns 1 if it emitted the instruction, 0 if this is not a
- * modifier-bearing float op (the caller should use the ordinary path), or -1
- * if it is one but out of the grounded domain (fail the shader).
+ * Route float modifiers and M5 scalar register operations carrying runtime
+ * waits/lifetime hints through the native encoder. Returns 1 if emitted,
+ * 0 for the ordinary path, or -1 for an unsupported claimed shape.
  */
 static int
 agx3_try_float_modifier(struct util_dynarray *emission,
@@ -437,9 +436,16 @@ agx3_try_float_modifier(struct util_dynarray *emission,
       return 0;
 
    bool has_mod = I->saturate;
+   bool has_runtime = wait || (I->nr_dests == 1 && I->dest[0].cache);
+   bool scalar_regs = I->nr_dests == 1 && agx3_mod_src_ok(I->dest[0]) &&
+                      agx_channels(I->dest[0]) == 1;
    for (unsigned s = 0; s < I->nr_srcs; ++s)
       has_mod |= I->src[s].abs || I->src[s].neg;
-   if (!has_mod)
+   for (unsigned s = 0; s < I->nr_srcs; ++s) {
+      has_runtime |= I->src[s].cache || I->src[s].discard;
+      scalar_regs &= agx3_mod_src_ok(I->src[s]) && agx_channels(I->src[s]) == 1;
+   }
+   if (!has_mod && !(enc == AGX_ISA_ENCODING_AGX3C && has_runtime && scalar_regs))
       return 0; /* the compact no-modifier packer handles it */
 
    const unsigned want = is_fma ? 3 : 2;

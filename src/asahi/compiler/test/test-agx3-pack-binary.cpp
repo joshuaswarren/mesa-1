@@ -1673,16 +1673,35 @@ TEST_F(AGX3PackBinary, FaddTwoMinifloatsFoldsToLdimm)
    }
 }
 
+TEST_F(AGX3PackBinary, M5FaddMinifloatAndSaturation)
+{
+   for (bool saturate : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      agx_index src = agx_register(saturate ? 4 : 0, AGX_SIZE_32);
+      src.discard = saturate;
+      agx_instr *add = agx_fadd_to(b,
+         agx_register(saturate ? 0 : 4, AGX_SIZE_32), src,
+         agx_immediate(saturate ? 0x80 : 0x20));
+      add->saturate = saturate;
+      agx_stop(b);
+      const std::vector<uint8_t> expected = saturate
+         ? std::vector<uint8_t>{0x09,0x05,0x1c,0x81,0x01,0x02,0x00,0x02,
+                                0x0e,0x00,0x00,0x00}
+         : std::vector<uint8_t>{0x29,0xa1,0x04,0x01,0x80,0x00,
+                                0x0e,0x00,0x00,0x00};
+      EXPECT_EQ(pack(b), expected);
+   }
+}
+
 TEST_F(AGX3PackBinary, FaddMinifloatRefusesRemainingUngroundedModes)
 {
-   for (unsigned variant = 0; variant < 10; ++variant) {
+   for (unsigned variant = 1; variant < 10; ++variant) {
       SCOPED_TRACE(variant);
       /* Negation, absolute, two-minifloat folding and saturation all have
        * exact, independently tested G17P paths. */
       if (variant == 4 || variant == 5 || variant == 7 || variant == 9)
          continue;
-      agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
-                                           : AGX_ISA_ENCODING_AGX3B);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
       agx_index src = variant == 2 ? agx_uniform(0, AGX_SIZE_32)
                                    : agx_register(0, AGX_SIZE_32);
@@ -4118,6 +4137,35 @@ TEST_F(AGX3PackBinary, FloatModifierRouting)
    append(want, mod, mlen);
    append(want, en.bytes, en.length);
    EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, M5PlainFloatAddPreservesWaitAndLiveness)
+{
+   for (bool loaded : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      agx_index src0 = agx_register(28, AGX_SIZE_32);
+      agx_index src1 = agx_register(30, AGX_SIZE_32);
+      if (loaded) {
+         /* Consume all eight producer slots before the arithmetic. */
+         for (unsigned i = 0; i < 8; ++i)
+            agx_device_load_to(b, agx_register(i * 4, AGX_SIZE_32),
+                              agx_uniform(0, AGX_SIZE_64), agx_immediate(i),
+                              AGX_FORMAT_I32, 1, 0, false);
+      }
+      src0.discard = true;
+      src1.cache = true;
+      agx_fadd_to(b, agx_register(14, AGX_SIZE_32), src0, src1);
+      agx_stop(b);
+      const auto bin = pack(b);
+      /* Independently composed GPU1 FADD: slot8 after load, keep src1 and
+       * discard src0. No abs/neg/saturate modifier triggers this routing. */
+      const std::vector<uint8_t> add = loaded
+         ? std::vector<uint8_t>{0x39,0x82,0x04,0xba,0x22,0x20,
+                                0xa0,0x1a,0x1a,0x08,0x12,0x00}
+         : std::vector<uint8_t>{0x79,0x9f,0x10,0x1d};
+      ASSERT_GE(bin.size(), add.size() + 4);
+      EXPECT_NE(std::search(bin.begin(), bin.end(), add.begin(), add.end()), bin.end());
+   }
 }
 
 TEST_F(AGX3PackBinary, RefusesUnmappedOp)
