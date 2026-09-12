@@ -130,7 +130,9 @@ agx_vdm_hal200_draw_emit(enum agx_chip chip, const void *packed,
 
    if (chip != AGX_CHIP_G17P || !packed || !stream || !emitted_size ||
        (packed_size != AGX_VDM_HAL200_DIRECT_DRAW_LENGTH &&
-        packed_size != AGX_VDM_HAL200_INDEXED_DRAW_LENGTH))
+        packed_size != AGX_VDM_HAL200_INDEXED_DRAW_LENGTH &&
+        packed_size != AGX_VDM_HAL200_INDIRECT_NONINDEXED_DRAW_LENGTH &&
+        packed_size != AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH))
       return false;
 
    const size_t skip = render_state_emitted

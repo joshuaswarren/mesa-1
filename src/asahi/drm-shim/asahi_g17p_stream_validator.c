@@ -1206,12 +1206,18 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          break;
       }
 
-      case AGX_VDM_RECORD_STREAM_LINK:
-         cursor = compact_address(record.data.stream_link.target);
-         if (!memory->owned(memory->data, cursor, 4))
-            return fail_at(cursor, "stream-link target is not owned");
+      case AGX_VDM_RECORD_STREAM_LINK: {
+         const uint64_t compact_target = record.data.stream_link.target;
+         uint64_t target;
+         if (!compact_target || (compact_target & 3) ||
+             !agx_g17p_vdm_payload_expand(compact_target, 4, &target) ||
+             target == cursor || target == config->root ||
+             !memory->owned(memory->data, target, 4))
+            return fail_at(cursor, "stream-link target is invalid or unowned");
+         cursor = target;
          local.links++;
          break;
+      }
 
       case AGX_VDM_RECORD_STREAM_TERMINATE:
          /* Empty VDM streams are valid for clear-only render passes, whose
@@ -1224,12 +1230,13 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             *stats = local;
          return true;
 
-      case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_NONINDEXED:
-         if (!have_state || restart_seen ||
-             !memory->owned(
-                memory->data,
+      case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_NONINDEXED: {
+         uint64_t indirect_buffer;
+         if (!agx_g17p_vdm_payload_expand(
                 record.data.index_list_indirect_nonindexed.indirect_buffer,
-                16))
+                16, &indirect_buffer) ||
+             !have_state || restart_seen ||
+             !memory->owned(memory->data, indirect_buffer, 16))
             return fail_at(cursor, "indirect draw arguments are not owned");
          local.draws++;
          barrier_since_last_draw = false;
@@ -1238,13 +1245,18 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          local.indirect_nonindexed = true;
          cursor += record.length;
          break;
+      }
 
       case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_INDEXED: {
          const struct agx_vdm_index_list_indirect_indexed_info *draw =
             &record.data.index_list_indirect_indexed;
-         const size_t index_range = ((size_t)draw->index_buffer_size_word + 1) * 4;
-         if (!have_state || restart_seen ||
-             !memory->owned(memory->data, draw->indirect_buffer, 20) ||
+         const size_t index_range =
+            ((size_t)draw->index_buffer_size_word + 1) * 4;
+         uint64_t indirect_buffer;
+         if (!agx_g17p_vdm_payload_expand(draw->indirect_buffer, 20,
+                                          &indirect_buffer) ||
+             !have_state || restart_seen ||
+             !memory->owned(memory->data, indirect_buffer, 20) ||
              !memory->owned(memory->data, draw->index_buffer, index_range))
             return fail_at(cursor,
                            "indexed-indirect buffers are not owned");

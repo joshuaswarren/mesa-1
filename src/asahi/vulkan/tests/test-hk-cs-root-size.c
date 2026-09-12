@@ -21,22 +21,19 @@ main(void)
                            HK_GFX_DRAW_RESERVATION, vdm_link_length));
 
    /* The exact Neon stream reaches 0x80c bytes including its terminator.
-    * That is ordinary in-root traffic for native's 0x8000-byte allocation,
-    * not a reason to publish a second VDM root. */
-   assert(!hk_g17p_vdm_needs_render_split(
-      AGX_CHIP_G17P, 15, HK_G17P_VDM_ROOT_SIZE - 0x80c,
-      vdm_link_length));
+    * That is ordinary in-root traffic for native's 0x8000-byte allocation.
+    */
+   assert(hk_cs_space_fits(HK_G17P_VDM_ROOT_SIZE - 0x80c,
+                           HK_GFX_DRAW_RESERVATION, vdm_link_length));
 
+   /* Crossing this boundary requires a stream link, not another retained
+    * render. hk_ensure_cs_has_space() owns that transition. */
    const size_t minimum = HK_GFX_DRAW_RESERVATION + vdm_link_length +
                           HK_CS_SPACE_PADDING;
-   assert(!hk_g17p_vdm_needs_render_split(AGX_CHIP_G17P, 1, minimum,
-                                          vdm_link_length));
-   assert(hk_g17p_vdm_needs_render_split(AGX_CHIP_G17P, 1, minimum - 1,
-                                         vdm_link_length));
-   assert(!hk_g17p_vdm_needs_render_split(AGX_CHIP_G17P, 0, minimum - 1,
-                                          vdm_link_length));
-   assert(!hk_g17p_vdm_needs_render_split(AGX_CHIP_G14G, 1, minimum - 1,
-                                          vdm_link_length));
+   assert(hk_cs_space_fits(minimum, HK_GFX_DRAW_RESERVATION,
+                           vdm_link_length));
+   assert(!hk_cs_space_fits(minimum - 1, HK_GFX_DRAW_RESERVATION,
+                            vdm_link_length));
 
    /* The command uploader aligns each root to 1 KiB. G17P graphics roots are
     * therefore densely shareable instead of consuming half a 128 KiB BO.

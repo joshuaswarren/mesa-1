@@ -178,6 +178,9 @@ hk_g17p_compressed_copy_plan(
       ((uint64_t)width + block_w - 1) / block_w;
    const uint32_t blocks_y =
       ((uint64_t)height + block_h - 1) / block_h;
+   if (blocks_x > UINT32_MAX / blocks_y)
+      return false;
+
    const uint64_t buffer_row_blocks =
       ((uint64_t)row_px + block_w - 1) / block_w;
    const uint64_t buffer_image_rows =

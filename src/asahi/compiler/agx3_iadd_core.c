@@ -335,6 +335,12 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          ov[n++] = (struct agx3_field_kv)KV(60 + i, 1);
    }
 
-   return agx3_bind_compose(encoding, "imadd", 0, baseline, nbaseline, ov, n,
-                            out, len);
+   /* A negated addend is Apple's `imsub`: same fields, one opcode bit. A
+    * pure multiply has no addend to negate, so refuse that rather than emit a
+    * form nothing witnesses. */
+   if (d->negate_addend && d->no_addend)
+      return false;
+
+   return agx3_bind_compose(encoding, d->negate_addend ? "imsub" : "imadd", 0,
+                            baseline, nbaseline, ov, n, out, len);
 }

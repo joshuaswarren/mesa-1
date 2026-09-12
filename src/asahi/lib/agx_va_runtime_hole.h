@@ -97,6 +97,16 @@ bool agx_g17p_vdm_alias_compact(uint64_t addr, uint32_t *offset);
 
 /* G17P HAL200 VDM payload fields are offsets from the render-context base. */
 bool agx_g17p_vdm_payload_compact(uint64_t addr, uint64_t *compact);
+static inline bool
+agx_g17p_vdm_payload_expand(uint64_t compact, uint64_t size, uint64_t *addr)
+{
+   if (!addr || size == 0 || compact >= AGX_G17P_VDM_USER_SIZE ||
+       size > AGX_G17P_VDM_USER_SIZE - compact)
+      return false;
+
+   *addr = AGX_G17P_VDM_USER_BASE + compact;
+   return true;
+}
 
 bool agx_va_reserve_runtime_graph_hole(
    enum agx_chip chip, struct util_vma_heap *main_heap, uint64_t main_start,

@@ -129,12 +129,28 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
       .io_semantics = nir_intrinsic_io_semantics(load));
 
    if (load->intrinsic == nir_intrinsic_load_input) {
-      assert(load->def.bit_size == 32);
+      nir_def *flat;
 
       if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER)
-         return nir_load_layer_id(b);
+         flat = nir_load_layer_id(b);
       else
-         return interpolate_flat(b, coefficients);
+         flat = interpolate_flat(b, coefficients);
+
+      /* A coefficient register is 32-bit, but storageInputOutput16 permits a
+       * logical 16-bit fragment input.  agx_nir_lower_uvs.c widened the value
+       * type-correctly before ST_VARY, so narrow it back the same way here.
+       * The interpolated path does its own narrowing in agx_compile.c; this is
+       * the flat half of the same contract.
+       */
+      if (flat->bit_size != load->def.bit_size) {
+         assert(load->def.bit_size == 16 && flat->bit_size == 32);
+
+         flat = nir_convert_to_bit_size(
+            b, flat, nir_alu_type_get_base_type(nir_intrinsic_dest_type(load)),
+            load->def.bit_size);
+      }
+
+      return flat;
    } else {
       nir_intrinsic_instr *bary = nir_src_as_intrinsic(load->src[0]);
 

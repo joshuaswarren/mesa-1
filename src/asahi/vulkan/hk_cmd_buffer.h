@@ -395,6 +395,34 @@ struct hk_cs {
     * whether the stream faults. See hk_cmd_draw.c. */
    unsigned g17p_state_publications;
 
+   /* Compact identity for a submitted G17P draw.  The full launch trace is
+    * intentionally enormous; this is enough to name the exact fragment
+    * program and draw that preceded a DM1 fragment timeout. */
+   struct {
+      uint64_t fragment_program;
+      uint64_t emitted_indirect_buffer;
+      uint32_t fragment_shader_hash;
+      uint32_t fragment_main_hash;
+      uint32_t fragment_ioto_hash;
+      uint32_t fragment_shader_size;
+      uint32_t fragment_main_size;
+      uint32_t fragment_ioto_size;
+      uint32_t api_count;
+      uint32_t api_instances;
+      uint32_t api_first;
+      int32_t api_base_vertex;
+      uint32_t api_first_instance;
+      uint32_t color_formats[HK_MAX_RTS];
+      uint32_t depth_format;
+      uint8_t color_count;
+      uint16_t draw_id;
+      uint8_t topology;
+      bool api_indexed;
+      bool api_indirect;
+      bool emitted_indexed;
+      bool emitted_indirect;
+   } g17p_draw_trace;
+
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
     * samplers (especially for GL/DX11-era engines).
@@ -870,6 +898,7 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
 bool hk_g17p_launch_trace_enabled(void);
+bool hk_g17p_draw_trace_enabled(void);
 bool hk_g17p_strong_dispatch_flush_enabled(void);
 bool hk_g17p_verbose_enabled(void);
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,

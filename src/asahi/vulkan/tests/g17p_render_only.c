@@ -81,7 +81,7 @@ VK_FN(vkGetPhysicalDeviceProperties);
 #if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
 VK_FN(vkGetPhysicalDeviceFeatures);
 #endif
-#ifdef G17P_CONDITIONAL_RENDERING
+#if defined(G17P_CONDITIONAL_RENDERING) || defined(G17P_REPEAT_DRAW)
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
@@ -115,18 +115,22 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
-#ifdef G17P_CONDITIONAL_RENDERING
 VK_FN(vkCmdBindIndexBuffer);
-#endif
 #ifdef G17P_ANY_SIDE_EFFECTS
 VK_FN(vkCmdBindDescriptorSets);
 #endif
 VK_FN(vkCmdDraw);
+VK_FN(vkCmdDrawIndirect);
+VK_FN(vkCmdDrawIndexed);
+VK_FN(vkCmdDrawIndexedIndirect);
+#ifdef G17P_REPEAT_DRAW
+VK_FN(vkCmdSetStencilReference);
+VK_FN(vkResetFences);
+VK_FN(vkUnmapMemory);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
 VK_FN(vkCmdBeginConditionalRenderingEXT);
 VK_FN(vkCmdClearAttachments);
-VK_FN(vkCmdDrawIndexed);
-VK_FN(vkCmdDrawIndirect);
 VK_FN(vkCmdDrawIndirectCount);
 VK_FN(vkCmdEndConditionalRenderingEXT);
 #endif
@@ -309,7 +313,7 @@ main(
 #if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
 #endif
-#ifdef G17P_CONDITIONAL_RENDERING
+#if defined(G17P_CONDITIONAL_RENDERING) || defined(G17P_REPEAT_DRAW)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
@@ -454,6 +458,26 @@ main(
       VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME;
 #endif
 
+#ifdef G17P_REPEAT_DRAW
+   const bool repeat_integer_bias = getenv("G17P_REPEAT_INTEGER_DEPTH_BIAS");
+   VkPhysicalDeviceDepthBiasControlFeaturesEXT bias_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT,
+   };
+   if (repeat_integer_bias) {
+      VkPhysicalDeviceFeatures2 available = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+         .pNext = &bias_features,
+      };
+      vkGetPhysicalDeviceFeatures2(physical, &available);
+      if (!bias_features.depthBiasControl ||
+          !bias_features.leastRepresentableValueForceUnormRepresentation)
+         die("forced UNORM depth bias is not advertised");
+      bias_features.floatRepresentation = VK_FALSE;
+      bias_features.depthBiasExact = VK_FALSE;
+   }
+   const char *const bias_extension = VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME;
+#endif
+
    const float queue_priority = 1.0f;
    const VkDeviceQueueCreateInfo queue_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -467,6 +491,11 @@ main(
       .pNext = &enabled_conditional,
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = &conditional_extension,
+#endif
+#ifdef G17P_REPEAT_DRAW
+      .pNext = repeat_integer_bias ? &bias_features : NULL,
+      .enabledExtensionCount = repeat_integer_bias ? 1 : 0,
+      .ppEnabledExtensionNames = repeat_integer_bias ? &bias_extension : NULL,
 #endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
@@ -517,18 +546,22 @@ main(
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
-#ifdef G17P_CONDITIONAL_RENDERING
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
-#endif
 #ifdef G17P_ANY_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
 #endif
    LOAD_DEVICE(device, vkCmdDraw);
+   LOAD_DEVICE(device, vkCmdDrawIndirect);
+   LOAD_DEVICE(device, vkCmdDrawIndexed);
+   LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
+#ifdef G17P_REPEAT_DRAW
+   LOAD_DEVICE(device, vkCmdSetStencilReference);
+   LOAD_DEVICE(device, vkResetFences);
+   LOAD_DEVICE(device, vkUnmapMemory);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
    LOAD_DEVICE(device, vkCmdBeginConditionalRenderingEXT);
    LOAD_DEVICE(device, vkCmdClearAttachments);
-   LOAD_DEVICE(device, vkCmdDrawIndexed);
-   LOAD_DEVICE(device, vkCmdDrawIndirect);
    LOAD_DEVICE(device, vkCmdDrawIndirectCount);
    LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
 #endif
@@ -557,10 +590,20 @@ main(
       {3.0f, -1.0f},
       {-1.0f, 3.0f},
    };
+   /* The first four words also form an arrays-indirect draw of three
+    * vertices. Keep the index data separate from both draw records. */
+   const VkDrawIndexedIndirectCommand repeat_indirect = {3, 1, 0, 0, 0};
+   const uint32_t repeat_indices[] = {0, 1, 2};
+   const VkDeviceSize repeat_index_offset =
+      sizeof(vertices) + sizeof(repeat_indirect);
+   const VkDeviceSize vertex_allocation_size =
+      repeat_index_offset + sizeof(repeat_indices);
    const VkBufferCreateInfo vertex_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(vertices),
-      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      .size = vertex_allocation_size,
+      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
    VkBuffer vertex_buffer;
@@ -583,10 +626,14 @@ main(
    check(vkBindBufferMemory(device, vertex_buffer, vertex_memory, 0),
          "vkBindBufferMemory(vertex)");
    void *vertex_map = NULL;
-   check(vkMapMemory(device, vertex_memory, 0, sizeof(vertices), 0,
+   check(vkMapMemory(device, vertex_memory, 0, vertex_allocation_size, 0,
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+   memcpy((uint8_t *)vertex_map + sizeof(vertices), &repeat_indirect,
+          sizeof(repeat_indirect));
+   memcpy((uint8_t *)vertex_map + repeat_index_offset, repeat_indices,
+          sizeof(repeat_indices));
 
 #ifdef G17P_CONDITIONAL_RENDERING
    const VkBufferCreateInfo conditional_info = {
@@ -922,8 +969,20 @@ main(
       .scissorCount = 1,
       .pScissors = &scissor,
    };
+#ifdef G17P_REPEAT_DRAW
+   const VkDepthBiasRepresentationInfoEXT bias_representation = {
+      .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+      .depthBiasRepresentation =
+         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT,
+   };
+#endif
    const VkPipelineRasterizationStateCreateInfo raster = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+#ifdef G17P_REPEAT_DRAW
+      .pNext = repeat_integer_bias ? &bias_representation : NULL,
+      .depthBiasEnable = repeat_integer_bias,
+      .depthBiasConstantFactor = repeat_integer_bias ? 1.0f : 0.0f,
+#endif
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_NONE,
       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
@@ -942,6 +1001,16 @@ main(
       .attachmentCount = 1,
       .pAttachments = &blend_attachment,
    };
+#ifdef G17P_REPEAT_DRAW
+   const bool repeat_stencil = getenv("G17P_REPEAT_STENCIL_REFERENCE") != NULL;
+   unsigned repeats = G17P_REPEAT_DRAW;
+   const VkDynamicState repeat_dynamic = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
+   const VkPipelineDynamicStateCreateInfo repeat_dynamic_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 1,
+      .pDynamicStates = &repeat_dynamic,
+   };
+#endif
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
       .stageCount = 2,
@@ -952,6 +1021,9 @@ main(
       .pRasterizationState = &raster,
       .pMultisampleState = &multisample,
       .pColorBlendState = &blend,
+#ifdef G17P_REPEAT_DRAW
+      .pDynamicState = repeat_stencil ? &repeat_dynamic_info : NULL,
+#endif
       .layout = pipeline_layout,
       .renderPass = render_pass,
    };
@@ -1003,7 +1075,11 @@ main(
    VkCommandBuffer command_buffer = command_buffers[0];
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+#ifdef G17P_REPEAT_DRAW
+      .flags = 0, /* Reusable after completion for retained-context tests. */
+#else
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+#endif
    };
 #ifdef G17P_VDM_CAPACITY
    for (unsigned command = 0; command < COMMAND_BUFFER_COUNT; ++command) {
@@ -1049,6 +1125,10 @@ main(
 #endif
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
+#ifdef G17P_REPEAT_DRAW
+   if (repeat_stencil)
+      vkCmdSetStencilReference(command_buffer, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+#endif
 #ifdef G17P_ANY_SIDE_EFFECTS
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &side_set, 0, NULL);
@@ -1056,6 +1136,10 @@ main(
    const VkDeviceSize vertex_offset = 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
+#ifdef G17P_REPEAT_DRAW
+   vkCmdBindIndexBuffer(command_buffer, vertex_buffer, repeat_index_offset,
+                        VK_INDEX_TYPE_UINT32);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
    if (indexed_draw)
       vkCmdBindIndexBuffer(command_buffer, conditional_buffer, 16,
@@ -1111,8 +1195,9 @@ main(
     * make every repeat republish render state, which is what a real Zink
     * workload does and what a body-only repeat deliberately does not. */
    {
-      unsigned repeats = G17P_REPEAT_DRAW;
       const char *requested = getenv("G17P_REPEAT_DRAW_COUNT");
+      const char *indirect_mode = getenv("G17P_REPEAT_INDIRECT");
+      const bool mixed_indexed = indirect_mode && !strcmp(indirect_mode, "2");
 
       if (requested) {
          const unsigned long parsed = strtoul(requested, NULL, 10);
@@ -1121,8 +1206,21 @@ main(
             repeats = (unsigned)parsed;
       }
 
-      for (unsigned repeat = 1; repeat < repeats; ++repeat)
-         vkCmdDraw(command_buffer, 3, 1, 0, 0);
+      for (unsigned repeat = 1; repeat < repeats; ++repeat) {
+         if (repeat_stencil)
+            vkCmdSetStencilReference(command_buffer,
+                                      VK_STENCIL_FACE_FRONT_AND_BACK, repeat);
+         if (mixed_indexed && repeat % 4 == 3)
+            vkCmdDrawIndexedIndirect(command_buffer, vertex_buffer,
+                                     sizeof(vertices), 1, sizeof(repeat_indirect));
+         else if (mixed_indexed && repeat % 4 == 2)
+            vkCmdDrawIndexed(command_buffer, 3, 1, 0, 0, 0);
+         else if (indirect_mode && (repeat & 1))
+            vkCmdDrawIndirect(command_buffer, vertex_buffer, sizeof(vertices),
+                              1, sizeof(repeat_indirect));
+         else
+            vkCmdDraw(command_buffer, 3, 1, 0, 0);
+      }
    }
 #endif
 #endif
@@ -1229,13 +1327,63 @@ main(
    }
 
 #if defined(G17P_REPEAT_DRAW)
-   /* The recorded stream is the whole point here and the shim executes
-    * nothing, so there are no pixels to compare. What the submission proves is
-    * checked by the shim's own inter-draw barrier accounting. */
-   printf("g17p-vulkan-repeat-draw: %u identical draws recorded and "
-          "submitted in one render pass\n",
-          (unsigned)G17P_REPEAT_DRAW);
-   return EXIT_SUCCESS;
+   unsigned submissions = 1;
+   const char *requested_submits = getenv("G17P_REPEAT_SUBMITS");
+   if (requested_submits) {
+      char *end;
+      const unsigned long n = strtoul(requested_submits, &end, 10);
+      if (*end || n == 0 || n > 128)
+         die("G17P_REPEAT_SUBMITS must be in 1..128");
+      submissions = n;
+   }
+   uint8_t *repeat_pixels = NULL;
+   if (getenv("G17P_REPEAT_READBACK")) {
+      if (!image_host_visible)
+         die("repeat pixel verification requires host-visible memory");
+      check(vkMapMemory(device, image_memory, 0, IMAGE_BYTES, 0,
+                        (void **)&repeat_pixels), "vkMapMemory(repeat image)");
+   }
+   const uint8_t repeat_expected[] = {0xff, 0x47, 0x0d, 0xff};
+   for (unsigned iteration = 0; iteration < submissions; ++iteration) {
+      if (iteration > 0) {
+         /* Completed work no longer owns this image. Poisoning it prevents
+          * an empty or dropped subsequent submit from passing on old pixels.
+          * The render pass discards the prior layout/content on every use. */
+         if (repeat_pixels)
+            memset(repeat_pixels, 0xa5, IMAGE_BYTES);
+         check(vkResetFences(device, 1, &fence), "vkResetFences(repeat)");
+         check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit(repeat)");
+         check(vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000)),
+               "vkWaitForFences(repeat)");
+      }
+      if (repeat_pixels) {
+         for (unsigned pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+            if (memcmp(repeat_pixels + 4 * pixel, repeat_expected, 4)) {
+               fprintf(stderr, "repeat submission %u: pixel %u differs\n",
+                       iteration + 1, pixel);
+               die("repeat submission failed exact pixel verification");
+            }
+         }
+         fprintf(stderr, "repeat submission %u/%u: %u/%u pixels exact\n",
+                 iteration + 1, submissions, IMAGE_WIDTH * IMAGE_HEIGHT,
+                 IMAGE_WIDTH * IMAGE_HEIGHT);
+      }
+   }
+   if (repeat_pixels) {
+      sleep(3);
+      for (unsigned pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+         if (memcmp(repeat_pixels + 4 * pixel, repeat_expected, 4))
+            die("repeat target changed after final completion");
+      }
+      vkUnmapMemory(device, image_memory);
+   }
+   printf("g17p-vulkan-repeat-draw: %u draws recorded and "
+          "submitted %u times on one device and queue\n",
+          repeats, submissions);
+   /* The shim validates framing and stream counts but does not execute.
+    * Hardware qualification must also use the exact pixel oracle below. */
+   if (!getenv("G17P_REPEAT_READBACK"))
+      return EXIT_SUCCESS;
 #endif
 
 #ifdef G17P_CONDITIONAL_RENDERING

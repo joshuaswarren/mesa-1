@@ -465,8 +465,9 @@ bool agx3_alu_fmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
-/* Full G17P minifloat multiply form, including the independently witnessed
- * destination retention and absolute source modifiers. */
+/* Full grounded G17P minifloat multiply form, including destination
+ * retention. `src_abs` is retained as a fail-closed API guard but is always
+ * rejected; lower ABS through fadd_abs_negzero followed by a plain FMUL. */
 bool agx3_alu_fmul_minifloat_mod(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    uint16_t immediate, bool dest_cache, bool src_abs,
@@ -480,8 +481,8 @@ bool agx3_alu_fmul_minifloat_mod(
  * optimizer folds that f2f16 into the multiply, so this mixed-width form is
  * what actually reaches the packer. See the witnesses in agx3_alu_core.c.
  *
- * A narrowing multiply with an absolute source is refused: the ABS deposit is
- * witnessed only against the 32-bit destination.
+ * An absolute source is refused for either destination width. The six-byte
+ * endpoint has no grounded fused ABS form; use explicit FABS plus plain FMUL.
  */
 bool agx3_alu_fmul_minifloat_narrow(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,

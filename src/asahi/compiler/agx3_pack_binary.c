@@ -100,7 +100,7 @@ agx3_index_kind(const agx_index x)
 static void
 agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
 {
-   if (!(agx_compiler_debug & AGX_DBG_SHADERS))
+   if (!(agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)))
       return;
 
    char shape[512];
@@ -117,12 +117,19 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
        * and a kind that print as one token is the same class of ambiguity as
        * a field left out entirely. */
       const bool immediate = x.type == AGX_INDEX_IMMEDIATE;
+      /* A source's CHANNEL COUNT gates several texture paths -- a 2D fetch
+       * wants two coordinate channels and an array or 3D fetch three, and
+       * without it two refusals that differ only in dimensionality print
+       * identically. Print it whenever it is not the scalar default. */
+      const unsigned chans = agx_channels(x);
       n += snprintf(shape + n, sizeof(shape) - n, " s%u=%u:%s%s%u%s%s%s%s%s", i,
                     16u << x.size, agx3_index_kind(x), immediate ? "#" : "",
                     x.value,
                     x.abs ? ".abs" : "", x.neg ? ".neg" : "",
                     x.kill ? ".kill" : "", x.cache ? ".cache" : "",
                     x.discard ? ".discard" : "");
+      if (chans != 1 && n > 0 && n < (int)sizeof(shape))
+         n += snprintf(shape + n, sizeof(shape) - n, "x%u", chans);
    }
 
    /* mask, format, shift and nest decide gates that the operand list cannot
@@ -137,12 +144,17 @@ agx3_report_refusal_why(const agx_instr *I, unsigned line, const char *why)
    fprintf(stderr,
            "agx3_pack_binary.c:%u: no grounded AGX3 encoding for %s "
            "[%s%s%s cond=%u nest=%u chan=%u mask=0x%x fmt=%u "
-           "shift=%u]%s%s\n",
+           "shift=%u dim=%u lod=%u%s%s%s%s%s]%s%s\n",
            line, agx_opcodes_info[I->op].name, shape,
            I->saturate ? " sat" : "", I->invert_cond ? " inv" : "",
            (unsigned)I->fcond, (unsigned)I->nest,
            I->nr_dests ? agx_channels(I->dest[0]) : 0u,
            (unsigned)I->mask, (unsigned)I->format, (unsigned)I->shift,
+           (unsigned)I->dim, (unsigned)I->lod_mode,
+           I->offset ? " off" : "", I->shadow ? " shadow" : "",
+           I->query_lod ? " qlod" : "",
+           I->gather != AGX_GATHER_NONE ? " gather" : "",
+           I->coherent ? " coherent" : "",
            why ? " -- " : "", why ? why : "");
 }
 
@@ -1259,7 +1271,22 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       !I->src[4].memory && !I->src[4].abs && !I->src[4].neg &&
       ((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
        (I->src[4].value == 1 && normalized));
-   const bool register_state = normalized &&
+   /* The state operand's form and f70 are ORTHOGONAL, so a register state does
+    * not imply normalized data.  metal-nt -arch applegpu_g17p, dynamically
+    * indexed `array<texture2d<T, access::write>, 4>` so the state is a
+    * register, one variable per kernel:
+    *
+    *   texture2d<float>  d72054000040001020040000883a0901
+    *   texture2d<uint>   d72054000040001020040000881a0901
+    *   texture2d<int>    d72054000040001020040000881a0901
+    *
+    * against the immediate-state controls that are already recorded in
+    * agx_compile.c (`...0000 0400 0088 3a09 00` / `...881a0900`): the state
+    * operand moves and f70 does not, and int and uint stay byte-identical.
+    * Requiring `normalized` here refused every dynamically indexed INTEGER
+    * storage image store -- 796 of 3,986 refused instructions in the
+    * 2026-09-11 census, and the bulk of binding_model's. */
+   const bool register_state =
       agx3_tex_plain_uniform64(I->src[3]) &&
       agx3_tex_plain_reg(I->src[4]) &&
       I->src[4].size == AGX_SIZE_32 && agx_channels(I->src[4]) == 1 &&
@@ -1275,7 +1302,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        (I->src[1].value & 1) || I->src[1].value > 252 ||
        !agx3_tex_imm(I->src[2], 0) ||
        (!immediate_state && !register_state)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
                  agx_channels(I->src[0]), I->src[1].value, I->src[1].size,
@@ -1288,7 +1315,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    const uint16_t data_dest[4] = {4, 6, 12, 14};
    if (!agx3_emit_image_coord(&staged, enc, 0, I->src[1].value) ||
        !agx3_emit_image_coord(&staged, enc, 2, I->src[1].value + 2)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
       goto fail;
    }
@@ -1301,7 +1328,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                                   c == 0 ? wait_mask : 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {
-         if (agx_compiler_debug & AGX_DBG_SHADERS)
+         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
             fprintf(stderr, "G17P imgwci data compose refusal: component=%u\n", c);
          goto fail;
       }
@@ -1321,7 +1348,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
           enc, &d, imgwci, &imgwci_len) ||
        !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
-      if (agx_compiler_debug & AGX_DBG_SHADERS)
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci instruction compose refusal\n");
       goto fail;
    }
@@ -7308,9 +7335,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * and register multiplier variants have distinct baselines. */
             const bool no_addend = c.type == AGX_INDEX_IMMEDIATE &&
                                    c.value == 0 && !c.abs && !c.neg;
+            /*
+             * `.neg` on an IMAD addend is an arithmetic negate, not a source
+             * modifier: agx_pack.c gives it a dedicated bit and permits it on
+             * src[2] alone.  AGX3 spells the negated form as its own
+             * instruction, `imsub`, so admit the modifier here and let
+             * agx3_imad_encode() select the opcode.  Without this every
+             * `a*b - imm` was refused outright -- 2,692 of 6,486 refused
+             * instructions in the 2026-09-11 CTS census, the single largest
+             * shape.
+             */
             const bool addend_imm =
                c.type == AGX_INDEX_IMMEDIATE && c.value != 0 &&
-               c.value <= 0xff && !c.abs && !c.neg && !c.memory;
+               c.value <= 0xff && !c.abs && !c.memory;
             /*
              * A bare narrow operand is SIGN-extended, the same rule the
              * comment above names and the same one agx_optimizer_signext()
@@ -7396,6 +7433,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      addend_reg && !narrow &&
                      (wide ? (c.size != AGX_SIZE_64 && !c.abs)
                            : (c.size == AGX_SIZE_16 && !c.abs)),
+                  /* Subtract rather than add.  This used to have no
+                   * representation at all: a negated REGISTER addend passed
+                   * the gate above and then composed as plain `imadd`, so
+                   * `a*b - c` silently computed `a*b + c`.  A negated
+                   * immediate addend was refused instead.  Both now select
+                   * Apple's `imsub`. */
+                  .negate_addend = !no_addend && c.neg,
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -8900,7 +8944,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t len = 0;
             if (!agx3_isel_encode(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len)) {
-               if (agx_compiler_debug & AGX_DBG_SHADERS)
+               if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
                   fprintf(stderr,
                           "isel refused: dest=%u/%s cmp=%u,%u cond=%u "
                           "t=%s:%u f=%s:%u wait=%x\n",
@@ -9587,9 +9631,33 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   enc, I->dest[0].value, reg.value, imm.value, reg.neg,
                   I->saturate, agx3_post_ra_hint(reg), wait, bytes, &len);
             } else if (multiply) {
+               /* The recovered six-byte minifloat endpoint fixes bits 32:33.
+                * Treating bit 33 as an ABS modifier produced wrong values on
+                * G17P: abs(0.027...) * 2.0 saturated above 1.0 while the
+                * identical plain multiply was exact. Use two independently
+                * Apple-grounded instructions instead. FABS writes the final
+                * destination as a retained intermediate; the plain FMUL then
+                * consumes it in place. This adds no register, spill, wait, or
+                * serialization and preserves the source's real lifetime. */
+               if (reg.abs) {
+                  uint8_t abs_bytes[AGX3_ALU_MAX_LENGTH], abs_len = 0;
+                  uint8_t mul_bytes[AGX3_ALU_MAX_LENGTH], mul_len = 0;
+                  if (I->dest[0].size != AGX_SIZE_32 ||
+                      !agx3_alu_fadd_abs_negzero(
+                         enc, I->dest[0].value, reg.value, true,
+                         agx3_post_ra_hint(reg), wait, abs_bytes, &abs_len) ||
+                      !agx3_alu_fmul_minifloat_mod(
+                         enc, I->dest[0].value, I->dest[0].value, imm.value,
+                         I->dest[0].cache, false, AGX3_ALU_HINT_DISCARD, 0,
+                         mul_bytes, &mul_len) ||
+                      !agx3_append(emission, abs_bytes, abs_len) ||
+                      !agx3_append(emission, mul_bytes, mul_len))
+                     AGX3_REFUSE(I);
+                  continue;
+               }
                encoded = agx3_alu_fmul_minifloat_narrow(
                   enc, I->dest[0].value, reg.value, imm.value,
-                  I->dest[0].cache, reg.abs,
+                  I->dest[0].cache, false,
                   I->dest[0].size == AGX_SIZE_16, agx3_post_ra_hint(reg),
                   wait, bytes, &len);
             } else if (reg.abs) {
@@ -10329,7 +10397,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          struct agx3_sel_instr S;
          if (!agx3_translate_instr(I, &S) ||
              !agx3_emit_alu(emission, enc, &S, wait)) {
-            if (agx_compiler_debug & AGX_DBG_SHADERS)
+            if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
                fprintf(stderr,
                        "ALUX %s wait=%x shift=%u d{v=%u sz=%u} s0{t=%u v=%u "
                        "sz=%u abs=%u} s1{t=%u v=%u sz=%u abs=%u}\n",

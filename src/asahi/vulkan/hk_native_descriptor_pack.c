@@ -77,6 +77,20 @@ hk_pack_native_texture(unsigned generation,
           legacy->height > 16384)
          return false;
 
+      /* Stride and Depth share word1[61:46], sixteen bits, and the genxml
+       * modifiers put stride >> 4 and depth - 1 there.  util_bitpack_uint()
+       * is `v << start`, so a value that does not fit runs past the field and
+       * into "Page-aligned layers" (126) and "Extended" (127) -- with only a
+       * debug-build assert to catch it.  Refuse instead.  Nothing hk builds
+       * reaches either bound today (the widest stride is a buffer texture's
+       * AGX_TEXTURE_BUFFER_WIDTH * 16 - 16, and maxImageArrayLayers is far
+       * below 65536), so this is a guard on a latent overrun rather than a
+       * behaviour change. */
+      if (legacy->layout == AGX_LAYOUT_LINEAR
+             ? ((legacy->stride >> 4) > 0xffffu)
+             : (legacy->depth > 0x10000u))
+         return false;
+
       /* HAL200 encodeImageReadState (4d238c, 4d2270..4d22e8) clears
        * word1[62] for an ordinary non-array 2D texture. Its conditional
        * layer-mode writer is not the inherited AIL page-aligned-allocation

@@ -207,6 +207,15 @@ check_native_indirect(void)
    assert(packed.length == sizeof(indexed_expected));
    assert(!memcmp(packed.bytes, indexed_expected, sizeof(indexed_expected)));
 
+   /* A second indirect draw with unchanged state must start with its restart
+    * packet, not a PPP address whose header was never emitted. */
+   uint8_t stream[AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH];
+   size_t emitted;
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  false, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(indexed_expected) - 4);
+   assert(!memcmp(stream, indexed_expected + 1, emitted));
+
    const struct agx_vdm_hal200_indirect_draw_fields nonindexed = {
       .draw_state_context_offset = 0x48000,
       .primitive = 6,
@@ -220,6 +229,15 @@ check_native_indirect(void)
    assert(packed.length == sizeof(nonindexed_expected));
    assert(!memcmp(packed.bytes, nonindexed_expected,
                   sizeof(nonindexed_expected)));
+
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  false, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(nonindexed_expected) - 4);
+   assert(!memcmp(stream, nonindexed_expected + 1, emitted));
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  true, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(nonindexed_expected));
+   assert(!memcmp(stream, nonindexed_expected, emitted));
 
    struct agx_vdm_hal200_indirect_draw_fields bad = indexed;
    bad.draw_state_context_offset |= 1;

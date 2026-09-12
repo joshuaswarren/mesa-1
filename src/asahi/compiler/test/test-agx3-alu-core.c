@@ -714,82 +714,26 @@ test_fmul_minifloat(void)
 static void
 test_fmul_minifloat_modifiers(void)
 {
-   static const struct {
-      uint16_t src, imm;
-      bool dest_cache;
-      enum agx3_alu_hint hint;
-      uint16_t wait;
-      uint8_t bytes[6];
-   } native[] = {
-      {0, 0x40, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xc1, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0x20, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xa1, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0x38, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xb9, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0xc0, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xc1, 0x1d, 0x01, 0x82, 0x00}},
-      {0, 0x40, true, AGX3_ALU_HINT_DISCARD, 1,
-       {0x09, 0xc1, 0x35, 0x01, 0x82, 0x20}},
-      {2, 0x40, false, AGX3_ALU_HINT_CACHE, 0,
-       {0x09, 0xc1, 0x05, 0x83, 0x82, 0x00}},
-   };
-   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
-   for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
-      assert(agx3_alu_fmul_minifloat_mod(
-         AGX_ISA_ENCODING_AGX3B, 0, native[i].src, native[i].imm,
-         native[i].dest_cache, true, native[i].hint,
-         native[i].wait, out, &len));
-      assert(len == sizeof(native[i].bytes));
-      assert(!memcmp(out, native[i].bytes, len));
-   }
-
-   unsigned matrix = 0;
+   unsigned rejected = 0;
    for (unsigned imm = 0; imm <= UINT8_MAX; ++imm) {
       for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
          for (unsigned hint = AGX3_ALU_HINT_NONE;
               hint <= AGX3_ALU_HINT_CACHE; ++hint) {
             for (unsigned wait = 0; wait < 64; ++wait) {
-               uint8_t plain[AGX3_ALU_MAX_LENGTH], absolute[AGX3_ALU_MAX_LENGTH];
-               uint8_t plain_len = 0xa5, absolute_len = 0xa5;
-               bool plain_ok = agx3_alu_fmul_minifloat_mod(
+               uint8_t absolute[AGX3_ALU_MAX_LENGTH];
+               uint8_t absolute_len = 0xa5;
+               memset(absolute, 0xa5, sizeof(absolute));
+               assert(!agx3_alu_fmul_minifloat_mod(
                   AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
-                  false, hint, wait, plain, &plain_len);
-               bool absolute_ok = agx3_alu_fmul_minifloat_mod(
-                  AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
-                  true, hint, wait, absolute, &absolute_len);
-               assert(plain_ok == absolute_ok);
-               if (!plain_ok)
-                  continue;
-               assert(plain_len == 6 && absolute_len == plain_len);
-               assert(!(plain[4] & 0x02) && (absolute[4] & 0x02));
-               absolute[4] &= ~0x02;
-               assert(!memcmp(plain, absolute, plain_len));
-               matrix++;
+                  true, hint, wait, absolute, &absolute_len));
+               assert(absolute_len == 0xa5 && absolute[0] == 0xa5);
+               rejected++;
             }
          }
       }
    }
-
-   memset(out, 0xa5, sizeof(out));
-   len = 99;
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3C, 0, 0, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(len == 99 && out[0] == 0xa5);
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 1, 0, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 0, 1, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x100, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-
-   printf("G17P absolute minifloat FMUL: five direct and one texture-wait "
-          "Apple witnesses, %u orthogonal immediate/lifetime/wait forms and "
-          "strict negatives PASS\n", matrix);
+   printf("G17P absolute minifloat FMUL: %u ungrounded fused encodings "
+          "rejected PASS\n", rejected);
 }
 
 static void test_fmul_half_minifloat_to_f32(void)
@@ -1563,11 +1507,21 @@ static void test_i32_to_f16(void)
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
-                               AGX3_ALU_HINT_CACHE, false, 0, out, &len));
+   /* A CACHED source used to be refused; f27 carries it, the way f29 carries
+    * discard.  Apple's own live-source kernel, recovered by composing with
+    * the registers held equal rather than by diffing two kernels whose
+    * register allocation differs: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 4, 0, true,
+                              AGX3_ALU_HINT_CACHE, false, 0x20, out, &len));
+   exact(out, len, "a707560402008a60");
+   /* and its dead-source twin, which our field set already reproduced: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
+                              AGX3_ALU_HINT_DISCARD, false, 0x20, out, &len));
+   exact(out, len, "a70756020204a860");
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
                                AGX3_ALU_HINT_NONE, false, 0x40, out, &len));
-   puts("Native i32-to-f16: five exact Apple vectors and refusals PASS");
+   puts("Native i32-to-f16: exact Apple vectors incl. cached source, and "
+        "refusals PASS");
 }
 
 static void
@@ -4380,13 +4334,11 @@ test_native_fmul_minifloat_narrow(void)
       AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, false, false,
       AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
 
-   /* The ABS deposit is witnessed only against a 32-bit destination, so a
-    * narrowing multiply with an absolute source stays refused rather than
-    * inventing a bit. */
+   /* Neither destination width has a grounded fused ABS form. */
    assert(!agx3_alu_fmul_minifloat_narrow(
       AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, true,
       AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
-   assert(agx3_alu_fmul_minifloat_narrow(
+   assert(!agx3_alu_fmul_minifloat_narrow(
       AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, false,
       AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
 

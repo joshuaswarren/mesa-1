@@ -884,9 +884,11 @@ main(void)
             die("failed to enable exact G17P compute-stream validation");
          if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS",
 #ifdef G17P_COMPRESSED_READBACK
-                    "17,17,0,0",
+                    /* Two-slice upload + sample + two-slice readback. */
+                    "5,5,0,0",
 #else
-                    "9,9,0,0",
+                    /* Two-slice upload + sample. */
+                    "3,3,0,0",
 #endif
                     1))
             die("failed to select exact compressed 3D stream counts");

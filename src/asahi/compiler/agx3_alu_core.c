@@ -162,7 +162,7 @@ agx3_alu_fmul_minifloat_narrow(
        src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
        immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       (wait_mask & ~UINT16_C(0x3f)))
+       (wait_mask & ~UINT16_C(0x3f)) || src_abs)
       return false;
 
    /* f10 is the DESTINATION width and f26 the source's; they are independent,
@@ -179,10 +179,10 @@ agx3_alu_fmul_minifloat_narrow(
     *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
     *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
     *
-    * The ABS deposit below is witnessed on the 32-bit destination only, so a
-    * narrowing multiply with an absolute source stays refused. */
-   if (dest_half && src_abs)
-      return false;
+    * The recovered six-byte endpoint fixes bits 32:33. There is no grounded
+    * fused ABS form: hardware testing showed that mutating bit 33 executes
+    * incorrectly. Callers must lower ABS through fadd_abs_negzero followed by
+    * this plain multiply. */
 
    /* Fresh Apple mul_scale: 0983150180c0 is loaded f32 * minifloat0x02
     * (1/32), wait6. mul_reuse: 0983050380c0 retains its half2 source.
@@ -206,23 +206,6 @@ agx3_alu_fmul_minifloat_narrow(
    if (!agx3_bind_compose(enc, "f32mul", 1, base, 8, fields, n, encoded,
                           &encoded_len))
       return false;
-
-   /* Fresh Apple G17P kernels encode abs(x) * {0.5, 1.5, 2.0} by setting
-    * bit33 of this same six-byte endpoint. A texture-dependent abs(x) * 2.0
-    * independently keeps that bit with destination retention and wait slot1:
-    *
-    *   plain/discard abs*2     09 c1 15 01 82 00
-    *   live-source abs*2       09 c1 05 83 82 00
-    *   cached/wait1 abs*2      09 c1 35 01 82 20
-    *
-    * Apple's recovered composer still fixes bit33 to zero, so deposit this
-    * one newly witnessed modifier after composing the otherwise byte-exact
-    * form. Keep AGX3c closed: these are applegpu_g17p witnesses only. */
-   if (src_abs) {
-      if (encoded_len != 6 || (encoded[4] & 0x02))
-         return false;
-      encoded[4] |= 0x02;
-   }
 
    memcpy(out, encoded, encoded_len);
    *len = encoded_len;
@@ -2095,7 +2078,7 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 256 || (src & 1) || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       hint == AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+       (wait_mask & ~0x3fu))
       return false;
 
    /* applegpu-nt 32023.917 emits int2flt with f10=1 for a half result and
@@ -2105,11 +2088,32 @@ agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {25, 2}, {26, 2},
    };
+   /* f27 is the CACHE half of the post-RA source hint and f29 the DISCARD
+    * half; the comment above named both but only f29 was ever set, so a
+    * cached source had to be refused outright.  Established by round-trip
+    * against Apple rather than by a byte diff, because applegpu_g17p
+    * allocates different registers for the two kernels and a raw diff cannot
+    * separate the hint from the allocation.  Composing with the registers
+    * held equal, our existing field set reproduces Apple's dead-source
+    * instruction exactly
+    *
+    *   a7 07 56 02 02 04 a8 60   dest=2 src=2 wait=0x20 f29=1
+    *
+    * and cannot reach the live-source one at any assignment; sweeping all 160
+    * fields then gives exactly one explanation, with no second candidate:
+    *
+    *   a7 07 56 04 02 00 8a 60   dest=4 src=0 wait=0x20 f27=1
+    *
+    * The two are complementary -- dead sets f29 and clears f27, live the
+    * reverse -- which is the one-hot {none, discard, cache} the enum already
+    * describes.  400 of the 2,455 remaining refusals in the 2026-09-11 census
+    * were this one shape, an i32-to-f16 convert whose source stays live. */
    struct agx3_field_kv fields[12] = {
       {2, dest}, {11, dest_cache}, {18, src},
+      {27, hint == AGX3_ALU_HINT_CACHE},
       {29, hint == AGX3_ALU_HINT_DISCARD}, {30, is_signed},
    };
-   unsigned n = 5;
+   unsigned n = 6;
    for (unsigned i = 0; i < 6; ++i)
       fields[n++] = (struct agx3_field_kv){33 + i, !!(wait_mask & (1u << i))};
    return agx3_bind_compose(enc, "int2flt", 0, base, 4, fields, n, out, len);

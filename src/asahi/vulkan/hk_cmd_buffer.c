@@ -28,6 +28,7 @@
 #include "libagx_shaders.h"
 
 #include "util/log.h"
+#include "util/hash_table.h"
 #include "util/u_debug.h"
 
 #include <inttypes.h>
@@ -524,6 +525,18 @@ hk_g17p_launch_trace_enabled(void)
    static int enabled = -1;
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
+   return enabled != 0;
+}
+
+/* One short line per submitted graphics stream.  This trace exists for real
+ * applications where HK_G17P_LAUNCH_TRACE changes timing and produces too
+ * much output to find the program whose fragment timestamp never ended. */
+bool
+hk_g17p_draw_trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
    return enabled != 0;
 }
 
@@ -1852,6 +1865,38 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       if (!published)
          return 0;
 
+      if (hk_g17p_draw_trace_enabled() &&
+          s->info.stage == MESA_SHADER_FRAGMENT && cmd->current_cs.gfx) {
+         struct hk_cs *cs = cmd->current_cs.gfx;
+         void *shader_map = agx_bo_map(linked->b.bo);
+
+         cs->g17p_draw_trace.fragment_program = published;
+         cs->g17p_draw_trace.fragment_ioto_hash =
+            _mesa_hash_data(program.bytes, program.length);
+         cs->g17p_draw_trace.fragment_ioto_size = program.length;
+         cs->g17p_draw_trace.fragment_shader_size = linked->b.size;
+         cs->g17p_draw_trace.fragment_shader_hash =
+            shader_map
+               ? _mesa_hash_data((uint8_t *)shader_map + linked->b.entry_offset,
+                                 linked->b.size)
+               : 0;
+         /* Keep the main shader identity separate from the linked executable:
+          * render-target epilogs can change the latter for one application
+          * shader, which makes a timeout fingerprint needlessly ambiguous.
+          */
+         cs->g17p_draw_trace.fragment_main_size = s->code_size;
+         cs->g17p_draw_trace.fragment_main_hash =
+            s->code_ptr ? _mesa_hash_data(s->code_ptr, s->code_size) : 0;
+         cs->g17p_draw_trace.color_count =
+            cmd->state.gfx.render.color_att_count;
+         for (unsigned i = 0; i < cmd->state.gfx.render.color_att_count; ++i) {
+            cs->g17p_draw_trace.color_formats[i] =
+               cmd->state.gfx.render.color_att[i].vk_format;
+         }
+         cs->g17p_draw_trace.depth_format =
+            cmd->state.gfx.render.depth_att.vk_format;
+      }
+
       if (hk_g17p_launch_trace_enabled()) {
          const char *label = s->info.stage == MESA_SHADER_FRAGMENT
                                 ? "fragment-ioto"
@@ -2341,11 +2386,15 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     */
    size_t size = 65536;
    struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
+   if (!T.cpu)
+      return;
 
    /* Jump from the old control stream to the new control stream. */
    void *link_end =
       hk_cmd_buffer_emit_cs_jump(cmd, cs->current, T.gpu, vdm);
    const bool linked = link_end != cs->current;
+   if (!linked)
+      return;
 
    /* Swap out the control stream */
    cs->current = T.cpu;

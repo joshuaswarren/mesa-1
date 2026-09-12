@@ -711,8 +711,19 @@ agx3_tex_encode_image_write_rgba8_2d(
        (immediate && (d->image_kill ||
           !((d->image_value == 0 && !d->normalized) ||
             (d->image_value == 1 && d->normalized)))) ||
-       (reg && (!d->normalized || (d->image_value & 1) ||
-                d->image_value > 126)))
+       /* f70 is the float-vs-integer bit and the state operand's form is a
+        * different field family (f91 immediate, f92/f93 register); they are
+        * orthogonal, so a register state does not imply normalized data.
+        * metal-nt -arch applegpu_g17p on a dynamically indexed
+        * `array<texture2d<T, access::write>, 4>`, one variable per kernel:
+        *
+        *   texture2d<float>  d72054000040001020040000883a0901
+        *   texture2d<uint>   d72054000040001020040000881a0901
+        *   texture2d<int>    d72054000040001020040000881a0901
+        *
+        * the state operand moves against the immediate-state controls and f70
+        * does not, and int and uint are byte-identical. */
+       (reg && ((d->image_value & 1) || d->image_value > 126)))
       return false;
 
    /* Nonzero field values recovered from native imgwci.ep0 instructions.

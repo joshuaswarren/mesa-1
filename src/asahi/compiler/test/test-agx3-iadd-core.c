@@ -103,6 +103,50 @@ test_apple_shift_witnesses(void)
       CHECK(len == sizeof(want) && memcmp(out, want, sizeof(want)) == 0);
    }
 
+   /* imsub: `a*b - c` is a DIFFERENT INSTRUCTION, not a modifier on imad.
+    * AGX3b.xml carries `imsub` with a field layout identical to `imadd`;
+    * only opcode bit 7 differs.  Same descriptor as imad_s0 above, one
+    * variable changed, from metal-nt -arch applegpu_g17p:
+    *
+    *   o[i] = a[i]*b[i] + c[i]   9f 00 56 00 02 08 00 40 d0 2f 2a 00
+    *   o[i] = a[i]*b[i] - c[i]   1f 00 56 00 02 08 00 40 d0 2f 2a 00
+    *
+    * and the same bit serves an immediate addend, from the same run:
+    *
+    *   o[i] = a[i]*b[i] + 1      9f 00 56 00 02 08 00 08 d0 26 0a 00
+    *   o[i] = a[i]*b[i] - 1      1f 00 56 00 02 08 00 08 d0 26 0a 00
+    *   o[i] = a[i]*b[i] + 2      9f 00 56 00 02 08 00 10 d0 26 0a 00
+    *   o[i] = a[i]*b[i] - 2      1f 00 56 00 02 08 00 10 d0 26 0a 00
+    *
+    * so f45 (the slot-C immediate, value << 3) and the opcode bit are
+    * independent.  Before this, a negated immediate addend was refused and a
+    * negated REGISTER addend composed as plain `imadd` -- `a*b - c` silently
+    * computing `a*b + c`.
+    */
+   {
+      static const uint8_t want[] = {0x1f, 0x00, 0x56, 0x00, 0x02, 0x08,
+                                     0x00, 0x40, 0xd0, 0x2f, 0x2a, 0x00};
+      struct agx3_imad_desc d = {
+         .dest = 0, .src_a = 4, .multiplier_is_register = true,
+         .multiplier_reg = 0, .multiplier_kill = true, .src_c = 8,
+         .src_a_kill = true, .src_c_kill = true,
+         .negate_addend = true,
+         .wait_mask = 1u << 5,
+      };
+      len = 0;
+      CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      CHECK(len == sizeof(want) && memcmp(out, want, sizeof(want)) == 0);
+
+      /* A pure multiply has no addend to negate: fail closed rather than
+       * emit an unwitnessed form. */
+      struct agx3_imad_desc bad = d;
+      bad.no_addend = true;
+      bad.src_c = 0;
+      bad.src_c_kill = false;
+      len = 0;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+   }
+
    /* imad_s1..s3: the pure multiply, identical for every shift.
     *
     * The product feeds the shifted add below, so its destination carries the
