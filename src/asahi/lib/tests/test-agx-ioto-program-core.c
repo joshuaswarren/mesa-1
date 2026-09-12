@@ -985,9 +985,10 @@ test_g17g_graphics_no_resource_programs(void)
       0x3c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
       0x0b,0x24,0x09,0x04,
    };
-   for (unsigned stage = 0; stage < 3; ++stage) {
+   static const uint8_t background_suffix[] = {7, 0x10, 0, 4, 0, 0, 14, 0, 0, 0};
+   for (unsigned stage = 0; stage < 4; ++stage) {
       const uint8_t *base = stage == 0 ? vertex : fragment;
-      const size_t suffix = stage == 1 ? 10 : 4;
+      const size_t suffix = (stage == 1 || stage == 3) ? 10 : 4;
       const size_t size = sizeof(body) + 80 + suffix;
       struct agx_ioto_state_tail_output tail = {
          .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
@@ -1003,9 +1004,9 @@ test_g17g_graphics_no_resource_programs(void)
       CHECK(memcmp(output, body, 16) == 0);
       CHECK(memcmp(output + 16, base, 80) == 0);
       CHECK(memcmp(output + 96, body + 16, 4) == 0);
-      CHECK(memcmp(output + 100,
-                   base + (stage == 0 ? sizeof(vertex) : sizeof(fragment)) - suffix,
-                   suffix) == 0);
+      const uint8_t *expected_suffix = stage == 3 ? background_suffix
+         : base + (stage == 0 ? sizeof(vertex) : sizeof(fragment)) - suffix;
+      CHECK(memcmp(output + 100, expected_suffix, suffix) == 0);
       for (size_t i = size; i < sizeof(output); ++i)
          CHECK(output[i] == 0xa5);
 

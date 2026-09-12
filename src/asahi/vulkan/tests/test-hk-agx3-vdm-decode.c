@@ -4,6 +4,7 @@
  */
 
 #include "hk_agx3_vdm_decode.h"
+#include "hk_ppp_state.h"
 
 #include "asahi/lib/agx_vdm_barrier_core.h"
 #include "asahi/lib/agx_vdm_ppp_state_core.h"
@@ -717,6 +718,24 @@ test_rejection(void)
 int
 main(void)
 {
+   /* Native M5 first PPP: full mapped VA is 0x1000058000, while the VDM
+    * record contains the task-relative 0x58000. Preserve all output on
+    * rejected roots rather than wrapping into the other UAT root. */
+   const uint8_t m5_ppp[] = {0,6,0,0, 0,0x80,5,0};
+   uint8_t ppp[8];
+   uint8_t *cursor = ppp;
+   CHECK(hk_ppp_emit_state(AGX_CHIP_G17G, &cursor,
+                           UINT64_C(0x1000058000), 24));
+   CHECK(cursor == ppp + 8 && memcmp(ppp, m5_ppp, 8) == 0);
+   cursor = ppp;
+   CHECK(!hk_ppp_emit_state(AGX_CHIP_G17G, &cursor, 0x58000, 24));
+   CHECK(!hk_ppp_emit_state(AGX_CHIP_G17G, &cursor,
+                            UINT64_C(0x9000058000), 24));
+   CHECK(cursor == ppp && memcmp(ppp, m5_ppp, 8) == 0);
+   CHECK(hk_ppp_emit_state(AGX_CHIP_G17G, &cursor,
+                           UINT64_C(0x5ffff30c00), 24));
+   const uint8_t relocated_ppp[] = {0x4f,6,0,0, 0,0x0c,0xf3,0xff};
+   CHECK(memcmp(ppp, relocated_ppp, 8) == 0);
    CHECK(test_program_cache_lifetime() == 0);
    CHECK(test_g17p_vertex_program_info() == 0);
    CHECK(test_honeykrisp_bridge() == 0);

@@ -86,6 +86,23 @@ test_g17g_programs(void)
       desc.shader_va--;
       CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17P, &desc, &output));
       CHECK(memcmp(&output, &baseline, sizeof(output)) == 0);
+      if (fragment) {
+         static const uint8_t bg_end[] = {7, 0x10, 0, 4, 0, 0, 14, 0, 0, 0};
+         static const uint8_t eot_end[] = {14, 0, 0, 0};
+         CHECK(agx3_g17g_tile_program_generate(AGX_CHIP_G17G, &desc, false,
+                                               &output));
+         CHECK(output.length == baseline.length);
+         CHECK(memcmp(output.bytes + output.length - sizeof(bg_end),
+                      bg_end, sizeof(bg_end)) == 0);
+         CHECK(agx3_g17g_tile_program_generate(AGX_CHIP_G17G, &desc, true,
+                                               &output));
+         CHECK(output.length + 6 == baseline.length);
+         CHECK(memcmp(output.bytes + output.length - sizeof(eot_end),
+                      eot_end, sizeof(eot_end)) == 0);
+      } else {
+         CHECK(!agx3_g17g_tile_program_generate(AGX_CHIP_G17G, &desc, false,
+                                                &output));
+      }
    }
    return 0;
 }

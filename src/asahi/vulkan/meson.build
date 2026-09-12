@@ -55,6 +55,7 @@ hk_files = files(
   'hk_agx3_ppp_w_clamp_cull2.h',
   'hk_agx3_vdm_decode.c',
   'hk_agx3_vdm_decode.h',
+  'hk_ppp_state.h',
   'hk_image.c',
   'hk_image.h',
   'hk_image_layout_core.c',

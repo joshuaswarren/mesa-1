@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_cmd_buffer.h"
+#include "hk_ppp_state.h"
 
 #include "agx_abi.h"
 #include "agx_bo.h"
@@ -1892,9 +1893,9 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       uint8_t records[2 * AGX_PPP_STATE_LENGTH];
       uint8_t *record = records;
       if (!depth_stencil_gpu || !gpu ||
-          !agx_ppp_emit_state(dev->dev.chip, &record, depth_stencil_gpu,
+          !hk_ppp_emit_state(dev->dev.chip, &record, depth_stencil_gpu,
                               depth_stencil.length) ||
-          !agx_ppp_emit_state(dev->dev.chip, &record, gpu, initial.length) ||
+          !hk_ppp_emit_state(dev->dev.chip, &record, gpu, initial.length) ||
           record != records + sizeof(records)) {
          mesa_loge("failed to emit HAL300 initial PPP state for %s",
                    agx_chip_name(dev->dev.chip));
@@ -1938,7 +1939,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       }
 
       memcpy(T.cpu, initial.bytes, initial.length);
-      if (!agx_ppp_emit_state(dev->dev.chip, &map, T.gpu, initial.length)) {
+      if (!hk_ppp_emit_state(dev->dev.chip, &map, T.gpu, initial.length)) {
          mesa_loge("failed to emit G17P initial PPP state for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);

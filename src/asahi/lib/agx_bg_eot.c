@@ -80,7 +80,13 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    if (!image)
       return false;
 
-   agx3_build_container_lead(image);
+   if (cache->dev->chip == AGX_CHIP_G17G) {
+      if (!agx3_build_g17g_container_lead(image, lead_size)) {
+         free(image);
+         return false;
+      }
+   } else
+      agx3_build_container_lead(image);
    const uint8_t *text = bin->binary;
    const bool built = agx3_build_code_block(
       image + lead_size, block_size, text + main_offset, bin->info.main_size,
@@ -228,7 +234,8 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
    }
 
    res->info = bin.info;
-   if (cache->dev->chip == AGX_CHIP_G17P) {
+   if (cache->dev->chip == AGX_CHIP_G17P ||
+       cache->dev->chip == AGX_CHIP_G17G) {
       if (!agx_g17p_upload_bg_eot(cache, &bin, res)) {
          free(bin.binary);
          ralloc_free(shader);
@@ -300,7 +307,8 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       .dev = agx_gather_device_key(cache->dev),
       .fs.ignore_tib_dependencies = true,
       .reserved_preamble = key->reserved_preamble,
-      .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
+      .no_preamble = cache->dev->chip == AGX_CHIP_G17P ||
+                     cache->dev->chip == AGX_CHIP_G17G,
    };
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {

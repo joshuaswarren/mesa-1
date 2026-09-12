@@ -269,7 +269,8 @@ hk_g17p_trace_render_command(const struct hk_device *dev,
    if (enabled < 0)
       enabled = debug_get_bool_option("HK_G17P_RENDER_TRACE", false);
 
-   if (!enabled || dev->dev.chip != AGX_CHIP_G17P)
+   if (!enabled || (dev->dev.chip != AGX_CHIP_G17P &&
+                    dev->dev.chip != AGX_CHIP_G17G))
       return;
 
    hk_g17p_trace_line("render-uapi", c->vdm_ctrl_stream_base, c,
@@ -376,7 +377,7 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    static_assert(sizeof(c->zls_ctrl) == sizeof(cs->cr.zls_control));
    memcpy(&c->zls_ctrl, &cs->cr.zls_control, sizeof(cs->cr.zls_control));
 
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G) {
       c->isp_zls_pixels = hk_drm_g17p_zls_pixels(
          cs->cr.zls_width, cs->cr.zls_height, cs->cr.depth.buffer,
          cs->cr.depth.meta, cs->cr.stencil.buffer, cs->cr.stencil.meta);
@@ -455,7 +456,10 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->sampler_count = dev->samplers.table.alloc;
    }
 
-   c->isp_oclqry_base = dev->occlusion_queries.bo->va->addr;
+   /* The experimental M5 PPP profile rejects queries. Do not attach the
+    * unused device-global query heap to this query-free render envelope. */
+   c->isp_oclqry_base = dev->dev.chip == AGX_CHIP_G17G
+                          ? 0 : dev->occlusion_queries.bo->va->addr;
 
    if (cs->cr.process_empty_tiles)
       c->flags |= DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES;
@@ -634,6 +638,12 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
                     unsigned ring_idx)
 {
    struct agx_submit_virt virt = {.ring_idx = ring_idx};
+
+   if (dev->dev.chip == AGX_CHIP_G17G &&
+       getenv("HK_M5_ABORT_BEFORE_IOCTL") != NULL) {
+      fprintf(stderr, "M5 diagnostic: aborting before DRM_IOCTL_ASAHI_SUBMIT\n");
+      return vk_device_set_lost(&dev->vk, "M5 diagnostic pre-submit abort");
+   }
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        getenv("HK_G17P_ABORT_BEFORE_IOCTL") != NULL) {

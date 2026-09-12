@@ -621,7 +621,8 @@ agx_ioto_g17g_resource_program_compose(
    if (!output || !written ||
        (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
         stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
-        stage != AGX_IOTO_G17G_PROGRAM_EOT))
+        stage != AGX_IOTO_G17G_PROGRAM_EOT &&
+        stage != AGX_IOTO_G17G_PROGRAM_BACKGROUND))
       return false;
 
    size_t copy_offset;
@@ -638,7 +639,17 @@ agx_ioto_g17g_resource_program_compose(
 
    const size_t prefix_size = AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
                              AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
-   const size_t suffix_size = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT
+   const bool pixel_release = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+                              stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
+   if (stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND) {
+      /* Native M5 main/partial background Ioto at +0x19e releases with
+       * 071000040000, unlike ordinary fragment 9f1700040000. The native
+       * preamble follows that record. Our no-preamble internal shaders
+       * terminate there, using the CODE block's stop constant. */
+      static const uint8_t background_pixrel[] = {7, 0x10, 0, 4, 0, 0};
+      memcpy(base + prefix_size, background_pixrel, sizeof(background_pixrel));
+   }
+   const size_t suffix_size = pixel_release
                                 ? base_size - prefix_size
                                 : AGX_IOTO_PROGRAM_TERMINATE_SIZE;
    const size_t fixed_size = prefix_size + suffix_size;

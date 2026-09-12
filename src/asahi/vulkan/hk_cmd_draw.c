@@ -39,6 +39,7 @@
 #include "hk_agx3_vdm_decode.h"
 #include "hk_physical_device.h"
 #include "hk_private.h"
+#include "hk_ppp_state.h"
 #include "hk_shader.h"
 
 #include "asahi/genxml/agx_pack.h"
@@ -691,6 +692,126 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 }
 
 static struct hk_bg_eot
+hk_build_g17g_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
+                     const VkRenderingInfo *info, bool store)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   const enum agx_bg_eot_op op = key->op[0];
+   struct hk_image_view *view = render->color_att[0].iview;
+   if (!view || info->colorAttachmentCount != 1 || key->tib.layered ||
+       key->tib.nr_samples != 1 || key->tib.sample_size_B != 8 ||
+       key->tib.tile_size != 32 * 32 || agx_tilebuffer_spills(&key->tib) ||
+       agx_tilebuffer_offset_B(&key->tib, 0) ||
+       info->pColorAttachments[0].resolveMode != VK_RESOLVE_MODE_NONE ||
+       (store ? op != AGX_EOT_STORE
+              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD)))
+      goto unsupported;
+   for (unsigned rt = 1; rt < HK_MAX_RTS; ++rt) {
+      if (key->op[rt] != AGX_BG_EOT_NONE)
+         goto unsupported;
+   }
+   if (op == AGX_BG_CLEAR)
+      key->reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+
+   struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&dev->bg_eot, key);
+   if (!hk_g17p_bg_eot_shader_supported(shader) ||
+       !shader->info.agx3_staging_known)
+      goto unsupported;
+
+   struct agx3_ioto_uniform_range ranges[2];
+   unsigned range_count = 1;
+   if (store) {
+      if (!view->planes[0].eot_pbe_valid || shader->info.binary_size != 78 ||
+          shader->info.nr_gprs != 8 || shader->info.agx3_staging_halfs != 8)
+         goto unsupported;
+      const uint64_t pbe = hk_pool_upload(cmd, &view->planes[0].eot,
+                                          sizeof(view->planes[0].eot), 32);
+      if (!pbe)
+         return (struct hk_bg_eot){0};
+      /* Native builtin binding0x32 supplies the PBE table address in u0..3;
+       * driver argument5 supplies the zero tile offset in u4..5. */
+      const uint64_t arguments[2] = {pbe, 0};
+      const uint64_t table = hk_pool_upload(cmd, arguments, sizeof(arguments), 16);
+      if (!table)
+         return (struct hk_bg_eot){0};
+      ranges[0] = (struct agx3_ioto_uniform_range){0, 6, table};
+   } else if (op == AGX_BG_CLEAR) {
+      if (shader->info.push_count != AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
+          shader->info.uses_txf)
+         goto unsupported;
+      const uint64_t clear = hk_pool_upload(
+         cmd, &info->pColorAttachments[0].clearValue.color, 16, 16);
+      if (!clear)
+         return (struct hk_bg_eot){0};
+      ranges[0] = (struct agx3_ioto_uniform_range){4, 8, clear};
+   } else {
+      if (shader->info.push_count || !shader->info.uses_txf ||
+          !dev->rodata.bo || !dev->rodata.bo->va)
+         goto unsupported;
+      const uint64_t texture = hk_pool_upload(cmd, &view->planes[0].background,
+                                              sizeof(view->planes[0].background), 32);
+      if (!texture)
+         return (struct hk_bg_eot){0};
+      const uint64_t pointers[2] = {texture, dev->rodata.bo->va->addr};
+      const uint64_t table = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+      if (!table)
+         return (struct hk_bg_eot){0};
+      ranges[0] = (struct agx3_ioto_uniform_range){0, 4, table};
+      ranges[1] = (struct agx3_ioto_uniform_range){4, 4, table + 8};
+      range_count = 2;
+   }
+   size_t capacity;
+   if (!agx3_g17g_graphics_program_bound(dev->dev.chip, ranges, range_count,
+                                          &capacity))
+      goto unsupported;
+   struct agx_bo *bo = hk_g17p_alloc_ioto_program(cmd, capacity,
+                                                 "M5 native tile Ioto");
+   if (!bo)
+      return (struct hk_bg_eot){0};
+   void *map = agx_bo_map(bo);
+   if (!map) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_MEMORY_MAP_FAILED);
+      return (struct hk_bg_eot){0};
+   }
+   const struct agx3_g17p_graphics_program_desc desc = {
+      .program_va = bo->va->addr,
+      .shader_va = shader->ptr + shader->info.main_offset,
+      .shader_binary_size = shader->info.binary_size,
+      .scratch_size = shader->info.scratch_size,
+      .nr_gprs = shader->info.nr_gprs,
+      .compiler_d_valid = shader->info.agx3_staging_known,
+      .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
+      .fragment = true,
+      .imageblock = {key->tib.sample_size_B, key->tib.nr_samples, key->tib.tile_size},
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+   };
+   struct agx3_g17p_graphics_program program;
+   if (!agx3_g17g_tile_program_generate(dev->dev.chip, &desc, store, &program) ||
+       program.length > capacity)
+      goto unsupported;
+   memcpy(map, program.bytes, program.length);
+   hk_cmd_buffer_retain_bo(cmd, shader->bo);
+   if (agx_bo_sync_for_device(bo, 0, program.length)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
+      return (struct hk_bg_eot){0};
+   }
+   if (hk_g17p_launch_trace_enabled())
+      hk_g17p_trace_line(store ? "hal300-eot" : "hal300-background",
+                         bo->va->addr, map, program.length);
+   return (struct hk_bg_eot){
+      .usc = bo->va->addr,
+      .rsrc_spec = store ? 0 : UINT64_C(0xffff800000000040),
+   };
+
+unsupported:
+   mesa_loge("M5 tile operation %u exceeds native RT0 support", op);
+   vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+   return (struct hk_bg_eot){0};
+}
+
+static struct hk_bg_eot
 hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
                 bool store, bool partial_render, bool incomplete_render_area)
 {
@@ -783,6 +904,8 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
    if (dev->dev.chip == AGX_CHIP_G17P)
       return hk_build_g17p_bg_eot(cmd, &key, info, store, partial_render);
+   if (dev->dev.chip == AGX_CHIP_G17G)
+      return hk_build_g17g_bg_eot(cmd, &key, info, store);
 
    const unsigned descriptor_generation =
       agx_chip_descriptor_generation(dev->dev.chip);
@@ -2737,8 +2860,8 @@ hk_emit_hal300_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * render-state path emits the viewport update before the base update. */
    uint8_t records[2 * AGX_PPP_STATE_LENGTH];
    uint8_t *record = records;
-   if (!agx_ppp_emit_state(chip, &record, viewport_gpu, viewport.length) ||
-       !agx_ppp_emit_state(chip, &record, bases_gpu, bases.length) ||
+   if (!hk_ppp_emit_state(chip, &record, viewport_gpu, viewport.length) ||
+       !hk_ppp_emit_state(chip, &record, bases_gpu, bases.length) ||
        record != records + sizeof(records))
       return false;
 
@@ -3607,7 +3730,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
       uint8_t records[AGX_PPP_HAL300_GRAPHICS_RECORDS * AGX_PPP_STATE_LENGTH];
       uint8_t *cursor = records;
       for (unsigned i = 0; i < AGX_PPP_HAL300_GRAPHICS_RECORDS; ++i) {
-         if (!agx_ppp_emit_state(dev->dev.chip, &cursor,
+         if (!hk_ppp_emit_state(dev->dev.chip, &cursor,
                                   upload.gpu + state.offsets[i],
                                   state.lengths[i])) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
