@@ -6,6 +6,7 @@
 #include "hk_g17p_meta_copy_core.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #define CHECK(c)                                                              \
    do {                                                                       \
@@ -15,9 +16,105 @@
       }                                                                       \
    } while (0)
 
+static uint8_t
+mip_source_byte(uint32_t x, uint32_t y, uint32_t channel)
+{
+   uint32_t v = x * 0x9e3779b1u ^ y * 0x85ebca6bu ^
+                channel * 0xc2b2ae35u ^ 0x6d2b79f5u;
+   v ^= v >> 16;
+   v *= 0x7feb352du;
+   v ^= v >> 15;
+   return v >> 24;
+}
+
+static uint64_t
+mip_oracle_hash(uint32_t src_width, uint32_t src_height,
+                uint32_t dst_width, uint32_t dst_height)
+{
+   uint32_t *axis = malloc((dst_width + dst_height) * sizeof(*axis));
+   if (!axis || !hk_g17p_build_mip_axis(src_width, dst_width, axis) ||
+       !hk_g17p_build_mip_axis(src_height, dst_height, axis + dst_width)) {
+      free(axis);
+      return 0;
+   }
+
+   uint64_t hash = UINT64_C(14695981039346656037);
+   for (uint32_t y = 0; y < dst_height; ++y) {
+      const uint32_t ye = axis[dst_width + y];
+      const uint32_t y0 = ye & 0xffffu;
+      const uint8_t wy = (ye >> 16) & 0xffu;
+      const uint32_t y1 = y0 + (wy != 0);
+
+      for (uint32_t x = 0; x < dst_width; ++x) {
+         const uint32_t xe = axis[x];
+         const uint32_t x0 = xe & 0xffffu;
+         const uint8_t wx = (xe >> 16) & 0xffu;
+         const uint32_t x1 = x0 + (wx != 0);
+
+         for (uint32_t channel = 0; channel < 4; ++channel) {
+            const uint8_t out = hk_g17p_filter_unorm8(
+               mip_source_byte(x0, y0, channel),
+               mip_source_byte(x1, y0, channel),
+               mip_source_byte(x0, y1, channel),
+               mip_source_byte(x1, y1, channel), wx, wy);
+            hash ^= out;
+            hash *= UINT64_C(1099511628211);
+         }
+      }
+   }
+
+   free(axis);
+   return hash;
+}
+
 int
 main(void)
 {
+   uint32_t axis[303];
+   CHECK(!hk_g17p_build_mip_axis(0, 1, axis));
+   CHECK(!hk_g17p_build_mip_axis(3, 2, axis));
+   CHECK(!hk_g17p_build_mip_axis(65537, 32768, axis));
+   CHECK(!hk_g17p_build_mip_axis(3, 1, NULL));
+   CHECK(hk_g17p_build_mip_axis(165, 82, axis));
+   CHECK(axis[0] == 0x00820000u);
+   CHECK(axis[20] == 0x00c00028u);
+   CHECK(axis[43] == 0x00080057u);
+   CHECK(hk_g17p_build_mip_axis(251, 125, axis));
+   /* Division would produce weight 106 here. vk_meta's pushed reciprocal and
+    * fragment FFMA produce 107, which is the graphics path being replaced. */
+   CHECK(axis[114] == 0x006b00e5u);
+   CHECK(hk_g17p_build_mip_axis(607, 303, axis));
+   CHECK(axis[122] == 0x00e800f4u);
+   CHECK(axis[180] == 0x00190169u);
+   CHECK(axis[302] == 0x0080025du);
+
+   CHECK(hk_g17p_filter_unorm8(0, 0, 0, 2, 128, 128) == 1);
+   CHECK(hk_g17p_filter_unorm8(126, 126, 126, 128, 128, 128) == 127);
+   CHECK(hk_g17p_filter_unorm8(127, 127, 127, 129, 128, 128) == 128);
+   CHECK(hk_g17p_filter_unorm8(128, 128, 128, 130, 128, 128) == 128);
+   CHECK(hk_g17p_filter_unorm8(254, 254, 255, 255, 128, 128) == 254);
+
+   /* These hashes were captured on Apple M5 Pro from both a native Metal
+    * linear sample into RGBA8 storage and a colour-attachment render. The two
+    * paths were byte-identical. The focused G17P Vulkan hardware oracle must
+    * agree before this path is enabled in a deployed build. */
+   static const struct {
+      uint32_t sw, sh, dw, dh;
+      uint64_t hash;
+   } mip_oracles[] = {
+      {64, 64, 32, 32, UINT64_C(0x757b41d55f5fefc5)},
+      {165, 165, 82, 82, UINT64_C(0x7d11df552c632a11)},
+      {256, 89, 128, 44, UINT64_C(0x1ca8d5bd3e1aaee5)},
+      {64, 63, 32, 31, UINT64_C(0x47a8e73e11743e54)},
+      {607, 476, 303, 238, UINT64_C(0xfa614cc5cdf07a92)},
+      {50, 45, 25, 22, UINT64_C(0x2c95ab15195eead6)},
+      {75, 75, 37, 37, UINT64_C(0x477eb04369d02df1)},
+   };
+   for (unsigned i = 0; i < sizeof(mip_oracles) / sizeof(mip_oracles[0]); ++i)
+      CHECK(mip_oracle_hash(mip_oracles[i].sw, mip_oracles[i].sh,
+                            mip_oracles[i].dw, mip_oracles[i].dh) ==
+            mip_oracles[i].hash);
+
    static const VkFormat bc[] = {
       VK_FORMAT_BC1_RGB_UNORM_BLOCK,  VK_FORMAT_BC1_RGB_SRGB_BLOCK,
       VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK,

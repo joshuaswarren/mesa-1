@@ -129,9 +129,9 @@ libagx_copy_image(global uint8_t *dest, global uint8_t *src,
       dest[dest_offset_B + b] = src[src_offset_B + b];
 }
 
-/* Round an unsigned four-sample average to nearest-even. This is the UNORM8
- * result of a linear sample at the centre of a 2x2 source footprint, without
- * relying on the still-unqualified G17P float-to-integer convert encoding. */
+/* Round an unsigned four-sample average like G17P's linear sampler followed
+ * by a normalized colour write. Exact output ties move toward code 128. This
+ * avoids the still-unqualified G17P float-to-integer convert encoding. */
 static uint8_t
 libagx_average4_unorm8(uint a, uint b, uint c, uint d)
 {
@@ -140,7 +140,7 @@ libagx_average4_unorm8(uint a, uint b, uint c, uint d)
    uint remainder = sum & 3u;
    return (uint8_t)(quotient +
                     (remainder > 2u ||
-                     (remainder == 2u && (quotient & 1u))));
+                     (remainder == 2u && quotient < 128u)));
 }
 
 /*
@@ -184,6 +184,65 @@ libagx_mipmap_unorm8x4(global uint8_t *dest, global uint8_t *src,
       dest[dest_offset + channel] = libagx_average4_unorm8(
          src[src00 + channel], src[src10 + channel],
          src[src01 + channel], src[src11 + channel]);
+   }
+}
+
+/*
+ * Exact odd-size full-level downsample for four-channel UNORM8 images.  The
+ * CPU builds one packed Q8 coordinate entry per destination X and Y, avoiding
+ * every per-pixel divide and all 64-bit arithmetic here.  G17P's sampler
+ * rounds the four-tap result half-up to four fractional colour bits; its
+ * normalized write rounds exact ties toward the midpoint code 128.
+ */
+KERNEL(32)
+libagx_mipmap_unorm8x4_odd(global uint8_t *dest, global uint8_t *src,
+                           global uint *axis,
+                           uint dest_width_px, uint dest_height_px,
+                           uint dest_stride_el, uint src_stride_el,
+                           uint dest_tile_width_el, uint dest_tile_height_el,
+                           uint src_tile_width_el, uint src_tile_height_el)
+{
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= dest_width_px || y >= dest_height_px)
+      return;
+
+   uint x_entry = axis[x];
+   uint y_entry = axis[dest_width_px + y];
+   uint src_x0 = x_entry & 0xffffu;
+   uint src_y0 = y_entry & 0xffffu;
+   uint wx = (x_entry >> 16) & 0xffu;
+   uint wy = (y_entry >> 16) & 0xffu;
+   uint src_x1 = src_x0 + (wx != 0u);
+   uint src_y1 = src_y0 + (wy != 0u);
+
+   uint dest_offset = libagx_copy_image_offset(
+      x, y, 0, dest_stride_el, dest_tile_width_el, dest_tile_height_el, 4, 1);
+   uint src00 = libagx_copy_image_offset(
+      src_x0, src_y0, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src10 = libagx_copy_image_offset(
+      src_x1, src_y0, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src01 = libagx_copy_image_offset(
+      src_x0, src_y1, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src11 = libagx_copy_image_offset(
+      src_x1, src_y1, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint ix = 256u - wx;
+   uint iy = 256u - wy;
+
+   for (uint channel = 0; channel < 4; ++channel) {
+      uint value = src[src00 + channel] * ix * iy +
+                   src[src10 + channel] * wx * iy +
+                   src[src01 + channel] * ix * wy +
+                   src[src11 + channel] * wx * wy;
+      uint fixed4 = (value + 2048u) >> 12;
+      uint out = fixed4 >> 4;
+      uint remainder = fixed4 & 15u;
+      out += remainder > 8u || (remainder == 8u && out < 128u);
+      dest[dest_offset + channel] = (uint8_t)out;
    }
 }
 

@@ -11,6 +11,62 @@
 #include <string.h>
 
 bool
+hk_g17p_build_mip_axis(uint32_t src_extent, uint32_t dst_extent,
+                       uint32_t *entries)
+{
+   if (!entries || !src_extent || !dst_extent || src_extent > UINT16_MAX + 1u ||
+       !(src_extent == dst_extent ||
+         src_extent == (uint64_t)dst_extent * 2u ||
+         src_extent == (uint64_t)dst_extent * 2u + 1u))
+      return false;
+
+   if (src_extent == dst_extent) {
+      for (uint32_t i = 0; i < dst_extent; ++i)
+         entries[i] = i;
+      return true;
+   }
+
+   /* vk_meta computes the normalized scale in double on the CPU, casts it to
+    * f32 push data, then applies it to FragCoord with an FFMA. */
+   const float scale = (float)(1.0 / (double)dst_extent);
+   for (uint32_t i = 0; i < dst_extent; ++i) {
+      /* This work happens once while recording the dispatch, not per pixel. */
+      const float uv = ((float)i + 0.5f) * scale;
+      const float source = uv * (float)src_extent - 0.5f;
+      uint32_t lower = (uint32_t)source;
+      uint32_t weight = (uint32_t)((source - (float)lower) * 256.0f + 0.5f);
+
+      if (weight == 256) {
+         ++lower;
+         weight = 0;
+      }
+
+      if (lower >= src_extent)
+         lower = src_extent - 1;
+
+      entries[i] = lower | (weight << 16);
+   }
+
+   return true;
+}
+
+uint8_t
+hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
+                      uint8_t wx, uint8_t wy)
+{
+   const uint32_t ix = 256u - wx;
+   const uint32_t iy = 256u - wy;
+   const uint32_t value = a * ix * iy + b * wx * iy +
+                          c * ix * wy + d * wx * wy;
+   const uint32_t fixed4 = (value + 2048u) >> 12;
+   uint32_t out = fixed4 >> 4;
+   const uint32_t remainder = fixed4 & 15u;
+
+   out += remainder > 8u || (remainder == 8u && out < 128u);
+   return out;
+}
+
+bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||

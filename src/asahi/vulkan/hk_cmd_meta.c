@@ -1555,10 +1555,12 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
  * startup; making each level a render is thousands of jobs before the first
  * frame can be presented.
  *
- * Use a raw AIL compute kernel for the exact power-of-two UNORM8 mipmap shape:
- * a complete 2x downsample in the same RGBA or BGRA format (or 1x along an
- * axis already at one pixel). The fallback remains the general graphics meta
- * path, so this does not narrow Vulkan functionality.
+ * Use raw AIL compute kernels for complete half-size UNORM8 mip levels in the
+ * same RGBA or BGRA format (or 1x along an axis already at one pixel).  Odd
+ * extents use CPU-built Q8 coordinate tables matching G17P's linear sampler,
+ * so their device path has no divide or 64-bit arithmetic.  The fallback
+ * remains the general graphics meta path, so this does not narrow Vulkan
+ * functionality.
  */
 static bool
 hk_g17p_compute_blit_format(VkFormat format)
@@ -1602,11 +1604,15 @@ hk_g17p_compute_blit_region_supported(const struct hk_image *src,
    const uint32_t height = (uint32_t)d1.y;
    const uint32_t src_width = (uint32_t)s1.x;
    const uint32_t src_height = (uint32_t)s1.y;
-   const bool scale_x = src_width == width || src_width == (uint64_t)width * 2;
+   const bool scale_x =
+      src_width == width || src_width == (uint64_t)width * 2 ||
+      src_width == (uint64_t)width * 2 + 1;
    const bool scale_y =
-      src_height == height || src_height == (uint64_t)height * 2;
+      src_height == height || src_height == (uint64_t)height * 2 ||
+      src_height == (uint64_t)height * 2 + 1;
    return scale_x && scale_y &&
           (src_width != width || src_height != height) &&
+          src_width <= UINT16_MAX + 1u && src_height <= UINT16_MAX + 1u &&
           (uint64_t)width * height <= UINT32_MAX;
 }
 
@@ -1646,6 +1652,48 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
       const uint32_t src_height = (uint32_t)region->srcOffsets[1].y;
       const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
       const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
+      const bool odd = src_width == (uint64_t)width * 2 + 1 ||
+                       src_height == (uint64_t)height * 2 + 1;
+
+      if (odd) {
+         struct agx_ptr axis =
+            hk_pool_alloc(cmd, (width + height) * sizeof(uint32_t), 4);
+         if (unlikely(axis.cpu == NULL))
+            return;
+
+         uint32_t *entries = axis.cpu;
+         const bool x_ok =
+            hk_g17p_build_mip_axis(src_width, width, entries);
+         const bool y_ok =
+            hk_g17p_build_mip_axis(src_height, height, entries + width);
+         assert(x_ok && y_ok);
+
+         const struct libagx_mipmap_unorm8x4_odd_args args = {
+            .dest = hk_image_base_address(dst, 0) +
+                    ail_get_layer_level_B(
+                       dst_layout, region->dstSubresource.baseArrayLayer,
+                       dst_level),
+            .src = hk_image_base_address(src, 0) +
+                   ail_get_layer_level_B(
+                      src_layout, region->srcSubresource.baseArrayLayer,
+                      src_level),
+            .axis = axis.gpu,
+            .dest_width_px = width,
+            .dest_height_px = height,
+            .dest_stride_el = dst_layout->stride_el[dst_level],
+            .src_stride_el = src_layout->stride_el[src_level],
+            .dest_tile_width_el = dst_tile.width_el,
+            .dest_tile_height_el = dst_tile.height_el,
+            .src_tile_width_el = src_tile.width_el,
+            .src_tile_height_el = src_tile.height_el,
+         };
+
+         libagx_mipmap_unorm8x4_odd_struct(
+            cmd, agx_2d(width, height), AGX_BARRIER_ALL, args);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return;
+         continue;
+      }
 
       const struct libagx_mipmap_unorm8x4_args args = {
          .dest = hk_image_base_address(dst, 0) +

@@ -242,6 +242,17 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 30,
   )
 
+  # A 129x129 base level exercises the Q8 coordinate-table kernel for the
+  # first blit while retaining the same merged compute-stream contract.
+  test(
+    'hk_g17p_generated_mips_odd_compute',
+    g17p_generated_mips_odd,
+    env : g17p_generated_mips_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-generated-mips'],
+    timeout : 30,
+  )
+
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
   g17p_xfb_draw_env.set('ASAHI_SHIM_G17P_EXPECT_XFB', '1')
   test(

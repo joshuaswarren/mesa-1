@@ -54,6 +54,7 @@ main(void)
       if (i == LIBAGX_FILL_UINT4 ||
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
+          i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -122,8 +123,8 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 6554);
-   CHECK(mipmap_info->binary_size == 6554);
+   CHECK(mipmap_info->main_size == 6506);
+   CHECK(mipmap_info->binary_size == 6506);
    CHECK(mipmap_info->nr_gprs == 52);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
    CHECK(mipmap_info->push_count == 28);
@@ -136,8 +137,42 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0x024e6d927deb375b));
+         UINT64_C(0x21df3d4244950e1c));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The odd-extent companion consumes CPU-precomputed Q8 axes.  Its bounded
+    * 32-bit kernel is substantially smaller than the discarded divide-based
+    * prototype (6,430 bytes / 52 GPRs versus 14,854 / 66) while retaining the
+    * same 56-byte push ABI as the even kernel. */
+   const uint32_t *odd_mipmap_blob =
+      libagx_g17p[LIBAGX_MIPMAP_UNORM8X4_ODD];
+   CHECK(odd_mipmap_blob != NULL);
+   if (!odd_mipmap_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *odd_mipmap_info =
+      (const void *)odd_mipmap_blob;
+   const uint8_t *odd_mipmap_binary =
+      (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
+   CHECK(odd_mipmap_info->preamble_offset == 0);
+   CHECK(odd_mipmap_info->main_offset == 0);
+   CHECK(odd_mipmap_info->main_size == 6430);
+   CHECK(odd_mipmap_info->binary_size == 6430);
+   CHECK(odd_mipmap_info->nr_gprs == 52);
+   CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
+   CHECK(odd_mipmap_info->push_count == 28);
+   CHECK(odd_mipmap_info->workgroup_size[0] == 32);
+   CHECK(odd_mipmap_info->workgroup_size[1] == 1);
+   CHECK(odd_mipmap_info->workgroup_size[2] == 1);
+   CHECK(odd_mipmap_info->local_size == 0);
+   CHECK(odd_mipmap_info->imageblock_stride == 0);
+   CHECK(!odd_mipmap_info->uses_txf);
+   CHECK(odd_mipmap_info->agx3_staging_known);
+   CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
+         UINT64_C(0x61721ca114c8f636));
+   CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
 

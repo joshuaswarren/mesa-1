@@ -964,6 +964,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    g17p_generated_mips_odd = executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips-odd',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS_ODD=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-texture-alpha-composite-64',
       files('tests/g17p_offscreen_triangle.c'),
