@@ -1716,7 +1716,7 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
          .src_tile_height_el = src_tile.height_el,
       };
 
-      libagx_mipmap_unorm8x4_struct(cmd, agx_1d(width * height),
+      libagx_mipmap_unorm8x4_struct(cmd, agx_2d(width, height),
                                     AGX_BARRIER_ALL, args);
       if (vk_command_buffer_has_error(&cmd->vk))
          return;

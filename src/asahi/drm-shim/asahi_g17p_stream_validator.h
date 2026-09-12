@@ -89,6 +89,7 @@ struct asahi_g17p_stream_config {
 
 struct asahi_g17p_compute_stats {
    unsigned launches;
+   unsigned two_dimensional_launches;
    /* Barriers paired with launches; ordered pre-launch flushes are separate. */
    unsigned barriers;
    unsigned prologue_barriers;

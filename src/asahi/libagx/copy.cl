@@ -156,12 +156,11 @@ libagx_mipmap_unorm8x4(global uint8_t *dest, global uint8_t *src,
                        uint dest_tile_width_el, uint dest_tile_height_el,
                        uint src_tile_width_el, uint src_tile_height_el)
 {
-   uint id = cl_global_id.x;
-   if (id >= dest_width_px * dest_height_px)
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= dest_width_px || y >= dest_height_px)
       return;
 
-   uint x = id % dest_width_px;
-   uint y = id / dest_width_px;
    uint dest_offset = libagx_copy_image_offset(
       x, y, 0, dest_stride_el, dest_tile_width_el, dest_tile_height_el, 4, 1);
    uint src_x = x * src_scale_x;

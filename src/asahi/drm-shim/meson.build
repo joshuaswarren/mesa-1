@@ -231,6 +231,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS',
                               '7,7,0,2')
+  # The two native 2D mip launches raise the fixture's exact total to six;
+  # the former flattened path produces four here and five in the odd fixture.
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_2D_COMPUTE_LAUNCHES',
+                              '6')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE',
                               '1:17:17:1:0')
   test(

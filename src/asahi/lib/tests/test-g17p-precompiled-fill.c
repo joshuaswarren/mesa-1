@@ -109,9 +109,12 @@ main(void)
                 copy_image_end, sizeof(copy_image_end)) == 0);
 
    /* The G17P UNORM8 mip kernel replaces one firmware render job per level
-    * with a launch in the command buffer's merged compute stream. Pin the
-    * complete binary and argument ABI: losing this table entry silently puts
-    * STK's thousands of startup mip renders back on the graphics fallback. */
+    * with a launch in the command buffer's merged compute stream. Its native
+    * 2D grid also avoids a quotient and remainder per output pixel, trimming
+    * the binary from 6,506 to 6,240 bytes without increasing register use.
+    * Pin the complete binary and argument ABI: losing this table entry
+    * silently puts STK's thousands of startup mip renders back on the
+    * graphics fallback. */
    const uint32_t *mipmap_blob =
       libagx_g17p[LIBAGX_MIPMAP_UNORM8X4];
    CHECK(mipmap_blob != NULL);
@@ -123,8 +126,8 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 6506);
-   CHECK(mipmap_info->binary_size == 6506);
+   CHECK(mipmap_info->main_size == 6240);
+   CHECK(mipmap_info->binary_size == 6240);
    CHECK(mipmap_info->nr_gprs == 52);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
    CHECK(mipmap_info->push_count == 28);
@@ -137,7 +140,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0x21df3d4244950e1c));
+         UINT64_C(0x37e51b976d3d5584));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);

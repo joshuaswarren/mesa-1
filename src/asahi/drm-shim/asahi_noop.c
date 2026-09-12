@@ -791,6 +791,8 @@ check_compute_coverage(void)
    bool exact = true;
    const char *expected =
       getenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS");
+   const char *expected_2d =
+      getenv("ASAHI_SHIM_G17P_EXPECT_2D_COMPUTE_LAUNCHES");
    if (expected) {
       unsigned launches, barriers, prologues, strong;
       char trailing;
@@ -802,6 +804,13 @@ check_compute_coverage(void)
               compute_stats.strong_barriers == strong;
    }
 
+   if (expected_2d) {
+      unsigned launches_2d;
+      char trailing;
+      exact &= sscanf(expected_2d, "%u%c", &launches_2d, &trailing) == 1 &&
+               compute_stats.two_dimensional_launches == launches_2d;
+   }
+
    if (!exact || !compute_stats.launches ||
        compute_stats.launches != compute_stats.barriers ||
        !compute_stats.terminated ||
@@ -809,11 +818,13 @@ check_compute_coverage(void)
         !compute_stats.strong_barriers)) {
       fprintf(stderr,
               "shim: incomplete G17P compute coverage: launches=%u "
-              "barriers=%u prologue=%u strong=%u terminated=%u "
-              "expected=%s\n",
-              compute_stats.launches, compute_stats.barriers,
+              "2d=%u barriers=%u prologue=%u strong=%u terminated=%u "
+              "expected=%s expected-2d=%s\n",
+              compute_stats.launches, compute_stats.two_dimensional_launches,
+              compute_stats.barriers,
               compute_stats.prologue_barriers, compute_stats.strong_barriers,
-              compute_stats.terminated, expected ? expected : "<structural>");
+              compute_stats.terminated, expected ? expected : "<structural>",
+              expected_2d ? expected_2d : "<structural>");
       _Exit(EXIT_FAILURE);
    }
 }
@@ -1457,14 +1468,17 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
             continue;
          }
          compute_stats.launches += stats.launches;
+         compute_stats.two_dimensional_launches +=
+            stats.two_dimensional_launches;
          compute_stats.barriers += stats.barriers;
          compute_stats.prologue_barriers += stats.prologue_barriers;
          compute_stats.strong_barriers += stats.strong_barriers;
          compute_stats.terminated |= stats.terminated;
          fprintf(stderr,
-                 "shim: G17P CDM validated: %u launches, %u barriers, "
+                 "shim: G17P CDM validated: %u launches (%u 2D), %u barriers, "
                  "%u prologue (%u strong)\n",
-                 stats.launches, stats.barriers, stats.prologue_barriers,
+                 stats.launches, stats.two_dimensional_launches,
+                 stats.barriers, stats.prologue_barriers,
                  stats.strong_barriers);
       }
 

@@ -594,6 +594,9 @@ asahi_g17p_compute_validate(
             return fail_at(cursor, "compute launch Ioto program is invalid");
 
          local.launches++;
+         local.two_dimensional_launches +=
+            record.data.launch.global_size[1] > 1 &&
+            record.data.launch.global_size[2] == 1;
          need_barrier = true;
          expect_compact_helper =
             (record.data.launch.word0_payload & UINT32_C(0x00800000)) != 0;
