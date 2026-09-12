@@ -977,6 +977,60 @@ test_g17g_graphics_no_resource_programs(void)
    };
    CHECK(sizeof(vertex) == AGX_IOTO_G17G_VERTEX_NO_RESOURCE_PROGRAM_SIZE);
    CHECK(sizeof(fragment) == AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE);
+   /* GPU1 loads followed by one final COPY round. The native M5 EOT places
+    * its 80-byte state/profile prefix between those spans. The full private
+    * 362-byte EOT witness also reconstructs byte for byte with this API. */
+   static const uint8_t body[] = {
+      0x2c,0x80,0x02,0x00,0x00,0x00,0x80,0x00,
+      0x3c,0x80,0x02,0x00,0x04,0x00,0x00,0x00,
+      0x0b,0x24,0x09,0x04,
+   };
+   for (unsigned stage = 0; stage < 3; ++stage) {
+      const uint8_t *base = stage == 0 ? vertex : fragment;
+      const size_t suffix = stage == 1 ? 10 : 4;
+      const size_t size = sizeof(body) + 80 + suffix;
+      struct agx_ioto_state_tail_output tail = {
+         .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
+      };
+      memcpy(tail.bytes, base, tail.length);
+      uint8_t output[128], before[128], alias[128];
+      memset(output, 0xa5, sizeof(output));
+      size_t written = 23;
+      CHECK(agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), body, sizeof(body), &tail, stage,
+         output, sizeof(output), &written));
+      CHECK(written == size);
+      CHECK(memcmp(output, body, 16) == 0);
+      CHECK(memcmp(output + 16, base, 80) == 0);
+      CHECK(memcmp(output + 96, body + 16, 4) == 0);
+      CHECK(memcmp(output + 100,
+                   base + (stage == 0 ? sizeof(vertex) : sizeof(fragment)) - suffix,
+                   suffix) == 0);
+      for (size_t i = size; i < sizeof(output); ++i)
+         CHECK(output[i] == 0xa5);
+
+      memcpy(alias, body, sizeof(body));
+      CHECK(agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), alias, sizeof(body), &tail, stage,
+         alias, sizeof(alias), &written));
+      CHECK(written == size && memcmp(alias, output, size) == 0);
+
+      memcpy(before, output, sizeof(output));
+      written = 23;
+      CHECK(!agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), body, sizeof(body), &tail, stage,
+         output, size - 1, &written));
+      CHECK(!agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), body, sizeof(body) - 1, &tail, stage,
+         output, sizeof(output), &written));
+      CHECK(!agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), body, sizeof(body), &tail, 99,
+         output, sizeof(output), &written));
+      CHECK(!agx_ioto_g17g_resource_program_compose(
+         UINT64_C(0x10000160000), fragment + 80, 6, &tail, stage,
+         output, sizeof(output), &written));
+      CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 23);
+   }
    for (unsigned stage = 0; stage < 2; ++stage) {
       const uint8_t *expected = stage ? fragment : vertex;
       const size_t size = stage ? sizeof(fragment) : sizeof(vertex);

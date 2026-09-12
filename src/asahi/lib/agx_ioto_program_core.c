@@ -9,6 +9,7 @@
 #include "agx_ioto_load_core.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 /* Exact fixed regions surrounding the runtime state tail in the SPDX-MIT
  * m1n1 NATIVE_ADD3_SHADER witness. */
@@ -606,6 +607,61 @@ agx_ioto_g17g_no_resource_program_compose(
       return false;
 
    memcpy(output, staged, size);
+   *written = size;
+   return true;
+}
+
+bool
+agx_ioto_g17g_resource_program_compose(
+   uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage,
+   void *output, size_t capacity, size_t *written)
+{
+   if (!output || !written ||
+       (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
+        stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
+        stage != AGX_IOTO_G17G_PROGRAM_EOT))
+      return false;
+
+   size_t copy_offset;
+   if (!agx_ioto_program_copy_suffix_offset(AGX_CHIP_G17G, body, body_size,
+                                            &copy_offset))
+      return false;
+
+   uint8_t base[AGX_IOTO_G17G_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE];
+   size_t base_size;
+   if (!agx_ioto_g17g_no_resource_program_compose(
+          program_va, packed_tail, stage != AGX_IOTO_G17G_PROGRAM_VERTEX,
+          base, sizeof(base), &base_size))
+      return false;
+
+   const size_t prefix_size = AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
+                             AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
+   const size_t suffix_size = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT
+                                ? base_size - prefix_size
+                                : AGX_IOTO_PROGRAM_TERMINATE_SIZE;
+   const size_t fixed_size = prefix_size + suffix_size;
+   if (body_size > SIZE_MAX - fixed_size)
+      return false;
+   const size_t size = body_size + fixed_size;
+   if (capacity < size || size > UINT64_C(0x1000000000000) ||
+       program_va > UINT64_C(0x1000000000000) - size)
+      return false;
+
+   uint8_t *staged = malloc(size);
+   if (!staged)
+      return false;
+   if (copy_offset)
+      memcpy(staged, body, copy_offset);
+   memcpy(staged + copy_offset, base, prefix_size);
+   if (body_size != copy_offset)
+      memcpy(staged + copy_offset + prefix_size,
+             (const uint8_t *)body + copy_offset, body_size - copy_offset);
+   memcpy(staged + body_size + prefix_size,
+          base + base_size - suffix_size, suffix_size);
+   memcpy(output, staged, size);
+   free(staged);
    *written = size;
    return true;
 }

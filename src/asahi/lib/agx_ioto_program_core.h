@@ -150,6 +150,23 @@ bool agx_ioto_g17g_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    bool fragment, void *output, size_t capacity, size_t *written);
 
+enum agx_ioto_g17g_program_stage {
+   AGX_IOTO_G17G_PROGRAM_VERTEX,
+   AGX_IOTO_G17G_PROGRAM_FRAGMENT,
+   AGX_IOTO_G17G_PROGRAM_EOT,
+};
+
+/* Compose a validated GPU1 uniform-load body using the native M5 ordering:
+ * load rounds, shader state, HAL300 profile loader, final copies, terminal.
+ * Fragment uses the witnessed RT0 PIXREL; EOT uses the fragment profile
+ * without PIXREL. Background preamble/call protocols are not covered.
+ * Output and written remain unchanged on failure; input/output may alias. */
+bool agx_ioto_g17g_resource_program_compose(
+   uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage,
+   void *output, size_t capacity, size_t *written);
+
 /* Compose a G17P resource program around a body emitted by the HAL200 ESL
  * scheduler. Resource loads and their drain padding precede the packed shader
  * state. The default profile loader then copies those results into CProg and
