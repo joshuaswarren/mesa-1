@@ -298,7 +298,8 @@ static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_render *c)
 {
-   size_t len = cs->stream_linked ? 65536 /* XXX */ : (cs->current - cs->start);
+   size_t len = cs->stream_linked ? hk_cs_root_size(dev->dev.chip, false)
+                                  : (cs->current - cs->start);
    len = asahi_g17p_vdm_bisect(dev, cs, len);
    const uint8_t *submitted_start = cs->start;
    uint64_t submitted_full = cs->addr;

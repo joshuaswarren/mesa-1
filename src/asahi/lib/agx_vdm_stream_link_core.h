@@ -36,8 +36,12 @@ struct agx_vdm_stream_link_core {
  *   word 1 bits  0..31: target address bits 0..31
  *
  * Unlike other AGX3 command-stream pointers, this target deliberately remains
- * 40-bit through HAL300.  The returning-call form at word 0 bit 28 is not
- * present in the pinned AGX3 emitters and therefore fails closed here.
+ * 40-bit through HAL300. On G17P the encoded value is a render-context-relative
+ * offset, while the neighboring generations use the address domain selected
+ * by their own command-stream ABI. This byte packer preserves the supplied
+ * value; the caller owns that generation-specific translation. The
+ * returning-call form at word 0 bit 28 is not present in the pinned AGX3
+ * emitters and therefore fails closed here.
  *
  * The target allowlist contains only identities directly served by the
  * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X Apple Metal plugins.

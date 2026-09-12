@@ -498,10 +498,10 @@ check_inter_draw_barriers(void)
  * Assert the shape a draws-per-stream policy produced.
  *
  * ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE is
- * "<graphics streams>:<draws>:<state updates>[:<barriers>]". Draw counts
- * prevent dropped draws from passing; state counts distinguish changed and
- * reused state. The optional barrier count also rejects a per-draw cache
- * invalidation masquerading as efficient batching.
+ * "<graphics streams>:<draws>:<state updates>[:<barriers>[:<links>]]". Draw
+ * counts prevent dropped draws from passing; state counts distinguish changed
+ * and reused state. The optional barrier and link counts reject per-draw cache
+ * invalidation or retained renders masquerading as efficient batching.
  */
 static void __attribute__((destructor))
 check_stream_shape(void)
@@ -511,10 +511,10 @@ check_stream_shape(void)
       return;
 
    unsigned expected_streams = 0, expected_draws = 0, expected_states = 0;
-   unsigned expected_barriers = 0;
-   const int fields = sscanf(value, "%u:%u:%u:%u", &expected_streams,
+   unsigned expected_barriers = 0, expected_links = 0;
+   const int fields = sscanf(value, "%u:%u:%u:%u:%u", &expected_streams,
                              &expected_draws, &expected_states,
-                             &expected_barriers);
+                             &expected_barriers, &expected_links);
    if (fields < 3) {
       fprintf(stderr,
               "shim: ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE wants "
@@ -526,23 +526,27 @@ check_stream_shape(void)
    if (validated_graphics_streams != expected_streams ||
        matrix_stats.draws != expected_draws ||
        matrix_stats.state_updates != expected_states ||
-       (fields == 4 && matrix_stats.barriers != expected_barriers)) {
+       (fields >= 4 && matrix_stats.barriers != expected_barriers) ||
+       (fields == 5 && matrix_stats.links != expected_links)) {
       fprintf(stderr,
               "shim: G17P stream shape %u/%u streams, %u/%u draws, %u/%u "
               "state updates\n",
               validated_graphics_streams, expected_streams, matrix_stats.draws,
               expected_draws, matrix_stats.state_updates, expected_states);
-      if (fields == 4)
+      if (fields >= 4)
          fprintf(stderr, "shim: G17P barriers %u/%u\n",
                  matrix_stats.barriers, expected_barriers);
+      if (fields == 5)
+         fprintf(stderr, "shim: G17P links %u/%u\n", matrix_stats.links,
+                 expected_links);
       _Exit(EXIT_FAILURE);
    }
 
    fprintf(stderr,
-           "shim: G17P recorded %u graphics streams carrying %u draws and %u "
-           "state updates\n",
+           "shim: G17P recorded %u graphics streams carrying %u draws, %u "
+           "state updates and %u links\n",
            validated_graphics_streams, matrix_stats.draws,
-           matrix_stats.state_updates);
+           matrix_stats.state_updates, matrix_stats.links);
 }
 
 static void __attribute__((destructor))

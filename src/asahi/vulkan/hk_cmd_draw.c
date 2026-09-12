@@ -210,11 +210,9 @@ static struct {
    uint64_t republishing_draws;
    uint64_t splits;
    /* Bytes a draw writes into the graphics control stream, sampled by the
-    * next draw in the same stream.  How many draws a 32 KiB VDM root can
-    * carry before hk_g17p_vdm_needs_render_split() forces a retained render
-    * is this number, not a guess, and the answer decides whether a
-    * draws-per-stream limit is a rule of its own or just that capacity
-    * restated. */
+    * next draw in the same stream. This measures when a 32 KiB VDM root needs
+    * an in-render stream link; it must not be confused with a retained-render
+    * or draws-per-stream limit. */
    uint64_t measured_draws;
    uint64_t measured_bytes;
    uint64_t max_draw_bytes;
@@ -5323,24 +5321,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (!cs)
       return NULL;
 
-   /* Select the root before applying per-render state. A retained render
-    * starts with an unset depth-bias mode even when API state is unchanged.
-    * Native G17P uses a 32 KiB VDM root; its in-stream link packet is not yet
-    * established, so use the retained-render transition at that boundary. */
-   if (hk_g17p_vdm_needs_render_split(
-          dev->dev.chip, cs->stats.cmds, cs->end - cs->current,
-          AGX_VDM_STREAM_LINK_LENGTH)) {
-      if (hk_g17p_launch_trace_enabled())
-         fprintf(stderr, "G17P VDM root full: starting a retained render\n");
-
-      hk_g17p_note_gfx_split(cmd, "vdm-root-full", cs->stats.cmds,
-                             cs->end - cs->current);
-      hk_cmd_buffer_end_graphics(cmd);
-      cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
-      if (!cs)
-         return NULL;
-   }
-
    /* Annoyingly,
     * VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT is
     * render pass state on Imaginapple but draw state in Vulkan. In practice,
@@ -5381,6 +5361,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
 
    hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return NULL;
 
 #ifndef NDEBUG
    if (unlikely(dev->dev.debug & AGX_DBG_DIRTY)) {
@@ -5909,6 +5891,22 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
+            /* G17P resolves the indirect-argument address in an Index List
+             * relative to the render-context base. Passing the main-heap VA
+             * verbatim makes hardware add 0x1000000000 a second time. This
+             * becomes visible when an indirect draw follows a direct draw in
+             * one stream. Index-buffer addresses use their separate native
+             * 48-bit absolute field and remain unchanged. */
+            const uint64_t indirect_buffer =
+               agx_is_indirect(draw.b)
+                  ? hk_g17p_vdm_compact(cmd, draw.b.ptr)
+                  : 0;
+            if (agx_is_indirect(draw.b) && !indirect_buffer) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
+
             /* This context-relative PPP record selects the latest scissor
              * and depth-bias array entries. Header0x100 is PPP selector bit8,
              * not a direct-draw shape; +4 contains indices, not enable flags.
@@ -5943,7 +5941,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                       : 0,
                   .index_buffer = draw.index_buffer,
                   .index_buffer_range_B = draw.index_buffer_range_B,
-                  .indirect_buffer = draw.b.ptr,
+                  .indirect_buffer = indirect_buffer,
                };
                struct agx_vdm_hal200_indirect_draw encoded;
                if (!agx_vdm_hal200_indirect_draw_pack(dev->dev.chip, &fields,

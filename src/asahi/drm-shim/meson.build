@@ -545,14 +545,32 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
          suite : ['asahi', 'g17p-batching'], timeout : 30)
   endforeach
 
+  # Minimal reproduction for the G17P context-relative indirect-argument
+  # pointer: one direct draw followed by one non-indexed indirect draw in the
+  # same stream. The strict validator adds the render-context base
+  # unconditionally, so the old raw full VA resolves to an unowned rebased
+  # address while the compact offset resolves to the recorded argument BO.
+  indirect_address_env = environment(g17p_image_copy_3d_environment)
+  indirect_address_env.set('G17P_REPEAT_DRAW_COUNT', '2')
+  indirect_address_env.set('G17P_REPEAT_INDIRECT', '2')
+  indirect_address_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
+  indirect_address_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:2:2:1')
+  test('hk_g17p_indirect_argument_address', g17p_repeat_draw,
+       env : indirect_address_env,
+       depends : [_dev_icd, libasahi_noop_drm_shim],
+       suite : ['asahi', 'g17p-batching', 'g17p-indirect-address'],
+       timeout : 30)
+
   # Cross the real VDM-root capacity with all four draw forms and fresh native
-  # state on every draw. This packet mix fits 182 draws per root, so 4096 draws
-  # require 23 retained renders, each with only its stream-head barrier.
+  # state on every draw. The 32 KiB root and following 64 KiB chunks carry all
+  # 4096 draws in one render through nine native links. A root-capacity
+  # boundary must not become one of the retained renders whose firmware job
+  # list is bounded independently.
   batching_capacity_env = environment(g17p_image_copy_3d_environment)
   batching_capacity_env.set('G17P_REPEAT_DRAW_COUNT', '4096')
   batching_capacity_env.set('G17P_REPEAT_INDIRECT', '2')
   batching_capacity_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
-  batching_capacity_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '23:4096:4096:23')
+  batching_capacity_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:4096:4096:1:9')
   test('hk_g17p_batching_capacity', g17p_repeat_draw,
        env : batching_capacity_env, depends : [_dev_icd, libasahi_noop_drm_shim],
        suite : ['asahi', 'g17p-batching'], timeout : 30)
@@ -563,7 +581,7 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   batching_bias_env.set('G17P_REPEAT_STENCIL_REFERENCE', '1')
   batching_bias_env.set('G17P_REPEAT_INTEGER_DEPTH_BIAS', '1')
   batching_bias_env.set('ASAHI_SHIM_G17P_EXPECT_INTEGER_DEPTH_BIAS', '1')
-  batching_bias_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '23:4096:4096:23')
+  batching_bias_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE', '1:4096:4096:1:9')
   test('hk_g17p_batching_capacity_integer_bias', g17p_repeat_draw,
        env : batching_bias_env, depends : [_dev_icd, libasahi_noop_drm_shim],
        suite : ['asahi', 'g17p-batching'], timeout : 30)

@@ -2386,11 +2386,15 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     */
    size_t size = 65536;
    struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
+   if (!T.cpu)
+      return;
 
    /* Jump from the old control stream to the new control stream. */
    void *link_end =
       hk_cmd_buffer_emit_cs_jump(cmd, cs->current, T.gpu, vdm);
    const bool linked = link_end != cs->current;
+   if (!linked)
+      return;
 
    /* Swap out the control stream */
    cs->current = T.cpu;
