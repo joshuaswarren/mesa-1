@@ -6,6 +6,7 @@
  */
 
 #include "agx_device.h"
+#include "agx3_code_container_core.h"
 #include "agx_g17p_bind0.h"
 #include "agx_m5_va.h"
 #include "agx_linker.h"
@@ -1368,7 +1369,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    u_printf_init(&dev->printf, bo, agx_bo_map(bo));
 
-   /* G17P: make the USC exec window's base page resident.
+   /* Make the USC exec window's helper page resident on both G17 variants.
     *
     * The kernel programs dev->shader_base into USC_EXEC_BASE_CP for every
     * command on the queue, so that register always names a real address to
@@ -1376,15 +1377,16 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * code container and is mapped; in Honeykrisp it was the bottom of a
     * top-down heap and was mapped by nothing, which the kernel audit confirms
     * on hardware ("usc_exec_base 0x1100000000+0x4000 covered=false phys=0x0").
-    * That is the last structural difference left between a passing add3 kick
-    * and a failing Honeykrisp one.
+    * M5 also reads this page: its first Mesa vertex launch faulted at
+    * shader_base + 0x280 (UL1C1, unmapped). The native M5 CODE allocation
+    * maps that address to its second helper table.
     *
     * The page carries the container's fixed leading block -- the same bytes
     * both captured Apple code images start with -- and its own block-size
     * dword terminates the chain, so it is a well-formed empty container
     * rather than a blank page.
     */
-   if (dev->chip == AGX_CHIP_G17P) {
+   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
       const size_t usc_base_size = AIL_PAGESIZE;
 
       simple_mtx_lock(&dev->vma_lock);
@@ -1399,7 +1401,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
       struct agx_bo *usc_base = agx_create_fixed_bo(
          dev, usc_base_size, AGX_BO_WRITEBACK, dev->shader_base,
-         DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "G17P USC window base");
+         DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "G17 USC window base");
       if (usc_base == NULL) {
          fprintf(stderr, "Failed to bind the USC window base page\n");
          return false;
@@ -1412,7 +1414,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
       }
 
       memset(map, 0, usc_base_size);
-      agx3_build_container_lead(map);
+      if (dev->chip == AGX_CHIP_G17G) {
+         if (!agx3_build_g17g_container_lead(map, usc_base_size))
+            return false;
+      } else {
+         agx3_build_container_lead(map);
+      }
       if (agx_bo_sync_for_device(usc_base, 0, usc_base_size))
          return false;
 
