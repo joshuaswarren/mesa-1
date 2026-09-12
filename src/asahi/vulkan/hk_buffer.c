@@ -326,7 +326,10 @@ hk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
 
       if (buffer->va) {
          VK_FROM_HANDLE(hk_device, dev, device);
-         size_t size = MIN2(mem->bo->size, buffer->va->size_B);
+         /* The VA allocation includes an overread guard, not backed by this
+          * buffer's memory. Mapping it too can exceed the BO when a captured
+          * BDA buffer occupies the last suballocation (Firefox/Zink). */
+         size_t size = align64(buffer->vk.size, 16384);
 
          /* Lower mapping: read-write */
          int ret = agx_bo_bind(&dev->dev, mem->bo, buffer->vk.device_address,
