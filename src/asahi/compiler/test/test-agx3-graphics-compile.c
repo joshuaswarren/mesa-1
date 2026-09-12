@@ -1264,6 +1264,22 @@ build_fs_interpolated_at_sample(void)
    return fs_finish(&b);
 }
 
+/* Retain the two coverage updates in the faulting Hyprland fragment: a
+ * dynamic no-tests discard followed by the final depth/stencil test. */
+static nir_shader *
+build_fs_discard_then_tests(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P discard then tests FS");
+   nir_def *target = nir_iand_imm(
+      &b, nir_load_preamble(&b, 1, 16, .base = 0), 1);
+   nir_sample_mask_agx(&b, target, nir_imm_intN_t(&b, 0, 16));
+   nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                       nir_imm_intN_t(&b, 0xff, 16));
+   fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
+   return fs_finish(&b);
+}
+
 /* Fragment shader with a discard: lowered to a sample_mask write. */
 static nir_shader *
 build_fs_discard(void)
@@ -5138,6 +5154,7 @@ struct agx3_graphics_case {
    bool expected_g17p_front_facing;
    bool expected_g17p_explicit_sample;
    bool expected_g17p_sample_group;
+   bool expected_g17p_balanced_coverage;
 };
 
 static bool
@@ -5512,6 +5529,8 @@ static const struct agx3_graphics_case cases[] = {
     .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
+   {"fs-discard-then-tests", build_fs_discard_then_tests, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true},
    {"fs-sample-mask-in", build_fs_sample_mask_in, true, .g17p_only = true,
     .expected_g17p_sample_mask_input = true},
    {"fs-front-facing", build_fs_front_facing, true, .g17p_only = true,
@@ -5698,6 +5717,25 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
                     "%s %s: fragment SMP group did not terminate only on "
                     "its final sample\n",
                     enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_balanced_coverage) {
+         /* The actual discard lowering emits a no-tests update followed by
+          * a testing update. Only the latter owns a class-1 transaction. */
+         const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+         const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+         unsigned acquired = 0, released = 0;
+         for (unsigned i = 0; i + sizeof(acquire) <= part.info.binary_size;
+              ++i) {
+            const uint8_t *bytes = (const uint8_t *)part.binary + i;
+            acquired += !memcmp(bytes, acquire, sizeof(acquire));
+            released += !memcmp(bytes, release, sizeof(release));
+         }
+         result = acquired == 1 && released == 1;
+         if (!result)
+            fprintf(stderr, "%s %s: coverage acquired %u, released %u\n",
+                    enc_name(enc), c->name, acquired, released);
       }
 
       if (result && c->lower_combined_sampler) {

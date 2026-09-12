@@ -8429,6 +8429,44 @@ TEST_F(AGX3PackBinary, FragmentHelperCoverageMatchesNativeAtomicPipeline)
    EXPECT_EQ(pack(b), native);
 }
 
+TEST_F(AGX3PackBinary, G17PDiscardDoesNotReleaseUnacquiredPixelClass)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (const std::vector<unsigned> &masks :
+        {std::vector<unsigned>{0}, {2}, {0, 0, 2}}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      for (unsigned flags : masks)
+         agx_sample_mask_1x_agx3(b, agx_register(0, AGX_SIZE_16),
+                                 agx_register(4, AGX_SIZE_32), flags);
+      agx_stop(b);
+
+      /* Apple G17P kill_fetch emits an early discard MOVMSK without a
+       * class-1 wait or release. Its later testing MOVMSK is bracketed by
+       * PIXWAIT(1)/PIXREL(1). kill_memory independently has two unbracketed
+       * discard MOVMSKs before its bracketed late depth test. */
+      std::vector<uint8_t> want;
+      const uint8_t entry[] = {0x87, 0x02, 0x54, 0x00, 0x06, 0x00};
+      const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+      const uint8_t mask[] = {0x57, 0x14, 0x54, 0x00, 0x00, 0x01};
+      const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+      append(want, entry, sizeof(entry));
+      for (unsigned flags : masks) {
+         uint8_t copy[AGX3_STAGE_MAX_LENGTH], length = 0;
+         ASSERT_TRUE(agx3_stage_copy_source(enc, 0, 4, false, 1, 0, copy,
+                                            &length));
+         append(want, copy, length);
+         if (flags == 2)
+            append(want, acquire, sizeof(acquire));
+         append(want, mask, sizeof(mask));
+         if (flags == 2)
+            append(want, release, sizeof(release));
+      }
+      want.insert(want.end(), {0x0e, 0, 0, 0});
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
 TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

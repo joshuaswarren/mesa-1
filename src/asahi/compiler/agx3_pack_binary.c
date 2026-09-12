@@ -6846,9 +6846,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                .value = 0, .value_kill = true, .slot = 1, .wait_mask = 1,
             };
             if (!agx3_zs_encode_sample_mask(enc, &zs, bytes, &len) ||
-                !agx3_append(emission, bytes, len) ||
-                !agx3_pixel_release(enc, 1, false, 0, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            /* A no-tests discard does not acquire class 1 above, so it
+             * must not release it either. Native G17P kill_fetch and
+             * kill_memory emit these early MOVMSKs without PIXREL(1),
+             * then bracket the eventual testing update with one wait and
+             * release. Keep that release paired with its acquire. */
+            if ((I->imm & 2) &&
+                (!agx3_pixel_release(enc, 1, false, 0, bytes, &len) ||
+                 !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
             outstanding = 0;
             ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 2);
