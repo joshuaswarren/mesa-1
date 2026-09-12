@@ -154,9 +154,10 @@ pack_absolute_copy(void *context, enum agx_chip chip,
       return false;
 
    uint16_t destination_half, source_half;
-   const uint16_t destination_stride =
-      packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 ? 2 : 4;
-   if (!add_half(load->native_slot_half, (uint16_t)(destination_stride * dword),
+   /* Both encodings address COPY destinations in 16-bit halves. In particular,
+    * the G17G EOT loader copies a pointer into halves 0 and 2, not 0 and 4.
+    */
+   if (!add_half(load->native_slot_half, (uint16_t)(2u * dword),
                  &destination_half) ||
        !add_half(load->data.half, (uint16_t)(2u * dword), &source_half))
       return false;
