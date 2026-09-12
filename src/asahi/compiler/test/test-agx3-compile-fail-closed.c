@@ -1539,6 +1539,40 @@ check_half_compare_select_compute(void)
 }
 
 static bool
+check_f32_abs_zero_compare_select_compute(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P f32 absolute zero comparison select");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *input = nir_load_global(&b, 3, 32,
+                                    nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *absolute = nir_fabs(&b, nir_channel(&b, input, 0));
+   nir_def *selected = nir_bcsel(
+      &b, nir_flt(&b, nir_imm_float(&b, 0.0f), absolute),
+      nir_channel(&b, input, 1), nir_channel(&b, input, 2));
+   nir_store_global(&b, selected, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary != NULL &&
+                      part.info.binary_size > 4 && part.info.stats.instrs >= 7;
+   if (!valid)
+      fprintf(stderr, "G17P f32 absolute zero comparison select failed\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_half_sqrt_compute(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1958,6 +1992,12 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--f32-abs-select-only")) {
+      const bool valid = check_f32_abs_zero_compare_select_compute();
+      fprintf(stderr, "G17P f32 absolute zero comparison select: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--half-sqrt-only")) {
       const bool valid = check_half_sqrt_compute();
       fprintf(stderr, "G17P shaderFloat16 square root: %s\n",
@@ -2043,6 +2083,8 @@ main(int argc, char **argv)
    if (!check_half_divide_compute())
       return 1;
    if (!check_half_compare_select_compute())
+      return 1;
+   if (!check_f32_abs_zero_compare_select_compute())
       return 1;
    if (!check_half_sqrt_compute())
       return 1;

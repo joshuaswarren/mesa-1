@@ -9172,10 +9172,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                src[i]=x.value; hints[i]=agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-            const bool encoded = I->saturate
+            bool encoded = I->saturate
                ? agx3_alu_hmul_saturate(enc,dst.value,src,hints,dst.cache,wait,
                                         bytes,&len)
                : agx3_alu_hmul(enc,dst.value,src,hints,dst.cache,wait,bytes,&len);
+
+            /* The compact multiply does not cover every pair of odd half
+             * registers.  The grounded three-source FMA does, and an exact
+             * multiply is the fused product plus negative zero: it preserves
+             * both the product rounding and signed zero.  Use this only when
+             * the ordinary non-saturating instruction cannot encode the
+             * assigned registers. */
+            if (!encoded && !I->saturate)
+               encoded = agx3_alu_hfma_addend_minifloat(
+                  enc, dst.value, src, UINT8_C(0x80), hints, dst.cache, wait,
+                  bytes, &len);
+
             if (!encoded || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
             continue;

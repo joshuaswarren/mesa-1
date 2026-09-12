@@ -2752,6 +2752,50 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          }
       }
 
+      /* frexp's full-precision path compares zero against fabs(x) and
+       * selects two full floats.  G17P's zero-comparison FSEL is grounded
+       * only without source modifiers, so make fabs/fneg exact with integer
+       * sign-bit operations while the modified comparator is still SSA. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32) {
+         const bool zero_first =
+            I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value == 0;
+         const bool zero_second =
+            I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value == 0;
+
+         if (zero_first != zero_second) {
+            const unsigned s = zero_first ? 1 : 0;
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE &&
+                I->src[s].size == AGX_SIZE_32 &&
+                (I->src[s].abs || I->src[s].neg)) {
+               const bool absolute = I->src[s].abs;
+               const bool negate = I->src[s].neg;
+               agx_index value = I->src[s];
+               value.abs = false;
+               value.neg = false;
+
+               if (absolute) {
+                  agx_index mask =
+                     agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+                  agx_index result = agx_temp(ctx, AGX_SIZE_32);
+                  agx_bitop_to(&b, result, value, mask, 0x8 /* AND */);
+                  value = result;
+               }
+
+               if (negate) {
+                  agx_index sign =
+                     agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+                  agx_index result = agx_temp(ctx, AGX_SIZE_32);
+                  agx_bitop_to(&b, result, value, sign, 0x6 /* XOR */);
+                  value = result;
+               }
+
+               I->src[s] = value;
+            }
+         }
+      }
+
       /* Chromium/Skia compares a negated f32 register for equality and then
        * selects two unrelated f32 registers. The only native FSEL negate bit
        * is grounded for a different half-mask endpoint, so do not infer that
