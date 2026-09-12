@@ -2975,6 +2975,9 @@ main(void)
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
+   const bool submit_only =
+      G17P_COMPOSITE_GENERATE_MIPS &&
+      getenv("G17P_GENERATED_MIPS_SUBMIT_ONLY") != NULL;
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -6466,6 +6469,12 @@ main(void)
       return EXIT_SUCCESS;
    }
 #endif
+
+   if (submit_only) {
+      printf(PROBE_NAME ": SUBMIT PASS — generated-mip command stream "
+                        "submitted and completed\n");
+      return EXIT_SUCCESS;
+   }
 
 #if G17P_HOST_IMAGE_COPY
    const VkImageToMemoryCopyEXT host_copy_region = {

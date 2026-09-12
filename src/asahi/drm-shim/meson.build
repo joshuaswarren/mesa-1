@@ -221,6 +221,26 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     timeout : 120,
   )
 
+  # STK/GTK-style full BGRA8 mip generation. The base upload and final sample
+  # remain render jobs, but the two-level mip chain and three readbacks must be
+  # one compute stream. Regressing to graphics meta makes each mip a separate
+  # firmware render job and removes the two strong compute launches.
+  g17p_generated_mips_env = environment(g17p_queue_progress_environment)
+  g17p_generated_mips_env.set('G17P_GENERATED_MIPS_SUBMIT_ONLY', '1')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS',
+                              '6,6,0,2')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE',
+                              '2:18:18:2:0')
+  test(
+    'hk_g17p_generated_mips_compute',
+    g17p_generated_mips,
+    env : g17p_generated_mips_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-generated-mips'],
+    timeout : 30,
+  )
+
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
   g17p_xfb_draw_env.set('ASAHI_SHIM_G17P_EXPECT_XFB', '1')
   test(

@@ -129,6 +129,64 @@ libagx_copy_image(global uint8_t *dest, global uint8_t *src,
       dest[dest_offset_B + b] = src[src_offset_B + b];
 }
 
+/* Round an unsigned four-sample average to nearest-even. This is the UNORM8
+ * result of a linear sample at the centre of a 2x2 source footprint, without
+ * relying on the still-unqualified G17P float-to-integer convert encoding. */
+static uint8_t
+libagx_average4_unorm8(uint a, uint b, uint c, uint d)
+{
+   uint sum = a + b + c + d;
+   uint quotient = sum >> 2;
+   uint remainder = sum & 3u;
+   return (uint8_t)(quotient +
+                    (remainder > 2u ||
+                     (remainder == 2u && (quotient & 1u))));
+}
+
+/*
+ * Exact full-level 2x downsample for ordinary four-channel UNORM8 images.
+ * RGBA and BGRA are both channel-order agnostic here: each stored byte is
+ * filtered independently and written back in the same order.
+ */
+KERNEL(32)
+libagx_mipmap_unorm8x4(global uint8_t *dest, global uint8_t *src,
+                       uint dest_width_px, uint dest_height_px,
+                       uint src_scale_x, uint src_scale_y,
+                       uint dest_stride_el, uint src_stride_el,
+                       uint dest_tile_width_el, uint dest_tile_height_el,
+                       uint src_tile_width_el, uint src_tile_height_el)
+{
+   uint id = cl_global_id.x;
+   if (id >= dest_width_px * dest_height_px)
+      return;
+
+   uint x = id % dest_width_px;
+   uint y = id / dest_width_px;
+   uint dest_offset = libagx_copy_image_offset(
+      x, y, 0, dest_stride_el, dest_tile_width_el, dest_tile_height_el, 4, 1);
+   uint src_x = x * src_scale_x;
+   uint src_y = y * src_scale_y;
+   uint src00 = libagx_copy_image_offset(
+      src_x, src_y, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src10 = libagx_copy_image_offset(
+      src_x + src_scale_x - 1, src_y, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src01 = libagx_copy_image_offset(
+      src_x, src_y + src_scale_y - 1, 0, src_stride_el, src_tile_width_el,
+      src_tile_height_el, 4, 1);
+   uint src11 = libagx_copy_image_offset(
+      src_x + src_scale_x - 1, src_y + src_scale_y - 1, 0, src_stride_el,
+      src_tile_width_el,
+      src_tile_height_el, 4, 1);
+
+   for (uint channel = 0; channel < 4; ++channel) {
+      dest[dest_offset + channel] = libagx_average4_unorm8(
+         src[src00 + channel], src[src10 + channel],
+         src[src01 + channel], src[src11 + channel]);
+   }
+}
+
 /*
  * Resolve an unorm8x4 multisample surface into a single-sample surface.
  * AIL tiles one logical pixel as a block containing every sample. Averaging

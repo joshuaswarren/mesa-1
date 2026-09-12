@@ -53,6 +53,7 @@ main(void)
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
           i == LIBAGX_COPY_IMAGE ||
+          i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -103,6 +104,40 @@ main(void)
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
          UINT64_C(0x3c9abc0bfdcf59e5));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The G17P UNORM8 mip kernel replaces one firmware render job per level
+    * with a launch in the command buffer's merged compute stream. Pin the
+    * complete binary and argument ABI: losing this table entry silently puts
+    * STK's thousands of startup mip renders back on the graphics fallback. */
+   const uint32_t *mipmap_blob =
+      libagx_g17p[LIBAGX_MIPMAP_UNORM8X4];
+   CHECK(mipmap_blob != NULL);
+   if (!mipmap_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *mipmap_info =
+      (const void *)mipmap_blob;
+   const uint8_t *mipmap_binary =
+      (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
+   CHECK(mipmap_info->preamble_offset == 0);
+   CHECK(mipmap_info->main_offset == 0);
+   CHECK(mipmap_info->main_size == 6554);
+   CHECK(mipmap_info->binary_size == 6554);
+   CHECK(mipmap_info->nr_gprs == 52);
+   CHECK(mipmap_info->nr_preamble_gprs == 0);
+   CHECK(mipmap_info->push_count == 28);
+   CHECK(mipmap_info->workgroup_size[0] == 32);
+   CHECK(mipmap_info->workgroup_size[1] == 1);
+   CHECK(mipmap_info->workgroup_size[2] == 1);
+   CHECK(mipmap_info->local_size == 0);
+   CHECK(mipmap_info->imageblock_stride == 0);
+   CHECK(!mipmap_info->uses_txf);
+   CHECK(mipmap_info->agx3_staging_known);
+   CHECK(mipmap_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
+         UINT64_C(0x024e6d927deb375b));
+   CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
 

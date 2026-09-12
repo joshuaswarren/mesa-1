@@ -954,7 +954,7 @@ if with_tests
     # GTK unified-GPU icon path: premultiplied BGRA8 base upload, complete
     # same-image linear-blit mip chain, implicit minified sampling and
     # compositor-style alpha blending.
-    executable(
+    g17p_generated_mips = executable(
       'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],

@@ -1548,6 +1548,133 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
    return props;
 }
 
+/*
+ * G17P has no general compute imageblock path yet, so the common Vulkan meta
+ * blitter turns every mip level into a separate render firmware job.  STK and
+ * GTK generate complete mip chains for hundreds of small RGBA/BGRA images at
+ * startup; making each level a render is thousands of jobs before the first
+ * frame can be presented.
+ *
+ * Use a raw AIL compute kernel for the exact power-of-two UNORM8 mipmap shape:
+ * a complete 2x downsample in the same RGBA or BGRA format (or 1x along an
+ * axis already at one pixel). The fallback remains the general graphics meta
+ * path, so this does not narrow Vulkan functionality.
+ */
+static bool
+hk_g17p_compute_blit_format(VkFormat format)
+{
+   return format == VK_FORMAT_R8G8B8A8_UNORM ||
+          format == VK_FORMAT_B8G8R8A8_UNORM;
+}
+
+static bool
+hk_g17p_compute_blit_region_supported(const struct hk_image *src,
+                                      const struct hk_image *dst,
+                                      const VkImageBlit2 *region,
+                                      VkFilter filter)
+{
+   if (filter != VK_FILTER_LINEAR || src->vk.image_type != VK_IMAGE_TYPE_2D ||
+       dst->vk.image_type != VK_IMAGE_TYPE_2D ||
+       src->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       dst->vk.samples != VK_SAMPLE_COUNT_1_BIT || src->plane_count != 1 ||
+       dst->plane_count != 1 ||
+       src->planes[0].layout.tiling != AIL_TILING_GPU ||
+       dst->planes[0].layout.tiling != AIL_TILING_GPU ||
+       src->planes[0].layout.compressed || dst->planes[0].layout.compressed ||
+       src->vk.format != dst->vk.format ||
+       !hk_g17p_compute_blit_format(src->vk.format) ||
+       region->srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+       region->dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+       vk_image_subresource_layer_count(&src->vk, &region->srcSubresource) != 1 ||
+       vk_image_subresource_layer_count(&dst->vk, &region->dstSubresource) != 1)
+      return false;
+
+   const VkOffset3D s0 = region->srcOffsets[0];
+   const VkOffset3D s1 = region->srcOffsets[1];
+   const VkOffset3D d0 = region->dstOffsets[0];
+   const VkOffset3D d1 = region->dstOffsets[1];
+   if (s0.x != 0 || s0.y != 0 || s0.z != 0 || s1.z != 1 ||
+       d0.x != 0 || d0.y != 0 || d0.z != 0 || d1.z != 1 ||
+       s1.x <= 0 || s1.y <= 0 || d1.x <= 0 || d1.y <= 0)
+      return false;
+
+   const uint32_t width = (uint32_t)d1.x;
+   const uint32_t height = (uint32_t)d1.y;
+   const uint32_t src_width = (uint32_t)s1.x;
+   const uint32_t src_height = (uint32_t)s1.y;
+   const bool scale_x = src_width == width || src_width == (uint64_t)width * 2;
+   const bool scale_y =
+      src_height == height || src_height == (uint64_t)height * 2;
+   return scale_x && scale_y &&
+          (src_width != width || src_height != height) &&
+          (uint64_t)width * height <= UINT32_MAX;
+}
+
+static bool
+hk_g17p_compute_blit_supported(const struct hk_device *dev,
+                               const struct hk_image *src,
+                               const struct hk_image *dst,
+                               const VkBlitImageInfo2 *info)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P || info->regionCount == 0)
+      return false;
+
+   for (uint32_t r = 0; r < info->regionCount; ++r) {
+      if (!hk_g17p_compute_blit_region_supported(
+             src, dst, &info->pRegions[r], info->filter))
+         return false;
+   }
+   return true;
+}
+
+static void
+hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
+                     struct hk_image *dst, const VkBlitImageInfo2 *info)
+{
+   const struct ail_layout *src_layout = &src->planes[0].layout;
+   const struct ail_layout *dst_layout = &dst->planes[0].layout;
+
+   for (uint32_t r = 0; r < info->regionCount; ++r) {
+      const VkImageBlit2 *region = &info->pRegions[r];
+      const uint32_t src_level = region->srcSubresource.mipLevel;
+      const uint32_t dst_level = region->dstSubresource.mipLevel;
+      const uint32_t width =
+         (uint32_t)(region->dstOffsets[1].x - region->dstOffsets[0].x);
+      const uint32_t height =
+         (uint32_t)(region->dstOffsets[1].y - region->dstOffsets[0].y);
+      const uint32_t src_width = (uint32_t)region->srcOffsets[1].x;
+      const uint32_t src_height = (uint32_t)region->srcOffsets[1].y;
+      const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
+      const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
+
+      const struct libagx_mipmap_unorm8x4_args args = {
+         .dest = hk_image_base_address(dst, 0) +
+                 ail_get_layer_level_B(dst_layout,
+                                       region->dstSubresource.baseArrayLayer,
+                                       dst_level),
+         .src = hk_image_base_address(src, 0) +
+                ail_get_layer_level_B(src_layout,
+                                      region->srcSubresource.baseArrayLayer,
+                                      src_level),
+         .dest_width_px = width,
+         .dest_height_px = height,
+         .src_scale_x = src_width == width ? 1 : 2,
+         .src_scale_y = src_height == height ? 1 : 2,
+         .dest_stride_el = dst_layout->stride_el[dst_level],
+         .src_stride_el = src_layout->stride_el[src_level],
+         .dest_tile_width_el = dst_tile.width_el,
+         .dest_tile_height_el = dst_tile.height_el,
+         .src_tile_width_el = src_tile.width_el,
+         .src_tile_height_el = src_tile.height_el,
+      };
+
+      libagx_mipmap_unorm8x4_struct(cmd, agx_1d(width * height),
+                                    AGX_BARRIER_ALL, args);
+      if (vk_command_buffer_has_error(&cmd->vk))
+         return;
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
                  const VkBlitImageInfo2 *pBlitImageInfo)
@@ -1557,6 +1684,15 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, dst_image, pBlitImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    perf_debug(cmd, "Blit image");
+
+   if (hk_g17p_compute_blit_supported(dev, src_image, dst_image,
+                                      pBlitImageInfo)) {
+      struct hk_meta_save save;
+      hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      hk_g17p_compute_blit(cmd, src_image, dst_image, pBlitImageInfo);
+      hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      return;
+   }
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
