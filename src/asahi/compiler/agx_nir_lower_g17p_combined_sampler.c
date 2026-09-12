@@ -951,14 +951,15 @@ g17p_has_bindless_texture_access(const nir_shader *shader)
 }
 
 /* A robustness bounds check lowers imageSize() into a descriptor crawl before
- * storage-image specialization runs.  The load/store handles are removed by
- * the specialization, but that read-only crawl still owns a bindless image
- * handle.  Admit only the same constant texture descriptor and only when every
- * use is the compiler's descriptor-address intrinsic; any residual texture,
- * sampler, or independently indexed image access still fails closed. */
+ * storage-image specialization runs. The load/store handles are removed by
+ * the specialization, but that read-only crawl and image atomics still need
+ * their bindless handles for address calculation. Admit only the exact paired
+ * texture/PBE descriptors and those two consumers; any independently indexed
+ * image or sampler access still fails closed. */
 static bool
 g17p_has_unsupported_storage_descriptor_access(const nir_shader *shader,
-                                                uint32_t texture_offset_B)
+                                                uint32_t texture_offset_B,
+                                                uint32_t pbe_offset_B)
 {
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
@@ -973,8 +974,11 @@ g17p_has_unsupported_storage_descriptor_access(const nir_shader *shader,
                continue;
 
             if (nir_intrinsic_desc_set(intr) != 0 ||
-                !nir_src_is_const(intr->src[0]) ||
-                nir_src_as_uint(intr->src[0]) != texture_offset_B)
+                !nir_src_is_const(intr->src[0]))
+               return true;
+
+            const uint32_t offset_B = nir_src_as_uint(intr->src[0]);
+            if (offset_B != texture_offset_B && offset_B != pbe_offset_B)
                return true;
 
             nir_foreach_use(use, &intr->def) {
@@ -983,9 +987,16 @@ g17p_has_unsupported_storage_descriptor_access(const nir_shader *shader,
                   return true;
 
                nir_intrinsic_instr *user = nir_instr_as_intrinsic(parent);
-               if (user->intrinsic !=
-                      nir_intrinsic_load_from_texture_handle_agx ||
-                   user->def.num_components != 1 || user->def.bit_size != 64)
+               const bool descriptor_address =
+                  user->intrinsic ==
+                     nir_intrinsic_load_from_texture_handle_agx &&
+                  user->def.num_components == 1 && user->def.bit_size == 64;
+               const bool image_atomic =
+                  offset_B == pbe_offset_B &&
+                  (user->intrinsic == nir_intrinsic_bindless_image_atomic ||
+                   user->intrinsic ==
+                      nir_intrinsic_bindless_image_atomic_swap);
+               if (!descriptor_address && !image_atomic)
                   return true;
             }
          }
@@ -1135,11 +1146,13 @@ agx_nir_lower_g17p_indexed_storage(
 static bool
 g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
 {
+   const enum pipe_format format = nir_intrinsic_format(intr);
    if (intr->intrinsic != (load ? nir_intrinsic_bindless_image_load
                                 : nir_intrinsic_bindless_image_store) ||
        nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
        nir_intrinsic_image_array(intr) ||
-       nir_intrinsic_format(intr) != PIPE_FORMAT_R8G8B8A8_UINT ||
+       (format != PIPE_FORMAT_R8G8B8A8_UINT &&
+        format != PIPE_FORMAT_R32_UINT) ||
        nir_src_num_components(intr->src[1]) != 4 ||
        nir_src_bit_size(intr->src[1]) != 32 ||
        !nir_src_is_const(intr->src[2]) ||
@@ -1159,8 +1172,30 @@ g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
           nir_src_bit_size(intr->src[3]) == 32 &&
           nir_src_is_const(intr->src[4]) &&
           nir_src_as_uint(intr->src[4]) == 0 &&
-          !(nir_intrinsic_access(intr) &
-            (ACCESS_COHERENT | ACCESS_VOLATILE));
+          !(nir_intrinsic_access(intr) & ACCESS_VOLATILE);
+}
+
+static bool
+g17p_storage_atomic_shape(const nir_intrinsic_instr *intr,
+                          uint32_t pbe_offset_B)
+{
+   const bool atomic =
+      intr->intrinsic == nir_intrinsic_bindless_image_atomic ||
+      intr->intrinsic == nir_intrinsic_bindless_image_atomic_swap;
+   const enum pipe_format format = nir_intrinsic_format(intr);
+
+   uint32_t atomic_pbe_offset_B;
+   return atomic && nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_2D &&
+          !nir_intrinsic_image_array(intr) &&
+          (format == PIPE_FORMAT_R32_UINT ||
+           format == PIPE_FORMAT_R32_SINT) &&
+          nir_src_num_components(intr->src[1]) == 4 &&
+          nir_src_bit_size(intr->src[1]) == 32 &&
+          nir_src_is_const(intr->src[2]) &&
+          nir_src_as_uint(intr->src[2]) == 0 &&
+          !(nir_intrinsic_access(intr) & ACCESS_VOLATILE) &&
+          g17p_storage_handle_offset(intr, &atomic_pbe_offset_B) &&
+          atomic_pbe_offset_B == pbe_offset_B;
 }
 
 bool
@@ -1171,6 +1206,7 @@ agx_nir_lower_g17p_storage_image(
       return false;
 
    nir_intrinsic_instr *load = NULL, *store = NULL;
+   unsigned atomics = 0;
    uint32_t texture_offset_B = 0, pbe_offset_B = 0;
    unsigned impl_count = 0;
    nir_foreach_function_impl(impl, shader) {
@@ -1193,9 +1229,19 @@ agx_nir_lower_g17p_storage_image(
                    !g17p_storage_handle_offset(intr, &pbe_offset_B))
                   return false;
                store = intr;
+            } else if (intr->intrinsic ==
+                          nir_intrinsic_bindless_image_atomic ||
+                       intr->intrinsic ==
+                          nir_intrinsic_bindless_image_atomic_swap) {
+               uint32_t atomic_pbe_offset_B;
+               if (!g17p_storage_handle_offset(intr,
+                                                &atomic_pbe_offset_B))
+                  return false;
+               if (atomics++ == 0)
+                  pbe_offset_B = atomic_pbe_offset_B;
+               else if (pbe_offset_B != atomic_pbe_offset_B)
+                  return false;
             } else if (intr->intrinsic == nir_intrinsic_bindless_image_sparse_load ||
-                       intr->intrinsic == nir_intrinsic_bindless_image_atomic ||
-                       intr->intrinsic == nir_intrinsic_bindless_image_atomic_swap ||
                        intr->intrinsic == nir_intrinsic_bindless_image_size ||
                        intr->intrinsic == nir_intrinsic_bindless_image_samples) {
                return false;
@@ -1204,39 +1250,71 @@ agx_nir_lower_g17p_storage_image(
       }
    }
 
-   /* A Gen9 storage descriptor is texture32 followed by PBE32. Requiring one
-    * load and one store from that exact pair proves both operations name the
-    * same API image. Their control-flow blocks and values are ordinary shader
-    * semantics; neither changes the native state-0 resource ABI. */
-   if (impl_count != 1 || !load || !store || (texture_offset_B & 7) != 0 ||
-       pbe_offset_B != texture_offset_B + 32)
+   /* A Gen9 storage descriptor is texture32 followed by PBE32. A shader with
+    * only PBE stores still needs the same native state-0 pair; derive the
+    * unused texture address from the PBE handle instead of leaving imgwci
+    * state0 unbound. Atomics keep the PBE handle live because they lower to a
+    * raw texel address, while the paired imageStore uses native state 0. */
+   if (impl_count != 1 || !store || (pbe_offset_B & 7) != 0)
       return false;
+
+   uint32_t store_pbe_offset_B;
+   if (!g17p_storage_handle_offset(store, &store_pbe_offset_B) ||
+       store_pbe_offset_B != pbe_offset_B)
+      return false;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if ((intr->intrinsic == nir_intrinsic_bindless_image_atomic ||
+                 intr->intrinsic ==
+                    nir_intrinsic_bindless_image_atomic_swap) &&
+                !g17p_storage_atomic_shape(intr, pbe_offset_B))
+               return false;
+         }
+      }
+   }
+
+   if (load) {
+      if ((texture_offset_B & 7) != 0 ||
+          pbe_offset_B != texture_offset_B + 32)
+         return false;
+   } else {
+      if (pbe_offset_B < 32)
+         return false;
+      texture_offset_B = pbe_offset_B - 32;
+   }
 
    nir_foreach_function_impl(impl, shader) {
       nir_builder b = nir_builder_create(impl);
       nir_foreach_block(block, impl) {
          nir_foreach_instr_safe(instr, block) {
-            if (instr != &load->instr && instr != &store->instr)
+            if ((!load || instr != &load->instr) && instr != &store->instr)
                continue;
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             b.cursor = nir_before_instr(instr);
             nir_src_rewrite(&intr->src[0],
                             nir_imm_intN_t(&b, 0, 16));
-            intr->intrinsic = intr == load ? nir_intrinsic_image_load
-                                           : nir_intrinsic_image_store;
+            intr->intrinsic = load && intr == load
+                                 ? nir_intrinsic_image_load
+                                 : nir_intrinsic_image_store;
          }
       }
       nir_progress(true, impl, nir_metadata_control_flow);
    }
 
    NIR_PASS(_, shader, nir_opt_dce);
-   if (g17p_has_unsupported_storage_descriptor_access(shader,
-                                                       texture_offset_B))
+   if (g17p_has_unsupported_storage_descriptor_access(
+          shader, texture_offset_B, pbe_offset_B))
       return false;
 
    *binding = (struct agx_g17p_storage_image_binding){
       .texture_offset_B = texture_offset_B,
       .pbe_offset_B = pbe_offset_B,
+      .write_only = load == NULL && atomics == 0,
    };
    return true;
 }

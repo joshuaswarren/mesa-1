@@ -2669,6 +2669,26 @@ test_3d_lod_witnesses(void)
    return 0;
 }
 
+static int
+test_image_write_state0_witnesses(void)
+{
+   uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH], length = 0;
+   struct agx3_image_write_desc d = {
+      .image_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      .image_value = 0,
+   };
+
+   CHECK(agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(length == 16 &&
+         hex_eq(bytes, length, "d71054000040000000040000881a0900"));
+
+   d.normalized = true;
+   CHECK(!agx3_tex_encode_image_write_rgba8_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2685,7 +2705,7 @@ main(void)
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias() ||
        test_offset_witnesses() || test_shadow_lod_witnesses() ||
-       test_3d_lod_witnesses())
+       test_3d_lod_witnesses() || test_image_write_state0_witnesses())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

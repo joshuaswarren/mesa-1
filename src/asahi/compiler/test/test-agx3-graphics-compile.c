@@ -3050,7 +3050,8 @@ build_cs_storage_image(unsigned mode)
    b.shader->info.workgroup_size[2] = 1;
 
    const enum pipe_format format =
-      mode == 1 ? PIPE_FORMAT_R16G16B16A16_UINT
+      mode >= 6 ? PIPE_FORMAT_R32_UINT
+      : mode == 1 ? PIPE_FORMAT_R16G16B16A16_UINT
                 : PIPE_FORMAT_R8G8B8A8_UINT;
    const enum glsl_sampler_dim dim =
       mode == 2 ? GLSL_SAMPLER_DIM_3D
@@ -3073,9 +3074,11 @@ build_cs_storage_image(unsigned mode)
    }
    if (mode == 5)
       nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, gid, 0), 4));
-   nir_def *value = nir_bindless_image_load(
-      &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
-      .image_array = false, .format = format, .access = ACCESS_RESTRICT);
+   nir_def *value = mode >= 6
+      ? nir_imm_ivec4(&b, 9, 8, 7, 6)
+      : nir_bindless_image_load(
+           &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
+           .image_array = false, .format = format, .access = ACCESS_RESTRICT);
    if (mode == 5) {
       nir_store_scratch(&b, value, zero, .write_mask = 0xf, .align_mul = 16);
       nir_pop_if(&b, NULL);
@@ -3085,7 +3088,14 @@ build_cs_storage_image(unsigned mode)
       &b, pbe, coord, zero,
       mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
       .image_dim = dim, .image_array = false, .format = format,
-      .access = ACCESS_RESTRICT);
+      .access = ACCESS_RESTRICT | (mode == 7 ? ACCESS_COHERENT : 0));
+   if (mode == 7) {
+      nir_bindless_image_atomic(
+         &b, 32, pbe, coord, zero, nir_imm_int(&b, 1),
+         .atomic_op = nir_atomic_op_iadd, .image_dim = dim,
+         .image_array = false, .format = format,
+         .access = ACCESS_RESTRICT | ACCESS_COHERENT);
+   }
    if (mode == 5)
       nir_pop_if(&b, NULL);
    return b.shader;
@@ -3094,7 +3104,7 @@ build_cs_storage_image(unsigned mode)
 static bool
 test_storage_image_lowering(void)
 {
-   for (unsigned mode = 0; mode < 6; ++mode) {
+   for (unsigned mode = 0; mode < 8; ++mode) {
       nir_shader *nir = build_cs_storage_image(mode);
       struct agx_g17p_storage_image_binding binding = {
          .texture_offset_B = UINT32_MAX,
@@ -3102,7 +3112,7 @@ test_storage_image_lowering(void)
       };
       const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
       unsigned bindless_handles = 0, bindless_ops = 0;
-      unsigned ordinary_loads = 0, ordinary_stores = 0;
+      unsigned ordinary_loads = 0, ordinary_stores = 0, atomics = 0;
       nir_foreach_function_impl(impl, nir) {
          nir_foreach_block(block, impl) {
             nir_foreach_instr(instr, block) {
@@ -3113,20 +3123,26 @@ test_storage_image_lowering(void)
                bindless_handles += op == nir_intrinsic_bindless_image_agx;
                bindless_ops += op == nir_intrinsic_bindless_image_load ||
                                op == nir_intrinsic_bindless_image_store;
+               atomics += op == nir_intrinsic_bindless_image_atomic ||
+                          op == nir_intrinsic_bindless_image_atomic_swap;
                ordinary_loads += op == nir_intrinsic_image_load;
                ordinary_stores += op == nir_intrinsic_image_store;
             }
          }
       }
 
-      const bool ok = mode == 0 || mode == 4 || mode == 5
+      const bool ok = mode == 0 || mode == 4 || mode == 5 || mode == 6 ||
+                      mode == 7
          ? lowered && binding.texture_offset_B == 64 &&
               binding.pbe_offset_B == 96 &&
-              bindless_handles == (mode == 4 ? 1 : 0) &&
-              bindless_ops == 0 && ordinary_loads == 1 && ordinary_stores == 1
+              binding.write_only == (mode == 6) &&
+              bindless_handles == (mode == 4 || mode == 7 ? 1 : 0) &&
+              bindless_ops == 0 && ordinary_loads == (mode >= 6 ? 0 : 1) &&
+              ordinary_stores == 1 && atomics == (mode == 7 ? 1 : 0)
          : !lowered && binding.texture_offset_B == UINT32_MAX &&
               binding.pbe_offset_B == UINT32_MAX && bindless_handles == 2 &&
-              bindless_ops == 2 && ordinary_loads == 0 && ordinary_stores == 0;
+              bindless_ops == 2 && ordinary_loads == 0 &&
+              ordinary_stores == 0 && atomics == 0;
       ralloc_free(nir);
       if (!ok)
          return false;

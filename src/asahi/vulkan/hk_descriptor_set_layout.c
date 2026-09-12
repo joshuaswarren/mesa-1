@@ -48,9 +48,19 @@ hk_descriptor_stride_align_for_type(
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
       *stride = hk_storage_image_descriptor_layout(
                    agx_chip_descriptor_generation(pdev->dev.chip)).stride;
-      if (pdev->dev.chip == AGX_CHIP_G17P)
+      if (pdev->dev.chip == AGX_CHIP_G17P) {
          *stride += HK_G17P_STORAGE_SW_SIZE;
-      *alignment = 8;
+         /* imgwci's native argument ABI requires a 32-byte-aligned PBE
+          * pointer. The PBE descriptor starts 32 bytes into the combined
+          * texture/PBE record, so both the binding offset and every array
+          * stride must preserve that alignment. Without this, an SSBO
+          * followed by a storage image places the PBE at +48 and compute
+          * stores silently target the wrong block. */
+         *alignment = HK_G17P_STORAGE_ALIGNMENT;
+         *stride = HK_G17P_STORAGE_STRIDE;
+      } else {
+         *alignment = 8;
+      }
       break;
 
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:

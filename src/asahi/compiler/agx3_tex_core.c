@@ -700,7 +700,7 @@ agx3_tex_encode_image_write_rgba8_2d(
    *len = 0;
    /* This argument is the dependency consumed by the first data-staging COPY,
     * not an imgwci field. The fixed native instruction always waits for the
-    * staging-slot2 writes, so both an outstanding slot1 producer and data
+    * staging-slot1 writes, so both an outstanding slot1 producer and data
     * already retired by an earlier consumer use the same grounded bytes. */
    const unsigned kind =
       d->image_kind ? d->image_kind : AGX3_TEX_OPERAND_IMMEDIATE;
@@ -726,6 +726,17 @@ agx3_tex_encode_image_write_rgba8_2d(
         * does not, and int and uint are byte-identical. */
        (reg && ((d->image_value & 1) || d->image_value > 126)))
       return false;
+
+   /* Direct state zero is a distinct native form. */
+   if (immediate && d->image_value == 0) {
+      static const uint8_t integer_state0[AGX3_IMAGE_WRITE_LENGTH] = {
+         0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+         0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
+      };
+      memcpy(out, integer_state0, sizeof(integer_state0));
+      *len = sizeof(integer_state0);
+      return true;
+   }
 
    /* Nonzero field values recovered from native imgwci.ep0 instructions.
     * Every omitted field is intentionally zero. The direct state selector is

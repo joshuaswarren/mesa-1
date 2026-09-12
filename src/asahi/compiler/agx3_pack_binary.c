@@ -1225,40 +1225,15 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
           agx3_append(emission, bytes, len);
 }
 
-/* Native G17P imgwci reads its integer coordinates through a dedicated pair
- * populated by this exact isel.ep35 form. Both selected values are the same,
- * so the select is a routing operation, not a source-level conditional. */
-static bool
-agx3_emit_image_coord(struct util_dynarray *emission,
-                      enum agx_isa_encoding enc, uint16_t dest, uint16_t src)
-{
-   if (enc != AGX_ISA_ENCODING_AGX3B || (dest & 1) || dest > 2 ||
-       (src & 1) || src > 254)
-      return false;
-
-   const struct agx3_field_kv base[] = {
-      {10, 5}, {11, 2}, {13, 2}, {42, 2}, {43, 2}, {46, 1},
-      {51, 12}, {57, 3}, {58, 2}, {72, 2}, {73, 2}, {76, 1},
-      {83, 12}, {89, 3}, {90, 2}, {106, 1},
-   };
-   const struct agx3_field_kv values[] = {
-      {6, dest}, {35, src}, {65, src},
-   };
-   uint8_t bytes[14], len = 0;
-   return agx3_bind_compose(enc, "isel", 35, base, ARRAY_SIZE(base), values,
-                            ARRAY_SIZE(values), bytes, &len) &&
-          len == sizeof(bytes) && agx3_append(emission, bytes, len);
-}
-
 /* Two bounded public storage-image forms: integer 2D state0 fed by an image
  * load or atomic result, and normalized formatted-float state1 fed by one
  * explicit-LOD sample. The native imgwci operation is the coherent image
  * write form; NIR's coherent bit does not select a different instruction.
  * The PBE descriptor selects RGBA8 versus RGB10A2.
- * The four slot2 COPYs route the packed vec4 into the exact imgwci data lanes.
+ * The four slot1 COPYs route the packed vec4 into the exact imgwci data lanes.
  * The first COPY consumes the one-shot texture dependency when it is still
  * outstanding. An intervening bounds consumer may already have retired that
- * producer; either way native imgwci waits for the new staging-slot2 writes.
+ * producer; either way native imgwci waits for the new staging-slot1 writes.
  * Validation happens before the first append, so a refusal leaves the output
  * transaction untouched. */
 static bool
@@ -1315,9 +1290,18 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
 
    struct util_dynarray staged;
    util_dynarray_init(&staged, NULL);
+   uint8_t coord_bytes[AGX3_STAGE_MAX_LENGTH], coord_len = 0;
    const uint16_t data_dest[4] = {4, 6, 12, 14};
-   if (!agx3_emit_image_coord(&staged, enc, 0, I->src[1].value) ||
-       !agx3_emit_image_coord(&staged, enc, 2, I->src[1].value + 2)) {
+   /* imgwci consumes integer coordinates from staging halves 0 and 2. Native
+    * texture/image kernels publish ordinary GPR coordinates with COPY on the
+    * same slot the instruction waits for. Keeping the source retained also
+    * matches the native write kernel, whose address calculation may reuse it. */
+   if (!agx3_stage_copy_source(enc, 0, I->src[1].value, false, 1, 0,
+                               coord_bytes, &coord_len) ||
+       !agx3_append(&staged, coord_bytes, coord_len) ||
+       !agx3_stage_copy_source(enc, 2, I->src[1].value + 2, false, 1, 0,
+                               coord_bytes, &coord_len) ||
+       !agx3_append(&staged, coord_bytes, coord_len)) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
       goto fail;
@@ -1327,7 +1311,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
       if (!agx3_stage_copy_source(enc, data_dest[c],
                                   I->src[0].value + 2 * c,
-                                  I->src[0].discard, 2,
+                                  I->src[0].discard, 1,
                                   c == 0 ? wait_mask : 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {

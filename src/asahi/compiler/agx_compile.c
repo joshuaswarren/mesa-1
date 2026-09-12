@@ -1851,8 +1851,14 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
           * there at all. */
          switch (nir_intrinsic_format(instr)) {
          case PIPE_FORMAT_R8G8B8A8_UINT:
+         case PIPE_FORMAT_R32_UINT:
             stored = nir_type_uint;
             break;
+         case PIPE_FORMAT_R8G8B8A8_SINT:
+         case PIPE_FORMAT_R32_SINT:
+            stored = nir_type_int;
+            break;
+         case PIPE_FORMAT_R32_FLOAT:
          case PIPE_FORMAT_R8G8B8A8_UNORM:
          case PIPE_FORMAT_R10G10B10A2_UNORM:
             stored = nir_type_float;

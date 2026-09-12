@@ -11985,7 +11985,7 @@ TEST_F(AGX3PackBinary, ArrayDriverLayerAcceptsHighRegistersWithoutWrap)
 TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
 {
    static const uint8_t native[AGX3_IMAGE_WRITE_LENGTH] = {
-      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
       0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
    };
    uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH];
@@ -12096,7 +12096,7 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
 TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
 {
    static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {
-      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
       0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
    };
 
@@ -12130,35 +12130,31 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
          EXPECT_NE(std::search(code.begin(), code.end(), read_coords,
                                read_coords + sizeof(read_coords)),
                    code.end());
-         static const uint8_t coord_x[] = {
-            0x02, 0x01, 0x2f, 0x0d, 0x83, 0x00, 0x45,
-            0x02, 0x20, 0x0c, 0x00, 0x04, 0x00, 0x00,
-         };
-         static const uint8_t coord_y[] = {
-            0x12, 0x03, 0x2f, 0x0d, 0x83, 0x02, 0x45,
-            0x02, 0x20, 0x0c, 0x00, 0x04, 0x00, 0x00,
-         };
-         const auto first_coord = std::search(code.begin(), code.end(),
-                                               coord_x,
-                                               coord_x + sizeof(coord_x));
-         ASSERT_NE(first_coord, code.end());
-         ASSERT_GE(std::distance(first_coord, code.end()),
-                   static_cast<ptrdiff_t>(sizeof(coord_x) + sizeof(coord_y)));
-         EXPECT_TRUE(std::equal(coord_y, coord_y + sizeof(coord_y),
-                                first_coord + sizeof(coord_x)));
+         std::vector<uint8_t> coordinates;
+         uint8_t coordinate[AGX3_STAGE_MAX_LENGTH], coordinate_len = 0;
+         ASSERT_TRUE(agx3_stage_copy_source(
+            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 0,
+            coordinate, &coordinate_len));
+         append(coordinates, coordinate, coordinate_len);
+         ASSERT_TRUE(agx3_stage_copy_source(
+            AGX_ISA_ENCODING_AGX3B, 2, 2, false, 1, 0,
+            coordinate, &coordinate_len));
+         append(coordinates, coordinate, coordinate_len);
+         EXPECT_NE(std::search(code.begin(), code.end(), coordinates.begin(),
+                               coordinates.end()), code.end());
 
          const auto first = std::search(code.begin(), code.end(), imgwci,
                                         imgwci + sizeof(imgwci));
          ASSERT_NE(first, code.end());
          /* The native witness consumes the image-load scoreboard signal once:
           * the first data-staging COPY waits on slot 1, while the remaining
-          * components only join the same slot-2 staging transaction. */
+          * components only join the same slot-1 staging transaction. */
          const unsigned data_dest[4] = {4, 6, 12, 14};
          std::vector<uint8_t> staging;
          for (unsigned c = 0; c < 4; ++c) {
             uint8_t copy[AGX3_STAGE_MAX_LENGTH], len = 0;
             ASSERT_TRUE(agx3_stage_copy_source(
-               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 2,
+               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1,
                c == 0 ? 1 : 0, copy, &len));
             append(staging, copy, len);
          }

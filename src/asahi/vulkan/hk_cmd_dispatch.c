@@ -1033,13 +1033,21 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             return;
          }
       } else if (s->info.agx3_storage_image_valid) {
-         /* Exact access::read_write control descriptor from the native G17P
-          * Tier-2 argument buffer. Preserve its full slot and alignment. */
+         /* Exact access controls from native G17P Tier-2 argument buffers.
+          * A write-only resource is a PBE pointer followed by write-control;
+          * read_write instead starts with texture/PBE and points at the
+          * paired read/write controls in its third slot. */
          static const uint8_t native_read_write_control[32] = {
             0x68, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x1b,
+            0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
          };
+         static const uint8_t native_write_control[32] = {
+            0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+         };
+         const bool write_only = s->info.agx3_storage_image.write_only;
          const uint64_t access_control =
-            hk_pool_upload(cmd, native_read_write_control,
+            hk_pool_upload(cmd, write_only ? native_write_control
+                                           : native_read_write_control,
                            sizeof(native_read_write_control), 32);
          if (!access_control) {
             vk_command_buffer_set_error(&cmd->vk,
@@ -1047,13 +1055,20 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             return;
          }
 
-         pointers[0] = set_address +
-                       s->info.agx3_storage_image.texture_offset_B;
-         pointers[1] = set_address + s->info.agx3_storage_image.pbe_offset_B;
-         pointers[2] = access_control;
-         /* The native read_write ISEL clamps each unsigned coordinate against
-          * uniform half12. The only consumed vector word is 0xffff. */
-         pointers[3] = UINT64_C(0xffff);
+         if (write_only) {
+            pointers[0] =
+               set_address + s->info.agx3_storage_image.pbe_offset_B;
+            pointers[1] = access_control;
+         } else {
+            pointers[0] = set_address +
+                          s->info.agx3_storage_image.texture_offset_B;
+            pointers[1] =
+               set_address + s->info.agx3_storage_image.pbe_offset_B;
+            pointers[2] = access_control;
+            /* The native read_write ISEL clamps each unsigned coordinate
+             * against uniform half12. The consumed vector word is 0xffff. */
+            pointers[3] = UINT64_C(0xffff);
+         }
       } else {
          /* Native G17P compute read() uses table pointers in uniform
           * halves0..7, with ordinary buffer arguments beginning at half8. */

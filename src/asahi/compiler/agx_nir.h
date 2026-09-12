@@ -81,6 +81,7 @@ struct agx_g17p_txf_binding {
 struct agx_g17p_storage_image_binding {
    uint32_t texture_offset_B;
    uint32_t pbe_offset_B;
+   bool write_only;
 };
 
 /* Apple's sampled-texture-to-write-image kernel ABI places a sampled texture,

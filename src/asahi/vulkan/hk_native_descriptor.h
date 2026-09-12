@@ -21,6 +21,8 @@
 #define HK_PBE_DESCRIPTOR_AGX3_SIZE     32
 #define HK_SAMPLED_IMAGE_SW_SIZE        40
 #define HK_G17P_STORAGE_SW_SIZE         16
+#define HK_G17P_STORAGE_ALIGNMENT       32
+#define HK_G17P_STORAGE_STRIDE          96
 
 static inline bool
 hk_pack_g17p_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,

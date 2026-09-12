@@ -399,7 +399,7 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * Exact G17P storage-image write instruction from native direct and
  * argument-buffer-indexed `texture2d<..., access::write>` witnesses. The
  * instruction consumes fixed coordinate/data staging lanes populated by the
- * caller and waits on staging slot 2. `wait_mask` is the upstream texture
+ * caller and waits on staging slot 1. `wait_mask` is the upstream texture
  * dependency consumed by the first data-staging write, not an imgwci field;
  * it may name any of AGX3b's six producer slots.
  *
