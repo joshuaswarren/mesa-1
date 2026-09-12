@@ -130,6 +130,20 @@ struct tps_vec {
 };
 
 static const struct tps_vec tps_vecs[] = {
+   /* G16G repeat-tps.metal: repeated dynamic read, then final read. f66
+    * consumes TPS on the last read; f27 independently consumes its GPR index. */
+   {AGX_ISA_ENCODING_AGX3B, true, 0,
+    {.data = 8, .width = AGX3_MEM_W32, .mask = 15,
+     .byte_offset = 16, .index = 0, .frame_region = 6,
+     .retain_tps = true, .slot = 1, .wait_mask = 1},
+    {0x6f, 0x10, 0x54, 0x08, 0x00, 0x02, 0x17, 0x0a,
+     0x04, 0x00, 0x02, 0x00}, 12},
+   {AGX_ISA_ENCODING_AGX3B, true, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 15,
+     .byte_offset = 16, .index = 0, .index_kill = true,
+     .frame_region = 6, .slot = 6, .wait_mask = 1u << 5},
+    {0x6f, 0x00, 0x56, 0x00, 0x00, 0x0a, 0x57, 0x0b,
+     0x04, 0x40, 0x02, 0x00}, 12},
    {AGX_ISA_ENCODING_AGX3B, false, 0,
     {.data = 48, .width = AGX3_MEM_W32, .mask = 15, .shift = 2,
      .byte_offset = 4, .index = 4, .frame_region = 5, .value_kill = true,

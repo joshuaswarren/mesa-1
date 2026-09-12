@@ -3414,9 +3414,8 @@ agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
 /* Mesa's scalar 16-bit or 32-bit stack operation is an exact match for
  * Apple's static copy/rld family: the immediate byte offset names a TPS
  * half-register and the single data operand names one half or one aligned GPR
- * pair, at W16 or W32.  Vector masks, dynamic offsets and modifiers stay on the
- * existing fail-closed path because they do not uniquely determine the
- * witnessed structural fields/forms. */
+ * pair, at W16 or W32. Constant vectors are split after RA and dynamic reads
+ * use LDTPS. Other modifiers stay on the fail-closed path. */
 static bool
 agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
                             uint16_t wait_mask, bool tps_live,
@@ -3569,9 +3568,53 @@ agx3_static_reload_rereads(agx_context *ctx, agx_instr **ordered,
 }
 
 static bool
+agx3_dynamic_stack_load(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_STACK_LOAD && I->nr_srcs == 1 &&
+          I->src[0].type == AGX_INDEX_REGISTER;
+}
+
+static bool
+agx3_translate_dynamic_stack_load(const agx_instr *I, uint8_t slot,
+                                  struct agx3_tps_desc *d)
+{
+   if (!agx3_dynamic_stack_load(I) || I->nr_dests != 1 ||
+       I->format != AGX_FORMAT_I32 || !I->mask || (I->mask & ~15))
+      return false;
+   const agx_index dst = I->dest[0], index = I->src[0];
+   if (!agx3_tex_plain_reg(dst) || dst.size != AGX_SIZE_32 ||
+       agx_channels(dst) != util_bitcount(I->mask) || (dst.value & 1) ||
+       dst.value + 2 * agx_channels(dst) > 256 ||
+       !agx3_tex_plain_reg(index) || index.size != AGX_SIZE_32 ||
+       agx_channels(index) != 1 || (index.value & 1) || index.value > 254 ||
+       (index.cache && index.discard))
+      return false;
+   /* G16G native uint4 private-array witness: ldtps frame1, byte index,
+    * mask15. Static COPY half8 and dynamic byte offset16 name the same data. */
+   *d = (struct agx3_tps_desc){
+      .data = dst.value, .width = AGX3_MEM_W32, .mask = I->mask,
+      .index = index.value, .index_kill = index.discard,
+      .frame_region = 1, .retain_tps = true, .slot = slot,
+   };
+   return true;
+}
+
+static bool
 agx3_append_static_spill_tokens(const agx_instr *I,
                                 struct agx3_slot_instr *slot_instr)
 {
+   if (agx3_dynamic_stack_load(I)) {
+      struct agx3_tps_desc desc;
+      if (!agx3_translate_dynamic_stack_load(I, 1, &desc) ||
+          slot_instr->nr_dsts >= AGX3_SLOT_MAX_REGS)
+         return false;
+      slot_instr->dst[slot_instr->nr_dsts++] = AGX3_SLOT_DYNAMIC_TPS_TOKEN;
+      return true;
+   }
+   if (slot_instr->nr_srcs >= AGX3_SLOT_MAX_REGS)
+      return false;
+   /* A dynamically addressed read can alias any static write. */
+   slot_instr->src[slot_instr->nr_srcs++] = AGX3_SLOT_DYNAMIC_TPS_TOKEN;
    const bool is_store = I->op == AGX_OPCODE_STACK_STORE;
    struct agx3_static_spill_store_desc store;
    struct agx3_static_spill_load_desc load;
@@ -9402,6 +9445,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!ok)
                AGX3_REFUSE(I);
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
+            continue;
+         }
+
+         if (agx3_dynamic_stack_load(I)) {
+            struct agx3_tps_desc desc;
+            uint8_t bytes[AGX3_LOCAL_TPS_MAX_LENGTH], len;
+            /* The address is unknown at compile time. Complete outstanding
+             * static writes before reading; retain this read's alias token
+             * until later static accesses have waited for it. */
+            const uint16_t retire = wait | outstanding_here;
+            if (!agx3_translate_dynamic_stack_load(I, slot, &desc) ||
+                (retire && !agx3_retire_slots_noop(emission, enc, retire)) ||
+                !agx3_tps_encode_load(enc, &desc, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            outstanding &= ~retire;
+            outstanding |= 1u << (slot - 1);
             continue;
          }
 

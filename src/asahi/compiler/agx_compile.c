@@ -1926,6 +1926,43 @@ agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
       packed_bytes;
 }
 
+/* Scalarize static 32-bit stack vectors after RA so both NIR scratch and
+ * allocator spills use the native scalar TPS copy/rld protocol. No temporary
+ * GPR is required: component registers and frame offsets are already fixed. */
+static void
+agx_lower_agx3_stack_vectors(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      const bool store = I->op == AGX_OPCODE_STACK_STORE;
+      if ((!store && I->op != AGX_OPCODE_STACK_LOAD) ||
+          I->format != AGX_FORMAT_I32 || I->mask == 1)
+         continue;
+      agx_index data = store ? I->src[0] : I->dest[0];
+      agx_index offset = I->src[store ? 1 : 0];
+      if (data.type != AGX_INDEX_REGISTER || data.memory ||
+          (data.size != AGX_SIZE_32 && data.size != AGX_SIZE_64) ||
+          offset.type != AGX_INDEX_IMMEDIATE)
+         continue;
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      unsigned packed = 0;
+      u_foreach_bit(c, I->mask) {
+         agx_index component = data;
+         component.value += 2 * packed++;
+         component.channels_m1 = 0;
+         component.size = AGX_SIZE_32;
+         agx_index address = agx_immediate(offset.value + 4 * c);
+         if (store)
+            agx_stack_store(&b, component, address, AGX_FORMAT_I32, 1);
+         else
+            agx_stack_load_to(&b, component, address, AGX_FORMAT_I32, 1);
+      }
+      agx_remove_instruction(I);
+   }
+}
+
 static void
 agx_emit_load_scratch(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
 {
@@ -7263,6 +7300,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    agx_lower_64bit_postra(ctx);
+   agx_lower_agx3_stack_vectors(ctx);
 
    if (ctx->scratch_size_B > 0) {
       /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
