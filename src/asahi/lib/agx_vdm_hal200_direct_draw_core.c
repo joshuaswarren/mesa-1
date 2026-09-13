@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_hal200_direct_draw_core.h"
+#include "agx_abi.h"
 #include "agx_vdm_index_list_core.h"
 
 #include <string.h>
@@ -161,12 +162,18 @@ agx_vdm_hal200_index_range(uint64_t address, uint64_t range_B,
    const uint64_t limit = UINT64_C(1) << 48;
    const uint64_t offset_B = (uint64_t)first_index * index_size_B;
    const uint64_t count_B = (uint64_t)count * index_size_B;
+   /* Null indices use the canonical zero page with a one-dword native bound.
+    * Repeated zero indices must not reduce the draw count or widen that bound.
+    * Ordinary buffers still require their complete requested span in range.
+    */
+   const bool zero_indices = address == AGX_ZERO_PAGE_ADDRESS &&
+                             range_B == 4 && first_index == 0;
    if (!relocated || !size_word || !address ||
        (index_size_B != 1 && index_size_B != 2 && index_size_B != 4) ||
        (address & (index_size_B - 1)) ||
        address >= limit || !range_B || range_B > UINT32_MAX ||
        range_B > limit - address || !count || offset_B >= range_B ||
-       count_B > range_B - offset_B)
+       (!zero_indices && count_B > range_B - offset_B))
       return false;
 
    /* Native direct indexed 0x47e57c..0x47e584 rounds the supplied byte

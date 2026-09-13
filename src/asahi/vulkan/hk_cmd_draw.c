@@ -5178,7 +5178,10 @@ hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw,
    /* Soft fault does not cover the hardware index buffer fetch, use the zero
     * page instead.
     */
-   if (draw->index_buffer_range_B == 0) {
+   if (draw->index_buffer_range_B == 0 ||
+       (dev->dev.chip == AGX_CHIP_G17P &&
+        draw->index_buffer == AGX_ZERO_PAGE_ADDRESS &&
+        draw->index_buffer_range_B == 4)) {
       draw->index_buffer = AGX_ZERO_PAGE_ADDRESS;
       draw->index_buffer_range_B = 4;
       draw->start = 0;
@@ -5635,6 +5638,19 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* Null index bindings execute the requested vertices, all with index zero.
+    * Normalize before native admission and conditional draw lowering, as the
+    * older path does in hk_needs_index_robustness. The one-dword range bounds
+    * hardware fetches to the zero page; it is not a count limit.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
+       draw_.index_buffer_range_B == 0) {
+      draw_.index_buffer = AGX_ZERO_PAGE_ADDRESS;
+      draw_.index_buffer_range_B = 4;
+      draw_.start = 0;
+   }
    const struct agx_draw api_draw = draw_;
    bool conditional_direct_indexed = false;
 
@@ -5691,8 +5707,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    hk_stat_enabled(stat_ia_prims) ||
                    hk_stat_enabled(stat_vs_inv) ||
                    hk_stat_enabled(stat_c_inv) || hk_stat_enabled(stat_c_prims);
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
    /* Validate the native index domain before robustness or geometry lowering
     * can introduce a pre-render compute dispatch.  Indirect robust draws keep
     * their application range for the ordered GPU-side bounds pass; direct
