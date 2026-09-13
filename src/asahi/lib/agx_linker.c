@@ -45,7 +45,11 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
 
    const bool g17p = chip == AGX_CHIP_G17P;
    key->preserve_zero_mask = g17p;
-   key->lower_srgb = g17p;
+   /* Both AGX3 tile interfaces move packed bytes. The RGB transfer function
+    * belongs around blending; alpha remains linear. Packed float lowering
+    * is a separate capability and remains confined to G17P. */
+   key->lower_srgb = g17p || chip == AGX_CHIP_G17G;
+   key->lower_r11g11b10 = g17p;
 }
 
 bool

@@ -187,7 +187,10 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
       unsigned bindless_base = 0;
       NIR_PASS(_, shader, agx_nir_lower_tilebuffer, tib, NULL, &bindless_base,
-               NULL, NULL, false, cache->dev->chip == AGX_CHIP_G17P);
+               NULL, NULL, false,
+               cache->dev->chip == AGX_CHIP_G17P ||
+                  cache->dev->chip == AGX_CHIP_G17G,
+               cache->dev->chip == AGX_CHIP_G17P);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
       NIR_PASS(_, shader, agx_nir_lower_texture);
@@ -339,7 +342,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 {
    const bool g17g = cache->dev->chip == AGX_CHIP_G17G;
    if (g17g) {
-      const enum pipe_format format = key->tib.logical_format[0];
+      const enum pipe_format format = util_format_linear(key->tib.logical_format[0]);
       if (key->op[0] != AGX_EOT_STORE || key->tib.nr_samples != 1 ||
           key->tib.layered || key->tib.spilled[0] ||
           agx_tilebuffer_offset_B(&key->tib, 0) != 0 ||
@@ -424,9 +427,9 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
           * PBE descriptor also uses R32_UINT to preserve those exact bits. */
          physical = PIPE_FORMAT_R32_UINT;
-      } else if (cache->dev->chip == AGX_CHIP_G17P &&
+      } else if ((cache->dev->chip == AGX_CHIP_G17P || g17g) &&
           util_format_is_srgb(key->tib.logical_format[rt])) {
-         /* G17P lowers the sRGB transfer explicitly before ST_TILE and stores
+         /* AGX3 lowers the sRGB transfer explicitly before ST_TILE and stores
           * the resulting bytes in a U8NORM imageblock.  EOT is a raw transfer
           * from that imageblock to the format-aware PBE descriptor; asking
           * IMGWBLK to consume SRGBA8 would perform a second conversion and has

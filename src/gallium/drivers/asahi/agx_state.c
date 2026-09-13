@@ -1911,7 +1911,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                                   (2 * BITSET_LAST_BIT(nir->info.images_used));
          unsigned rt_spill = rt_spill_base;
          NIR_PASS(_, nir, agx_nir_lower_tilebuffer, &tib, NULL, &rt_spill, NULL,
-                  &translucent, false, dev->chip == AGX_CHIP_G17P);
+                  &translucent, false,
+                  dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G,
+                  dev->chip == AGX_CHIP_G17P);
       }
 
       if (nir->info.fs.uses_sample_shading) {
@@ -4238,6 +4240,9 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       struct agx_ptr pbe = agx_pool_alloc_aligned(
          &batch->pool, sizeof(struct agx_gallium_pbe_descriptor), 32);
       struct pipe_image_view view = image_view_for_surface(surf);
+      /* The fragment and background shaders already encode sRGB into the
+       * packed imageblock. Store those bytes without a second conversion. */
+      view.format = util_format_linear(view.format);
       if (!agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false,
                                 batch->feedback & PIPE_CLEAR_COLOR0))
          agx_native_descriptor_rejected(dev, "M5 EOT PBE");

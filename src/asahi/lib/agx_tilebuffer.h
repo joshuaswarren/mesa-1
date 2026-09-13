@@ -102,7 +102,7 @@ bool agx_nir_lower_tilebuffer(struct nir_shader *shader,
                               uint8_t *colormasks, unsigned *bindless_base,
                               struct nir_def *write_samples, bool *translucent,
                               bool preserve_zero_mask,
-                              bool lower_g17p_formats);
+                              bool lower_srgb, bool lower_r11g11b10);
 
 bool agx_nir_lower_to_per_sample(struct nir_shader *shader);
 

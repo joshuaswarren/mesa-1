@@ -2807,6 +2807,36 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
    }
 }
 
+static agx_index
+agx3_materialize_f32_source(agx_builder *b, agx_index source)
+{
+   assert(source.type != AGX_INDEX_IMMEDIATE);
+   assert(source.size == AGX_SIZE_16 || source.size == AGX_SIZE_32);
+   const bool absolute = source.abs, negate = source.neg;
+   source.abs = source.neg = false;
+
+   if (source.size == AGX_SIZE_16) {
+      agx_index widened = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, widened, source);
+      source = widened;
+   }
+
+   /* IEEE abs/neg are exact sign-bit operations, including signed zero. */
+   if (absolute) {
+      agx_index mask = agx_mov_imm(b, 32, UINT32_C(0x7fffffff));
+      agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+      agx_bitop_to(b, result, source, mask, 0x8 /* AND */);
+      source = result;
+   }
+   if (negate) {
+      agx_index sign = agx_mov_imm(b, 32, UINT32_C(0x80000000));
+      agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+      agx_bitop_to(b, result, source, sign, 0x6 /* XOR */);
+      source = result;
+   }
+   return source;
+}
+
 static void
 agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
@@ -2983,6 +3013,55 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
             uint32_t bits;
             memcpy(&bits, &value, sizeof(bits));
             I->src[immediate_src] = agx_mov_imm(&b, 32, bits);
+         }
+      }
+
+      /* G17G's proven logarithm endpoint consumes f32. Optimizing a
+       * mediump value followed by log2 may fold away its widening move;
+       * restore that exact conversion before RA instead of inventing a
+       * mixed-width instruction encoding. Every finite half is exactly
+       * representable in f32, so the original input is retained. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_LOG2 && I->nr_srcs == 1 && I->nr_dests == 1 &&
+          I->dest[0].size == AGX_SIZE_32 &&
+          I->src[0].type != AGX_INDEX_IMMEDIATE &&
+          I->src[0].size == AGX_SIZE_16) {
+         agx_index source = I->src[0];
+         source.abs = source.neg = false;
+         agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+         agx_fmov_to(&b, widened, source);
+         widened.abs = I->src[0].abs;
+         widened.neg = I->src[0].neg;
+         I->src[0] = widened;
+      }
+
+      /* The G17G full-register select compares f32 operands. Retain a
+       * mediump comparator's value by widening it before that comparison;
+       * leave the selected values and ordered comparison condition intact. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 && I->nr_dests == 1 &&
+          I->dest[0].size == AGX_SIZE_32 &&
+          I->src[2].size == AGX_SIZE_32 && I->src[3].size == AGX_SIZE_32) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+                (I->src[s].size != AGX_SIZE_16 && I->src[s].size != AGX_SIZE_32) ||
+                (I->src[s].size == AGX_SIZE_32 &&
+                 !I->src[s].abs && !I->src[s].neg))
+               continue;
+            I->src[s] = agx3_materialize_f32_source(&b, I->src[s]);
+         }
+      }
+
+      /* Native FLTNORM consumes unmodified f32 sources. A negative alpha
+       * from subtractive blending must reach its normal clamp/quantization,
+       * not be dropped or have its sign modifier silently ignored. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          I->op == AGX_OPCODE_FLTNORM_AGX3) {
+         agx_foreach_src(I, s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE &&
+                !agx_is_null(I->src[s]) && I->src[s].size == AGX_SIZE_32 &&
+                (I->src[s].abs || I->src[s].neg))
+               I->src[s] = agx3_materialize_f32_source(&b, I->src[s]);
          }
       }
 

@@ -27,7 +27,8 @@ struct ctx {
    uint8_t outputs_written;
    nir_def *write_samples;
    bool preserve_zero_mask;
-   bool lower_g17p_formats;
+   bool lower_srgb;
+   bool lower_r11g11b10;
 };
 
 static nir_def *
@@ -301,10 +302,10 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    enum pipe_format format = agx_tilebuffer_physical_format(tib, rt);
    unsigned comps = util_format_get_nr_components(logical_format);
    const bool lower_r11g11b10 =
-      ctx->lower_g17p_formats &&
+      ctx->lower_r11g11b10 &&
       logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
    const bool lower_srgb =
-      ctx->lower_g17p_formats && util_format_is_srgb(logical_format);
+      ctx->lower_srgb && util_format_is_srgb(logical_format);
    const enum pipe_format lowered_format =
       lower_r11g11b10
          ? PIPE_FORMAT_R32_UINT
@@ -430,7 +431,8 @@ bool
 agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
                          uint8_t *colormasks, unsigned *bindless_base,
                          nir_def *write_samples, bool *translucent,
-                         bool preserve_zero_mask, bool lower_g17p_formats)
+                         bool preserve_zero_mask, bool lower_srgb,
+                         bool lower_r11g11b10)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -440,7 +442,8 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
       .translucent = translucent,
       .write_samples = write_samples,
       .preserve_zero_mask = preserve_zero_mask,
-      .lower_g17p_formats = lower_g17p_formats,
+      .lower_srgb = lower_srgb,
+      .lower_r11g11b10 = lower_r11g11b10,
    };
 
    /* Allocate 1 texture + 1 PBE descriptor for each spilled descriptor */

@@ -46,11 +46,11 @@ check_lowering(nir_shader *shader, unsigned expected_powers)
 }
 
 static bool
-compile_epilog(nir_shader *shader, const char *name)
+compile_epilog(nir_shader *shader, const char *name, enum agx_isa_encoding encoding)
 {
    agx_preprocess_nir(shader);
    struct agx_shader_key backend_key = {
-      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .dev.encoding = encoding,
       .secondary = true,
       .no_preamble = true,
    };
@@ -67,19 +67,25 @@ main(void)
 {
    struct agx_fs_epilog_key policy = {
       .lower_srgb = true,
+      .lower_r11g11b10 = true,
       .preserve_zero_mask = true,
    };
    agx_fs_epilog_apply_device_policy(AGX_CHIP_G13G, &policy);
-   if (policy.lower_srgb || policy.preserve_zero_mask) {
+   if (policy.lower_srgb || policy.lower_r11g11b10 || policy.preserve_zero_mask) {
       fprintf(stderr, "legacy device inherited G17P epilog policy\n");
       return 1;
    }
    agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &policy);
-   if (!policy.lower_srgb || !policy.preserve_zero_mask) {
+   if (!policy.lower_srgb || !policy.lower_r11g11b10 || !policy.preserve_zero_mask) {
       fprintf(stderr, "G17P framebuffer epilog policy is incomplete\n");
       return 1;
    }
    agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, NULL);
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17G, &policy);
+   if (!policy.lower_srgb || policy.lower_r11g11b10 || policy.preserve_zero_mask) {
+      fprintf(stderr, "G17G sRGB policy changed an unrelated format capability\n");
+      return 1;
+   }
 
    struct agx_fs_epilog_key key = {
       .link.loc_written = BITFIELD_BIT(0),
@@ -106,8 +112,38 @@ main(void)
       return 1;
    }
 
-   bool ok = compile_epilog(b.shader, "G17P sRGB blend epilog");
+   bool ok = compile_epilog(b.shader, "G17P sRGB blend epilog",
+                           AGX_ISA_ENCODING_AGX3B);
    ralloc_free(b.shader);
+
+   for (unsigned half = 0; half < 2; ++half) {
+      struct agx_fs_epilog_key m5_key = key;
+      agx_fs_epilog_apply_device_policy(AGX_CHIP_G17G, &m5_key);
+      m5_key.link.size_32 = half ? 0 : BITFIELD_BIT(0);
+      nir_builder m5 = nir_builder_init_simple_shader(
+         0, &agx_nir_options, "G17G sRGB blend epilog");
+      agx_nir_fs_epilog(&m5, &m5_key);
+      if (!check_lowering(m5.shader, 2)) {
+         fprintf(stderr, "G17G sRGB blend did not preserve both RGB conversions\n");
+         return 1;
+      }
+      ok &= compile_epilog(m5.shader, "G17G sRGB blend epilog",
+                           AGX_ISA_ENCODING_AGX3C);
+      ralloc_free(m5.shader);
+
+      /* Reverse subtraction retains a negated mediump source inside the
+       * transfer function, exercising logarithm modifier legalization. */
+      m5_key.blend.rt[0].mode = agx_pack_blend_standard(
+         PIPE_BLEND_REVERSE_SUBTRACT, PIPE_BLENDFACTOR_DST_ALPHA,
+         PIPE_BLENDFACTOR_ZERO, PIPE_BLEND_REVERSE_SUBTRACT,
+         PIPE_BLENDFACTOR_DST_ALPHA, PIPE_BLENDFACTOR_ZERO);
+      nir_builder negative = nir_builder_init_simple_shader(
+         0, &agx_nir_options, "G17G negative sRGB blend epilog");
+      agx_nir_fs_epilog(&negative, &m5_key);
+      ok &= compile_epilog(negative.shader, "G17G negative sRGB blend epilog",
+                           AGX_ISA_ENCODING_AGX3C);
+      ralloc_free(negative.shader);
+   }
 
    /* A disabled colour mask must preserve the raw encoded tile. It needs one
     * real U8 load/store pair but no sRGB round trip. */
@@ -123,7 +159,8 @@ main(void)
       fprintf(stderr, "G17P zero-mask epilog did not preserve the encoded tile\n");
       return 1;
    }
-   ok &= compile_epilog(masked.shader, "G17P zero-mask sRGB epilog");
+   ok &= compile_epilog(masked.shader, "G17P zero-mask sRGB epilog",
+                        AGX_ISA_ENCODING_AGX3B);
    ralloc_free(masked.shader);
    return ok ? 0 : 1;
 }

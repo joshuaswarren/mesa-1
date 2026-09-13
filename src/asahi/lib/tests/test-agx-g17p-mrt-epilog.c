@@ -134,6 +134,7 @@ compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
       .link = *link,
       .nr_samples = 1,
       .lower_srgb = true,
+      .lower_r11g11b10 = true,
       .preserve_zero_mask = true,
    };
    memset(key.remap, -1, sizeof(key.remap));
@@ -202,7 +203,7 @@ test_wboit_background_clear(void)
    agx_preprocess_nir(b.shader);
    unsigned bindless_base = 0;
    NIR_PASS(_, b.shader, agx_nir_lower_tilebuffer, &tib, NULL,
-            &bindless_base, NULL, NULL, false, false);
+            &bindless_base, NULL, NULL, false, false, false);
    NIR_PASS(_, b.shader, agx_nir_lower_monolithic_msaa, tib.nr_samples);
    NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, tib.nr_samples);

@@ -177,6 +177,7 @@ main(void)
                      .blend.alpha_to_coverage = (w1 >> 8) & 1,
                      .blend.alpha_to_one = (w1 >> 9) & 1,
                      .lower_srgb = srgb != 0,
+                     .lower_r11g11b10 = srgb != 0,
                   };
                   memset(key.remap, -1, sizeof(key.remap));
                   key.remap[0] = 0;
