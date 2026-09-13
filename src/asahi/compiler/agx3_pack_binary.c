@@ -1461,6 +1461,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool array = I->dim == AGX_DIM_2D_ARRAY || cube_array;
    const bool three_d = I->dim == AGX_DIM_3D;
    const bool cube = I->dim == AGX_DIM_CUBE || cube_array;
+   const bool shadow_level_zero = shadow && !cube_array &&
+      valid_immediate_lod && immediate_level == 0.0f;
    /* A per-lane level and a per-lane bias share one staging form, so they
     * share one operand test: a live single-channel 16-bit register. */
    const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
@@ -1569,15 +1571,16 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (array && (biased_lod || (explicit_lod && immediate_lod))))) ||
        /* A depth comparison is orthogonal to the LOD shape on a plain 2D
         * sample. The array and cube comparisons use their own packed layer /
-        * CEM operands and keep the implicit LOD they were witnessed with. */
+        * CEM operands, with implicit LOD or the witnessed explicit zero. */
        (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
                    I->mask != (gather ? 15u : 1u) ||
-                   ((array || cube) && !implicit_lod))) ||
+                   ((array || cube) && !implicit_lod &&
+                    !shadow_level_zero))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
-   /* The witnessed copy form carries at most one producer dependency. */
+   /* The caller lowers additional required dependencies before staging. */
    if (wait_mask & (wait_mask - 1))
       return false;
 
@@ -1733,7 +1736,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          ? agx3_tex_stage_cube_array_shadow(
               enc, I->src[0].value + 6, stage_slot, 0,
               I->src[0].cache, I->src[0].discard, bytes, &len)
-         : agx3_tex_stage_cube_z(enc, 2, stage_slot, 0, false, true,
+         : agx3_tex_stage_cube_z(enc, immediate ? 2 : cem_scratch[0] + 2,
+                                 stage_slot, 0, false, true,
                                  bytes, &len);
       if (!packed || !agx3_append(emission, bytes, len))
          return false;
@@ -5665,7 +5669,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                   ctx->stage == MESA_SHADER_FRAGMENT &&
                                   sample_group_members_left > 1;
 
-   /* CEM has three real 32-bit destinations. They used to be hardcoded to
+   /* CEM axis 0 writes a magnitude/face pair, while axes 1 and 2 each write
+    * one 32-bit coordinate. Native cube_compare_zero uses half8 for axis0
+    * and half10 for PACK_SMPIR's face; two_cubes uses half24 and half26.
+    * Reserve the implicit face word too, or axis1 overwrites it.
+    * The destinations used to be hardcoded to
     * r0/r7/r2 after RA, which could overwrite live control-flow state or a
     * register descriptor (vkQuake's sky shader puts its texture handle in
     * r2:r3). Reserve one reusable bank immediately above RA's allocation and
@@ -5674,11 +5682,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    uint16_t cem_scratch[3] = {0};
    if (has_dynamic_cube_sample) {
       const unsigned base = (observed_max_reg + 2) & ~1u;
-      if (base + 4 > 190)
+      if (base + 6 > 190)
          goto fail;
-      for (unsigned i = 0; i < 3; ++i)
-         cem_scratch[i] = (uint16_t)(base + 2 * i);
-      ctx->max_reg = base + 5;
+      cem_scratch[0] = base;
+      cem_scratch[1] = base + 4;
+      cem_scratch[2] = base + 6;
+      ctx->max_reg = base + 7;
    }
 
    /* Apple's sampled G17P fragment objects use a distinct constant program
@@ -5940,7 +5949,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * SMP, with separate staging banks for the two results.
           *
           * A four-channel f32 texture result expands to eight tokens, leaving
-          * room for these three exact scratch destinations. */
+          * room for the four scratch words, including axis0's implicit face. */
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (I->dim == AGX_DIM_CUBE ||
@@ -5951,8 +5960,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const uint16_t fixed_scratch[3] = {0, 14, 4};
             const uint16_t *scratch = dynamic_cem ? cem_scratch
                                                    : fixed_scratch;
-            assert(nd + 3 <= AGX3_SLOT_MAX_REGS);
+            assert(nd + 4 <= AGX3_SLOT_MAX_REGS);
             e->dst[nd++] = scratch[0];
+            e->dst[nd++] = scratch[0] + 2;
             e->dst[nd++] = scratch[1];
             e->dst[nd++] = scratch[2];
          }
@@ -6498,6 +6508,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (retire && !agx3_retire_slots_noop(emission, enc, retire))
                   AGX3_REFUSE(I);
                sample_wait = native_wait;
+            }
+            /* A native staging COPY carries one producer wait. Lower only
+             * the extra RAW/WAW dependencies assigned to this sample, using
+             * the same grounded wait carrier as other compound instructions.
+             * Do not drain unrelated outstanding slots or change allocation.
+             * Previously encodable zero/one-wait samples remain unchanged. */
+            if (sample_wait & (sample_wait - 1)) {
+               const uint16_t staging_wait = sample_wait & -sample_wait;
+               if (!agx3_retire_slots_noop(emission, enc,
+                                           sample_wait & ~staging_wait))
+                  AGX3_REFUSE(I);
+               sample_wait = staging_wait;
             }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
                  !compute_gradient) ||

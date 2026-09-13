@@ -2568,9 +2568,28 @@ test_shadow_lod_witnesses(void)
    d.mask = 15;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
-   /* The array and cube comparisons use separately packed layer / CEM
-    * operands and were only witnessed with an implicit LOD; they must not
-    * inherit the sweep above. */
+   /* Native compute sample_compare(level(0)) retains the packed layer or
+    * CEM face and changes f139 to 2. Other explicit levels remain closed.
+    * These kernels carry no fragment sample-group terminator. */
+   const uint8_t native_zero[2][14] = {
+      {0x05,0x80,0x0c,0xa0,0x90,0x00,0x29,0x01,0x00,0x00,0x00,0x00,0x01,0x00},
+      {0x0d,0x80,0x0c,0xa0,0x90,0x00,0x33,0x00,0x00,0x00,0x00,0x00,0x01,0x00},
+   };
+   for (unsigned cube = 0; cube < 2; ++cube) {
+      d = base;
+      d.dest = cube ? 2 : 0;
+      d.array = !cube;
+      d.array_layer = cube ? 0 : 4;
+      d.cube = cube;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+      d.sample_group_nonterminal = true;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      CHECK(length == sizeof(native_zero[cube]) &&
+            !memcmp(bytes, native_zero[cube], length));
+   }
+
+   /* Level two and cube gradients do not inherit the level-zero witness. */
    d = base;
    d.array = true;
    d.array_layer = 6;

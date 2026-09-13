@@ -62,6 +62,13 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
+   const int level_src = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   /* Native G17P compute depthcube/depth2d_array sample_compare(level(0))
+    * keeps the ordinary face/layer staging and selects SMP f139=2. */
+   const bool shadow_level_zero = tex->is_shadow && !cube_array &&
+      tex->op == nir_texop_txl && level_src >= 0 &&
+      nir_src_is_const(tex->src[level_src].src) &&
+      nir_src_as_float(tex->src[level_src].src) == 0.0;
 
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
@@ -75,8 +82,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
          (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
           tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
        /* A cube comparison publishes its reference through the same CEM
-        * bracket the colour cube uses; it is witnessed only with an implicit
-        * LOD. A colour cube also takes an explicit per-lane level, on the
+        * bracket the colour cube uses, with implicit or explicit zero LOD.
+        * A colour cube also takes an explicit per-lane level, on the
         * plain cube exactly as on the cube array -- Apple's own
         * t.sample(s, dir, level(reg)) for texturecube<float> is
         *
@@ -90,7 +97,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * does, SuperTuxKart's IBL.frag included. */
        (cube &&
         (tex->op != nir_texop_tex &&
-         !(!tex->is_shadow && tex->op == nir_texop_txl))) ||
+         !((!tex->is_shadow || shadow_level_zero) &&
+            tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
        tex->coord_components != (cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
@@ -112,14 +120,14 @@ g17p_sample_shape(const nir_tex_instr *tex)
        * and gradient2d() each differ from the corresponding colour sample by
        * f143 alone, and gather_compare is the ordinary gather plus f143.
        * See the witness table in agx3_tex_core.c. The array and cube
-       * comparisons use separately packed layer / CEM operands and are only
-       * witnessed with an implicit LOD, so they stay on nir_texop_tex. */
+       * comparisons use separately packed layer / CEM operands and admit
+       * only implicit LOD or the native explicit-zero form above. */
       const int comparator =
          nir_tex_instr_src_index(tex, nir_tex_src_comparator);
       if (comparator < 0 ||
           nir_src_num_components(tex->src[comparator].src) != 1 ||
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
-          (tex->is_array && tex->op != nir_texop_tex))
+          (tex->is_array && tex->op != nir_texop_tex && !shadow_level_zero))
          return false;
    }
 

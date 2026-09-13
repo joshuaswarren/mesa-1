@@ -441,7 +441,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
-        ((d->array || d->cube) && d->lod != AGX3_TEX_LOD_AUTO)))
+        ((d->array || d->cube) && d->lod != AGX3_TEX_LOD_AUTO &&
+         !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0 &&
+           !(d->array && d->cube)))))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -578,7 +580,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * staged scalars are the derivative. */
       ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
-      if (d->array) {
+      /* A level-zero comparison keeps the packed f77=2 layer operand.
+       * Native array_compare_zero therefore uses f29/f37 for the level,
+       * just like a non-array sample, rather than the direct-layer f43. */
+      if (d->array && !shadow_array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
       } else {

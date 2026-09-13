@@ -10870,10 +10870,10 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
    I->mask = 15;
    agx_stop(b);
 
-   /* The ordinary operands occupy through half37, so the reusable three-GPR
-    * CEM bank is halves38/40/42. In particular, it cannot overwrite the
+   /* The ordinary operands occupy through half37. Axis0 needs halves38/40
+    * for magnitude/face; axes1/2 use halves42/44. It cannot overwrite the
     * texture handle at r2:r3 as the old fixed-r2 axis destination did. */
-   const uint16_t scratch[3] = {38, 40, 42};
+   const uint16_t scratch[3] = {38, 42, 44};
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    for (unsigned axis = 0; axis < 3; ++axis) {
@@ -10890,7 +10890,7 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
          enc, component, scratch[0], scratch[component + 1], 6, bytes, &len));
       append(want, bytes, len);
    }
-   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 6, 0, false, true, bytes,
+   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 40, 6, 0, false, true, bytes,
                                      &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
@@ -10919,9 +10919,99 @@ TEST_F(AGX3PackBinary, TextureCubeRegisterDescriptorsUseLiveCEMScratch)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->max_reg, 43u);
+   EXPECT_EQ(b->shader->max_reg, 45u);
    /* The lane-indexed cube uses slot 6 without resizing the private extent. */
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
+TEST_F(AGX3PackBinary, SampleStagingWaitsOnlyForItsOwnProducers)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_get_sr_to(b, agx_register(4, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_X);
+   agx_get_sr_to(b, agx_register(6, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_Y);
+   /* Slot3 is live but unrelated to the sample. It must not be prewaited. */
+   agx_get_sr_to(b, agx_register(60, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_Z);
+   agx_index dest = agx_register(16, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coords = agx_register(4, AGX_SIZE_32);
+   coords.channels_m1 = 1;
+   auto *sample = agx_texture_sample_to(
+      b, dest, coords, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN,
+      0, false, false, false, AGX_GATHER_NONE, false);
+   sample->mask = 15;
+   agx_stop(b);
+   const auto binary = pack(b);
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   std::vector<uint8_t> staging;
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                2, bytes, &len));
+   append(staging, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 4, 1, false, false,
+                                         bytes, &len));
+   append(staging, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 4, 0, false, false,
+                                         bytes, &len));
+   append(staging, bytes, len);
+   const auto found = std::search(binary.begin(), binary.end(),
+                                   staging.begin(), staging.end());
+   ASSERT_NE(found, binary.end());
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                4, bytes, &len));
+   EXPECT_EQ(std::search(binary.begin(), found, bytes, bytes + len), found);
+}
+
+TEST_F(AGX3PackBinary, IndexedShadowLevelZeroKeepsNativeHandles)
+{
+   for (bool cube : {false, true}) {
+      for (unsigned level = 0; level < 3; ++level) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "indexed shadow level");
+         nir_def *offset = nir_imm_int(&b, 72);
+         nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set = 1);
+         nir_def *smp = nir_bindless_sampler_agx(
+            &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 3, 16),
+            .desc_set = 1);
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader, 5);
+         tex->op = nir_texop_txl;
+         tex->sampler_dim = cube ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
+         tex->is_array = !cube;
+         tex->is_shadow = true;
+         tex->is_new_style_shadow = true;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = 3;
+         tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                          nir_imm_vec3(&b, .5, .25, 1));
+         tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+         tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, smp);
+         tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                          nir_imm_float(&b, .5));
+         tex->src[4] = nir_tex_src_for_ssa(
+            nir_tex_src_lod, level < 2 ? nir_imm_float(&b, float(level))
+                                      : nir_load_global_constant(
+                                           &b, 1, 32, nir_imm_int64(&b, 0x10000),
+                                           .align_mul = 4));
+         nir_def_init(&tex->instr, &tex->def, 1, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
+                           .align_mul = 4);
+         EXPECT_EQ(agx_nir_lower_g17p_indexed_samplers(b.shader), level == 0);
+         if (level == 0) {
+            const int texture = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+            const int sampler = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
+            ASSERT_GE(texture, 0);
+            ASSERT_GE(sampler, 0);
+            EXPECT_EQ(nir_src_bit_size(tex->src[texture].src), 64);
+            EXPECT_EQ(nir_src_bit_size(tex->src[sampler].src), 64);
+         }
+         ralloc_free(b.shader);
+      }
+   }
 }
 
 TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
