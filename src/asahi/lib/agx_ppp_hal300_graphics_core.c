@@ -12,15 +12,16 @@ agx_ppp_hal300_graphics_core_pack(
 {
    if (chip != AGX_CHIP_G17G || !fields || !out ||
        !fields->fragment_program || fields->cull_mode > 3 ||
-       fields->fragment_pass > 1)
+       fields->fragment_pass > 1 || fields->vertex_varying_components > 8 ||
+       fields->fragment_varying_components > fields->vertex_varying_components)
       return false;
 
-   if (fields->color_varying) {
-      if (!fields->vertex_color_output || !fields->varying_table ||
+   if (fields->fragment_varying_components) {
+      if (!fields->varying_table ||
           (fields->varying_table & 63) ||
           fields->varying_table >= (UINT64_C(1) << 48) ||
-          !fields->cf_binding_count || fields->cf_binding_count > 2 ||
-          (fields->flat_varying && fields->cf_binding_count != 1))
+          !fields->cf_binding_count || fields->cf_binding_count > 3 ||
+          (fields->flat_varying && fields->cf_binding_count > 2))
          return false;
    } else if (fields->varying_table || fields->cf_binding_count ||
               fields->flat_varying) {
@@ -45,7 +46,7 @@ agx_ppp_hal300_graphics_core_pack(
     */
    const uint32_t records[][7] = {
       {0x10100000,
-       fields->color_varying ? (fields->flat_varying ? 0x400 : 4) : 0,
+       fields->fragment_varying_components << (fields->flat_varying ? 8 : 0),
        0, 0, 0},
       {0x01000000, (uint32_t)(fields->varying_table >> 32) |
                       (fields->cf_binding_count << 16),
@@ -53,9 +54,9 @@ agx_ppp_hal300_graphics_core_pack(
       {0x00000001, 0x000007aa, 0xe2e00000, 0xf0c00000,
        0x00023020, 0x0001ffff},
       {0x0c280000, (fields->point_size_output ? 0x40000 : 0) |
-                      (fields->vertex_color_output ? 0x10000 : 0), 0, 0,
+                      (fields->vertex_varying_components ? 0x10000 : 0), 0, 0,
        4 + (fields->point_size_output ? 1 : 0) +
-           (fields->vertex_color_output ? 4 : 0)},
+           fields->vertex_varying_components},
       {0x020000e0, fields->depth_less_write ? 0x00000200 : 0x00040200,
        fields->depth_less_write ? 0x01000f00 : 0x07200f00,
        fields->depth_less_write ? 0x01000f00 : 0x07200f00,

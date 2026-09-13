@@ -5510,16 +5510,35 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    const struct agx_rasterizer *rast = ctx->rast;
    struct agx_varyings_fs *cf = fs ? &fs->cf : NULL;
    const struct agx_cf_binding *color =
-      cf && cf->nr_bindings >= 1 && cf->nr_bindings <= 2
+      cf && cf->nr_bindings >= 1 && cf->nr_bindings <= 3
          ? &cf->bindings[cf->nr_bindings - 1] : NULL;
    const bool psiz = vs && vs->uvs.group_offs[UVS_LAYER_VIEWPORT] ==
                               vs->uvs.group_offs[UVS_PSIZ] + 1;
    const bool vertex_color_output =
-      vs && vs->uvs.user_size == 4 && vs->uvs.size == 8 + psiz;
-   const bool color_varying = vs && color && vs->uvs.user_size == 4 &&
-      vs->uvs.size == 8 + psiz && color->offset == 0 && color->count == 4 &&
-      (color->smooth ? (color->perspective && cf->nr_bindings == 2 && cf->nr_cf == 5)
-                     : (!color->perspective && cf->nr_bindings == 1 && cf->nr_cf == 4));
+      vs && vs->uvs.user_size >= 1 && vs->uvs.user_size <= 8 &&
+      vs->uvs.size == 4 + vs->uvs.user_size + psiz;
+   bool color_varying = vertex_color_output && color;
+   unsigned coefficient_count = 0;
+   if (color_varying) {
+      for (unsigned i = 0; i < cf->nr_bindings; ++i) {
+         const struct agx_cf_binding *b = &cf->bindings[i];
+         coefficient_count += b->count;
+         if (b->slot == VARYING_SLOT_POS) {
+            color_varying &= i == 0 && b->offset == 3 && b->count == 1 &&
+                             b->smooth && !b->perspective;
+         } else {
+            color_varying &= b->slot < ARRAY_SIZE(vs->uvs.components) &&
+                             b->count > 0 &&
+                             b->offset + b->count <= vs->uvs.components[b->slot] &&
+                             b->smooth == color->smooth &&
+                             b->perspective == color->smooth;
+         }
+      }
+      color_varying &= coefficient_count == cf->nr_cf &&
+         (color->smooth ? (cf->nr_bindings >= 2 &&
+                          cf->bindings[0].slot == VARYING_SLOT_POS)
+                        : cf->nr_bindings <= 2);
+   }
    /* Shared utility vertex shaders can export a color that a constant-color
     * fragment shader ignores. Keep the vertex UVS layout intact while emitting
     * zero fragment interpolation bindings for that independently linked stage. */
@@ -5589,7 +5608,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       if (batch->generate_primitive_id ||
           batch->linked_varyings.counts_16.opaque[0] != 0 ||
           batch->linked_varyings.counts_32.opaque[0] !=
-             (color->smooth ? 4 : 0x400))
+             (vs->uvs.user_size << (color->smooth ? 0 : 8)))
          return NULL;
       batch->varyings = t.gpu;
    }
@@ -5625,8 +5644,9 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       .varying_table = batch->varyings, .cf_binding_count = cf->nr_bindings,
       .cull_mode = rast->base.cull_face,
       .front_face_ccw = rast->base.front_ccw, .point_size_output = psiz,
-      .vertex_color_output = vertex_color_output,
-      .color_varying = color_varying, .flat_varying = color_varying && !color->smooth,
+      .vertex_varying_components = vs->uvs.user_size,
+      .fragment_varying_components = color_varying ? vs->uvs.user_size : 0,
+      .flat_varying = color_varying && !color->smooth,
    };
    struct agx_ppp_hal300_graphics_core graphics;
    if (!agx_ppp_hal300_graphics_core_pack(dev->chip, &graphics_fields, &graphics))

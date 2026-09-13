@@ -115,8 +115,8 @@ main(void)
       .varying_table = UINT64_C(0x100000004c0),
       .cf_binding_count = 2,
       .point_size_output = true,
-      .vertex_color_output = true,
-      .color_varying = true,
+      .vertex_varying_components = 4,
+      .fragment_varying_components = 4,
    };
    CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    for (unsigned i = 0; i < sizeof(out.bytes); ++i)
@@ -140,13 +140,13 @@ main(void)
    f.varying_table = UINT64_C(0x10000000480);
    f.cf_binding_count = 0;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
-   f.cf_binding_count = 2;
-   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
-   f.flat_varying = false;
    f.cf_binding_count = 3;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.flat_varying = false;
+   f.cf_binding_count = 4;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    f.cf_binding_count = 1;
-   f.color_varying = false;
+   f.fragment_varying_components = 0;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    CHECK(memcmp(&out, &color_before, sizeof(out)) == 0);
 
@@ -156,7 +156,7 @@ main(void)
    f = (struct agx_ppp_hal300_graphics_fields) {
       .fragment_program = UINT64_C(0x10000170700),
       .point_size_output = true,
-      .vertex_color_output = true,
+      .vertex_varying_components = 4,
    };
    CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    CHECK(out.bytes[4] == 0); /* No interpolated coefficients. */
@@ -165,12 +165,43 @@ main(void)
    CHECK(out.bytes[78] == 5); /* PSIZ and color vertex outputs. */
    CHECK(out.bytes[88] == 9); /* All vertex output words stay live. */
    const struct agx_ppp_hal300_graphics_core unused_before = out;
-   f.color_varying = true;
-   f.vertex_color_output = false;
+   f.fragment_varying_components = 4;
+   f.vertex_varying_components = 0;
    f.varying_table = UINT64_C(0x10000000480);
    f.cf_binding_count = 1;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    CHECK(memcmp(&out, &unused_before, sizeof(out)) == 0);
+
+   /* The Varying Counts ABI counts scalar coefficients: smooth occupies
+    * byte 0 and flat byte 1. Changing vector width also changes the UVS
+    * word count, but no record boundary, pointer or face-state byte. */
+   for (unsigned count = 1; count <= 8; ++count) {
+      for (unsigned flat = 0; flat <= 1; ++flat) {
+         f = (struct agx_ppp_hal300_graphics_fields) {
+            .fragment_program = UINT64_C(0x10000170700),
+            .varying_table = UINT64_C(0x100000004c0),
+            .cf_binding_count = flat ? 1 : 2,
+            .point_size_output = true,
+            .vertex_varying_components = count,
+            .fragment_varying_components = count,
+            .flat_varying = flat,
+         };
+         CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+         for (unsigned i = 0; i < sizeof(out.bytes); ++i) {
+            uint8_t expected = color_words[i / 4] >> (8 * (i % 4));
+            if (i == 4) expected = flat ? 0 : count;
+            if (i == 5) expected = flat ? count : 0;
+            if (i == 26) expected = flat ? 1 : 2;
+            if (i == 88) expected = 5 + count;
+            CHECK(out.bytes[i] == expected);
+         }
+      }
+   }
+   f.vertex_varying_components = 9;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   f.vertex_varying_components = 2;
+   f.fragment_varying_components = 3;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    puts("M5 native PPP graphics records: PASS");
    return 0;
 }

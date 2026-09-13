@@ -23,9 +23,12 @@ struct agx_ppp_hal300_graphics_fields {
    bool front_face_ccw;
    bool point_size_output;
    /* Vertex exports and fragment interpolation are independent. A fragment
-    * shader may leave the vertex shader's float4 output unused. */
-   bool vertex_color_output;
-   bool color_varying;
+    * shader may leave the vertex shader's output unused. Counts are scalar
+    * 32-bit UVS slots, not source-language vectors or CF bindings. The
+    * interpolator reserves all exported user slots even when a CF binding
+    * reads only a subvector; its offset is carried by the VIT separately. */
+   unsigned vertex_varying_components;
+   unsigned fragment_varying_components;
    bool flat_varying;
    bool depth_less_write;
 };
@@ -36,7 +39,8 @@ struct agx_ppp_hal300_graphics_core {
    uint8_t lengths[AGX_PPP_HAL300_GRAPHICS_RECORDS];
 };
 
-/* Opaque/translucent triangles, optionally float4 color and D32 LESS/write.
+/* Opaque/translucent triangles, optionally up to two vec4 varyings
+ * and D32 LESS/write.
  * No stencil, queries, discard, or MSAA. Attachment storage and clear/load/store
  * setup are separate; packing this state alone does not enable depth rendering.
  * Caller must validate those semantic restrictions before using this profile.
