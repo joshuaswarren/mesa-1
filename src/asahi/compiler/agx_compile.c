@@ -1013,11 +1013,11 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
    assert(!write_z || z.size == AGX_SIZE_32);
    assert(!write_s || s.size == AGX_SIZE_16);
 
-   /* G17P depthf reads a single staged 32-bit word. Apple's depth-only
-    * fragments build its low half as 15 | (SR2 << 4) | (SR2 << 8), clamp the
-    * depth to [0, 1] while narrowing it to f16 in the high half, publish the
-    * pair, then issue depthf. Build the register tuple here, before RA, so the
-    * allocator owns every scratch value and the packer only publishes it.
+   /* G17P depthf reads two staged dwords: coverage at half 0 and float32
+    * depth at half 2. Native FSEL.ep35 publishes the clamped depth directly
+    * to staging[2], followed by a separate coverage COPY to staging[0].
+    * Do not narrow depth into the coverage word's high half. Build both
+    * full-width values before RA so the allocator owns the payload.
     *
     * Stencil remains on the legacy path and is refused by the AGX3 packer:
     * Metal has no fragment stencil-output expression from which to ground its
@@ -1030,12 +1030,17 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
       agx_index mid = agx_iadd(b, sr2, sr2, 4);
       agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
 
-      agx_index depth = agx_temp(b->shader, AGX_SIZE_16);
-      agx_instr *narrow = agx_fmov_to(b, depth, z);
-      narrow->saturate = true;
-
-      agx_index word = agx_temp(b->shader, AGX_SIZE_32);
-      agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, depth});
+      agx_index coverage32 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_mov_to(b, coverage32, coverage);
+      agx_index depth;
+      if (nir_src_is_const(instr->src[1])) {
+         const float value = nir_src_as_float(instr->src[1]);
+         depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
+      } else {
+         depth = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, depth, z)->saturate = true;
+      }
+      agx_index word = agx_vec2(b, coverage32, depth);
 
       b->shader->out->writes_sample_mask = true;
       agx_wait_pixel_mask(b, 0x1);
@@ -3831,6 +3836,7 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(frcp, rcp);
       UNOP(frsq, rsqrt);
       UNOP(flog2, log2);
+      UNOP(fsinc_agx3, sinc_agx3);
       UNOP(fexp2, exp2);
 
       UNOP(mov, mov);
@@ -4135,34 +4141,28 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 
    case nir_op_fsin_agx: {
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-         /* G17P has no sin_pt_1 quadrant fixup. Use the standard Mesa
-          * minimax sine fallback on the already-normalized quadrant input
-          * instead. This is the same polynomial used by lower_sincos, with
-          * radians / (2 pi) reduced to quadrants / 4:
-          *
-          *   t = 2 fract(q / 4 + 1/2) - 1
-          *   x = 4 (t - t |t|)
-          *   sin(q pi/2) ~= x + .225 (x |x| - x)
-          *
-          * It uses only the grounded G17P FMA and floor paths and avoids
-          * assigning AGX2 semantics to G17P's unqualified f32sinc funop.
-          */
-         agx_index u = agx_ffma(b, s0, agx_immediate_f(0.25f),
-                                agx_immediate_f(0.5f));
-         agx_index fract = agx_ffma(b, agx_neg(agx_floor(b, u)),
-                                    agx_immediate_f(1.0f), u);
-         agx_index t = agx_ffma(b, fract, agx_immediate_f(2.0f),
-                                agx_immediate_f(-1.0f));
-         agx_index x = agx_ffma(b, agx_neg(t), agx_abs(t), t);
-         x = agx_fmul(b, x, agx_immediate_f(4.0f));
-         agx_index correction = agx_ffma(b, x, agx_abs(x), agx_neg(x));
-         agx_index slope = agx_mov_imm(b, 32, UINT32_C(0x3e666666));
-         return agx_ffma_to(b, dst, correction, slope, x);
+         /* Compatibility for callers which already performed the AGX2 NIR
+          * quadrant reduction. Fold [0,4] exactly to [-1,1], then use the
+          * same native sinc operation as the G17P radians lowering. */
+         agx_index middle = agx_fadd(b, agx_immediate_f(2.0f), agx_neg(s0));
+         agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
+         agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
+                                   middle, AGX_FCOND_LE);
+         t = agx_fcmpsel(b, s0, agx_immediate_f(3.0f), last, t,
+                         AGX_FCOND_GT);
+         return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
       }
 
       agx_index fixup = agx_sin_pt_1(b, s0);
       agx_index sinc = agx_sin_pt_2(b, fixup);
       return agx_fmul_to(b, dst, sinc, fixup);
+   }
+
+   case nir_op_bittest_select_agx3: {
+      assert(nir_src_is_const(instr->src[1].src));
+      const unsigned mask = nir_alu_src_as_uint(instr->src[1]);
+      assert(mask == 1 || mask == 2 || mask == 4);
+      return agx_bittest_select_agx3_to(b, dst, s0, s2, s3, mask);
    }
 
    case nir_op_f2i16:
@@ -4312,16 +4312,19 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_backend2:
-         /* G17P's witnessed 2D texture offset is an immediate byte in SMP,
-          * with signed x/y nibbles. Keep the constant produced by
+         /* G17P's texture offset is an immediate in SMP, with signed
+          * x/y nibbles and a third z nibble for 3D. Keep the constant from
           * agx_nir_lower_texture in that form instead of materializing a GPR
           * that the native instruction does not read.
           */
          if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              nir_src_is_const(instr->src[i].src) &&
-             nir_src_as_uint(instr->src[i].src) <= UINT8_MAX) {
-            const uint32_t value = nir_src_as_uint(instr->src[i].src);
-            /* Apple's compiler emits offset (0, 0) as a plain sample. */
+             (instr->op == nir_texop_tg4 ||
+              nir_src_as_uint(instr->src[i].src) <= 0xfff)) {
+            uint32_t value = nir_src_as_uint(instr->src[i].src);
+            if (instr->op == nir_texop_tg4)
+               value = (value & 0xf) | ((value >> 12) & 0xf0);
+            /* Apple's compiler emits an all-zero offset as a plain sample. */
             packed_offset = value ? agx_immediate(value) : agx_null();
          } else {
             packed_offset = index;
@@ -4465,15 +4468,13 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Pack shadow reference value (compare) and packed offset together */
    agx_index compare_offset = agx_null();
 
-   /* G17P carries the offset as an immediate field in the sample instruction
-    * and the comparator as a staged register, so the two cannot share this
-    * one vector operand. Hand the offset to the packer out of band and leave
-    * src[5] to the comparator alone; AGX2, whose hardware reads a register
-    * pair, keeps the combined form. */
+   /* G17P constant offsets live in the instruction, leaving src[5] to
+    * the comparator. Runtime gather offsets retain the combined vector;
+    * the packer publishes each value into its own native operand bank. */
    const bool offset_present = !agx_is_null(packed_offset);
-   const uint8_t offset_xy =
-      packed_offset.type == AGX_INDEX_IMMEDIATE ? (uint8_t)packed_offset.value
-                                                : 0;
+   const uint16_t offset_xyz =
+      packed_offset.type == AGX_INDEX_IMMEDIATE
+         ? (uint16_t)packed_offset.value : 0;
 
    const bool g17p_split_offset =
       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -4505,7 +4506,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
 
    /* The packer reads the G17P offset from the instruction, not from src[5],
     * so it survives being split away from the comparator above. */
-   I->offset_xy = offset_xy;
+   I->offset_xyz = offset_xyz;
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
       I->op = AGX_OPCODE_TEXTURE_LOAD;
@@ -4899,10 +4900,46 @@ agx_lower_sincos_filter(const nir_instr *instr, UNUSED const void *_)
  */
 
 static nir_def *
-agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, UNUSED void *_)
+agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    nir_def *x = nir_mov_alu(b, alu->src[0], 1);
+
+   if ((uintptr_t)data && x->bit_size <= 32) {
+      /* Native G17P sin/cos use three non-overlapping pieces of 2/pi.
+       * The magic rounding add retains the quadrant in its low two bits.
+       * Keep the explicit FMAs and subtraction order, including low pieces.
+       * Native trig-fast text hashes are retained with the focused tests. */
+      const unsigned bits = x->bit_size;
+      const uint32_t saved_ctrl = b->fp_math_ctrl;
+      b->fp_math_ctrl = nir_fp_no_fast_math;
+      x = nir_f2f32(b, x);
+      nir_def *hi = nir_imm_float(b, uif(0x3f22f983));
+      nir_def *magic = nir_imm_float(b, uif(0x4b400000));
+      nir_def *quadrant = nir_ffma(b, x, hi, magic);
+      nir_def *r = nir_ffma(b, x, hi, nir_fsub(b, magic, quadrant));
+      r = nir_ffma(b, x, nir_imm_float(b, uif(0x32dc9c88)), r);
+      r = nir_ffma(b, x, nir_imm_float(b, uif(0x25a94fe1)), r);
+      nir_def *complement = nir_fsub(b, nir_imm_float(b, 1), nir_fabs(b, r));
+      const bool cosine = alu->op == nir_op_fcos;
+      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 1),
+                                 cosine ? nir_fneg(b, r) : complement,
+                                 cosine ? complement : r);
+      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 2),
+                                 nir_fneg(b, r), r);
+      nir_def *result = nir_fmul(b, nir_fsinc_agx3(b, r), r);
+      nir_def *small = cosine ? nir_imm_float(b, 1) : x;
+      result = nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), 0x1p-12f),
+                        small, result);
+      result = nir_bcsel(b, nir_flt(b, nir_imm_float(b, uif(0x4ac90fdb)),
+                                  nir_fabs(b, x)),
+                        nir_imm_float(b, 0), result);
+      if (bits != 32)
+         result = nir_f2fN(b, result, bits);
+      b->fp_math_ctrl = saved_ctrl;
+      return result;
+   }
+
    nir_def *turns = nir_fmul_imm(b, x, M_1_PI * 0.5f);
 
    if (alu->op == nir_op_fcos)
@@ -4913,10 +4950,11 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static bool
-agx_lower_sincos(nir_shader *shader)
+agx_lower_sincos(nir_shader *shader, bool g17p)
 {
    return nir_shader_lower_instructions(shader, agx_lower_sincos_filter,
-                                        agx_lower_sincos_impl, NULL);
+                                        agx_lower_sincos_impl,
+                                        (void *)(uintptr_t)g17p);
 }
 
 static bool
@@ -5823,7 +5861,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
-   agx_instr *loads[3] = {0}, *stores[3] = {0}, *stop = NULL;
+   agx_instr *loads[4] = {0}, *stores[4] = {0}, *stop = NULL;
    agx_instr *first_wait = NULL;
    unsigned load_count = 0, store_count = 0;
    agx_foreach_block(ctx, block) {
@@ -5883,6 +5921,17 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    if (!stop || store_count < 2)
       return false;
 
+   /* Native raw32 BG clear/reload keeps ascending stores and has no
+    * ordinary colour transactions, including two/three RGBA32 targets. */
+   if (ctx->key->fs.ignore_tib_dependencies) {
+      bool rgba32 = !load_count;
+      for (unsigned i = 0; i < store_count; ++i)
+         rgba32 &= stores[i]->format == AGX_FORMAT_I32 &&
+                   stores[i]->mask == 15 && stores[i]->pixel_offset == 16 * i;
+      if (store_count == 4 || rgba32)
+         return false;
+   }
+
    if (load_count && !first_wait)
       return false;
 
@@ -5921,6 +5970,28 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    for (unsigned i = 0; i < store_count; ++i) {
       list_del(&stores[i]->link);
       list_addtail(&stores[i]->link, &stop->link);
+   }
+   if (store_count == 4 && !load_count) {
+      /* Scalar epilog inputs retain their fixed export ABI. Unlike a collect,
+       * a direct PRELOAD cannot be assigned into the quad's witnessed store
+       * bank by RA. Materialize only out-of-bank scalar inputs before the
+       * terminal store group, then let RA choose a legal free register. */
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(stores[0]));
+      for (unsigned i = 0; i < store_count; ++i) {
+         agx_index source = stores[i]->src[0];
+         if (source.type != AGX_INDEX_NORMAL || agx_channels(source) != 1)
+            continue;
+         agx_foreach_instr_global(ctx, I) {
+            if (I->op == AGX_OPCODE_PRELOAD && I->nr_dests == 1 &&
+                agx_is_equiv(I->dest[0], source) &&
+                I->src[0].type == AGX_INDEX_REGISTER && I->src[0].value >= 32) {
+               agx_index copy = agx_temp(ctx, source.size);
+               agx_mov_to(&b, copy, source);
+               stores[i]->src[0] = copy;
+               break;
+            }
+         }
+      }
    }
    ctx->agx3_mrt_tile_ops_ordered = true;
    return true;
@@ -5988,7 +6059,7 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
          sample->op == AGX_OPCODE_TEXTURE_SAMPLE && sample->nr_srcs == 6 &&
          sample->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
          sample->dim == AGX_DIM_2D && !sample->shadow && !sample->offset &&
-         !sample->query_lod && !sample->sparse &&
+         !sample->sparse &&
          sample->gather == AGX_GATHER_NONE;
       if (!plain_implicit || sample->src[0].type != AGX_INDEX_NORMAL ||
           sample->src[0].size != AGX_SIZE_32 ||
@@ -6168,6 +6239,27 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);
+
+   /* Apple's G17P compiler publishes a 16-byte scratch footprint for both
+    * compute and fragment shaders that consume a device atomic's return.
+    * The otherwise equivalent return-unused shaders publish zero, and the
+    * returned form immediately reloads the old value from TPS half 0. Keep
+    * this fixed ABI reservation distinct from allocator-created spill size;
+    * the packer refuses a mixed returned-atomic/compiler-scratch shader until
+    * ordinary scratch offsets are rebased around these words. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (ctx->stage == MESA_SHADER_COMPUTE ||
+        ctx->stage == MESA_SHADER_FRAGMENT)) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
+             !agx_is_null(I->dest[0])) {
+            out->agx3_spectpr_scratch_size =
+               MAX2(out->agx3_spectpr_scratch_size, 16);
+            break;
+         }
+      }
+   }
+
    agx_lower_64bit_postra(ctx);
 
    if (ctx->scratch_size_B > 0) {
@@ -6486,7 +6578,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_lower_var_copies);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, agx_nir_lower_frag_sidefx);
+      NIR_PASS(_, nir, agx_nir_lower_frag_sidefx, g17p);
       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
    }
 
@@ -6503,7 +6595,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_flrp, 16 | 32 | 64, false);
-   NIR_PASS(_, nir, agx_lower_sincos);
+   NIR_PASS(_, nir, agx_lower_sincos, g17p);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_lower_front_face,
             nir_metadata_control_flow, NULL);
    if (g17p)

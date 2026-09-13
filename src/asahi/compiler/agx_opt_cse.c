@@ -83,7 +83,7 @@ instrs_equal(const void *_i1, const void *_i2)
    /* Two samples that differ only in their coordinate offset are different
     * samples. This field is not in the union `imm` covers, so it needs its
     * own line here; test-agx3-pack-binary.cpp asserts it. */
-   if (i1->offset_xy != i2->offset_xy)
+   if (i1->offset_xyz != i2->offset_xyz)
       return false;
    if (i1->shadow != i2->shadow)
       return false;
@@ -109,7 +109,7 @@ instrs_equal(const void *_i1, const void *_i2)
  * Exposed for testing. instrs_equal() enumerates the instruction's immediates
  * one at a time, so a field added to agx_instr without a matching line here
  * lets two otherwise-identical instructions collapse into one --
- * test-agx3-pack-binary.cpp guards I->offset_xy against exactly that.
+ * test-agx3-pack-binary.cpp guards I->offset_xyz against exactly that.
  */
 bool
 agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2)

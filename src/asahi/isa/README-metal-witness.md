@@ -225,9 +225,11 @@ uniform across all five selectors the driver uses, byte for byte:
 
 The attachment table carries no sample count -- the count comes from the
 tilebuffer geometry and the PBE descriptor, which is consistent with a block
-store that writes the whole imageblock. The distinct 84-byte signed builtins
-(RGBA16_SINT, RGBA32_SINT) were not swept, so they have no multisample witness
-and the packer refuses them.
+store that writes the whole imageblock. Signed RGBA16/RGBA32 multisample
+admission remains disabled. The later RGBA32 audit in
+`../compiler/test/probes/README-g17p-native-rt0-eot.md` identifies its old
+84-byte fixture as an array program, not a signedness variant; that correction
+does not expand multisample admission.
 
 The matching write descriptor comes from the UMD rather than the compiler:
 `AGX::PBEStateEncoderGen9<kAGXRevHAL200>::StateFields::StateFields` derives its

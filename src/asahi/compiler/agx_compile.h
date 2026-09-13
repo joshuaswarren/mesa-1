@@ -97,6 +97,10 @@ struct agx_shader_info {
    /* Scratch memory allocation in bytes for main/preamble respectively */
    unsigned scratch_size, preamble_scratch_size;
 
+   /* G17P compiler footprint programmed in SPECTPR. This is separate from
+    * explicit shader scratch and does not use the legacy helper program. */
+   unsigned agx3_spectpr_scratch_size;
+
    /* Size in bytes of the main sahder */
    unsigned main_size;
 
@@ -158,7 +162,8 @@ struct agx_shader_info {
     */
    uint16_t nr_gprs, nr_preamble_gprs;
 
-   /* Separate AGX3 staging allocation, in 16-bit halves. */
+   /* Half of the AGX3 compiler staging footprint. The launch path doubles
+    * this value to reproduce Apple ShaderInfo fields 38/42. */
    uint16_t agx3_staging_halfs;
    bool agx3_staging_known;
 

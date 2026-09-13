@@ -597,8 +597,39 @@ test_g17p_dynamic_compute_program(void)
    CHECK(strong_dispatch[strong_sink.length] == 0xb6);
 
    const struct hk_agx3_g17p_compute_program before = program;
+   struct hk_agx3_g17p_compute_program_desc scratch_desc = desc;
+   scratch_desc.scratch_size = 16;
+   struct hk_agx3_g17p_compute_program scratch_program;
+   CHECK(hk_agx3_g17p_compute_program_generate(
+      AGX_CHIP_G17P, &scratch_desc, &scratch_program));
+   CHECK(scratch_program.length == before.length);
+
+   struct agx_ioto_state scratch_spectpr;
+   CHECK(agx_ioto_g17p_compiler_spectpr_build(
+      scratch_desc.scratch_size, scratch_desc.compiler_d, &scratch_spectpr));
+   struct agx_ioto_state_tail_output scratch_tail = expected_tail;
+   CHECK(agx_ioto_state_pack_spectpr(
+      AGX_CHIP_G17P, &scratch_spectpr,
+      scratch_tail.bytes + AGX_IOTO_SPECLM_SIZE + AGX_IOTO_LDSHDR_SIZE,
+      AGX_IOTO_SPECTPR_SIZE));
+   size_t scratch_tail_matches = 0;
+   for (size_t i = 0; i + scratch_tail.length <= scratch_program.length; ++i) {
+      if (memcmp(scratch_program.bytes + i, scratch_tail.bytes,
+                 scratch_tail.length) == 0)
+         scratch_tail_matches++;
+   }
+   CHECK(scratch_tail_matches == 1);
+
+   size_t scratch_differences = 0;
+   for (size_t i = 0; i < before.length; ++i) {
+      if (scratch_program.bytes[i] != before.bytes[i])
+         scratch_differences++;
+   }
+   CHECK(scratch_differences > 0);
+   CHECK(scratch_differences <= AGX_IOTO_SPECTPR_SIZE);
+
    struct hk_agx3_g17p_compute_program_desc invalid = desc;
-   invalid.scratch_size = 16;
+   invalid.scratch_size = 32;
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
@@ -854,6 +885,33 @@ test_g17p_basic_graphics_program(void)
    CHECK(program.length == sizeof(expected_fragment));
    CHECK(memcmp(program.bytes, expected_fragment, sizeof(expected_fragment)) ==
          0);
+
+   struct hk_agx3_g17p_graphics_program_desc scratch_fragment = fragment;
+   scratch_fragment.scratch_size = 16;
+   struct hk_agx3_g17p_graphics_program scratch_fragment_program;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &scratch_fragment, &scratch_fragment_program));
+   CHECK(scratch_fragment_program.length == program.length);
+
+   struct agx_ioto_state scratch_fragment_spectpr;
+   CHECK(agx_ioto_g17p_compiler_spectpr_build(
+      16, fragment.nr_gprs, &scratch_fragment_spectpr));
+   uint8_t packed_scratch_fragment[AGX_IOTO_SPECTPR_SIZE];
+   CHECK(agx_ioto_state_pack_spectpr(
+      AGX_CHIP_G17P, &scratch_fragment_spectpr, packed_scratch_fragment,
+      sizeof(packed_scratch_fragment)));
+   CHECK(memcmp(scratch_fragment_program.bytes + AGX_IOTO_SPECLM_SIZE +
+                   AGX_IOTO_LDSHDR_SIZE,
+                packed_scratch_fragment, sizeof(packed_scratch_fragment)) ==
+         0);
+
+   size_t scratch_fragment_differences = 0;
+   for (size_t i = 0; i < program.length; ++i) {
+      if (scratch_fragment_program.bytes[i] != program.bytes[i])
+         scratch_fragment_differences++;
+   }
+   CHECK(scratch_fragment_differences > 0);
+   CHECK(scratch_fragment_differences <= AGX_IOTO_SPECTPR_SIZE);
 
    const struct hk_agx3_g17p_graphics_program_desc vertex = {
       .program_va = UINT64_C(0x10000128000),

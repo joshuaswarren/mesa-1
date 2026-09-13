@@ -106,7 +106,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x78fcb61ced8d3cda));
+         UINT64_C(0x93a824ae6ebc0afa));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -144,7 +144,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0xb105d8e80674aeec));
+         UINT64_C(0x1761df231cb8080c));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -179,7 +179,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0xc1ff576c0980c0bb));
+         UINT64_C(0x96fff30496176f5b));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -210,7 +210,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0x4a38f5b56045209b));
+         UINT64_C(0xa698ddb6b7dcd46c));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -224,12 +224,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3278,
-       UINT64_C(0xafea67d1a800a95b)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3350,
-       UINT64_C(0x21b435d342a21da4)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3348,
-       UINT64_C(0x0d245326362de592)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3286,
+       UINT64_C(0x65f2e3931125c0e5)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3358,
+       UINT64_C(0xe0f6486882dbf4ce)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3356,
+       UINT64_C(0x8ac2f745459caef4)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -348,7 +348,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0xf86f3a06246d7ee3));
+         UINT64_C(0x53a133a878a678f4));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -372,9 +372,9 @@ main(void)
        * from 09 to 01: the unconditional break must consume true directly.
        * Size, registers and every other helper byte are unchanged. */
       {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2962, 3090, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xaaf0fe24895afa6a)},
+       {1024, 1, 1}, 4, UINT64_C(0x6360c3db2cff4712)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x5a1a52f3cab87ab5)},
+       UINT64_C(0x810469359ef8a715)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
@@ -425,8 +425,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 668, UINT64_C(0x3b6d443be271fbfb)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 814, UINT64_C(0x33746e6fd2961f9f)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 668, UINT64_C(0xf2b66d8d7f84647b)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 814, UINT64_C(0x8d8bd8fca36d1b3f)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -489,7 +489,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x3fe6ea1821ab208e));
+         UINT64_C(0x215a4d602b5de34e));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);

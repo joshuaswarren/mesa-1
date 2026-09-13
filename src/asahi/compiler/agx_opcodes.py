@@ -215,6 +215,10 @@ funop("sin_pt_1",  0b001010)
 funop("log2",      0b001100)
 funop("exp2",      0b001101)
 funop("sin_pt_2",  0b001110)
+op("sinc_agx3", None, srcs=1, is_float=True, agx3_mnemonic="f32sinc")
+# Sources: quadrant bits, selected true float, selected false float.
+op("bittest_select_agx3", None, srcs=3, imms=[IMM], is_float=True,
+   agx3_mnemonic="isel")
 funop("ceil",      0b010000)
 funop("trunc",     0b100000)
 funop("roundeven", 0b110000)
@@ -579,7 +583,7 @@ op("unpack_rgb10a2_agx3", _, dests=1, srcs=1, agx3_mnemonic="unpack")
 op("get_coverage_1x_agx3", _, dests = 1, schedule_class = "coverage")
 op("sample_mask_1x_agx3", _, dests = 0, srcs = 2, imms = [IMM],
    can_eliminate = False, schedule_class = "coverage")
-# G17P depthf consumes one packed staging word: coverage in the low half and
-# saturated f16 depth in the high half. The value is assembled before RA.
+# G17P depthf consumes two dwords: coverage and full-width float32 depth.
+# The tuple is assembled before RA and published at staging halves 0 and 2.
 op("zs_emit_agx3", _, dests = 0, srcs = 1, imms = [ZS],
    can_eliminate = False, schedule_class = "coverage")

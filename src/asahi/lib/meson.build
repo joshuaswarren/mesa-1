@@ -269,6 +269,21 @@ if with_tests
   )
 
   test(
+    'asahi-agx-bo-map-placed',
+    executable(
+      'asahi-agx-bo-map-placed',
+      files('tests/test-agx-bo-map-placed.c'),
+      include_directories : [
+        inc_include, inc_src, inc_asahi, libasahi_lib_includes,
+        include_directories('../libagx'),
+      ],
+      dependencies : [idep_mesautil],
+      c_args : ['-UNDEBUG'],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-precompiled-fill',
     executable(
       'asahi-g17p-precompiled-fill',
@@ -371,6 +386,18 @@ if with_tests
     executable(
       'asahi-g17p-mrt-epilog',
       files('tests/test-agx-g17p-mrt-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-mrt-quad',
+    executable(
+      'asahi-g17p-mrt-quad',
+      files('tests/test-agx-g17p-mrt-quad.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],

@@ -89,6 +89,7 @@ enum agx3_tex_sample_abi {
  * Evidence: .tmp/g17p-gallium2-evidence/texlodtype.{metal,nat}.
  */
 enum agx3_tex_level_kind {
+   AGX3_TEX_LEVEL_MINIMUM = 1,
    AGX3_TEX_LEVEL_FLOAT = 2,
    AGX3_TEX_LEVEL_INTEGER = 3,
 };
@@ -105,6 +106,7 @@ struct agx3_tex_fetch_desc {
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer in the register after the pair */
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
+   bool staged_sample;  /* MS sample and optional array layer in staging half4 */
    bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
    uint8_t sample;      /* immediate non-array sample index, values 0..3 */
    bool texture_kill;   /* Last use of an indirect texture index */
@@ -256,8 +258,9 @@ enum agx3_tex_lod {
  *    t.gather(s, uv, int2(0), component::z) 05800cb490000000010000001200  f145 2
  *    t.gather(s, uv, int2(0), component::w) 05800cbc90000000010000001200  f145 3
  *
- * Every witness is a plain 2D implicit-LOD gather: no array layer, no LOD
- * argument and no coordinate offset, so those stay refused.
+ * 2D-array and cube gathers share the same component selector. Runtime
+ * 2D offsets use f141=2 with the bank-6 publication declared below; immediate
+ * offsets retain f43/f51/f141. Gathers take no explicit LOD argument.
  */
 enum agx3_tex_gather {
    AGX3_TEX_GATHER_NONE = 0,
@@ -275,6 +278,9 @@ struct agx3_tex_sample_desc {
    uint8_t texture;     /* immediate texture-state index, 0..15 */
    uint8_t sampler;     /* immediate sampler-state index, 0..15 */
    enum agx3_tex_lod lod;
+   /* G17P f140=2 consumes a native bank-6 minimum, combined with the
+    * half-float bias or published beside explicit gradients. */
+   bool min_lod;
    uint16_t lod_x64;    /* level * 64 when LEVEL, bias * 64 when BIAS */
    uint8_t slot;
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
@@ -288,6 +294,9 @@ struct agx3_tex_sample_desc {
     * in every other stage/ISA. */
    bool sample_group_nonterminal;
    bool sample_group_end;
+   /* Vertex explicit-LOD samples use the same SMP fields and operand staging
+    * as fragment samples, but never carry fragment group terminator f156. */
+   bool vertex_stage;
    bool array;           /* array sample; shadow layers use PACK_SMPIR */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
@@ -300,8 +309,12 @@ struct agx3_tex_sample_desc {
    bool sampler_kill;
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
    bool shadow;                 /* compare against the scalar in bank 4 */
+   /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
+    * Array queries take no layer and encode immediate layer zero. */
+   bool query_lod;
    bool offset;                 /* signed nibble-packed 2D texel offset */
-   uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
+   uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
+   bool offset_register;         /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
 };
 
@@ -316,18 +329,33 @@ bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
                               enum agx3_tex_level_kind kind,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                            uint16_t minimum, uint8_t slot, uint16_t wait_mask,
+                            bool src_cache, bool src_discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* The float-level form, which is what the filtered sample path stages. */
 bool agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                        uint16_t wait_mask, bool src_cache, bool src_discard,
                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* Pack the dynamic layer/sample word used by array texel fetches into the
- * separately witnessed PACK_SMPIR form. Filtered G17P array samples instead
- * name their layer register directly in SMP. */
+/* Pack the dynamic layer used by array fetches and driver-ABI samples. */
+bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+                                   bool array, uint16_t packed_layer,
+                                   uint8_t slot, bool cache, bool discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
-                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish the layer and per-lane half-float LOD together into operand bank 6. */
+bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
+                              uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                              bool layer_cache, bool layer_discard,
+                              bool lod_cache, bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Run one axis of the native cube-coordinate calculation.  Three axes with
  * the fixed reciprocal between axis 0 and 1 are required before sampling. */
@@ -377,6 +405,14 @@ bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               uint16_t wait_mask, bool src_cache,
                               bool src_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
+                                 uint16_t dest, bool cache, bool discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_ms_array_sample(enum agx_isa_encoding enc, uint16_t sample,
+                                   uint16_t packed_layer, bool cache,
+                                   bool discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
                             const struct agx3_tex_sample_desc *d,

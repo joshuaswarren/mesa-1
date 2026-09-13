@@ -69,6 +69,14 @@ bool agx3_stage_copy_source(enum agx_isa_encoding enc, uint16_t dest,
                             uint16_t wait_mask,
                             uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
 
+/* Set staging publication f13 independently of GPR last-use f27. Native
+ * G17P DEPTHF producers set f13 on both coverage and depth staging words.
+ * This must not force the GPR source dead if another instruction uses it. */
+bool agx3_stage_copy_liveness(enum agx_isa_encoding enc, uint16_t dest,
+                              uint16_t src, bool stage_kill, bool src_kill,
+                              uint8_t slot, uint16_t wait_mask,
+                              uint8_t out[AGX3_STAGE_MAX_LENGTH], uint8_t *len);
+
 /* staging[dest] <- imm32, 32-bit, taking scoreboard slot `slot`. */
 bool agx3_stage_ldimm(enum agx_isa_encoding enc, uint16_t dest, uint32_t imm,
                       bool kill, uint8_t slot, uint16_t wait_mask,

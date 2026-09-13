@@ -40,6 +40,15 @@ struct isel_vec {
 };
 
 static const struct isel_vec vectors[] = {
+   /* Apple's `isel_chain` keeps this 16-bit boolean result live for the
+    * following select. f12 is the only non-register field that differs from
+    * the direct-store twin, establishing it as destination cache. */
+   {"u16_result_cached", {.dest_16=true, .cmp1_immediate=true,
+       .dest_cache=true, .cmp0=0, .cmp1=1, .cond=AGX3_ISEL_ICOND_EQ,
+       .true_kind=AGX3_ISEL_IMMEDIATE, .false_kind=AGX3_ISEL_IMMEDIATE,
+       .sel_true=1, .sel_false=0, .discard={true,false,false,false},
+       .wait_mask=32},
+    {0x02,0x01,0x2d,0x80,0x26,0x81,0x17,0xc2,0x20,0x80}, 10},
    {"s32_zero", {.dest_16=false, .cmp_16=false,
        .cmp1_immediate=true, .explicit_hints=true, .cmp0=0, .cmp1=0,
        .cond=AGX3_ISEL_ICOND_SLT, .sel_true=2, .sel_false=4,
@@ -60,8 +69,9 @@ static const struct isel_vec vectors[] = {
        .cond=AGX3_ISEL_ICOND_SGT, .sel_true=2, .sel_false=3,
        .discard={true,true,true,true}, .wait_mask=32},
     {0x02,0x00,0x1d,0x00,0x82,0x02,0x16,0xc8,0x82,0x03}, 10},
-   {"u32_mixed_retains_scheduling", {
+   {"u32_mixed_cached_result", {
        .cmp1_immediate=true, .cmp1=2, .cond=AGX3_ISEL_ICOND_EQ,
+       .dest_cache=true,
        .discard={true,false,true,false}, .false_kind=AGX3_ISEL_IMMEDIATE,
        .sel_true=2, .sel_false=13, .wait_mask=32},
     {0x02,0x01,0x2f,0x82,0x86,0x02,0x07,0xc2,0x20,0x8d}, 10},
@@ -432,6 +442,41 @@ main(void)
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5.sel_true = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+
+   /* Fresh G17P bit_select and bit_negate witnesses. These establish the
+    * mask-test condition and selected float sign bits independently of trig. */
+   static const struct {
+      struct agx3_bittest_desc d;
+      uint8_t bytes[10];
+   } bit_vectors[] = {
+      {{.dest=0,.src={4,6,8},.mask=1,.cache={1,1,1},.wait_mask=32},
+       {0x02,0x85,0x07,0x80,0x06,0x86,0x16,0xc2,0x00,0x88}},
+      {{.dest=2,.src={4,6,8},.mask=2,.cache={1,1,1}},
+       {0x12,0x85,0x07,0x82,0x06,0x86,0x06,0x02,0x00,0x88}},
+      {{.dest=4,.src={4,6,8},.mask=4,.discard={1,1,1}},
+       {0x22,0x05,0x0f,0x84,0x86,0x06,0x06,0x02,0x80,0x08}},
+      {{.dest=0,.src={2,4,6},.mask=1,.negate={1,0},
+        .cache={1,1,1},.wait_mask=32},
+       {0x02,0x83,0x03,0x80,0x16,0x84,0x16,0xc2,0x00,0x86}},
+      {{.dest=2,.src={2,4,6},.mask=2,.negate={0,1},.discard={1,1,1}},
+       {0x12,0x03,0x0b,0x82,0x86,0x04,0x06,0x02,0x90,0x06}},
+   };
+   for (unsigned i = 0; i < sizeof(bit_vectors)/sizeof(bit_vectors[0]); ++i) {
+      CHECK(agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit_vectors[i].d,
+                               out, &len));
+      CHECK(len == 10 && memcmp(out, bit_vectors[i].bytes, 10) == 0);
+   }
+   struct agx3_bittest_desc bit = bit_vectors[0].d;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3C, &bit, out, &len));
+   CHECK(len == 0);
+   bit.mask = 0;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
+   bit.mask = 1;
+   bit.negate[0] = bit.negate[1] = true;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
+   bit = bit_vectors[0].d;
+   bit.src[0] = 128;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
    printf("%u checks, %u failures\n", checks, failures);
    return failures ? 1 : 0;
 }

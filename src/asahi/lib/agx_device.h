@@ -145,8 +145,9 @@ typedef struct {
     * so the SAME function is installed in both agx_device_drm_ops and
     * agx_virtio_device_ops.
     *
-    * bo_munmap: unmap bo->_map (bo->size bytes). Only ever called from
-    * agx_bo_free() when bo->_map is non-NULL.
+    * bo_munmap: unmap bo->_map (bo->size bytes). Called from agx_bo_free()
+    * and before moving a cached CPU mapping to an application-selected
+    * address for VK_EXT_map_memory_placed.
     *
     * bo_free: release the OS/kernel object referenced by `handle` (GEM_CLOSE
     * on Linux). Deliberately takes the raw handle, not `struct agx_bo *`,
@@ -383,6 +384,20 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
 static inline void *
 agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
 {
+   /* The BO cache deliberately preserves CPU mappings.  A Vulkan allocation
+    * may therefore inherit a mapping from an earlier allocation even though
+    * the new VkDeviceMemory object has never been mapped.  A placed map must
+    * move that stale process mapping to the application's reserved address;
+    * returning it would violate VK_EXT_map_memory_placed and used to trip the
+    * caller's exact-address assertion.
+    *
+    * Keep ordinary mapping reuse unchanged.  Only the explicit placed-map
+    * contract is allowed to relocate an existing BO mapping. */
+   if (fixed_addr && bo->_map && bo->_map != fixed_addr) {
+      bo->dev->ops.bo_munmap(bo->dev, bo);
+      bo->_map = NULL;
+   }
+
    if (!bo->_map)
       bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
 

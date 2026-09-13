@@ -91,14 +91,15 @@ hk_pack_native_texture(unsigned generation,
              : (legacy->depth > 0x10000u))
          return false;
 
-      /* HAL200 encodeImageReadState (4d238c, 4d2270..4d22e8) clears
-       * word1[62] for an ordinary non-array 2D texture. Its conditional
-       * layer-mode writer is not the inherited AIL page-aligned-allocation
-       * flag. Keep this correction bounded to the fully represented plain
-       * one-level case; array/compression policies need their own evidence.
+      /* HAL200 encodeImageReadState clears word1[62] for ordinary non-array
+       * 2D and 2DMS textures. Its conditional layer-mode writer is not the
+       * inherited AIL page-aligned-allocation flag. Keep this correction
+       * bounded to fully represented, single-layer, one-level images;
+       * array/compression policies need their own evidence.
        */
       const bool plain_2d =
-         legacy->dimension == AGX_TEXTURE_DIMENSION_2D &&
+         (legacy->dimension == AGX_TEXTURE_DIMENSION_2D ||
+          legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED) &&
          legacy->layout == AGX_LAYOUT_GPU && legacy->depth == 1 &&
          !legacy->compressed && !extended &&
          legacy->mode == AGX_IMAGE_MODE_NORMAL;

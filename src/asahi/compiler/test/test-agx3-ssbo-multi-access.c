@@ -307,6 +307,39 @@ atomic_return_store(nir_builder *b, nir_def *base, nir_def *g)
                     .align_mul = 4);
 }
 
+static void
+check_atomic_return_spectpr_metadata(enum mesa_shader_stage stage)
+{
+   struct agx_shader_part returned = {0}, discarded = {0};
+
+   nir_builder a = stage == MESA_SHADER_COMPUTE
+      ? start("returned-atomic-spectpr")
+      : start_graphics(stage, "returned-atomic-spectpr");
+   nir_def *a_base = nir_load_preamble(&a, 1, 64, .base = 0);
+   nir_def *old = nir_global_atomic(&a, 32, a_base, nir_imm_int(&a, 1),
+                                    .atomic_op = nir_atomic_op_iadd);
+   nir_store_global(&a, old, nir_iadd_imm(&a, a_base, 4), .align_mul = 4);
+   CHECK(compile_shape(&a, &returned));
+
+   nir_builder b = stage == MESA_SHADER_COMPUTE
+      ? start("discarded-atomic-spectpr")
+      : start_graphics(stage, "discarded-atomic-spectpr");
+   nir_def *b_base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_global_atomic(&b, 32, b_base, nir_imm_int(&b, 1),
+                     .atomic_op = nir_atomic_op_iadd);
+   CHECK(compile_shape(&b, &discarded));
+
+   CHECK(returned.info.scratch_size == 0);
+   CHECK(discarded.info.scratch_size == 0);
+   CHECK(returned.info.agx3_spectpr_scratch_size == 16);
+   CHECK(discarded.info.agx3_spectpr_scratch_size == 0);
+
+   free(returned.binary);
+   free(discarded.binary);
+   ralloc_free(a.shader);
+   ralloc_free(b.shader);
+}
+
 /*
  * Apple's own two consecutive device stores, from
  * `out[gid] = A; out[gid + 64] = B;` compiled by metal-nt for
@@ -371,6 +404,9 @@ main(void)
    run("atomic-and", atomic_and, 0);
    run("atomic-xchg", atomic_xchg, 0);
    run("atomic-return-store", atomic_return_store, 1);
+
+   check_atomic_return_spectpr_metadata(MESA_SHADER_COMPUTE);
+   check_atomic_return_spectpr_metadata(MESA_SHADER_FRAGMENT);
 
    run_graphics_stage(MESA_SHADER_VERTEX, "vertex-atomic-return-store");
    run_graphics_stage(MESA_SHADER_FRAGMENT, "fragment-atomic-return-store");

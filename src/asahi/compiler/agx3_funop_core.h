@@ -46,8 +46,7 @@ enum agx3_funop {
    AGX3_FUNOP_RINT,      /* f32rint mode 0 (roundeven) */
    AGX3_FUNOP_LOG2,      /* f32log2 */
    AGX3_FUNOP_EXP2,      /* f32exp2 */
-   AGX3_FUNOP_SINC,      /* f32sinc: encoding grounded; see agx3_pack_binary
-                          * for why no Mesa opcode routes here yet. */
+   AGX3_FUNOP_SINC,      /* f32sinc on signed reduced quadrants */
    AGX3_FUNOP_DFDX,      /* f32dfdx, fragment-only gradient */
    AGX3_FUNOP_DFDY,      /* f32dfdy, fragment-only gradient */
    AGX3_FUNOP_RSQRT,     /* G17G native reciprocal square root */

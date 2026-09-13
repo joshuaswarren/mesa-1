@@ -7,7 +7,66 @@
 
 #include "agx3_binder.h"
 
+#include <string.h>
+
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
+
+bool
+agx3_bittest_encode(enum agx_isa_encoding enc,
+                   const struct agx3_bittest_desc *d,
+                   uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_ISEL_MAX_LENGTH);
+   *len = 0;
+   if (!d || enc != AGX_ISA_ENCODING_AGX3B ||
+       d->dest >= 128 || (d->dest & 1) ||
+       (d->mask != 1 && d->mask != 2 && d->mask != 4) ||
+       (d->negate[0] && d->negate[1]) || d->wait_mask >= 64)
+      return false;
+   for (unsigned i = 0; i < 3; ++i) {
+      if (d->src[i] >= 128 || (d->src[i] & 1) ||
+          (d->cache[i] && d->discard[i]))
+         return false;
+   }
+
+   const bool negate = d->negate[0] || d->negate[1];
+   const struct agx3_field_kv base[] = {
+      KV(42, 2), KV(43, 2), KV(57, 1), KV(58, 1),
+      KV(72, 2), KV(73, 2), KV(89, 2), KV(90, 2), KV(106, 3),
+   };
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   if (negate) {
+      ov[n++] = (struct agx3_field_kv)KV(0, 1);
+      ov[n++] = (struct agx3_field_kv)KV(17, d->dest);
+      ov[n++] = (struct agx3_field_kv)KV(24, 2);
+      ov[n++] = (struct agx3_field_kv)KV(25, 2);
+   } else {
+      ov[n++] = (struct agx3_field_kv)KV(3, d->dest);
+      ov[n++] = (struct agx3_field_kv)KV(10, 2);
+      ov[n++] = (struct agx3_field_kv)KV(11, 2);
+   }
+   ov[n++] = (struct agx3_field_kv)KV(35, d->src[0]);
+   ov[n++] = (struct agx3_field_kv)KV(49, d->mask);
+   ov[n++] = (struct agx3_field_kv)KV(65, d->src[1]);
+   ov[n++] = (struct agx3_field_kv)KV(82, d->src[2]);
+   ov[n++] = (struct agx3_field_kv)KV(44, d->cache[0]);
+   ov[n++] = (struct agx3_field_kv)KV(46, d->discard[0]);
+   ov[n++] = (struct agx3_field_kv)KV(74, d->cache[1]);
+   ov[n++] = (struct agx3_field_kv)KV(76, d->discard[1]);
+   ov[n++] = (struct agx3_field_kv)KV(91, d->cache[2]);
+   ov[n++] = (struct agx3_field_kv)KV(93, d->discard[2]);
+   ov[n++] = (struct agx3_field_kv)KV(78, d->negate[0]);
+   ov[n++] = (struct agx3_field_kv)KV(95, d->negate[1]);
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (d->wait_mask & (1u << slot))
+         ov[n++] = (struct agx3_field_kv)KV(98 + slot, 1);
+   }
+   return agx3_bind_compose(enc, "isel", negate ? 22 : 27, base,
+                           sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
 
 static bool
 cond_ok(enum agx3_isel_icond cond)
@@ -55,16 +114,10 @@ static const struct agx3_isel_form form_32_imm_imm = {
    27, 64, 81, 12,
    {KV(10, 2), KV(11, 2), KV(42, 2), KV(43, 2), KV(46, 1), KV(57, 2),
     KV(58, 2), KV(61, 1), KV(72, 1), KV(73, 2), KV(89, 1), KV(90, 2)}};
-/*
- * The two 32-bit mixed shapes carry f12 = 1, taken verbatim from their
- * witnessed instructions. Its meaning is NOT established: across the probes
- * it correlates with the select's result feeding a later ALU op rather than
- * being stored directly, in both the mixed and the register/register shapes,
- * so it is not shape-specific and is not a wait (those are f98..f103). It is
- * carried unchanged because dropping it would stop reproducing Apple's bytes;
- * if a shader ever miscompiles around a mixed select, re-probe this field
- * first. Everything else in these two baselines is explained above.
- */
+/* These legacy vectors predate explicit lifetime arguments. Both happened to
+ * keep their results live and therefore carry destination-cache f12. New
+ * production callers use encode_explicit(), which derives f12 from post-RA
+ * state for every operand shape and result width. */
 static const struct agx3_isel_form form_32_reg_imm = {
    27, 65, 81, 14,
    {KV(10, 2), KV(11, 2), KV(12, 1), KV(42, 2), KV(43, 2), KV(46, 1),
@@ -165,7 +218,7 @@ encode_explicit(const struct agx3_isel_desc *d,
 
    const unsigned width = d->dest_16 ? 1 : 2;
    const struct agx3_field_kv base[] = {
-      KV(10, 2), KV(11, width), KV(12, !d->dest_16 && (ti != fi)),
+      KV(10, 2), KV(11, width), KV(12, d->dest_cache),
       KV(42, 2), KV(43, d->cmp_16 ? 1 : 2),
       KV(57, d->cmp1_immediate ? 1 : 2),
       KV(58, (d->cmp1_immediate || d->cmp_16) ? 1 : 2), KV(72, ti ? 1 : 2), KV(73, width),
@@ -299,7 +352,8 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
    if (encoding == AGX_ISA_ENCODING_AGX3C)
       return encode_gpu1(d, out, len);
 
-   if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints)
+   if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints ||
+       d->dest_cache)
       return encode_explicit(d, out, len);
 
    const struct agx3_isel_form *form =

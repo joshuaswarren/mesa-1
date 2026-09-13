@@ -59,13 +59,24 @@ g17p_decline(const char *why, const nir_tex_instr *tex,
 static bool
 g17p_sample_shape(const nir_tex_instr *tex)
 {
+   const bool query_lod = tex->op == nir_texop_lod;
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
+   const bool offset_array = tex->is_array && !cube &&
+      (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0);
+   const int level_src = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   /* Native G17P compute depthcube/depth2d_array sample_compare(level(0))
+    * keeps the ordinary face/layer staging and selects SMP f139=2. */
+   const bool shadow_level_zero = tex->is_shadow && !cube_array &&
+      tex->op == nir_texop_txl && level_src >= 0 &&
+      nir_src_is_const(tex->src[level_src].src) &&
+      nir_src_as_float(tex->src[level_src].src) == 0.0;
 
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
-       tex->op != nir_texop_tg4) ||
+       tex->op != nir_texop_tg4 && !query_lod) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d && !cube) ||
        /* 3D takes the implicit, immediate-bias and per-lane LOD shapes the
         * 2D dimension takes; only gradient3d, which stages six scalars
@@ -73,10 +84,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
        (three_d &&
         (tex->is_array || tex->is_shadow ||
          (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-          tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
+          tex->op != nir_texop_txl && tex->op != nir_texop_txd && !query_lod))) ||
        /* A cube comparison publishes its reference through the same CEM
-        * bracket the colour cube uses; it is witnessed only with an implicit
-        * LOD. A colour cube also takes an explicit per-lane level, on the
+        * bracket the colour cube uses, with implicit or explicit zero LOD.
+        * A colour cube also takes an explicit per-lane level, on the
         * plain cube exactly as on the cube array -- Apple's own
         * t.sample(s, dir, level(reg)) for texturecube<float> is
         *
@@ -89,10 +100,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * roughness-indexed probe lookup every image-based lighting shader
         * does, SuperTuxKart's IBL.frag included. */
        (cube &&
-        (tex->op != nir_texop_tex &&
-         !(!tex->is_shadow && tex->op == nir_texop_txl))) ||
+        (tex->op != nir_texop_tex && tex->op != nir_texop_tg4 && !query_lod &&
+         !((!tex->is_shadow || shadow_level_zero) &&
+            tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
-       tex->coord_components != (cube_array ? 4 :
+       tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
+                                cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
@@ -102,59 +115,80 @@ g17p_sample_shape(const nir_tex_instr *tex)
         tex->dest_type != nir_type_uint32 &&
         tex->dest_type != nir_type_int32) ||
        tex->def.num_components !=
-          ((tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
+          (query_lod ? 2 : (tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
+       (query_lod && tex->dest_type != nir_type_float32) ||
        tex->def.bit_size != 32)
       return false;
 
-   if (tex->is_shadow) {
+   if (tex->is_shadow && !query_lod) {
       /* The depth comparison is orthogonal to the LOD shape: Apple's
        * depth2d sample_compare with level(k), level(reg), bias(k), bias(reg)
        * and gradient2d() each differ from the corresponding colour sample by
        * f143 alone, and gather_compare is the ordinary gather plus f143.
        * See the witness table in agx3_tex_core.c. The array and cube
-       * comparisons use separately packed layer / CEM operands and are only
-       * witnessed with an implicit LOD, so they stay on nir_texop_tex. */
+       * comparisons use separately packed layer / CEM operands and admit
+       * only implicit LOD or the native explicit-zero form above. */
       const int comparator =
          nir_tex_instr_src_index(tex, nir_tex_src_comparator);
       if (comparator < 0 ||
           nir_src_num_components(tex->src[comparator].src) != 1 ||
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
-          (tex->is_array && tex->op != nir_texop_tex))
+          (tex->is_array && !offset_array && tex->op != nir_texop_tex &&
+           tex->op != nir_texop_tg4 &&
+           !shadow_level_zero))
          return false;
    }
 
-   const bool has_bias =
+   const int packed_bias_min =
+      nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx);
+   const int minimum = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   const bool has_minimum = packed_bias_min >= 0 || minimum >= 0;
+   const bool has_bias = packed_bias_min >= 0 ||
       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0;
    const bool has_lod = nir_tex_instr_src_index(tex, nir_tex_src_lod) >= 0;
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
-   /* A coordinate offset is an immediate nibble pair in the sample itself
-    * (f43/f51/f141), witnessed in every LOD mode and on the gather; only a
-    * compile-time offset can reach that field. Without this the whole
-    * shader is disowned and falls back to the heap-descriptor form, which
-    * has no grounded encoding -- so a plain textureOffset() refuses. */
+   /* Ordinary samples use immediate offsets. Gathers also accept runtime
+    * offsets through PACK_SMPIR, so their descriptor rewrite must preserve
+    * both constant and dynamic operands. */
    int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
    const bool packed_offset = offset_src < 0;
    if (packed_offset)
       offset_src = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
    const bool has_offset = offset_src >= 0;
+   /* Native bank-6 minimum operands are grounded for non-array 2D/3D
+    * fragment samples. The shared texture lowering has already combined a
+    * bias/minimum pair into one f16x2 source, or left the gradient minimum
+    * as a scalar half. Preserve that source while selecting native handles. */
+   if (has_minimum &&
+       (tex->is_array || cube || (three_d && has_offset) ||
+        (packed_bias_min >= 0 &&
+         (tex->op != nir_texop_txb || minimum >= 0 ||
+          nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||
+          nir_src_num_components(tex->src[packed_bias_min].src) != 1 ||
+          nir_src_bit_size(tex->src[packed_bias_min].src) != 32)) ||
+        (minimum >= 0 &&
+         (tex->op != nir_texop_txd ||
+          nir_src_num_components(tex->src[minimum].src) != 1 ||
+          nir_src_bit_size(tex->src[minimum].src) != 16))))
+      return false;
+   if (query_lod && has_offset)
+      return false;
    if (has_offset &&
-       (!nir_src_is_const(tex->src[offset_src].src) ||
+       ((tex->op != nir_texop_tg4 &&
+         !nir_src_is_const(tex->src[offset_src].src)) ||
         nir_src_num_components(tex->src[offset_src].src) !=
-           (packed_offset ? 1u : 2u) ||
-        (packed_offset && nir_src_as_uint(tex->src[offset_src].src) > 0xff) ||
-        three_d || cube ||
-        /* A comparison sample takes the offset -- agx_emit_tex() hands it to
-         * the packer on the instruction rather than through src[5], which the
-         * comparator needs. An array comparison does not: its layer form is
-         * not settled (see README-agx3-packer-limits.md). */
-        (tex->is_shadow && tex->is_array)))
+           (packed_offset ? 1u : three_d ? 3u : 2u) ||
+        (packed_offset && tex->op != nir_texop_tg4 &&
+         nir_src_as_uint(tex->src[offset_src].src) >
+                             (three_d ? 0xfffu : 0xffu)) || cube))
       return false;
 
    const unsigned expected_srcs =
-      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) + tex->is_shadow +
-      has_offset;
+      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) +
+      (tex->is_shadow && !query_lod) +
+      has_offset + (minimum >= 0);
    if (tex->num_srcs != expected_srcs ||
        has_lod != (tex->op == nir_texop_txl) ||
        has_bias != (tex->op == nir_texop_txb) ||
@@ -163,8 +197,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
 
    /* Metal's gather takes no LOD argument, so no gather carries one. The
     * array layer, the coordinate offset and the depth comparison all
-    * compose with it; 3D and cube gathers are not witnessed. */
-   if (tex->op == nir_texop_tg4 && (three_d || cube || tex->component > 3))
+    * compose with it. Cube gathers use the existing CEM coordinate path;
+    * 3D gathers remain unsupported. */
+   if (tex->op == nir_texop_tg4 && (three_d || tex->component > 3))
       return false;
 
    /* An explicit gradient is four 32-bit scalars staged into their own
@@ -661,12 +696,11 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* txb and txd reach the packer as the same sample instruction
              * with a different LOD mode; the heap-indexed descriptor operand
              * is orthogonal to it. */
-            /* Apple's dynamic argument-buffer vertex witnesses cover read()
-             * and sample(..., level(0)). Vertex implicit sampling has no
-             * fragment quad derivatives, so admit only the explicit txl form
-             * here; the ordinary shape validator below checks its operands. */
+            /* Dynamic argument-buffer vertex witnesses cover explicit level
+             * and gradient samples. Vertex implicit sampling has no fragment
+             * quad derivatives; bias likewise remains fragment-only. */
             if (!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
-                tex->op != nir_texop_txl)
+                tex->op != nir_texop_txl && tex->op != nir_texop_txd)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);
             if (!fetch && !g17p_sample_shape(tex))

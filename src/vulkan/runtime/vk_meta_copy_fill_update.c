@@ -1234,6 +1234,9 @@ copy_buffer_image_prepare_gfx_push_const(
     */
    assert(buf_layout->image_stride_B <= UINT32_MAX);
 
+   const VkOffset3D source_offset =
+      vk_meta_buffer_to_image_gfx_source_offset(meta, img->image_type,
+                                                region->imageOffset);
    struct vk_meta_copy_buffer_image_info info = {
       .buf = {
          .row_stride = buf_layout->row_stride_B,
@@ -1242,9 +1245,9 @@ copy_buffer_image_prepare_gfx_push_const(
                                         VK_WHOLE_SIZE),
       },
       .img.offset = {
-         .x = region->imageOffset.x,
-         .y = region->imageOffset.y,
-         .z = region->imageOffset.z,
+         .x = source_offset.x,
+         .y = source_offset.y,
+         .z = source_offset.z,
       },
    };
 

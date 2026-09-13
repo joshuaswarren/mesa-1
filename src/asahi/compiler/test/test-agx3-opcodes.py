@@ -28,11 +28,12 @@ expected = {
     "scs_load_agx3", "scs_store_agx3", "scs_load_uniform_indexed_agx3",
     "scs_store_uniform_indexed_agx3", "fltnorm_agx3", "normflt_agx3",
     "pack_rgb10a2_agx3", "unpack_rgb10a2_agx3",
+    "sinc_agx3", "bittest_select_agx3",
 }
 assert {name for name, op in opcodes.items()
         if op.agx3_mnemonic is not None} == expected
 print("agx3 opcode mapping: mov_imm -> ldimm, stop -> end, "
       "threadgroup/scoped barriers -> barrier, direct/uniform-indexed SCS "
       "-> ldscs/stscs, tile normalization -> fltnorm/normflt, "
-      "RGB10A2 conversion -> pack/unpack; "
+      "RGB10A2 conversion -> pack/unpack, native trig -> f32sinc/isel; "
       "all other opcodes fail closed")

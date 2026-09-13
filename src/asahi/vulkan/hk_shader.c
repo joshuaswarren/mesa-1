@@ -28,6 +28,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
+#include "hk_image.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
 #include "hk_shader.h"
@@ -539,6 +540,69 @@ lookup_ycbcr_conversion(const void *_state, uint32_t set, uint32_t binding,
              : NULL;
 }
 
+static bool
+lower_ycbcr_plane_range(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   const int plane_src = nir_tex_instr_src_index(tex, nir_tex_src_plane);
+   const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (plane_src < 0 || deref_src < 0)
+      return false;
+
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[deref_src].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned array_index = 0;
+   if (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type != nir_deref_type_array ||
+          !nir_src_is_const(deref->arr.index))
+         return false;
+      array_index = nir_src_as_uint(deref->arr.index);
+   }
+
+   const struct vk_ycbcr_conversion_state *conversion =
+      lookup_ycbcr_conversion(data, var->data.descriptor_set,
+                              var->data.binding, array_index);
+   if (!conversion)
+      return false;
+
+   const struct vk_format_ycbcr_info *info =
+      vk_format_get_ycbcr_info(conversion->format);
+   const unsigned plane = nir_src_as_uint(tex->src[plane_src].src);
+   if (!info || plane >= info->n_planes)
+      return false;
+
+   const VkFormat format = info->planes[plane].format;
+   unsigned bits;
+   switch (format) {
+   case VK_FORMAT_R10X6_UNORM_PACK16:
+   case VK_FORMAT_R10X6G10X6_UNORM_2PACK16:
+      bits = 10;
+      break;
+   case VK_FORMAT_R12X4_UNORM_PACK16:
+   case VK_FORMAT_R12X4G12X4_UNORM_2PACK16:
+      bits = 12;
+      break;
+   default:
+      return false;
+   }
+
+   /* hk_format_to_pipe_format samples these MSB-aligned channels as UNORM16.
+    * Normalize by the actual channel maximum before YCbCr range/model math.
+    * This is linear, so it also commutes with the chroma filtering above. */
+   const float scale = 65535.0f / (BITFIELD_MASK(bits) << (16 - bits));
+   const unsigned comps =
+      util_format_get_nr_components(hk_format_to_pipe_format(format));
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *channels[4];
+   for (unsigned c = 0; c < tex->def.num_components; ++c) {
+      channels[c] = nir_channel(b, &tex->def, c);
+      if (c < comps)
+         channels[c] = nir_fmul_imm(b, channels[c], scale);
+   }
+   nir_def_rewrite_uses_after(&tex->def,
+                             nir_vec(b, channels, tex->def.num_components));
+   return true;
+}
+
 static int
 glsl_type_size(const struct glsl_type *type, bool bindless)
 {
@@ -824,6 +888,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    };
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_plane_range,
+               nir_metadata_control_flow, (void *)&ycbcr_state);
+   }
 
    /* Lower push constants before lower_descriptors */
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,

@@ -81,6 +81,28 @@ by `test_g17p_multisample_eot_block_store`.
 
 ## Validation scope
 
+### RGBA32 signed store dimension correction
+
+The former RGBA32_SINT 84-byte fixture was the array program. It reads layer
+SR0xc3, packs three coordinates, and sets IMGWBLK's array field even when Mesa
+has a non-array render target. This is not a signedness-dependent instruction
+sequence.
+
+A fresh native-factory cross-product changes attachment format at byte0x75 to
+10, 11 or 17, signed integer, unsigned integer or float, while independently
+setting texture type at byte0x76 to 2 or 3. Components at byte0x79 stay4.
+All three formats produce identical text for each texture type:
+
+- Type2, 2D: 68 bytes, SHA256
+  `60beeb253d8f81af993e93617ed3fca4559e0f614c8465f4cd2bb42c0f1f5fb6`.
+- Type3, 2D array: 84 bytes, SHA256
+  `a2b424a85d087598fafb384d4b50e04311363bc068eefb020fac0a84df581286`.
+
+The type2 text is the existing selector0x35 program. Type3 reproduces the old
+signed fixture byte for byte. The regression requires the same type2 bytes for
+signed and unsigned four-word I32 stores. Multisample and layered admission
+remain unchanged. This is native compiler evidence, not GPU pixel validation.
+
 On J700 A18 Pro B1, native DM1, the old per-thread-coordinate program stored
 only the first 32x32 tile of a 512x512 target. The matched native shader and
 CProg pair passed a contained orange triangle over red clear: 73,536 strict

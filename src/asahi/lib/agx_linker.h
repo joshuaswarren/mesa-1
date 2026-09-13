@@ -33,6 +33,7 @@ struct agx_linked_shader {
 
    /* Aggregated main-program resources after fast linking. */
    uint32_t scratch_size;
+   uint32_t agx3_spectpr_scratch_size;
    uint16_t nr_gprs;
 
    /* Apple's compiler ProgramVariant field 38 describes staging bytes,

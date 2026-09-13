@@ -30,6 +30,7 @@ same(const struct agx3_tex_fetch_desc *a,
           a->final == b->final &&
           a->array == b->array &&
           a->multisample == b->multisample &&
+          a->staged_sample == b->staged_sample &&
           a->three_d == b->three_d && a->sample == b->sample &&
           (a->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
              (b->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) &&
@@ -451,19 +452,19 @@ test_sample_witnesses(void)
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .offset = true,
-        .offset_xy = 0xf1},
+        .offset_xyz = 0xf1},
        "05800cb8b000010201881000010e", NULL},
       {"ts_auto offset half +(1,-1)",
        {.dest = 6, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .offset = true,
-        .offset_xy = 0xf1},
+        .offset_xyz = 0xf1},
        "35000cb8b000010201881000010e", NULL},
       {"ts_auto offset x-only result",
        {.dest = 6, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .offset = true,
-        .offset_xy = 0xf1},
+        .offset_xyz = 0xf1},
        "1d800ca09000010201881000010e", NULL},
       {"ts_array direct register layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
@@ -898,7 +899,7 @@ test_gradient_and_register_bias(void)
                                     bytes, &length));
       bad_gather = gd;
       bad_gather.cube = true;
-      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
                                     bytes, &length));
       bad_gather = gd;
       bad_gather.lod = AGX3_TEX_LOD_BIAS;
@@ -1192,11 +1193,10 @@ test_sample_fail_closed(void)
    d.offset = true;
    /* Offset (0, 0) is the plain form in native, and AGX3c has no witness. */
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
-   d.offset_xy = 0xf1;
+   d.offset_xyz = 0xf1;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
-   /* An immediate level and a dynamic array layer both take the offset --
-    * see test_offset_witnesses() for the byte-exact rows -- so only the
-    * combination of the two, which would want f43 twice, refuses. */
+   /* The driver stages the layer, leaving separate immediate fields for
+    * level and offset. The direct Apple-fragment profile still collides. */
    d.lod = AGX3_TEX_LOD_LEVEL;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.lod = AGX3_TEX_LOD_AUTO;
@@ -1204,15 +1204,24 @@ test_sample_fail_closed(void)
    d.array_layer = 2;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.lod = AGX3_TEX_LOD_LEVEL;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
    d.lod = AGX3_TEX_LOD_AUTO;
    d.array = false;
    d.array_layer = 0;
-   /* The register descriptor pair has no offset witness of its own. */
+   /* Native runtime-indexed descriptors carry the same offset field. */
    d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
    d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
    d.texture_value = 2;
    d.sampler_value = 4;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.offset_xyz = 0x100;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.three_d = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d.offset_xyz = 0x1000;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
    d.sample_group_end = true;
@@ -1227,7 +1236,7 @@ test_sample_fail_closed(void)
    d.sample_group_end = true;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
-   d.offset_xy = 0xf1;
+   d.offset_xyz = 0xf1;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
    /* Stage-copy edges: odd registers, bad slots, wide waits. */
@@ -1995,7 +2004,7 @@ test_fetch_lod(void)
 
    /* No other level type is witnessed. */
    CHECK(!agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 4, 2, 0, false,
-                                   true, (enum agx3_tex_level_kind)1, b,
+                                   true, (enum agx3_tex_level_kind)0, b,
                                    &len));
    CHECK(!agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3B, 4, 2, 0, false,
                                    true, (enum agx3_tex_level_kind)4, b,
@@ -2182,6 +2191,26 @@ test_multisample_fetch(void)
    d.sample = 4;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    d.sample = 0;
+   d.staged_sample = true;
+   d.sampler_value = 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b0008014000100000100"));
+
+   /* Complete native indexed-texture/runtime-sample witness. No extra
+    * descriptor-context or anonymous tail bits appear in this form. */
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 0;
+   d.texture_kill = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b0008014000380000100002800000000"));
+   d.sample = 1;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sample = 0;
+   d.sampler_value = 0;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.staged_sample = false;
+   d.texture_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.texture_kill = false;
    d.coord = 16;
    d.array = true;
    d.texture = 1;
@@ -2192,6 +2221,37 @@ test_multisample_fetch(void)
    CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    CHECK(len == sizeof(native_ms_array) &&
          !memcmp(bytes, native_ms_array, len));
+   /* Fresh runtime layer+sample native programs use bank0 coordinates and
+    * consume their merged operand from staging half4, not literal layer2. */
+   d.coord = 0;
+   d.texture = 0;
+   d.wait_mask = 1;
+   d.staged_sample = true;
+   d.sampler_value = 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b000a014000100000100"));
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 16;
+   d.texture_kill = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b000a014100380000100002800000000"));
+   CHECK(agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 6, 2,
+                                     false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055402030c0000f0880400"));
+   CHECK(agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                                       false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540400000010d0c20a00"));
+   CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3C, 6, 2,
+                                      false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 128, 2,
+                                      false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 3,
+                                        false, true, bytes, &len));
+   d.staged_sample = false;
+   d.sampler_value = 0;
+   d.texture_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.texture_kill = false;
+   d.coord = 16;
    d.sample = 1;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    d.sample = 0;
@@ -2213,18 +2273,31 @@ test_multisample_fetch(void)
 static int
 test_multisample_sample_stage(void)
 {
-   /* Own-MSL buffer-indexed sample: discarded r2h is published before the
-    * otherwise sample-0 texture2d_ms read. */
+   /* The native bit_and producer writes half2. PACK_SMPIR reads that same
+    * half address with a 16-bit source and publishes it at staging half4.
+    * Both fixed and indexed texture witnesses have these exact bytes. */
    static const uint8_t native[] = {
-      0x17,0x05,0x54,0x04,0x00,0x00,
+      0x17,0x05,0x54,0x04,0x00,0x04,
       0x00,0x00,0xd0,0xc0,0x08,0x00,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0,
-                                  false, true, bytes, &len));
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 2, 0,
+                                   false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
+   uint8_t other[AGX3_TEX_MAX_LENGTH], other_len;
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 6, 0,
+                                  false, true, other, &other_len));
+   CHECK(other_len == len && memcmp(other, bytes, len));
+   CHECK(other[3] == 4 && bytes[3] == 4 && other[5] == 12);
+   /* The store/fetch probe produces sample1 at half12 while half6 is the
+    * descriptor's zero high word. Dividing this address aliases sample0. */
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 12, 0,
+                                  false, true, other, &other_len));
+   CHECK(hex_eq(other, other_len, "1705540400180000d0c00800"));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                    false, false, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,
+                                   false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0,
                                    false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0x40,
@@ -2387,7 +2460,7 @@ test_offset_witnesses(void)
    for (unsigned i = 0; i < sizeof(sweep) / sizeof(sweep[0]); ++i) {
       d = base;
       d.offset = true;
-      d.offset_xy = sweep[i].xy;
+      d.offset_xyz = sweep[i].xy;
       CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
                                    &length));
       CHECK(length == 14 && hex_eq(bytes, length, sweep[i].hex));
@@ -2401,7 +2474,7 @@ test_offset_witnesses(void)
    d.lod_x64 = 128;                 /* level(2.0) */
    d.sample_group_end = true;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0001b02018810081200"));
 
@@ -2409,28 +2482,28 @@ test_offset_witnesses(void)
    d.lod = AGX3_TEX_LOD_BIAS;
    d.lod_x64 = 32;                  /* bias(0.5) */
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0000b03018810021200"));
 
    d = base;
    d.lod = AGX3_TEX_LOD_REGISTER;   /* level(in.dx.x) */
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0001102018810001200"));
 
    d = base;
    d.lod = AGX3_TEX_LOD_BIAS_REGISTER;  /* bias(in.dx.x) */
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0008102018810001200"));
 
    d = base;
    d.lod = AGX3_TEX_LOD_GRADIENT;   /* gradient2d(in.dx, in.dy) */
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0000902008810001200"));
 
@@ -2438,7 +2511,7 @@ test_offset_witnesses(void)
    d = base;
    d.gather = AGX3_TEX_GATHER_R;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800ca490000102018800001200"));
    d.gather = AGX3_TEX_GATHER_G;
@@ -2450,7 +2523,7 @@ test_offset_witnesses(void)
    d.array = true;
    d.array_layer = 22;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800cb8b0001bb7018810001200"));
    d.lod = AGX3_TEX_LOD_GRADIENT;
@@ -2462,7 +2535,7 @@ test_offset_witnesses(void)
    CHECK(length == 14 && hex_eq(bytes, length, "05800ca490001bb7018800001200"));
    /* and the same array gather with no offset at all. */
    d.offset = false;
-   d.offset_xy = 0;
+   d.offset_xyz = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800ca490000db4010000001200"));
 
@@ -2474,7 +2547,7 @@ test_offset_witnesses(void)
    d.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
    d.sampler_value = 24;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 20 &&
          hex_eq(bytes, length,
@@ -2498,7 +2571,7 @@ test_offset_witnesses(void)
    d.lod = AGX3_TEX_LOD_BIAS;
    d.lod_x64 = 32;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.lod = AGX3_TEX_LOD_LEVEL;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
@@ -2507,15 +2580,15 @@ test_offset_witnesses(void)
    d.lod_x64 = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
-   /* Nothing unwitnessed: no 3D offset, no cube offset, no offset (0,0)
-    * (native folds that to the plain form), and nothing on AGX3c. */
+   /* Native 3D offsets use a third nibble. Cubes and AGX3c remain closed;
+    * native folds the all-zero offset to a plain sample. */
    d = base;
    d.offset = true;
-   d.offset_xy = 0;
+   d.offset_xyz = 0;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    d.three_d = true;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.three_d = false;
    d.cube = true;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
@@ -2587,7 +2660,7 @@ test_shadow_lod_witnesses(void)
    /* The comparison composes with the coordinate offset too. */
    d = base;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "1d800ca090002102018800001200"));
 
@@ -2600,7 +2673,7 @@ test_shadow_lod_witnesses(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800ca490002000010000001200"));
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    CHECK(length == 14 && hex_eq(bytes, length, "05800ca490002102018800001200"));
 
@@ -2615,9 +2688,28 @@ test_shadow_lod_witnesses(void)
    d.mask = 15;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
-   /* The array and cube comparisons use separately packed layer / CEM
-    * operands and were only witnessed with an implicit LOD; they must not
-    * inherit the sweep above. */
+   /* Native compute sample_compare(level(0)) retains the packed layer or
+    * CEM face and changes f139 to 2. Other explicit levels remain closed.
+    * These kernels carry no fragment sample-group terminator. */
+   const uint8_t native_zero[2][14] = {
+      {0x05,0x80,0x0c,0xa0,0x90,0x00,0x29,0x01,0x00,0x00,0x00,0x00,0x01,0x00},
+      {0x0d,0x80,0x0c,0xa0,0x90,0x00,0x33,0x00,0x00,0x00,0x00,0x00,0x01,0x00},
+   };
+   for (unsigned cube = 0; cube < 2; ++cube) {
+      d = base;
+      d.dest = cube ? 2 : 0;
+      d.array = !cube;
+      d.array_layer = cube ? 0 : 4;
+      d.cube = cube;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+      d.sample_group_nonterminal = true;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      CHECK(length == sizeof(native_zero[cube]) &&
+            !memcmp(bytes, native_zero[cube], length));
+   }
+
+   /* Level two and cube gradients do not inherit the level-zero witness. */
    d = base;
    d.array = true;
    d.array_layer = 6;
@@ -2772,10 +2864,481 @@ test_image_write_state0_witnesses(void)
    return 0;
 }
 
+static int
+test_query_lod_witnesses(void)
+{
+   /* Native G17P calculate_clamped_lod / calculate_unclamped_lod. The
+    * component-only witnesses establish X/Y ordering independently. */
+   const struct agx3_tex_sample_desc base = {
+      .width = AGX3_TEX_W32,
+      .mask = 3,
+      .slot = 1,
+      .wait_mask = 1,
+      .coord_kill = true,
+      .final = true,
+      .query_lod = true,
+   };
+   static const struct {
+      bool three_d, cube, array;
+      unsigned mask;
+      const char *hex;
+   } rows[] = {
+      {false, false, false, 3, "05800ca8b0000000010020000100"},
+      {true,  false, false, 3, "05800ca8b0008001010020000100"},
+      {false, true,  false, 3, "05800ca8b0001000010020000100"},
+      {false, false, true,  3, "05800ca8b0000d00010020000100"},
+      {false, true,  true,  3, "05800ca8b0001301010020000100"},
+      {false, false, false, 1, "05800ca090000000010020000100"},
+      {false, false, false, 2, "05800ca890000000010020000100"},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      struct agx3_tex_sample_desc d = base;
+      d.three_d = rows[i].three_d;
+      d.cube = rows[i].cube;
+      d.array = rows[i].array;
+      d.mask = rows[i].mask;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      CHECK(length == 14 && hex_eq(bytes, length, rows[i].hex));
+   }
+   struct agx3_tex_sample_desc d = base;
+   d.texture_kind = d.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
+   d.texture_value = d.sampler_value = 12;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05e00ca8bc0000008103a0010100802000000000"));
+   d.texture_kind = d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = d.sampler_value = 0;
+   d.texture_kill = d.sampler_kill = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05800ca8b00000000102a0010100a02800000000"));
+
+   /* A query shares the existing sample-group lifetime. Native two-query
+    * and query-plus-sample programs terminate only the second instruction. */
+   d = base;
+   d.final = false;
+   d.sample_group_nonterminal = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05800c28b0000000000020000100"));
+   d = base;
+   d.dest = 4;
+   d.coord = 4;
+   d.wait_mask = 2;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "15820ca830010000010020000100"));
+   d.query_lod = false;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "15820ca830010000010010000100"));
+
+   d = base;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d.width = AGX3_TEX_W16;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.mask = 4;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.lod = AGX3_TEX_LOD_LEVEL;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.array = true;
+   d.array_layer = 4;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.gather = AGX3_TEX_GATHER_R;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.shadow = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.offset = true;
+   d.offset_xyz = 1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   return 0;
+}
+
+/* Own-MSL runtime-indexed argument buffers, metal-nt applegpu_g17p,
+ * macOS 27.0. Every literal below independently recomposes to its native
+ * twenty-byte SMP. Controls differ only by f43/f51/f141; array controls
+ * and offsets both use the staged f77=2 layer. */
+static int
+test_indexed_offset_witnesses(void)
+{
+   static const struct {
+      const char *name;
+      enum agx3_tex_lod lod;
+      bool array, three_d, shadow;
+      uint16_t level, offset;
+      const char *hex;
+   } rows[] = {
+      {"native_extra/d2_auto_offset", AGX3_TEX_LOD_AUTO,
+       false, false, false, 0, 0x87,
+       "05800cb834000102013a90010108a02800004000"},
+      {"native_extra/d2_level0_offset", AGX3_TEX_LOD_LEVEL,
+       false, false, false, 0, 0x87,
+       "05800cb834001b02013a90010108a02800004000"},
+      {"native_extra/d2_level2_offset", AGX3_TEX_LOD_LEVEL,
+       false, false, false, 128, 0x87,
+       "05800cb834001b02013a90090108a02800004000"},
+      {"native_extra/d2_levelreg_offset", AGX3_TEX_LOD_REGISTER,
+       false, false, false, 0, 0x87,
+       "05800cb834001102013a90010108a02800004000"},
+      {"native_extra/d2_bias_offset", AGX3_TEX_LOD_BIAS_REGISTER,
+       false, false, false, 0, 0x87,
+       "05800cb834008102013a90010108a02800004000"},
+      {"native_extra/d2_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       false, false, false, 0, 0x87,
+       "05800cb834000902003a90010108a02800004000"},
+      {"native_extra/a2_auto_offset", AGX3_TEX_LOD_AUTO,
+       true, false, false, 0, 0x87,
+       "05800cb834000103013a90010108a02800004000"},
+      {"native_extra/a2_level0_offset", AGX3_TEX_LOD_LEVEL,
+       true, false, false, 0, 0x87,
+       "05800cb834005b02013a90010108a02800004000"},
+      {"native_extra/a2_level2_offset", AGX3_TEX_LOD_LEVEL,
+       true, false, false, 128, 0x87,
+       "05800cb834005b02013a90090108a02800004000"},
+      {"native_extra/a2_levelreg_offset", AGX3_TEX_LOD_REGISTER,
+       true, false, false, 0, 0x87,
+       "05800cb834005102013a90010108a02800004000"},
+      {"native_extra/a2_bias_offset", AGX3_TEX_LOD_BIAS_REGISTER,
+       true, false, false, 0, 0x87,
+       "05800cb834008103013a90010108a02800004000"},
+      {"native_extra/a2_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       true, false, false, 0, 0x87,
+       "05800cb834000903003a90010108a02800004000"},
+      {"native_extra/d3_auto_offset", AGX3_TEX_LOD_AUTO,
+       false, true, false, 0, 0x387,
+       "05800cb834009102013a90010138a02800004000"},
+      {"native_extra/d3_level0_offset", AGX3_TEX_LOD_LEVEL,
+       false, true, false, 0, 0x387,
+       "05800cb834009503013a90010138a02800004000"},
+      {"native_extra/d3_level2_offset", AGX3_TEX_LOD_LEVEL,
+       false, true, false, 128, 0x387,
+       "05800cb834009503013a90090138a02800004000"},
+      {"native_extra/d3_levelreg_offset", AGX3_TEX_LOD_REGISTER,
+       false, true, false, 0, 0x387,
+       "05800cb834001902013a90010138a02800004000"},
+      {"native_extra/d3_bias_offset", AGX3_TEX_LOD_BIAS_REGISTER,
+       false, true, false, 0, 0x387,
+       "05800cb834009902013a90010138a02800004000"},
+      {"native_extra/d3_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       false, true, false, 0, 0x387,
+       "05800cb834001903003a90010138a02800004000"},
+      {"native_extra/depth_auto_offset", AGX3_TEX_LOD_AUTO,
+       false, false, true, 0, 0x87,
+       "05800ca014002102013a80010108a02800004000"},
+      {"native_extra/depth_level0_offset", AGX3_TEX_LOD_LEVEL,
+       false, false, true, 0, 0x87,
+       "05800ca014003b02013a80010108a02800004000"},
+      {"native_extra/depth_level2_offset", AGX3_TEX_LOD_LEVEL,
+       false, false, true, 128, 0x87,
+       "05800ca014003b02013a80090108a02800004000"},
+      {"native_extra/depth_levelreg_offset", AGX3_TEX_LOD_REGISTER,
+       false, false, true, 0, 0x87,
+       "05800ca014003102013a80010108a02800004000"},
+      {"native_extra/depth_bias_offset", AGX3_TEX_LOD_BIAS_REGISTER,
+       false, false, true, 0, 0x87,
+       "05800ca01400a102013a80010108a02800004000"},
+      {"native_extra/depth_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       false, false, true, 0, 0x87,
+       "05800ca014002902003a80010108a02800004000"},
+      {"native_extra/deptha_auto_offset", AGX3_TEX_LOD_AUTO,
+       true, false, true, 0, 0x87,
+       "05800ca014002103013a80010108a02800004000"},
+      {"native_extra/deptha_level0_offset", AGX3_TEX_LOD_LEVEL,
+       true, false, true, 0, 0x87,
+       "05800ca014007b02013a80010108a02800004000"},
+      {"native_extra/deptha_level2_offset", AGX3_TEX_LOD_LEVEL,
+       true, false, true, 128, 0x87,
+       "05800ca014007b02013a80090108a02800004000"},
+      {"native_extra/deptha_levelreg_offset", AGX3_TEX_LOD_REGISTER,
+       true, false, true, 0, 0x87,
+       "05800ca014007102013a80010108a02800004000"},
+      {"native_extra/deptha_bias_offset", AGX3_TEX_LOD_BIAS_REGISTER,
+       true, false, true, 0, 0x87,
+       "05800ca01400a103013a80010108a02800004000"},
+      {"native_extra/deptha_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       true, false, true, 0, 0x87,
+       "05800ca014002903003a80010108a02800004000"},
+      {"native_ranges/d2_biasimm_offset", AGX3_TEX_LOD_BIAS,
+       false, false, false, 32, 0x87,
+       "05800cb834000b03013a90030108a02800004000"},
+      {"native_ranges/a2_biasimm_offset", AGX3_TEX_LOD_BIAS,
+       true, false, false, 32, 0x87,
+       "05800cb834004b03013a90030108a02800004000"},
+      {"native_ranges/d3_auto_offset", AGX3_TEX_LOD_AUTO,
+       false, true, false, 0, 0x837,
+       "05802cb83400910201ba90010102a02800004000"},
+      {"native_ranges/d3_level0_offset", AGX3_TEX_LOD_LEVEL,
+       false, true, false, 0, 0x837,
+       "05802cb83400950301ba90010102a02800004000"},
+      {"native_ranges/d3_biasimm_offset", AGX3_TEX_LOD_BIAS,
+       false, true, false, 32, 0x837,
+       "05802cb83400950201ba90030102a02800004000"},
+      {"native_ranges/d3_gradient_offset", AGX3_TEX_LOD_GRADIENT,
+       false, true, false, 0, 0x837,
+       "05802cb83400190300ba90010102a02800004000"},
+      {"native_ranges/depth_biasimm_offset", AGX3_TEX_LOD_BIAS,
+       false, false, true, 32, 0x87,
+       "05800ca014002b03013a80030108a02800004000"},
+      {"native_ranges/deptha_biasimm_offset", AGX3_TEX_LOD_BIAS,
+       true, false, true, 32, 0x87,
+       "05800ca014006b03013a80030108a02800004000"},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      const struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = rows[i].shadow ? 1 : 15,
+         .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+         .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+         .texture_value = 0, .sampler_value = 4,
+         .texture_kill = true, .sampler_kill = true,
+         .lod = rows[i].lod, .lod_x64 = rows[i].level,
+         .slot = 1, .wait_mask = 1u << 5, .coord_kill = true, .final = true,
+         .array = rows[i].array, .array_layer = rows[i].array ? 12 : 0,
+         .three_d = rows[i].three_d, .shadow = rows[i].shadow,
+         .sample_group_end = rows[i].lod == AGX3_TEX_LOD_LEVEL,
+         .offset = true, .offset_xyz = rows[i].offset,
+      };
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      if (!hex_eq(bytes, length, rows[i].hex)) {
+         fprintf(stderr, "indexed offset witness: %s\n", rows[i].name);
+         return 1;
+      }
+      checks++;
+   }
+
+   /* The layer and register LOD share bank 6. Their single publication
+    * matches both native level(reg) and bias(reg), including comparisons. */
+   CHECK(agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
+                                   false, true, false, true, bytes, &length));
+   CHECK(hex_eq(bytes, length, "1705540600183400f0e42500"));
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3C, 12, 13, 6, 0,
+                                    false, true, false, true, bytes, &length));
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 128, 13, 6, 0,
+                                    false, true, false, true, bytes, &length));
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 256, 6, 0,
+                                    false, true, false, true, bytes, &length));
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
+                                    true, true, false, true, bytes, &length));
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
+                                    false, true, true, true, bytes, &length));
+   return 0;
+}
+
+/* Runtime-indexed vertex pipelines from the Metal 27.1 native translator.
+ * Every complete SMP recomposes through the AGX3B table. In each pair the
+ * offset changes only f43/f51/f141; register level and gradient operands use
+ * the same staging ABI as fragments, while vertex level clears fragment-only
+ * sample-group terminator f156. */
+static int
+test_vertex_offset_witnesses(void)
+{
+   static const struct {
+      const char *name;
+      enum agx3_tex_lod lod;
+      bool array, three_d, shadow;
+      uint16_t offset;
+      const char *plain, *offset_hex;
+   } rows[] = {
+      {"2D level", AGX3_TEX_LOD_REGISTER, false, false, false, 0x87,
+       "05800cb834000001000290010100a02800004000",
+       "05800cb834001102003a90010108a02800004000"},
+      {"2D gradient", AGX3_TEX_LOD_GRADIENT, false, false, false, 0x87,
+       "05800cb834000401000290010100a02800004000",
+       "05800cb834000902003a90010108a02800004000"},
+      {"2D array level", AGX3_TEX_LOD_REGISTER, true, false, false, 0x87,
+       "05800cb834000801000290010100a02800004000",
+       "05800cb834005102003a90010108a02800004000"},
+      {"2D array gradient", AGX3_TEX_LOD_GRADIENT, true, false, false, 0x87,
+       "05800cb834000c01000290010100a02800004000",
+       "05800cb834000903003a90010108a02800004000"},
+      {"3D level", AGX3_TEX_LOD_REGISTER, false, true, false, 0x837,
+       "05800cb834008821000290010100a02800004000",
+       "05802cb83400190200ba90010102a02800004000"},
+      {"3D gradient", AGX3_TEX_LOD_GRADIENT, false, true, false, 0x837,
+       "05800cb834009c01000290010100a02800004000",
+       "05802cb83400190300ba90010102a02800004000"},
+      {"depth level", AGX3_TEX_LOD_REGISTER, false, false, true, 0x87,
+       "05800ca014002001000280010100a02800004000",
+       "05800ca014003102003a80010108a02800004000"},
+      {"depth gradient", AGX3_TEX_LOD_GRADIENT, false, false, true, 0x87,
+       "05800ca014002401000280010100a02800004000",
+       "05800ca014002902003a80010108a02800004000"},
+      {"depth array level", AGX3_TEX_LOD_REGISTER, true, false, true, 0x87,
+       "05800ca014002801000280010100a02800004000",
+       "05800ca014007102003a80010108a02800004000"},
+      {"depth array gradient", AGX3_TEX_LOD_GRADIENT, true, false, true, 0x87,
+       "05800ca014002c01000280010100a02800004000",
+       "05800ca014002903003a80010108a02800004000"},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = rows[i].shadow ? 1 : 15,
+         .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+         .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+         .texture_value = 0, .sampler_value = 4,
+         .texture_kill = true, .sampler_kill = true,
+         .lod = rows[i].lod, .slot = 1, .wait_mask = 1u << 5,
+         .coord_kill = true, .final = true, .vertex_stage = true,
+         .array = rows[i].array,
+         .array_layer = rows[i].array ? 12 : 0,
+         .three_d = rows[i].three_d, .shadow = rows[i].shadow,
+      };
+      CHECK(agx3_tex_encode_sample(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      if (!hex_eq(bytes, length, rows[i].plain)) {
+         fprintf(stderr, "vertex sample witness: %s control\n", rows[i].name);
+         return 1;
+      }
+      d.offset = true;
+      d.offset_xyz = rows[i].offset;
+      CHECK(agx3_tex_encode_sample(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      if (!hex_eq(bytes, length, rows[i].offset_hex)) {
+         fprintf(stderr, "vertex sample witness: %s offset\n", rows[i].name);
+         return 1;
+      }
+      checks += 2;
+   }
+   return 0;
+}
+
+/* Fresh native.metal G17P fragments, independently compiled on 2026-09-13.
+ * These retain the native SMP and PACK bytes, not bytes from this encoder. */
+static int
+test_minimum_lod_witnesses(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   CHECK(agx3_tex_stage_typed_lod(enc, 6, 1, 0, false, true,
+                                 AGX3_TEX_LEVEL_MINIMUM, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055406000c1004f0c00800"));
+   CHECK(agx3_tex_stage_typed_lod(enc, 14, 1, 0, false, true,
+                                 AGX3_TEX_LEVEL_MINIMUM, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055406001c1004f0c00800"));
+   CHECK(agx3_tex_stage_bias_min(enc, 2, 0, 1, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600000800f0c02100"));
+   CHECK(agx3_tex_stage_bias_min(enc, 10, 8, 1, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600102800f0c02100"));
+   CHECK(!agx3_tex_stage_bias_min(enc, 0, 128, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_bias_min(enc, 256, 0, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_bias_min(enc, 0, 1, 0, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_bias_min(enc, 0, 1, 1, 64, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_bias_min(enc, 0, 1, 1, 0, true, true, bytes, &len));
+   CHECK(!agx3_tex_stage_bias_min(AGX_ISA_ENCODING_AGX3C, 0, 1, 1, 0,
+                                 false, true, bytes, &len));
+   static const struct {
+      bool gradient, offset, shadow, three_d, indexed;
+      uint16_t texture, sampler;
+      const char *hex;
+   } rows[] = {
+      {false, false, false, false, false, 0, 0, "05800cb8b0000408010010000100"},
+      {true, false, false, false, false, 0, 0, "05800cb8b0001401000010000100"},
+      {false, true, false, false, false, 0, 0, "05800cb8b000c10201881000010e"},
+      {true, true, false, false, false, 0, 0, "05800cb8b000490200881000010e"},
+      {false, false, true, false, false, 0, 0, "05800ca090002408010000000100"},
+      {true, false, true, false, false, 0, 0, "05800ca090003401000000000100"},
+      {false, false, false, true, false, 0, 0, "05800cb8b0009021010010000100"},
+      {true, false, false, true, false, 0, 0, "05800cb8b0009c21000010000100"},
+      {false, false, false, false, true, 0, 4, "05800cb8b4000408010290010100a02800000000"},
+      {true, false, false, false, true, 8, 12, "05c00cb8bc001401000290010100a02800000000"},
+   };
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = rows[i].shadow ? 1 : 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .min_lod = true,
+         .lod = rows[i].gradient ? AGX3_TEX_LOD_GRADIENT
+                                 : AGX3_TEX_LOD_BIAS_REGISTER,
+         .offset = rows[i].offset, .offset_xyz = rows[i].offset ? 0xf1 : 0,
+         .shadow = rows[i].shadow, .three_d = rows[i].three_d,
+         .texture_kind = rows[i].indexed ? AGX3_TEX_OPERAND_REGISTER
+                                         : AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = rows[i].indexed ? AGX3_TEX_OPERAND_REGISTER
+                                         : AGX3_TEX_OPERAND_IMMEDIATE,
+         .texture_value = rows[i].texture, .sampler_value = rows[i].sampler,
+         .texture_kill = rows[i].indexed, .sampler_kill = rows[i].indexed,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      if (!hex_eq(bytes, len, rows[i].hex)) {
+         fprintf(stderr, "minimum LOD native row %u\n", i);
+         return 1;
+      }
+      checks++;
+      d.array = true;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.array = false;
+      d.vertex_stage = true;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.vertex_stage = false;
+      d.query_lod = true;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.query_lod = false;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+   }
+   return 0;
+}
+
+/* Fresh G17P runtime-descriptor gather kernels, with native register numbers.
+ * These bytes test operand typing, packed layer preservation, f141=2 and the
+ * cube dimension independently of the IR packer. */
+static int
+test_runtime_gather_witnesses(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   CHECK(agx3_tex_stage_gather_offset(enc, 0, false, 0, 1, false, true,
+                                      bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600000400f0c00100"));
+   CHECK(agx3_tex_pack_ms_array_layer(enc, 14, 8, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055408031c0000f0880400"));
+   CHECK(agx3_tex_stage_gather_offset(enc, 16, true, 8, 6, false, true,
+                                      bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600204440f0e60300"));
+   CHECK(!agx3_tex_stage_gather_offset(enc, 128, false, 0, 1, false, false,
+                                       bytes, &len));
+   CHECK(!agx3_tex_stage_gather_offset(enc, 1, false, 0, 1, false, false,
+                                       bytes, &len));
+   for (unsigned shape = 0; shape < 6; ++shape) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 32,
+         .coord_kill = true, .final = true,
+         .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+         .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+         .texture_value = 0, .sampler_value = 4,
+         .texture_kill = true, .sampler_kill = true,
+         .gather = AGX3_TEX_GATHER_R, .shadow = shape & 1,
+         .offset = shape < 4, .offset_register = shape < 4,
+         .array = shape == 2 || shape == 3, .cube = shape >= 4,
+      };
+      const char *native[] = {
+         "05800ca414004000010280010100a02800004000",
+         "05800ca414006000010280010100a02800004000",
+         "05800ca414004004010280010100a02800004000",
+         "05800ca414006004010280010100a02800004000",
+         "05800ca414001000010280010100a02800004000",
+         "05800ca414003000010280010100a02800004000",
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, native[shape]));
+   }
+   return 0;
+}
+
 int
 main(void)
 {
-   if (test_m5_array_sample() || test_register_lod() || test_fetch_lod() ||
+   if (test_m5_array_sample() || test_runtime_gather_witnesses() ||
+       test_minimum_lod_witnesses() || test_register_lod() || test_fetch_lod() ||
        test_register_array_layer() || test_cube_coordinate_stage() ||
        test_multisample_fetch() ||
        test_multisample_sample_stage() ||
@@ -2787,8 +3350,11 @@ main(void)
        test_bindless_operand_kinds() || test_indexed_sample_witnesses() ||
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias() ||
-       test_offset_witnesses() || test_shadow_lod_witnesses() ||
-       test_3d_lod_witnesses() || test_image_write_state0_witnesses() || test_m5_indexed_reads())
+       test_offset_witnesses() || test_indexed_offset_witnesses() ||
+       test_vertex_offset_witnesses() ||
+       test_shadow_lod_witnesses() ||
+       test_3d_lod_witnesses() || test_image_write_state0_witnesses() ||
+       test_query_lod_witnesses() || test_m5_indexed_reads())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

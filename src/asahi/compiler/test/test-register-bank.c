@@ -35,6 +35,7 @@ init(struct fixture *f, unsigned bound, unsigned reserved)
       .ncomps = f->widths, .sizes = f->sizes, .classes = f->classes,
       .used_regs[RA_GPR] = f->used, .bound[RA_GPR] = bound,
       .low_gpr = f->low_gpr, .texture_gpr = f->texture_gpr,
+      .tile_gpr_limit = 16,
       .log2_gpr = f->log2_gpr,
       .high_gpr = f->high_gpr,
       .count[RA_GPR] = &f->high_water, .count[RA_MEM] = &f->memory_count,
@@ -114,6 +115,9 @@ main(void)
    assert(dest_limit(&f.ra, &producer, 0) == 128);
    BITSET_SET(f.low_gpr, constrained.value);
    assert(dest_limit(&f.ra, &producer, 0) == 16);
+   f.ra.tile_gpr_limit = 32;
+   assert(dest_limit(&f.ra, &producer, 0) == 32);
+   f.ra.tile_gpr_limit = 16;
    f.key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
    assert(dest_limit(&f.ra, &producer, 0) == 256);
 

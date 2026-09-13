@@ -239,6 +239,38 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
 }
 
+TEST(Tilebuffer, G17PNarrowSRGB)
+{
+   for (enum pipe_format format : {PIPE_FORMAT_R8_SRGB,
+                                   PIPE_FORMAT_R8G8_SRGB}) {
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {format};
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(formats, 1, 1, false);
+
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(tib.sample_size_B, 8);
+      EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 0), 0);
+      EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0),
+                PIPE_FORMAT_R8G8B8A8_SRGB);
+      EXPECT_EQ(agx_g17p_rt0_pbe_format(format), util_format_linear(format));
+
+      tib.spilled[0] = true;
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+      tib = agx_build_tilebuffer_layout(formats, 1, 1, true);
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+      for (unsigned samples : {2u, 4u}) {
+         tib = agx_build_tilebuffer_layout(formats, 1, samples, false);
+         EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      }
+
+      formats[1] = format;
+      tib = agx_build_tilebuffer_layout(formats, 2, 1, false);
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   }
+}
+
 TEST(Tilebuffer, G17PRGB565EOTKey)
 {
    struct agx_shader_key key = {};
