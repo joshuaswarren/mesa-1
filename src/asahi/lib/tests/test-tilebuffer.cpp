@@ -239,6 +239,48 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
 }
 
+TEST(Tilebuffer, G17PCompactsSparseRGBA8Attachments)
+{
+   enum pipe_format sparse[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_NONE,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_NONE,
+      PIPE_FORMAT_B8G8R8A8_UNORM,
+   };
+   const struct agx_tilebuffer_layout source =
+      agx_build_tilebuffer_layout(sparse, 4, 1, false);
+   struct agx_tilebuffer_layout compact;
+   uint8_t map[AGX_MAX_RENDER_TARGETS] = {0};
+   ASSERT_EQ(agx_tilebuffer_compact(&source, &compact, map), 2u);
+   EXPECT_EQ(map[0], 1u);
+   EXPECT_EQ(map[1], 3u);
+   EXPECT_EQ(compact.logical_format[0], PIPE_FORMAT_R8G8B8A8_UNORM);
+   EXPECT_EQ(compact.logical_format[1], PIPE_FORMAT_B8G8R8A8_UNORM);
+   EXPECT_EQ(compact._offset_B[0], 0u);
+   EXPECT_EQ(compact._offset_B[1], 4u);
+   EXPECT_EQ(agx_g17p_classify_mrt(&source), AGX_G17P_MRT_RGBA8);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&source));
+
+   for (unsigned count : {3u, 4u}) {
+      enum pipe_format rgba8[AGX_MAX_RENDER_TARGETS] = {
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+      };
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(rgba8, count, 1, false);
+      EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_RGBA8);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   }
+
+   enum pipe_format none[AGX_MAX_RENDER_TARGETS] = {PIPE_FORMAT_NONE};
+   struct agx_tilebuffer_layout attachmentless =
+      agx_build_tilebuffer_layout(none, 1, 0, false);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&attachmentless));
+   EXPECT_EQ(attachmentless.nr_samples, 0u);
+}
+
 TEST(Tilebuffer, G17PNarrowSRGB)
 {
    for (enum pipe_format format : {PIPE_FORMAT_R8_SRGB,

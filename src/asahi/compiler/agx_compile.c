@@ -5792,7 +5792,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       for (unsigned i = 0; i < store_count; ++i)
          rgba32 &= stores[i]->format == AGX_FORMAT_I32 &&
                    stores[i]->mask == 15 && stores[i]->pixel_offset == 16 * i;
-      if (store_count == 4 || rgba32)
+      bool rgba8 = !load_count && store_count >= 3;
+      for (unsigned i = 0; i < store_count; ++i)
+         rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
+                  stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
+      if (store_count == 4 || rgba32 || rgba8)
          return false;
    }
 

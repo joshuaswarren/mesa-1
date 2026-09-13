@@ -2065,8 +2065,9 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    /* Fresh two-to-four-target BG and ordinary fragments ground f13=0 for full
     * raw32 payloads starting at half16/24 too. Other high-bank shapes retain
     * the existing refusal. The caller proves the complete raw32 store graph. */
-   const bool quad_high = quad_store && !load && I->format == AGX_FORMAT_I32 &&
-      value.value < 32 && (I->mask == 1 || I->mask == 15);
+   const bool quad_high = quad_store && !load && value.value < 32 &&
+      ((I->format == AGX_FORMAT_I32 && (I->mask == 1 || I->mask == 15)) ||
+       (I->format == AGX_FORMAT_U8NORM && I->mask == 15));
    if (!load && enc == AGX_ISA_ENCODING_AGX3B && value.value >= 16 && !quad_high)
       return false;
 
@@ -5307,8 +5308,10 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (p.count == 4) {
          const unsigned stride = p.offsets[1];
          if ((stride != 4 && stride != 16) ||
-             I->op != AGX_OPCODE_ST_TILE || I->format != AGX_FORMAT_I32 ||
-             I->mask != (stride == 4 ? 1 : 15) || I->nr_srcs != 3 ||
+             I->op != AGX_OPCODE_ST_TILE ||
+             !((I->format == AGX_FORMAT_I32 &&
+                I->mask == (stride == 4 ? 1 : 15)) ||
+               (stride == 4 && I->format == AGX_FORMAT_U8NORM && I->mask == 15)) || I->nr_srcs != 3 ||
              I->nr_dests || !agx_is_null(I->src[2]) || partition < 0 ||
              I->pixel_offset != (unsigned)partition * stride)
             return (struct agx3_g17p_mrt_protocol){0};
@@ -5356,13 +5359,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    return p;
 }
 
-/* Fresh G17P BG constructors for two to four identical RGBA32 targets and
- * four R32 targets have no
- * PIXWAIT/PIXREL in the shader and loader release 0x200. They store ascending
- * offsets, unlike the ordinary four-target epilog's shared class-12 lifetime.
- * Admit only the corresponding straight-line, single-sample store graph. */
+/* Fresh G17P BG constructors for two to four identical RGBA32 targets, four
+ * R32 targets, and three or four RGBA8 targets have no PIXWAIT/PIXREL in the
+ * shader and use loader release 0x200. They store ascending offsets, unlike
+ * the ordinary four-target epilog's shared class-12 lifetime. */
 static bool
-agx3_g17p_raw32_background_protocol(const agx_context *ctx)
+agx3_g17p_multi_background_protocol(const agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
@@ -5372,6 +5374,7 @@ agx3_g17p_raw32_background_protocol(const agx_context *ctx)
 
    unsigned stores = 0, stride = 0;
    bool stopped = false;
+   enum agx_format format = 0;
    agx_foreach_instr_global(ctx, I) {
       if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
@@ -5379,14 +5382,19 @@ agx3_g17p_raw32_background_protocol(const agx_context *ctx)
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
       } else if (I->op == AGX_OPCODE_ST_TILE) {
-         const unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
+         const bool rgba8 = I->format == AGX_FORMAT_U8NORM && I->mask == 15;
+         const unsigned width =
+            rgba8 ? 4 : I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
          if (!width || (stores && width != stride) || stores >= 4 ||
-             I->format != AGX_FORMAT_I32 || I->nr_srcs != 3 ||
+             (!rgba8 && I->format != AGX_FORMAT_I32) || I->nr_srcs != 3 ||
              I->nr_dests != 0 || I->explicit_coords ||
              I->src[1].type != AGX_INDEX_IMMEDIATE ||
              I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
              !agx_is_null(I->src[2]) || I->pixel_offset != stores * width)
             return false;
+         if (stores && I->format != format)
+            return false;
+         format = I->format;
          stride = width;
          stores++;
       } else if (!agx_opcodes_info[I->op].can_eliminate &&
@@ -5397,7 +5405,8 @@ agx3_g17p_raw32_background_protocol(const agx_context *ctx)
       }
    }
    return stopped && ((stride == 16 && stores >= 2 && stores <= 4) ||
-                      (stride == 4 && stores == 4));
+                      (stride == 4 && (stores == 4 ||
+                       (stores == 3 && format == AGX_FORMAT_U8NORM))));
 }
 
 /* Prove complete shader-part shapes from post-RA IR. EXPORT is an ABI
@@ -5495,13 +5504,16 @@ agx3_g17p_colour_link_info(agx_context *ctx, bool opaque_protocol)
    ctx->agx3_colour_link = info;
 }
 
+/* Recognize EOT shaders with two to four raw32 targets or three to four
+ * RGBA8 targets. The native constructors use one store per dense attachment,
+ * with a four-byte or sixteen-byte imageblock stride. */
 static unsigned
-agx3_g17p_raw32_eot_count(const agx_context *ctx)
+agx3_g17p_multi_eot_count(const agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
        ctx->key->no_stop || ctx->key->g17p_rt0_eot_multisample ||
-       !ctx->key->g17p_rt0_eot_i32 || list_length(&ctx->blocks) != 1)
+       list_length(&ctx->blocks) != 1)
       return false;
 
    unsigned values[256];
@@ -5540,7 +5552,10 @@ agx3_g17p_raw32_eot_count(const agx_context *ctx)
          }
       } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
          if (stores >= 4 || I->nr_dests || I->nr_srcs != 4 ||
-             I->format != AGX_FORMAT_I32 || I->dim != AGX_DIM_2D ||
+             I->format != (ctx->key->g17p_rt0_eot_i32
+                              ? AGX_FORMAT_I32
+                              : AGX_FORMAT_U8NORM) ||
+             I->dim != AGX_DIM_2D ||
              !I->explicit_coords ||
              I->src[0].type != AGX_INDEX_IMMEDIATE || I->src[0].value != 0 ||
              I->src[0].size != AGX_SIZE_16 ||
@@ -5566,6 +5581,8 @@ agx3_g17p_raw32_eot_count(const agx_context *ctx)
    }
    /* A two-word packed-format pair has its own explicit format gate. Do
     * not let its four-byte stride enter through the new RGBA32 admission. */
+   if (!ctx->key->g17p_rt0_eot_i32)
+      return stopped && stride == 4 && stores >= 3 && stores <= 4 ? stores : 0;
    return stopped && ((stride == 16 && stores >= 2 && stores <= 4) ||
                       (stride == 4 && stores == 4)) ? stores : 0;
 }
@@ -5588,15 +5605,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;
 
-   const unsigned raw32_eot_count = agx3_g17p_raw32_eot_count(ctx);
-   if (raw32_eot_count) {
+   const unsigned multi_eot_count = agx3_g17p_multi_eot_count(ctx);
+   if (multi_eot_count) {
       static_assert(sizeof(agx3_g17p_quad_eot) == 208, "native quad EOT");
       ctx->max_reg = MAX2(ctx->max_reg, 7);
-      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8 * raw32_eot_count);
-      if (raw32_eot_count == 2)
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8 * multi_eot_count);
+      if (!ctx->key->g17p_rt0_eot_i32) {
+         return multi_eot_count == 3
+            ? agx3_append(emission, agx3_g17p_rgba8_3_eot,
+                            sizeof(agx3_g17p_rgba8_3_eot))
+            : agx3_append(emission, agx3_g17p_rgba8_4_eot,
+                            sizeof(agx3_g17p_rgba8_4_eot));
+      }
+      if (multi_eot_count == 2)
          return agx3_append(emission, agx3_g17p_dual_raw32_eot,
                             sizeof(agx3_g17p_dual_raw32_eot));
-      if (raw32_eot_count == 3)
+      if (multi_eot_count == 3)
          return agx3_append(emission, agx3_g17p_triple_raw32_eot,
                             sizeof(agx3_g17p_triple_raw32_eot));
       return agx3_append(emission, agx3_g17p_quad_eot, sizeof(agx3_g17p_quad_eot));
@@ -6048,7 +6072,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * partition and release each partition in descending order. */
    const struct agx3_g17p_mrt_protocol g17p_mrt =
       agx3_g17p_mrt_protocol(ctx);
-   const bool g17p_raw32_background = agx3_g17p_raw32_background_protocol(ctx);
+   const bool g17p_multi_background = agx3_g17p_multi_background_protocol(ctx);
    const bool g17p_msaa_background_stores =
       agx3_g17p_msaa_background_store_protocol(ctx);
    const bool g17p_colour_protocol =
@@ -6062,7 +6086,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * produces a syntactically valid shader that writes only partition zero. */
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
-       tile_stores_left > 1 && !g17p_mrt.valid && !g17p_raw32_background &&
+       tile_stores_left > 1 && !g17p_mrt.valid && !g17p_multi_background &&
        !g17p_msaa_background_stores)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
@@ -7186,7 +7210,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
             }
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
-                                g17p_raw32_background))
+                                g17p_multi_background))
                AGX3_REFUSE(I);
 
             if (g17p_pixel_protocol && I->op == AGX_OPCODE_ST_TILE && last) {

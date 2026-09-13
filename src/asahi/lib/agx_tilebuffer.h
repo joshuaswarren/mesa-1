@@ -94,6 +94,12 @@ struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
                             uint8_t nr_samples, bool layered);
 
+/* Compact attachment slots for internal programs without moving tile data.
+ * map[dense slot] identifies the original logical attachment. */
+unsigned agx_tilebuffer_compact(const struct agx_tilebuffer_layout *src,
+                                struct agx_tilebuffer_layout *dst,
+                                uint8_t map[AGX_MAX_RENDER_TARGETS]);
+
 void agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
                                 unsigned nr_samples);
 
@@ -115,14 +121,16 @@ bool agx_nir_lower_sample_intrinsics(struct nir_shader *shader,
 uint32_t agx_tilebuffer_total_size(struct agx_tilebuffer_layout *tib);
 
 enum pipe_format
-agx_tilebuffer_physical_format(struct agx_tilebuffer_layout *tib, unsigned rt);
+agx_tilebuffer_physical_format(const struct agx_tilebuffer_layout *tib,
+                               unsigned rt);
 
 bool agx_tilebuffer_supports_mask(struct agx_tilebuffer_layout *tib,
                                   unsigned rt);
 
 void agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib);
 
-bool agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib);
+bool agx_g17p_rt0_tile_layout_supported(
+   const struct agx_tilebuffer_layout *tib);
 
 enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_NONE,

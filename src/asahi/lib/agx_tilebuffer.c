@@ -166,7 +166,8 @@ agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
 }
 
 enum pipe_format
-agx_tilebuffer_physical_format(struct agx_tilebuffer_layout *tib, unsigned rt)
+agx_tilebuffer_physical_format(const struct agx_tilebuffer_layout *tib,
+                               unsigned rt)
 {
    return ail_pixel_format[tib->logical_format[rt]].renderable;
 }
@@ -215,11 +216,47 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
    }
 }
 
-bool
-agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
+unsigned
+agx_tilebuffer_compact(const struct agx_tilebuffer_layout *src,
+                       struct agx_tilebuffer_layout *dst,
+                       uint8_t map[AGX_MAX_RENDER_TARGETS])
 {
-   if (!tib ||
-       (tib->nr_samples != 1 && tib->nr_samples != 2 &&
+   if (!src || !dst)
+      return 0;
+
+   const struct agx_tilebuffer_layout original = *src;
+   *dst = original;
+   memset(dst->logical_format, 0, sizeof(dst->logical_format));
+   memset(dst->spilled, 0, sizeof(dst->spilled));
+   memset(dst->_offset_B, 0, sizeof(dst->_offset_B));
+   unsigned count = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (original.logical_format[rt] == PIPE_FORMAT_NONE)
+         continue;
+      if (map)
+         map[count] = rt;
+      dst->logical_format[count] = original.logical_format[rt];
+      dst->spilled[count] = original.spilled[rt];
+      dst->_offset_B[count++] = original._offset_B[rt];
+   }
+   return count;
+}
+
+bool
+agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
+{
+   if (!tib)
+      return false;
+
+   struct agx_tilebuffer_layout compact;
+   const unsigned count = agx_tilebuffer_compact(tib, &compact, NULL);
+   tib = &compact;
+   /* No attachment supplies a sample count. Draw-time state completes this
+    * layout; the empty BG/EOT programs use the single-sample form. */
+   if (count == 0 && compact.nr_samples == 0)
+      compact.nr_samples = 1;
+
+   if ((tib->nr_samples != 1 && tib->nr_samples != 2 &&
         tib->nr_samples != 4) ||
        tib->layered || tib->spilled[0])
       return false;
@@ -242,7 +279,8 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
-   for (unsigned rt = raw32 ? 4 : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
+   for (unsigned rt = raw32 || mrt == AGX_G17P_MRT_RGBA8 ? 4
+                           : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
          return false;
@@ -340,7 +378,13 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 enum agx_g17p_mrt_layout
 agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
 {
-   if (!tib || tib->nr_samples != 1 || tib->spilled[0] || tib->spilled[1] ||
+   if (!tib)
+      return AGX_G17P_MRT_NONE;
+   struct agx_tilebuffer_layout compact;
+   const unsigned active_count = agx_tilebuffer_compact(tib, &compact, NULL);
+   tib = &compact;
+
+   if (tib->nr_samples != 1 || tib->spilled[0] || tib->spilled[1] ||
        tib->_offset_B[0] != 0)
       return AGX_G17P_MRT_NONE;
 
@@ -367,6 +411,19 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
       if (supported)
          return rgba32 ? AGX_G17P_MRT_RGBA32 : AGX_G17P_MRT_R32_QUAD;
    }
+
+   bool rgba8 = !tib->layered && active_count >= 2 && active_count <= 4 &&
+                tib->sample_size_B == ALIGN_POT(4 * active_count, 8);
+   for (unsigned rt = 0; rt < active_count; ++rt) {
+      const enum pipe_format f = tib->logical_format[rt];
+      rgba8 &= (f == PIPE_FORMAT_R8G8B8A8_UNORM ||
+                f == PIPE_FORMAT_B8G8R8A8_UNORM ||
+                f == PIPE_FORMAT_R8G8B8X8_UNORM ||
+                f == PIPE_FORMAT_B8G8R8X8_UNORM) &&
+               !tib->spilled[rt] && tib->_offset_B[rt] == 4 * rt;
+   }
+   if (rgba8)
+      return AGX_G17P_MRT_RGBA8;
 
    for (unsigned rt = 2; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)

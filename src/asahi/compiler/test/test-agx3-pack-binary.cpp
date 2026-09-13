@@ -27,6 +27,7 @@ extern "C" {
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_funop_core.h"
+#include "agx3_g17p_quad_eot.h"
 #include "agx3_iadd_core.h"
 #include "agx3_local_tps_core.h"
 #include "agx3_mem_core.h"
@@ -457,6 +458,37 @@ TEST_F(AGX3PackBinary, G17PRGBA8MRTEOTUsesExactNativeProgram)
    EXPECT_TRUE(pack(build(0, 4, AGX_FORMAT_U8NORM), false).empty());
    EXPECT_TRUE(pack(build(1, 8, AGX_FORMAT_U8NORM), false).empty());
    EXPECT_TRUE(pack(build(1, 4, AGX_FORMAT_S8NORM), false).empty());
+}
+
+TEST_F(AGX3PackBinary, G17PThreeAndFourRGBA8EOTUseNativePrograms)
+{
+   for (unsigned count : {3u, 4u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index coords = agx_register(0, AGX_SIZE_32);
+      coords.channels_m1 = 1;
+      agx_get_sr_to(b, agx_register(0, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_X);
+      agx_get_sr_to(b, agx_register(2, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_Y);
+      for (unsigned rt = 0; rt < count; ++rt) {
+         agx_mov_imm_to(b, agx_register(4, AGX_SIZE_32), 4 * rt);
+         agx_block_image_store(b, agx_immediate(0), agx_immediate(rt),
+                               agx_register(4, AGX_SIZE_32), coords,
+                               AGX_FORMAT_U8NORM, AGX_DIM_2D, true);
+      }
+      agx_stop(b);
+
+      const uint8_t *native = count == 3 ? agx3_g17p_rgba8_3_eot
+                                          : agx3_g17p_rgba8_4_eot;
+      const size_t native_size = count == 3
+                                    ? sizeof(agx3_g17p_rgba8_3_eot)
+                                    : sizeof(agx3_g17p_rgba8_4_eot);
+      EXPECT_EQ(pack(b), std::vector<uint8_t>(native, native + native_size));
+      EXPECT_EQ(b->shader->max_reg, 7);
+      EXPECT_TRUE(b->shader->agx3_staging_known);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 8 * count);
+   }
 }
 
 TEST_F(AGX3PackBinary, G17PF16EOTUsesExactNativeI16Program)

@@ -292,6 +292,26 @@ main(void)
                                               &eot_program));
    }
 
+   /* Three RGBA8 attachments occupy twelve bytes but the tilebuffer rounds
+    * the sample stride to sixteen. The native EOT still publishes offsets
+    * 0, 4 and 8, with no fourth offset operand. */
+   struct agx3_g17p_rt0_eot_program_desc rgba8_three = eot;
+   rgba8_three.shader_binary_size = 164;
+   rgba8_three.staging_halfs = 24;
+   rgba8_three.attachment_count = 3;
+   rgba8_three.imageblock_offset1_B = 4;
+   rgba8_three.imageblock_offset2_B = 8;
+   rgba8_three.imageblock_offset3_B = 0;
+   rgba8_three.imageblock.sample_size_B = 16;
+   rgba8_three.imageblock.tile_size_px = 32 * 32;
+   CHECK(agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+   CHECK(eot_program.length > 0 &&
+         eot_program.length <= AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE);
+   rgba8_three.imageblock.sample_size_B = 12;
+   CHECK(!agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+
    /* Two and three RGBA32 targets retain the same sparse per-attachment
     * offset ABI, with only their actual descriptor and staging counts. */
    for (unsigned count = 2; count <= 3; ++count) {

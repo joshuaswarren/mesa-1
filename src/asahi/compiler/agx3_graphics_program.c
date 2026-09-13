@@ -393,7 +393,8 @@ agx3_g17p_rt0_eot_program_generate(
       (desc->imageblock_offset1_B == 4 || desc->imageblock_offset1_B == 16) &&
       desc->imageblock_offset2_B == (count > 2 ? 2 * desc->imageblock_offset1_B : 0) &&
       desc->imageblock_offset3_B == (count > 3 ? 3 * desc->imageblock_offset1_B : 0) &&
-      desc->imageblock.sample_size_B == count * desc->imageblock_offset1_B &&
+      desc->imageblock.sample_size_B ==
+         ALIGN_POT(count * desc->imageblock_offset1_B, 8) &&
       desc->imageblock.nr_samples == 1;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
        (!rt0 && !dual_mrt && !raw32_mrt) ||
