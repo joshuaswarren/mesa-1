@@ -3854,13 +3854,17 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          I->src[1] = tmp;
       }
 
-      /* The grounded immediate-multiplier IMAD has either no addend or a
-       * nonnegative byte addend. Split `a * byte - byte` into the witnessed
-       * pure multiply followed by the witnessed subtract-immediate form. */
+      /* Neither register nor immediate multiplication has a grounded
+       * negative immediate addend. Split a * b - byte into the native
+       * pure multiply followed by subtract-immediate, with the same
+       * modulo-2^32 result. */
       if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs == 3 &&
           I->dest[0].size == AGX_SIZE_32 && I->shift == 0 &&
-          I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
-          !I->src[1].neg && I->src[1].value <= UINT8_MAX &&
+          !I->src[1].abs && !I->src[1].neg &&
+          ((I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value <= UINT8_MAX) ||
+           (I->src[1].type == AGX_INDEX_NORMAL &&
+            I->src[1].size == AGX_SIZE_32)) &&
           I->src[2].type == AGX_INDEX_IMMEDIATE && !I->src[2].abs &&
           I->src[2].neg && I->src[2].value <= UINT8_MAX) {
          agx_index product = agx_temp(ctx, AGX_SIZE_32);
