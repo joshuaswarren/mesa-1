@@ -658,6 +658,19 @@ agx3_emit_funop(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
    uint8_t bytes[AGX3_FUNOP_MAX_LENGTH];
    uint8_t len = 0;
+   if (enc == AGX_ISA_ENCODING_AGX3C && op <= AGX3_FUNOP_EXP2) {
+      if (I->src[0].kill)
+         return false;
+      const struct agx3_funop_runtime runtime = {
+         .dest_cache = I->dest[0].cache,
+         .src_cache = I->src[0].cache,
+         .src_discard = I->src[0].discard,
+      };
+      return agx3_funop_encode_g17g(op, I->dest[0].value, I->src[0].value,
+                                    I->src[0].abs, I->src[0].neg, I->saturate,
+                                    wait_mask, &runtime, bytes, &len) &&
+             agx3_append(emission, bytes, len);
+   }
    return agx3_funop_encode(enc, op, I->dest[0].value, I->src[0].value,
                             I->src[0].abs, I->src[0].neg, I->saturate,
                             wait_mask, bytes, &len) &&

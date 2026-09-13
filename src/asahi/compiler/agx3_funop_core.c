@@ -15,11 +15,11 @@
 /*
  * Per-mnemonic canonical baselines, taken verbatim from the decoded bare
  * witnesses (transcendental-int-re analysis.json `baselines`, corpus_frag for
- * the gradients). f9/f10/f25/f26/f29 are the operand-shape selectors; f11,
- * f27, f29 and f40(b)/f42(c) include the liveness-hint bits exactly as the
- * canonical witness carried them -- the research grades them non-semantic,
- * and replaying the witness value keeps every emitted byte string one Apple
- * itself produced. On AGX3c the class discriminator f33=3 plus the f34
+ * the gradients). f9/f10/f25/f26 select the operand shape. The legacy replay
+ * entry point preserves the witnesses' f11/f27/f29 lifetime fields and
+ * f40(b)/f42(c) waits. G17G runtime encoding overrides them with the actual
+ * post-RA lifetimes and scheduler dependencies. On AGX3c the class
+ * discriminator f33=3 plus the f34
  * op-select join the baseline (f32sinc uses a distinct word0 without f42).
  */
 struct funop_form {
@@ -100,10 +100,11 @@ is_b(enum agx_isa_encoding e)
    return e == AGX_ISA_ENCODING_AGX3B;
 }
 
-bool
-agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
+static bool
+agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
                   uint16_t src, bool src_abs, bool src_neg, bool saturate,
-                  uint16_t wait_mask, uint8_t out[AGX3_FUNOP_MAX_LENGTH],
+                  uint16_t wait_mask, const struct agx3_funop_runtime *runtime,
+                  uint8_t out[AGX3_FUNOP_MAX_LENGTH],
                   uint8_t *len)
 {
    if (out == NULL || len == NULL)
@@ -112,7 +113,11 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
    *len = 0;
 
    if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
-       op >= AGX3_FUNOP_COUNT)
+        op >= AGX3_FUNOP_COUNT)
+      return false;
+
+   if (runtime && (enc != AGX_ISA_ENCODING_AGX3C || op > AGX3_FUNOP_EXP2 ||
+                   (runtime->src_cache && runtime->src_discard)))
       return false;
 
    /* Witnessed operand domain: even 32-bit half-register pairs below 128. */
@@ -132,7 +137,7 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
    if (wait_mask && !F->wait_ok)
       return false;
 
-   struct agx3_field_kv ov[16];
+   struct agx3_field_kv ov[20];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
    ov[n++] = (struct agx3_field_kv)KV(18, src);
@@ -144,11 +149,21 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
       ov[n++] = (struct agx3_field_kv)KV(14, 1);
    if (F->rint_mode >= 0)
       ov[n++] = (struct agx3_field_kv)KV(43, F->rint_mode);
+
+   /* Apple applegpu_g17g witnesses log2(x)*x and exp2(x)*x retain the
+    * source (f27=1, f29=0), while their last-use counterparts set f29.
+    * The same fields are independently witnessed for all four rint modes.
+    * Copying the canonical last-use template here discards live inputs. */
+   if (runtime) {
+      ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
+      ov[n++] = (struct agx3_field_kv)KV(27, runtime->src_cache);
+      ov[n++] = (struct agx3_field_kv)KV(29, runtime->src_discard);
+   }
    /* Wait bits f35..f40 (b) / f35..f42 (c), one per scoreboard slot; on the
     * canonical AGX3b baseline the slot-6 field doubles as the f40 hint. */
    for (unsigned i = 0; i < nslots; ++i) {
-      if (wait_mask & (1u << i))
-         ov[n++] = (struct agx3_field_kv)KV(35 + i, 1);
+      if (runtime || (wait_mask & (1u << i)))
+         ov[n++] = (struct agx3_field_kv)KV(35 + i, !!(wait_mask & (1u << i)));
    }
 
    const struct agx3_field_kv *base = is_b(enc) ? F->base_b : F->base_c;
@@ -160,4 +175,26 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
       return false;
    }
    return true;
+}
+
+bool
+agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
+                  uint16_t src, bool src_abs, bool src_neg, bool saturate,
+                  uint16_t wait_mask, uint8_t out[AGX3_FUNOP_MAX_LENGTH],
+                  uint8_t *len)
+{
+   return agx3_funop_encode_impl(enc, op, dest, src, src_abs, src_neg, saturate,
+                                 wait_mask, NULL, out, len);
+}
+
+bool
+agx3_funop_encode_g17g(enum agx3_funop op, uint16_t dest, uint16_t src,
+                       bool src_abs, bool src_neg, bool saturate,
+                       uint16_t wait_mask,
+                       const struct agx3_funop_runtime *runtime,
+                       uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len)
+{
+   return runtime && agx3_funop_encode_impl(AGX_ISA_ENCODING_AGX3C, op, dest, src,
+                                            src_abs, src_neg, saturate,
+                                            wait_mask, runtime, out, len);
 }

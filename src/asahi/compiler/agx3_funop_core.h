@@ -65,6 +65,20 @@ bool agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op,
                        bool saturate, uint16_t wait_mask,
                        uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len);
 
+struct agx3_funop_runtime {
+   bool dest_cache;
+   bool src_cache;
+   bool src_discard;
+};
+
+/* G17G f32rint/log2/exp2 with actual post-RA lifetimes and scoreboard waits.
+ * The legacy entry point above replays the original fixed corpus shapes. */
+bool agx3_funop_encode_g17g(enum agx3_funop op, uint16_t dest, uint16_t src,
+                           bool src_abs, bool src_neg, bool saturate,
+                           uint16_t wait_mask,
+                           const struct agx3_funop_runtime *runtime,
+                           uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

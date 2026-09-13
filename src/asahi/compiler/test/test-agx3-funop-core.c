@@ -68,6 +68,51 @@ main(void)
    uint8_t b[AGX3_FUNOP_MAX_LENGTH];
    uint8_t len;
 
+   /* Independent applegpu_g17g Metal 27.1.5194.15 witnesses: the live
+    * probes multiply the funop result by its input; the dead probes only
+    * store the result. Registers are in half units. The second instruction
+    * has no outstanding load, so it must not inherit the template's wait. */
+   static const struct {
+      enum agx3_funop op;
+      uint16_t dest, src, wait;
+      bool live;
+      const char *hex;
+   } runtime_vectors[] = {
+      {AGX3_FUNOP_LOG2, 14, 0, 128, true, "3f80040a2a20a41a1000"},
+      {AGX3_FUNOP_LOG2, 12, 4,   0, true, "2780041a2a20a41a1000"},
+      {AGX3_FUNOP_LOG2,  0, 0, 128, false,"2f00040a2220a4023000"},
+      {AGX3_FUNOP_LOG2,  2, 2,   0, false,"3702040a2220a4023000"},
+      {AGX3_FUNOP_EXP2, 14, 0, 128, true, "3f80040a2a20a51a1000"},
+      {AGX3_FUNOP_EXP2, 12, 4,   0, true, "2780041a2a20a51a1000"},
+      {AGX3_FUNOP_EXP2,  0, 0, 128, false,"2f00040a2220a5023000"},
+      {AGX3_FUNOP_EXP2,  2, 2,   0, false,"3702040a2220a5023000"},
+      {AGX3_FUNOP_FLOOR,14,0,128, true, "3f8004182a20a01a5000"},
+      {AGX3_FUNOP_FLOOR,12,4,  0, true, "278004382a20a01a5000"},
+      {AGX3_FUNOP_CEIL, 14,0,128, true, "3f8004182a20a01a9000"},
+      {AGX3_FUNOP_CEIL, 12,4,  0, true, "278004382a20a01a9000"},
+      {AGX3_FUNOP_TRUNC,14,0,128, true, "3f8004182a20a01ad000"},
+      {AGX3_FUNOP_TRUNC,12,4,  0, true, "278004382a20a01ad000"},
+      {AGX3_FUNOP_RINT, 14,0,128, true, "3f8004182a20a01a1000"},
+      {AGX3_FUNOP_RINT, 12,4,  0, true, "278004382a20a01a1000"},
+   };
+   for (unsigned i = 0; i < sizeof(runtime_vectors) / sizeof(runtime_vectors[0]); ++i) {
+      const struct agx3_funop_runtime runtime = {
+         .dest_cache = runtime_vectors[i].live,
+         .src_cache = runtime_vectors[i].live,
+         .src_discard = !runtime_vectors[i].live,
+      };
+      const bool ok = agx3_funop_encode_g17g(
+         runtime_vectors[i].op, runtime_vectors[i].dest, runtime_vectors[i].src,
+         false, false, false, runtime_vectors[i].wait, &runtime, b, &len);
+      expect("G17G runtime lifetime", ok, b, len, runtime_vectors[i].hex);
+   }
+
+   const struct agx3_funop_runtime invalid_runtime = {
+      .src_cache = true, .src_discard = true,
+   };
+   expect_refused("conflicting source lifetime", agx3_funop_encode_g17g(
+      AGX3_FUNOP_LOG2, 0, 2, false, false, false, 0, &invalid_runtime, b, &len));
+
    /* AGX3b, corpus/g16g fu_* kernels and corpus_frag/g16g dfd_func1. */
    static const struct vec vb[] = {
       {"fu_floor", AGX3_FUNOP_FLOOR, 0, 0, false, false, false,
