@@ -3805,11 +3805,23 @@ agx3_is_cf_op(const agx_instr *I)
 }
 
 static bool
-agx3_is_nested_loop_push(const agx_instr *I)
+agx3_is_loop_push(const agx_instr *I, unsigned nest)
 {
-   return I->op == AGX_OPCODE_IF_FCMP && I->target == NULL && I->nest == 1 &&
+   return I->op == AGX_OPCODE_IF_FCMP && I->target == NULL && I->nest == nest &&
           I->fcond == AGX_FCOND_EQ && !I->invert_cond && I->nr_srcs == 2 &&
           agx3_cf_is_zero(I->src[0]) && agx3_cf_is_zero(I->src[1]);
+}
+
+static bool
+agx3_is_loop_entry_push(const agx_instr *I)
+{
+   return agx3_is_loop_push(I, 1);
+}
+
+static bool
+agx3_is_loop_guard_push(const agx_instr *I)
+{
+   return agx3_is_loop_push(I, 0);
 }
 
 static int
@@ -3855,8 +3867,16 @@ agx3_try_control_flow(struct util_dynarray *emission,
    if (I->op == AGX_OPCODE_BEGIN_CF)
       return wait_mask == 0 ? 1 : -1; /* architectural state: zero bytes */
 
-   if (agx3_is_nested_loop_push(I)) {
-      /* agx_push_exec(1), used before a nested loop, becomes Apple's
+   if (agx3_is_loop_guard_push(I)) {
+      /* A top-level loop first opens the ordinary outer control-flow scope.
+       * Slot 6 is Apple's always-true predicate, so no compare is needed. */
+      return wait_mask == 0 && agx3_emit_cnd(emission, enc, I->op, 6, false, 1)
+                ? 1
+                : -1;
+   }
+
+   if (agx3_is_loop_entry_push(I)) {
+      /* agx_push_exec(1), used before every AGX3 loop, becomes Apple's
        * unconditional TRUE-slot loop entry and opens two architectural
        * exec-mask levels. No compare is emitted. */
       return wait_mask == 0 && agx3_emit_cnd(emission, enc, I->op, 6, false, 2)
@@ -3894,19 +3914,27 @@ agx3_try_control_flow(struct util_dynarray *emission,
                             I->op == AGX_OPCODE_WHILE_FCMP ||
                             I->op == AGX_OPCODE_BREAK_IF_FCMP;
       /* CNDLT predicates are persistent across a backedge. Apple assigns
-       * outer through inner loop predicates to successive flag slots; NEST
-       * is the number of exec-mask levels a break exits and is not this
-       * depth. The linear pack walk tracks each native nested-loop push and
-       * its matching backedge pop. */
-      const unsigned flag_slot = is_break_if || is_while ? loop_depth - 1 : 0;
+       * outer through inner loop predicates to flag slots 0, 1, ... . A deep
+       * break needs the next slot so it does not overwrite the live predicate
+       * of the enclosing conditional; Apple's two-if outer-loop break uses
+       * slot 1, and the equivalent inner-loop break uses slot 2. NEST counts
+       * exec-mask levels exited, not loop depth. */
+      if ((is_break_if || is_while) && loop_depth == 0)
+         return -1;
+      const unsigned loop_slot = loop_depth - 1;
+      const unsigned flag_slot =
+         is_break_if ? loop_slot + (I->nest > 1) : (is_while ? loop_slot : 0);
       if (flag_slot >= 6 ||
           !agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
                                 &invert))
          return -1;
-      /* CNDLT retains lanes for which its consumed predicate is true. A
-       * WHILE predicate already means "continue", whereas BREAK_IF names
-       * the complementary lanes that must leave the loop. */
-      if (is_break_if)
+      /* CNDLT retains lanes for which its predicate is true, so a shallow
+       * BREAK_IF needs the complementary continue predicate. CNDCF instead
+       * consumes the break predicate directly. Native break_continue uses
+       * EQ(i, 9) followed by CNDCF(invert=0); deep_break uses EQ(guard, 0)
+       * followed by CNDCF(invert=1). Flipping a deep unconditional break's
+       * true predicate makes it false and leaves the loop running forever. */
+      if (is_break_if && I->nest == 1)
          invert = !invert;
       const unsigned levels = is_break_if ? I->nest + 1 : (is_if ? 1 : 2);
       if (!agx3_emit_cnd(emission, enc, I->op, flag_slot, invert, levels))
@@ -5951,7 +5979,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    k = 0;
    unsigned vertex_loads_seen = 0;
-   unsigned loop_depth = 1;
+   unsigned loop_depth = 0;
    /* f63 on F32INTERP and f48 on LDCF are two encodings of the same native
     * fragment-input entry marker. Apple's mixed flat+smooth fragment marks
     * whichever family comes first and leaves the other family's first op
@@ -6010,7 +6038,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         const bool nested_loop_push = agx3_is_nested_loop_push(I);
+         const bool loop_entry_push = agx3_is_loop_entry_push(I);
          const bool loop_pop =
             I->op == AGX_OPCODE_POP_EXEC && after_loop_backedge;
          const int cf = agx3_try_control_flow(
@@ -6019,9 +6047,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (cf < 0)
             AGX3_REFUSE(I);
          if (cf > 0) {
-            if (nested_loop_push)
+            if (loop_entry_push)
                loop_depth++;
-            else if (loop_pop && loop_depth > 1) {
+            else if (loop_pop && loop_depth > 0) {
                loop_depth--;
             }
             after_loop_backedge = I->op == AGX_OPCODE_JMP_EXEC_ANY;

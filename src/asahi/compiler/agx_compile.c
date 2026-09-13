@@ -4548,12 +4548,18 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    ctx->break_block = agx_create_block(ctx);
    agx_block *loop_header = agx_create_block(ctx);
 
-   /* If we are emitting a loop inside other control flow, there might be
-    * threads masked off (TODO: divergence analysis), so push_exec them so
-    * we get the lower nesting count values to ourselves.
+   /* AGX3 loops always open two architectural exec-mask levels before their
+    * body. Apple's top-level prodloop witness starts with the same
+    * unconditional CNDST(2) used by nested loops, and the shared footer pops
+    * those two levels. AGX2 needs the push only inside other control flow,
+    * where threads may already be masked off (TODO: divergence analysis).
     */
    agx_builder _b = agx_init_builder(ctx, agx_after_block(ctx->current_block));
-   if (ctx->total_nesting > 1)
+   const bool agx3 = ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   const bool top_level_agx3 = agx3 && ctx->total_nesting == 1;
+   if (top_level_agx3)
+      agx_push_exec(&_b, 0);
+   if (agx3 || ctx->total_nesting > 1)
       agx_push_exec(&_b, 1);
 
    /* Fallthrough to loop header */
@@ -4567,6 +4573,8 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    _b.cursor = agx_after_block(ctx->current_block);
    agx_jmp_exec_any(&_b, start_block);
    agx_pop_exec(&_b, 1);
+   if (top_level_agx3)
+      agx_pop_exec(&_b, 1);
    agx_block_add_successor(ctx->current_block, loop_header);
 
    /* Pop off */
