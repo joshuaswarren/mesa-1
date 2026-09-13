@@ -8,8 +8,8 @@
  * The point is not the pass count. A vector whose operands the encoder does
  * not understand must FAIL CLOSED and is asserted to fail, so the split
  * between "reproduced byte-exactly" and "refused" is visible and cannot be
- * papered over by a green total. Select-slot kind 2 is the corpus majority and
- * is unidentified, so those are the refusals.
+ * papered over by a green total. Fresh G17P probes identify select-slot kind
+ * 2 as GPR and kind 3 as uniform, so both classes must now reproduce.
  */
 
 #include "agx3_alu_core.h"
@@ -86,25 +86,27 @@ main(void)
          .cmp1_16 = field(c, 60) == 1,
          .sel0_kind = (uint8_t)sel0_kind,
          .sel1_kind = (uint8_t)sel1_kind,
-         .sel0 = (uint16_t)(sel0_kind == AGX3_FSEL_SEL_REGISTER ? field(c, 70)
-                                                                : field(c, 68)),
-         .sel1 = (uint16_t)(sel1_kind == AGX3_FSEL_SEL_REGISTER ? field(c, 87)
-                                                                : field(c, 85)),
+         .sel0 = (uint16_t)(sel0_kind == AGX3_FSEL_SEL_REGISTER ? field(c, 69) :
+                           sel0_kind == AGX3_FSEL_SEL_UNIFORM ? field(c, 70) : field(c, 68)),
+         .sel1 = (uint16_t)(sel1_kind == AGX3_FSEL_SEL_REGISTER ? field(c, 86) :
+                           sel1_kind == AGX3_FSEL_SEL_UNIFORM ? field(c, 87) : field(c, 85)),
+         .sel0_hint = hint_of(field(c, 78), field(c, 80)),
+         .sel1_hint = hint_of(field(c, 95), field(c, 97)),
          .sel_16 = field(c, 77) == 1,
          .condition = (unsigned)field(c, 110),
-         .wait_mask = field(c, 107) ? 32u : 0u,
+         .wait_mask = (field(c, 106) ? 16u : 0u) | (field(c, 107) ? 32u : 0u),
       };
 
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
       const bool ok = agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes,
                                            &len);
-      const bool understood = sel0_kind != AGX3_FSEL_SEL_UNKNOWN2 &&
-                              sel1_kind != AGX3_FSEL_SEL_UNKNOWN2;
+      const bool understood = sel0_kind >= 1 && sel0_kind <= 3 &&
+                              sel1_kind >= 1 && sel1_kind <= 3;
 
       if (!understood) {
          /* Must fail closed, not guess. */
          if (ok) {
-            printf("FAIL: encoded a vector using select kind 2 (%zu)\n", i);
+            printf("FAIL: encoded a vector using unknown select kind (%zu)\n", i);
             ++wrong;
          } else {
             ++refused;
@@ -129,7 +131,7 @@ main(void)
    }
 
    printf("agx3 fsel corpus: %u reproduced byte-exactly, %u refused closed "
-          "(select kind 2, unidentified), %u immediate compare sources\n",
+          "(unknown select kind), %u immediate compare sources\n",
           reproduced, refused, imm_cmp);
    if (wrong) {
       printf("%u FAILURES\n", wrong);

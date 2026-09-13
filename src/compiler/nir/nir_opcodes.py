@@ -1490,6 +1490,14 @@ unop("fcos_mdg", tfloat, "cosf(3.141592653589793 * src0)")
 # additional ALU that NIR may be able to optimize.
 unop("fsin_agx", tfloat, "sinf(src0 * (6.2831853/4.0))")
 
+# G17P's native sinc input is a signed, reduced quadrant in [-1, 1].
+# Range reduction and quadrant selection are separate, optimizable ALU.
+unop("fsinc_agx3", tfloat32,
+     "src0 == 0.0f ? 1.5707963267948966f : sinf(src0 * 1.5707963267948966f) / src0")
+opcode("bittest_select_agx3", 0, tfloat32, [0, 0, 0, 0],
+       [tuint32, tuint32, tfloat32, tfloat32], False, "",
+       "(src0 & src1) != 0 ? src2 : src3")
+
 # AGX specific bitfield extraction from a pair of 32bit registers.
 # src0,src1: the two registers
 # src2: bit position of the LSB of the bitfield

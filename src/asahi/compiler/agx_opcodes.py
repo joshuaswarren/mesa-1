@@ -215,6 +215,10 @@ funop("sin_pt_1",  0b001010)
 funop("log2",      0b001100)
 funop("exp2",      0b001101)
 funop("sin_pt_2",  0b001110)
+op("sinc_agx3", None, srcs=1, is_float=True, agx3_mnemonic="f32sinc")
+# Sources: quadrant bits, selected true float, selected false float.
+op("bittest_select_agx3", None, srcs=3, imms=[IMM], is_float=True,
+   agx3_mnemonic="isel")
 funop("ceil",      0b010000)
 funop("trunc",     0b100000)
 funop("roundeven", 0b110000)

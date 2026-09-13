@@ -1288,7 +1288,9 @@ test_fcmp_select_half_comparator(void)
       .condition = 5,
    };
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
-   exact(out, len, "12234da4268112002032");
+   /* Corrected synthetic register-operand assertion. The old 0x20 selected
+    * uniform half 50 rather than the requested GPR half 50. */
+   exact(out, len, "12234da4268112000032");
 
    /* The same instruction with a 32-bit comparator differs only in the width
     * field and in the register number -- the length and every other byte are
@@ -1298,7 +1300,7 @@ test_fcmp_select_half_comparator(void)
    d32.cmp1_16 = false;
    d32.cmp1 = 36;
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d32, wide, &wide_len));
-   exact(wide, wide_len, "12234da5268102002032");
+   exact(wide, wide_len, "12234da5268102000032");
    assert(wide_len == len);
 
    /* Holding the register number and moving only the width isolates the bit:
@@ -1306,7 +1308,7 @@ test_fcmp_select_half_comparator(void)
    struct agx3_fsel_desc even16 = d;
    even16.cmp1 = 36;
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &even16, out, &len));
-   exact(out, len, "12234da4268102002032");
+   exact(out, len, "12234da4268102000032");
    {
       unsigned differing = 0;
       for (unsigned i = 0; i < len; ++i)
@@ -1358,6 +1360,40 @@ test_fcmp_select_half_comparator(void)
           memcmp(imm_bytes, imm32_bytes, imm_len) == 0);
 
    puts("FSEL half comparator: three.js point-shadow shape encodes PASS");
+}
+
+static void
+test_native_fsel_selected_register_kind(void)
+{
+   /* Fresh G17P select-kind.metal, fabs(f32) < f16 ? a : b.
+    * GPR compute text SHA 0029c35e1a30be4d161f3bb941b56a93e5f63749391afe31bee9d80094a855db.
+    * Uniform text SHA 53ac8904298508f51d69ff53f46687581b5e7b32d9f1ce55981ebffba50d7903.
+    * Both native instructions are at text offset 0x58. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   struct agx3_fsel_desc d = {
+      .dest = 0, .cmp0 = 0, .cmp0_abs = true,
+      .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp1 = 2, .cmp1_16 = true, .cmp1_hint = AGX3_ALU_HINT_DISCARD,
+      .sel0_kind = AGX3_FSEL_SEL_REGISTER, .sel0 = 4,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER, .sel1 = 6,
+      .sel0_hint = AGX3_ALU_HINT_DISCARD,
+      .sel1_hint = AGX3_ALU_HINT_DISCARD,
+      .condition = 1,
+   };
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   exact(bytes, len, "02011f0283040300800600000100");
+
+   d.sel0_kind = d.sel1_kind = AGX3_FSEL_SEL_UNIFORM;
+   d.sel0 = 12;
+   d.sel1 = 14;
+   /* Uniforms cannot carry GPR-cache hints. */
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sel0_hint = d.sel1_hint = AGX3_ALU_HINT_NONE;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   exact(bytes, len, "02011f02230c0300200e00000100");
+   d.sel0_kind = 4;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   puts("FSEL selected GPR versus uniform native contrast PASS");
 }
 
 static void
@@ -4814,6 +4850,7 @@ int main(void){
    test_f16_to_int32();
    test_float_compare_select();
    test_fcmp_select_half_comparator();
+   test_native_fsel_selected_register_kind();
    test_threejs_width_kind_modifier_axes();
    test_float_compare_zero();
    test_integer_lifetimes();

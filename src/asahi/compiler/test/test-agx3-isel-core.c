@@ -295,6 +295,40 @@ main(void)
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
    d.cmp0 = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   /* Fresh G17P bit_select and bit_negate witnesses. These establish the
+    * mask-test condition and selected float sign bits independently of trig. */
+   static const struct {
+      struct agx3_bittest_desc d;
+      uint8_t bytes[10];
+   } bit_vectors[] = {
+      {{.dest=0,.src={4,6,8},.mask=1,.cache={1,1,1},.wait_mask=32},
+       {0x02,0x85,0x07,0x80,0x06,0x86,0x16,0xc2,0x00,0x88}},
+      {{.dest=2,.src={4,6,8},.mask=2,.cache={1,1,1}},
+       {0x12,0x85,0x07,0x82,0x06,0x86,0x06,0x02,0x00,0x88}},
+      {{.dest=4,.src={4,6,8},.mask=4,.discard={1,1,1}},
+       {0x22,0x05,0x0f,0x84,0x86,0x06,0x06,0x02,0x80,0x08}},
+      {{.dest=0,.src={2,4,6},.mask=1,.negate={1,0},
+        .cache={1,1,1},.wait_mask=32},
+       {0x02,0x83,0x03,0x80,0x16,0x84,0x16,0xc2,0x00,0x86}},
+      {{.dest=2,.src={2,4,6},.mask=2,.negate={0,1},.discard={1,1,1}},
+       {0x12,0x03,0x0b,0x82,0x86,0x04,0x06,0x02,0x90,0x06}},
+   };
+   for (unsigned i = 0; i < sizeof(bit_vectors)/sizeof(bit_vectors[0]); ++i) {
+      CHECK(agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit_vectors[i].d,
+                               out, &len));
+      CHECK(len == 10 && memcmp(out, bit_vectors[i].bytes, 10) == 0);
+   }
+   struct agx3_bittest_desc bit = bit_vectors[0].d;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3C, &bit, out, &len));
+   CHECK(len == 0);
+   bit.mask = 0;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
+   bit.mask = 1;
+   bit.negate[0] = bit.negate[1] = true;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
+   bit = bit_vectors[0].d;
+   bit.src[0] = 128;
+   CHECK(!agx3_bittest_encode(AGX_ISA_ENCODING_AGX3B, &bit, out, &len));
    printf("%u checks, %u failures\n", checks, failures);
    return failures ? 1 : 0;
 }

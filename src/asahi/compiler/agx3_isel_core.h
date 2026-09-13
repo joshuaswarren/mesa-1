@@ -118,6 +118,23 @@ bool agx3_isel_encode(enum agx_isa_encoding encoding,
                       const struct agx3_isel_desc *desc,
                       uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len);
 
+/* G17P condition 3 is a nonzero mask test. Fresh mask1/2/4 witnesses pin
+ * f49 and f106; selected-negation contrasts pin f78/f95. The quadrant
+ * lowering uses these fused selects, not a branch or a separate bit test. */
+struct agx3_bittest_desc {
+   uint16_t dest;
+   uint16_t src[3]; /* bits, true float, false float */
+   uint8_t mask;
+   bool negate[2];
+   bool cache[3];
+   bool discard[3];
+   uint16_t wait_mask;
+};
+
+bool agx3_bittest_encode(enum agx_isa_encoding encoding,
+                        const struct agx3_bittest_desc *desc,
+                        uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

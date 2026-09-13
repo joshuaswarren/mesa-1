@@ -1457,21 +1457,20 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
 
    struct agx3_fsel_desc d = *in;
 
-   /* Select-slot kind 2 is unidentified. Fail closed rather than deposit a
-    * value into a field whose meaning is not known. */
-   if (d.sel0_kind == AGX3_FSEL_SEL_UNKNOWN2 ||
-       d.sel1_kind == AGX3_FSEL_SEL_UNKNOWN2)
-      return false;
    if ((d.sel0_kind != AGX3_FSEL_SEL_IMMEDIATE &&
-        d.sel0_kind != AGX3_FSEL_SEL_REGISTER) ||
+        d.sel0_kind != AGX3_FSEL_SEL_REGISTER &&
+        d.sel0_kind != AGX3_FSEL_SEL_UNIFORM) ||
        (d.sel1_kind != AGX3_FSEL_SEL_IMMEDIATE &&
-        d.sel1_kind != AGX3_FSEL_SEL_REGISTER))
+        d.sel1_kind != AGX3_FSEL_SEL_REGISTER &&
+        d.sel1_kind != AGX3_FSEL_SEL_UNIFORM))
       return false;
 
    if (d.condition != 0 && d.condition != 1 && d.condition != 2 &&
        d.condition != 5 && d.condition != 6)
       return false;
-   if (d.wait_mask != 0 && d.wait_mask != 32)
+   /* Native corpus rows 222/429 carry slot 5 on this long endpoint; the
+    * existing slot 6 form remains unchanged. */
+   if (d.wait_mask != 0 && d.wait_mask != 16 && d.wait_mask != 32)
       return false;
    if (d.dest >= 256 || (!d.dest_16 && (d.dest & 1)))
       return false;
@@ -1564,12 +1563,16 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
       return false;
    if (d.sel0 >= 256 || d.sel1 >= 256)
       return false;
-   if (d.sel0_kind == AGX3_FSEL_SEL_REGISTER && !d.sel_16 && (d.sel0 & 1))
+   if (d.sel0_kind != AGX3_FSEL_SEL_IMMEDIATE && !d.sel_16 && (d.sel0 & 1))
       return false;
-   if (d.sel1_kind == AGX3_FSEL_SEL_REGISTER && !d.sel_16 && (d.sel1 & 1))
+   if (d.sel1_kind != AGX3_FSEL_SEL_IMMEDIATE && !d.sel_16 && (d.sel1 & 1))
       return false;
    if ((unsigned)d.cmp0_hint > AGX3_ALU_HINT_CACHE ||
-       (unsigned)d.cmp1_hint > AGX3_ALU_HINT_CACHE)
+       (unsigned)d.cmp1_hint > AGX3_ALU_HINT_CACHE ||
+       (unsigned)d.sel0_hint > AGX3_ALU_HINT_CACHE ||
+       (unsigned)d.sel1_hint > AGX3_ALU_HINT_CACHE ||
+       (d.sel0_kind != AGX3_FSEL_SEL_REGISTER && d.sel0_hint != AGX3_ALU_HINT_NONE) ||
+       (d.sel1_kind != AGX3_FSEL_SEL_REGISTER && d.sel1_hint != AGX3_ALU_HINT_NONE))
       return false;
 
    /* f43 and f60 are the two comparators' width fields, exactly as in
@@ -1583,7 +1586,7 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
       {77, d.sel_16 ? 1 : 2}, {94, d.sel_16 ? 1 : 2},
    };
 
-   struct agx3_field_kv f[20];
+   struct agx3_field_kv f[25];
    unsigned n = 0;
    f[n++] = (struct agx3_field_kv){3, d.dest};
    f[n++] = (struct agx3_field_kv){12, d.dest_cache};
@@ -1608,12 +1611,19 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
 
    f[n++] = (struct agx3_field_kv){76, d.sel0_kind};
    f[n++] = (struct agx3_field_kv){
-      d.sel0_kind == AGX3_FSEL_SEL_REGISTER ? 70 : 68, d.sel0};
+      d.sel0_kind == AGX3_FSEL_SEL_REGISTER ? 69 :
+      d.sel0_kind == AGX3_FSEL_SEL_UNIFORM ? 70 : 68, d.sel0};
    f[n++] = (struct agx3_field_kv){93, d.sel1_kind};
    f[n++] = (struct agx3_field_kv){
-      d.sel1_kind == AGX3_FSEL_SEL_REGISTER ? 87 : 85, d.sel1};
+      d.sel1_kind == AGX3_FSEL_SEL_REGISTER ? 86 :
+      d.sel1_kind == AGX3_FSEL_SEL_UNIFORM ? 87 : 85, d.sel1};
+   f[n++] = (struct agx3_field_kv){78, d.sel0_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){80, d.sel0_hint == AGX3_ALU_HINT_DISCARD};
+   f[n++] = (struct agx3_field_kv){95, d.sel1_hint == AGX3_ALU_HINT_CACHE};
+   f[n++] = (struct agx3_field_kv){97, d.sel1_hint == AGX3_ALU_HINT_DISCARD};
 
    f[n++] = (struct agx3_field_kv){110, d.condition};
+   f[n++] = (struct agx3_field_kv){106, d.wait_mask == 16};
    f[n++] = (struct agx3_field_kv){107, d.wait_mask == 32};
 
    /*
@@ -1653,7 +1663,9 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
       const bool shifted = pass == 1;
       f[0] = (struct agx3_field_kv){shifted ? 17 : 3, d.dest};
       f[1] = (struct agx3_field_kv){shifted ? 26 : 12, d.dest_cache};
-      for (unsigned ep = 20; ep < 36; ++ep) {
+      /* Corpus rows 546/634 use the tied-result GPR forms 13/19. Let the
+       * native predicates select them instead of growing an 8-byte select. */
+      for (unsigned ep = 13; ep < 36; ++ep) {
          if (agx3_bind_compose(enc, "fsel", ep, shifted ? alt_base : base,
                                shifted ? nab : 7, f, n, out, len))
             return true;

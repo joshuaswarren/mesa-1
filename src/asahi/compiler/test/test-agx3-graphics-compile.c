@@ -25,6 +25,7 @@
 #include "agx_compile.h"
 #include "agx3_alu_core.h"
 #include "agx3_copy_core.h"
+#include "agx3_funop_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_sr_core.h"
 #include "agx3_tex_core.h"
@@ -5063,6 +5064,63 @@ build_fs_meta_rgba_upload(void)
  * friends) plus the fragment-only gradient dfdx.
  */
 static nir_shader *
+build_fs_native_trig_precision(bool half)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P native trig FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *x = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   if (half)
+      x = nir_f2f16(&b, x);
+   nir_def *sine = nir_fsin(&b, x);
+   nir_def *cosine = nir_fcos(&b, x);
+   if (half) {
+      sine = nir_f2f32(&b, sine);
+      cosine = nir_f2f32(&b, cosine);
+   }
+   fs_store_colour(&b, nir_vec4(&b, sine, cosine,
+                               nir_fmul(&b, sine, nir_frcp(&b, cosine)),
+                               nir_imm_float(&b, 1)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   agx_preprocess_nir_g17p(b.shader);
+   unsigned fmas = 0, sincs = 0, selects = 0;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            if (alu->op == nir_op_ffma) {
+               ++fmas;
+               assert(nir_alu_instr_is_exact(alu));
+            }
+            sincs += alu->op == nir_op_fsinc_agx3;
+            selects += alu->op == nir_op_bittest_select_agx3;
+         }
+      }
+   }
+   assert(fmas == 4 && sincs == 2 && selects == 4);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+static nir_shader *
+build_fs_native_trig(void)
+{
+   return build_fs_native_trig_precision(false);
+}
+
+static nir_shader *
+build_fs_native_trig_f16(void)
+{
+   return build_fs_native_trig_precision(true);
+}
+
+static nir_shader *
 build_fs_funops(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -5651,6 +5709,7 @@ struct agx3_graphics_case {
    bool expected_g17p_explicit_sample;
    bool expected_g17p_sample_group;
    bool expected_g17p_balanced_coverage;
+   uint8_t expected_g17p_sincs;
 };
 
 static bool
@@ -5995,6 +6054,10 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,
     AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
    {"fs-transcendentals", build_fs_funops, true},
+   {"fs-native-trig", build_fs_native_trig, true, .g17p_only = true,
+    .expected_g17p_sincs = 2},
+   {"fs-native-trig-f16", build_fs_native_trig_f16, true, .g17p_only = true,
+    .expected_g17p_sincs = 2},
    {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
     .g17p_only = true},
    {"fs-hyprland-cm-mixed-add", build_fs_hyprland_cm_mixed_add, true,
@@ -6151,6 +6214,28 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             fprintf(stderr, "%s %s: vertex LDDEV policy mismatch\n",
                     enc_name(enc), c->name);
          }
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_sincs != 0) {
+         unsigned found = 0;
+         const uint8_t *text = part.binary;
+         for (unsigned off = 0; off + 10 <= part.info.binary_size; off += 2) {
+            if (text[off] != 0x2f || text[off + 1] != 0x03)
+               continue;
+            bool match = false;
+            for (unsigned dest = 0; dest < 128 && !match; dest += 2) {
+               for (unsigned src = 0; src < 128 && !match; src += 2) {
+                  uint8_t exact[AGX3_FUNOP_MAX_LENGTH], len = 0;
+                  match = agx3_funop_encode(enc, AGX3_FUNOP_SINC, dest, src,
+                                            false, false, false, 0,
+                                            exact, &len) && len == 10 &&
+                          memcmp(text + off, exact, len) == 0;
+               }
+            }
+            found += match;
+         }
+         result = found == c->expected_g17p_sincs;
       }
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B &&

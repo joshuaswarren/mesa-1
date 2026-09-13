@@ -1780,6 +1780,17 @@ agx_ra(agx_context *ctx)
    unsigned max_ncomps = 1;
 
    agx_foreach_instr_global(ctx, I) {
+      /* Native G17P sinc and its fused quadrant selects use the bounded
+       * seven-bit operand forms. Constrain only these SSA webs. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          (I->op == AGX_OPCODE_SINC_AGX3 ||
+           I->op == AGX_OPCODE_BITTEST_SELECT_AGX3)) {
+         agx_foreach_ssa_src(I, s)
+            BITSET_SET(texture_gpr, I->src[s].value);
+         agx_foreach_ssa_dest(I, d)
+            BITSET_SET(texture_gpr, I->dest[d].value);
+      }
+
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(low_gpr, I->src[0].value);

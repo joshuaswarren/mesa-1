@@ -3697,6 +3697,7 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(frcp, rcp);
       UNOP(frsq, rsqrt);
       UNOP(flog2, log2);
+      UNOP(fsinc_agx3, sinc_agx3);
       UNOP(fexp2, exp2);
 
       UNOP(mov, mov);
@@ -4001,34 +4002,28 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
 
    case nir_op_fsin_agx: {
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-         /* G17P has no sin_pt_1 quadrant fixup. Use the standard Mesa
-          * minimax sine fallback on the already-normalized quadrant input
-          * instead. This is the same polynomial used by lower_sincos, with
-          * radians / (2 pi) reduced to quadrants / 4:
-          *
-          *   t = 2 fract(q / 4 + 1/2) - 1
-          *   x = 4 (t - t |t|)
-          *   sin(q pi/2) ~= x + .225 (x |x| - x)
-          *
-          * It uses only the grounded G17P FMA and floor paths and avoids
-          * assigning AGX2 semantics to G17P's unqualified f32sinc funop.
-          */
-         agx_index u = agx_ffma(b, s0, agx_immediate_f(0.25f),
-                                agx_immediate_f(0.5f));
-         agx_index fract = agx_ffma(b, agx_neg(agx_floor(b, u)),
-                                    agx_immediate_f(1.0f), u);
-         agx_index t = agx_ffma(b, fract, agx_immediate_f(2.0f),
-                                agx_immediate_f(-1.0f));
-         agx_index x = agx_ffma(b, agx_neg(t), agx_abs(t), t);
-         x = agx_fmul(b, x, agx_immediate_f(4.0f));
-         agx_index correction = agx_ffma(b, x, agx_abs(x), agx_neg(x));
-         agx_index slope = agx_mov_imm(b, 32, UINT32_C(0x3e666666));
-         return agx_ffma_to(b, dst, correction, slope, x);
+         /* Compatibility for callers which already performed the AGX2 NIR
+          * quadrant reduction. Fold [0,4] exactly to [-1,1], then use the
+          * same native sinc operation as the G17P radians lowering. */
+         agx_index middle = agx_fadd(b, agx_immediate_f(2.0f), agx_neg(s0));
+         agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
+         agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
+                                   middle, AGX_FCOND_LE);
+         t = agx_fcmpsel(b, s0, agx_immediate_f(3.0f), last, t,
+                         AGX_FCOND_GT);
+         return agx_fmul_to(b, dst, agx_sinc_agx3(b, t), t);
       }
 
       agx_index fixup = agx_sin_pt_1(b, s0);
       agx_index sinc = agx_sin_pt_2(b, fixup);
       return agx_fmul_to(b, dst, sinc, fixup);
+   }
+
+   case nir_op_bittest_select_agx3: {
+      assert(nir_src_is_const(instr->src[1].src));
+      const unsigned mask = nir_alu_src_as_uint(instr->src[1]);
+      assert(mask == 1 || mask == 2 || mask == 4);
+      return agx_bittest_select_agx3_to(b, dst, s0, s2, s3, mask);
    }
 
    case nir_op_f2i16:
@@ -4763,10 +4758,46 @@ agx_lower_sincos_filter(const nir_instr *instr, UNUSED const void *_)
  */
 
 static nir_def *
-agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, UNUSED void *_)
+agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
 {
    nir_alu_instr *alu = nir_instr_as_alu(instr);
    nir_def *x = nir_mov_alu(b, alu->src[0], 1);
+
+   if ((uintptr_t)data && x->bit_size <= 32) {
+      /* Native G17P sin/cos use three non-overlapping pieces of 2/pi.
+       * The magic rounding add retains the quadrant in its low two bits.
+       * Keep the explicit FMAs and subtraction order, including low pieces.
+       * Native trig-fast text hashes are retained with the focused tests. */
+      const unsigned bits = x->bit_size;
+      const uint32_t saved_ctrl = b->fp_math_ctrl;
+      b->fp_math_ctrl = nir_fp_no_fast_math;
+      x = nir_f2f32(b, x);
+      nir_def *hi = nir_imm_float(b, uif(0x3f22f983));
+      nir_def *magic = nir_imm_float(b, uif(0x4b400000));
+      nir_def *quadrant = nir_ffma(b, x, hi, magic);
+      nir_def *r = nir_ffma(b, x, hi, nir_fsub(b, magic, quadrant));
+      r = nir_ffma(b, x, nir_imm_float(b, uif(0x32dc9c88)), r);
+      r = nir_ffma(b, x, nir_imm_float(b, uif(0x25a94fe1)), r);
+      nir_def *complement = nir_fsub(b, nir_imm_float(b, 1), nir_fabs(b, r));
+      const bool cosine = alu->op == nir_op_fcos;
+      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 1),
+                                 cosine ? nir_fneg(b, r) : complement,
+                                 cosine ? complement : r);
+      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 2),
+                                 nir_fneg(b, r), r);
+      nir_def *result = nir_fmul(b, nir_fsinc_agx3(b, r), r);
+      nir_def *small = cosine ? nir_imm_float(b, 1) : x;
+      result = nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), 0x1p-12f),
+                        small, result);
+      result = nir_bcsel(b, nir_flt(b, nir_imm_float(b, uif(0x4ac90fdb)),
+                                  nir_fabs(b, x)),
+                        nir_imm_float(b, 0), result);
+      if (bits != 32)
+         result = nir_f2fN(b, result, bits);
+      b->fp_math_ctrl = saved_ctrl;
+      return result;
+   }
+
    nir_def *turns = nir_fmul_imm(b, x, M_1_PI * 0.5f);
 
    if (alu->op == nir_op_fcos)
@@ -4777,10 +4808,11 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static bool
-agx_lower_sincos(nir_shader *shader)
+agx_lower_sincos(nir_shader *shader, bool g17p)
 {
    return nir_shader_lower_instructions(shader, agx_lower_sincos_filter,
-                                        agx_lower_sincos_impl, NULL);
+                                        agx_lower_sincos_impl,
+                                        (void *)(uintptr_t)g17p);
 }
 
 static bool
@@ -6365,7 +6397,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_flrp, 16 | 32 | 64, false);
-   NIR_PASS(_, nir, agx_lower_sincos);
+   NIR_PASS(_, nir, agx_lower_sincos, g17p);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_lower_front_face,
             nir_metadata_control_flow, NULL);
    if (g17p)

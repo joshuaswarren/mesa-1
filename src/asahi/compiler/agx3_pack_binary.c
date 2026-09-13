@@ -604,14 +604,9 @@ agx3_try_float_modifier(struct util_dynarray *emission,
 
 /*
  * The transcendental / rounding / gradient funops with a corpus-grounded
- * AGX3 form. roundeven keeps its existing select-core route; sin_pt_1 and
- * sin_pt_2 are deliberately absent: AGX3 has no counterpart of the sin_pt_1
- * quadrant fixup at all (Apple computes it with an fma/isel polynomial), and
- * although f32sinc's *encoding* is grounded (agx3_funop_core emits it and
- * replays Apple's bytes), whether its input contract equals AGX2 sin_pt_2's
- * is not decidable offline -- Apple folds a phase constant into the preceding
- * polynomial. Routing sin_pt_2 onto f32sinc would be a semantic guess, so
- * fsin_agx stays fail-closed until an executed-numerics witness exists.
+ * AGX3 form. roundeven keeps its existing select-core route. The native sinc
+ * has a dedicated IR opcode, fed by G17P's split-constant range reduction
+ * and masked quadrant selects. AGX2 sin_pt_1/2 remain unmapped here.
  */
 static int
 agx3_map_funop(unsigned op)
@@ -627,6 +622,8 @@ agx3_map_funop(unsigned op)
       return AGX3_FUNOP_LOG2;
    case AGX_OPCODE_EXP2:
       return AGX3_FUNOP_EXP2;
+   case AGX_OPCODE_SINC_AGX3:
+      return AGX3_FUNOP_SINC;
    case AGX_OPCODE_DFDX:
       return AGX3_FUNOP_DFDX;
    case AGX_OPCODE_DFDY:
@@ -7348,6 +7345,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         if (I->op == AGX_OPCODE_BITTEST_SELECT_AGX3) {
+            struct agx3_bittest_desc d = {
+               .dest = I->dest[0].value,
+               .mask = I->imm,
+               .wait_mask = wait,
+            };
+            if (I->nr_dests != 1 || I->nr_srcs != 3 ||
+                !agx3_src_is_register(I->dest[0]) ||
+                I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
+                I->imm > UINT8_MAX || I->src[0].abs || I->src[0].neg)
+               AGX3_REFUSE(I);
+            for (unsigned s = 0; s < 3; ++s) {
+               if (!agx3_src_is_register(I->src[s]) ||
+                   I->src[s].size != AGX_SIZE_32 || I->src[s].memory ||
+                   I->src[s].abs)
+                  AGX3_REFUSE(I);
+               d.src[s] = I->src[s].value;
+               d.cache[s] = I->src[s].cache;
+               d.discard[s] = I->src[s].discard;
+               if (s)
+                  d.negate[s - 1] = I->src[s].neg;
+            }
+            uint8_t bytes[AGX3_ISEL_MAX_LENGTH], len = 0;
+            if (!agx3_bittest_encode(enc, &d, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Transcendental / rounding / gradient funops. The gradients need
           * the 2x2 quad, and every witness is a fragment shader. */
          const int fop = agx3_map_funop(I->op);
@@ -8465,6 +8491,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                       : AGX3_FSEL_SEL_REGISTER,
                   .sel0 = tv.value,
                   .sel1 = fv.value,
+                  .sel0_hint = tv_imm ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(tv),
+                  .sel1_hint = fv_imm ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(fv),
                   .sel_16 = I->dest[0].size == AGX_SIZE_16,
                   .condition = condition,
                   .wait_mask = 0,
@@ -8478,6 +8506,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   (!fv_imm || agx3_plain_immediate(fv)) &&
                   !(cmp0.cache && cmp0.discard) &&
                   !(cmp1.cache && cmp1.discard) &&
+                  !(tv.cache && tv.discard) && !(fv.cache && fv.discard) &&
                   (tv_imm || agx3_src_is_register(tv)) &&
                   (fv_imm || agx3_src_is_register(fv)) &&
                   agx_channels(cmp0) == 1 && agx_channels(cmp1) == 1;

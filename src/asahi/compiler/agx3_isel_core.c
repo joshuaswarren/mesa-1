@@ -7,7 +7,66 @@
 
 #include "agx3_binder.h"
 
+#include <string.h>
+
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
+
+bool
+agx3_bittest_encode(enum agx_isa_encoding enc,
+                   const struct agx3_bittest_desc *d,
+                   uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_ISEL_MAX_LENGTH);
+   *len = 0;
+   if (!d || enc != AGX_ISA_ENCODING_AGX3B ||
+       d->dest >= 128 || (d->dest & 1) ||
+       (d->mask != 1 && d->mask != 2 && d->mask != 4) ||
+       (d->negate[0] && d->negate[1]) || d->wait_mask >= 64)
+      return false;
+   for (unsigned i = 0; i < 3; ++i) {
+      if (d->src[i] >= 128 || (d->src[i] & 1) ||
+          (d->cache[i] && d->discard[i]))
+         return false;
+   }
+
+   const bool negate = d->negate[0] || d->negate[1];
+   const struct agx3_field_kv base[] = {
+      KV(42, 2), KV(43, 2), KV(57, 1), KV(58, 1),
+      KV(72, 2), KV(73, 2), KV(89, 2), KV(90, 2), KV(106, 3),
+   };
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   if (negate) {
+      ov[n++] = (struct agx3_field_kv)KV(0, 1);
+      ov[n++] = (struct agx3_field_kv)KV(17, d->dest);
+      ov[n++] = (struct agx3_field_kv)KV(24, 2);
+      ov[n++] = (struct agx3_field_kv)KV(25, 2);
+   } else {
+      ov[n++] = (struct agx3_field_kv)KV(3, d->dest);
+      ov[n++] = (struct agx3_field_kv)KV(10, 2);
+      ov[n++] = (struct agx3_field_kv)KV(11, 2);
+   }
+   ov[n++] = (struct agx3_field_kv)KV(35, d->src[0]);
+   ov[n++] = (struct agx3_field_kv)KV(49, d->mask);
+   ov[n++] = (struct agx3_field_kv)KV(65, d->src[1]);
+   ov[n++] = (struct agx3_field_kv)KV(82, d->src[2]);
+   ov[n++] = (struct agx3_field_kv)KV(44, d->cache[0]);
+   ov[n++] = (struct agx3_field_kv)KV(46, d->discard[0]);
+   ov[n++] = (struct agx3_field_kv)KV(74, d->cache[1]);
+   ov[n++] = (struct agx3_field_kv)KV(76, d->discard[1]);
+   ov[n++] = (struct agx3_field_kv)KV(91, d->cache[2]);
+   ov[n++] = (struct agx3_field_kv)KV(93, d->discard[2]);
+   ov[n++] = (struct agx3_field_kv)KV(78, d->negate[0]);
+   ov[n++] = (struct agx3_field_kv)KV(95, d->negate[1]);
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (d->wait_mask & (1u << slot))
+         ov[n++] = (struct agx3_field_kv)KV(98 + slot, 1);
+   }
+   return agx3_bind_compose(enc, "isel", negate ? 22 : 27, base,
+                           sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
 
 static bool
 cond_ok(enum agx3_isel_icond cond)
