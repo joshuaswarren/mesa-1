@@ -5784,10 +5784,16 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    if (!stop || store_count < 2)
       return false;
 
-   /* Native four-target BG clear/reload has ascending stores and no ordinary
-    * colour transactions. Keep that program out of the epilog reordering. */
-   if (store_count == 4 && ctx->key->fs.ignore_tib_dependencies)
-      return false;
+   /* Native raw32 BG clear/reload keeps ascending stores and has no
+    * ordinary colour transactions, including two/three RGBA32 targets. */
+   if (ctx->key->fs.ignore_tib_dependencies) {
+      bool rgba32 = !load_count;
+      for (unsigned i = 0; i < store_count; ++i)
+         rgba32 &= stores[i]->format == AGX_FORMAT_I32 &&
+                   stores[i]->mask == 15 && stores[i]->pixel_offset == 16 * i;
+      if (store_count == 4 || rgba32)
+         return false;
+   }
 
    if (load_count && !first_wait)
       return false;

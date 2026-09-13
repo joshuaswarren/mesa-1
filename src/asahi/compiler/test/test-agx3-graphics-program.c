@@ -191,6 +191,13 @@ main(void)
                                            &bg_program));
    CHECK(bg_program.length > 0 &&
          bg_program.length <= AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+   bg.clear_push_halfs = AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS;
+   CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR, bg.clear_push_halfs, false));
+   CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                           &bg_program));
+   CHECK(bg_program.length > 0 &&
+         bg_program.length <= AGX_IOTO_G17P_QUAD_CLEAR_PROGRAM_MAX_SIZE);
    bg.clear_push_halfs = AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS - 1;
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));
@@ -282,6 +289,38 @@ main(void)
                                               &eot_program));
       quad.pbe_argument_va = UINT64_C(0xffffffffffe0);
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+   }
+
+   /* Two and three RGBA32 targets retain the same sparse per-attachment
+    * offset ABI, with only their actual descriptor and staging counts. */
+   for (unsigned count = 2; count <= 3; ++count) {
+      struct agx3_g17p_rt0_eot_program_desc raw = eot;
+      raw.shader_binary_size = 32 + 44 * count;
+      raw.staging_halfs = 8 * count;
+      raw.attachment_count = count;
+      raw.imageblock_offset1_B = 16;
+      raw.imageblock_offset2_B = count > 2 ? 32 : 0;
+      raw.imageblock_offset3_B = 0;
+      raw.imageblock.sample_size_B = 16 * count;
+      raw.imageblock.tile_size_px = count == 2 ? 32 * 16 : 16 * 16;
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
+                                             &eot_program));
+      CHECK(eot_program.length > 0 && eot_program.length <= 144);
+      raw.imageblock_offset3_B = 48;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
+                                              &eot_program));
+      raw.imageblock_offset3_B = 0;
+      raw.staging_halfs -= 8;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
+                                              &eot_program));
+      raw.staging_halfs += 8;
+      raw.attachment_count++;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
+                                              &eot_program));
+      raw.attachment_count--;
+      raw.pbe_argument_va = UINT64_C(0xffffffffffe0);
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
                                               &eot_program));
    }
 

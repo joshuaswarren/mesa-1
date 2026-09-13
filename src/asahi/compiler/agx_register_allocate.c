@@ -1780,9 +1780,9 @@ agx_ra(agx_context *ctx)
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
-   /* Four native raw32 stores need four simultaneously live payloads. Their
+   /* Native raw32 stores need simultaneously live payloads. Their
     * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
-    * only the admitted quad payload bank, not general tile-store admission. */
+    * only the admitted two-to-four RGBA32 or four R32 payload bank. */
    unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
    bool quad_tile =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -1808,8 +1808,10 @@ agx_ra(agx_context *ctx)
          quad_tile = false;
       }
    }
-   const unsigned tile_gpr_limit =
-      quad_tile && quad_stores == 4 && quad_mask == 15 ? 32 : 16;
+   const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
+      (quad_width == 16 || quad_stores == 4) &&
+      quad_mask == BITFIELD_MASK(quad_stores);
+   const unsigned tile_gpr_limit = raw32_bank ? 32 : 16;
 
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded

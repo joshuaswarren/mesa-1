@@ -586,8 +586,8 @@ typedef struct {
    unsigned loop_count;
    unsigned max_reg;
 
-   /* AGX3 staging-file high-water mark, in 16-bit halves. Unlike max_reg,
-    * this describes the separate file consumed by UVSW and texture inputs. */
+   /* Half of the AGX3 compiler staging footprint. Unlike max_reg, this
+    * describes the separate file consumed by UVSW and texture inputs. */
    unsigned agx3_staging_halfs;
    bool agx3_staging_known;
    bool agx3_fltnorm_start;

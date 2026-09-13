@@ -229,10 +229,10 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     * layout; BG/EOT use pixel coordinates and the render UAPI publishes the
     * utile geometry to firmware. */
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
-   const bool quad = mrt == AGX_G17P_MRT_RGBA32_QUAD ||
+   const bool raw32 = mrt == AGX_G17P_MRT_RGBA32 ||
                      mrt == AGX_G17P_MRT_R32_QUAD;
    if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16 &&
-       !(mrt == AGX_G17P_MRT_RGBA32_QUAD && tib->tile_size == 16 * 16))
+       !(mrt == AGX_G17P_MRT_RGBA32 && tib->tile_size == 16 * 16))
       return false;
 
    if (tib->nr_samples > 1 &&
@@ -242,7 +242,7 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
-   for (unsigned rt = quad ? 4 : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
+   for (unsigned rt = raw32 ? 4 : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
          return false;
@@ -344,22 +344,28 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
        tib->_offset_B[0] != 0)
       return AGX_G17P_MRT_NONE;
 
-   /* Native G17P four-target fragment/BG/EOT constructors cover identical
-    * raw 32-bit targets in one imageblock: 0/16/32/48 or 0/4/8/12. */
+   /* Native G17P constructors cover two through four identical RGBA32
+    * targets in one imageblock. Keep the existing four-target R32 path. */
    const enum pipe_format format = tib->logical_format[0];
    const bool rgba32 = format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
                        format == PIPE_FORMAT_R32G32B32A32_UINT ||
                        format == PIPE_FORMAT_R32G32B32A32_SINT;
    if (rgba32 || format == PIPE_FORMAT_R32_FLOAT) {
       const unsigned stride = rgba32 ? 16 : 4;
-      bool quad = !tib->layered && tib->sample_size_B == 4 * stride;
+      unsigned count = 0;
+      while (count < AGX_MAX_RENDER_TARGETS &&
+             tib->logical_format[count] == format)
+         count++;
+      bool supported = !tib->layered && count >= 2 && count <= 4 &&
+                       (rgba32 || count == 4) &&
+                       tib->sample_size_B == count * stride;
       for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
-         quad &= rt < 4 ? tib->logical_format[rt] == format &&
+         supported &= rt < count ? tib->logical_format[rt] == format &&
                              !tib->spilled[rt] && tib->_offset_B[rt] == rt * stride
                        : tib->logical_format[rt] == PIPE_FORMAT_NONE;
       }
-      if (quad)
-         return rgba32 ? AGX_G17P_MRT_RGBA32_QUAD : AGX_G17P_MRT_R32_QUAD;
+      if (supported)
+         return rgba32 ? AGX_G17P_MRT_RGBA32 : AGX_G17P_MRT_R32_QUAD;
    }
 
    for (unsigned rt = 2; rt < AGX_MAX_RENDER_TARGETS; ++rt) {

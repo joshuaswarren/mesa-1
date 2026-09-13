@@ -162,7 +162,8 @@ struct agx_shader_info {
     */
    uint16_t nr_gprs, nr_preamble_gprs;
 
-   /* Separate AGX3 staging allocation, in 16-bit halves. */
+   /* Half of the AGX3 compiler staging footprint. The launch path doubles
+    * this value to reproduce Apple ShaderInfo fields 38/42. */
    uint16_t agx3_staging_halfs;
    bool agx3_staging_known;
 

@@ -643,12 +643,11 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* txb and txd reach the packer as the same sample instruction
              * with a different LOD mode; the heap-indexed descriptor operand
              * is orthogonal to it. */
-            /* Apple's dynamic argument-buffer vertex witnesses cover read()
-             * and sample(..., level(0)). Vertex implicit sampling has no
-             * fragment quad derivatives, so admit only the explicit txl form
-             * here; the ordinary shape validator below checks its operands. */
+            /* Dynamic argument-buffer vertex witnesses cover explicit level
+             * and gradient samples. Vertex implicit sampling has no fragment
+             * quad derivatives; bias likewise remains fragment-only. */
             if (!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
-                tex->op != nir_texop_txl)
+                tex->op != nir_texop_txl && tex->op != nir_texop_txd)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);
             if (!fetch && !g17p_sample_shape(tex))

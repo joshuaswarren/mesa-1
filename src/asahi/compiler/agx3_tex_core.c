@@ -38,9 +38,11 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
     * The array form uses halves 16/18 and PACK_SMPIR publishes the packed
     * sample/layer word separately. */
    if ((d->sample && !d->multisample) ||
+       (d->staged_sample && (!d->multisample || d->sample)) ||
        (d->multisample &&
         (enc != AGX_ISA_ENCODING_AGX3B || d->sample > 3 ||
-         (d->array && d->sample) || d->coord != (d->array ? 16 : 0))))
+         (d->array && d->sample) ||
+         d->coord != (d->array && !d->staged_sample ? 16 : 0))))
       return false;
 
    /* Own-MSL texture3d::read witnesses use f76=3 with a third integer
@@ -61,7 +63,8 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
          : ((d->sampler_value & 1) || d->sampler_value > 252)) ||
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
-        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0)))
+        (sk != AGX3_TEX_OPERAND_IMMEDIATE ||
+         d->sampler_value != (d->staged_sample ? 1 : 0))))
       return false;
    if (d->three_d &&
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
@@ -129,9 +132,9 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(19, d->coord);
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot);
    ov[n++] = (struct agx3_field_kv)KV(27, d->coord_kill ? 1 : 0);
-   /* MS-array names its packed third coordinate with f29=2. Non-MS fetches
-    * use f29 for immediate LOD and f37 to mark that operand. */
-   if (d->multisample && d->array) {
+   /* Keep the native literal-layer2 witness; staged arrays use f77=2 instead.
+    * Non-MS fetches use f29 for immediate LOD and f37 to mark that operand. */
+   if (d->multisample && d->array && !d->staged_sample) {
       ov[n++] = (struct agx3_field_kv)KV(29, 2);
       ov[n++] = (struct agx3_field_kv)KV(37, 1);
    } else if (!d->register_lod) {
@@ -144,7 +147,7 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       76, d->three_d ? 3 : (d->multisample ? 2 : 1));
    if (d->array)
       ov[n++] = (struct agx3_field_kv)KV(
-         77, d->multisample ? 1 : 2); /* MS array vs register-layer array */
+         77, d->multisample && !d->staged_sample ? 1 : 2);
    ov[n++] = (struct agx3_field_kv)KV(78, 1);  /* texel fetch */
    /* Each operand lands in the field its kind selects: 95/96/97 for the
     * texture, 124/125/126 for the sampler. */
@@ -452,7 +455,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
-        ((d->cube || (d->array && !d->offset)) &&
+        ((d->cube || (d->array && !d->offset && !d->vertex_stage)) &&
          d->lod != AGX3_TEX_LOD_AUTO &&
          !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0 &&
            !(d->array && d->cube)))))
@@ -488,7 +491,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool staged_driver_array =
       d->array && !d->cube &&
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
-      (d->shadow || d->lod == AGX3_TEX_LOD_AUTO || d->offset);
+      (d->vertex_stage || d->shadow || d->lod == AGX3_TEX_LOD_AUTO ||
+       d->offset);
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
    unsigned nb = 0;
@@ -544,10 +548,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     * sample_group_end when a multi-op group ends on a shape (including an
     * immediate LEVEL) that would not infer it in isolation. Explicit-gradient
     * samples are outside these groups. */
-   const bool intrinsic_group =
-      d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
-      d->lod == AGX3_TEX_LOD_REGISTER || d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
-      (d->lod != AGX3_TEX_LOD_GRADIENT && (d->array || d->cube));
+   const bool intrinsic_group = !d->vertex_stage &&
+      (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
+       d->lod == AGX3_TEX_LOD_REGISTER ||
+       d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
+       (d->lod != AGX3_TEX_LOD_GRADIENT && (d->array || d->cube)));
    if (d->sample_group_end ||
        (intrinsic_group && !d->sample_group_nonterminal))
       ov[n++] = (struct agx3_field_kv)KV(156, 1);
@@ -1326,9 +1331,59 @@ agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
                             sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
-/* Own-MSL texture2d_ms reads publish a variable integer sample with this
- * distinct PACK_SMPIR before the otherwise sample-0 MS fetch. The exact
- * discarded-r2h witness is 1705540400000000d0c00800. */
+/* Native runtime MS-array reads normalize the layer to a GPR, then merge
+ * that word with the sample at staging half4. NIR provides sample in low16
+ * and layer in high16, so both half addresses must be consumed separately.
+ * Fresh native runtime witnesses: layer half6 -> packed half2 is
+ * 17055402030c0000f0880400; sample half0 plus packed half2 is
+ * 1705540400000010d0c20a00. */
+bool
+agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
+                            uint16_t dest, bool cache, bool discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 128 || dest > 190 ||
+       (dest & 1) || (cache && discard))
+      return false;
+   const struct agx3_field_kv fields[] = {
+      KV(2, dest), KV(9, 2), KV(10, 2), KV(11, 1),
+      KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                           sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+}
+
+bool
+agx3_tex_stage_ms_array_sample(enum agx_isa_encoding enc, uint16_t sample,
+                              uint16_t packed_layer, bool cache, bool discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || sample >= 128 || (sample & 1) ||
+       packed_layer > 190 || (packed_layer & 1) || (cache && discard))
+      return false;
+   const struct agx3_field_kv fields[] = {
+      KV(5, 4), KV(9, 5), KV(10, 2), KV(12, 1),
+      KV(16, sample), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(37, 1), KV(38, 1), KV(44, packed_layer), KV(51, 2),
+      KV(52, 2), KV(55, 1), KV(74, 9), KV(75, 12), KV(76, 1), KV(77, 16),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                           sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+}
+
+/* Native texture2d_ms reads publish the sample at fixed staging half4.
+ * Field24=1 reads the low16 of the sample producer. Field16 uses the same
+ * half-register address as the producer, without converting it to words.
+ * The native discarded-half2 witness is 1705540400040000d0c00800. */
 bool
 agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                          uint16_t wait_mask, bool src_cache,
@@ -1339,18 +1394,18 @@ agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || (src & 1) ||
        (wait_mask & ~0x3f) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(9, 5),  KV(10, 2), KV(12, 1), KV(23, 2), KV(24, 1), KV(37, 1),
+      KV(5, 4),  KV(9, 5),  KV(10, 2), KV(12, 1), KV(23, 2), KV(24, 1), KV(37, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 9), KV(75, 12),
       KV(76, 1), KV(77, 16),
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;
-   ov[n++] = (struct agx3_field_kv)KV(5, src);
+   ov[n++] = (struct agx3_field_kv)KV(16, src);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
    for (unsigned i = 0; i < 6; ++i)

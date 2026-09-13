@@ -30,6 +30,7 @@ same(const struct agx3_tex_fetch_desc *a,
           a->final == b->final &&
           a->array == b->array &&
           a->multisample == b->multisample &&
+          a->staged_sample == b->staged_sample &&
           a->three_d == b->three_d && a->sample == b->sample &&
           (a->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
              (b->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) &&
@@ -2190,6 +2191,26 @@ test_multisample_fetch(void)
    d.sample = 4;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    d.sample = 0;
+   d.staged_sample = true;
+   d.sampler_value = 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b0008014000100000100"));
+
+   /* Complete native indexed-texture/runtime-sample witness. No extra
+    * descriptor-context or anonymous tail bits appear in this form. */
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 0;
+   d.texture_kill = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b0008014000380000100002800000000"));
+   d.sample = 1;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sample = 0;
+   d.sampler_value = 0;
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.staged_sample = false;
+   d.texture_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.texture_kill = false;
    d.coord = 16;
    d.array = true;
    d.texture = 1;
@@ -2200,6 +2221,37 @@ test_multisample_fetch(void)
    CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    CHECK(len == sizeof(native_ms_array) &&
          !memcmp(bytes, native_ms_array, len));
+   /* Fresh runtime layer+sample native programs use bank0 coordinates and
+    * consume their merged operand from staging half4, not literal layer2. */
+   d.coord = 0;
+   d.texture = 0;
+   d.wait_mask = 1;
+   d.staged_sample = true;
+   d.sampler_value = 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b000a014000100000100"));
+   d.texture_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = 16;
+   d.texture_kill = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   CHECK(hex_eq(bytes, len, "05800cb8b000a014100380000100002800000000"));
+   CHECK(agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 6, 2,
+                                     false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055402030c0000f0880400"));
+   CHECK(agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                                       false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540400000010d0c20a00"));
+   CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3C, 6, 2,
+                                      false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 128, 2,
+                                      false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_array_sample(AGX_ISA_ENCODING_AGX3B, 0, 3,
+                                        false, true, bytes, &len));
+   d.staged_sample = false;
+   d.sampler_value = 0;
+   d.texture_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.texture_kill = false;
+   d.coord = 16;
    d.sample = 1;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    d.sample = 0;
@@ -2221,18 +2273,31 @@ test_multisample_fetch(void)
 static int
 test_multisample_sample_stage(void)
 {
-   /* Own-MSL buffer-indexed sample: discarded r2h is published before the
-    * otherwise sample-0 texture2d_ms read. */
+   /* The native bit_and producer writes half2. PACK_SMPIR reads that same
+    * half address with a 16-bit source and publishes it at staging half4.
+    * Both fixed and indexed texture witnesses have these exact bytes. */
    static const uint8_t native[] = {
-      0x17,0x05,0x54,0x04,0x00,0x00,
+      0x17,0x05,0x54,0x04,0x00,0x04,
       0x00,0x00,0xd0,0xc0,0x08,0x00,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0,
-                                  false, true, bytes, &len));
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 2, 0,
+                                   false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
+   uint8_t other[AGX3_TEX_MAX_LENGTH], other_len;
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 6, 0,
+                                  false, true, other, &other_len));
+   CHECK(other_len == len && memcmp(other, bytes, len));
+   CHECK(other[3] == 4 && bytes[3] == 4 && other[5] == 12);
+   /* The store/fetch probe produces sample1 at half12 while half6 is the
+    * descriptor's zero high word. Dividing this address aliases sample0. */
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 12, 0,
+                                  false, true, other, &other_len));
+   CHECK(hex_eq(other, other_len, "1705540400180000d0c00800"));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                    false, false, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,
+                                   false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0,
                                    false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0x40,
@@ -2982,6 +3047,86 @@ test_indexed_offset_witnesses(void)
    return 0;
 }
 
+/* Runtime-indexed vertex pipelines from the Metal 27.1 native translator.
+ * Every complete SMP recomposes through the AGX3B table. In each pair the
+ * offset changes only f43/f51/f141; register level and gradient operands use
+ * the same staging ABI as fragments, while vertex level clears fragment-only
+ * sample-group terminator f156. */
+static int
+test_vertex_offset_witnesses(void)
+{
+   static const struct {
+      const char *name;
+      enum agx3_tex_lod lod;
+      bool array, three_d, shadow;
+      uint16_t offset;
+      const char *plain, *offset_hex;
+   } rows[] = {
+      {"2D level", AGX3_TEX_LOD_REGISTER, false, false, false, 0x87,
+       "05800cb834000001000290010100a02800004000",
+       "05800cb834001102003a90010108a02800004000"},
+      {"2D gradient", AGX3_TEX_LOD_GRADIENT, false, false, false, 0x87,
+       "05800cb834000401000290010100a02800004000",
+       "05800cb834000902003a90010108a02800004000"},
+      {"2D array level", AGX3_TEX_LOD_REGISTER, true, false, false, 0x87,
+       "05800cb834000801000290010100a02800004000",
+       "05800cb834005102003a90010108a02800004000"},
+      {"2D array gradient", AGX3_TEX_LOD_GRADIENT, true, false, false, 0x87,
+       "05800cb834000c01000290010100a02800004000",
+       "05800cb834000903003a90010108a02800004000"},
+      {"3D level", AGX3_TEX_LOD_REGISTER, false, true, false, 0x837,
+       "05800cb834008821000290010100a02800004000",
+       "05802cb83400190200ba90010102a02800004000"},
+      {"3D gradient", AGX3_TEX_LOD_GRADIENT, false, true, false, 0x837,
+       "05800cb834009c01000290010100a02800004000",
+       "05802cb83400190300ba90010102a02800004000"},
+      {"depth level", AGX3_TEX_LOD_REGISTER, false, false, true, 0x87,
+       "05800ca014002001000280010100a02800004000",
+       "05800ca014003102003a80010108a02800004000"},
+      {"depth gradient", AGX3_TEX_LOD_GRADIENT, false, false, true, 0x87,
+       "05800ca014002401000280010100a02800004000",
+       "05800ca014002902003a80010108a02800004000"},
+      {"depth array level", AGX3_TEX_LOD_REGISTER, true, false, true, 0x87,
+       "05800ca014002801000280010100a02800004000",
+       "05800ca014007102003a80010108a02800004000"},
+      {"depth array gradient", AGX3_TEX_LOD_GRADIENT, true, false, true, 0x87,
+       "05800ca014002c01000280010100a02800004000",
+       "05800ca014002903003a80010108a02800004000"},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = rows[i].shadow ? 1 : 15,
+         .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+         .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+         .texture_value = 0, .sampler_value = 4,
+         .texture_kill = true, .sampler_kill = true,
+         .lod = rows[i].lod, .slot = 1, .wait_mask = 1u << 5,
+         .coord_kill = true, .final = true, .vertex_stage = true,
+         .array = rows[i].array,
+         .array_layer = rows[i].array ? 12 : 0,
+         .three_d = rows[i].three_d, .shadow = rows[i].shadow,
+      };
+      CHECK(agx3_tex_encode_sample(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      if (!hex_eq(bytes, length, rows[i].plain)) {
+         fprintf(stderr, "vertex sample witness: %s control\n", rows[i].name);
+         return 1;
+      }
+      d.offset = true;
+      d.offset_xyz = rows[i].offset;
+      CHECK(agx3_tex_encode_sample(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      if (!hex_eq(bytes, length, rows[i].offset_hex)) {
+         fprintf(stderr, "vertex sample witness: %s offset\n", rows[i].name);
+         return 1;
+      }
+      checks += 2;
+   }
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2998,6 +3143,7 @@ main(void)
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias() ||
        test_offset_witnesses() || test_indexed_offset_witnesses() ||
+       test_vertex_offset_witnesses() ||
        test_shadow_lod_witnesses() ||
        test_3d_lod_witnesses() || test_image_write_state0_witnesses() ||
        test_query_lod_witnesses())

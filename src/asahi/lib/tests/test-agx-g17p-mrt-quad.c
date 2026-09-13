@@ -5,6 +5,7 @@
 #include <string.h>
 #include "util/format/u_formats.h"
 #include "agx3_graphics_program.h"
+#include "agx3_g17p_quad_eot.h"
 #include "agx_compile.h"
 #include "agx_linker.h"
 #include "agx_nir.h"
@@ -26,36 +27,40 @@ dump(const char *name, enum pipe_format format,
 }
 
 static void
-check_format(enum pipe_format format, unsigned components)
+check_format(enum pipe_format format, unsigned components, unsigned count)
 {
-   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {format, format, format,
-                                                       format};
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+   for (unsigned i = 0; i < count; ++i)
+      formats[i] = format;
    struct agx_tilebuffer_layout tib =
-      agx_build_tilebuffer_layout(formats, 4, 1, false);
+      agx_build_tilebuffer_layout(formats, count, 1, false);
    assert(agx_g17p_classify_mrt(&tib) ==
-          (components == 4 ? AGX_G17P_MRT_RGBA32_QUAD : AGX_G17P_MRT_R32_QUAD));
+          (components == 4 ? AGX_G17P_MRT_RGBA32 : AGX_G17P_MRT_R32_QUAD));
    assert(agx_g17p_rt0_tile_layout_supported(&tib));
-   assert(tib.sample_size_B == 16 * components);
-   for (unsigned i = 0; i < 4; ++i)
+   assert(tib.sample_size_B == ALIGN_POT(count * 4 * components, 8));
+   for (unsigned i = 0; i < count; ++i)
       assert(agx_tilebuffer_offset_B(&tib, i) == i * components * 4);
    struct agx_tilebuffer_layout invalid = tib;
-   invalid.spilled[3] = true;
+   invalid.spilled[count - 1] = true;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
-   invalid._offset_B[3]++;
+   invalid._offset_B[count - 1]++;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
-   invalid.logical_format[4] = format;
+   invalid.logical_format[count] = format;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
    invalid.nr_samples = 2;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
+   invalid = tib;
+   invalid.layered = true;
+   assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
 
-   struct agx_fs_epilog_key epilog = {.link.loc_written = 15,
-                                      .link.size_32 = 15,
+   struct agx_fs_epilog_key epilog = {.link.loc_written = (1u << count) - 1,
+                                      .link.size_32 = (1u << count) - 1,
                                       .nr_samples = 1};
    memset(epilog.remap, -1, sizeof(epilog.remap));
-   for (unsigned i = 0; i < 4; ++i) {
+   for (unsigned i = 0; i < count; ++i) {
       epilog.remap[i] = i;
       epilog.rt_formats[i] = format;
       epilog.blend.rt[i].colormask = (1u << components) - 1;
@@ -73,7 +78,7 @@ check_format(enum pipe_format format, unsigned components)
                                 .secondary = true};
    struct agx_shader_part part = {0};
    assert(agx_compile_shader_nir(b.shader, &key, &part));
-   assert(part.info.agx3_colour_link.colour_partitions == 3);
+   assert(part.info.agx3_colour_link.colour_partitions == MIN2(count, 3));
    assert(part.info.agx3_colour_link.entry_emitted);
    assert(!part.info.scratch_size);
    dump("epilog", format, &part);
@@ -83,7 +88,7 @@ check_format(enum pipe_format format, unsigned components)
    b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
                                       "G17P quad BG clear");
    b.shader->info.fs.untyped_color_outputs = true;
-   for (unsigned i = 0; i < 4; ++i) {
+   for (unsigned i = 0; i < count; ++i) {
       nir_store_output(&b,
                        nir_load_preamble(&b, components, 32, .base = 4 + i * 8),
                        nir_imm_int(&b, 0), .write_mask = (1u << components) - 1,
@@ -102,13 +107,40 @@ check_format(enum pipe_format format, unsigned components)
    key = (struct agx_shader_key){
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .fs.ignore_tib_dependencies = true,
-      .reserved_preamble = AGX3_G17P_QUAD_CLEAR_PUSH_HALFS,
+      .reserved_preamble = 4 + 8 * count,
       .no_preamble = true};
    part = (struct agx_shader_part){0};
    assert(agx_compile_shader_nir(b.shader, &key, &part));
-   assert(part.info.push_count == AGX3_G17P_QUAD_CLEAR_PUSH_HALFS);
+   assert(part.info.push_count == 4 + 8 * count);
    assert(!part.info.scratch_size && !part.info.agx3_colour_link.entry_emitted);
    dump("clear", format, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+
+   b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &agx_nir_options,
+                                      "G17P raw32 MRT EOT");
+   nir_def *coords =
+      nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+   for (unsigned i = 0; i < count; ++i)
+      nir_image_store_block_agx(
+         &b, nir_imm_intN_t(&b, i, 16), nir_imm_int(&b, 4 * components * i),
+         coords, .format = PIPE_FORMAT_R32_UINT,
+         .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(b.shader);
+   key = (struct agx_shader_key){
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .g17p_rt0_eot_i32 = true,
+      .no_preamble = true};
+   part = (struct agx_shader_part){0};
+   assert(agx_compile_shader_nir(b.shader, &key, &part));
+   const uint8_t *expected = count == 2 ? agx3_g17p_dual_raw32_eot
+                            : count == 3 ? agx3_g17p_triple_raw32_eot
+                                         : agx3_g17p_quad_eot;
+   assert(part.info.binary_size == 32 + 44 * count);
+   assert(part.info.agx3_staging_known &&
+          part.info.agx3_staging_halfs == 8 * count);
+   assert(!memcmp(part.binary, expected, part.info.binary_size));
+   dump("eot", format, &part);
    free(part.binary);
    ralloc_free(b.shader);
 }
@@ -116,10 +148,12 @@ check_format(enum pipe_format format, unsigned components)
 int
 main(void)
 {
-   check_format(PIPE_FORMAT_R32G32B32A32_FLOAT, 4);
-   check_format(PIPE_FORMAT_R32G32B32A32_UINT, 4);
-   check_format(PIPE_FORMAT_R32G32B32A32_SINT, 4);
-   check_format(PIPE_FORMAT_R32_FLOAT, 1);
-   puts("quad layouts, epilogs and clear shaders PASS");
+   for (unsigned count = 2; count <= 4; ++count) {
+      check_format(PIPE_FORMAT_R32G32B32A32_FLOAT, 4, count);
+      check_format(PIPE_FORMAT_R32G32B32A32_UINT, 4, count);
+      check_format(PIPE_FORMAT_R32G32B32A32_SINT, 4, count);
+   }
+   check_format(PIPE_FORMAT_R32_FLOAT, 1, 4);
+   puts("two-to-four-target layouts, epilogs and clear shaders PASS");
    return 0;
 }

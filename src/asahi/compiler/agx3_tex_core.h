@@ -105,6 +105,7 @@ struct agx3_tex_fetch_desc {
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer in the register after the pair */
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
+   bool staged_sample;  /* MS sample and optional array layer in staging half4 */
    bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
    uint8_t sample;      /* immediate non-array sample index, values 0..3 */
    bool texture_kill;   /* Last use of an indirect texture index */
@@ -288,6 +289,9 @@ struct agx3_tex_sample_desc {
     * in every other stage/ISA. */
    bool sample_group_nonterminal;
    bool sample_group_end;
+   /* Vertex explicit-LOD samples use the same SMP fields and operand staging
+    * as fragment samples, but never carry fragment group terminator f156. */
+   bool vertex_stage;
    bool array;           /* array sample; shadow layers use PACK_SMPIR */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
@@ -385,6 +389,14 @@ bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               uint16_t wait_mask, bool src_cache,
                               bool src_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
+                                 uint16_t dest, bool cache, bool discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_ms_array_sample(enum agx_isa_encoding enc, uint16_t sample,
+                                   uint16_t packed_layer, bool cache,
+                                   bool discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
                             const struct agx3_tex_sample_desc *d,
