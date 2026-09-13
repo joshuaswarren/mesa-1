@@ -58,6 +58,29 @@ TEST_F(LowerPseudo, Not)
    CASE(agx_not_to(b, wx, wy), agx_bitop_to(b, wx, wy, agx_zero(), 0x5));
 }
 
+TEST_F(LowerPseudo, Agx3MaterializesImmediateFloatAdd)
+{
+   for (auto enc : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
+      agx_shader_key key = {};
+      key.dev.encoding = enc;
+      const uint8_t constants[] = {0x00, 0x80, 0x30};
+      const uint32_t bits[] = {0x00000000, 0x80000000, 0x3f800000};
+      for (unsigned i = 0; i < 3; ++i) {
+         agx_builder *actual = agx_test_builder(mem_ctx);
+         actual->shader->key = &key;
+         agx_fadd_to(actual, wx, agx_immediate(constants[i]), agx_negzero());
+
+         agx_builder *expected = agx_test_builder(mem_ctx);
+         expected->shader->key = &key;
+         agx_mov_imm_to(expected, wx, bits[i]);
+         agx_fadd_to(expected, wx, wx, agx_negzero());
+
+         agx_lower_pseudo(actual->shader);
+         ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+      }
+   }
+}
+
 TEST_F(LowerPseudo, LowersAgx3UnconditionalBreak)
 {
    agx_shader_key key = {};

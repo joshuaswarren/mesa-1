@@ -921,6 +921,13 @@ bool agx3_alu_hadd_saturate_negzero(
    enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* G17G scalar-half register plus a minifloat; G17P accepts its native inverse. */
+bool agx3_alu_hadd_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src, uint16_t immediate, bool src_neg,
+                             enum agx3_alu_hint hint, bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native scalar-half inverse: 1.0h + -src. */
 bool agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t src, enum agx3_alu_hint hint,

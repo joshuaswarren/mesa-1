@@ -3775,18 +3775,21 @@ agx3_alu_hmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !out || !len || dest >= 256 ||
        src >= 256 || immediate > UINT8_MAX ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
-       (wait_mask & ~UINT16_C(0x3f)))
+       (wait_mask & ~(m5 ? UINT16_C(0xff) : UINT16_C(0x3f))))
       return false;
 
    /* Fresh G17P Metal witnesses place the minifloat in field16, retain the
-    * ordinary half register/lifetime fields, and carry all six wait bits. */
+    * ordinary half register/lifetime fields, and carry all six wait bits.
+    * G17G uses the same compact operands and its f16mul ep3 selectors;
+    * native constant sweeps and live/dead half4 vectors pin slot 8. */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {24, 1}, {25, 1}, {41, 2}, {42, 1},
    };
-   struct agx3_field_kv fields[12] = {
+   struct agx3_field_kv fields[16] = {
       {2, dest},
       {16, immediate},
       {34, src},
@@ -3794,12 +3797,17 @@ agx3_alu_hmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
       {43, hint == AGX3_ALU_HINT_CACHE},
       {45, hint == AGX3_ALU_HINT_DISCARD},
    };
-   for (unsigned i = 0; i < 6; ++i)
-      fields[6 + i] = (struct agx3_field_kv){51 + i,
+   unsigned n = 6;
+   if (m5) {
+      fields[n++] = (struct agx3_field_kv){49, 3};
+      fields[n++] = (struct agx3_field_kv){50, 47};
+   }
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
+      fields[n++] = (struct agx3_field_kv){51 + i,
                                             !!(wait_mask & (1u << i))};
 
-   for (unsigned ep = 0; ep < 2; ++ep)
-      if (agx3_bind_compose(enc, "f16mul", ep, base, 6, fields, 12, out,
+   for (unsigned ep = 0; ep < (m5 ? 4 : 2); ++ep)
+      if (agx3_bind_compose(enc, "f16mul", ep, base, 6, fields, n, out,
                             len))
          return true;
 
@@ -3877,14 +3885,17 @@ agx3_alu_hadd_saturate_negzero(
 }
 
 bool
-agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
-                      uint16_t src, enum agx3_alu_hint hint,
+agx3_alu_hadd_minifloat(enum agx_isa_encoding enc, uint16_t dest,
+                      uint16_t src, uint16_t immediate, bool src_neg,
+                      enum agx3_alu_hint hint,
                       bool dest_cache, uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !out || !len || dest >= 256 ||
-       src >= 256 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       src >= 256 || immediate > UINT8_MAX ||
+       (!m5 && (immediate != UINT8_C(0x30) || !src_neg)) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~(m5 ? UINT16_C(0xff) : UINT16_C(0x3f))))
       return false;
 
@@ -3893,15 +3904,17 @@ agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
     * pin destination/source registers, discard and slot-0 wait; a fifth
     * live-source witness pins the cache axis on this same ep1 form.
     * G17G live/dead half4 references retain the ep1 form and pin the ep3
-    * selectors and slot-8 wait shared with its half-saturate encoding. */
+    * selectors and slot-8 wait shared with its half-saturate encoding.
+    * G17G positive and negative constant sweeps also pin the non-negated
+    * source form. G17P remains restricted to the existing inverse helper. */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {24, 1}, {25, 1}, {41, 2}, {42, 1},
    };
    struct agx3_field_kv fields[17] = {
       {2, dest},
-      {16, UINT8_C(0x30)},
+      {16, immediate},
       {34, src},
-      {47, 1},
+      {47, src_neg},
       {11, dest_cache},
       {43, hint == AGX3_ALU_HINT_CACHE},
       {45, hint == AGX3_ALU_HINT_DISCARD},
@@ -3920,6 +3933,16 @@ agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
          return true;
    }
    return false;
+}
+
+bool
+agx3_alu_hadd_one_neg(enum agx_isa_encoding enc, uint16_t dest,
+                      uint16_t src, enum agx3_alu_hint hint,
+                      bool dest_cache, uint16_t wait_mask,
+                      uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_hadd_minifloat(enc, dest, src, UINT8_C(0x30), true,
+                                  hint, dest_cache, wait_mask, out, len);
 }
 
 /* Native scalar half FMA preserves the single-rounding f16 semantics. */

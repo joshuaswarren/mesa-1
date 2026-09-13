@@ -3339,7 +3339,9 @@ TEST_F(AGX3PackBinary, HalfSaturateRefusesUnwitnessedOperands)
                                           : AGX_ISA_ENCODING_AGX3C);
       agx_index dst = agx_register(0, AGX_SIZE_16);
       agx_index src = agx_register(0, AGX_SIZE_16);
-      agx_index imm = agx_immediate(mode == 1 ? 0x30 : 0x80);
+      /* A non-saturating G17G add accepts minifloats, but not 9-bit values. */
+      agx_index imm = agx_immediate(mode == 1 ? (variant < 7 ? 0x30 : 0x100)
+                                             : 0x80);
       if (mode == 2)
          src.size = AGX_SIZE_32;
       if (mode == 3)
@@ -3397,10 +3399,43 @@ TEST_F(AGX3PackBinary, G17GHalfInverseMatchesNativeForm)
    }
 }
 
+TEST_F(AGX3PackBinary, G17GHalfImmediatesMatchNativeForms)
+{
+   /* Apple G17G Metal reference: live half add-one and multiply-two. */
+   const uint8_t native[][6] = {
+      {0x08, 0xb0, 0x04, 0x05, 0x80, 0x00},
+      {0x08, 0xc0, 0x05, 0x05, 0x80, 0x00},
+   };
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3C, &end));
+   for (unsigned multiply = 0; multiply < 2; ++multiply) {
+      std::vector<uint8_t> want(std::begin(native[multiply]),
+                                std::end(native[multiply]));
+      append(want, end.bytes, end.length);
+      for (bool immediate_first : {false, true}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+         agx_index dst = agx_register(1, AGX_SIZE_16);
+         agx_index src = agx_register(5, AGX_SIZE_16);
+         agx_index imm = agx_immediate(multiply ? 0x40 : 0x30);
+         agx_index s0 = immediate_first ? imm : src;
+         agx_index s1 = immediate_first ? src : imm;
+         if (multiply)
+            agx_hmul_to(b, dst, s0, s1);
+         else
+            agx_hadd_to(b, dst, s0, s1);
+         agx_stop(b);
+         EXPECT_EQ(pack(b), want);
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, HalfInverseRefusesUnwitnessedOperands)
 {
    for (unsigned variant = 0; variant < 16; ++variant) {
       unsigned mode = (variant % 8) + 1;
+      /* G17G now supports general minifloats and non-negated sources. */
+      if (variant >= 8 && mode <= 2)
+         continue;
       agx_builder *b = builder(variant < 8 ? AGX_ISA_ENCODING_AGX3B
                                           : AGX_ISA_ENCODING_AGX3C);
       agx_index dst = agx_register(1, AGX_SIZE_16);

@@ -9370,7 +9370,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              ((agx3_src_is_register(I->src[0]) &&
                I->src[1].type == AGX_INDEX_IMMEDIATE) ||
@@ -9477,11 +9478,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 dst.size != AGX_SIZE_16 || agx_channels(dst) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 src.size != AGX_SIZE_16 || agx_channels(src) != 1 || src.abs ||
-                !src.neg || src.kill || (src.cache && src.discard) ||
+                src.kill || (src.cache && src.discard) ||
                 imm.memory || imm.abs || imm.neg || imm.kill || imm.cache ||
                 imm.discard || imm.size != AGX_SIZE_16 ||
-                agx_channels(imm) != 1 || imm.value != UINT8_C(0x30) ||
-                !agx3_alu_hadd_one_neg(enc, dst.value, src.value,
+                agx_channels(imm) != 1 ||
+                !agx3_alu_hadd_minifloat(enc, dst.value, src.value, imm.value, src.neg,
                                        agx3_post_ra_hint(src), dst.cache, wait,
                                        bytes, &len) ||
                 !agx3_append(emission, bytes, len))
