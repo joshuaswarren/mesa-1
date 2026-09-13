@@ -1308,7 +1308,11 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
              "Page aligned Z layers");
 
       unsigned stride_pages = z_layout->layer_stride_B / AIL_PAGESIZE;
-      render->cr.depth.stride = ((stride_pages - 1) << 14) | 1;
+      /* M5 single-layer ZLS does not use an array stride. Small miptails
+       * occupy less than one page, so encoding pages-minus-one underflows. */
+      render->cr.depth.stride =
+         (dev->dev.chip == AGX_CHIP_G17G && z_layout->depth_px == 1)
+            ? 0 : ((stride_pages - 1) << 14) | 1;
 
       assert(z_layout->tiling != AIL_TILING_LINEAR && "must tile");
 
