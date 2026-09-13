@@ -5453,6 +5453,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    const bool no_bias = !rast->depth_bias ||
       (rast->base.offset_units == 0 && rast->base.offset_scale == 0 &&
        rast->base.offset_clamp == 0);
+   const unsigned fragment_pass = fs ? fs->fragment_control.opaque[0] >> 29 : 0;
    if (!vs || !fs || ctx->gs || (!no_varyings && !color_varying) ||
        cf->reads_z || vs->b.info.has_preamble ||
        vs->b.info.nr_preamble_gprs || vs->b.info.preamble_scratch_size ||
@@ -5465,7 +5466,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
        batch->reduced_prim != MESA_PRIM_TRIANGLES ||
        batch->key.nr_cbufs != 1 || !batch->key.cbufs[0].texture || batch->key.zsbuf.texture ||
        batch->key.layers > 1 || batch->tilebuffer_layout.nr_samples != 1 ||
-       (fs->fragment_control.opaque[0] >> 29) != AGX_PASS_TYPE_OPAQUE ||
+       (fragment_pass != AGX_PASS_TYPE_OPAQUE &&
+        fragment_pass != AGX_PASS_TYPE_TRANSLUCENT) ||
        (ctx->fs->so && ctx->fs->so->info.writes_memory) || rast->base.rasterizer_discard ||
        rast->base.fill_front != PIPE_POLYGON_MODE_FILL ||
        rast->base.fill_back != PIPE_POLYGON_MODE_FILL || !no_bias ||
@@ -5473,7 +5475,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
        !rast->base.depth_clip_far || ctx->zs->base.depth_enabled ||
        ctx->zs->base.stencil[0].enabled || ctx->zs->base.stencil[1].enabled ||
        (ctx->active_queries && ctx->occlusion_query) || vs->b.info.nonzero_viewport) {
-      mesa_loge("G17G Gallium draw exceeds the native opaque triangle profile");
+      mesa_loge("G17G Gallium draw exceeds the native triangle profile");
       if ((dev->debug & AGX_DBG_FAULTTRACE) && vs && fs) {
          fprintf(stderr, "M5_DRAW_REJECT varyings=%u/%u psiz=%u uvs=%u user=%u groups=%u,%u,%u,%u,%u osel=%#x cf=%u,%u reads_z=%u preamble=%u,%u,%u viewport=%u\n",
                  no_varyings, color_varying, psiz, vs->uvs.size, vs->uvs.user_size,
@@ -5595,6 +5597,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
 
    const struct agx_ppp_hal300_graphics_fields graphics_fields = {
       .fragment_program = fragment_program,
+      .fragment_pass = fragment_pass,
       .varying_table = batch->varyings, .cf_binding_count = cf->nr_bindings,
       .cull_mode = rast->base.cull_face,
       .front_face_ccw = rast->base.front_ccw, .point_size_output = psiz,

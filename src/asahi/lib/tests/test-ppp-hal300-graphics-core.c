@@ -42,6 +42,23 @@ main(void)
    CHECK(memcmp(out.offsets, offsets, sizeof(offsets)) == 0);
    CHECK(memcmp(out.lengths, lengths, sizeof(lengths)) == 0);
 
+   /* Native HAL300 disassembly routes context+780c to word1 of the
+    * 02000062 secondary record. For pass=1 it retains 20000200 there;
+    * every primary-face byte and all other records must stay unchanged. */
+   f.fragment_pass = 1;
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   for (unsigned i = 0; i < sizeof(golden); ++i)
+      CHECK(out.bytes[i] == (i == 127 ? 0x20 : golden[i]));
+   const struct agx_ppp_hal300_graphics_core translucent = out;
+   for (unsigned pass = 2; pass < 8; ++pass) {
+      f.fragment_pass = pass;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+      CHECK(memcmp(&out, &translucent, sizeof(out)) == 0);
+   }
+   f.fragment_pass = 0;
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   CHECK(memcmp(out.bytes, golden, sizeof(golden)) == 0);
+
    /* Relocation must retain all 48 address bits, not only the low word. */
    f.fragment_program = UINT64_C(0xa5c001234540);
    f.cull_mode = 3;

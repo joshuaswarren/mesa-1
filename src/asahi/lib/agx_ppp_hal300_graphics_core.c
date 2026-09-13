@@ -11,7 +11,8 @@ agx_ppp_hal300_graphics_core_pack(
    struct agx_ppp_hal300_graphics_core *out)
 {
    if (chip != AGX_CHIP_G17G || !fields || !out ||
-       !fields->fragment_program || fields->cull_mode > 3)
+       !fields->fragment_program || fields->cull_mode > 3 ||
+       fields->fragment_pass > 1)
       return false;
 
    if (fields->color_varying) {
@@ -59,7 +60,13 @@ agx_ppp_hal300_graphics_core_pack(
        fields->depth_less_write ? 0x01000f00 : 0x07200f00,
        fields->depth_less_write ? 0x01000f00 : 0x07200f00,
        0x0e000000, 0x0e000000, 0},
-      {0x02000062, 0x00000200, 0x07e00000, 0x07e00000, 0x0001ffff},
+      /* HAL300 updateFragmentShaderISPState (M5/25G76, 4d2b10..4d2b38)
+       * stores pass bits29..31 at context+780c. encodeAndEmitRenderState
+       * loads them at 4e831c (7500+30c), preserves them at 4e83ac..4e83b8,
+       * and emits this secondary record's word1 at 4e83d0. They do not
+       * belong in the primary face record, unlike the HAL200 layout. */
+      {0x02000062, 0x00000200 | (fields->fragment_pass << 29),
+       0x07e00000, 0x07e00000, 0x0001ffff},
       {0x00840002, 0, 0x80},
       {0x00800000, 0x480 | fields->cull_mode |
                       ((uint32_t)fields->front_face_ccw << 16)},

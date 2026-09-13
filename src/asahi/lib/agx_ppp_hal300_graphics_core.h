@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include "agx_chip.h"
 
-/* The opaque triangle profile, initially captured on M5/25G76 without PSIZ.
+/* Triangle state, initially captured on M5/25G76 without PSIZ.
  * Each range is a complete PPP payload with its own VDM pointer. */
 #define AGX_PPP_HAL300_GRAPHICS_RECORDS 9u
 #define AGX_PPP_HAL300_GRAPHICS_BYTES 172u
@@ -17,6 +17,9 @@ struct agx_ppp_hal300_graphics_fields {
    uint64_t varying_table;
    unsigned cf_binding_count;
    unsigned cull_mode;
+   /* Native pass values: 0 opaque, 1 translucent. Punch-through also needs
+    * coverage state and is not supported by this profile yet. */
+   unsigned fragment_pass;
    bool front_face_ccw;
    bool point_size_output;
    /* Vertex exports and fragment interpolation are independent. A fragment
@@ -33,7 +36,7 @@ struct agx_ppp_hal300_graphics_core {
    uint8_t lengths[AGX_PPP_HAL300_GRAPHICS_RECORDS];
 };
 
-/* Opaque triangles, optionally one float4 smooth/flat color and D32 LESS/write.
+/* Opaque/translucent triangles, optionally float4 color and D32 LESS/write.
  * No stencil, queries, discard, or MSAA. Attachment storage and clear/load/store
  * setup are separate; packing this state alone does not enable depth rendering.
  * Caller must validate those semantic restrictions before using this profile.
