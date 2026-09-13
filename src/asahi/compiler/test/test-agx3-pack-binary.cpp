@@ -12430,6 +12430,53 @@ TEST_F(AGX3PackBinary, BindlessStorageImageWriteMatchesNativeIndexForm)
    EXPECT_TRUE(pack(bad, false).empty());
 }
 
+TEST_F(AGX3PackBinary, ArrayFetchLayerOperandMatchesNative)
+{
+   /* Own G17P texture2d_array<uint>::read(gid.xy, gid.z) witness. The
+    * layer's low16 bits are discarded after publishing operand bank6. */
+   const uint8_t native[] = {
+      0x17, 0x05, 0x54, 0x06, 0x00, 0x04,
+      0x00, 0x00, 0xf0, 0xc0, 0x04, 0x00,
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_tex_stage_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 1, 0, false, true, bytes, &len));
+   ASSERT_EQ(len, sizeof(native));
+   EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
+}
+
+TEST_F(AGX3PackBinary, ArrayFetchPublishesLayerSeparatelyFromCoordinates)
+{
+   for (bool array : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index data = agx_register(8, AGX_SIZE_32);
+      data.channels_m1 = 3;
+      agx_index coord = agx_register(0, AGX_SIZE_32);
+      coord.channels_m1 = array ? 2 : 1;
+      agx_instr *read = agx_image_load_to(
+         b, data, coord, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_immediate(0), agx_null(),
+         array ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
+         AGX_LOD_MODE_AUTO_LOD, 15, false, false, false);
+      read->op = AGX_OPCODE_TEXTURE_LOAD;
+      read->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      /* The native layer operand with source half4, slot1 and retained
+       * source. The prior third coordinate COPY did not publish this bank. */
+      const uint8_t packed[] = {
+         0x17, 0x05, 0x54, 0x06, 0x00, 0x08,
+         0x00, 0x00, 0x70, 0xc0, 0x04, 0x00,
+      };
+      const auto found = std::search(code.begin(), code.end(), packed,
+                                      packed + sizeof(packed));
+      EXPECT_EQ(found != code.end(), array);
+      EXPECT_TRUE(b->shader->agx3_staging_known);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, array ? 8 : 4);
+   }
+}
+
 TEST_F(AGX3PackBinary, BindlessStorageImageReadMatchesNativeIndexAndLOD)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

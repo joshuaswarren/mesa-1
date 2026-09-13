@@ -1085,6 +1085,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       agx_channels(I->src[1]) == 1;
    const bool ms_2d = I->dim == AGX_DIM_2D_MS;
    const bool ms_array = I->dim == AGX_DIM_2D_MS_ARRAY;
+   const bool array = I->dim == AGX_DIM_2D_ARRAY;
    const bool three_d = I->dim == AGX_DIM_3D;
    const bool bindless_image = I->op == AGX_OPCODE_IMAGE_LOAD && !immediate &&
       agx3_tex_plain_reg(I->src[3]) && I->src[3].size == AGX_SIZE_64 &&
@@ -1175,7 +1176,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       }
 
       const unsigned plain_coords =
-         (ms_2d || ms_array) ? 2 : agx_channels(I->src[0]);
+         (ms_2d || ms_array || array) ? 2 : agx_channels(I->src[0]);
       for (unsigned i = 0; i < plain_coords; i++) {
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
@@ -1188,10 +1189,11 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
             return false;
       }
 
-      /* The lowered MS-array coordinate packs sample in the low half and
-       * layer in the high half of its third word. Native publishes that word
-       * through the same PACK_SMPIR array operand as ordinary array fetches. */
-      if (ms_array) {
+      /* Native array fetches consume the layer through PACK_SMPIR's bank6
+       * operand, independently of the x/y coordinate COPYs. A third ordinary
+       * COPY leaves that operand unwritten and reads layer0. The non-MS
+       * lowered layer is the low16 bits of the third coordinate word. */
+      if (ms_array || array) {
          uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
          if (!agx3_tex_stage_array_layer(
                 enc, I->src[0].value + 4, staging_slot, 0,
@@ -6313,12 +6315,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      : 0;
                const unsigned coord_count =
                   (I->dim == AGX_DIM_2D_MS ||
-                   I->dim == AGX_DIM_2D_MS_ARRAY)
+                   I->dim == AGX_DIM_2D_MS_ARRAY ||
+                   I->dim == AGX_DIM_2D_ARRAY)
                      ? 2
                      : agx_channels(I->src[0]);
                ctx->agx3_staging_halfs = MAX2(
                   ctx->agx3_staging_halfs,
                   coord_base + 2 * coord_count);
+               if (I->dim == AGX_DIM_2D_ARRAY)
+                  ctx->agx3_staging_halfs =
+                     MAX2(ctx->agx3_staging_halfs, 8);
             }
             else
                ctx->agx3_staging_known = false;
