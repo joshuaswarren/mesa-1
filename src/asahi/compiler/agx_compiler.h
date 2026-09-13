@@ -511,8 +511,10 @@ typedef struct agx_block {
     */
    bool loop_header;
 
-   /* Offset of the block in the emitted binary */
-   off_t offset, last_offset;
+   /* Offsets of the block in the emitted binary.  On AGX3, loop_exit_offset
+    * names the first CNDEND after a loop backedge, before any enclosing-scope
+    * CNDENDs that happen to share the block. */
+   off_t offset, last_offset, loop_exit_offset;
 
    /** Available for passes to use for metadata */
    uint8_t pass_flags;

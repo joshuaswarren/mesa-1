@@ -10146,6 +10146,44 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    EXPECT_EQ(memcmp(code.data()+38,pop_native,sizeof(pop_native)),0);
 }
 
+TEST_F(AGX3PackBinary, LoopExitBranchKeepsLoopAndOuterPops)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_begin_cf(b);
+   agx_push_exec(b, 0);
+   agx_push_exec(b, 1);
+
+   agx_block *body = agx_test_block(b->shader);
+   agx_block *footer = agx_test_block(b->shader);
+   agx_block *after = agx_test_block(b->shader);
+
+   agx_builder lb = agx_init_builder(b->shader, agx_after_block(body));
+   agx_break_if_icmp(&lb, agx_register(18, AGX_SIZE_16),
+                     agx_register(1, AGX_SIZE_16), 1, false, AGX_ICOND_SLT,
+                     after);
+   agx_jmp_exec_none_after(&lb, footer);
+
+   agx_builder fb = agx_init_builder(b->shader, agx_after_block(footer));
+   agx_jmp_exec_any(&fb, body);
+   agx_pop_exec(&fb, 1);
+   agx_pop_exec(&fb, 1);
+
+   agx_builder ab = agx_init_builder(b->shader, agx_after_block(after));
+   agx_stop(&ab);
+
+   const auto code = pack(b);
+   uint8_t expected[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, true, expected, &len));
+   ASSERT_TRUE(agx3_cf_patch_branch(AGX_ISA_ENCODING_AGX3B, true, expected,
+                                    20));
+
+   /* The forward branch starts after the two pushes, compare and CNDLT.  It
+    * must land on CNDEND(2), not skip it and land on the outer CNDEND(1). */
+   ASSERT_GE(code.size(), 22u + len);
+   EXPECT_EQ(memcmp(code.data() + 22, expected, len), 0);
+}
+
 /*
  * agx_lower_pseudo spells an AGX3 unconditional break as the always-true
  * identity r0l == r0l; this pins the cached/killed normalization of that

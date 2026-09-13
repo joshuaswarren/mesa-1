@@ -65,6 +65,7 @@ struct agx3_branch_fixup {
    agx_block *block;
    off_t offset;
    bool skip_to_end;
+   bool loop_exit;
    bool is_bn;
 };
 
@@ -3839,7 +3840,7 @@ agx3_try_control_flow(struct util_dynarray *emission,
                       struct util_dynarray *fixups, enum agx_isa_encoding enc,
                       const agx_instr *I, uint16_t wait_mask,
                       uint16_t outstanding, bool after_loop_backedge,
-                      unsigned loop_depth)
+                      bool loop_exit_jump, unsigned loop_depth)
 {
    const bool is_if =
       I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_IF_FCMP;
@@ -3981,6 +3982,7 @@ agx3_try_control_flow(struct util_dynarray *emission,
          .block = I->target,
          .offset = emission->size,
          .skip_to_end = I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER,
+         .loop_exit = loop_exit_jump,
          .is_bn = is_bn,
       };
       util_dynarray_append(fixups, fixup);
@@ -4007,8 +4009,19 @@ static bool
 agx3_fixup_branch(struct util_dynarray *emission, enum agx_isa_encoding enc,
                   struct agx3_branch_fixup fixup)
 {
+   /* JMP_EXEC_NONE_AFTER normally targets the last instruction in a block.
+    * A shallow loop break is different: its footer may contain CNDEND(2)
+    * followed by CNDEND(1) for an enclosing scope.  The branch has to execute
+    * both.  Skipping the loop pop leaves every lane inactive at END and the
+    * GPU walks off the executable allocation. */
+   if (fixup.loop_exit && fixup.block->loop_exit_offset < 0)
+      return false;
+
    const off_t target =
-      fixup.skip_to_end ? fixup.block->last_offset : fixup.block->offset;
+      fixup.loop_exit
+         ? fixup.block->loop_exit_offset
+         : fixup.skip_to_end ? fixup.block->last_offset
+                             : fixup.block->offset;
    const int64_t displacement = (int64_t)target - (int64_t)fixup.offset;
 
    /* Only Apple's witnessed directions are accepted: bn skips forward and b
@@ -6014,7 +6027,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    agx_foreach_block(ctx, block) {
       block->offset = emission->size;
+      block->loop_exit_offset = -1;
       bool after_loop_backedge = false;
+      bool after_loop_exit_test = false;
       agx_foreach_instr_in_block(block, I) {
          block->last_offset = emission->size;
 
@@ -6051,9 +6066,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          const bool loop_entry_push = agx3_is_loop_entry_push(I);
          const bool loop_pop =
             I->op == AGX_OPCODE_POP_EXEC && after_loop_backedge;
+         if (loop_pop)
+            block->loop_exit_offset = emission->size;
          const int cf = agx3_try_control_flow(
             emission, &fixups, enc, I, cf_wait, cf_outstanding,
-            after_loop_backedge, loop_depth);
+            after_loop_backedge,
+            I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER && after_loop_exit_test,
+            loop_depth);
          if (cf < 0)
             AGX3_REFUSE(I);
          if (cf > 0) {
@@ -6063,9 +6082,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                loop_depth--;
             }
             after_loop_backedge = I->op == AGX_OPCODE_JMP_EXEC_ANY;
+            after_loop_exit_test =
+               (I->op == AGX_OPCODE_BREAK_IF_ICMP ||
+                I->op == AGX_OPCODE_BREAK_IF_FCMP) &&
+               I->nest == 1;
             continue;
          }
          after_loop_backedge = false;
+         after_loop_exit_test = false;
 
          /*
           * `export` is a zero-byte pseudo-op, exactly as on AGX2
