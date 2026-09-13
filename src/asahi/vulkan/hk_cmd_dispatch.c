@@ -1229,13 +1229,8 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return;
 
       const struct agx3_g17p_native_indirect_dispatch dispatch = {
-         .helper_program_va = helper_program_va,
+         .helper_program = &helper_program.launch,
          .geometry_va = geometry.gpu,
-         /* The main record's inline dimensions are ignored in this mode; the
-          * encoder still rejects zero, so publish the local size as a
-          * self-consistent placeholder rather than an invented grid. */
-         .inline_global_size = {local_size.x, local_size.y, local_size.z},
-         .local_size = {local_size.x, local_size.y, local_size.z},
       };
       if (!hk_agx3_g17p_native_indirect_compute_dispatch_append(
              &program.launch, &dispatch, &sink)) {

@@ -3224,6 +3224,44 @@ TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
    pack(bad, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, G17PHalfFMARetiresLoadBeforeNoWaitForm)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_get_sr_to(b, agx_register(14, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_X);
+   agx_hfma_to(b, agx_register(6, AGX_SIZE_16),
+               agx_register(2, AGX_SIZE_16),
+               agx_register(3, AGX_SIZE_16),
+               agx_register(14, AGX_SIZE_16));
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   struct agx3_sr_desc sr = {};
+   sr.dest = 14;
+   sr.width = AGX3_SR_W32;
+   sr.sr = 23;
+   sr.slot = 1;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   const uint16_t src[] = {2, 3, 14};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   ASSERT_TRUE(agx3_alu_hfma(enc, 6, src, hints, false, false, false, 0,
+                              bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, G17PHalfSaturateMatchesNative)
 {
    static const uint8_t native[] = {

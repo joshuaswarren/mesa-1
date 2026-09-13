@@ -9394,9 +9394,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                hints[0] = hints[1];
                hints[1] = swap_hint;
             }
+
+            /* The recovered register HFMA wait fields have no direct hardware
+             * witness. Retire its load dependencies through the established
+             * wait-carrying identity before issuing the native no-wait form.
+             * Without this prewait, pk_immediate reads the preceding value of
+             * its asynchronously loaded addend and computes 2 * 1 + 2 = 4. */
+            if (wait && !agx3_retire_slots_noop(emission, enc, wait))
+               AGX3_REFUSE(I);
+
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!agx3_alu_hfma(enc, dst.value, src, hints, product_neg,
-                               I->src[2].neg, dst.cache, wait, bytes, &len) ||
+                               I->src[2].neg, dst.cache, 0, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

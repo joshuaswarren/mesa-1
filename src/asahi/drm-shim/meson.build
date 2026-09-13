@@ -47,6 +47,18 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   )
 
   test(
+    'hk_g17p_sequential_dispatch',
+    prog_python,
+    args : [
+      files('../vulkan/tests/test-g17p-sequential-dispatch.py'),
+      meson.current_build_dir() / '../../..',
+    ],
+    depends : [_dev_icd, libasahi_noop_drm_shim, g17p_sequential_dispatch],
+    suite : ['asahi', 'g17p-sequential-dispatch'],
+    timeout : 30,
+  )
+
+  test(
     'hk_g17p_buffer_memory_lifetime',
     g17p_buffer_memory,
     env : g17p_queue_progress_environment,

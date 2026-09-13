@@ -1460,6 +1460,24 @@ agx_local_base(nir_src src)
       return agx_src_index(&src);
 }
 
+static agx_index
+agx_local_atomic_base(agx_builder *b, nir_src src)
+{
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       nir_src_is_const(src)) {
+      const uint64_t address = nir_src_as_uint(src);
+
+      /* G17P has a witnessed 16-bit immediate byte-address field for
+       * threadgroup atomics, including returned exchanges at nonzero
+       * addresses. Keep aligned constants immediate instead of needlessly
+       * materializing the ungrounded returned register-address form. */
+      if (address <= UINT16_MAX && (address & 3) == 0)
+         return agx_immediate(address);
+   }
+
+   return agx_local_base(src);
+}
+
 static void
 agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
                 bool local)
@@ -1467,7 +1485,8 @@ agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
    enum agx_atomic_opc op =
       translate_atomic_opcode(nir_intrinsic_atomic_op(instr));
    agx_index base =
-      local ? agx_local_base(instr->src[0]) : agx_src_index(&instr->src[0]);
+      local ? agx_local_atomic_base(b, instr->src[0])
+            : agx_src_index(&instr->src[0]);
    agx_index value = agx_src_index(&instr->src[local ? 1 : 2]);
    agx_index index = local ? agx_zero() : agx_src_index(&instr->src[1]);
 
@@ -6102,6 +6121,55 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
    return true;
 }
 
+static bool
+agx_nir_lower_g17p_f16_classify(nir_builder *b, nir_alu_instr *alu,
+                                void *_data)
+{
+   if (alu->def.num_components != 1 ||
+       nir_src_bit_size(alu->src[0].src) != 16)
+      return false;
+
+   const bool is_nan =
+      alu->op == nir_op_fneu && nir_alu_srcs_equal(alu, alu, 0, 1);
+
+   bool is_inf = false;
+   nir_alu_instr *absolute = NULL;
+   if (alu->op == nir_op_feq) {
+      for (unsigned constant = 0; constant < 2; ++constant) {
+         const unsigned value = constant ^ 1;
+         nir_alu_instr *candidate = nir_src_as_alu(alu->src[value].src);
+         const double compare = nir_src_is_const(alu->src[constant].src)
+                                   ? nir_src_as_float(alu->src[constant].src)
+                                   : 0.0;
+
+         if (candidate && candidate->op == nir_op_fabs &&
+             nir_src_bit_size(candidate->src[0].src) == 16 &&
+             isinf(compare) && compare > 0.0) {
+            is_inf = true;
+            absolute = candidate;
+         }
+      }
+   }
+
+   if (!is_nan && !is_inf)
+      return false;
+
+   /* Classify the IEEE-754 binary16 encoding directly. Clearing the sign
+    * leaves +infinity at 0x7c00 and every NaN strictly above it. This is exact
+    * for quiet and signaling NaNs, both infinities, both zeros, subnormals,
+    * and finite values. Ordinary half compares stay on their native path. */
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *value = is_nan ? nir_ssa_for_alu_src(b, alu, 0)
+                           : nir_ssa_for_alu_src(b, absolute, 0);
+   nir_def *magnitude =
+      nir_iand_imm(b, nir_u2u32(b, value), UINT32_C(0x7fff));
+   nir_def *result = is_nan
+                        ? nir_ult(b, nir_imm_int(b, 0x7c00), magnitude)
+                        : nir_ieq_imm(b, magnitude, 0x7c00);
+   nir_def_replace(&alu->def, result);
+   return true;
+}
+
 /* Shared preprocessing with target-bounded subgroup choices. */
 static void
 agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
@@ -6148,6 +6216,11 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_opt_dce);
 
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   if (g17p) {
+      NIR_PASS(_, nir, nir_shader_alu_pass,
+               agx_nir_lower_g17p_f16_classify,
+               nir_metadata_control_flow, NULL);
+   }
    NIR_PASS(_, nir, nir_lower_frexp);
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);

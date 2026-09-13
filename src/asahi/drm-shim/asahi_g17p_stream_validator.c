@@ -477,26 +477,26 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
 }
 
 static bool
-validate_compact_compute_helper(
+validate_compact_compute_launch(
    const struct asahi_g17p_stream_memory *memory, uint64_t address,
    const uint8_t bytes[AGX3_CDM_INDIRECT_LAUNCH_SIZE])
 {
-   struct agx3_cdm_indirect_launch_info helper;
+   struct agx3_cdm_indirect_launch_info launch;
    if (!agx3_cdm_indirect_launch_unpack(
-          AGX_CHIP_G17P, bytes, AGX3_CDM_INDIRECT_LAUNCH_SIZE, &helper) ||
-       helper.word0_payload != AGX3_G17P_NATIVE_INDIRECT_HELPER_WORD0 ||
-       helper.word1_payload != 0 || !helper.pipeline ||
-       (helper.pipeline & 63) ||
-       helper.opaque_word3 !=
-          (UINT32_C(0x40000000) | ((helper.pipeline >> 40) & 0xff)) ||
-       !helper.indirect_parameters || (helper.indirect_parameters & 3) ||
-       !memory->owned(memory->data, helper.indirect_parameters, 6 * 4))
-      return fail_at(address, "invalid compact indirect compute helper");
+          AGX_CHIP_G17P, bytes, AGX3_CDM_INDIRECT_LAUNCH_SIZE, &launch) ||
+       (launch.word0_payload >> 27) != 2 ||
+       launch.indirect_word4_payload != 0 || !launch.pipeline ||
+       (launch.pipeline & 63) ||
+       launch.opaque_word3 !=
+          (UINT32_C(0x40000000) | ((launch.pipeline >> 40) & 0xff)) ||
+       !launch.indirect_parameters || (launch.indirect_parameters & 3) ||
+       !memory->owned(memory->data, launch.indirect_parameters, 6 * 4))
+      return fail_at(address, "invalid compact indirect compute launch");
 
    struct asahi_g17p_stream_stats shader_stats = {0};
-   if (!validate_ioto_program(memory, helper.pipeline, false, true,
+   if (!validate_ioto_program(memory, launch.pipeline, false, true,
                               &shader_stats))
-      return fail_at(address, "compact compute helper Ioto program is invalid");
+      return fail_at(address, "compact compute launch Ioto program is invalid");
 
    return true;
 }
@@ -509,7 +509,6 @@ asahi_g17p_compute_validate(
 {
    struct asahi_g17p_compute_stats local = {0};
    bool need_barrier = false;
-   bool expect_compact_helper = false;
    bool followed_link = false;
 
    if (stats)
@@ -551,18 +550,18 @@ asahi_g17p_compute_validate(
          fprintf(stderr, "\n");
       }
 
-      /* Native indirect dispatches are a direct-shaped 40-byte main launch,
-       * a barrier, then an explicitly delimited 24-byte compact helper and
-       * its barrier.  Type zero alone cannot distinguish the helper from the
-       * 36/40-byte launch families, so decode it only in that exact state. */
-      if (expect_compact_helper && !need_barrier) {
-         if (available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
-             !validate_compact_compute_helper(memory, cursor, bytes))
-            return false;
+      /* Mode 2 is a compact application launch reading six geometry words.
+       * The preceding geometry producer is an ordinary direct launch. Bit 23
+       * is part of the resource template and does not select indirect mode. */
+      const uint32_t header = agx3_cmdstream_load_le32(bytes);
+      if ((header >> 29) == AGX_CDM_BLOCK_TYPE_LAUNCH &&
+          ((header >> 27) & 3) == 2) {
+         if (need_barrier || available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
+             !validate_compact_compute_launch(memory, cursor, bytes))
+            return fail_at(cursor, "invalid compact compute launch ordering");
 
          local.launches++;
          need_barrier = true;
-         expect_compact_helper = false;
          cursor += AGX3_CDM_INDIRECT_LAUNCH_SIZE;
          continue;
       }
@@ -574,7 +573,8 @@ asahi_g17p_compute_validate(
 
       switch (record.kind) {
       case AGX3_CDM_RECORD_LAUNCH: {
-         if (need_barrier || (record.data.launch.pipeline & 63) ||
+         if (need_barrier || (record.data.launch.word0_payload >> 27) != 0 ||
+             (record.data.launch.pipeline & 63) ||
              !record.data.launch.pipeline ||
              record.length != G17P_CDM_DIRECT_LAUNCH_SIZE ||
              record.data.launch.opaque_word3 !=
@@ -598,8 +598,6 @@ asahi_g17p_compute_validate(
             record.data.launch.global_size[1] > 1 &&
             record.data.launch.global_size[2] == 1;
          need_barrier = true;
-         expect_compact_helper =
-            (record.data.launch.word0_payload & UINT32_C(0x00800000)) != 0;
          break;
       }
 
@@ -612,7 +610,7 @@ asahi_g17p_compute_validate(
             /* Immediate post-graphics writes begin with the strong cache
              * flush which makes the preceding render visible.  It is an
              * ordered stream prologue, not a launch terminator. */
-            if (expect_compact_helper || local.launches != 0 ||
+            if (local.launches != 0 ||
                 local.prologue_barriers != 0 ||
                 record.data.barrier.flags != 0x5)
                return fail_at(cursor, "compute barrier is not canonical");
@@ -628,7 +626,7 @@ asahi_g17p_compute_validate(
          break;
 
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || expect_compact_helper || !local.launches ||
+         if (need_barrier || !local.launches ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");
@@ -639,8 +637,7 @@ asahi_g17p_compute_validate(
 
       case AGX3_CDM_RECORD_STREAM_LINK: {
          const uint64_t target = record.data.stream_link.target;
-         if (need_barrier || expect_compact_helper ||
-             record.data.stream_link.with_return || (target & 3) ||
+         if (need_barrier || record.data.stream_link.with_return || (target & 3) ||
              !memory->owned(memory->data, target, 4))
             return fail_at(cursor, "compute stream link is invalid");
 

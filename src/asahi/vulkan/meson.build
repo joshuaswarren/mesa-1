@@ -2276,12 +2276,21 @@ if with_tests
     # Offline proof that vkCmdDispatchIndirect records a native G17P indirect
     # launch pair.  Runs under the noop drm-shim and stops at
     # vkEndCommandBuffer: it asserts the recording, never execution.
-    executable(
+    g17p_dispatch_indirect = executable(
       'g17p-vulkan-dispatch-indirect',
       files('tests/g17p_vulkan_dispatch_indirect.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    g17p_sequential_dispatch = executable(
+      'g17p-vulkan-sequential-dispatch',
+      files('tests/g17p_vulkan_dispatch_indirect.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_SEQUENTIAL_DISPATCH=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

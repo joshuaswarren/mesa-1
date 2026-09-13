@@ -115,14 +115,12 @@ struct agx3_compute_program_upload {
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
 #define AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE \
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
-/* Word 0 of the indirect compute helper record, exported so a decoder or an
- * oracle compares against the encoder rather than a retyped copy. */
-#define AGX3_G17P_NATIVE_INDIRECT_HELPER_WORD0 UINT32_C(0x10080000)
-
-#define AGX3_G17P_NATIVE_INDIRECT_HELPER_SIZE 28u
+/* Mode 2 consumes both global and local sizes from six indirect u32 words. */
+#define AGX3_G17P_NATIVE_INDIRECT_MODE UINT32_C(0x10000000)
+#define AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE 28u
 #define AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE \
    (AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE + \
-    AGX3_G17P_NATIVE_INDIRECT_HELPER_SIZE)
+    AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE)
 
 /* Caller-owned command-stream span.  A successful append writes one exact
  * direct launch followed by CommandEncodingNext's strong flags=5 barrier. */
@@ -143,14 +141,11 @@ struct agx3_compute_direct_grid {
    bool g15x_has_multiple_agcs;
 };
 
-/* Native A18 Pro indirect compute is a pair of records.  The first launches
- * the caller program with its inline grid ignored; the compact second launch
- * runs the grid helper and names the six-u32 geometry output it publishes. */
+/* The direct helper runs first and writes geometry. The compact application
+ * launch then consumes it. Each program supplies its own launch template. */
 struct agx3_g17p_native_indirect_dispatch {
-   uint64_t helper_program_va;
+   const struct agx3_compute_program *helper_program;
    uint64_t geometry_va;
-   uint32_t inline_global_size[3];
-   uint32_t local_size[3];
 };
 
 /*
@@ -211,7 +206,7 @@ bool agx3_g17p_native_compute_dispatch_append_with_barrier(
    const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
    struct agx3_compute_dispatch_sink *sink);
 
-/* Append the byte-exact main/helper record pair used by native G17P indirect
+/* Append the helper/indirect-application record pair used by G17P indirect
  * compute.  The caller owns the helper program, its resources, and geometry
  * storage; this encoder only publishes their already-established GPU VAs. */
 bool agx3_g17p_native_indirect_compute_dispatch_append(
