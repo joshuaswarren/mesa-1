@@ -36,6 +36,7 @@
 #include "zink_resource.h"
 #include "zink_state.h"
 #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
+#include "frontend/sw_winsys.h"
 
 #include "util/u_debug.h"
 #include "util/u_dl.h"
@@ -653,30 +654,39 @@ zink_init_shader_caps(struct zink_screen *screen)
          MIN2(screen->info.props.limits.maxPerStageDescriptorStorageBuffers,
               PIPE_MAX_SHADER_BUFFERS);
 
-      switch (i) {
-      case MESA_SHADER_VERTEX:
-      case MESA_SHADER_TESS_CTRL:
-      case MESA_SHADER_TESS_EVAL:
-      case MESA_SHADER_GEOMETRY:
-         if (!screen->info.feats.features.vertexPipelineStoresAndAtomics)
-            caps->max_shader_buffers = 0;
-         break;
-      case MESA_SHADER_FRAGMENT:
-         if (!screen->info.feats.features.fragmentStoresAndAtomics)
-            caps->max_shader_buffers = 0;
-         break;
-      default:
-         break;
-      }
-
-      caps->supported_irs = (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
-
       if (screen->info.feats.features.shaderStorageImageExtendedFormats &&
           screen->info.feats.features.shaderStorageImageWriteWithoutFormat) {
          caps->max_shader_images =
             MIN2(screen->info.props.limits.maxPerStageDescriptorStorageImages,
                  ZINK_MAX_SHADER_IMAGES);
       }
+
+      /* Gallium's image capability includes stores. PBO downloads generate
+       * fragment image-store shaders when images are advertised, so respect
+       * Vulkan's per-stage store features as well as its resource limits.
+       */
+
+      switch (i) {
+      case MESA_SHADER_VERTEX:
+      case MESA_SHADER_TESS_CTRL:
+      case MESA_SHADER_TESS_EVAL:
+      case MESA_SHADER_GEOMETRY:
+         if (!screen->info.feats.features.vertexPipelineStoresAndAtomics) {
+            caps->max_shader_buffers = 0;
+            caps->max_shader_images = 0;
+         }
+         break;
+      case MESA_SHADER_FRAGMENT:
+         if (!screen->info.feats.features.fragmentStoresAndAtomics) {
+            caps->max_shader_buffers = 0;
+            caps->max_shader_images = 0;
+         }
+         break;
+      default:
+         break;
+      }
+
+      caps->supported_irs = (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
 
       caps->cont_supported = true;
    }
@@ -3878,9 +3888,31 @@ struct pipe_screen *
 zink_create_screen(struct sw_winsys *winsys, const struct pipe_screen_config *config)
 {
    struct zink_screen *ret = zink_internal_create_screen(config, -1, -1, 0);
-   if (ret) {
-      ret->drm_fd = -1;
+   if (!ret)
+      return NULL;
+
+#ifdef HAVE_LIBDRM
+   /* A KMS winsys can name a display-only device, separate from the Vulkan
+    * render device. Keep its fd so exported DMA-BUFs acquire GEM handles in
+    * the display device's namespace instead of returning an invalid handle.
+    * The winsys retains ownership of the original descriptor.
+    */
+   if (winsys && winsys->get_fd) {
+      int fd = winsys->get_fd(winsys);
+      if (fd >= 0) {
+         if (!ret->info.have_KHR_external_memory_fd) {
+            mesa_loge("ZINK: KHR_external_memory_fd required for KMS winsys");
+            zink_destroy_screen(&ret->base);
+            return NULL;
+         }
+         ret->drm_fd = os_dupfd_cloexec(fd);
+         if (ret->drm_fd < 0) {
+            zink_destroy_screen(&ret->base);
+            return NULL;
+         }
+      }
    }
+#endif
 
    return &ret->base;
 }
