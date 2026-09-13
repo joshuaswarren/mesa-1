@@ -4074,9 +4074,8 @@ test_g17p_multisample_eot_block_store(void)
        expected_u8norm_resolved, sizeof(expected_u8norm_resolved)},
       {false, PIPE_FORMAT_R32_UINT, 1, true, false, false,
        expected_i32_resolved, sizeof(expected_i32_resolved)},
-      /* The distinct 84-byte signed four-word I32 builtin has no multisample
-       * witness, so it must fail closed rather than store a resolving 2D
-       * program into a multisample surface. */
+      /* This change qualifies the signed four-word I32 2D store only.
+       * Preserve the existing multisample refusal. */
       {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, NULL, 0},
    };
 
@@ -4491,7 +4490,9 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i32x4_float.shader);
 
-   /* Fresh signed key0x10020a00 uses an 84-byte program with selector0x35. */
+   /* Fresh format10, components4, texture-type2 is byte-identical to UINT
+    * and FLOAT. The old 84-byte fixture belongs to texture-type3, an array
+    * store that reads a layer register even for a non-layered attachment. */
    nir_builder i32x4_signed = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 SINT RT0 EOT");
    coords = nir_trim_vector(
@@ -4506,23 +4507,13 @@ test_g17p_eot_block_store(void)
    key.g17p_rt0_eot_i32_signed_four_words = true;
    const bool i32x4_signed_compiled =
       agx_compile_shader_nir(i32x4_signed.shader, &key, &part);
-   static const uint8_t expected_i32x4_signed[] = {
-      0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
-      0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
-      0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
-      0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
-      0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
-      0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
-      0x00,0x00,0x00,0x80,0x28,0x35,0x00,0x00,0x0e,0x00,0x00,0x00,
-   };
    ok &= i32x4_signed_compiled &&
-         part.info.binary_size == sizeof(expected_i32x4_signed) &&
+         part.info.binary_size == sizeof(expected_i32) &&
          part.info.main_offset == 0 &&
-         part.info.main_size == sizeof(expected_i32x4_signed) &&
+         part.info.main_size == sizeof(expected_i32) &&
          part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
          part.info.agx3_staging_halfs == 8 &&
-         memcmp(part.binary, expected_i32x4_signed,
-                sizeof(expected_i32x4_signed)) == 0;
+         memcmp(part.binary, expected_i32, sizeof(expected_i32)) == 0;
    if (i32x4_signed_compiled)
       free(part.binary);
    ralloc_free(i32x4_signed.shader);

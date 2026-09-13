@@ -4345,8 +4345,11 @@ agx3_vertex_outputs_share_source(agx_context *ctx)
  * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
  * despite both lowering to the same I32 store as scalar R32. Fresh
  * R32G32B32A32_UINT key0x10020b00 has four I32 imageblock words and returns
- * to the scalar 0x35 selector. R32G32B32A32_SINT key0x10020a00 also uses
- * selector 0x35 but requires the distinct complete 84-byte signed program.
+ * to the scalar 0x35 selector. R32G32B32A32_SINT key0x10020a00 uses the same
+ * 68-byte 2D program. The old 84-byte signed fixture was a texture-type3
+ * array program, not a signedness variant. Fresh format10/11/17 crossed
+ * with texture-type2/3 witnesses distinguish these independently; see
+ * test/probes/README-g17p-native-rt0-eot.md.
  * Fresh R32G32B32A32_SFLOAT key0x10021100 has four I32 imageblock words and
  * is byte-identical to the 68-byte UINT/scalar 0x35 program; its PBE carries
  * FLOAT conversion.
@@ -4380,7 +4383,6 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_SELECTOR_55,
    AGX3_G17P_RT0_EOT_NORM16,
    AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS,
-   AGX3_G17P_RT0_EOT_I32_SIGNED_FOUR_WORDS,
 };
 
 static enum agx3_g17p_rt0_eot_kind
@@ -4467,10 +4469,8 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        zero_reg != offset_reg)
       return AGX3_G17P_RT0_EOT_NONE;
 
-   /* Only the five 68-byte selector programs have an Apple multisample
-    * witness. The distinct 84-byte signed builtins do not, and substituting
-    * their resolving 2D form into a multisample target is exactly the
-    * silent-wrong-pixels failure this substitution exists to prevent. */
+   /* Keep the existing signed-format multisample admission unchanged. The
+    * RGBA32 signed correction below is qualified for texture-type2 only. */
    if (ctx->key->g17p_rt0_eot_multisample &&
        (ctx->key->g17p_rt0_eot_i16_signed_two_words ||
         ctx->key->g17p_rt0_eot_i32_signed_four_words))
@@ -4539,7 +4539,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
          return AGX3_G17P_RT0_EOT_NONE;
 
       if (ctx->key->g17p_rt0_eot_i32_signed_four_words)
-         return AGX3_G17P_RT0_EOT_I32_SIGNED_FOUR_WORDS;
+         return AGX3_G17P_RT0_EOT_SELECTOR_35;
 
       if (ctx->key->g17p_rt0_eot_i32_four_words)
          return ctx->key->g17p_rt0_eot_words == 4
@@ -5541,28 +5541,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
          0x00,0x00,0x00,0x80,0x28,0x15,0x00,0x00,0x0e,0x00,0x00,0x00,
       };
-      static const uint8_t g17p_rgba32_sint_eot[] = {
-         0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
-         0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
-         0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
-         0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
-         0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
-         0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
-         0x00,0x00,0x00,0x80,0x28,0x35,0x00,0x00,0x0e,0x00,0x00,0x00,
-      };
 
       if (rt0_eot == AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS) {
          ctx->max_reg = MAX2(ctx->max_reg, 7);
          ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
          return agx3_append(emission, g17p_rgba16_sint_eot,
                             sizeof(g17p_rgba16_sint_eot));
-      }
-
-      if (rt0_eot == AGX3_G17P_RT0_EOT_I32_SIGNED_FOUR_WORDS) {
-         ctx->max_reg = MAX2(ctx->max_reg, 7);
-         ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
-         return agx3_append(emission, g17p_rgba32_sint_eot,
-                            sizeof(g17p_rgba32_sint_eot));
       }
 
       static const uint8_t g17p_rt0_eot[][68] = {{
