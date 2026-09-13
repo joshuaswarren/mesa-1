@@ -1826,6 +1826,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       root = vertex_uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_vbos);
 
    shader->info.set_count = set_count;
+   shader->info.agx3_root_uniform = root;
 
    /* XXX: rename */
    NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos,

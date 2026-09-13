@@ -1588,7 +1588,7 @@ hk_g17p_graphics_uniform_ranges(
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    const uint64_t root_ptr = cmd->state.gfx.root;
    size_t count = 0;
-   unsigned root_uniform = 0;
+   const unsigned root_uniform = s->info.agx3_root_uniform;
 
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
@@ -1647,18 +1647,11 @@ hk_g17p_graphics_uniform_ranges(
          };
       }
 
-      root_uniform = uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_attribs);
    } else if ((s->info.stage == MESA_SHADER_GEOMETRY ||
                s->info.stage == MESA_SHADER_TESS_EVAL) &&
               s->b.info.stage == MESA_SHADER_VERTEX) {
-      /* poly's raster variant lowers its geometry parameter loads, and the
-       * post-tessellation vertex program its control-shader output loads,
-       * against the compute-style root. Indexed texture heaps occupy the
-       * first eight halves, so the root follows them as it does for every
-       * other native indexed-sampler stage. */
-      root_uniform = s->info.agx3_indexed_sampler_valid
-                        ? AGX_G17P_TXF_ROOT_HALFS
-                        : 0;
+      /* The compiled geometry/tessellation raster variant owns its root
+       * layout. Do not infer it from the original API stage. */
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (cmd->state.gfx.uses_blend_constant) {
          /* The non-monolithic blend epilog reads the four constants from
@@ -1676,7 +1669,6 @@ hk_g17p_graphics_uniform_ranges(
             return hk_g17p_graphics_ranges_refused(range_count, count);
          count++;
       }
-      root_uniform = AGX_ABI_FUNI_ROOT;
    } else {
       return hk_g17p_graphics_ranges_refused(range_count, count);
    }
@@ -1770,10 +1762,8 @@ hk_g17p_graphics_uniform_ranges(
    }
 
    if (s->info.agx3_indexed_sampler_valid) {
-      if ((s->info.stage != MESA_SHADER_FRAGMENT &&
-           s->info.stage != MESA_SHADER_VERTEX &&
-           !(s->info.stage == MESA_SHADER_GEOMETRY &&
-             s->b.info.stage == MESA_SHADER_VERTEX)) ||
+      if ((s->b.info.stage != MESA_SHADER_FRAGMENT &&
+           s->b.info.stage != MESA_SHADER_VERTEX) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)
          return hk_g17p_graphics_ranges_refused(range_count, count);
       const uint64_t pointers[2] = {

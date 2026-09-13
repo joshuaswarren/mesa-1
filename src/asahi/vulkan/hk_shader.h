@@ -121,6 +121,8 @@ struct hk_shader_info {
     */
    bool agx3_combined_sampler_valid;
    bool agx3_uses_root;
+   /* Actual uniform address selected after stage and resource lowering. */
+   unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;
    bool agx3_storage_image_valid;
    bool agx3_sampled_storage_valid;
