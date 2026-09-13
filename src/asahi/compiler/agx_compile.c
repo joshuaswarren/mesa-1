@@ -3532,6 +3532,33 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 }
 
 void
+agx_lower_agx3_immediates(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_MOV_IMM || I->nr_dests != 1 ||
+          I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
+         continue;
+
+      /* G17G has an established dword immediate load, but its half load
+       * encoding has not been established. Materialize the raw half bits
+       * in a dword and select the low half before register allocation. This
+       * is a bit-preserving operation, including for signed zero and NaNs;
+       * it is not a floating-point conversion. Run after ALU immediate
+       * materialization, which can introduce more half constants.
+       */
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index word = agx_mov_imm(&b, 32, I->imm & UINT16_MAX);
+      agx_instr *split = agx_split(&b, 2, word);
+      split->dest[0] = I->dest[0];
+      split->dest[1] = agx_temp(ctx, AGX_SIZE_16);
+      agx_remove_instruction(I);
+   }
+}
+
+void
 agx_materialize_agx3_cf_constants(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -6055,6 +6082,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
    AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
+
+   AGX_PASS(ctx, agx_lower_agx3_immediates);
 
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);

@@ -8981,6 +8981,81 @@ TEST_F(AGX3PackBinary, G17GUniformHalfReadUsesAlignedWordAndCorrectHalf)
    }
 }
 
+TEST_F(AGX3PackBinary, G17GRepeatedHalfUniformExportsStayEncodableAfterRA)
+{
+   for (unsigned uniform : {0u, 1u, 16u, 17u, 510u, 511u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->nir = rzalloc(mem_ctx, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+      /* GLES lifetime setup exports (1,0,1) from promoted half literals.
+       * Reusing the first half forces a late copy without this legalization. */
+      agx_export(b, agx_uniform(uniform, AGX_SIZE_16), 8);
+      agx_export(b, agx_uniform(uniform ^ 1, AGX_SIZE_16), 9);
+      agx_export(b, agx_uniform(uniform, AGX_SIZE_16), 10);
+      agx_lower_uniform_sources(b->shader);
+
+      bool exporting = false;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_EXPORT) {
+            exporting = true;
+            EXPECT_NE(I->src[0].type, AGX_INDEX_UNIFORM);
+         } else {
+            EXPECT_FALSE(exporting) << "materialization split the export group";
+         }
+      }
+
+      agx_dce(b->shader, true);
+      agx_ra(b->shader);
+      agx_lower_pseudo(b->shader);
+      agx_foreach_instr_global(b->shader, I) {
+         agx_foreach_src(I, s) {
+            if (I->src[s].type == AGX_INDEX_UNIFORM) {
+               EXPECT_EQ(I->src[s].size, AGX_SIZE_32);
+               EXPECT_EQ(I->src[s].value, uniform & ~1u);
+            }
+         }
+      }
+      EXPECT_FALSE(pack(b).empty()) << uniform;
+   }
+}
+
+TEST_F(AGX3PackBinary, G17GRepeatedHalfLiteralExportsStayEncodableAfterRA)
+{
+   for (unsigned bits : {0u, 1u, 0x3c00u, 0xbc00u, 0x8000u, 0x7c00u,
+                         0x7e01u, 0xffffu}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->nir = rzalloc(mem_ctx, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+      agx_index value = agx_mov_imm(b, 16, bits);
+      agx_index zero = agx_mov_imm(b, 16, 0);
+      agx_export(b, value, 8);
+      agx_export(b, zero, 9);
+      agx_export(b, value, 10);
+      agx_lower_agx3_immediates(b->shader);
+
+      unsigned immediate_count = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_MOV_IMM) {
+            EXPECT_EQ(I->dest[0].size, AGX_SIZE_32);
+            EXPECT_EQ(I->imm, immediate_count++ == 0 ? bits : 0u);
+         } else if (I->op == AGX_OPCODE_SPLIT) {
+            EXPECT_EQ(I->dest[0].size, AGX_SIZE_16);
+            EXPECT_EQ(I->src[0].size, AGX_SIZE_32);
+         }
+      }
+      EXPECT_EQ(immediate_count, 2u);
+
+      agx_dce(b->shader, true);
+      agx_ra(b->shader);
+      agx_lower_pseudo(b->shader);
+      EXPECT_FALSE(pack(b).empty()) << bits;
+   }
+}
+
 TEST_F(AGX3PackBinary, G17GMixedFMAKeepsFusedOperationThroughPacking)
 {
    for (unsigned half_mask = 1; half_mask < 8; ++half_mask) {

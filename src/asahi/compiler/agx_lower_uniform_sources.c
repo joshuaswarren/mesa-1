@@ -83,6 +83,11 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_ICMP_QUAD_BALLOT:
       return false;
    case AGX_OPCODE_EXPORT:
+      /* Export coalescing can introduce copies during register allocation.
+       * Materialize G17G half uniforms while virtual registers are available,
+       * rather than asking the late parallel-copy pass to encode an unwitnessed
+       * uniform-to-half move. PHIs still require predecessor-local lowering. */
+      return encoding != AGX_ISA_ENCODING_AGX3C || size != AGX_SIZE_16;
    case AGX_OPCODE_PHI:
       /* We would fail validation otherwise */
       return true;
@@ -103,11 +108,16 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    }
 }
 
-void
-agx_lower_uniform_sources(agx_context *ctx)
+static void
+agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
 {
-   agx_foreach_instr_global_safe(ctx, I) {
-      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_foreach_instr_in_block_safe(block, I) {
+      /* Exports are a parallel group after the block's logical end. Uniform
+       * materialization must precede the entire group, just like spill reloads. */
+      agx_cursor cursor = I->op == AGX_OPCODE_EXPORT
+                            ? agx_after_block_logical(block)
+                            : agx_before_instr(I);
+      agx_builder b = agx_init_builder(ctx, cursor);
 
       agx_foreach_src(I, s) {
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
@@ -138,4 +148,11 @@ agx_lower_uniform_sources(agx_context *ctx)
          }
       }
    }
+}
+
+void
+agx_lower_uniform_sources(agx_context *ctx)
+{
+   agx_foreach_block(ctx, block)
+      agx_lower_uniform_sources_block(ctx, block);
 }
