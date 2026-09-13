@@ -64,3 +64,13 @@
 #define AGX_ZERO_PAGE_SIZE    (16384)
 
 #define AGX_SCRATCH_PAGE_ADDRESS (AGX_ZERO_PAGE_ADDRESS + AGX_ZERO_PAGE_SIZE)
+
+/* Honeykrisp G17P texel-buffer metadata follows the native texture/PBE and
+ * heap-index records. These are software ABI fields, not Gen9 hardware bits.
+ */
+#define AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET 72
+#define AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET 72
+#define AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET 76
+#define AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET 80
+#define AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET 88
+#define AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE 96

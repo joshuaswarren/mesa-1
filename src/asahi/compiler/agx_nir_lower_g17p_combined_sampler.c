@@ -1189,14 +1189,16 @@ agx_nir_lower_g17p_indexed_storage(
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
                const enum pipe_format format = nir_intrinsic_format(intr);
+               const bool r32 = format == PIPE_FORMAT_R32_UINT;
                if (store ||
                    nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
                    nir_intrinsic_image_array(intr) ||
                    (format != PIPE_FORMAT_R8G8B8A8_UNORM &&
-                    format != PIPE_FORMAT_R10G10B10A2_UNORM) ||
+                    format != PIPE_FORMAT_R10G10B10A2_UNORM && !r32) ||
                    nir_src_num_components(intr->src[1]) != 4 ||
                    nir_src_bit_size(intr->src[1]) != 32 ||
-                   nir_src_num_components(intr->src[3]) != 4 ||
+                   (nir_src_num_components(intr->src[3]) != 4 &&
+                    !(r32 && nir_src_num_components(intr->src[3]) == 1)) ||
                    nir_src_bit_size(intr->src[3]) != 32 ||
                    !nir_src_is_const(intr->src[2]) ||
                    nir_src_as_uint(intr->src[2]) != 0 ||

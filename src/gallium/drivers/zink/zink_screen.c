@@ -663,7 +663,8 @@ zink_init_shader_caps(struct zink_screen *screen)
 
       /* Gallium's image capability includes stores. PBO downloads generate
        * fragment image-store shaders when images are advertised, so respect
-       * Vulkan's per-stage store features as well as its resource limits. */
+       * Vulkan's per-stage store features as well as its resource limits.
+       */
       switch (i) {
       case MESA_SHADER_VERTEX:
       case MESA_SHADER_TESS_CTRL:

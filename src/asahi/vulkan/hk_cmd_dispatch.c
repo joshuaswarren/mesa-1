@@ -31,6 +31,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* EXP-G1b's native access::write argument is a PBE pointer followed by a
+ * pointer to this control descriptor, including when it follows a sampled
+ * texture in the argument table. It is not the read_write clamp scalar. */
+static const uint8_t hk_g17p_native_write_control[32] = {
+   0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+};
+
 struct hk_g17p_compute_program_cache_key {
    uint32_t libagx_program;
    uint32_t data_size;
@@ -899,10 +906,19 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
+            const uint64_t write_control = hk_pool_upload(
+               cmd, hk_g17p_native_write_control,
+               sizeof(hk_g17p_native_write_control), 32);
+            if (!write_control) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
             const struct hk_agx3_g17p_indexed_storage_heap heap = {
                .texture_heap_va = pointers[0],
                .sampler_heap_va = pointers[1],
                .pbe_descriptor_set_va = set_address,
+               .write_control_va = write_control,
                .pbe_offset_B = binding->pbe_offset_B,
             };
             if (!hk_agx3_g17p_indexed_storage_pointers(&heap, pointers)) {
@@ -958,6 +974,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 (const uint8_t *)texture_set->mapped_ptr +
                    binding->sampler_index_offset_B,
                 sizeof(sampler_index));
+         const uint64_t write_control = hk_pool_upload(
+            cmd, hk_g17p_native_write_control,
+            sizeof(hk_g17p_native_write_control), 32);
+         if (!write_control) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return;
+         }
          const struct hk_agx3_g17p_sampled_storage_heap heap = {
             .sampled = {
                .descriptor_set_va = texture_set_address,
@@ -969,6 +993,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                   agx_chip_sampler_heap_element_size(dev->dev.chip),
             },
             .pbe_descriptor_set_va = pbe_set_address,
+            .write_control_va = write_control,
             .pbe_offset_B = binding->pbe_offset_B,
          };
          uint64_t pointers[4] = {0};
@@ -1041,12 +1066,9 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             0x68, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x1b,
             0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
          };
-         static const uint8_t native_write_control[32] = {
-            0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
-         };
          const bool write_only = s->info.agx3_storage_image.write_only;
          const uint64_t access_control =
-            hk_pool_upload(cmd, write_only ? native_write_control
+            hk_pool_upload(cmd, write_only ? hk_g17p_native_write_control
                                            : native_read_write_control,
                            sizeof(native_read_write_control), 32);
          if (!access_control) {

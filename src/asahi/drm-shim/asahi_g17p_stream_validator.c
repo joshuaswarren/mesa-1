@@ -277,7 +277,16 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
          for (size_t j = 0; j < readable; ++j)
             fprintf(stderr, " %02x", bytes[j]);
          fprintf(stderr, "\n");
-         return fail_at(cursor, "unknown or truncated Ioto record");
+         /* A record the Ioto decoder cannot identify is genuinely ambiguous:
+          * a truncated program and a decoder that has never been given this
+          * payload look identical from here, and the second has already
+          * happened once (every MRT release descriptor was undecodable while
+          * the driver was emitting the natively witnessed value). Validation
+          * cannot continue either way, but do not call it a driver bug. */
+         return fail_at(cursor,
+                        "Ioto record is undecodable -- INDETERMINATE (a "
+                        "truncated program or a decoder gap); not by itself "
+                        "evidence of a driver bug");
       }
 
       if (record.kind == AGX_IOTO_PROGRAM_RECORD_TERMINATE) {

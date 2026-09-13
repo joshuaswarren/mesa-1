@@ -4,6 +4,7 @@
  */
 
 #include "hk_native_descriptor_pack.h"
+#include "asahi/lib/agx_abi.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -334,9 +335,69 @@ check_gen9_bc_textures(void)
    }
 }
 
+static void
+check_buffer_metadata(void)
+{
+   struct AGX_TEXTURE semantic = {
+      AGX_TEXTURE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D,
+      .layout = AGX_LAYOUT_LINEAR,
+      .channels = AGX_CHANNELS_R32,
+      .type = AGX_TEXTURE_TYPE_UINT,
+      .width = 16384, .height = 1, .depth = 1,
+      .stride = 16384 * 4 - 16,
+      .address = UINT64_C(0x123000000000),
+      .buffer_size_sw = 64,
+   };
+   struct hk_native_texture_descriptor native;
+   assert(hk_pack_native_texture(9, &native, &semantic));
+   struct AGX_TEXTURE_GEN9 hardware;
+   assert(AGX_TEXTURE_GEN9_unpack(NULL, (const uint8_t *)&native, &hardware));
+   assert(hardware.address == semantic.address && hardware.width == 16384);
+
+   /* The old buffer crawl decoded these Gen9 bytes as AGX2. Its software
+    * element count is absent, so every valid coordinate was rejected.
+    */
+   struct AGX_TEXTURE old_crawl;
+   AGX_TEXTURE_unpack(NULL, (const uint8_t *)&native, &old_crawl);
+   assert(old_crawl.buffer_size_sw == 0);
+
+   const struct hk_g17p_buffer_texture_metadata metadata = {
+      .elements = 64, .offset_el = 3,
+      .address = semantic.address,
+   };
+   assert(sizeof(metadata) == 24);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, elements) ==
+      AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, offset_el) ==
+      AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, address) ==
+      AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, rgb32) ==
+      AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + sizeof(metadata) ==
+          AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE);
+   uint8_t descriptor[AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE] = {0};
+   memcpy(descriptor, &native, sizeof(native));
+   memcpy(descriptor + AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET,
+          &metadata, sizeof(metadata));
+   uint32_t count, tail;
+   uint64_t address;
+   memcpy(&count, descriptor + AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET, sizeof(count));
+   memcpy(&tail, descriptor + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, sizeof(tail));
+   memcpy(&address, descriptor + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, sizeof(address));
+   assert(count == 64 && tail == 3 && address == semantic.address);
+   assert(memcmp(descriptor, &native, sizeof(native)) == 0);
+}
+
 int
 main(void)
 {
+   check_buffer_metadata();
    uint64_t atomic_sw = 0;
    assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
                                        &atomic_sw));

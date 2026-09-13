@@ -302,6 +302,12 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
    case AGX_OPCODE_ST_TILE:
       /* See agx_write_registers */
       if (s == 0) {
+         if (I->op == AGX_OPCODE_DEVICE_STORE && I->memory_is_packed) {
+            assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+            assert(I->format == AGX_FORMAT_I8);
+            return DIV_ROUND_UP(util_bitcount(I->mask), 2);
+         }
+
          /* AGX3's tile store carries a width, not a format, so an 8-bit
           * target arrives packed two channels to a 16-bit register. Normalized
           * values use fltnorm; pure integers use agx_pack_integer_8_agx3. */

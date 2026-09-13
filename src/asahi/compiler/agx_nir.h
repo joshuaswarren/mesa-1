@@ -38,6 +38,8 @@ bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
                                                     bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
+bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
+                                               unsigned generation);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
@@ -85,7 +87,7 @@ struct agx_g17p_storage_image_binding {
 };
 
 /* Apple's sampled-texture-to-write-image kernel ABI places a sampled texture,
- * its native sampler, the destination PBE state, and the coordinate clamp in
+ * its native sampler, the destination PBE state, and its write control in
  * uniform slots 0..3.  Keep the two descriptor sets explicit: Vulkan does not
  * require sampled and storage images to share a set. */
 struct agx_g17p_sampled_storage_binding {

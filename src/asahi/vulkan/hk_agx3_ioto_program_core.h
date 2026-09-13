@@ -135,11 +135,12 @@ bool hk_agx3_g17p_combined_sampler_pointers(
 struct hk_agx3_g17p_sampled_storage_heap {
    struct hk_agx3_g17p_combined_sampler_heap sampled;
    uint64_t pbe_descriptor_set_va;
+   uint64_t write_control_va;
    uint32_t pbe_offset_B;
 };
 
 /* Resolve Apple's exact four-slot compute texture0/sample0 -> write-texture1
- * tuple: sampled texture, sampler, destination PBE, coordinate clamp. */
+ * tuple: sampled texture, sampler, destination PBE, write-control pointer. */
 bool hk_agx3_g17p_sampled_storage_pointers(
    const struct hk_agx3_g17p_sampled_storage_heap *heap,
    uint64_t pointers[4]);
@@ -148,6 +149,7 @@ struct hk_agx3_g17p_indexed_storage_heap {
    uint64_t texture_heap_va;
    uint64_t sampler_heap_va;
    uint64_t pbe_descriptor_set_va;
+   uint64_t write_control_va;
    uint32_t pbe_offset_B;
 };
 

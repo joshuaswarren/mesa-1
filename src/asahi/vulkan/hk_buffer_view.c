@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_buffer_view.h"
+#include "asahi/lib/agx_abi.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/bitscan.h"
@@ -129,6 +130,20 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       texture.depth = 1;
       texture.stride =
          (texture.width * util_format_get_blocksize(format)) - 16;
+   }
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      view->buffer_metadata = (struct hk_g17p_buffer_texture_metadata){
+         .elements = view->vk.elements,
+         .offset_el = tail_offset_el,
+         .address = ro_base,
+         .rgb32 = texture.channels == AGX_CHANNELS_R32G32B32_EMULATED,
+      };
+      /* Gen9 has no AGX2 software tail fields. The shader consumes the
+       * explicit metadata, while hardware sees the aligned base texture.
+       */
+      texture.buffer_offset_sw = 0;
+      texture.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el,
+                                    texture.width);
    }
    if (!hk_pack_native_texture(generation, &view->tex, &texture)) {
       vk_buffer_view_destroy(&device->vk, pAllocator, &view->vk);

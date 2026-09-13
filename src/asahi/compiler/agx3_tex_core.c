@@ -706,8 +706,9 @@ agx3_tex_stage_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
-agx3_tex_encode_image_write_rgba8_2d(
+agx3_tex_encode_image_write_2d(
    enum agx_isa_encoding enc, const struct agx3_image_write_desc *d,
+   uint16_t uniform_base, uint8_t staging_slot,
    uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len)
 {
    if (d == NULL || out == NULL || len == NULL)
@@ -715,20 +716,21 @@ agx3_tex_encode_image_write_rgba8_2d(
 
    memset(out, 0, AGX3_IMAGE_WRITE_LENGTH);
    *len = 0;
-   /* This argument is the dependency consumed by the first data-staging COPY,
-    * not an imgwci field. The fixed native instruction always waits for the
-    * staging-slot1 writes, so both an outstanding slot1 producer and data
-    * already retired by an earlier consumer use the same grounded bytes. */
+   /* Operand dependencies are consumed by the preceding COPYs. This packet
+    * waits for their staging slot. The PBE heap base and descriptor index
+    * are independent operands, including for an immediate index. */
    const unsigned kind =
       d->image_kind ? d->image_kind : AGX3_TEX_OPERAND_IMMEDIATE;
    const bool immediate = kind == AGX3_TEX_OPERAND_IMMEDIATE;
    const bool reg = kind == AGX3_TEX_OPERAND_REGISTER;
    if (enc != AGX_ISA_ENCODING_AGX3B ||
+       (uniform_base & 3) || uniform_base > 508 ||
+       staging_slot < 1 || staging_slot > 6 ||
        (d->wait_mask & ~UINT16_C(0x3f)) != 0 ||
        (!immediate && !reg) ||
        (immediate && (d->image_kill ||
           !((d->image_value == 0 && !d->normalized) ||
-            (d->image_value == 1 && d->normalized)))) ||
+            d->image_value == 1))) ||
        /* f70 is the float-vs-integer bit and the state operand's form is a
         * different field family (f91 immediate, f92/f93 register); they are
         * orthogonal, so a register state does not imply normalized data.
@@ -744,31 +746,23 @@ agx3_tex_encode_image_write_rgba8_2d(
        (reg && ((d->image_value & 1) || d->image_value > 126)))
       return false;
 
-   /* Direct state zero is a distinct native form. */
-   if (immediate && d->image_value == 0) {
-      static const uint8_t integer_state0[AGX3_IMAGE_WRITE_LENGTH] = {
-         0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
-         0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
-      };
-      memcpy(out, integer_state0, sizeof(integer_state0));
-      *len = sizeof(integer_state0);
-      return true;
-   }
-
+   /* The native integer direct-state0 packet is the same composed form
+    * with base0/index0 and a slot1 wait. Do not special-case its bytes: that
+    * would silently discard an explicit nonzero PBE base. */
    /* Nonzero field values recovered from native imgwci.ep0 instructions.
-    * Every omitted field is intentionally zero. The direct state selector is
-    * f91. Native argument-buffer indexing instead uses f92 for a killed GPR
+    * Every omitted field is intentionally zero. The immediate descriptor index
+    * is f91. Native argument-buffer indexing instead uses f92 for a killed GPR
     * or f93 for a retained GPR, with f99/f100 selecting that operand family.
     * The composer validates the complete selected form. */
    struct agx3_field_kv fields[24] = {
       KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
-      KV(51, 1),  KV(52, 1),  KV(60, 1),   KV(71, 2), KV(72, 1),
+      KV(51, 1),  KV(52, 1),  KV(58 + staging_slot, 1), KV(71, 2), KV(72, 1),
       KV(74, 1),  KV(85, 3),  KV(86, 3),   KV(113, 1),
       KV(70, d->normalized),
    };
    unsigned n = 15;
+   fields[n++] = (struct agx3_field_kv)KV(79, uniform_base);
    if (immediate) {
-      fields[n++] = (struct agx3_field_kv)KV(79, 4);
       fields[n++] = (struct agx3_field_kv)KV(91, d->image_value);
       fields[n++] = (struct agx3_field_kv)KV(99, 1);
       fields[n++] = (struct agx3_field_kv)KV(100, 1);
@@ -793,6 +787,23 @@ agx3_tex_encode_image_write_rgba8_2d(
    }
 
    return true;
+}
+
+/* Preserve the native witness interface used by existing callers. Hk's
+ * resolved descriptors use the explicit-base interface above. */
+bool
+agx3_tex_encode_image_write_rgba8_2d(
+   enum agx_isa_encoding enc, const struct agx3_image_write_desc *d,
+   uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len)
+{
+   if (!d)
+      return false;
+
+   const bool immediate = !d->image_kind ||
+                          d->image_kind == AGX3_TEX_OPERAND_IMMEDIATE;
+   const uint16_t base = immediate && d->image_value == 1 ? 4 : 0;
+   const uint8_t slot = immediate && d->image_value == 0 ? 1 : 2;
+   return agx3_tex_encode_image_write_2d(enc, d, base, slot, out, len);
 }
 
 static uint16_t

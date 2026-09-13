@@ -186,12 +186,12 @@ bool agx3_cf_cndef(enum agx_isa_encoding enc, uint8_t out[AGX3_CF_MAX_LENGTH],
                    uint8_t *len);
 
 /*
- * cndcf is cndlt's general form: the lanes it selects leave the current
- * construct and stay inactive until `level_count` architectural exec-mask
- * levels have been popped. cndlt is the compact four-byte encoding of exactly
- * `level_count == 2`, which is why an ordinary loop break and the loop's own
- * continue test both use it -- a loop owns two levels. Anything deeper needs
- * this form, whose count field is sixteen bits wide.
+ * cndcf selects lanes to leave the current construct when flag[slot] XOR
+ * invert is true. They stay inactive until `level_count` architectural
+ * exec-mask levels have been popped. CNDLT instead retains lanes whose
+ * predicate is true. These forms therefore require opposite predicate senses
+ * when lowering the same BREAK_IF. A loop owns two levels; deeper breaks use
+ * CNDCF's sixteen-bit level count.
  *
  * Witnessed with `metal-nt -arch applegpu_g17p` (.tmp/g17p-deep-break-evidence)
  * from MSL that breaks out of a loop from inside 2..7 nested ifs, each

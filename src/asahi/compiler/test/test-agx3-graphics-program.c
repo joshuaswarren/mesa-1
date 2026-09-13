@@ -433,13 +433,13 @@ main(void)
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
 
-   /* The exact layered array-wire EOT grows to 110 bytes and its r0..r6
-    * coordinate prefix rounds to a sixteen-half GPR allocation. It keeps the
-    * same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch span. */
+   /* The native layered array EOT is an 84-byte, eight-half program. It keeps
+    * the same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch
+    * span as the other admitted RT0 builtins. */
    eot.pbe_argument_va = UINT64_C(0x4000030000);
-   eot.shader_binary_size = 110;
+   eot.shader_binary_size = 84;
    eot.imageblock.sample_size_B = 8;
-   eot.nr_gprs = 16;
+   eot.nr_gprs = 8;
    eot.staging_halfs = 8;
    eot.attachment_count = 1;
    eot.imageblock_offset1_B = 0;
@@ -447,7 +447,8 @@ main(void)
                                             &eot_program));
    CHECK(eot_program.length > 0 &&
          eot_program.length <= AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE);
-   eot.nr_gprs = 15;
+   eot.shader_binary_size = 110;
+   eot.nr_gprs = 16;
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
 
