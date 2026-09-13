@@ -97,6 +97,10 @@ struct agx_shader_info {
    /* Scratch memory allocation in bytes for main/preamble respectively */
    unsigned scratch_size, preamble_scratch_size;
 
+   /* G17P compiler footprint programmed in SPECTPR. This is separate from
+    * explicit shader scratch and does not use the legacy helper program. */
+   unsigned agx3_spectpr_scratch_size;
+
    /* Size in bytes of the main sahder */
    unsigned main_size;
 

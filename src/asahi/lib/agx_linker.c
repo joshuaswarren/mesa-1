@@ -255,7 +255,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
          return false;
    }
    size_t size = 0;
-   unsigned nr_gprs = 0, scratch_size = 0;
+   unsigned nr_gprs = 0, scratch_size = 0, agx3_spectpr_scratch_size = 0;
    unsigned staging_halfs = 0;
    unsigned colour_partitions = 0;
    bool staging_known = true;
@@ -285,6 +285,9 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       staging_halfs = MAX2(staging_halfs, part->info.agx3_staging_halfs);
       staging_known &= part->info.agx3_staging_known;
       scratch_size = MAX2(scratch_size, part->info.scratch_size);
+      agx3_spectpr_scratch_size =
+         MAX2(agx3_spectpr_scratch_size,
+              part->info.agx3_spectpr_scratch_size);
       reads_tib |= part->info.reads_tib;
       writes_sample_mask |= part->info.writes_sample_mask;
       disable_tri_merging |= part->info.disable_tri_merging;
@@ -426,6 +429,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    assert(offset == size);
 
    linked->scratch_size = scratch_size;
+   linked->agx3_spectpr_scratch_size = agx3_spectpr_scratch_size;
    linked->nr_gprs = nr_gprs;
    linked->g17p_colour_partitions = colour_partitions;
 

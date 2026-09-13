@@ -5901,6 +5901,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             e->preferred_slot = 1;
+         /* A returned G17P device atomic is a two-stage operation in Apple's
+          * native stream: atomicdev publishes the old value in TPS half 0 on
+          * slot 1, then rld waits slot 1 and publishes the architectural GPR
+          * result on slot 6. Model slot 1 as an internal generation and slot
+          * 6 as the logical instruction's result dependency. */
+         const bool g17p_returned_atomic =
+            enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_ATOMIC &&
+            I->nr_dests == 1 && !agx_is_null(I->dest[0]);
+         if (g17p_returned_atomic) {
+            e->preferred_slot = 6;
+            e->transient_slots = 1u << 0;
+         }
          /* Apple's G17P programmable-blend and framebuffer-fetch corpus
           * assigns LLDCol to slot 6, including scalar, pair, and RGBA loads.
           * Keep tile reads in that native hardware domain instead of applying
@@ -5935,6 +5947,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             e->dst[nd++] = AGX3_SLOT_TEX_COORD_TOKEN;
          if (I->agx3_tex_coords_staged)
             e->src[ns++] = AGX3_SLOT_TEX_COORD_TOKEN;
+
+         /* rld's asynchronous read of the hidden atomic-return words must
+          * complete before a later stack access may reuse them. Existing
+          * compiler scratch still starts at TPS half 0, so refuse that mixed
+          * case below until its offsets are rebased around this native ABI. */
+         if (g17p_returned_atomic) {
+            assert(nd + 2 <= AGX3_SLOT_MAX_REGS);
+            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE;
+            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE + 1;
+         }
 
          /* CEM is a compound cube-coordinate pipeline, not a single opaque
           * sampler operation. Its three calculations write the dedicated
@@ -7023,11 +7045,37 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_device_atomic_desc d;
             uint8_t bytes[AGX3_ATOMIC_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_device_atomic(I, enc, block->divergent,
-                                              slot, wait, &d) ||
+            const bool returned = I->nr_dests == 1 &&
+                                  !agx_is_null(I->dest[0]);
+            const bool g17p_returned =
+               enc == AGX_ISA_ENCODING_AGX3B && returned;
+            const uint8_t atomic_slot = g17p_returned ? 1 : slot;
+            if ((g17p_returned && (slot != 6 || ctx->scratch_size_B != 0)) ||
+                !agx3_translate_device_atomic(I, enc, block->divergent,
+                                              atomic_slot, wait, &d) ||
                 !agx3_atomic_encode_device(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
+
+            if (g17p_returned) {
+               /* Exact applegpu_g17p return sequence. For destination r0,
+                * this composes to 0c8019a500200000, the eight-byte native
+                * rld immediately following atomicdev. */
+               const struct agx3_static_spill_load_desc reload = {
+                  .dest = I->dest[0].value,
+                  .tps_half = 0,
+                  .width = AGX3_MEM_W32,
+                  .slot = 6,
+                  .slot_mirror = 6,
+                  .wait_mask = 1u << 0,
+               };
+               uint8_t reload_bytes[AGX3_STATIC_SPILL_MAX_LENGTH];
+               uint8_t reload_len = 0;
+               if (!agx3_static_spill_encode_load_form(
+                      enc, &reload, 1, reload_bytes, &reload_len) ||
+                   !agx3_append(emission, reload_bytes, reload_len))
+                  AGX3_REFUSE(I);
+            }
             continue;
          }
 

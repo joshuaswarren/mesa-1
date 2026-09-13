@@ -224,12 +224,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3278,
-       UINT64_C(0xafea67d1a800a95b)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3350,
-       UINT64_C(0x21b435d342a21da4)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3348,
-       UINT64_C(0x0d245326362de592)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3286,
+       UINT64_C(0xe79eb19ae3545805)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3358,
+       UINT64_C(0x82dab87f388196ce)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3356,
+       UINT64_C(0x1aa4c4854db94fb4)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {

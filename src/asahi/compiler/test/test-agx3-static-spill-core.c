@@ -142,6 +142,23 @@ main(void)
    check_load(AGX_ISA_ENCODING_AGX3B, &b_rld_structural_d, 1, b_rld_structural,
               sizeof(b_rld_structural), true);
 
+   /* applegpu_g17p device-atomic return: atomicdev publishes its hidden old
+    * value on slot 1, then this exact rld fetches TPS word 0 into r0 and
+    * republishes the GPR result on slot 6. */
+   static const uint8_t b_atomic_return_rld[] = {
+      0x0c, 0x80, 0x19, 0xa5, 0x00, 0x20, 0x00, 0x00,
+   };
+   const struct agx3_static_spill_load_desc b_atomic_return_rld_d = {
+      .dest = 0,
+      .tps_half = 0,
+      .width = AGX3_MEM_W32,
+      .slot = 6,
+      .slot_mirror = 6,
+      .wait_mask = 1,
+   };
+   check_load(AGX_ISA_ENCODING_AGX3B, &b_atomic_return_rld_d, 1,
+              b_atomic_return_rld, sizeof(b_atomic_return_rld), true);
+
    static const uint8_t c_copy_h[] = {
       0x2b, 0x00, 0x07, 0x10, 0x26, 0x00, 0xa0, 0x02,
    };
@@ -261,7 +278,7 @@ main(void)
       return 1;
    }
 
-   printf("agx3_static_spill_core: 10 Apple copy/rld vectors and all %u "
+   printf("agx3_static_spill_core: 11 Apple copy/rld vectors and all %u "
           "checks passed\n",
           checks);
    return 0;

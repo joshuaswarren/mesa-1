@@ -14,7 +14,7 @@ agx3_g17p_compute_state_tail(
    struct agx_ioto_state_tail_output *tail)
 {
    if (!desc || !tail || !desc->shader_binary_size || !desc->nr_gprs ||
-       desc->scratch_size)
+       (desc->scratch_size != 0 && desc->scratch_size != 16))
       return false;
 
    struct agx_ioto_state_tail_output staged;

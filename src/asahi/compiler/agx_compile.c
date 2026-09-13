@@ -6062,6 +6062,27 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);
+
+   /* Apple's G17P compiler publishes a 16-byte scratch footprint for both
+    * compute and fragment shaders that consume a device atomic's return.
+    * The otherwise equivalent return-unused shaders publish zero, and the
+    * returned form immediately reloads the old value from TPS half 0. Keep
+    * this fixed ABI reservation distinct from allocator-created spill size;
+    * the packer refuses a mixed returned-atomic/compiler-scratch shader until
+    * ordinary scratch offsets are rebased around these words. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (ctx->stage == MESA_SHADER_COMPUTE ||
+        ctx->stage == MESA_SHADER_FRAGMENT)) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
+             !agx_is_null(I->dest[0])) {
+            out->agx3_spectpr_scratch_size =
+               MAX2(out->agx3_spectpr_scratch_size, 16);
+            break;
+         }
+      }
+   }
+
    agx_lower_64bit_postra(ctx);
 
    if (ctx->scratch_size_B > 0) {

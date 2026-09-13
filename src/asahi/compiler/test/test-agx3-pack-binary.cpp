@@ -54,6 +54,24 @@ append(std::vector<uint8_t> &v, const uint8_t *b, unsigned n)
    v.insert(v.end(), b, b + n);
 }
 
+static void
+append_g17p_atomic_return_reload(std::vector<uint8_t> &v, uint16_t dest)
+{
+   const struct agx3_static_spill_load_desc reload = {
+      .dest = dest,
+      .tps_half = 0,
+      .width = AGX3_MEM_W32,
+      .slot = 6,
+      .slot_mirror = 6,
+      .wait_mask = 1,
+   };
+   uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH];
+   uint8_t length = 0;
+   ASSERT_TRUE(agx3_static_spill_encode_load_form(
+      AGX_ISA_ENCODING_AGX3B, &reload, 1, bytes, &length));
+   append(v, bytes, length);
+}
+
 class AGX3PackBinary : public testing::Test {
  protected:
    void *mem_ctx;
@@ -2682,6 +2700,8 @@ TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
 
       std::vector<uint8_t> want;
       append(want, atomic, atomic_len);
+      if (!e)
+         append_g17p_atomic_return_reload(want, result.value);
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
    }
@@ -2715,6 +2735,7 @@ TEST_F(AGX3PackBinary, DeviceAtomicUsesNativeMaskedExecutionMode)
 
    std::vector<uint8_t> want;
    append(want, bytes, atomic_len);
+   append_g17p_atomic_return_reload(want, 6);
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
    ASSERT_GE(want.size(), 2u);
@@ -2907,6 +2928,8 @@ TEST_F(AGX3PackBinary, DeviceAtomicMapsPostRaDiscardHints)
 
       std::vector<uint8_t> want;
       append(want, atomic, atomic_len);
+      if (!e)
+         append_g17p_atomic_return_reload(want, result.value);
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
    }
