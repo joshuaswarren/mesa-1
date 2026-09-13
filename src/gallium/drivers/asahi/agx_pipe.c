@@ -1744,8 +1744,10 @@ agx_destroy_context(struct pipe_context *pctx)
          drmSyncobjDestroy(dev->fd, ctx->batches.slots[i].syncobj);
    }
 
-   dev->ops.bo_unbind_object(dev, ctx->timestamp_handle);
-   agx_bo_unreference(dev, ctx->timestamps);
+   if (ctx->timestamps) {
+      dev->ops.bo_unbind_object(dev, ctx->timestamp_handle);
+      agx_bo_unreference(dev, ctx->timestamps);
+   }
 
    u_rwlock_wrunlock(&screen->destroy_lock);
 
@@ -1919,16 +1921,18 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ctx->compute_blitter.blit_cs = asahi_blit_key_table_create(ctx);
 
    struct agx_device *dev = agx_device(screen);
-   size_t timestamps_size = sizeof(struct agx_timestamps) * AGX_MAX_BATCHES;
+   if (screen->caps.query_timestamp || screen->caps.query_time_elapsed) {
+      size_t timestamps_size = sizeof(struct agx_timestamps) * AGX_MAX_BATCHES;
 
-   /* The kernel requires that timestamp buffers are SHARED */
-   ctx->timestamps =
-      agx_bo_create(dev, timestamps_size, 0, AGX_BO_WRITEBACK | AGX_BO_SHARED,
-                    "Timestamp buffer");
-   assert(ctx->timestamps);
+      /* The kernel requires that timestamp buffers are SHARED. */
+      ctx->timestamps =
+         agx_bo_create(dev, timestamps_size, 0, AGX_BO_WRITEBACK | AGX_BO_SHARED,
+                       "Timestamp buffer");
+      assert(ctx->timestamps);
 
-   ret = agx_bind_timestamps(dev, ctx->timestamps, &ctx->timestamp_handle);
-   assert(!ret);
+      ret = agx_bind_timestamps(dev, ctx->timestamps, &ctx->timestamp_handle);
+      assert(!ret);
+   }
 
    /* Sync object/FD used for NATIVE_FENCE_FD. */
    ctx->in_sync_fd = -1;
@@ -2132,8 +2136,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_dual_source_render_targets = 1;
 
    caps->occlusion_query = true;
-   caps->query_timestamp = true;
-   caps->query_time_elapsed = true;
+   /* The experimental M5 kernel does not map timestamp objects yet. Timer
+    * queries are optional for GL 2.x and GLES 3.0; do not advertise them or
+    * require their unsupported buffer binding to create an ordinary context.
+    */
+   const bool timestamps =
+      !agx_params_m5_bringup_supported(&agx_device(pscreen)->params);
+   caps->query_timestamp = timestamps;
+   caps->query_time_elapsed = timestamps;
    caps->query_so_overflow = true;
    caps->query_memory_info = true;
    caps->primitive_restart = true;

@@ -290,7 +290,7 @@ agx_batch_print_stats(struct agx_device *dev, struct agx_batch *batch)
       abort();
    }
 
-   if (likely(!(dev->debug & AGX_DBG_STATS)))
+   if (likely(!(dev->debug & AGX_DBG_STATS)) || !batch->ctx->timestamps)
       return;
 
    struct agx_timestamps *ts = agx_batch_timestamps(batch);
