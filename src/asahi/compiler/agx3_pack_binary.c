@@ -2338,16 +2338,26 @@ agx3_translate_mem(const agx_instr *I, bool is_store, uint8_t slot,
    d->shift = (uint8_t)I->shift;
 
    const agx_index data = is_store ? I->src[0] : I->dest[0];
+   const bool packed_byte_store =
+      is_store && w == AGX3_MEM_W8 && I->memory_is_packed;
    /* Native scalar byte loads write an aligned low half. Stores can also
     * address individual halves: Apple's byte_halves_odd_zero stores
-    * ushort2.y from half3 with W8/mask1. */
+    * ushort2.y from half3 with W8/mask1. A packed vector byte store likewise
+    * names its physical 16-bit payload in half-register units, regardless of
+    * the logical component mask. */
    const bool scalar_half = data.size == AGX_SIZE_16 &&
       (w == AGX3_MEM_W16 || w == AGX3_MEM_W8) &&
       I->mask == 1 && agx_channels(data) == 1;
    const bool byte_load_half = !is_store && w == AGX3_MEM_W8 && scalar_half;
+   const unsigned data_halfs = packed_byte_store
+      ? DIV_ROUND_UP(util_bitcount(I->mask), 2)
+      : agx_size_align_16(data.size) * util_bitcount(I->mask);
    if (!agx3_src_is_register(data) || data.memory ||
-       ((!scalar_half || byte_load_half) && (data.value & 1)) ||
-       data.value >= 256)
+       ((!scalar_half || byte_load_half) && !packed_byte_store &&
+        (data.value & 1)) ||
+       (packed_byte_store &&
+        (data.size != AGX_SIZE_16 || agx_channels(data) != data_halfs)) ||
+       data.value + data_halfs > 256)
       return false;
    d->data = data.value;
 
