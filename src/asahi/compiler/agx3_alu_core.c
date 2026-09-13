@@ -3945,26 +3945,37 @@ agx3_alu_widen_half(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     bool dest_cache, uint16_t wait_mask,
                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 256 || (dest & 1) || (wait_mask & ~UINT16_C(0x3f)) ||
-       (unsigned)hint > AGX3_ALU_HINT_CACHE || (src_abs && src_neg))
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !out || !len ||
+       dest >= 256 || src >= 256 || (dest & 1) ||
+       (wait_mask & ~(m5 ? UINT16_C(0xff) : UINT16_C(0x3f))) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (!m5 && src_abs && src_neg))
       return false;
+   /* G17G Metal half4 -> float4 witnesses retain the half operand and add
+    * negative zero. M5 also requires its floating-point pipeline selectors;
+    * these are not the G17P long-form tail bits. Native modifier and slot-8
+    * wait variants round-trip through the AGX3C composer without patching.
+    */
    const struct agx3_field_kv base[] = {
       {9,2},{10,2},{25,2},{26,1},{42,1},{43,2},
+      {50,3},{51,48},
    };
-   struct agx3_field_kv fields[14] = {
+   struct agx3_field_kv fields[16] = {
       {2,dest},{18,src},{34,0x80},{11,dest_cache},
       {27,hint == AGX3_ALU_HINT_CACHE},{29,hint == AGX3_ALU_HINT_DISCARD},
       {30,src_abs},{31,src_neg},
    };
-   for (unsigned i=0;i<6;i++)
+   const unsigned slots = m5 ? 8 : 6;
+   for (unsigned i=0;i<slots;i++)
       fields[8+i] = (struct agx3_field_kv){52+i,!!(wait_mask & (1u<<i))};
    for (unsigned ep=0;ep<4;ep++)
-      if (agx3_bind_compose(enc,"f32add",ep,base,6,fields,14,out,len)) {
+      if (agx3_bind_compose(enc,"f32add",ep,base,m5 ? 8 : 6,
+                           fields,8+slots,out,len)) {
          /* metal-nt canonicalizes modifier-specific tail bits. */
-         if (src_abs && *len == 10)
+         if (!m5 && src_abs && *len == 10)
             out[7] |= 0x80;
-         if (src_neg && *len == 8)
+         if (!m5 && src_neg && *len == 8)
             out[7] |= 0x80;
          return true;
       }

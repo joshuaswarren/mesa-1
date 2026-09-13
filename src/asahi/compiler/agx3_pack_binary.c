@@ -9782,14 +9782,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B ||
+              enc == AGX_ISA_ENCODING_AGX3C) && I->op == AGX_OPCODE_FADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1) {
             const bool swap=I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index src=I->src[swap?1:0], imm=I->src[swap?0:1];
             if (agx3_src_is_register(src) && !src.memory && src.size == AGX_SIZE_16 &&
                 agx_channels(src) == 1 && !src.kill &&
-                !(src.abs && src.neg) &&
+                (enc == AGX_ISA_ENCODING_AGX3C || !(src.abs && src.neg)) &&
                 imm.type == AGX_INDEX_IMMEDIATE && imm.value == 0x80 &&
                 !imm.abs && !imm.neg && !imm.memory) {
                uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;

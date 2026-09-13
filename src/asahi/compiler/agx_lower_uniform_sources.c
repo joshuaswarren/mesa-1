@@ -116,7 +116,25 @@ agx_lower_uniform_sources(agx_context *ctx)
 
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;
-            agx_replace_src(I, s, agx_mov(&b, idx));
+            if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                idx.size == AGX_SIZE_16 && agx_channels(idx) == 1) {
+               /* AGX3c has witnessed dword uniform reads and half-register
+                * moves, but no witnessed uniform-to-half copy. Read the
+                * containing aligned word and select the original half. This
+                * preserves every bit, including an odd uniform's upper half,
+                * without inventing an instruction encoding.
+                */
+               const unsigned half = idx.value & 1;
+               idx.value &= ~1u;
+               idx.size = AGX_SIZE_32;
+               agx_index word = agx_mov(&b, idx);
+               agx_instr *split = agx_split(&b, 2, word);
+               split->dest[0] = agx_temp(ctx, AGX_SIZE_16);
+               split->dest[1] = agx_temp(ctx, AGX_SIZE_16);
+               agx_replace_src(I, s, split->dest[half]);
+            } else {
+               agx_replace_src(I, s, agx_mov(&b, idx));
+            }
          }
       }
    }

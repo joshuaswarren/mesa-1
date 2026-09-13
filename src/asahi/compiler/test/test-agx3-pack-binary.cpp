@@ -8891,6 +8891,96 @@ TEST_F(AGX3PackBinary, G17PUniformHalfMoveUsesNativeCopy)
    }
 }
 
+TEST_F(AGX3PackBinary, G17GHalfWidenMatchesNativeMetal)
+{
+   /* metal-nt -arch applegpu_g17g, dynamic half4 -> float4 and signed/abs
+    * variants. Byte strings are extracted from native output, not produced
+    * by the encoder under test. The first conversion waits on load slot 8.
+    */
+   const struct {
+      unsigned dest, src;
+      bool abs, neg;
+      unsigned wait;
+      std::vector<uint8_t> bytes;
+   } cases[] = {
+      {0, 4, false, false, 0x80,
+       {0x29,0x00,0x04,0x1a,0x22,0x20,0xa4,0x02,0x84,0x06,0x40,0x00}},
+      {2, 5, false, false, 0,
+       {0x19,0x04,0x1c,0x81,0x08,0x02}},
+      {4, 6, false, false, 0,
+       {0x29,0x06,0x1c,0x81,0x00,0x02}},
+      {6, 7, false, false, 0,
+       {0x39,0x06,0x1c,0x81,0x08,0x02}},
+      {2, 5, false, true, 0,
+       {0x19,0x04,0x1c,0x81,0x09,0x02,0x02,0x00}},
+      {4, 6, true, false, 0,
+       {0x21,0x02,0x04,0x1a,0x22,0x20,0xa4,0x0a,0x84,0x86,0x40,0x00}},
+      {6, 7, true, true, 0,
+       {0x31,0x03,0x04,0x1a,0x22,0x20,0xa4,0x0a,0x84,0x86,0x40,0x04}},
+   };
+
+   for (const auto &c : cases) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_alu_widen_half(
+         AGX_ISA_ENCODING_AGX3C, c.dest, c.src, AGX3_ALU_HINT_DISCARD,
+         c.abs, c.neg, false, c.wait, bytes, &len));
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len), c.bytes);
+   }
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   EXPECT_FALSE(agx3_alu_widen_half(
+      AGX_ISA_ENCODING_AGX3C, 1, 4, AGX3_ALU_HINT_DISCARD,
+      false, false, false, 0, bytes, &len));
+   EXPECT_FALSE(agx3_alu_widen_half(
+      AGX_ISA_ENCODING_AGX3C, 0, 256, AGX3_ALU_HINT_DISCARD,
+      false, false, false, 0, bytes, &len));
+   EXPECT_FALSE(agx3_alu_widen_half(
+      AGX_ISA_ENCODING_AGX3C, 0, 4, AGX3_ALU_HINT_DISCARD,
+      false, false, false, 0x100, bytes, &len));
+}
+
+TEST_F(AGX3PackBinary, G17GUniformHalfReadUsesAlignedWordAndCorrectHalf)
+{
+   for (unsigned uniform : {0u, 1u, 12u, 13u, 510u, 511u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      b->shader->nir = rzalloc(mem_ctx, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+      /* Match the half-to-float conversion that refused the native GLES
+       * vertex shader. Keep the result live through an actual varying store.
+       */
+      agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *add = agx_fadd_to(b, result,
+         agx_uniform(uniform, AGX_SIZE_16), agx_immediate(0x80));
+      agx_st_vary(b, agx_immediate(0), result);
+      agx_stop(b);
+      agx_lower_uniform_sources(b->shader);
+      agx_dce(b->shader, true);
+      agx_ra(b->shader);
+      agx_lower_pseudo(b->shader);
+
+      /* The original source is exactly one half of the uniform word, not a
+       * numeric conversion or a replacement constant. Check both edge halves
+       * of the complete uniform file as well as the observed odd-half case.
+       */
+      unsigned reads = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         agx_foreach_src(I, s) {
+            if (I->src[s].type != AGX_INDEX_UNIFORM)
+               continue;
+            ++reads;
+            EXPECT_EQ(I->src[s].size, AGX_SIZE_32);
+            EXPECT_EQ(I->src[s].value, uniform & ~1u);
+            EXPECT_EQ(add->src[0].value, I->dest[0].value + (uniform & 1));
+         }
+      }
+      EXPECT_EQ(reads, 1u);
+      EXPECT_EQ(add->src[0].size, AGX_SIZE_16);
+      EXPECT_FALSE(pack(b).empty()) << uniform;
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
