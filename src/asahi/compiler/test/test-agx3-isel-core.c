@@ -40,6 +40,15 @@ struct isel_vec {
 };
 
 static const struct isel_vec vectors[] = {
+   /* Apple's `isel_chain` keeps this 16-bit boolean result live for the
+    * following select. f12 is the only non-register field that differs from
+    * the direct-store twin, establishing it as destination cache. */
+   {"u16_result_cached", {.dest_16=true, .cmp1_immediate=true,
+       .dest_cache=true, .cmp0=0, .cmp1=1, .cond=AGX3_ISEL_ICOND_EQ,
+       .true_kind=AGX3_ISEL_IMMEDIATE, .false_kind=AGX3_ISEL_IMMEDIATE,
+       .sel_true=1, .sel_false=0, .discard={true,false,false,false},
+       .wait_mask=32},
+    {0x02,0x01,0x2d,0x80,0x26,0x81,0x17,0xc2,0x20,0x80}, 10},
    {"s32_zero", {.dest_16=false, .cmp_16=false,
        .cmp1_immediate=true, .explicit_hints=true, .cmp0=0, .cmp1=0,
        .cond=AGX3_ISEL_ICOND_SLT, .sel_true=2, .sel_false=4,
@@ -60,8 +69,9 @@ static const struct isel_vec vectors[] = {
        .cond=AGX3_ISEL_ICOND_SGT, .sel_true=2, .sel_false=3,
        .discard={true,true,true,true}, .wait_mask=32},
     {0x02,0x00,0x1d,0x00,0x82,0x02,0x16,0xc8,0x82,0x03}, 10},
-   {"u32_mixed_retains_scheduling", {
+   {"u32_mixed_cached_result", {
        .cmp1_immediate=true, .cmp1=2, .cond=AGX3_ISEL_ICOND_EQ,
+       .dest_cache=true,
        .discard={true,false,true,false}, .false_kind=AGX3_ISEL_IMMEDIATE,
        .sel_true=2, .sel_false=13, .wait_mask=32},
     {0x02,0x01,0x2f,0x82,0x86,0x02,0x07,0xc2,0x20,0x8d}, 10},

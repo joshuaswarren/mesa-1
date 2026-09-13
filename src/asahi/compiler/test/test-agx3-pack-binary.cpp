@@ -8529,6 +8529,69 @@ TEST_F(AGX3PackBinary, GradientRetiresAsyncSourceBeforeNativeDfdx)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, FloatSelectWaitPreservesUnrelatedPendingLoads)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool narrow : {false, true}) {
+      for (bool two_producers : {false, true}) {
+         SCOPED_TRACE(narrow);
+         SCOPED_TRACE(two_producers);
+         agx_builder *b = builder(enc);
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         const auto size = narrow ? AGX_SIZE_16 : AGX_SIZE_32;
+         const auto format = narrow ? AGX_FORMAT_I16 : AGX_FORMAT_I32;
+         agx_device_load_to(b, agx_register(0, AGX_SIZE_32),
+                           agx_uniform(0, AGX_SIZE_64), agx_immediate(0),
+                           AGX_FORMAT_I32, 1, 0, false);
+         agx_device_load_to(b, agx_register(8, size),
+                           agx_uniform(0, AGX_SIZE_64), agx_immediate(4),
+                           format, 1, 0, false);
+         if (two_producers) {
+            agx_device_load_to(b, agx_register(12, size),
+                              agx_uniform(0, AGX_SIZE_64), agx_immediate(8),
+                              format, 1, 0, false);
+         } else {
+            agx_mov_imm_to(b, agx_register(12, size),
+                           narrow ? 1 : 0x3d4ccccd);
+         }
+         agx_index compare = agx_register(8, size);
+         compare.discard = true;
+         agx_fcmpsel_to(b, agx_register(4, AGX_SIZE_16), compare,
+                        narrow ? agx_immediate(0x30) : agx_register(12, size),
+                        narrow ? agx_register(12, size) : agx_immediate(1),
+                        agx_immediate(0), AGX_FCOND_LT);
+         agx_index unrelated = agx_register(0, AGX_SIZE_32);
+         unrelated.discard = true;
+         agx_iadd_to(b, agx_register(2, AGX_SIZE_32), unrelated,
+                     agx_immediate(1), 0);
+         agx_stop(b);
+         const auto code = pack(b);
+         ASSERT_FALSE(code.empty());
+
+         /* Join only the comparison's producer slots. Never carry this wait
+          * on r0, whose independent load is still outstanding. A half-width
+          * comparison must not silently read/write its neighbouring half. */
+         const uint16_t mask = two_producers ? 6 : 2;
+         const uint16_t operands[] = {8, 8};
+         const enum agx3_alu_hint hints[] = {
+            AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+         uint8_t correct[AGX3_ALU_MAX_LENGTH], old[AGX3_ALU_MAX_LENGTH];
+         uint8_t length = 0, old_length = 0;
+         ASSERT_TRUE(narrow
+            ? agx3_alu_bit_reg16(enc, AGX3_ALU_BAND, 8, operands, hints,
+                                  mask, correct, &length)
+            : agx3_alu_bit_reg(enc, AGX3_ALU_BAND, 8, operands, hints,
+                                mask, correct, &length));
+         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                     2, old, &old_length));
+         EXPECT_NE(std::search(code.begin(), code.end(), correct,
+                               correct + length), code.end());
+         EXPECT_EQ(std::search(code.begin(), code.end(), old,
+                               old + old_length), code.end());
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, InterpolationWaitDoesNotReadPendingRegisters)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -9377,6 +9440,29 @@ TEST_F(AGX3PackBinary, NativeIselImmediateAndNarrowComparands)
    }
 }
 
+TEST_F(AGX3PackBinary, NativeIselCarriesDestinationCache)
+{
+   auto build = [&](bool cache) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index dest = agx_register(0, AGX_SIZE_16);
+      agx_index cmp = agx_register(2, AGX_SIZE_32);
+      dest.cache = cache;
+      cmp.discard = true;
+      agx_icmpsel_to(b, dest, cmp, agx_immediate(1), agx_immediate(1),
+                     agx_immediate(0), AGX_ICOND_UEQ);
+      agx_stop(b);
+      return pack(b);
+   };
+
+   const auto uncached = build(false);
+   const auto cached = build(true);
+   ASSERT_EQ(uncached.size(), 14);
+   ASSERT_EQ(cached.size(), uncached.size());
+   auto expected = uncached;
+   expected[2] |= 0x20; /* Native ISEL destination-cache field f12. */
+   EXPECT_EQ(cached, expected);
+}
+
 TEST_F(AGX3PackBinary, NativeIselRetainsLiveRegisterComparands)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -9391,6 +9477,78 @@ TEST_F(AGX3PackBinary, NativeIselRetainsLiveRegisterComparands)
    const uint8_t native_nowait[10] = {0x02,0x83,0x07,0x85,0x02,0x86,0x05,0,0,0x88};
    ASSERT_EQ(code.size(), 14);
    EXPECT_EQ(memcmp(code.data(), native_nowait, 10), 0);
+}
+
+TEST_F(AGX3PackBinary, NativeIselPairsAdjacentDeviceLoadSlots)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index root = agx_register(0, AGX_SIZE_32);
+   root.channels_m1 = 3;
+   agx_device_load_to(b, root, agx_uniform(8, AGX_SIZE_64), agx_immediate(0),
+                      AGX_FORMAT_I32, 15, 0, false);
+
+   agx_index first = agx_register(8, AGX_SIZE_32);
+   agx_index second = agx_register(10, AGX_SIZE_32);
+   agx_device_load_to(b, first, agx_register(0, AGX_SIZE_64),
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+   agx_device_load_to(b, second, agx_register(0, AGX_SIZE_64),
+                      agx_immediate(1), AGX_FORMAT_I32, 1, 2, false);
+   first.discard = true;
+   second.discard = true;
+   agx_icmpsel_to(b, agx_register(12, AGX_SIZE_32), first, second, first,
+                  second, AGX_ICOND_UEQ);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   /* Three 14-byte loads, one 10-byte ISEL and END. A generic extra wait
+    * carrier would add another instruction here. */
+   ASSERT_EQ(code.size(), 56);
+   const struct agx3_isel_desc desc = {
+      .dest = 12,
+      .cmp0 = 8,
+      .cmp1 = 10,
+      .cond = AGX3_ISEL_ICOND_EQ,
+      .explicit_hints = true,
+      .discard = {true, true, true, true},
+      .true_kind = AGX3_ISEL_REGISTER,
+      .false_kind = AGX3_ISEL_REGISTER,
+      .sel_true = 8,
+      .sel_false = 10,
+      .wait_mask = 3,
+   };
+   uint8_t expected[AGX3_ISEL_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &desc, expected,
+                                &length));
+   ASSERT_EQ(length, 10);
+   EXPECT_EQ(memcmp(code.data() + 42, expected, length), 0);
+}
+
+TEST_F(AGX3PackBinary, AbsFselWaitsOnItsLoadedComparator)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_device_load_to(b, agx_register(4, AGX_SIZE_32),
+                      agx_uniform(8, AGX_SIZE_64), agx_immediate(0),
+                      AGX_FORMAT_I32, 1, 2, false);
+   agx_mov_imm_to(b, agx_register(6, AGX_SIZE_32), 0x3d4ccccd);
+
+   agx_index loaded = agx_register(4, AGX_SIZE_32);
+   agx_index threshold = agx_register(6, AGX_SIZE_32);
+   loaded.abs = loaded.discard = true;
+   threshold.cache = true;
+   agx_fcmpsel_to(b, agx_register(8, AGX_SIZE_16), loaded, threshold,
+                  agx_immediate(1), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   uint8_t carrier[AGX3_ALU_MAX_LENGTH], length = 0;
+   const uint16_t operands[] = {4, 4};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   ASSERT_TRUE(agx3_alu_bit_reg(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
+                                4, operands, hints, 1, carrier, &length));
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier, carrier + length),
+             code.end());
 }
 
 TEST_F(AGX3PackBinary, NativeIselImageCopyBooleanHalfRegisters)

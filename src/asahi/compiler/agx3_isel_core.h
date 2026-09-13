@@ -52,10 +52,10 @@
  * with an immediate on the left. Signed/unsigned 16-bit and u8-comparand forms stay
  * fused, without temporary register materialization.
  *
- * The original form vectors remain available to callers without explicit
- * hints, preserving their exact encoding and unexplained scheduling field
- * f12. Explicit forms preserve the same f12=1 on32-bit mixed selected
- * operands, also reproduced by the fresh G17P eq2_mix witness. The compact native wait selector represents one slot or slots1+2;
+ * f12 is destination cache. A fresh direct-store/continued-use pair changes
+ * only destination register allocation and f12; the continued-use form sets
+ * it for a 16-bit boolean result even though both selected values are
+ * immediates. The compact native wait selector represents one slot or slots1+2;
  * other producer combinations must be retired separately before this form.
  */
 
@@ -100,6 +100,7 @@ struct agx3_isel_desc {
    bool cmp1_immediate;
    bool cmp_16;
    bool explicit_hints;
+   bool dest_cache; /* f12: result is consumed through the register cache */
    bool cache[4];
    bool discard[4];
 

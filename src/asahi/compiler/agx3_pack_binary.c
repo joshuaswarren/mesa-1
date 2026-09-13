@@ -3808,6 +3808,38 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
    return true;
 }
 
+/* A select's wait covers its operands and overwritten destination, not an
+ * arbitrary r0. An r0 identity can race an unrelated load still writing r0.
+ * Carry the exact dependency mask on one scalar operand, preserving its bits
+ * and width. Join all required slots before touching the operand, and keep it
+ * live for the select. No scratch register or unrelated wait is needed. */
+static bool
+agx3_retire_select_waits(struct util_dynarray *emission,
+                         enum agx_isa_encoding enc, const agx_instr *I,
+                         uint16_t mask)
+{
+   for (unsigned s = 0; s < I->nr_srcs; ++s) {
+      const agx_index operand = I->src[s];
+      if (!agx3_src_is_register(operand) || operand.memory ||
+          agx_channels(operand) != 1 ||
+          (operand.size != AGX_SIZE_16 && operand.size != AGX_SIZE_32))
+         continue;
+
+      const uint16_t src[] = {operand.value, operand.value};
+      const enum agx3_alu_hint hints[] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+      const bool ok = operand.size == AGX_SIZE_16
+         ? agx3_alu_bit_reg16(enc, AGX3_ALU_BAND, operand.value, src, hints,
+                               mask, bytes, &len)
+         : agx3_alu_bit_reg(enc, AGX3_ALU_BAND, operand.value, src, hints,
+                             mask, bytes, &len);
+      return ok && agx3_append(emission, bytes, len);
+   }
+
+   return false;
+}
+
 /* The instructions agx3_try_control_flow() claims. */
 static bool
 agx3_is_cf_op(const agx_instr *I)
@@ -6138,6 +6170,38 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
    }
    assert(k == count);
+
+   /* G17P ISEL can directly wait for one scoreboard slot or the native
+    * slots-1-and-2 pair. When two adjacent device loads feed the following
+    * ISEL, publish them on that pair. This preserves their overlap and avoids
+    * trying to retire one producer through an unrelated ALU carrier, which
+    * races the load on hardware. Use slot 2 first so a load which waits on a
+    * prior slot-1 descriptor generation never waits on the generation it is
+    * simultaneously publishing. */
+   if (enc == AGX_ISA_ENCODING_AGX3B) {
+      for (unsigned i = 0; i + 2 < count; ++i) {
+         if (ordered[i]->op != AGX_OPCODE_DEVICE_LOAD ||
+             ordered[i + 1]->op != AGX_OPCODE_DEVICE_LOAD ||
+             ordered[i + 2]->op != AGX_OPCODE_ICMPSEL ||
+             sl[i].preferred_slot || sl[i + 1].preferred_slot ||
+             sl[i].transient_slots || sl[i + 1].transient_slots)
+            continue;
+
+         bool reads_first = false, reads_second = false;
+         for (unsigned src = 0; src < sl[i + 2].nr_srcs; ++src) {
+            for (unsigned dst = 0; dst < sl[i].nr_dsts; ++dst)
+               reads_first |= sl[i + 2].src[src] == sl[i].dst[dst];
+            for (unsigned dst = 0; dst < sl[i + 1].nr_dsts; ++dst)
+               reads_second |= sl[i + 2].src[src] == sl[i + 1].dst[dst];
+         }
+
+         if (reads_first && reads_second) {
+            sl[i].preferred_slot = 2;
+            sl[i + 1].preferred_slot = 1;
+         }
+      }
+   }
+
    if (!agx3_slot_assign(sl, count, nslots, res))
       goto fail;
 
@@ -7889,7 +7953,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * first, exactly as the other fsel paths do. */
                uint16_t fsel_wait = wait;
                if (fsel_wait & (fsel_wait - 1)) {
-                  if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                      AGX3_REFUSE(I);
                   fsel_wait = 0;
                }
@@ -8090,7 +8154,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8151,7 +8215,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                uint16_t fsel_wait = wait;
                if (fsel_wait != 0 && fsel_wait != 32) {
-                  if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+                  if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                      AGX3_REFUSE(I);
                   fsel_wait = 0;
                }
@@ -8215,7 +8279,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                immediate_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8276,7 +8340,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint16_t fsel_wait = wait;
             if ((compare.abs && fsel_wait != 0 && fsel_wait != 32) ||
                 (fsel_wait & (fsel_wait - 1))) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8328,7 +8392,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                half_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8371,7 +8435,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8419,7 +8483,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                           (I->src[i].cache && I->src[i].discard);
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8473,7 +8537,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if(invalid)AGX3_REFUSE(I);
             uint16_t fsel_wait=wait;
             if(fsel_wait!=0 && fsel_wait!=32) {
-               if(!agx3_retire_slots_noop(emission,enc,fsel_wait))AGX3_REFUSE(I);
+               if(!agx3_retire_select_waits(emission,enc,I,fsel_wait))AGX3_REFUSE(I);
                fsel_wait=0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -8552,7 +8616,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if(invalid)AGX3_REFUSE(I);
             uint16_t fsel_wait=wait;
             if(fsel_wait!=0 && fsel_wait!=32) {
-               if(!agx3_retire_slots_noop(emission,enc,fsel_wait))AGX3_REFUSE(I);
+               if(!agx3_retire_select_waits(emission,enc,I,fsel_wait))AGX3_REFUSE(I);
                fsel_wait=0;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -8608,7 +8672,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             uint16_t fsel_wait = wait;
             if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_slots_noop(emission, enc, fsel_wait))
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
                   AGX3_REFUSE(I);
                fsel_wait = 0;
             }
@@ -8750,7 +8814,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   /* No witness of this endpoint carries a scoreboard wait, so
                    * retire outstanding slots first rather than dropping the
                    * dependency. */
-                  if (wait != 0 && !agx3_retire_slots_noop(emission, enc, wait))
+                  if (wait != 0 &&
+                      !agx3_retire_select_waits(emission, enc, I, wait))
                      AGX3_REFUSE(I);
                   if (agx3_alu_fcmp_select(enc, &d, bytes, &len) &&
                       agx3_append(emission, bytes, len))
@@ -9278,6 +9343,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             d.cmp1_immediate = b.type == AGX_INDEX_IMMEDIATE;
             d.cmp_16 = a.size == AGX_SIZE_16;
             d.explicit_hints = true;
+            d.dest_cache = dest.cache;
             const agx_index hinted[4] = {a, b, t, f};
             for (unsigned n = 0; n < 4; ++n) {
                if (hinted[n].type == AGX_INDEX_REGISTER) {

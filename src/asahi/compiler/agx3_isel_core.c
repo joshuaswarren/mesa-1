@@ -114,16 +114,10 @@ static const struct agx3_isel_form form_32_imm_imm = {
    27, 64, 81, 12,
    {KV(10, 2), KV(11, 2), KV(42, 2), KV(43, 2), KV(46, 1), KV(57, 2),
     KV(58, 2), KV(61, 1), KV(72, 1), KV(73, 2), KV(89, 1), KV(90, 2)}};
-/*
- * The two 32-bit mixed shapes carry f12 = 1, taken verbatim from their
- * witnessed instructions. Its meaning is NOT established: across the probes
- * it correlates with the select's result feeding a later ALU op rather than
- * being stored directly, in both the mixed and the register/register shapes,
- * so it is not shape-specific and is not a wait (those are f98..f103). It is
- * carried unchanged because dropping it would stop reproducing Apple's bytes;
- * if a shader ever miscompiles around a mixed select, re-probe this field
- * first. Everything else in these two baselines is explained above.
- */
+/* These legacy vectors predate explicit lifetime arguments. Both happened to
+ * keep their results live and therefore carry destination-cache f12. New
+ * production callers use encode_explicit(), which derives f12 from post-RA
+ * state for every operand shape and result width. */
 static const struct agx3_isel_form form_32_reg_imm = {
    27, 65, 81, 14,
    {KV(10, 2), KV(11, 2), KV(12, 1), KV(42, 2), KV(43, 2), KV(46, 1),
@@ -224,7 +218,7 @@ encode_explicit(const struct agx3_isel_desc *d,
 
    const unsigned width = d->dest_16 ? 1 : 2;
    const struct agx3_field_kv base[] = {
-      KV(10, 2), KV(11, width), KV(12, !d->dest_16 && (ti != fi)),
+      KV(10, 2), KV(11, width), KV(12, d->dest_cache),
       KV(42, 2), KV(43, d->cmp_16 ? 1 : 2),
       KV(57, d->cmp1_immediate ? 1 : 2),
       KV(58, (d->cmp1_immediate || d->cmp_16) ? 1 : 2), KV(72, ti ? 1 : 2), KV(73, width),
@@ -292,7 +286,8 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
        !operand_ok(d->false_kind, d->sel_false, d->dest_16))
       return false;
 
-   if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints)
+   if (d->cmp1_immediate || d->cmp_16 || d->explicit_hints ||
+       d->dest_cache)
       return encode_explicit(d, out, len);
 
    const struct agx3_isel_form *form =
