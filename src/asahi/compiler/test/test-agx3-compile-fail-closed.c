@@ -1918,7 +1918,7 @@ check_deep_loop_break_compute(unsigned enclosing_ifs)
          for (unsigned invert = 0; invert < 2 && !found; ++invert) {
             uint8_t want[AGX3_CF_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 0, invert != 0, count,
+            if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, invert != 0, count,
                                want, &len))
                continue;
             for (unsigned at = 0; at + len <= part.info.binary_size; at += 2) {

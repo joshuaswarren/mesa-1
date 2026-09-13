@@ -106,7 +106,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x1807d7af823af8ae));
+         UINT64_C(0x78fcb61ced8d3cda));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -225,11 +225,11 @@ main(void)
       uint64_t hash;
    } robust_index[] = {
       {LIBAGX_DRAW_ROBUST_INDEX_0, 3278,
-       UINT64_C(0x7e03d6da51b3ba53)},
+       UINT64_C(0xafea67d1a800a95b)},
       {LIBAGX_DRAW_ROBUST_INDEX_1, 3350,
-       UINT64_C(0xfc02bf46ab54d6e4)},
+       UINT64_C(0x21b435d342a21da4)},
       {LIBAGX_DRAW_ROBUST_INDEX_2, 3348,
-       UINT64_C(0x7b6b63e6e34e4782)},
+       UINT64_C(0x0d245326362de592)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -367,18 +367,14 @@ main(void)
       uint16_t local_size;
       uint64_t hash;
    } statistics[] = {
-      /* Two bytes longer than it used to be, and one hash apart: the restart
-       * kernel breaks out of its loop from inside an enclosing block, and
-       * that break moved off the four-byte CNDLT (which spends only the
-       * loop's own two exec-mask levels) onto the six-byte CNDCF that carries
-       * a level count. The single added instruction is
-       * `8f 05 54 03 00 09` at +0x2c8 -- slot 1, inverted, three levels --
-       * which is byte-for-byte one of Apple's own applegpu_g17p encodings
-       * (see agx3_cf_cndcf()). Nothing else in the program moved. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2948, 3076, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x726819b369700d85)},
+      /* The top-level loop now has the native guard/entry/exit scopes.
+       * Relative to that topology, the CNDCF fix changes only byte +0x2db
+       * from 09 to 01: the unconditional break must consume true directly.
+       * Size, registers and every other helper byte are unchanged. */
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2962, 3090, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xaaf0fe24895afa6a)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x3b6988993fef71a1)},
+       UINT64_C(0x5a1a52f3cab87ab5)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
@@ -479,8 +475,8 @@ main(void)
       (const uint8_t *)conditional_blob + sizeof(*conditional_info);
    CHECK(conditional_info->preamble_offset == 0);
    CHECK(conditional_info->main_offset == 0);
-   CHECK(conditional_info->main_size == 170);
-   CHECK(conditional_info->binary_size == 170);
+   CHECK(conditional_info->main_size == 184);
+   CHECK(conditional_info->binary_size == 184);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
    CHECK(conditional_info->push_count == 16);
@@ -493,7 +489,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0xdd78584e246b702d));
+         UINT64_C(0x3fe6ea1821ab208e));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);

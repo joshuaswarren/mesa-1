@@ -944,12 +944,21 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
    }
 
-   /* TODO: we can do indirect VS output */
+   /* G17P's f32interp names its coefficient with an immediate field. Apple's
+    * native compiler therefore lowers a dynamically indexed fragment-input
+    * array to direct interpolations and selection. Do the same while the I/O
+    * is still represented by derefs, so each resulting interpolation keeps a
+    * constant coefficient and no temporary array reaches scratch memory.
+    * AGX2 retains its native indirect fragment-input path. */
    nir_variable_mode lower_indirect_modes = 0;
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       lower_indirect_modes |= nir_var_shader_out;
-   else if (nir->info.stage == MESA_SHADER_VERTEX)
+
+      if (dev->dev.chip == AGX_CHIP_G17P)
+         lower_indirect_modes |= nir_var_shader_in;
+   } else if (nir->info.stage == MESA_SHADER_VERTEX) {
       lower_indirect_modes |= nir_var_shader_in | nir_var_shader_out;
+   }
 
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             lower_indirect_modes, UINT32_MAX);

@@ -6597,9 +6597,9 @@ TEST_F(AGX3PackBinary, NestedLoopEntryBackedgeAndPop)
       ASSERT_TRUE(agx3_cf_cndst(enc, 6, false, 2, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(
-         agx3_cf_icmp_reg(enc, AGX3_CF_ICOND_ULT, 1, 0, 2, bytes, &len));
+         agx3_cf_icmp_reg(enc, AGX3_CF_ICOND_ULT, 0, 0, 2, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_cf_cndlt(enc, 1, false, bytes, &len));
+      ASSERT_TRUE(agx3_cf_cndlt(enc, 0, false, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, false, bytes, &len));
       ASSERT_EQ(len, AGX3_CF_BRANCH_LENGTH);
@@ -10131,8 +10131,8 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    const auto code = pack(b);
    const uint8_t prefix[] = {
       0x0f,0x05,0x54,0x1a,
-      0x2a,0x12,0x23,0x00,0x02,0x00,0x17,0x08,0x02,0x00,
-      0x8f,0x04,0x54,0x26,
+      0x0a,0x12,0x23,0x00,0x02,0x00,0x17,0x08,0x02,0x00,
+      0x8f,0x04,0x54,0x22,
    };
    ASSERT_EQ(code.size(),48u);
    EXPECT_EQ(memcmp(code.data(),prefix,sizeof(prefix)),0);
@@ -10189,7 +10189,7 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
                                   bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(
-      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, 3, bytes, &len));
+      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 3, bytes, &len));
    append(want, bytes, len);
    const size_t branch_offset = want.size();
    ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
@@ -10203,6 +10203,122 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
+}
+
+/*
+ * Compiler-produced AGX3 outer loops carry an unconditional push_exec after
+ * BEGIN_CF.  The GLSL CTS return_after_loop_sequence vertex shader reaches
+ * this exact shape, with a break escaping two enclosing ifs.  Apple's loop
+ * entry is CNDST(2). A deep break uses the next flag slot so it does not
+ * overwrite either enclosing if predicate; nested loops advance again.
+ */
+TEST_F(AGX3PackBinary, BeginCfDeepBreakUsesNextFlagSlot)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_block *body = agx_test_block(b->shader);
+   agx_block *after = agx_test_block(b->shader);
+
+   agx_begin_cf(b);
+   agx_push_exec(b, 0);
+   agx_push_exec(b, 1);
+   agx_builder lb = agx_init_builder(b->shader, agx_after_block(body));
+   agx_index counter = agx_register(2, AGX_SIZE_16);
+   agx_if_icmp(&lb, counter, agx_immediate(8), 1, AGX_ICOND_UEQ, true, NULL);
+   agx_if_icmp(&lb, counter, agx_immediate(9), 1, AGX_ICOND_UEQ, false, NULL);
+   agx_index r0l = agx_register(0, AGX_SIZE_16);
+   r0l.cache = true;
+   r0l.kill = true;
+   agx_break_if_icmp(&lb, r0l, r0l, 3, false, AGX_ICOND_UEQ, after);
+   agx_pop_exec(&lb, 1);
+   agx_pop_exec(&lb, 1);
+   agx_jmp_exec_any(&lb, body);
+   agx_pop_exec(&lb, 1);
+   agx_pop_exec(&lb, 1);
+
+   agx_builder ab = agx_init_builder(b->shader, agx_after_block(after));
+   agx_stop(&ab);
+
+   const auto code = pack(b);
+   uint8_t bytes[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   const uint16_t src[] = {0, 0};
+   const struct agx3_cf_source_hints live[] = {
+      {false, false}, {false, false},
+   };
+   std::vector<uint8_t> guard;
+   ASSERT_TRUE(
+      agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 6, false, 1, bytes, &len));
+   append(guard, bytes, len);
+   EXPECT_NE(std::search(code.begin(), code.end(), guard.begin(), guard.end()),
+             code.end());
+
+   std::vector<uint8_t> entry;
+   ASSERT_TRUE(
+      agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 6, false, 2, bytes, &len));
+   append(entry, bytes, len);
+   EXPECT_NE(std::search(code.begin(), code.end(), entry.begin(), entry.end()),
+             code.end());
+
+   std::vector<uint8_t> native;
+   ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
+                                  AGX3_CF_ICOND_EQ, 1, src, live, 0,
+                                  bytes, &len));
+   append(native, bytes, len);
+   ASSERT_TRUE(
+      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, 4, bytes, &len));
+   append(native, bytes, len);
+   EXPECT_NE(std::search(code.begin(), code.end(), native.begin(), native.end()),
+             code.end());
+
+   std::vector<uint8_t> stale;
+   ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
+                                  AGX3_CF_ICOND_EQ, 0, src, live, 0,
+                                  bytes, &len));
+   append(stale, bytes, len);
+   ASSERT_TRUE(
+      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 0, false, 4, bytes, &len));
+   append(stale, bytes, len);
+   EXPECT_EQ(std::search(code.begin(), code.end(), stale.begin(), stale.end()),
+             code.end());
+}
+
+TEST_F(AGX3PackBinary, DeepBreakConsumesBreakPredicateInsteadOfContinuePredicate)
+{
+   /* Full native pairs, decoded with Apple's composed tables:
+    * break_continue +0xac: EQ(i,9), CNDCF(slot0,invert0,count3).
+    * deep_break +0xc8: EQ(guard,0), CNDCF(slot1,invert1,count3).
+    * Thus true, not false, selects a lane to break with CNDCF. Test both
+    * source senses and both nesting classes without deriving the truth
+    * table from the packer's choice of opcode. */
+   for (unsigned nest : {1u, 2u, 3u}) {
+      for (bool invert : {false, true}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_push_exec(b, 1);
+         agx_break_if_icmp(b, agx_register(4, AGX_SIZE_32),
+                           agx_immediate(9), nest, invert, AGX_ICOND_UEQ,
+                           nullptr);
+         agx_stop(b);
+         const auto code = pack(b);
+         const unsigned cnd_offset = 4 + 10; /* entry + EQ comparison */
+         ASSERT_GE(code.size(), cnd_offset + (nest == 1 ? 4u : 6u));
+         uint64_t cnd = 0;
+         for (unsigned byte = 0; byte < (nest == 1 ? 4u : 6u); ++byte)
+            cnd |= uint64_t(code[cnd_offset + byte]) << (byte * 8);
+         const bool encoded_invert = (cnd >> (nest == 1 ? 29 : 43)) & 1;
+         for (bool equal : {false, true}) {
+            const bool consumed = equal ^ encoded_invert;
+            const bool exits = nest == 1 ? !consumed : consumed;
+            EXPECT_EQ(exits, equal ^ invert) << "nest=" << nest;
+         }
+         if (nest > 1) {
+            const uint8_t native[] = {
+               0x8f, 0x05, 0x54, uint8_t(nest + 1), 0,
+               uint8_t(invert ? 9 : 1),
+            };
+            EXPECT_EQ(memcmp(code.data() + cnd_offset, native, sizeof(native)), 0);
+         }
+      }
+   }
 }
 
 /*
@@ -10262,7 +10378,7 @@ TEST_F(AGX3PackBinary, IdentityBreakEscapingNestedIfsUsesNativeLevelCount)
                                      &len));
       append(want, bytes, len);
       /* NEST is ifs + 1, so the native level count is ifs + 2. */
-      ASSERT_TRUE(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, ifs + 2,
+      ASSERT_TRUE(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, false, ifs + 2,
                                 bytes, &len));
       append(want, bytes, len);
 

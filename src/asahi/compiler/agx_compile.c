@@ -912,6 +912,36 @@ agx_pack_integer_8_agx3(agx_builder *b, const agx_index *channels,
    return n;
 }
 
+/* A multi-component W8 memory payload is byte-packed in the register file:
+ * two adjacent components occupy the low/high bytes of one 16-bit register.
+ * NIR keeps each 8-bit component in its own 16-bit lane, so unpack the raw
+ * device-load payload before exposing it to the rest of the backend. */
+static void
+agx_unpack_integer_8_memory_agx3(agx_builder *b, agx_index dest,
+                                 agx_index packed, unsigned nr_channels)
+{
+   const unsigned nr_halfs = DIV_ROUND_UP(nr_channels, 2);
+   agx_index halfs[2] = {agx_null()};
+   for (unsigned i = 0; i < nr_halfs; ++i) {
+      halfs[i] = agx_temp(b->shader, AGX_SIZE_16);
+      agx_subdivide_to(b, halfs[i], packed, i);
+   }
+
+   agx_index channels[4] = {agx_null()};
+   agx_index shift = agx_mov_imm(b, 32, 8);
+   for (unsigned i = 0; i < nr_channels; ++i) {
+      agx_index wide = agx_pad_to_32(b, halfs[i / 2]);
+      if (i & 1)
+         wide = agx_ushr(b, wide, shift);
+
+      agx_index narrow = agx_temp(b->shader, AGX_SIZE_16);
+      agx_subdivide_to(b, narrow, wide, 0);
+      channels[i] = agx_and(b, narrow, agx_immediate(0xff));
+   }
+
+   agx_emit_collect_to(b, dest, nr_channels, channels);
+}
+
 static agx_instr *
 agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
 {
@@ -1171,18 +1201,23 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       return;
    }
 
-   /* Apple's scalar-byte LDDEV writes the low half of an aligned 32-bit GPR.
-    * Model that physical result explicitly, then expose only its low 16 bits
-    * to the size-lowered NIR value. The split coalesces away during RA. */
+   /* A scalar W8 load writes an aligned low half. Multi-component W8 loads
+    * instead return a byte-packed payload, like G17P tile traffic. */
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       fmt == AGX_FORMAT_I8 && instr->def.num_components == 1 &&
-       dest.size == AGX_SIZE_16 && packed_count == 0) {
-      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
-      agx_instr *load = agx_device_load_to(b, packed, addr, offset, fmt, 1,
-                                           shift, nir_is_coherent(instr));
+       fmt == AGX_FORMAT_I8 && dest.size == AGX_SIZE_16 && packed_count == 0) {
+      const unsigned nr = instr->def.num_components;
+      agx_index payload = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *load = agx_device_load_to(b, payload, addr, offset, fmt,
+                                           BITFIELD_MASK(nr), shift,
+                                           nir_is_coherent(instr));
       load->memory_index_is_bytes = index_bytes;
-      agx_subdivide_to(b, dest, packed, 0);
-      agx_emit_cached_split(b, dest, 1);
+
+      if (nr == 1) {
+         agx_subdivide_to(b, dest, payload, 0);
+      } else {
+         load->memory_is_packed = true;
+         agx_unpack_integer_8_memory_agx3(b, dest, payload, nr);
+      }
       return;
    }
 
@@ -1224,6 +1259,23 @@ agx_emit_store(agx_builder *b, nir_intrinsic_instr *instr)
          agx_extract_nir_src(b, instr->src[0], 3));
       fmt = AGX_FORMAT_I32;
       mask = 1;
+   } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+              fmt == AGX_FORMAT_I8 &&
+              nir_src_bit_size(instr->src[0]) == 8 &&
+              nir_src_num_components(instr->src[0]) > 1) {
+      /* Preserve one W8 vector transaction while packing its register payload
+       * two bytes per 16-bit lane. */
+      const unsigned nr = nir_src_num_components(instr->src[0]);
+      agx_index channels[4] = {agx_null()};
+      for (unsigned i = 0; i < nr; ++i)
+         channels[i] = agx_extract_nir_src(b, instr->src[0], i);
+
+      agx_index packed[2] = {agx_null()};
+      const unsigned nr_packed =
+         agx_pack_integer_8_agx3(b, channels, nr, fmt, packed);
+      assert(nr_packed == DIV_ROUND_UP(nr, 2));
+      value = agx_emit_collect(b, nr_packed, packed);
+      mask = BITFIELD_MASK(nr);
    } else {
       value = agx_recollect_vector(b, instr->src[0]);
       mask = BITFIELD_MASK(nir_src_num_components(instr->src[0]));
@@ -1231,6 +1283,9 @@ agx_emit_store(agx_builder *b, nir_intrinsic_instr *instr)
    agx_instr *store = agx_device_store(b, value, addr, offset, fmt, mask,
                                       shift, nir_is_coherent(instr));
    store->memory_index_is_bytes = index_bytes;
+   store->memory_is_packed =
+      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      fmt == AGX_FORMAT_I8 && nir_src_num_components(instr->src[0]) > 1;
 }
 
 /*
@@ -4561,12 +4616,18 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    ctx->break_block = agx_create_block(ctx);
    agx_block *loop_header = agx_create_block(ctx);
 
-   /* If we are emitting a loop inside other control flow, there might be
-    * threads masked off (TODO: divergence analysis), so push_exec them so
-    * we get the lower nesting count values to ourselves.
+   /* AGX3 loops always open two architectural exec-mask levels before their
+    * body. Apple's top-level prodloop witness starts with the same
+    * unconditional CNDST(2) used by nested loops, and the shared footer pops
+    * those two levels. AGX2 needs the push only inside other control flow,
+    * where threads may already be masked off (TODO: divergence analysis).
     */
    agx_builder _b = agx_init_builder(ctx, agx_after_block(ctx->current_block));
-   if (ctx->total_nesting > 1)
+   const bool agx3 = ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   const bool top_level_agx3 = agx3 && ctx->total_nesting == 1;
+   if (top_level_agx3)
+      agx_push_exec(&_b, 0);
+   if (agx3 || ctx->total_nesting > 1)
       agx_push_exec(&_b, 1);
 
    /* Fallthrough to loop header */
@@ -4580,6 +4641,8 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    _b.cursor = agx_after_block(ctx->current_block);
    agx_jmp_exec_any(&_b, start_block);
    agx_pop_exec(&_b, 1);
+   if (top_level_agx3)
+      agx_pop_exec(&_b, 1);
    agx_block_add_successor(ctx->current_block, loop_header);
 
    /* Pop off */
@@ -5435,6 +5498,81 @@ agx3_coalesce_uniform_half_stores(agx_context *ctx)
    return progress;
 }
 
+/* Native G17P fragment programs issue independent LDDEVs sharing a register
+ * base in increasing address order. The row-major UBO path is the minimal
+ * counterexample: NIR presents offsets 16 then 0, both become ready together,
+ * and the resulting descending pair returns intermittent stale data while the
+ * otherwise identical ascending column-major path is stable. Sort only an
+ * adjacent run of non-coherent loads with identical operation and base; SSA
+ * keeps their consumers attached to the correct result and no serialization
+ * is introduced. */
+static bool
+agx3_order_fragment_device_loads(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT)
+      return false;
+
+   bool progress = false;
+   agx_foreach_block(ctx, block) {
+      agx_instr *run[16];
+      unsigned count = 0;
+
+      agx_foreach_instr_in_block(block, I) {
+         const bool candidate =
+            I->op == AGX_OPCODE_DEVICE_LOAD && !I->coherent &&
+            I->nr_dests == 1 && I->nr_srcs == 2 &&
+            I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
+            !I->src[1].neg && !I->src[1].memory;
+         const bool joins =
+            candidate && count > 0 && count < ARRAY_SIZE(run) &&
+            agx_is_equiv(I->src[0], run[0]->src[0]) &&
+            I->format == run[0]->format && I->mask == run[0]->mask &&
+            I->memory_index_is_bytes == run[0]->memory_index_is_bytes;
+
+         /* SPLIT only describes the preceding SSA result and emits no machine
+          * instruction. It may sit between the loads in an otherwise adjacent
+          * hardware run. */
+         if (!candidate && I->op == AGX_OPCODE_SPLIT)
+            continue;
+
+         if (!candidate || (count > 0 && !joins)) {
+            for (unsigned i = 1; i < count; ++i) {
+               for (unsigned j = i; j > 0 &&
+                    ((uint64_t)run[j - 1]->src[1].value << run[j - 1]->shift) >
+                    ((uint64_t)run[j]->src[1].value << run[j]->shift); --j) {
+                  agx_instr *lower = run[j];
+                  list_del(&lower->link);
+                  list_addtail(&lower->link, &run[j - 1]->link);
+                  run[j] = run[j - 1];
+                  run[j - 1] = lower;
+                  progress = true;
+               }
+            }
+            count = 0;
+         }
+
+         if (candidate)
+            run[count++] = I;
+      }
+
+      for (unsigned i = 1; i < count; ++i) {
+         for (unsigned j = i; j > 0 &&
+              ((uint64_t)run[j - 1]->src[1].value << run[j - 1]->shift) >
+              ((uint64_t)run[j]->src[1].value << run[j]->shift); --j) {
+            agx_instr *lower = run[j];
+            list_del(&lower->link);
+            list_addtail(&lower->link, &run[j - 1]->link);
+            run[j] = run[j - 1];
+            run[j - 1] = lower;
+            progress = true;
+         }
+      }
+   }
+
+   return progress;
+}
+
 /* Keep scalar UVS values live until a native-shaped terminal writeout.
  * Run after pressure scheduling but before RA: moving physical-register stores
  * would lose values when later instructions reuse their sources. */
@@ -5894,6 +6032,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
       AGX_PASS(ctx, agx_pressure_schedule);
    }
+
+   AGX_PASS(ctx, agx3_order_fragment_device_loads);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
