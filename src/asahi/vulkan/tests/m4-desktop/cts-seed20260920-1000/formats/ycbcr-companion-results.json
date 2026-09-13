@@ -1,0 +1,59 @@
+[
+  {
+    "index": 0,
+    "case": "dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223205316391Z-packed-ycbcr-companions-000/cts/000/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338726.4227917,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.1082203880000634,
+    "finished_unix": 1789338726.537157,
+    "pid": 17366
+  },
+  {
+    "index": 1,
+    "case": "dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223205316391Z-packed-ycbcr-companions-000/cts/001/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338726.5474918,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.10806815700016159,
+    "finished_unix": 1789338726.6613536,
+    "pid": 17369
+  },
+  {
+    "index": 2,
+    "case": "dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223205316391Z-packed-ycbcr-companions-000/cts/002/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338726.671658,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.10743111700003283,
+    "finished_unix": 1789338726.7841833,
+    "pid": 17371
+  }
+]

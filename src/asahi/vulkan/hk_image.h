@@ -94,9 +94,38 @@ hk_image_base_address(const struct hk_image *image, uint8_t plane)
    return hk_image_plane_base_address(&image->planes[plane]);
 }
 
+/* Packed 4:2:2 contains two luma samples and one pair of chroma samples
+ * per four-component word. The shader reconstructs the full-resolution texels. */
+static inline unsigned
+hk_packed_ycbcr_bits(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_G8B8G8R8_422_UNORM:
+   case VK_FORMAT_B8G8R8G8_422_UNORM: return 8;
+   case VK_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16:
+   case VK_FORMAT_B10X6G10X6R10X6G10X6_422_UNORM_4PACK16: return 10;
+   case VK_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16:
+   case VK_FORMAT_B12X4G12X4R12X4G12X4_422_UNORM_4PACK16: return 12;
+   case VK_FORMAT_G16B16G16R16_422_UNORM:
+   case VK_FORMAT_B16G16R16G16_422_UNORM: return 16;
+   default: return 0;
+   }
+}
+
+static inline bool
+hk_packed_ycbcr_luma_first(VkFormat format)
+{
+   return format == VK_FORMAT_G8B8G8R8_422_UNORM ||
+          format == VK_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16 ||
+          format == VK_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16 ||
+          format == VK_FORMAT_G16B16G16R16_422_UNORM;
+}
+
 static inline enum pipe_format
 hk_format_to_pipe_format(VkFormat vkformat)
 {
+   if (hk_packed_ycbcr_bits(vkformat) > 8)
+      return PIPE_FORMAT_R16G16_R16B16_422_UNORM;
    switch (vkformat) {
    case VK_FORMAT_R10X6_UNORM_PACK16:
    case VK_FORMAT_R12X4_UNORM_PACK16:

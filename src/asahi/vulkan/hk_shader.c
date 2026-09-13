@@ -22,6 +22,7 @@
 #include "agx_nir_lower_vbo.h"
 #include "glsl_types.h"
 #include "hk_instance.h"
+#include "hk_image.h"
 #include "hk_agx3_vdm_decode.h"
 #include "libagx.h"
 #include "nir.h"
@@ -642,13 +643,135 @@ lookup_ycbcr_sampler(const void *_state, uint32_t set, uint32_t binding,
    return sampler && sampler->vk.ycbcr_conversion ? sampler : NULL;
 }
 
+static const struct hk_sampler *
+lookup_packed_ycbcr_sampler(nir_tex_instr *tex, const void *state)
+{
+   int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (handle < 0)
+      return NULL;
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[handle].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned index = 0;
+   if (deref->deref_type == nir_deref_type_array) {
+      if (!nir_src_is_const(deref->arr.index))
+         return NULL;
+      index = nir_src_as_uint(deref->arr.index);
+   }
+   const struct hk_sampler *sampler = lookup_ycbcr_sampler(
+      state, var->data.descriptor_set, var->data.binding, index);
+   return sampler && hk_packed_ycbcr_bits(sampler->ycbcr.format) ? sampler : NULL;
+}
+
+/* API size queries return luma pixels. Run before adding private word queries. */
+static bool
+lower_packed_ycbcr_size(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   if (tex->op != nir_texop_txs || !lookup_packed_ycbcr_sampler(tex, state))
+      return false;
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *size = nir_vector_insert_imm(b, &tex->def,
+      nir_imul_imm(b, nir_channel(b, &tex->def, 0), 2), 0);
+   nir_def_rewrite_uses_after(&tex->def, size);
+   return true;
+}
+
+static nir_def *
+packed_ycbcr_word(nir_builder *b, nir_tex_instr *orig, nir_def *x,
+                  nir_def *y, nir_def *layer, nir_def *word_size)
+{
+   x = nir_imin(b, nir_imax(b, x, nir_imm_int(b, 0)),
+                  nir_iadd_imm(b, nir_channel(b, word_size, 0), -1));
+   nir_def *coord = layer ? nir_vec3(b, x, y, layer) : nir_vec2(b, x, y);
+   nir_tex_instr *fetch = nir_tex_instr_create(b->shader, 3);
+   fetch->op = nir_texop_txf;
+   fetch->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   fetch->is_array = orig->is_array;
+   fetch->dest_type = nir_type_float32;
+   fetch->coord_components = coord->num_components;
+   fetch->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref,
+      orig->src[nir_tex_instr_src_index(orig, nir_tex_src_texture_deref)].src.ssa);
+   fetch->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   fetch->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+   nir_def_init(&fetch->instr, &fetch->def, 4, 32);
+   nir_builder_instr_insert(b, &fetch->instr);
+   return &fetch->def;
+}
+
+/* Reconstruct chroma at one luma centre. The outer explicit pass filters these
+ * reconstructed samples, including separately chosen luma/chroma filters. */
+static bool
+lower_packed_ycbcr_center(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   if (tex->op != nir_texop_txl)
+      return false;
+   const struct hk_sampler *sampler = lookup_packed_ycbcr_sampler(tex, state);
+   if (!sampler)
+      return false;
+   const struct vk_ycbcr_conversion_state *conversion = &sampler->ycbcr;
+   unsigned bits = hk_packed_ycbcr_bits(conversion->format);
+   bool first = hk_packed_ycbcr_luma_first(conversion->format);
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *word_size = nir_get_texture_size(b, tex);
+   nir_def *size = nir_vec2(b, nir_imul_imm(b, nir_channel(b, word_size, 0), 2),
+                             nir_channel(b, word_size, 1));
+   nir_def *coord = tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa;
+   nir_def *ij = nir_f2i32(b, nir_ffloor(b,
+      nir_fmul(b, nir_channels(b, coord, 3), nir_i2f32(b, size))));
+   ij = nir_imin(b, nir_imax(b, ij, nir_imm_int(b, 0)), nir_iadd_imm(b, size, -1));
+   nir_def *i = nir_channel(b, ij, 0), *j = nir_channel(b, ij, 1);
+   nir_def *layer = NULL;
+   if (tex->is_array) {
+      layer = nir_f2i32(b, nir_fround_even(b, nir_channel(b, coord, 2)));
+      layer = nir_imin(b, nir_imax(b, layer, nir_imm_int(b, 0)),
+                         nir_iadd_imm(b, nir_channel(b, word_size, 2), -1));
+   }
+   nir_def *word_x = nir_ishr_imm(b, i, 1);
+   nir_def *word = packed_ycbcr_word(b, tex, word_x, j, layer, word_size);
+   nir_def *y = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, i, 1), 0),
+      nir_channel(b, word, first ? 2 : 3), nir_channel(b, word, first ? 0 : 1));
+   nir_def *chroma = word;
+   if (conversion->chroma_filter == VK_FILTER_LINEAR) {
+      nir_def *x = nir_fmul_imm(b, nir_i2f32(b, i), 0.5);
+      if (conversion->chroma_offsets[0] == VK_CHROMA_LOCATION_MIDPOINT)
+         x = nir_fadd_imm(b, x, -0.25);
+      nir_def *base = nir_f2i32(b, nir_ffloor(b, x));
+      nir_def *a = packed_ycbcr_word(b, tex, base, j, layer, word_size);
+      nir_def *z = packed_ycbcr_word(b, tex, nir_iadd_imm(b, base, 1), j, layer, word_size);
+      chroma = nir_flrp(b, a, z, nir_ffract(b, x));
+      b->shader->info.flrp_lowered = false;
+   }
+   const float scale = bits == 8 ? 1.0f :
+      65535.0f / (((1u << bits) - 1u) << (16 - bits));
+   nir_def *raw[4] = {
+      nir_fmul_imm(b, nir_channel(b, chroma, first ? 3 : 2), scale),
+      nir_fmul_imm(b, y, scale),
+      nir_fmul_imm(b, nir_channel(b, chroma, first ? 1 : 0), scale),
+      nir_imm_float(b, 1),
+   };
+   nir_def *mapped[4];
+   for (unsigned c = 0; c < 4; ++c) {
+      VkComponentSwizzle sw = conversion->mapping[c];
+      mapped[c] = sw == VK_COMPONENT_SWIZZLE_ZERO ? nir_imm_float(b, 0) :
+                  sw == VK_COMPONENT_SWIZZLE_ONE ? nir_imm_float(b, 1) :
+                  raw[sw == VK_COMPONENT_SWIZZLE_IDENTITY ? c : sw - VK_COMPONENT_SWIZZLE_R];
+   }
+   nir_def *result = nir_vec(b, mapped, 4);
+   uint32_t bpcs[4] = {bits, bits, bits, bits};
+   if (conversion->ycbcr_model != VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY)
+      result = nir_convert_ycbcr_to_rgb(b, conversion->ycbcr_model,
+                                      conversion->ycbcr_range, result, bpcs);
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
 static const struct vk_ycbcr_conversion_state *
 lookup_ycbcr_conversion(const void *state, uint32_t set, uint32_t binding,
                         uint32_t array_index)
 {
    const struct hk_sampler *sampler =
       lookup_ycbcr_sampler(state, set, binding, array_index);
-   return sampler ? &sampler->ycbcr : NULL;
+   /* Packed images were reconstructed by the native word-sampling pass. */
+   return sampler && !hk_packed_ycbcr_bits(sampler->ycbcr.format) ? &sampler->ycbcr : NULL;
 }
 
 /* Reconstruct at full-resolution luma texel centres, then filter the converted
@@ -686,6 +809,8 @@ lower_ycbcr_explicit(nir_builder *b, nir_tex_instr *tex, void *state)
    b->cursor = nir_before_instr(&tex->instr);
    nir_def *size =
       nir_u2f32(b, nir_channels(b, nir_get_texture_size(b, tex), 3));
+   if (hk_packed_ycbcr_bits(sampler->ycbcr.format))
+      size = nir_fmul(b, size, nir_imm_vec2(b, 2, 1));
    nir_def *coord =
       tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa;
    nir_def *uv = nir_fmul(b, nir_channels(b, coord, 3), size);
@@ -1120,7 +1245,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       .set_layout_count = set_layout_count,
       .set_layouts = set_layouts,
    };
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_packed_ycbcr_size,
+            nir_metadata_control_flow, (void *)&ycbcr_state);
    NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_explicit,
+            nir_metadata_none, (void *)&ycbcr_state);
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_packed_ycbcr_center,
             nir_metadata_none, (void *)&ycbcr_state);
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);

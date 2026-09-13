@@ -9,6 +9,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_instance.h"
+#include "hk_image.h"
 #include "hk_native_sampler.h"
 #include "hk_physical_device.h"
 
@@ -230,6 +231,8 @@ hk_CreateSampler(VkDevice device,
    sampler->mip_lod_bias = info->mipLodBias;
    if (sampler->vk.ycbcr_conversion) {
       sampler->ycbcr = sampler->vk.ycbcr_conversion->state;
+      if (agx_native_graphics(&dev->dev) && hk_packed_ycbcr_bits(sampler->ycbcr.format))
+         sampler->ycbcr.force_explicit_reconstruction = true;
       /* Explicit nearest chroma maps luma (i,j) to (i/2,j/2), independent
        * of chroma location. Linear reconstruction retains the offset. */
       if (sampler->ycbcr.force_explicit_reconstruction &&
@@ -296,7 +299,10 @@ hk_CreateSampler(VkDevice device,
     * then just copy the last sampler plane out as far as we need to fill the
     * number of image planes.
     */
-   if (sampler->vk.ycbcr_conversion) {
+   /* Packed conversion fetches raw words; chroma filtering runs in the
+    * shader and does not consume a second sampler/descriptor plane. */
+   if (sampler->vk.ycbcr_conversion &&
+       !(agx_native_graphics(&dev->dev) && hk_packed_ycbcr_bits(sampler->ycbcr.format))) {
       assert(!uses_border(info) &&
              "consequence of VUID-VkSamplerCreateInfo-addressModeU-01646");
 
