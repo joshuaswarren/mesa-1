@@ -269,6 +269,37 @@ main(void)
    pipe->set_framebuffer_state(pipe, &framebuffer);
    draw_and_check(pipe, "return to previous batch", &full_z);
 
+   /* Destination-only blending may become a no-op, but any remaining tile
+    * read must use the translucent pass. In particular, sRGB transfer
+    * lowering can retain a load/decode/encode/store even for ZERO,ONE.
+    */
+   blend.rt[0].rgb_src_factor = PIPE_BLENDFACTOR_ZERO;
+   blend.rt[0].rgb_dst_factor = PIPE_BLENDFACTOR_ONE;
+   blend.rt[0].alpha_src_factor = PIPE_BLENDFACTOR_ZERO;
+   blend.rt[0].alpha_dst_factor = PIPE_BLENDFACTOR_ONE;
+   void *preserve_blend = pipe->create_blend_state(pipe, &blend);
+   CHECK(preserve_blend);
+   pipe->bind_blend_state(pipe, preserve_blend);
+   draw_and_check(pipe, "destination-only UNORM", NULL);
+   struct agx_linked_shader *linked = agx_context(pipe)->linked.fs;
+   unsigned pass = linked->fragment_control.opaque[0] >> 29;
+   printf("destination-only UNORM: pass=%u no_op=%u\n", pass, linked->no_op);
+   CHECK(linked->no_op || pass == AGX_PASS_TYPE_TRANSLUCENT);
+
+   texture_template.width0 = texture_template.height0 = 64;
+   texture_template.format = PIPE_FORMAT_R8G8B8A8_SRGB;
+   struct pipe_resource *srgb = screen->resource_create(screen, &texture_template);
+   CHECK(srgb);
+   struct pipe_framebuffer_state srgb_framebuffer = framebuffer;
+   srgb_framebuffer.cbufs[0].texture = srgb;
+   srgb_framebuffer.cbufs[0].format = texture_template.format;
+   pipe->set_framebuffer_state(pipe, &srgb_framebuffer);
+   draw_and_check(pipe, "destination-only sRGB", &full_z);
+   linked = agx_context(pipe)->linked.fs;
+   pass = linked->fragment_control.opaque[0] >> 29;
+   printf("destination-only sRGB: pass=%u no_op=%u\n", pass, linked->no_op);
+   CHECK(linked->no_op || pass == AGX_PASS_TYPE_TRANSLUCENT);
+
    /* The shim rejects any cleanup submission. No GPU result is claimed. */
    pipe->bind_vs_state(pipe, NULL);
    pipe->bind_fs_state(pipe, NULL);
@@ -278,6 +309,7 @@ main(void)
    pipe->delete_vertex_elements_state(pipe, vertex_elements);
    pipe->bind_blend_state(pipe, NULL);
    pipe->delete_blend_state(pipe, blend_state);
+   pipe->delete_blend_state(pipe, preserve_blend);
    pipe->bind_depth_stencil_alpha_state(pipe, NULL);
    pipe->delete_depth_stencil_alpha_state(pipe, zs_state);
    pipe->bind_rasterizer_state(pipe, NULL);
@@ -285,6 +317,7 @@ main(void)
    pipe->delete_rasterizer_state(pipe, scissored);
    pipe->delete_rasterizer_state(pipe, full_depth);
    pipe_resource_reference(&other, NULL);
+   pipe_resource_reference(&srgb, NULL);
    pipe_resource_reference(&texture, NULL);
    pipe_resource_reference(&buffer, NULL);
    pipe->destroy(pipe);
