@@ -28,20 +28,24 @@ count_intrinsic(nir_shader *s, nir_intrinsic_op op)
    return count;
 }
 
-int
-main(void)
+static bool
+test_configuration(enum pipe_advanced_blend_mode op,
+                   enum pipe_blend_overlap_mode overlap,
+                   bool src_premultiplied, bool dst_premultiplied,
+                   enum pipe_format format)
 {
-   const unsigned mode =
-      agx_pack_blend_advanced(PIPE_ADVANCED_BLEND_MULTIPLY,
-                              PIPE_BLEND_OVERLAP_CONJOINT, false, false, false);
-   const struct agx_blend_advanced unpacked =
-      agx_unpack_blend_advanced(mode);
-   if (unpacked.op != PIPE_ADVANCED_BLEND_MULTIPLY ||
-       unpacked.overlap != PIPE_BLEND_OVERLAP_CONJOINT ||
-       unpacked.src_premultiplied || unpacked.dst_premultiplied ||
+   const unsigned mode = agx_pack_blend_advanced(
+      op, overlap, src_premultiplied, dst_premultiplied, false);
+   const struct agx_blend_advanced unpacked = agx_unpack_blend_advanced(mode);
+   if (unpacked.op != op || unpacked.overlap != overlap ||
+       unpacked.src_premultiplied != src_premultiplied ||
+       unpacked.dst_premultiplied != dst_premultiplied ||
        unpacked.clamp_results) {
-      fprintf(stderr, "advanced blend state did not round-trip\n");
-      return 1;
+      fprintf(stderr,
+              "advanced blend state did not round-trip "
+              "(op=%u overlap=%u src_premul=%u dst_premul=%u format=%u)\n",
+              op, overlap, src_premultiplied, dst_premultiplied, format);
+      return false;
    }
 
    struct agx_fs_epilog_key key = {
@@ -53,15 +57,16 @@ main(void)
    };
    memset(key.remap, -1, sizeof(key.remap));
    key.remap[0] = 0;
-   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.rt_formats[0] = format;
    key.blend.rt[0].advanced_blend = true;
    key.blend.rt[0].colormask = 0xf;
    key.blend.rt[0].mode = mode;
 
    nir_builder b =
       nir_builder_init_simple_shader(0, &agx_nir_options,
-                                     "G17P conjoint multiply epilog");
+                                     "G17P advanced blend epilog");
    agx_nir_fs_epilog(&b, &key);
+   nir_validate_shader(b.shader, "advanced blend epilog");
 
    const unsigned loads =
       count_intrinsic(b.shader, nir_intrinsic_load_local_pixel_agx);
@@ -70,10 +75,12 @@ main(void)
    if (loads != 1 || stores != 1 ||
        !b.shader->info.fs.uses_fbfetch_output) {
       fprintf(stderr,
-              "advanced blend did not retain one tile load/store (%u/%u)\n",
-              loads, stores);
+              "advanced blend did not retain one tile load/store (%u/%u) "
+              "(op=%u overlap=%u src_premul=%u dst_premul=%u format=%u)\n",
+              loads, stores, op, overlap, src_premultiplied,
+              dst_premultiplied, format);
       ralloc_free(b.shader);
-      return 1;
+      return false;
    }
 
    agx_preprocess_nir(b.shader);
@@ -107,11 +114,56 @@ main(void)
               tile_load, sizeof(tile_load)) &&
       !memcmp(program + part.info.main_size - sizeof(tail),
               tail, sizeof(tail));
-   const bool ok = compiled && part.binary && protocol;
+   /* Keep the hardware-witnessed byte sequence as an anchor. Other modes
+    * legitimately change register allocation or eliminate the tile load.
+    */
+   const bool exact_protocol = op == PIPE_ADVANCED_BLEND_MULTIPLY &&
+                               overlap == PIPE_BLEND_OVERLAP_CONJOINT &&
+                               !src_premultiplied && !dst_premultiplied &&
+                               format == PIPE_FORMAT_R8G8B8A8_UNORM;
+   const bool ok = compiled && part.binary && (!exact_protocol || protocol);
    if (!ok)
-      fprintf(stderr, "G17P advanced blend epilog/protocol failed\n");
+      fprintf(stderr,
+              "G17P advanced blend epilog/protocol failed "
+              "(op=%u overlap=%u src_premul=%u dst_premul=%u format=%u)\n",
+              op, overlap, src_premultiplied, dst_premultiplied, format);
 
    free(part.binary);
    ralloc_free(b.shader);
-   return ok ? 0 : 1;
+   return ok;
+}
+
+int
+main(void)
+{
+   unsigned tested = 0;
+   static const enum pipe_format formats[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+   };
+
+   for (unsigned f = 0; f < ARRAY_SIZE(formats); ++f) {
+      for (enum pipe_advanced_blend_mode op = PIPE_ADVANCED_BLEND_NONE;
+           op <= PIPE_ADVANCED_BLEND_BLUE; ++op) {
+         for (enum pipe_blend_overlap_mode overlap =
+                 PIPE_BLEND_OVERLAP_UNCORRELATED;
+              overlap <= PIPE_BLEND_OVERLAP_DISJOINT; ++overlap) {
+            for (unsigned premultiplied = 0; premultiplied < 4;
+                 ++premultiplied) {
+               const bool src_premultiplied = premultiplied & BITFIELD_BIT(0);
+               const bool dst_premultiplied = premultiplied & BITFIELD_BIT(1);
+
+               if (!test_configuration(op, overlap, src_premultiplied,
+                                       dst_premultiplied, formats[f]))
+                  return 1;
+
+               tested++;
+            }
+         }
+      }
+   }
+
+   printf("G17P advanced blend: %u operation/state/format epilogs compiled\n",
+          tested);
+   return 0;
 }
