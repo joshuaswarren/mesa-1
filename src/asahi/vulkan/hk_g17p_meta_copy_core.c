@@ -349,7 +349,8 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
 
    if (!copy || !plan || !hk_g17p_uncompressed_upload_format(copy->format) ||
        (copy->image_type != VK_IMAGE_TYPE_1D &&
-        copy->image_type != VK_IMAGE_TYPE_2D) ||
+        copy->image_type != VK_IMAGE_TYPE_2D &&
+        copy->image_type != VK_IMAGE_TYPE_3D) ||
        copy->plane_count != 1 ||
        copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
        !hk_g17p_buffer_to_image_copy_supported(copy))
@@ -369,10 +370,14 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       copy->buffer_row_length ? copy->buffer_row_length : width;
    const uint32_t image_height =
       copy->buffer_image_height ? copy->buffer_image_height : height;
-   const uint32_t slice_count =
-      copy->layer_count == VK_REMAINING_ARRAY_LAYERS
-         ? copy->array_layers - copy->base_array_layer
-         : copy->layer_count;
+   const bool volume = copy->image_type == VK_IMAGE_TYPE_3D;
+   const uint32_t first_slice =
+      volume ? copy->image_offset.z : copy->base_array_layer;
+   const uint32_t slice_count = volume
+      ? copy->copy_extent.depth
+      : (copy->layer_count == VK_REMAINING_ARRAY_LAYERS
+            ? copy->array_layers - copy->base_array_layer
+            : copy->layer_count);
 
    uint64_t row_B, slice_B, span = 0, term;
    if (!hk_u64_mul(row_el, block_B, &row_B) || row_B > UINT32_MAX ||
@@ -391,7 +396,7 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       .base_y_el = copy->image_offset.y,
       .width_el = width,
       .height_el = height,
-      .first_slice = copy->base_array_layer,
+      .first_slice = first_slice,
       .slice_count = slice_count,
       .buffer_row_stride_B = row_B,
       .buffer_slice_stride_B = slice_B,

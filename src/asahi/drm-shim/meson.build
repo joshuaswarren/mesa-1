@@ -479,8 +479,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
   g17p_image_copy_3d_env = environment(g17p_image_copy_3d_environment)
+  # The uncompressed source and destination uploads use raw CDM slices.  Only
+  # the two actual image-copy draws should reach the fragment path.
   g17p_image_copy_3d_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '7')
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '2')
   test(
     'hk_g17p_image_copy_3d',
     g17p_vulkan_image_copy_3d,

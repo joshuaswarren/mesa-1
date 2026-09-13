@@ -533,6 +533,28 @@ main(void)
    one_d_upload.copy_extent.height = 2;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &one_d_upload, 3, 182, &raw_plan));
+
+   struct hk_g17p_buffer_to_image_copy raw_volume_upload = raw_upload;
+   raw_volume_upload.image_type = VK_IMAGE_TYPE_3D;
+   raw_volume_upload.array_layers = 1;
+   raw_volume_upload.base_array_layer = 0;
+   raw_volume_upload.layer_count = 1;
+   raw_volume_upload.image_extent = (VkExtent3D){64, 32, 9};
+   raw_volume_upload.image_offset = (VkOffset3D){7, 5, 2};
+   raw_volume_upload.copy_extent = (VkExtent3D){17, 11, 3};
+   raw_volume_upload.buffer_row_length = 24;
+   raw_volume_upload.buffer_image_height = 16;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_volume_upload, 8, 1033, &raw_plan));
+   CHECK(raw_plan.block_size_B == 1 && raw_plan.base_x_el == 7 &&
+         raw_plan.base_y_el == 5 && raw_plan.width_el == 17 &&
+         raw_plan.height_el == 11 && raw_plan.first_slice == 2 &&
+         raw_plan.slice_count == 3 && raw_plan.buffer_row_stride_B == 24 &&
+         raw_plan.buffer_slice_stride_B == 384 &&
+         raw_plan.buffer_span_B == 1025);
+   raw_volume_upload.copy_extent.depth = 8;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_volume_upload, 8, UINT64_MAX, &raw_plan));
    raw_upload.format = VK_FORMAT_B8G8R8A8_SRGB;
    CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, 32212, &raw_plan));
@@ -565,6 +587,7 @@ main(void)
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 2, 262146, &raw_plan));
    raw_upload.image_type = VK_IMAGE_TYPE_3D;
+   raw_upload.array_layers = 2;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 0, UINT64_MAX, &raw_plan));
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
