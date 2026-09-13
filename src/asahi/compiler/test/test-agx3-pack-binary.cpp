@@ -1132,9 +1132,12 @@ TEST_F(AGX3PackBinary, HalfMultiplyOddSourcesHasExactFmaFallback)
    ASSERT_FALSE(agx3_alu_hmul(AGX_ISA_ENCODING_AGX3B, 6, src, hints,
                               false, UINT16_C(0x5), native, &len));
 
+   /* A multi-slot dependency selects the extended mask endpoint. */
    ASSERT_TRUE(agx3_alu_hfma_addend_minifloat(
       AGX_ISA_ENCODING_AGX3B, 6, src, UINT8_C(0x80), hints, false,
       UINT16_C(0x5), native, &len));
+   ASSERT_EQ(len, 10u);
+   EXPECT_EQ((native[7] >> 5) | ((native[9] >> 5) << 3), UINT16_C(0x5));
 }
 
 TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
@@ -3349,7 +3352,7 @@ TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
    pack(bad, /*expect_ok=*/false);
 }
 
-TEST_F(AGX3PackBinary, G17PHalfFMARetiresLoadBeforeNoWaitForm)
+TEST_F(AGX3PackBinary, G17PHalfFMAWaitsOnProducerDirectly)
 {
    const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -3370,14 +3373,11 @@ TEST_F(AGX3PackBinary, G17PHalfFMARetiresLoadBeforeNoWaitForm)
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
-   append(want, bytes, len);
    const uint16_t src[] = {2, 3, 14};
    const enum agx3_alu_hint hints[] = {
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
    };
-   ASSERT_TRUE(agx3_alu_hfma(enc, 6, src, hints, false, false, false, 0,
+   ASSERT_TRUE(agx3_alu_hfma(enc, 6, src, hints, false, false, false, 1,
                               bytes, &len));
    append(want, bytes, len);
    struct agx3_encoded_end end;
@@ -6883,6 +6883,31 @@ TEST_F(AGX3PackBinary, FloatRelationAndCanonicalElse)
    }
 }
 
+TEST_F(AGX3PackBinary, NegatedHalfZeroCompareCanonicalizes)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index source = agx_register(9, AGX_SIZE_16);
+   source.neg = true;
+   agx_if_fcmp(b, source, agx_immediate(0), 1, AGX_FCOND_EQ, false, NULL);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_CF_MAX_LENGTH];
+   uint8_t len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_cf_fcmp_zero_imm(
+      AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_EQ, false, 0, 9, true, 0,
+      (struct agx3_cf_source_hints){false, false}, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(
+      agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 0, false, 1, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, FirefoxFloatIfMinifloatsMaterializeToGroundedRegisters)
 {
    for (float constant : {1.0f, -10.0f}) {
@@ -9626,6 +9651,29 @@ TEST_F(AGX3PackBinary, NativeIselCarriesDestinationCache)
    EXPECT_EQ(cached, expected);
 }
 
+TEST_F(AGX3PackBinary, NativeHalfComparisonSelectsIntegerImmediate)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(0, AGX_SIZE_16);
+   agx_index c = agx_register(1, AGX_SIZE_16);
+   a.discard = c.discard = true;
+   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_32), a, c,
+                  agx_immediate(2), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   const uint16_t src[] = {0, 1};
+   const bool src_16[] = {true, true};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+   uint8_t expected[AGX3_ALU_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_alu_fcmp_select_imm_width(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, AGX_FCOND_LT,
+      2, 0, false, false, 0, expected, &length));
+   ASSERT_GE(code.size(), length);
+   EXPECT_EQ(memcmp(code.data(), expected, length), 0);
+}
+
 TEST_F(AGX3PackBinary, NativeIselRetainsLiveRegisterComparands)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -10046,7 +10094,7 @@ TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
       agx_stop(b);
       const auto code = pack(b);
       const uint8_t retained[] = {
-         0x0a,0x82,0x25,0x82,0x02,0x84,0x13,0xc0,0x80,0x05,
+         0x02,0x82,0x25,0x82,0x02,0x84,0x13,0xc0,0x80,0x05,
       };
       const uint8_t dead[] = {
          0x02,0x00,0x1d,0x00,0x82,0x02,0x13,0xc0,0x80,0x03,
@@ -10104,7 +10152,7 @@ TEST_F(AGX3PackBinary, HalfSqrtMatchesNativeSequenceAndRefusesModifier)
    EXPECT_TRUE(pack(b, false).empty());
 }
 
-TEST_F(AGX3PackBinary, MixedHalfMultiplyRetainsUncachedHalf)
+TEST_F(AGX3PackBinary, MixedHalfMultiplyCarriesCachedHalf)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index f32 = agx_register(16, AGX_SIZE_32);
@@ -10117,7 +10165,7 @@ TEST_F(AGX3PackBinary, MixedHalfMultiplyRetainsUncachedHalf)
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    ASSERT_TRUE(agx3_alu_fmul_mixed_half(
       AGX_ISA_ENCODING_AGX3B, 15, 16, 13, AGX3_ALU_HINT_DISCARD,
-      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
    std::vector<uint8_t> want;
    append(want, bytes, len);
    struct agx3_encoded_end end;
@@ -10411,8 +10459,8 @@ TEST_F(AGX3PackBinary, MixedWidthLog2MatchesCurrentGtkAndNativeModifiers)
                     sizeof(modified_native)), 0);
 
    /* A full-width destination/source still requires aligned register pairs,
-    * and mixed-width waits outside the witnessed no-wait/slot-6 domain must
-    * remain a low-level refusal. */
+    * and every scalar register remains inside the endpoint's register
+    * bounds. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_log2_to(b, agx_register(3, AGX_SIZE_32),
                agx_register(2, AGX_SIZE_16));
@@ -10444,7 +10492,7 @@ TEST_F(AGX3PackBinary, HalfFloorMatchesNativeAndRefusesModifier)
       const auto code = pack(b);
       const uint8_t native[][10] = {
          {0x2f,0x00,0x54,0x03,0x02,0x06,0xac,0x60,0x02,0x00},
-         {0x2f,0x00,0x54,0x03,0x02,0x06,0x8c,0x60,0x02,0x00},
+         {0x2f,0x00,0x54,0x03,0x02,0x06,0x8e,0x60,0x02,0x00},
       };
       ASSERT_EQ(code.size(), sizeof(native[cached]) + 4);
       EXPECT_EQ(memcmp(code.data(), native[cached], sizeof(native[cached])), 0);

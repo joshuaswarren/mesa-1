@@ -853,6 +853,16 @@ bool agx3_alu_hceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                     uint8_t *len);
 
+/* Native scalar half round-to-nearest-even and truncate. */
+bool agx3_alu_hroundeven(enum agx_isa_encoding enc, uint16_t dest,
+                         uint16_t src, enum agx3_alu_hint hint,
+                         bool dest_cache, uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+bool agx3_alu_htrunc(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len);
+
 /* Native square-root step, multiplied by the input by common Mesa lowering. */
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
@@ -889,6 +899,12 @@ bool agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
                    const uint16_t src[2], const enum agx3_alu_hint hints[2],
                    bool dest_cache, uint16_t wait_mask,
                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+bool agx3_alu_hmul_abs(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2],
+                       const enum agx3_alu_hint hints[2],
+                       const bool src_abs[2], bool dest_cache,
+                       uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native scalar half register multiplied by an 8-bit minifloat. */
 bool agx3_alu_hmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
@@ -921,6 +937,12 @@ bool agx3_alu_hadd_saturate(enum agx_isa_encoding enc, uint16_t dest,
 
 /* Native scalar-half saturate: sat(src + -0.0h). */
 bool agx3_alu_hadd_saturate_negzero(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native -src + -0.0h used by half negate and matrix inverse lowering. */
+bool agx3_alu_hadd_neg_negzero(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
