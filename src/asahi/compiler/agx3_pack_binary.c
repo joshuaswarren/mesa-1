@@ -7748,7 +7748,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          /* Native tied half comparison/selection is scalar fmin/fmax. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FCMPSEL &&
              I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
              (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
              !I->saturate &&
@@ -7763,7 +7764,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                src[i] = I->src[i].value;
                hints[i] = agx3_post_ra_hint(I->src[i]);
             }
-            if (wait != 0 && wait != 32)
+            if (enc == AGX_ISA_ENCODING_AGX3B && wait != 0 && wait != 32)
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             const bool composed = I->fcond == AGX_FCOND_GTN
@@ -9269,7 +9270,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* AGX models a narrowing float conversion as add with exact -0.
           * Keep one native operation, with actual source lifetime and waits. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FADD &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1) {
@@ -9294,7 +9296,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FMUL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
@@ -9398,7 +9401,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * the shape probes/f16_saturate_texture.frag reaches the packer as
           * (clamp(texture(tex, uv) * vcolor, 0.0, 1.0) -> fmul.sat on halves)
           * and it was refused outright before the encoder existed. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HMUL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2]; enum agx3_alu_hint hints[2];
             agx_index dst=I->dest[0];
@@ -9435,7 +9439,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HADD &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && I->saturate &&
              I->src[1].type == AGX_INDEX_IMMEDIATE) {
             const agx_index dst = I->dest[0];
@@ -9458,12 +9463,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HADD &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
-             I->src[1].type == AGX_INDEX_IMMEDIATE) {
+             (I->src[0].type == AGX_INDEX_IMMEDIATE ||
+              I->src[1].type == AGX_INDEX_IMMEDIATE)) {
+            const unsigned immediate = I->src[0].type == AGX_INDEX_IMMEDIATE ? 0 : 1;
             const agx_index dst = I->dest[0];
-            const agx_index src = I->src[0];
-            const agx_index imm = I->src[1];
+            const agx_index src = I->src[1 - immediate];
+            const agx_index imm = I->src[immediate];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!agx3_src_is_register(dst) || dst.memory ||
                 dst.size != AGX_SIZE_16 || agx_channels(dst) != 1 ||
@@ -9483,7 +9491,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* Same for the saturating half add. The saturating half add against
           * an immediate is handled above; this is the register/register one. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HADD &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HADD &&
              I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2];
             enum agx3_alu_hint hints[2];
@@ -9511,7 +9520,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_HFMA &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_HFMA &&
              I->nr_dests == 1 && I->nr_srcs == 3 && !I->saturate) {
             const bool immediate_addend =
                I->src[2].type == AGX_INDEX_IMMEDIATE;

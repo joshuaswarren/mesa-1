@@ -163,6 +163,30 @@ TEST_F(Optimizer, G17PPreservesHalfWidenBeforeFltnorm)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+TEST_F(Optimizer, G17GPreservesEpilogConversions)
+{
+   /* A mediump fragment epilog widens half exports, blends in f32, then
+    * packs normalized color. All three boundaries must keep their widths. */
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   for (agx_builder *b : {actual, expected}) {
+      b->shader->key = &key;
+      agx_index wide = agx_temp(b->shader, AGX_SIZE_32);
+      agx_fmov_to(b, wide, hx);
+      agx_index sum = agx_fadd(b, wide, wy);
+      agx_index narrow = agx_temp(b->shader, AGX_SIZE_16);
+      agx_fmov_to(b, narrow, sum);
+      agx_unit_test(b, narrow);
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
+      agx_fltnorm_agx3_to(b, packed, wide, sum, AGX_FORMAT_U8NORM);
+      agx_unit_test(b, packed);
+   }
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 /*
  * A tied fcmpsel with a GTN or LTN condition is G17P's native minimum or
  * maximum, and Apple's encoding carries the constant operand as one minifloat

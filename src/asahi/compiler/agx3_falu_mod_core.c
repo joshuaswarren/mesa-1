@@ -159,8 +159,10 @@ agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                      bool saturate, const struct agx3_falu_runtime *runtime,
                      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !runtime || !out || !len ||
-       dest >= 256 || src >= 256 || (src & 1) || runtime->wait_mask > 0x3f ||
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || !runtime || !out || !len ||
+       dest >= 256 || src >= 256 || (src & 1) ||
+       (!m5 && runtime->wait_mask > 0x3f) ||
        (runtime->cache[0] && runtime->discard[0]))
       return false;
    const struct agx3_field_kv base[] = {
@@ -171,7 +173,11 @@ agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
       KV(27, runtime->cache[0]), KV(29, runtime->discard[0]), KV(14, saturate),
    };
    unsigned n = 7;
-   for (unsigned i = 0; i < 6; ++i)
+   if (m5) {
+      ov[n++] = (struct agx3_field_kv)KV(50, 3);
+      ov[n++] = (struct agx3_field_kv)KV(51, 48);
+   }
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
       ov[n++] = (struct agx3_field_kv)KV(52 + i,
                                        (runtime->wait_mask >> i) & 1);
    for (unsigned ep = 0; ep <= 3; ++ep) {

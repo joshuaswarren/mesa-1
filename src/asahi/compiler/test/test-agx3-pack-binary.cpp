@@ -3316,11 +3316,27 @@ TEST_F(AGX3PackBinary, G17PHalfSaturateMatchesNative)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, G17PHalfSaturateRefusesUnwitnessedOperands)
+TEST_F(AGX3PackBinary, G17GHalfSaturateMatchesNativeForm)
 {
-   for (unsigned mode = 0; mode < 8; ++mode) {
-      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
-                                         : AGX_ISA_ENCODING_AGX3B);
+   const uint8_t native[] = {0x08, 0x05, 0x14, 0x80, 0x01, 0x02, 0x00, 0x02};
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_instr *I = agx_hadd_to(b, agx_register(1, AGX_SIZE_16),
+                             agx_register(5, AGX_SIZE_16), agx_immediate(0x80));
+   I->saturate = true;
+   agx_stop(b);
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3C, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, HalfSaturateRefusesUnwitnessedOperands)
+{
+   for (unsigned variant = 0; variant < 14; ++variant) {
+      unsigned mode = (variant % 7) + 1;
+      agx_builder *b = builder(variant < 7 ? AGX_ISA_ENCODING_AGX3B
+                                          : AGX_ISA_ENCODING_AGX3C);
       agx_index dst = agx_register(0, AGX_SIZE_16);
       agx_index src = agx_register(0, AGX_SIZE_16);
       agx_index imm = agx_immediate(mode == 1 ? 0x30 : 0x80);
@@ -3362,11 +3378,31 @@ TEST_F(AGX3PackBinary, G17PHalfInverseMatchesNativeForm)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, G17PHalfInverseRefusesUnwitnessedOperands)
+TEST_F(AGX3PackBinary, G17GHalfInverseMatchesNativeForm)
 {
-   for (unsigned mode = 0; mode < 9; ++mode) {
-      agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
-                                         : AGX_ISA_ENCODING_AGX3B);
+   const uint8_t native[] = {0x08, 0xb0, 0x04, 0x05, 0x80, 0x08};
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3C, &end));
+   append(want, end.bytes, end.length);
+   for (bool immediate_first : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      agx_index src = agx_register(5, AGX_SIZE_16);
+      src.neg = true;
+      agx_index imm = agx_immediate(0x30);
+      agx_hadd_to(b, agx_register(1, AGX_SIZE_16),
+                  immediate_first ? imm : src, immediate_first ? src : imm);
+      agx_stop(b);
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
+TEST_F(AGX3PackBinary, HalfInverseRefusesUnwitnessedOperands)
+{
+   for (unsigned variant = 0; variant < 16; ++variant) {
+      unsigned mode = (variant % 8) + 1;
+      agx_builder *b = builder(variant < 8 ? AGX_ISA_ENCODING_AGX3B
+                                          : AGX_ISA_ENCODING_AGX3C);
       agx_index dst = agx_register(1, AGX_SIZE_16);
       agx_index src = agx_register(0, AGX_SIZE_16);
       agx_index imm = agx_immediate(mode == 1 ? 0x80 : 0x30);
@@ -9635,6 +9671,28 @@ TEST_F(AGX3PackBinary, ModifiedFaddWaitAndLifetimeStayFused)
    const uint8_t native[6] = {0x29,0x81,0x14,0x03,0,0xc8};
    ASSERT_GE(code.size(), 10u);
    EXPECT_EQ(memcmp(code.data()+code.size()-10, native, 6), 0);
+}
+
+TEST_F(AGX3PackBinary, M5NarrowMultiplyMatchesNativeHalf4)
+{
+   for (unsigned component = 1; component < 4; ++component) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      agx_index x = agx_register(2 * component, AGX_SIZE_32);
+      agx_index y = agx_register(8 + 2 * component, AGX_SIZE_32);
+      x.discard = y.discard = true;
+      agx_fmul_to(b, agx_register(component, AGX_SIZE_16), x, y);
+      agx_stop(b);
+      const auto code = pack(b);
+      /* Actual G17G metal-nt half4(float4 * float4), including odd halves. */
+      const uint8_t native[][6] = {
+         {0x01,0x03,0x1d,0x0b,0x04,0x00},
+         {0x11,0x05,0x19,0x0d},
+         {0x11,0x07,0x1d,0x0f,0x04,0x00},
+      };
+      const unsigned length = component == 2 ? 4 : 6;
+      ASSERT_EQ(code.size(), length + 4);
+      EXPECT_EQ(memcmp(code.data(), native[component - 1], length), 0);
+   }
 }
 
 TEST_F(AGX3PackBinary, NarrowFaddKeepsOddHalfAndLiveInput)

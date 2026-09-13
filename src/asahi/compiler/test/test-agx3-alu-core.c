@@ -2085,6 +2085,30 @@ static void test_native_narrow_multiply(void)
                               false,0,bytes,&len));
    exact(bytes,len,"01051d070400");
    puts("Native narrow multiply: three Apple live/dead/odd-half vectors PASS");
+
+   /* Independently compiled with metal-nt -arch applegpu_g17g, Metal 26.0,
+    * -fno-fast-math: half4(input[i] * scale[i]). Compact instructions at
+    * text+0x68/0x6e/0x72; the first component uses the slot-8 long form. */
+   const struct {
+      uint16_t dest, src[2], wait;
+      const char *bytes;
+   } m5[] = {
+      {1,{2,10},0,"01031d0b0400"},
+      {2,{4,12},0,"1105190d"},
+      {3,{6,14},0,"11071d0f0400"},
+      {0,{0,8},128,"290005182280a0021c0220000010"},
+   };
+   for (unsigned i=0;i<sizeof(m5)/sizeof(m5[0]);i++) {
+      assert(agx3_alu_fmul_narrow(AGX_ISA_ENCODING_AGX3C,m5[i].dest,
+                                  m5[i].src,odd_hints,false,m5[i].wait,
+                                  bytes,&len));
+      exact(bytes,len,m5[i].bytes);
+   }
+   assert(!agx3_alu_fmul_narrow(AGX_ISA_ENCODING_AGX3C,256,src,odd_hints,
+                                 false,0,bytes,&len));
+   assert(!agx3_alu_fmul_narrow(AGX_ISA_ENCODING_AGX3C,0,src,odd_hints,
+                                 false,256,bytes,&len));
+   puts("M5 narrow multiply: four native half4 vectors and bounds PASS");
 }
 
 static void test_native_half_multiply(void)
@@ -2209,9 +2233,9 @@ static void test_native_half_saturating_arithmetic(void)
                            bytes, &len));
       exact(bytes, len, "10031c0200c0");
 
-      /* Fail closed off G17P and on an out-of-range wait. */
+      /* Reject dependency slots outside each generation's scoreboard. */
       assert(!agx3_alu_hmul_saturate(AGX_ISA_ENCODING_AGX3C, 2, src, hints,
-                                     false, 32, bytes, &len));
+                                     false, 0x100, bytes, &len));
       assert(!agx3_alu_hadd_saturate(AGX_ISA_ENCODING_AGX3B, 2, src, hints,
                                      false, 0x40, bytes, &len));
    }
@@ -2844,7 +2868,7 @@ static void test_native_half_add(void)
       AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-   assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3C, 0, src, hints, false, 0,
+   assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3C, 0, src, hints, false, 0x100,
                          bytes, &len));
    assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 256, src, hints, false, 0,
                          bytes, &len));
@@ -2872,9 +2896,30 @@ static void test_native_half_saturate(void)
       exact(bytes, len, witnesses[i].bytes);
    }
 
+   /* Original applegpu_g17g half4 saturate bytes: dead and live inputs. */
+   static const struct {
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } m5[] = {
+      {0, 0, 128, AGX3_ALU_HINT_DISCARD, "280004022220a0028416"},
+      {1, 1, 0, AGX3_ALU_HINT_DISCARD, "08011c8001020002"},
+      {2, 2, 0, AGX3_ALU_HINT_DISCARD, "10021c8001020002"},
+      {3, 3, 0, AGX3_ALU_HINT_DISCARD, "18031c8001020002"},
+      {0, 4, 128, AGX3_ALU_HINT_NONE, "2800040a2220a0028016"},
+      {1, 5, 0, AGX3_ALU_HINT_NONE, "0805148001020002"},
+      {2, 6, 0, AGX3_ALU_HINT_NONE, "1006148001020002"},
+      {3, 7, 0, AGX3_ALU_HINT_NONE, "1807148001020002"},
+   };
+   for (unsigned i = 0; i < sizeof(m5) / sizeof(m5[0]); ++i) {
+      assert(agx3_alu_hadd_saturate_negzero(
+         AGX_ISA_ENCODING_AGX3C, m5[i].dest, m5[i].src, m5[i].hint,
+         false, m5[i].wait, bytes, &len));
+      exact(bytes, len, m5[i].bytes);
+   }
    assert(!agx3_alu_hadd_saturate_negzero(
-      AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE, false, 0, bytes,
-      &len));
+      AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE, false, 0x100,
+      bytes, &len));
    assert(!agx3_alu_hadd_saturate_negzero(
       AGX_ISA_ENCODING_AGX3B, 256, 0, AGX3_ALU_HINT_NONE, false, 0, bytes,
       &len));
@@ -2884,7 +2929,7 @@ static void test_native_half_saturate(void)
    assert(!agx3_alu_hadd_saturate_negzero(
       AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE, false, 0x40, bytes,
       &len));
-   puts("Native half saturate: four exact Apple vectors and bounds PASS");
+   puts("Native half saturate: twelve exact Apple vectors and bounds PASS");
 }
 
 static void test_native_half_inverse(void)
@@ -2908,8 +2953,29 @@ static void test_native_half_inverse(void)
       exact(bytes, len, witnesses[i].bytes);
    }
 
+   /* Original applegpu_g17g 1.0h - half4 bytes, dead and live inputs. */
+   static const struct {
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } m5[] = {
+      {0, 0, 128, AGX3_ALU_HINT_DISCARD, "280024622620a8020008"},
+      {1, 1, 0, AGX3_ALU_HINT_DISCARD, "08b014018008"},
+      {2, 2, 0, AGX3_ALU_HINT_DISCARD, "10b014028008"},
+      {3, 3, 0, AGX3_ALU_HINT_DISCARD, "18b014038008"},
+      {0, 4, 128, AGX3_ALU_HINT_NONE, "280024622620a8020200"},
+      {1, 5, 0, AGX3_ALU_HINT_NONE, "08b004058008"},
+      {2, 6, 0, AGX3_ALU_HINT_NONE, "10b004068008"},
+      {3, 7, 0, AGX3_ALU_HINT_NONE, "18b004078008"},
+   };
+   for (unsigned i = 0; i < sizeof(m5) / sizeof(m5[0]); ++i) {
+      assert(agx3_alu_hadd_one_neg(
+         AGX_ISA_ENCODING_AGX3C, m5[i].dest, m5[i].src, m5[i].hint,
+         false, m5[i].wait, bytes, &len));
+      exact(bytes, len, m5[i].bytes);
+   }
    assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3C, 0, 0,
-                                  AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+                                  AGX3_ALU_HINT_NONE, false, 0x100, bytes, &len));
    assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                   AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 0, 256,
@@ -2917,7 +2983,7 @@ static void test_native_half_inverse(void)
    assert(!agx3_alu_hadd_one_neg(AGX_ISA_ENCODING_AGX3B, 0, 0,
                                   AGX3_ALU_HINT_NONE, false, 0x40, bytes,
                                   &len));
-   puts("Native half inverse: five exact Apple vectors and bounds PASS");
+   puts("Native half inverse: thirteen exact Apple vectors and bounds PASS");
 }
 
 static void test_native_half_fma(void)
@@ -2953,13 +3019,101 @@ static void test_native_half_fma(void)
                         true, false, true, 0, bytes, &len));
    exact(bytes, len, "08832682018400c8");
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3C, 0, dead_src, dead_hints,
-                         false, false, false, 0, bytes, &len));
+                         false, false, false, 0x100, bytes, &len));
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 256, dead_src, dead_hints,
                          false, false, false, 0, bytes, &len));
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
                          false, false, false, 0x40, bytes, &len));
    puts("Native half FMA/FMS: six complete Apple modifier/lifetime vectors "
         "and refusals PASS");
+}
+
+static void test_m5_native_half_arithmetic(void)
+{
+   /* Original applegpu_g17g half4 arithmetic. Long forms wait on slot 8;
+    * short forms exercise odd registers and both live/dead source lifetimes. */
+   static const struct {
+      bool add, saturate;
+      uint16_t dest, src[2], wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } vectors[] = {
+      {false, false, 0, {0, 4}, 128, AGX3_ALU_HINT_DISCARD, "280005022220a4020401"},
+      {false, false, 1, {1, 5}, 0, AGX3_ALU_HINT_DISCARD, "08011905"},
+      {false, false, 2, {2, 6}, 0, AGX3_ALU_HINT_DISCARD, "10021906"},
+      {false, false, 3, {3, 7}, 0, AGX3_ALU_HINT_DISCARD, "18031907"},
+      {false, false, 8, {4, 0}, 128, AGX3_ALU_HINT_NONE, "2800050a2220a0120000"},
+      {false, false, 9, {5, 1}, 0, AGX3_ALU_HINT_NONE, "48050101"},
+      {false, false, 10, {6, 2}, 0, AGX3_ALU_HINT_NONE, "50060102"},
+      {false, false, 11, {7, 3}, 0, AGX3_ALU_HINT_NONE, "58070103"},
+      {true, false, 0, {0, 4}, 128, AGX3_ALU_HINT_DISCARD, "280004022220a0020608"},
+      {true, false, 1, {1, 5}, 0, AGX3_ALU_HINT_DISCARD, "08011805"},
+      {true, false, 2, {2, 6}, 0, AGX3_ALU_HINT_DISCARD, "10021806"},
+      {true, false, 3, {3, 7}, 0, AGX3_ALU_HINT_DISCARD, "18031807"},
+      {false, true, 0, {0, 4}, 128, AGX3_ALU_HINT_DISCARD, "280005022220a4020601"},
+      {false, true, 1, {1, 5}, 0, AGX3_ALU_HINT_DISCARD, "08011d0501000002"},
+      {false, true, 2, {2, 6}, 0, AGX3_ALU_HINT_DISCARD, "10021d0601000002"},
+      {false, true, 3, {3, 7}, 0, AGX3_ALU_HINT_DISCARD, "18031d0701000002"},
+      {true, true, 0, {0, 4}, 128, AGX3_ALU_HINT_DISCARD, "280004022220a0020618"},
+      {true, true, 1, {1, 5}, 0, AGX3_ALU_HINT_DISCARD, "08011c0501000002"},
+      {true, true, 2, {2, 6}, 0, AGX3_ALU_HINT_DISCARD, "10021c0601000002"},
+      {true, true, 3, {3, 7}, 0, AGX3_ALU_HINT_DISCARD, "18031c0701000002"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      const enum agx3_alu_hint hints[] = {vectors[i].hint, vectors[i].hint};
+      bool (*encode)(enum agx_isa_encoding, uint16_t, const uint16_t *,
+                     const enum agx3_alu_hint *, bool, uint16_t, uint8_t *, uint8_t *) =
+         vectors[i].add ? (vectors[i].saturate ? agx3_alu_hadd_saturate : agx3_alu_hadd)
+                        : (vectors[i].saturate ? agx3_alu_hmul_saturate : agx3_alu_hmul);
+      assert(encode(AGX_ISA_ENCODING_AGX3C, vectors[i].dest, vectors[i].src,
+                    hints, false, vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+   const char *fma[] = {"280006022320a4020c018000", "08011e058009",
+                        "10021e06800a", "18031e07800b"};
+   for (unsigned i = 0; i < 4; ++i) {
+      const uint16_t src[] = {i, i + 4, i + 8};
+      const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_DISCARD,
+                                         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+      assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3C, i, src, hints,
+                           false, false, false, i ? 0 : 128, bytes, &len));
+      exact(bytes, len, fma[i]);
+   }
+   puts("M5 half arithmetic: twenty-four original Apple instructions PASS");
+}
+
+static void test_m5_native_half_minmax(void)
+{
+   static const struct {
+      bool maximum, live;
+      uint16_t dest, x, y, wait;
+      const char *bytes;
+   } vectors[] = {
+      {false, false, 0, 0, 4, 128, "2200450a2300a0020c81a06000028000"},
+      {false, false, 1, 1, 5, 0, "0a001c041900"},
+      {false, false, 2, 2, 6, 0, "12021c060100"},
+      {false, false, 3, 3, 7, 0, "1a021c061900"},
+      {true, false, 0, 0, 4, 128, "2200050a2300a0020c81a06400028000"},
+      {true, false, 1, 1, 5, 0, "0a001c041800"},
+      {true, false, 2, 2, 6, 0, "12021c060000"},
+      {true, false, 3, 3, 7, 0, "1a021c061800"},
+      {false, true, 8, 4, 0, 128, "2200452a2300a0120a80004000008000"},
+      {false, true, 9, 5, 1, 0, "4a0404001900"},
+      {false, true, 10, 6, 2, 0, "520604020100"},
+      {false, true, 11, 7, 3, 0, "5a0604021900"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      const uint16_t src[] = {vectors[i].x, vectors[i].y, vectors[i].x, vectors[i].y};
+      enum agx3_alu_hint hint = vectors[i].live ? AGX3_ALU_HINT_NONE : AGX3_ALU_HINT_DISCARD;
+      const enum agx3_alu_hint hints[] = {hint, hint, hint, hint};
+      assert((vectors[i].maximum ? agx3_alu_fmax_half : agx3_alu_fmin_half)(
+         AGX_ISA_ENCODING_AGX3C, vectors[i].dest, src, hints, false,
+         vectors[i].wait, bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+   puts("M5 half min/max: twelve original Apple instructions PASS");
 }
 
 static void test_native_half_fma_minifloat_addend(void)
@@ -3608,7 +3762,7 @@ static void test_native_half_max(void)
                             false,32,bytes,&len));
    exact(bytes,len,"12021c0210c0");
    assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3C,0,src,cached,
-                             true,32,bytes,&len));
+                             true,0x100,bytes,&len));
    assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,256,src,cached,
                              true,32,bytes,&len));
    puts("Native half maximum: exact internal-clamp/dead Apple FSEL vectors and fail-closed bounds PASS");
@@ -5009,6 +5163,8 @@ int main(void){
    test_native_fadd_mixed_half();
    test_native_fadd_abs_mixed_half();
    test_native_half_fma();
+   test_m5_native_half_arithmetic();
+   test_m5_native_half_minmax();
    test_native_half_fma_minifloat_addend();
    test_native_narrow_multiply();
    test_native_sqrt_step();

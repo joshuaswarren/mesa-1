@@ -50,6 +50,35 @@ narrow_runtime_vectors(void)
    rt.discard[0]=true;
    fail += agx3_falu_narrow_f32(AGX_ISA_ENCODING_AGX3B,0,2,false,&rt,bytes,&length);
    printf("native f32-to-f16: odd/even halves, live/dead input, saturate, waits: %u failures\n",fail);
+
+   /* metal-nt applegpu_g17g, -fno-fast-math: half4(float4), and
+    * half4(saturate(float4)). The first lane consumes load dependency 8. */
+   const struct {
+      uint16_t dest, src;
+      bool saturate;
+      uint8_t wait, size, bytes[12];
+   } m5[] = {
+      {0,0,false,128,12,{0x29,0x00,0x04,0x08,0x22,0x30,0xa0,0x02,0x84,0x06,0x42,0x00}},
+      {1,2,false,0,6,{0x01,0x03,0x1c,0x81,0x04,0x02}},
+      {2,4,false,0,6,{0x11,0x05,0x1c,0x81,0x00,0x02}},
+      {3,6,false,0,6,{0x11,0x07,0x1c,0x81,0x04,0x02}},
+      {0,0,true,128,12,{0x29,0x00,0x04,0x08,0x22,0x30,0xa0,0x02,0x84,0x16,0x42,0x00}},
+      {1,2,true,0,8,{0x01,0x03,0x1c,0x81,0x05,0x02,0x00,0x02}},
+   };
+   for (unsigned i=0;i<sizeof(m5)/sizeof(m5[0]);i++) {
+      struct agx3_falu_runtime runtime = {
+         .discard={true}, .wait_mask=m5[i].wait,
+      };
+      if (!agx3_falu_narrow_f32(AGX_ISA_ENCODING_AGX3C,m5[i].dest,
+             m5[i].src,m5[i].saturate,&runtime,bytes,&length) ||
+          length != m5[i].size || memcmp(bytes,m5[i].bytes,length)) {
+         fprintf(stderr,"M5 native narrowing vector %u failed\n",i);
+         for (unsigned j=0;j<length;j++) fprintf(stderr,"%02x",bytes[j]);
+         fprintf(stderr,"\n");
+         fail++;
+      }
+   }
+   printf("M5 native f32-to-f16: six Apple half/saturate/slot-8 vectors: %u failures\n",fail);
    return fail;
 }
 

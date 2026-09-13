@@ -844,7 +844,8 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       if (channels[i].size == AGX_SIZE_32) {
          pack_sources[i] = channels[i];
       } else if (norm8 &&
-                 b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                 (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+                  b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
                  channels[i].size == AGX_SIZE_16) {
          pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
          agx_fmov_to(b, pack_sources[i], channels[i]);
