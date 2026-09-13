@@ -5664,6 +5664,12 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    NIR_PASS(_, nir, nir_opt_algebraic_late);
    NIR_PASS(_, nir, agx_nir_lower_fminmax);
 
+   /* The AGX3 byte-address backend cannot encode 64-bit shifted adds.
+    * Lower remaining multiplies before fusion turns x * 3 into one; the
+    * normal late multiply pass cannot recognize fused backend opcodes. */
+   if (byte_indices)
+      NIR_PASS(_, nir, agx_nir_lower_imul64);
+
    /* Fuse add/sub/multiplies/shifts after running opt_algebraic_late to fuse
     * isub but before shifts are lowered.
     */
