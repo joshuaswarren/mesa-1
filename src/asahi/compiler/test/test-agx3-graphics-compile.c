@@ -2121,7 +2121,7 @@ test_g17p_storage_read_zero_lod_compile(void)
       NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
                lower_test_descriptor_set, nir_metadata_control_flow, NULL);
       agx_preprocess_nir(b.shader);
-      const struct agx_shader_key key = {
+      struct agx_shader_key key = {
          .dev.encoding = AGX_ISA_ENCODING_AGX3B,
          .no_preamble = true,
          .promote_constants = true,
