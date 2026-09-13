@@ -2718,28 +2718,40 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
    return agx_fcmpsel_to(b, dst, s0, s1, s0, s1, fcond);
 }
 
-static void
+void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+   const bool g17g = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g17g)
       return;
 
    agx_foreach_instr_global_safe(ctx, I) {
       if (I->op != AGX_OPCODE_FFMA || I->nr_srcs != 3 || I->saturate)
          continue;
 
+      if (g17g && I->dest[0].size != AGX_SIZE_32)
+         continue;
+
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       agx_foreach_src(I, s) {
          if (I->src[s].size != AGX_SIZE_16 ||
              I->src[s].type == AGX_INDEX_IMMEDIATE ||
-             I->src[s].type == AGX_INDEX_NULL || I->src[s].abs ||
-             I->src[s].neg)
+             I->src[s].type == AGX_INDEX_NULL ||
+             (!g17g && (I->src[s].abs || I->src[s].neg)))
             continue;
 
          agx_index widened = agx_temp(ctx, AGX_SIZE_32);
          agx_fmov_to(&b, widened, I->src[s]);
          I->src[s] = widened;
       }
+
+      /* G17G's native half widening is exact, including source modifiers.
+       * Widen before the full-register FMA to preserve its single rounding;
+       * do not split the fused operation into multiply and add. The modifier
+       * workarounds below describe separate G17P instruction forms.
+       */
+      if (g17g)
+         continue;
 
       /* Zink's fragment shaders combine a minifloat multiplier with an
        * absolute addend. The immediate FMA form has no grounded addend-abs

@@ -8981,6 +8981,48 @@ TEST_F(AGX3PackBinary, G17GUniformHalfReadUsesAlignedWordAndCorrectHalf)
    }
 }
 
+TEST_F(AGX3PackBinary, G17GMixedFMAKeepsFusedOperationThroughPacking)
+{
+   for (unsigned half_mask = 1; half_mask < 8; ++half_mask) {
+      for (unsigned modifiers = 0; modifiers < 4; ++modifiers) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+         b->shader->stage = MESA_SHADER_VERTEX;
+         b->shader->nir = rzalloc(mem_ctx, nir_shader);
+         b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+         agx_index src[3];
+         for (unsigned s = 0; s < 3; ++s) {
+            const bool half = half_mask & BITFIELD_BIT(s);
+            src[s] = agx_uniform(4 * s, half ? AGX_SIZE_16 : AGX_SIZE_32);
+            if (half) {
+               src[s].abs = modifiers & 1;
+               src[s].neg = modifiers & 2;
+            }
+         }
+         agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+         agx_instr *fma = agx_ffma_to(b, result, src[0], src[1], src[2]);
+         agx_st_vary(b, agx_immediate(0), result);
+         agx_stop(b);
+
+         agx_lower_agx3_fma_sources(b->shader);
+         for (unsigned s = 0; s < 3; ++s)
+            EXPECT_EQ(fma->src[s].size, AGX_SIZE_32);
+         agx_lower_uniform_sources(b->shader);
+         agx_dce(b->shader, true);
+         agx_ra(b->shader);
+         agx_lower_pseudo(b->shader);
+
+         unsigned fused = 0, multiplied = 0;
+         agx_foreach_instr_global(b->shader, I) {
+            fused += I->op == AGX_OPCODE_FFMA;
+            multiplied += I->op == AGX_OPCODE_FMUL;
+         }
+         EXPECT_EQ(fused, 1u);
+         EXPECT_EQ(multiplied, 0u);
+         EXPECT_FALSE(pack(b).empty()) << half_mask << "/" << modifiers;
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
