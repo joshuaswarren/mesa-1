@@ -6,6 +6,7 @@
 #include "hk_g17p_meta_copy_core.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #define CHECK(c)                                                              \
    do {                                                                       \
@@ -15,9 +16,193 @@
       }                                                                       \
    } while (0)
 
+static uint8_t
+mip_source_byte(uint32_t x, uint32_t y, uint32_t channel)
+{
+   uint32_t v = x * 0x9e3779b1u ^ y * 0x85ebca6bu ^
+                channel * 0xc2b2ae35u ^ 0x6d2b79f5u;
+   v ^= v >> 16;
+   v *= 0x7feb352du;
+   v ^= v >> 15;
+   return v >> 24;
+}
+
+static uint64_t
+mip_oracle_hash(uint32_t src_width, uint32_t src_height,
+                uint32_t dst_width, uint32_t dst_height)
+{
+   uint32_t *axis = malloc((dst_width + dst_height) * sizeof(*axis));
+   if (!axis || !hk_g17p_build_mip_axis(src_width, dst_width, axis) ||
+       !hk_g17p_build_mip_axis(src_height, dst_height, axis + dst_width)) {
+      free(axis);
+      return 0;
+   }
+
+   uint64_t hash = UINT64_C(14695981039346656037);
+   for (uint32_t y = 0; y < dst_height; ++y) {
+      const uint32_t ye = axis[dst_width + y];
+      const uint32_t y0 = ye & 0xffffu;
+      const uint8_t wy = (ye >> 16) & 0xffu;
+      const uint32_t y1 = y0 + (wy != 0);
+
+      for (uint32_t x = 0; x < dst_width; ++x) {
+         const uint32_t xe = axis[x];
+         const uint32_t x0 = xe & 0xffffu;
+         const uint8_t wx = (xe >> 16) & 0xffu;
+         const uint32_t x1 = x0 + (wx != 0);
+
+         for (uint32_t channel = 0; channel < 4; ++channel) {
+            const uint8_t out = hk_g17p_filter_unorm8(
+               mip_source_byte(x0, y0, channel),
+               mip_source_byte(x1, y0, channel),
+               mip_source_byte(x0, y1, channel),
+               mip_source_byte(x1, y1, channel), wx, wy);
+            hash ^= out;
+            hash *= UINT64_C(1099511628211);
+         }
+      }
+   }
+
+   free(axis);
+   return hash;
+}
+
+static uint32_t
+tile_space_bits(uint32_t x)
+{
+   uint32_t accum = 0;
+   for (uint32_t i = 0; i < 14; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
+static uint32_t
+tile_space_bits_7(uint32_t x)
+{
+   uint32_t accum = 0;
+   for (uint32_t i = 0; i < 7; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
+static uint32_t
+tile_offset_division(uint32_t x, uint32_t y, uint32_t stride_el,
+                     uint32_t tile_width_el, uint32_t tile_height_el,
+                     uint32_t block_size_B)
+{
+   const uint32_t tiles_per_row =
+      (stride_el + tile_width_el - 1) / tile_width_el;
+   const uint32_t tile_idx = (y / tile_height_el) * tiles_per_row +
+                             (x / tile_width_el);
+   const uint32_t morton = tile_space_bits(x & (tile_width_el - 1)) |
+                           (tile_space_bits(y & (tile_height_el - 1)) << 1);
+   return (tile_idx * tile_width_el * tile_height_el + morton) *
+          block_size_B;
+}
+
+static uint32_t
+tile_offset_shifted(uint32_t x, uint32_t y,
+                    const struct hk_g17p_tile_address_config *config,
+                    uint32_t block_size_B)
+{
+   const uint32_t tile_width_el = 1u << config->tile_width_log2;
+   const uint32_t tile_height_el = 1u << config->tile_height_log2;
+   const uint32_t tile_idx =
+      (y >> config->tile_height_log2) * config->tiles_per_row +
+      (x >> config->tile_width_log2);
+   const uint32_t morton = tile_space_bits_7(x & (tile_width_el - 1)) |
+                           (tile_space_bits_7(y & (tile_height_el - 1)) << 1);
+   return (tile_idx << (config->tile_width_log2 +
+                        config->tile_height_log2)) *
+             block_size_B +
+          morton * block_size_B;
+}
+
 int
 main(void)
 {
+   struct hk_g17p_tile_address_config tile_config;
+   CHECK(!hk_g17p_tile_address_config_init(0, 64, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 0, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 48, 64, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 256, 128, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 256, 1, &tile_config));
+   CHECK(!hk_g17p_tile_address_config_init(64, 64, 64, NULL));
+
+   static const struct {
+      uint32_t block_size_B;
+      uint32_t width_el;
+      uint32_t height_el;
+   } tile_shapes[] = {
+      {1, 128, 128}, {2, 128, 64}, {4, 64, 64}, {8, 64, 32},
+      {16, 32, 32},  {32, 32, 16}, {64, 16, 16}, {128, 16, 8},
+      {256, 8, 8},
+   };
+   uint64_t tile_cases = 0;
+   for (unsigned i = 0; i < sizeof(tile_shapes) / sizeof(tile_shapes[0]); ++i) {
+      const uint32_t w = tile_shapes[i].width_el;
+      const uint32_t h = tile_shapes[i].height_el;
+      const uint32_t strides[] = {1, w - 1, w, w + 1, 2 * w + 3};
+      for (unsigned s = 0; s < sizeof(strides) / sizeof(strides[0]); ++s) {
+         CHECK(hk_g17p_tile_address_config_init(strides[s], w, h,
+                                                 &tile_config));
+         for (uint32_t y = 0; y < 2 * h + 3; ++y) {
+            for (uint32_t x = 0; x < 2 * w + 3; ++x) {
+               CHECK(tile_offset_shifted(x, y, &tile_config,
+                                         tile_shapes[i].block_size_B) ==
+                     tile_offset_division(x, y, strides[s], w, h,
+                                          tile_shapes[i].block_size_B));
+               ++tile_cases;
+            }
+         }
+      }
+   }
+
+   uint32_t axis[303];
+   CHECK(!hk_g17p_build_mip_axis(0, 1, axis));
+   CHECK(!hk_g17p_build_mip_axis(3, 2, axis));
+   CHECK(!hk_g17p_build_mip_axis(65537, 32768, axis));
+   CHECK(!hk_g17p_build_mip_axis(3, 1, NULL));
+   CHECK(hk_g17p_build_mip_axis(165, 82, axis));
+   CHECK(axis[0] == 0x00820000u);
+   CHECK(axis[20] == 0x00c00028u);
+   CHECK(axis[43] == 0x00080057u);
+   CHECK(hk_g17p_build_mip_axis(251, 125, axis));
+   /* Division would produce weight 106 here. vk_meta's pushed reciprocal and
+    * fragment FFMA produce 107, which is the graphics path being replaced. */
+   CHECK(axis[114] == 0x006b00e5u);
+   CHECK(hk_g17p_build_mip_axis(607, 303, axis));
+   CHECK(axis[122] == 0x00e800f4u);
+   CHECK(axis[180] == 0x00190169u);
+   CHECK(axis[302] == 0x0080025du);
+
+   CHECK(hk_g17p_filter_unorm8(0, 0, 0, 2, 128, 128) == 1);
+   CHECK(hk_g17p_filter_unorm8(126, 126, 126, 128, 128, 128) == 127);
+   CHECK(hk_g17p_filter_unorm8(127, 127, 127, 129, 128, 128) == 128);
+   CHECK(hk_g17p_filter_unorm8(128, 128, 128, 130, 128, 128) == 128);
+   CHECK(hk_g17p_filter_unorm8(254, 254, 255, 255, 128, 128) == 254);
+
+   /* These hashes were captured on Apple M5 Pro from both a native Metal
+    * linear sample into RGBA8 storage and a colour-attachment render. The two
+    * paths were byte-identical. The focused G17P Vulkan hardware oracle must
+    * agree before this path is enabled in a deployed build. */
+   static const struct {
+      uint32_t sw, sh, dw, dh;
+      uint64_t hash;
+   } mip_oracles[] = {
+      {64, 64, 32, 32, UINT64_C(0x757b41d55f5fefc5)},
+      {165, 165, 82, 82, UINT64_C(0x7d11df552c632a11)},
+      {256, 89, 128, 44, UINT64_C(0x1ca8d5bd3e1aaee5)},
+      {64, 63, 32, 31, UINT64_C(0x47a8e73e11743e54)},
+      {607, 476, 303, 238, UINT64_C(0xfa614cc5cdf07a92)},
+      {50, 45, 25, 22, UINT64_C(0x2c95ab15195eead6)},
+      {75, 75, 37, 37, UINT64_C(0x477eb04369d02df1)},
+   };
+   for (unsigned i = 0; i < sizeof(mip_oracles) / sizeof(mip_oracles[0]); ++i)
+      CHECK(mip_oracle_hash(mip_oracles[i].sw, mip_oracles[i].sh,
+                            mip_oracles[i].dw, mip_oracles[i].dh) ==
+            mip_oracles[i].hash);
+
    static const VkFormat bc[] = {
       VK_FORMAT_BC1_RGB_UNORM_BLOCK,  VK_FORMAT_BC1_RGB_SRGB_BLOCK,
       VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
@@ -288,6 +473,127 @@ main(void)
    explicit_stride.buffer_row_length += 8;
    explicit_stride.buffer_image_height += 4;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&explicit_stride));
+
+   /* STK uploads hundreds of R8 and RGBA8/BGRA8 base levels immediately
+    * before generating their mip chains.  Resolve padded rows and array
+    * layers once so the driver can copy them through the raw tiled compute
+    * kernel instead of allocating one firmware render job per texture. */
+   struct hk_g17p_buffer_to_image_copy raw_upload = vkcube;
+   raw_upload.array_layers = 3;
+   raw_upload.base_array_layer = 1;
+   raw_upload.layer_count = VK_REMAINING_ARRAY_LAYERS;
+   raw_upload.image_offset = (VkOffset3D){11, 13, 0};
+   raw_upload.copy_extent = (VkExtent3D){37, 29, 1};
+   raw_upload.buffer_row_length = 80;
+   raw_upload.buffer_image_height = 72;
+   struct hk_g17p_uncompressed_copy_plan raw_plan;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   CHECK(raw_plan.block_size_B == 4 && raw_plan.base_x_el == 11 &&
+         raw_plan.base_y_el == 13 && raw_plan.width_el == 37 &&
+         raw_plan.height_el == 29);
+   CHECK(raw_plan.first_slice == 1 && raw_plan.slice_count == 2 &&
+         raw_plan.buffer_row_stride_B == 320 &&
+         raw_plan.buffer_slice_stride_B == 23040 &&
+         raw_plan.buffer_span_B == 32148);
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32211, &raw_plan));
+   CHECK(raw_plan.buffer_span_B == 0);
+
+   raw_upload.format = VK_FORMAT_R8_UNORM;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 7, 8044, &raw_plan));
+   CHECK(raw_plan.block_size_B == 1 &&
+         raw_plan.buffer_row_stride_B == 80 &&
+         raw_plan.buffer_slice_stride_B == 5760 &&
+         raw_plan.buffer_span_B == 8037);
+
+   struct hk_g17p_buffer_to_image_copy one_d_upload = raw_upload;
+   one_d_upload.image_type = VK_IMAGE_TYPE_1D;
+   one_d_upload.array_layers = 2;
+   one_d_upload.base_array_layer = 0;
+   one_d_upload.layer_count = 2;
+   one_d_upload.image_extent = (VkExtent3D){256, 1, 1};
+   one_d_upload.image_offset = (VkOffset3D){17, 0, 0};
+   one_d_upload.copy_extent = (VkExtent3D){83, 1, 1};
+   one_d_upload.buffer_row_length = 96;
+   one_d_upload.buffer_image_height = 0;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &one_d_upload, 3, 182, &raw_plan));
+   CHECK(raw_plan.block_size_B == 1 && raw_plan.base_x_el == 17 &&
+         raw_plan.base_y_el == 0 && raw_plan.width_el == 83 &&
+         raw_plan.height_el == 1 && raw_plan.first_slice == 0 &&
+         raw_plan.slice_count == 2 && raw_plan.buffer_row_stride_B == 96 &&
+         raw_plan.buffer_slice_stride_B == 96 &&
+         raw_plan.buffer_span_B == 179);
+   one_d_upload.image_offset.y = 1;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &one_d_upload, 3, 182, &raw_plan));
+   one_d_upload.image_offset.y = 0;
+   one_d_upload.copy_extent.height = 2;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &one_d_upload, 3, 182, &raw_plan));
+
+   struct hk_g17p_buffer_to_image_copy raw_volume_upload = raw_upload;
+   raw_volume_upload.image_type = VK_IMAGE_TYPE_3D;
+   raw_volume_upload.array_layers = 1;
+   raw_volume_upload.base_array_layer = 0;
+   raw_volume_upload.layer_count = 1;
+   raw_volume_upload.image_extent = (VkExtent3D){64, 32, 9};
+   raw_volume_upload.image_offset = (VkOffset3D){7, 5, 2};
+   raw_volume_upload.copy_extent = (VkExtent3D){17, 11, 3};
+   raw_volume_upload.buffer_row_length = 24;
+   raw_volume_upload.buffer_image_height = 16;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_volume_upload, 8, 1033, &raw_plan));
+   CHECK(raw_plan.block_size_B == 1 && raw_plan.base_x_el == 7 &&
+         raw_plan.base_y_el == 5 && raw_plan.width_el == 17 &&
+         raw_plan.height_el == 11 && raw_plan.first_slice == 2 &&
+         raw_plan.slice_count == 3 && raw_plan.buffer_row_stride_B == 24 &&
+         raw_plan.buffer_slice_stride_B == 384 &&
+         raw_plan.buffer_span_B == 1025);
+   raw_volume_upload.copy_extent.depth = 8;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_volume_upload, 8, UINT64_MAX, &raw_plan));
+   raw_upload.format = VK_FORMAT_B8G8R8A8_SRGB;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   raw_upload.format = VK_FORMAT_R8G8B8A8_UINT;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   raw_upload.format = VK_FORMAT_R16G16_UNORM;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 32212, &raw_plan));
+   raw_upload.format = VK_FORMAT_R8G8_SRGB;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 8, 16148, &raw_plan));
+   raw_upload.format = VK_FORMAT_R32G32_UINT;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 64360, &raw_plan));
+   CHECK(raw_plan.block_size_B == 8 &&
+         raw_plan.buffer_row_stride_B == 640 &&
+         raw_plan.buffer_slice_stride_B == 46080 &&
+         raw_plan.buffer_span_B == 64296);
+   raw_upload.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, UINT64_MAX, &raw_plan));
+   raw_upload.format = VK_FORMAT_R32G32B32A32_UINT;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, UINT64_MAX, &raw_plan));
+   raw_upload.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, UINT64_MAX, &raw_plan));
+   raw_upload = vkcube;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 2, 262146, &raw_plan));
+   raw_upload.image_type = VK_IMAGE_TYPE_3D;
+   raw_upload.array_layers = 2;
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 0, UINT64_MAX, &raw_plan));
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      NULL, 0, 0, &raw_plan));
+   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &vkcube, 0, 0, NULL));
 
    struct hk_g17p_buffer_to_image_copy bad = vkcube;
    bad.format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -725,6 +1031,7 @@ main(void)
    CHECK(!hk_g17p_image_blit_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_2D, 6, 6,
       &bad_blit, 0, &no_blit));
-   printf("Honeykrisp G17P meta copy region/mip/layer checks passed (%u exhaustive layer cases)\n", tested);
+   printf("Honeykrisp G17P meta copy checks passed (%u layer and %llu tiled-address cases)\n",
+          tested, (unsigned long long)tile_cases);
    return 0;
 }

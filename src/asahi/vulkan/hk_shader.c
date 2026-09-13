@@ -964,8 +964,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_control_flow, NULL);
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
-            agx_chip_descriptor_generation(dev->dev.chip));
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      NIR_PASS(_, nir, agx_nir_lower_texture_with_buffer_metadata,
+               agx_chip_descriptor_generation(dev->dev.chip));
+   } else {
+      NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
+               agx_chip_descriptor_generation(dev->dev.chip));
+   }
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 
    if (dev->dev.chip == AGX_CHIP_G17P)
@@ -1545,7 +1550,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        shader->b.info.stage == MESA_SHADER_VERTEX) {
       const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
-         .position_only = shader->b.info.outputs == VARYING_BIT_POS,
          .has_preamble = shader->b.info.has_preamble,
          .nr_preamble_gprs = shader->b.info.nr_preamble_gprs,
          .preamble_scratch_size = shader->b.info.preamble_scratch_size,
@@ -1562,9 +1566,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
       if (!state_ok && hk_g17p_launch_trace_enabled())
          fprintf(stderr,
-                 "G17P vertex state refused: sw=%u pos_only=%u pre=%u/%u/%u "
+                 "G17P vertex state refused: sw=%u pre=%u/%u/%u "
                  "written=%" PRIx64 " off=%u/%u/%u/%u/%u size=%u user=%u\n",
-                 (unsigned)sw_stage, compiler_info.position_only,
+                 (unsigned)sw_stage,
                  compiler_info.has_preamble, compiler_info.nr_preamble_gprs,
                  compiler_info.preamble_scratch_size,
                  compiler_info.uvs_written, compiler_info.position_off,

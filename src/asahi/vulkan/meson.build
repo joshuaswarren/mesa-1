@@ -103,6 +103,16 @@ hk_files = files(
 )
 
 if with_tests
+  if host_machine.system() == 'linux'
+    hk_sparse_format_properties = executable(
+      'hk-sparse-format-properties',
+      files('tests/hk_sparse_format_properties.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+    )
+  endif
+
   test(
     'hk_bvh_depth_core',
     executable(
@@ -652,6 +662,15 @@ if with_tests
     )
 
     executable(
+      'asahi-vulkan-g17p-layer-requirements',
+      files('tests/g17p_vulkan_layer_requirements.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'asahi-submit-g17p-add3',
       files('tests/asahi_submit_g17p_add3.c'),
       include_directories : [inc_include],
@@ -963,13 +982,24 @@ if with_tests
     # GTK unified-GPU icon path: premultiplied BGRA8 base upload, complete
     # same-image linear-blit mip chain, implicit minified sampling and
     # compositor-style alpha blending.
-    executable(
+    g17p_generated_mips = executable(
       'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips',
       files('tests/g17p_offscreen_triangle.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
                 '-DG17P_COMPOSITE_GENERATE_MIPS=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    g17p_generated_mips_odd = executable(
+      'g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips-odd',
+      files('tests/g17p_offscreen_triangle.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_TEXTURE_ALPHA_COMPOSITE=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS=1',
+                '-DG17P_COMPOSITE_GENERATE_MIPS_ODD=1'],
       gnu_symbol_visibility : 'hidden',
     )
 
@@ -2265,12 +2295,21 @@ if with_tests
     # Offline proof that vkCmdDispatchIndirect records a native G17P indirect
     # launch pair.  Runs under the noop drm-shim and stops at
     # vkEndCommandBuffer: it asserts the recording, never execution.
-    executable(
+    g17p_dispatch_indirect = executable(
       'g17p-vulkan-dispatch-indirect',
       files('tests/g17p_vulkan_dispatch_indirect.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    g17p_sequential_dispatch = executable(
+      'g17p-vulkan-sequential-dispatch',
+      files('tests/g17p_vulkan_dispatch_indirect.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_SEQUENTIAL_DISPATCH=1'],
       gnu_symbol_visibility : 'hidden',
     )
 

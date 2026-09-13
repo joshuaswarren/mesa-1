@@ -26,27 +26,24 @@ static bool
 agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
 {
    /* Admit only complete native builtin texts: the common 68-byte RT0
-    * program, its exact 110-byte layered array-wire form, the signed RGBA16
-    * 84-byte RT0 program, the admitted 120-byte RGBA8 pair, or the
+    * program, an exact 84-byte layered or signed-integer RT0 program, the
+    * admitted 120-byte RGBA8 pair, or the
     * 238-byte different-partition RGBA16F+R8 WBOIT pair. None has a synthetic
     * compute preamble; the CODE container supplies the stop constant. */
    const bool rt0 = bin && bin->info.binary_size == 68 &&
                     bin->info.nr_gprs == 8 &&
                     bin->info.agx3_staging_halfs == 8;
-   const bool layered_rt0 = bin && bin->info.binary_size == 110 &&
-                            bin->info.nr_gprs == 16 &&
-                            bin->info.agx3_staging_halfs == 8;
+   const bool native_84_rt0 = bin && bin->info.binary_size == 84 &&
+                              bin->info.nr_gprs == 8 &&
+                              bin->info.agx3_staging_halfs == 8;
    const bool rgba8_mrt = bin && bin->info.binary_size == 120 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
    const bool wboit_mrt = bin && bin->info.binary_size == 238 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
-   const bool rgba16_sint = bin && bin->info.binary_size == 84 &&
-                            bin->info.nr_gprs == 8 &&
-                            bin->info.agx3_staging_halfs == 8;
    return bin && bin->binary &&
-          (rt0 || layered_rt0 || rgba16_sint || rgba8_mrt || wboit_mrt) &&
+          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;

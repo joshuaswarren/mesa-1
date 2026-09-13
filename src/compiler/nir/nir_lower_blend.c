@@ -555,13 +555,31 @@ blend_pinlight(nir_builder *b, nir_def *src, nir_def *dst)
 }
 
 static nir_def *
-blend_hardmix(nir_builder *b, nir_def *src, nir_def *dst)
+blend_hardmix(nir_builder *b, nir_def *src, nir_def *dst,
+              enum pipe_format format)
 {
-   /* if src + dst >= 1: 1, else 0.
-    * Use small epsilon to handle 8-bit quantization.
-    */
+   /* if src + dst >= 1: 1, else 0. */
    nir_def *sum = nir_fadd(b, src, dst);
-   nir_def *threshold = nir_imm_float(b, 1.0 - 0.5 / 255.0); /* ~0.998039 */
+   nir_def *threshold = imm3(b, 1.0);
+
+   /* Advanced blending permits arithmetic at the destination's precision.
+    * For normalized attachments, round the comparison to that precision:
+    * quantizing the stored destination can otherwise move a sum of 1 just
+    * below the discontinuity. Floating-point attachments retain the exact
+    * comparison, and each normalized channel uses its own bit count.
+    */
+   const bool snorm = util_format_is_snorm(format);
+   if (util_format_is_unorm(format) || snorm) {
+      nir_const_value scale[3];
+      for (unsigned c = 0; c < 3; ++c) {
+         unsigned bits = util_format_get_component_bits(
+            format, UTIL_FORMAT_COLORSPACE_RGB, c);
+         scale[c].f32 = bits ? u_uintN_max(bits - snorm) : 1.0f;
+      }
+      threshold = nir_build_imm(b, 3, 32, scale);
+      sum = nir_fround_even(b, nir_fmul(b, sum, threshold));
+   }
+
    return nir_bcsel(b, nir_fge(b, sum, threshold),
                     imm3(b, 1.0), imm3(b, 0.0));
 }
@@ -571,7 +589,8 @@ blend_hardmix(nir_builder *b, nir_def *src, nir_def *dst)
  * Returns NULL for blend modes where X=0, meaning f() is not used.
  */
 static nir_def *
-calc_blend_factor(nir_builder *b, enum pipe_advanced_blend_mode blend_op, nir_def *src, nir_def *dst)
+calc_blend_factor(nir_builder *b, enum pipe_advanced_blend_mode blend_op,
+                  nir_def *src, nir_def *dst, enum pipe_format format)
 {
    switch (blend_op) {
    /* f() result unused (X=0) */
@@ -643,7 +662,7 @@ calc_blend_factor(nir_builder *b, enum pipe_advanced_blend_mode blend_op, nir_de
    case PIPE_ADVANCED_BLEND_PINLIGHT:
       return blend_pinlight(b, src, dst);
    case PIPE_ADVANCED_BLEND_HARDMIX:
-      return blend_hardmix(b, src, dst);
+      return blend_hardmix(b, src, dst, format);
    default:
       UNREACHABLE("Invalid advanced blend op");
    }
@@ -841,7 +860,9 @@ nir_blend_advanced(
    }
 
    /* f(Cs', Cd') - may be NULL if X=0 (result unused) */
-   nir_def *factor = calc_blend_factor(b, options->rt[rt].blend_mode, src_rgb_unpre, dst_rgb_unpre);
+   nir_def *factor = calc_blend_factor(b, options->rt[rt].blend_mode,
+                                      src_rgb_unpre, dst_rgb_unpre,
+                                      options->rt[rt].format);
 
    nir_def *p0, *p1, *p2;
 

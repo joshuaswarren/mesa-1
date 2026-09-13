@@ -54,6 +54,37 @@ struct hk_g17p_compressed_copy_plan {
    uint64_t buffer_span_B;
 };
 
+/* A raw linear-buffer to AIL-tiled upload.  This is intentionally narrower
+ * than the generic render-based copy path: it covers the byte-exact R8 and
+ * four-channel 8-bit texture shapes used by STK without interpreting their
+ * colour space or channel order. */
+struct hk_g17p_uncompressed_copy_plan {
+   uint32_t block_size_B;
+   uint32_t base_x_el;
+   uint32_t base_y_el;
+   uint32_t width_el;
+   uint32_t height_el;
+   uint32_t first_slice;
+   uint32_t slice_count;
+   uint64_t buffer_row_stride_B;
+   uint64_t buffer_slice_stride_B;
+   uint64_t buffer_span_B;
+};
+
+struct hk_g17p_tile_address_config {
+   uint32_t tiles_per_row;
+   uint32_t tile_width_log2;
+   uint32_t tile_height_log2;
+};
+
+/* Reduce AIL's power-of-two tile geometry once on the CPU. G17P transfer tiles
+ * are at most 128 elements per axis. Raw copy and mip kernels consume this
+ * form so every element uses shifts and a seven-bit Morton encoder instead of
+ * integer division and the generic fourteen-bit encoder. */
+bool hk_g17p_tile_address_config_init(
+   uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
+   struct hk_g17p_tile_address_config *config);
+
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
  * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so
@@ -107,6 +138,14 @@ bool hk_g17p_compressed_image_to_buffer_copy_plan(
    VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
    struct hk_g17p_compressed_copy_plan *plan);
 
+/* Resolve an R8/RGBA8/BGRA8 upload into one raw compute copy per 2D array
+ * layer.  The returned byte span includes row and layer padding and is checked
+ * against the source buffer before any command is emitted. */
+bool hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_uncompressed_copy_plan *plan);
+
 /* HAL200's qualified tile programs are single-layer.  Convert one logical
  * slice of a valid 2D array, 3D volume, or 2D-array<->3D image copy without
  * changing its rectangle or mip levels.  The resolved source/destination
@@ -122,3 +161,17 @@ bool hk_g17p_image_blit_slice(enum agx_chip chip, VkImageType src_type,
                               uint32_t dst_layers,
                               const VkImageBlit2 *region, uint32_t slice,
                               VkImageBlit2 *out);
+
+/* One destination coordinate's exact G17P linear-filter footprint.  The low
+ * half is the lower source coordinate and bits 16..23 are the Q8 upper-texel
+ * weight.  A carried weight of 256 is normalized to the following source
+ * coordinate with weight zero, keeping every table entry in one word. */
+bool hk_g17p_build_mip_axis(uint32_t src_extent, uint32_t dst_extent,
+                            uint32_t *entries);
+
+/* Integer oracle for G17P's UNORM8 linear sampler followed by a UNORM8 colour
+ * write.  Coordinates are Q8; the sampler rounds its four-tap result half-up
+ * to four fractional colour bits, while exact output ties round toward the
+ * midpoint code 128. */
+uint8_t hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
+                              uint8_t wx, uint8_t wy);

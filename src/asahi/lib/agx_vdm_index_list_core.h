@@ -74,8 +74,7 @@ struct agx_vdm_index_list_direct_indexed {
 
 struct agx_vdm_index_list_indirect_nonindexed_info {
    uint8_t primitive;
-   /* Encoded argument-buffer pointer. G17P callers supply a context-relative
-    * offset; other admitted generations retain their native absolute VA. */
+   /* Native absolute argument-buffer VA. */
    uint64_t indirect_buffer;
 };
 
@@ -84,7 +83,7 @@ struct agx_vdm_index_list_indirect_indexed_info {
    bool restart_enable;
    enum agx_vdm_index_list_index_size index_size;
    uint64_t index_buffer;    /* index-buffer VA */
-   /* Encoded argument-buffer pointer; context-relative on G17P. */
+   /* Native absolute argument-buffer VA. */
    uint64_t indirect_buffer;
    uint32_t restart_index;   /* State Update restart value */
    uint32_t index_buffer_size_word; /* index-buffer size in dwords, minus 1 */

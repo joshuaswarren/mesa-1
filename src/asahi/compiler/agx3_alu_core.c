@@ -1548,10 +1548,8 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
    const bool cmp0_16 = d.cmp0_16;
    const bool cmp1_16 = d.cmp1_is_immediate ? false : d.cmp1_16;
 
-   /* Mixed width is ordinary -- a highp value compared against a mediump one
-    * is what GLSL produces all day -- but no witness has both comparators at
-    * half width, and agx3_alu_fcmp_select_imm_width_internal() refuses that
-    * same pair.  Keep the two entry points agreeing. */
+   /* The all-half comparison uses a different select-slot routing from this
+    * general descriptor.  Keep it on its byte-grounded dedicated encoder. */
    if (cmp0_16 && cmp1_16)
       return false;
 
@@ -2621,6 +2619,67 @@ agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
          return true;
    }
 
+   return false;
+}
+
+/* Compare two scalar half values and select between two full registers.
+ *
+ * Apple keeps the comparison narrow and the selected values full-width.  The
+ * plain and absolute forms below are byte-exact applegpu_g17p witnesses from
+ * `metal-nt` for `(a < b) ? t : f` and `(fabs(a) < b) ? t : f`:
+ *
+ *   plain  02 08 1f 08 80 04 13 c0
+ *   abs(a) 02 08 1f 08 83 00 13 00 80 04 00 80 01 00
+ *   abs(b) 02 08 1f 08 83 00 13 00 80 04 00 80 02 00
+ *   both   02 08 1f 08 83 00 13 00 80 04 00 80 03 00
+ *
+ * Decomposition gives f43=f60=1 for the two half comparators, f77=f94=2 for
+ * the two full selected values, and f47/f64 as their independent ABS bits.
+ */
+bool
+agx3_alu_fcmp_select_f16_f16_f32(
+   enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[4],
+   const enum agx3_alu_hint hints[4], const bool src_abs[2],
+   unsigned condition, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !hints ||
+       !src_abs || dest >= 256 || (dest & 1) ||
+       (condition != 0 && condition != 1 && condition != 2 &&
+        condition != 5 && condition != 6) ||
+       (wait_mask != 0 && wait_mask != 32))
+      return false;
+
+   for (unsigned i = 0; i < 4; ++i) {
+      const bool half = i < 2;
+      if (src[i] >= 256 || (!half && (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   const struct agx3_field_kv base[] = {
+      {10, 2}, {11, 2}, {42, 2}, {43, 1}, {59, 2},
+      {60, 1}, {76, 2}, {77, 2}, {93, 2}, {94, 2},
+   };
+   struct agx3_field_kv fields[18] = {
+      {3, dest}, {12, dest_cache}, {35, src[0]}, {52, src[1]},
+      {69, src[2]}, {86, src[3]}, {110, condition},
+      {107, wait_mask == 32}, {47, src_abs[0]}, {64, src_abs[1]},
+   };
+   const unsigned cache[] = {44, 61, 78, 95};
+   const unsigned discard[] = {46, 63, 80, 97};
+   unsigned n = 10;
+   for (unsigned i = 0; i < 4; ++i) {
+      fields[n++] = (struct agx3_field_kv){cache[i],
+                                           hints[i] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){discard[i],
+                                           hints[i] == AGX3_ALU_HINT_DISCARD};
+   }
+
+   for (unsigned ep = 0; ep < 36; ++ep) {
+      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, n, out, len))
+         return true;
+   }
    return false;
 }
 

@@ -1292,17 +1292,18 @@ test_g17p_rt0_eot_program(void)
    CHECK(signed_program.length == program.length);
    CHECK(memcmp(signed_program.bytes, program.bytes, program.length) == 0);
 
-   /* Layered U8NORM uses the exact 110-byte array-wire text with r0..r6
-    * coordinates. Its Ioto ABI remains one PBE and one imageblock offset. */
+   /* Layered U8NORM uses the exact 84-byte native array EOT with an eight-half
+    * allocation. Its Ioto ABI remains one PBE and one imageblock offset. */
    struct hk_agx3_g17p_rt0_eot_program layered_program;
    struct hk_agx3_g17p_rt0_eot_program_desc layered_desc = desc;
    layered_desc.attachment_count = 1;
-   layered_desc.shader_binary_size = 110;
-   layered_desc.nr_gprs = 16;
+   layered_desc.shader_binary_size = 84;
+   layered_desc.nr_gprs = 8;
    CHECK(hk_agx3_g17p_rt0_eot_program_generate(
       AGX_CHIP_G17P, &layered_desc, &layered_program));
    CHECK(layered_program.length == program.length);
-   layered_desc.nr_gprs = 15;
+   layered_desc.shader_binary_size = 110;
+   layered_desc.nr_gprs = 16;
    CHECK(!hk_agx3_g17p_rt0_eot_program_generate(
       AGX_CHIP_G17P, &layered_desc, &layered_program));
 
@@ -1600,6 +1601,7 @@ test_g17p_combined_sampler_pointers(void)
    const struct hk_agx3_g17p_sampled_storage_heap sampled_storage = {
       .sampled = client,
       .pbe_descriptor_set_va = UINT64_C(0x87fff10000),
+      .write_control_va = UINT64_C(0x87fff20000),
       .pbe_offset_B = 160,
    };
    uint64_t four[4] = {0};
@@ -1607,10 +1609,17 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(four[0] == UINT64_C(0x87ffed0040));
    CHECK(four[1] == UINT64_C(0x87ffef40e0));
    CHECK(four[2] == UINT64_C(0x87fff100a0));
-   CHECK(four[3] == UINT64_C(0xffff));
+   CHECK(four[3] == sampled_storage.write_control_va);
 
    const uint64_t four_before[4] = {four[0], four[1], four[2], four[3]};
    struct hk_agx3_g17p_sampled_storage_heap invalid = sampled_storage;
+   const uint64_t bad_controls[] = {0, 0xffff, UINT64_MAX};
+   for (unsigned i = 0; i < 3; ++i) {
+      invalid.write_control_va = bad_controls[i];
+      CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
+      CHECK(memcmp(four, four_before, sizeof(four)) == 0);
+   }
+   invalid = sampled_storage;
    invalid.pbe_offset_B++;
    CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
    CHECK(memcmp(four, four_before, sizeof(four)) == 0);
@@ -1623,18 +1632,25 @@ test_g17p_combined_sampler_pointers(void)
       .texture_heap_va = UINT64_C(0x9000000000),
       .sampler_heap_va = UINT64_C(0x9100000000),
       .pbe_descriptor_set_va = UINT64_C(0x9200000000),
+      .write_control_va = UINT64_C(0x9300000000),
       .pbe_offset_B = 176,
    };
    CHECK(hk_agx3_g17p_indexed_storage_pointers(&indexed_storage, four));
    CHECK(four[0] == indexed_storage.texture_heap_va);
    CHECK(four[1] == indexed_storage.sampler_heap_va);
    CHECK(four[2] == UINT64_C(0x92000000b0));
-   CHECK(four[3] == UINT64_C(0xffff));
+   CHECK(four[3] == indexed_storage.write_control_va);
 
    const uint64_t indexed_before[4] = {
       four[0], four[1], four[2], four[3],
    };
    struct hk_agx3_g17p_indexed_storage_heap bad_indexed = indexed_storage;
+   for (unsigned i = 0; i < 3; ++i) {
+      bad_indexed.write_control_va = bad_controls[i];
+      CHECK(!hk_agx3_g17p_indexed_storage_pointers(&bad_indexed, four));
+      CHECK(memcmp(four, indexed_before, sizeof(four)) == 0);
+   }
+   bad_indexed = indexed_storage;
    bad_indexed.pbe_offset_B++;
    CHECK(!hk_agx3_g17p_indexed_storage_pointers(&bad_indexed, four));
    CHECK(memcmp(four, indexed_before, sizeof(four)) == 0);
@@ -1660,6 +1676,29 @@ test_g17p_root_range(void)
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
    CHECK(!hk_agx3_g17p_root_range(12, 0, 0, &range));
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
+
+   struct agx3_ioto_uniform_range rodata = {0};
+   CHECK(hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(rodata.start_halfs == 8 && rodata.size_halfs == 2 &&
+         rodata.address == UINT64_C(0x10000030004));
+   CHECK(hk_agx3_g17p_rodata_range(
+      12, 3, UINT64_C(0x10000030000), 8, 128, &rodata));
+   CHECK(rodata.start_halfs == 12 && rodata.size_halfs == 4 &&
+         rodata.address == UINT64_C(0x10000030008));
+   const struct agx3_ioto_uniform_range rodata_before = rodata;
+   CHECK(!hk_agx3_g17p_rodata_range(
+      9, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      510, 3, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 126, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030002), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
 
    struct agx3_ioto_uniform_range blend = {0};
    CHECK(hk_agx3_g17p_fragment_blend_constants_range(

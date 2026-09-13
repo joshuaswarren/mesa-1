@@ -132,7 +132,7 @@ struct agx_vdm_hal200_indirect_draw_fields {
    /* Native absolute 48-bit address. */
    uint64_t index_buffer;
    uint32_t index_buffer_range_B;
-   /* G17P context-relative offset, not an absolute VA. */
+   /* Native absolute 48-bit argument-buffer address. */
    uint64_t indirect_buffer;
 };
 

@@ -4,6 +4,7 @@
  */
 
 #include "hk_native_descriptor_pack.h"
+#include "asahi/lib/agx_abi.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -45,6 +46,27 @@ check_layout(unsigned generation, unsigned texture_size,
    assert(storage.texture == 0);
    assert(storage.pbe == texture_size);
    assert(storage.stride == storage_stride);
+}
+
+static void
+check_g17p_storage_binding_alignment(void)
+{
+   const struct hk_storage_image_descriptor_layout storage =
+      hk_storage_image_descriptor_layout(9);
+
+   assert(storage.stride + HK_G17P_STORAGE_SW_SIZE == 80);
+   assert(HK_G17P_STORAGE_ALIGNMENT == 32);
+   assert(HK_G17P_STORAGE_STRIDE == 96);
+
+   /* CTS compute.pipeline.basic.copy_ssbo_to_image_small binds a 16-byte
+    * SSBO descriptor first. The following storage-image record must advance
+    * to 32 before adding the PBE half at +32. Every array element must retain
+    * that alignment too. */
+   const unsigned binding_offset = HK_G17P_STORAGE_ALIGNMENT;
+   assert(((binding_offset + storage.pbe) & 31) == 0);
+   for (unsigned element = 0; element < 8; ++element)
+      assert(((binding_offset + element * HK_G17P_STORAGE_STRIDE +
+               storage.pbe) & 31) == 0);
 }
 
 static void
@@ -313,9 +335,85 @@ check_gen9_bc_textures(void)
    }
 }
 
+static void
+check_buffer_metadata(void)
+{
+   struct AGX_TEXTURE semantic = {
+      AGX_TEXTURE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D,
+      .layout = AGX_LAYOUT_LINEAR,
+      .channels = AGX_CHANNELS_R32,
+      .type = AGX_TEXTURE_TYPE_UINT,
+      .width = 16384, .height = 1, .depth = 1,
+      .stride = 16384 * 4 - 16,
+      .address = UINT64_C(0x123000000000),
+      .buffer_size_sw = 64,
+   };
+   struct hk_native_texture_descriptor native;
+   assert(hk_pack_native_texture(9, &native, &semantic));
+   struct AGX_TEXTURE_GEN9 hardware;
+   assert(AGX_TEXTURE_GEN9_unpack(NULL, (const uint8_t *)&native, &hardware));
+   assert(hardware.address == semantic.address && hardware.width == 16384);
+
+   /* The old buffer crawl decoded these Gen9 bytes as AGX2. Its software
+    * element count is absent, so every valid coordinate was rejected.
+    */
+   struct AGX_TEXTURE old_crawl;
+   AGX_TEXTURE_unpack(NULL, (const uint8_t *)&native, &old_crawl);
+   assert(old_crawl.buffer_size_sw == 0);
+
+   const struct hk_g17p_buffer_texture_metadata metadata = {
+      .elements = 64, .offset_el = 3,
+      .address = semantic.address,
+   };
+   assert(sizeof(metadata) == 24);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, elements) ==
+      AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, offset_el) ==
+      AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, address) ==
+      AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, rgb32) ==
+      AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + sizeof(metadata) ==
+          AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE);
+   uint8_t descriptor[AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE] = {0};
+   memcpy(descriptor, &native, sizeof(native));
+   memcpy(descriptor + AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET,
+          &metadata, sizeof(metadata));
+   uint32_t count, tail;
+   uint64_t address;
+   memcpy(&count, descriptor + AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET, sizeof(count));
+   memcpy(&tail, descriptor + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, sizeof(tail));
+   memcpy(&address, descriptor + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, sizeof(address));
+   assert(count == 64 && tail == 3 && address == semantic.address);
+   assert(memcmp(descriptor, &native, sizeof(native)) == 0);
+}
+
 int
 main(void)
 {
+   check_buffer_metadata();
+   uint64_t atomic_sw = 0;
+   assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
+                                       &atomic_sw));
+   assert((atomic_sw & ((UINT64_C(1) << 27) - 1)) == 3);
+   assert(((atomic_sw >> 27) & 0xf) == 6);
+   assert(((atomic_sw >> 31) & 0xf) == 5);
+   assert(((atomic_sw >> 35) & ((UINT64_C(1) << 27) - 1)) == 0x80);
+   assert((atomic_sw >> 62) == 2);
+   assert(!hk_pack_g17p_image_atomic_sw(1, 64, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 48, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 64, 64, 0x4000, 3,
+                                        &atomic_sw));
+   check_g17p_storage_binding_alignment();
+
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();

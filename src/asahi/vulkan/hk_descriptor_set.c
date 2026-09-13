@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_descriptor_set.h"
+#include "asahi/lib/agx_abi.h"
 
 #include "vk_acceleration_structure.h"
 #include "asahi/lib/agx_bo.h"
@@ -201,6 +202,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    const struct hk_storage_image_descriptor_layout native =
       hk_storage_image_descriptor_layout(generation);
    bool supported = false;
+   bool texture_supported = false;
 
    if (info && info->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
@@ -233,22 +235,34 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
          view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
-      if (supported) {
+      /* A readable native texture does not require a writable PBE. In
+       * particular, linear storage views have a valid texture descriptor
+       * even when the native PBE packer cannot represent their layout.
+       * Keep imageLoad/imageSize bound to that view instead of replacing
+       * both halves with a null descriptor because stores are unsupported.
+       */
+      texture_supported = supported ||
+         (generation == 9 && view->plane_count == 1);
+      if (texture_supported) {
          /* Storage images are always single plane */
          assert(view->plane_count == 1);
          uint8_t plane = 0;
 
          desc.tex = view->planes[plane].ro_storage;
-         desc.pbe = view->planes[plane].storage;
          desc.texture_heap_index =
             view->planes[plane].storage_heap_index;
       }
+      if (supported) {
+         const uint8_t plane = 0;
+         desc.pbe = view->planes[plane].storage;
+         desc.atomic_sw = view->planes[plane].storage_atomic_sw;
+      }
    }
 
-   if (!supported) {
+   if (!texture_supported)
       hk_set_null_native_texture(generation, &desc.tex);
+   if (!supported)
       hk_set_null_native_pbe(generation, &desc.pbe);
-   }
 
    uint8_t packed[HK_MAX_DESCRIPTOR_SIZE] = {0};
    memcpy(packed + native.texture, &desc.tex,
@@ -258,6 +272,9 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_STORAGE_HEAP_INDEX_OFFSET + sizeof(uint64_t))
       memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
              &desc.texture_heap_index, sizeof(desc.texture_heap_index));
+   if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
+      memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
+             sizeof(desc.atomic_sw));
    if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64
@@ -322,13 +339,17 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       hk_storage_image_descriptor_layout(generation);
    uint32_t heap_index = 0;
 
-   if ((!storage || hk_native_pbe_supported(generation)) &&
+   /* G17P imageBuffer reads use the native texture heap even though buffer
+    * writes cannot use the legacy PBE software descriptor. */
+   if ((!storage || generation == 9 || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
 
       desc.tex = view->tex;
-      if (storage)
+      if (storage && hk_native_pbe_supported(generation))
          desc.pbe = view->pbe;
+      else if (storage)
+         hk_set_null_native_pbe(generation, &desc.pbe);
       heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);
@@ -357,6 +378,14 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
              sizeof(heap_index));
       memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET, &heap_index,
              sizeof(heap_index));
+   }
+   if (heap_index &&
+       stride >= AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE) {
+      VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
+      static_assert(sizeof(view->buffer_metadata) == 24,
+                    "texel-buffer software descriptor ABI");
+      memcpy(packed + AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET,
+             &view->buffer_metadata, sizeof(view->buffer_metadata));
    }
    /* Write the binding's whole stride, not just the texture/PBE pair: the
     * reserved heap-index bytes live past native.stride, so a native.stride

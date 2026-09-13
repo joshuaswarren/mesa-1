@@ -5203,7 +5203,10 @@ hk_needs_index_robustness(struct hk_cmd_buffer *cmd, struct agx_draw *draw,
    /* Soft fault does not cover the hardware index buffer fetch, use the zero
     * page instead.
     */
-   if (draw->index_buffer_range_B == 0) {
+   if (draw->index_buffer_range_B == 0 ||
+       (dev->dev.chip == AGX_CHIP_G17P &&
+        draw->index_buffer == AGX_ZERO_PAGE_ADDRESS &&
+        draw->index_buffer_range_B == 4)) {
       draw->index_buffer = AGX_ZERO_PAGE_ADDRESS;
       draw->index_buffer_range_B = 4;
       draw->start = 0;
@@ -5660,6 +5663,19 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* Null index bindings execute the requested vertices, all with index zero.
+    * Normalize before native admission and conditional draw lowering, as the
+    * older path does in hk_needs_index_robustness. The one-dword range bounds
+    * hardware fetches to the zero page; it is not a count limit.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
+       draw_.index_buffer_range_B == 0) {
+      draw_.index_buffer = AGX_ZERO_PAGE_ADDRESS;
+      draw_.index_buffer_range_B = 4;
+      draw_.start = 0;
+   }
    const struct agx_draw api_draw = draw_;
    bool conditional_direct_indexed = false;
 
@@ -5716,8 +5732,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    hk_stat_enabled(stat_ia_prims) ||
                    hk_stat_enabled(stat_vs_inv) ||
                    hk_stat_enabled(stat_c_inv) || hk_stat_enabled(stat_c_prims);
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-
    /* Validate the native index domain before robustness or geometry lowering
     * can introduce a pre-render compute dispatch.  Indirect robust draws keep
     * their application range for the ordered GPU-side bounds pass; direct
@@ -5907,31 +5921,28 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             dev->dev.chip, g17p_native_bind_tail_emitted);
          uint64_t target = hk_cs_alloc_for_indirect(cs, size_B);
 
+         uint64_t empty_draw_jump = 0;
+         if (dev->dev.chip == AGX_CHIP_G17P) {
+            const uint64_t compact =
+               hk_g17p_vdm_compact(cmd, target + size_B);
+            if (!compact || compact >= (UINT64_C(1) << 40)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
+            empty_draw_jump = compact;
+         }
+
          libagx_draw_robust_index(cmd, agx_1d(32), AGX_BARRIER_ALL | AGX_PREGFX,
                                   target, hk_heap(cmd), draw.b.ptr,
                                   draw.index_buffer, draw.index_buffer_range_B,
                                   draw.restart, dev->dev.chip, topology,
                                   draw_state_offset,
                                   g17p_native_bind_tail_emitted,
+                                  empty_draw_jump,
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
-            /* G17P resolves the indirect-argument address in an Index List
-             * relative to the render-context base. Passing the main-heap VA
-             * verbatim makes hardware add 0x1000000000 a second time. This
-             * becomes visible when an indirect draw follows a direct draw in
-             * one stream. Index-buffer addresses use their separate native
-             * 48-bit absolute field and remain unchanged. */
-            const uint64_t indirect_buffer =
-               agx_is_indirect(draw.b)
-                  ? hk_g17p_vdm_compact(cmd, draw.b.ptr)
-                  : 0;
-            if (agx_is_indirect(draw.b) && !indirect_buffer) {
-               vk_command_buffer_set_error(&cmd->vk,
-                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
-               return;
-            }
-
             /* This context-relative PPP record selects the latest scissor
              * and depth-bias array entries. Header0x100 is PPP selector bit8,
              * not a direct-draw shape; +4 contains indices, not enable flags.
@@ -5966,7 +5977,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                       : 0,
                   .index_buffer = draw.index_buffer,
                   .index_buffer_range_B = draw.index_buffer_range_B,
-                  .indirect_buffer = indirect_buffer,
+                  /* Unlike PPP and stream-link pointers, the Index List
+                   * indirect-argument pointer is a native absolute 48-bit VA.
+                   * Compacting it by the render-context base makes hardware
+                   * read an unmapped address and silently skip the draw. */
+                  .indirect_buffer = draw.b.ptr,
                };
                struct agx_vdm_hal200_indirect_draw encoded;
                if (!agx_vdm_hal200_indirect_draw_pack(dev->dev.chip, &fields,

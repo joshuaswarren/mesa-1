@@ -137,11 +137,12 @@ bool hk_agx3_g17p_combined_sampler_pointers(
 struct hk_agx3_g17p_sampled_storage_heap {
    struct hk_agx3_g17p_combined_sampler_heap sampled;
    uint64_t pbe_descriptor_set_va;
+   uint64_t write_control_va;
    uint32_t pbe_offset_B;
 };
 
 /* Resolve Apple's exact four-slot compute texture0/sample0 -> write-texture1
- * tuple: sampled texture, sampler, destination PBE, coordinate clamp. */
+ * tuple: sampled texture, sampler, destination PBE, write-control pointer. */
 bool hk_agx3_g17p_sampled_storage_pointers(
    const struct hk_agx3_g17p_sampled_storage_heap *heap,
    uint64_t pointers[4]);
@@ -150,6 +151,7 @@ struct hk_agx3_g17p_indexed_storage_heap {
    uint64_t texture_heap_va;
    uint64_t sampler_heap_va;
    uint64_t pbe_descriptor_set_va;
+   uint64_t write_control_va;
    uint32_t pbe_offset_B;
 };
 
@@ -162,6 +164,14 @@ bool hk_agx3_g17p_indexed_storage_pointers(
 bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
                              uint64_t root_va,
                              struct agx3_ioto_uniform_range *range);
+
+/* Publish promoted constants through G17P's dword-granular Ioto loader.
+ * Compiler binaries pad the rodata blob before the aligned code entry, so an
+ * odd final half may be covered by loading the following padding half. */
+bool hk_agx3_g17p_rodata_range(uint16_t base_halfs, uint16_t size_halfs,
+                               uint64_t bo_va, uint32_t offset_B,
+                               uint64_t bo_size_B,
+                               struct agx3_ioto_uniform_range *range);
 
 /* Load the four fragment blend constants at an even uniform-half base. The
  * standard ABI uses half4; HAL200 may relocate the epilog range when native

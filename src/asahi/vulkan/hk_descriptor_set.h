@@ -62,8 +62,9 @@ struct hk_storage_image_descriptor {
    struct hk_native_pbe_descriptor pbe;
    uint32_t texture_heap_index;
    uint32_t pad;
+   uint64_t atomic_sw;
 };
-static_assert(sizeof(struct hk_storage_image_descriptor) == 72,
+static_assert(sizeof(struct hk_storage_image_descriptor) == 80,
               "maximum storage descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */

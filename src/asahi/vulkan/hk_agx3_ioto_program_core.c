@@ -295,6 +295,8 @@ hk_agx3_g17p_sampled_storage_pointers(
    uint64_t pointers[4])
 {
    if (!heap || !pointers || !heap->pbe_descriptor_set_va ||
+       !heap->write_control_va || (heap->write_control_va & 31) ||
+       heap->write_control_va > UINT64_MAX - 31 ||
        (heap->pbe_offset_B & 7) != 0 ||
        heap->pbe_descriptor_set_va > UINT64_MAX - heap->pbe_offset_B ||
        heap->pbe_descriptor_set_va + heap->pbe_offset_B > UINT64_MAX - 31)
@@ -305,7 +307,7 @@ hk_agx3_g17p_sampled_storage_pointers(
       return false;
 
    staged[2] = heap->pbe_descriptor_set_va + heap->pbe_offset_B;
-   staged[3] = UINT64_C(0xffff);
+   staged[3] = heap->write_control_va;
    memcpy(pointers, staged, sizeof(staged));
    return true;
 }
@@ -317,6 +319,8 @@ hk_agx3_g17p_indexed_storage_pointers(
 {
    if (!heap || !pointers || !heap->texture_heap_va ||
        !heap->sampler_heap_va || !heap->pbe_descriptor_set_va ||
+       !heap->write_control_va || (heap->write_control_va & 31) ||
+       heap->write_control_va > UINT64_MAX - 31 ||
        (heap->pbe_offset_B & 7) != 0 ||
        heap->pbe_descriptor_set_va > UINT64_MAX - heap->pbe_offset_B ||
        heap->pbe_descriptor_set_va + heap->pbe_offset_B > UINT64_MAX - 31)
@@ -326,7 +330,7 @@ hk_agx3_g17p_indexed_storage_pointers(
       heap->texture_heap_va,
       heap->sampler_heap_va,
       heap->pbe_descriptor_set_va + heap->pbe_offset_B,
-      UINT64_C(0xffff),
+      heap->write_control_va,
    };
    memcpy(pointers, staged, sizeof(staged));
    return true;
@@ -345,6 +349,32 @@ hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
       .start_halfs = start_halfs,
       .size_halfs = 4 * (1 + set_count),
       .address = root_va,
+   };
+   return true;
+}
+
+bool
+hk_agx3_g17p_rodata_range(uint16_t base_halfs, uint16_t size_halfs,
+                          uint64_t bo_va, uint32_t offset_B,
+                          uint64_t bo_size_B,
+                          struct agx3_ioto_uniform_range *range)
+{
+   const uint32_t loaded_halfs = ((uint32_t)size_halfs + 1) & ~1u;
+
+   if (!range || !bo_va || !size_halfs || (base_halfs & 1) ||
+       loaded_halfs > 512 || base_halfs > 512 - loaded_halfs ||
+       offset_B > bo_size_B || bo_va > UINT64_MAX - offset_B)
+      return false;
+
+   const uint64_t loaded_bytes = (uint64_t)loaded_halfs * 2;
+   const uint64_t address = bo_va + offset_B;
+   if (loaded_bytes > bo_size_B - offset_B || (address & 3))
+      return false;
+
+   *range = (struct agx3_ioto_uniform_range){
+      .start_halfs = base_halfs,
+      .size_halfs = loaded_halfs,
+      .address = address,
    };
    return true;
 }
@@ -529,10 +559,6 @@ hk_agx3_g17p_rt0_eot_program_generate(
                     desc->nr_gprs == 8 && desc->staging_halfs == 8 &&
                     (desc->attachment_count == 0 ||
                      desc->attachment_count == 1);
-   const bool layered_rt0 = desc && desc->shader_binary_size == 110 &&
-                            desc->nr_gprs == 16 &&
-                            desc->staging_halfs == 8 &&
-                            desc->attachment_count == 1;
    const bool rgba8_mrt = desc && desc->shader_binary_size == 120 &&
                           desc->nr_gprs == 8 &&
                           desc->staging_halfs == 16 &&
@@ -547,7 +573,7 @@ hk_agx3_g17p_rt0_eot_program_generate(
                           desc->imageblock_offset1_B == 8;
    const bool dual_mrt = rgba8_mrt || wboit_mrt;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (!rt0 && !layered_rt0 && !dual_mrt) ||
+       (!rt0 && !dual_mrt) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
           (dual_mrt ? 63 : 31) ||

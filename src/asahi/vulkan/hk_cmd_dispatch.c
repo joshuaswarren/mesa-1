@@ -31,6 +31,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* EXP-G1b's native access::write argument is a PBE pointer followed by a
+ * pointer to this control descriptor, including when it follows a sampled
+ * texture in the argument table. It is not the read_write clamp scalar. */
+static const uint8_t hk_g17p_native_write_control[32] = {
+   0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+};
+
 struct hk_g17p_compute_program_cache_key {
    uint32_t libagx_program;
    uint32_t data_size;
@@ -412,17 +419,12 @@ hk_g17p_internal_graphics_uniform_ranges(
 
    if (s->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &s->b.info.rodata;
-      const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
       if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || !s->bo || !s->bo->va ||
-          (rodata->base_uniform & 1) || (rodata->size_16 & 1) ||
-          rodata->offset > s->bo->size ||
-          size_B > s->bo->size - rodata->offset)
+          !hk_agx3_g17p_rodata_range(
+             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
+             rodata->offset, s->bo->size, &ranges[count]))
          return false;
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = rodata->base_uniform,
-         .size_halfs = rodata->size_16,
-         .address = s->bo->va->addr + rodata->offset,
-      };
+      count++;
    }
 
    *range_count = count;
@@ -480,20 +482,6 @@ hk_g17p_compute_uniform_ranges(
    if (!hk_agx3_g17p_root_range(root_uniform, s->info.set_count, root_ptr, &ranges[0]))
       return false;
 
-   /* Deliver the footprint the compiler finally settled on.
-    *
-    * `reserved_preamble = root + 4 * (1 + set_count)` (hk_shader.c:1255) is
-    * where the compiler STARTS; agx_opt_promote_constants() can raise
-    * `push_count` afterwards (agx_opt_promote_constants.c:149).  Measured on
-    * hardware this is currently a no-op -- push_count reads 8 for the probe,
-    * exactly 4 * (1 + 1) -- so this only matters for a shader whose constants
-    * were promoted.  Safe either way: push_count is in the same 16-bit
-    * uniform registers as size_halfs, and the bytes come from the root
-    * descriptor table, which is larger than the range.
-    */
-   if (s->b.info.push_count > root_uniform + ranges[0].size_halfs)
-      ranges[0].size_halfs = s->b.info.push_count - root_uniform;
-
    size_t count = 1;
    if (texture_pointers) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
@@ -503,18 +491,12 @@ hk_g17p_compute_uniform_ranges(
    }
    const struct agx_rodata *rodata = &s->b.info.rodata;
    if (rodata->size_16 != 0) {
-      const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
-      if (!s->bo || !s->bo->va || (rodata->base_uniform & 1) != 0 ||
-          (rodata->size_16 & 1) != 0 || rodata->size_16 > 512 ||
-          rodata->offset > s->bo->size ||
-          size_B > s->bo->size - rodata->offset)
+      if (!s->bo || !s->bo->va ||
+          !hk_agx3_g17p_rodata_range(
+             rodata->base_uniform, rodata->size_16, s->bo->va->addr,
+             rodata->offset, s->bo->size, &ranges[count]))
          return false;
-
-      ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = rodata->base_uniform,
-         .size_halfs = rodata->size_16,
-         .address = s->bo->va->addr + rodata->offset,
-      };
+      count++;
    }
 
    *range_count = count;
@@ -947,10 +929,19 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
+            const uint64_t write_control = hk_pool_upload(
+               cmd, hk_g17p_native_write_control,
+               sizeof(hk_g17p_native_write_control), 32);
+            if (!write_control) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
             const struct hk_agx3_g17p_indexed_storage_heap heap = {
                .texture_heap_va = pointers[0],
                .sampler_heap_va = pointers[1],
                .pbe_descriptor_set_va = set_address,
+               .write_control_va = write_control,
                .pbe_offset_B = binding->pbe_offset_B,
             };
             if (!hk_agx3_g17p_indexed_storage_pointers(&heap, pointers)) {
@@ -1006,6 +997,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 (const uint8_t *)texture_set->mapped_ptr +
                    binding->sampler_index_offset_B,
                 sizeof(sampler_index));
+         const uint64_t write_control = hk_pool_upload(
+            cmd, hk_g17p_native_write_control,
+            sizeof(hk_g17p_native_write_control), 32);
+         if (!write_control) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return;
+         }
          const struct hk_agx3_g17p_sampled_storage_heap heap = {
             .sampled = {
                .descriptor_set_va = texture_set_address,
@@ -1017,6 +1016,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                   agx_chip_sampler_heap_element_size(dev->dev.chip),
             },
             .pbe_descriptor_set_va = pbe_set_address,
+            .write_control_va = write_control,
             .pbe_offset_B = binding->pbe_offset_B,
          };
          uint64_t pointers[4] = {0};
@@ -1081,13 +1081,18 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             return;
          }
       } else if (s->info.agx3_storage_image_valid) {
-         /* Exact access::read_write control descriptor from the native G17P
-          * Tier-2 argument buffer. Preserve its full slot and alignment. */
+         /* Exact access controls from native G17P Tier-2 argument buffers.
+          * A write-only resource is a PBE pointer followed by write-control;
+          * read_write instead starts with texture/PBE and points at the
+          * paired read/write controls in its third slot. */
          static const uint8_t native_read_write_control[32] = {
             0x68, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x1b,
+            0x08, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
          };
+         const bool write_only = s->info.agx3_storage_image.write_only;
          const uint64_t access_control =
-            hk_pool_upload(cmd, native_read_write_control,
+            hk_pool_upload(cmd, write_only ? hk_g17p_native_write_control
+                                           : native_read_write_control,
                            sizeof(native_read_write_control), 32);
          if (!access_control) {
             vk_command_buffer_set_error(&cmd->vk,
@@ -1095,13 +1100,20 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             return;
          }
 
-         pointers[0] = set_address +
-                       s->info.agx3_storage_image.texture_offset_B;
-         pointers[1] = set_address + s->info.agx3_storage_image.pbe_offset_B;
-         pointers[2] = access_control;
-         /* The native read_write ISEL clamps each unsigned coordinate against
-          * uniform half12. The only consumed vector word is 0xffff. */
-         pointers[3] = UINT64_C(0xffff);
+         if (write_only) {
+            pointers[0] =
+               set_address + s->info.agx3_storage_image.pbe_offset_B;
+            pointers[1] = access_control;
+         } else {
+            pointers[0] = set_address +
+                          s->info.agx3_storage_image.texture_offset_B;
+            pointers[1] =
+               set_address + s->info.agx3_storage_image.pbe_offset_B;
+            pointers[2] = access_control;
+            /* The native read_write ISEL clamps each unsigned coordinate
+             * against uniform half12. The consumed vector word is 0xffff. */
+            pointers[3] = UINT64_C(0xffff);
+         }
       } else {
          /* Native G17P compute read() uses table pointers in uniform
           * halves0..7, with ordinary buffer arguments beginning at half8. */
@@ -1262,13 +1274,8 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return;
 
       const struct agx3_g17p_native_indirect_dispatch dispatch = {
-         .helper_program_va = helper_program_va,
+         .helper_program = &helper_program.launch,
          .geometry_va = geometry.gpu,
-         /* The main record's inline dimensions are ignored in this mode; the
-          * encoder still rejects zero, so publish the local size as a
-          * self-consistent placeholder rather than an invented grid. */
-         .inline_global_size = {local_size.x, local_size.y, local_size.z},
-         .local_size = {local_size.x, local_size.y, local_size.z},
       };
       if (!hk_agx3_g17p_native_indirect_compute_dispatch_append(
              &program.launch, &dispatch, &sink)) {

@@ -240,6 +240,8 @@ target_supports_program(const char *target, const nir_function *func)
    return strcmp(target, "g17p") ||
           !strcmp(func->name, "libagx_fill_uint4") ||
           !strcmp(func->name, "libagx_copy_image") ||
+          !strcmp(func->name, "libagx_mipmap_unorm8x4") ||
+          !strcmp(func->name, "libagx_mipmap_unorm8x4_odd") ||
           !strcmp(func->name, "libagx_predicate_indirect") ||
           !strcmp(func->name, "libagx_draw_indirect_byte_count") ||
           !strcmp(func->name, "libagx_conditional_render") ||
@@ -421,6 +423,10 @@ main(int argc, char **argv)
                  "const uint32_t *libagx_g17p[LIBAGX_NUM_PROGRAMS] = {\n"
                  "    [LIBAGX_FILL_UINT4] = libagx_fill_uint4_0_g17p,\n"
                  "    [LIBAGX_COPY_IMAGE] = libagx_copy_image_0_g17p,\n"
+                 "    [LIBAGX_MIPMAP_UNORM8X4] = "
+                 "libagx_mipmap_unorm8x4_0_g17p,\n"
+                 "    [LIBAGX_MIPMAP_UNORM8X4_ODD] = "
+                 "libagx_mipmap_unorm8x4_odd_0_g17p,\n"
                  "    [LIBAGX_PREDICATE_INDIRECT_0] = "
                  "libagx_predicate_indirect_0_g17p,\n"
                  "    [LIBAGX_PREDICATE_INDIRECT_1] = "

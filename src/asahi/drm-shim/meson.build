@@ -29,6 +29,22 @@ libasahi_noop_drm_shim = shared_library(
 )
 
 if with_tests and with_asahi_vk and host_machine.system() == 'linux'
+  foreach sparse_case : [['g17p', 'no-sparse'], ['g13g', 'sparse']]
+    test(
+      'hk_sparse_format_properties_' + sparse_case[0],
+      hk_sparse_format_properties,
+      args : [sparse_case[1]],
+      env : {
+        'ASAHI_SHIM_CHIP' : sparse_case[0],
+        'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
+        'VK_DRIVER_FILES' : _dev_icd.full_path(),
+        'MESA_VK_VERSION_OVERRIDE' : '1.0',
+      },
+      depends : [_dev_icd, libasahi_noop_drm_shim, libvulkan_asahi],
+      suite : ['asahi'],
+    )
+  endforeach
+
   g17p_queue_progress_environment = {
     'ASAHI_SHIM_CHIP' : 'g17p',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
@@ -52,6 +68,18 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     env : g17p_queue_progress_environment,
     depends : _dev_icd,
     suite : ['asahi', 'g17p-pipeline-cache'],
+    timeout : 30,
+  )
+
+  test(
+    'hk_g17p_sequential_dispatch',
+    prog_python,
+    args : [
+      files('../vulkan/tests/test-g17p-sequential-dispatch.py'),
+      meson.current_build_dir() / '../../..',
+    ],
+    depends : [_dev_icd, libasahi_noop_drm_shim, g17p_sequential_dispatch],
+    suite : ['asahi', 'g17p-sequential-dispatch'],
     timeout : 30,
   )
 
@@ -228,6 +256,43 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     depends : _dev_icd,
     suite : ['asahi', 'g17p-ioto-program-pressure'],
     timeout : 120,
+  )
+
+  # STK/GTK-style full BGRA8 upload and mip generation. The base upload,
+  # two-level mip chain and three readbacks must be one compute stream; only
+  # the final sample remains graphics. Regressing either fast path adds one or
+  # more firmware render jobs, while regressing mip ordering removes the two
+  # strong compute launches.
+  g17p_generated_mips_env = environment(g17p_queue_progress_environment)
+  g17p_generated_mips_env.set('G17P_GENERATED_MIPS_SUBMIT_ONLY', '1')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS',
+                              '7,7,0,2')
+  # The raw copy and both mip filters make every fixture compute launch 2D.
+  # Flattening the copy drops this to six; flattening the mip filters produces
+  # four here and five in the odd fixture.
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_2D_COMPUTE_LAUNCHES',
+                              '7')
+  g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_STREAM_SHAPE',
+                              '1:17:17:1:0')
+  test(
+    'hk_g17p_generated_mips_compute',
+    g17p_generated_mips,
+    env : g17p_generated_mips_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-generated-mips'],
+    timeout : 30,
+  )
+
+  # A 129x129 base level exercises the Q8 coordinate-table kernel for the
+  # first blit while retaining the same merged compute-stream contract.
+  test(
+    'hk_g17p_generated_mips_odd_compute',
+    g17p_generated_mips_odd,
+    env : g17p_generated_mips_env,
+    depends : _dev_icd,
+    suite : ['asahi', 'g17p-generated-mips'],
+    timeout : 30,
   )
 
   g17p_xfb_draw_env = environment(g17p_queue_progress_environment)
@@ -423,8 +488,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
   g17p_image_copy_3d_env = environment(g17p_image_copy_3d_environment)
+  # The uncompressed source and destination uploads use raw CDM slices.  Only
+  # the two actual image-copy draws should reach the fragment path.
   g17p_image_copy_3d_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '7')
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '2')
   test(
     'hk_g17p_image_copy_3d',
     g17p_vulkan_image_copy_3d,
@@ -554,11 +621,10 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
          suite : ['asahi', 'g17p-batching'], timeout : 30)
   endforeach
 
-  # Minimal reproduction for the G17P context-relative indirect-argument
+  # Minimal reproduction for the native absolute G17P indirect-argument
   # pointer: one direct draw followed by one non-indexed indirect draw in the
-  # same stream. The strict validator adds the render-context base
-  # unconditionally, so the old raw full VA resolves to an unowned rebased
-  # address while the compact offset resolves to the recorded argument BO.
+  # same stream. The strict validator must check the encoded VA directly;
+  # rebasing it as a compact PPP/stream-link payload rejects the owned BO.
   indirect_address_env = environment(g17p_image_copy_3d_environment)
   indirect_address_env.set('G17P_REPEAT_DRAW_COUNT', '2')
   indirect_address_env.set('G17P_REPEAT_INDIRECT', '2')
@@ -767,8 +833,14 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   }
   g17p_layered_mip_blit_env = environment(
     g17p_layered_mip_blit_environment)
+  # The twelve cube-layer base uploads are raw CDM copies; the six layered
+  # blits remain the general graphics path and the readback adds one CDM
+  # launch.
   g17p_layered_mip_blit_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '18')
+    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '6')
+  g17p_layered_mip_blit_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
+  g17p_layered_mip_blit_env.set(
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,0')
   test(
     'hk_g17p_layered_mip_blit',
     g17p_vulkan_layered_mip_blit,

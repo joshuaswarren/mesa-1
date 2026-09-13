@@ -259,7 +259,7 @@ agx3_g17p_native_indirect_compute_dispatch_append(
    const struct agx3_g17p_native_indirect_dispatch *dispatch,
    struct agx3_compute_dispatch_sink *sink)
 {
-   if (!program || !dispatch || !sink ||
+   if (!program || !dispatch || !dispatch->helper_program || !sink ||
        (sink->capacity != 0 && !sink->data) || sink->length > sink->capacity ||
        AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE >
           sink->capacity - sink->length ||
@@ -267,57 +267,47 @@ agx3_g17p_native_indirect_compute_dispatch_append(
        !program->g17p_native_compute_live_bound || program->program_va == 0 ||
        program->program_va > UINT64_C(0xffffffffffff) ||
        (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
-       dispatch->helper_program_va == 0 ||
-       dispatch->helper_program_va > UINT64_C(0xffffffffffff) ||
-       (dispatch->helper_program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
+       !dispatch->geometry_va || dispatch->geometry_va >= (UINT64_C(1) << 48) ||
        (dispatch->geometry_va & 3) != 0 ||
-       program->launch_template.word0 >= (UINT32_C(1) << 29) ||
+       program->launch_template.word0 >= (UINT32_C(1) << 27) ||
+       dispatch->helper_program->launch_template.word0 >=
+          (UINT32_C(1) << 27) ||
        program->launch_template.word1 >= (UINT32_C(1) << 22))
       return false;
 
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      if (dispatch->inline_global_size[axis] == 0 ||
-          dispatch->local_size[axis] == 0)
-         return false;
-   }
-
    uint8_t staged[AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE] = {0};
+   struct agx3_compute_dispatch_sink helper_sink = {
+      .data = staged,
+      .capacity = sizeof(staged),
+   };
+   const struct agx3_compute_direct_grid helper_grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {1, 1, 1},
+      .local_size = {1, 1, 1},
+      .dimensions = 1,
+   };
+   /* The 44-byte record is a direct dispatch, not a deferred application
+    * launch. Bit 23 belongs to the program template; it is not indirect mode.
+    * Run the one-invocation geometry producer with its own resource template. */
+   if (!agx3_g17p_native_compute_dispatch_append(
+          dispatch->helper_program, &helper_grid, &helper_sink))
+      return false;
 
-   /* Bit 23 changes the direct-shaped main record to consume geometry from
-    * the following helper instead of its inline dimensions. */
+   uint8_t *main = staged + helper_sink.length;
    agx3_cmdstream_store_le32(
-      staged, program->launch_template.word0 | UINT32_C(0x00800000));
+      main, program->launch_template.word0 | AGX3_G17P_NATIVE_INDIRECT_MODE);
    agx3_cmdstream_store_le32(
-      staged + 4,
+      main + 4,
       (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
          program->launch_template.word1);
-   agx3_g17p_store_native_program_pointer(staged + 8, program->program_va);
-   for (unsigned axis = 0; axis < 3; ++axis) {
-      agx3_cmdstream_store_le32(staged + 16 + axis * 4,
-                                dispatch->inline_global_size[axis]);
-      agx3_cmdstream_store_le32(staged + 28 + axis * 4,
-                                dispatch->local_size[axis]);
-   }
-
+   agx3_g17p_store_native_program_pointer(main + 8, program->program_va);
+   agx3_cmdstream_store_le32(main + 16, (uint32_t)(dispatch->geometry_va >> 32));
+   agx3_cmdstream_store_le32(main + 20, (uint32_t)dispatch->geometry_va);
    const struct agx3_cdm_barrier_info barrier = {
       .chip = AGX_CHIP_G17P,
       .flags = 0,
    };
-   if (!agx3_cdm_barrier_pack(&barrier, staged + 40))
-      return false;
-
-   uint8_t *helper = staged + AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
-   agx3_cmdstream_store_le32(helper, AGX3_G17P_NATIVE_INDIRECT_HELPER_WORD0);
-   agx3_cmdstream_store_le32(
-      helper + 4,
-      (uint32_t)(((dispatch->helper_program_va >> 38) & 0x3ff) << 22));
-   agx3_g17p_store_native_program_pointer(helper + 8,
-                                           dispatch->helper_program_va);
-   agx3_cmdstream_store_le32(helper + 16,
-                             (uint32_t)(dispatch->geometry_va >> 32));
-   agx3_cmdstream_store_le32(helper + 20,
-                             (uint32_t)dispatch->geometry_va);
-   if (!agx3_cdm_barrier_pack(&barrier, helper + 24))
+   if (!agx3_cdm_barrier_pack(&barrier, main + 24))
       return false;
 
    memcpy(sink->data + sink->length, staged, sizeof(staged));

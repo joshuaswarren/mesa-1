@@ -38,6 +38,8 @@ bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
                                                     bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
+bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
+                                               unsigned generation);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
@@ -46,6 +48,12 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 /* G17P appends one native texture-heap index after the 64-byte texture/PBE
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
+/* G17P storage descriptors reserve the following eight bytes for the two
+ * texture-heap indices.  Image atomics keep their software address metadata
+ * in a separate packed word after those indices, 40 bytes past the native PBE
+ * handle seen by agx_nir_lower_texture_for_generation(). */
+#define AGX_G17P_IMAGE_ATOMIC_SW_OFFSET 72
+#define AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE 40
 /* Software sampler indices carry AGX2's reservation of the first 28 entries;
  * the native G17P heap is zero-based. Must match the runtime's
  * HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX. */
@@ -75,10 +83,11 @@ struct agx_g17p_txf_binding {
 struct agx_g17p_storage_image_binding {
    uint32_t texture_offset_B;
    uint32_t pbe_offset_B;
+   bool write_only;
 };
 
 /* Apple's sampled-texture-to-write-image kernel ABI places a sampled texture,
- * its native sampler, the destination PBE state, and the coordinate clamp in
+ * its native sampler, the destination PBE state, and its write control in
  * uniform slots 0..3.  Keep the two descriptor sets explicit: Vulkan does not
  * require sampled and storage images to share a set. */
 struct agx_g17p_sampled_storage_binding {

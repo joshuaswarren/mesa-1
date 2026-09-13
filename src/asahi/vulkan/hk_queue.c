@@ -678,6 +678,19 @@ max_commands_per_submit(struct hk_device *dev)
       HK_PERF(dev, BATCH), dev->dev.params.max_commands_per_submission);
 }
 
+/* One aggregate line per Vulkan queue submit.  Unlike the per-stream launch
+ * and draw diagnostics, this is cheap enough to leave enabled for a complete
+ * STK cold start and exposes whether texture work reached CDM without
+ * perturbing production batching. */
+static bool
+hk_g17p_submit_trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_SUBMIT_TRACE", false);
+   return enabled != 0;
+}
+
 static VkResult
 queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
                     unsigned ring_idx)
@@ -1271,6 +1284,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
 
    unsigned nr_vdm = 0, nr_cdm = 0;
+   unsigned nr_draws = 0, nr_dispatches = 0, nr_flushes = 0, nr_merged = 0;
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
@@ -1296,6 +1310,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_cdm_command(dev, cs, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_cdm++;
+            nr_dispatches += cs->stats.cmds;
+            nr_flushes += cs->stats.flushes;
+            nr_merged += cs->stats.merged;
          } else {
             assert(cs->type == HK_CS_VDM);
             perf_debug(cmdbuf, "%u: Submitting VDM with %u API draws, %u draws",
@@ -1310,8 +1327,25 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_vdm_command(dev, cs, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
+            nr_draws += cs->stats.cmds;
          }
       }
+   }
+
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_submit_trace_enabled()) {
+      static int sequence;
+      const unsigned submit_sequence = p_atomic_inc_return(&sequence);
+      const unsigned limit = max_commands_per_submit(dev);
+      const unsigned ioctls = DIV_ROUND_UP(command_count, limit);
+      fprintf(stderr,
+              "G17P submit trace: seq=%u streams=%u vdm=%u cdm=%u draws=%u "
+              "dispatches=%u flushes=%u merged=%u command-buffers=%u "
+              "waits=%u signals=%u ioctls=%u limit=%u\n",
+              submit_sequence, command_count, nr_vdm, nr_cdm, nr_draws,
+              nr_dispatches, nr_flushes, nr_merged,
+              submit->command_buffer_count, wait_count, submit->signal_count,
+              ioctls, limit);
+      fflush(stderr);
    }
 
    if ((dev->dev.debug & AGX_DBG_TRACE) && hk_agxdecode_trace_armed()) {

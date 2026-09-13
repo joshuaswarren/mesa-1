@@ -445,6 +445,10 @@
 #define G17P_COMPOSITE_GENERATE_MIPS 0
 #endif
 
+#ifndef G17P_COMPOSITE_GENERATE_MIPS_ODD
+#define G17P_COMPOSITE_GENERATE_MIPS_ODD 0
+#endif
+
 /* Descriptor-path discriminator for the same compositor sample:
  * 0 = allocated combined array (original oracle)
  * 1 = allocated single combined image sampler
@@ -493,6 +497,10 @@
 
 #if G17P_COMPOSITE_GENERATE_MIPS && !G17P_TEXTURE_ALPHA_COMPOSITE
 #error "generated mipmaps require the texture alpha-composite oracle"
+#endif
+
+#if G17P_COMPOSITE_GENERATE_MIPS_ODD && !G17P_COMPOSITE_GENERATE_MIPS
+#error "odd generated mipmaps require generated mipmaps"
 #endif
 
 #if G17P_COMPOSITE_SRGB_SOURCE || G17P_COMPOSITE_SRGB_TARGET
@@ -1392,11 +1400,20 @@
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
 #elif G17P_TEXTURE_ALPHA_COMPOSITE && G17P_COMPOSITE_GENERATE_MIPS
+#if G17P_COMPOSITE_GENERATE_MIPS_ODD
+#define PROBE_NAME "g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips-odd"
+#else
 #define PROBE_NAME "g17p-vulkan-texture-alpha-composite-bgra8p-generated-mips"
+#endif
 #define READBACK_IMAGE_USAGE 0
 #define READBACK_GUARD_BYTES 64
 #define READBACK_BYTES (IMAGE_BYTES + 2 * READBACK_GUARD_BYTES)
-#define GENERATED_LEVEL0_BYTES (4 * IMAGE_BYTES)
+#define GENERATED_LEVEL0_WIDTH                                           \
+   (2 * IMAGE_WIDTH + G17P_COMPOSITE_GENERATE_MIPS_ODD)
+#define GENERATED_LEVEL0_HEIGHT                                          \
+   (2 * IMAGE_HEIGHT + G17P_COMPOSITE_GENERATE_MIPS_ODD)
+#define GENERATED_LEVEL0_BYTES                                           \
+   (GENERATED_LEVEL0_WIDTH * GENERATED_LEVEL0_HEIGHT * TEXTURE_PIXEL_BYTES)
 #define GENERATED_PRE_LEVEL0_OFFSET READBACK_GUARD_BYTES
 #define GENERATED_POST_LEVEL0_OFFSET                                        \
    (READBACK_GUARD_BYTES + GENERATED_LEVEL0_BYTES + READBACK_GUARD_BYTES)
@@ -2795,11 +2812,12 @@ verify_generated_mip1(const uint8_t *map)
    const char *level0_names[2] = {"pre-blit", "post-blit"};
    for (unsigned snapshot = 0; snapshot < 2; ++snapshot) {
       const uint8_t *level0 = map + level0_offsets[snapshot];
-      for (unsigned y = 0; y < 2 * IMAGE_HEIGHT; ++y) {
-         for (unsigned x = 0; x < 2 * IMAGE_WIDTH; ++x) {
+      for (unsigned y = 0; y < GENERATED_LEVEL0_HEIGHT; ++y) {
+         for (unsigned x = 0; x < GENERATED_LEVEL0_WIDTH; ++x) {
             const uint8_t *expected = ((x / 2) ^ (y / 2)) & 1
                                          ? green : transparent;
-            const uint8_t *actual = level0 + (y * 2 * IMAGE_WIDTH + x) * 4;
+            const uint8_t *actual =
+               level0 + (y * GENERATED_LEVEL0_WIDTH + x) * 4;
             if (memcmp(actual, expected, 4) != 0) {
                fprintf(stderr, PROBE_NAME
                                ": %s level0 pixel (%u,%u) got "
@@ -2813,6 +2831,23 @@ verify_generated_mip1(const uint8_t *map)
          }
       }
    }
+
+#if G17P_COMPOSITE_GENERATE_MIPS_ODD
+   uint64_t hash = UINT64_C(14695981039346656037);
+   const uint8_t *pixels = map + GENERATED_LEVEL1_OFFSET;
+   for (size_t i = 0; i < IMAGE_BYTES; ++i) {
+      hash ^= pixels[i];
+      hash *= UINT64_C(1099511628211);
+   }
+   if (hash != UINT64_C(0xa5df1f2ca9de2521)) {
+      fprintf(stderr, PROBE_NAME
+                      ": odd generated mip1 hash %016" PRIx64
+                      ", expected a5df1f2ca9de2521\n",
+              hash);
+      return false;
+   }
+   return true;
+#else
 
    const uint8_t *pixels = map + GENERATED_LEVEL1_OFFSET;
    const uint8_t gray[4] = {128, 128, 128, 128};
@@ -2850,6 +2885,7 @@ verify_generated_mip1(const uint8_t *map)
                       "gray80808080=%zu mixed00808000=%zu other=%zu\n",
               exact_transparent, exact_green, exact_gray, exact_mixed, other);
    return !mismatch;
+#endif
 }
 #endif
 
@@ -2975,6 +3011,9 @@ main(void)
       (G17P_R8_UINT && getenv("G17P_R8_UINT_RECORD_ONLY") != NULL) ||
       (G17P_R8_SINT && getenv("G17P_R8_SINT_RECORD_ONLY") != NULL) ||
       (G17P_RG32_UINT && getenv("G17P_RG32_UINT_RECORD_ONLY") != NULL);
+   const bool submit_only =
+      G17P_COMPOSITE_GENERATE_MIPS &&
+      getenv("G17P_GENERATED_MIPS_SUBMIT_ONLY") != NULL;
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
       die(dlerror());
@@ -4103,8 +4142,12 @@ main(void)
 
 #if G17P_TEXTURE_ORACLE
    enum {
-      TEXTURE_WIDTH = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_WIDTH * 2 : 64,
-      TEXTURE_HEIGHT = G17P_TEXTURE_ALPHA_COMPOSITE ? IMAGE_HEIGHT * 2 : 64,
+      TEXTURE_WIDTH = G17P_TEXTURE_ALPHA_COMPOSITE
+                         ? IMAGE_WIDTH * 2 + G17P_COMPOSITE_GENERATE_MIPS_ODD
+                         : 64,
+      TEXTURE_HEIGHT = G17P_TEXTURE_ALPHA_COMPOSITE
+                          ? IMAGE_HEIGHT * 2 + G17P_COMPOSITE_GENERATE_MIPS_ODD
+                          : 64,
 #if G17P_YCBCR
       TEXTURE_LEVELS = 1,
       TEXTURE_LAYERS = 1,
@@ -5823,7 +5866,7 @@ main(void)
          const VkBufferImageCopy pre_blit_level0_copy = {
             .bufferOffset = GENERATED_PRE_LEVEL0_OFFSET,
             .imageSubresource = {TEXTURE_ASPECT, 0, 0, 1},
-            .imageExtent = {2 * IMAGE_WIDTH, 2 * IMAGE_HEIGHT, 1},
+            .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
          };
          vkCmdCopyImageToBuffer(command_buffer, texture,
                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -5849,7 +5892,7 @@ main(void)
    const VkBufferImageCopy post_blit_level0_copy = {
       .bufferOffset = GENERATED_POST_LEVEL0_OFFSET,
       .imageSubresource = {TEXTURE_ASPECT, 0, 0, 1},
-      .imageExtent = {2 * IMAGE_WIDTH, 2 * IMAGE_HEIGHT, 1},
+      .imageExtent = {TEXTURE_WIDTH, TEXTURE_HEIGHT, 1},
    };
    vkCmdCopyImageToBuffer(command_buffer, texture,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -6467,6 +6510,12 @@ main(void)
    }
 #endif
 
+   if (submit_only) {
+      printf(PROBE_NAME ": SUBMIT PASS — generated-mip command stream "
+                        "submitted and completed\n");
+      return EXIT_SUCCESS;
+   }
+
 #if G17P_HOST_IMAGE_COPY
    const VkImageToMemoryCopyEXT host_copy_region = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_TO_MEMORY_COPY_EXT,
@@ -6491,6 +6540,10 @@ main(void)
 #if G17P_COMPOSITE_GENERATE_MIPS
    if (!verify_generated_mip1(generated_mip_readback.map))
       return EXIT_FAILURE;
+#if G17P_COMPOSITE_GENERATE_MIPS_ODD
+   printf(PROBE_NAME ": PASS — odd mip1 matches the native linear-filter oracle\n");
+   return EXIT_SUCCESS;
+#endif
 #endif
    if (!verify_readback(readback_map))
       return EXIT_FAILURE;
