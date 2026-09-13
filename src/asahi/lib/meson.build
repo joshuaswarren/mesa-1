@@ -267,6 +267,21 @@ if with_tests
   )
 
   test(
+    'asahi-agx-bo-map-placed',
+    executable(
+      'asahi-agx-bo-map-placed',
+      files('tests/test-agx-bo-map-placed.c'),
+      include_directories : [
+        inc_include, inc_src, inc_asahi, libasahi_lib_includes,
+        include_directories('../libagx'),
+      ],
+      dependencies : [idep_mesautil],
+      c_args : ['-UNDEBUG'],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-precompiled-fill',
     executable(
       'asahi-g17p-precompiled-fill',
