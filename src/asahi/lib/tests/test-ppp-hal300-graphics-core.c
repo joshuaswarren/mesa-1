@@ -98,6 +98,7 @@ main(void)
       .varying_table = UINT64_C(0x100000004c0),
       .cf_binding_count = 2,
       .point_size_output = true,
+      .vertex_color_output = true,
       .color_varying = true,
    };
    CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
@@ -131,6 +132,28 @@ main(void)
    f.color_varying = false;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    CHECK(memcmp(&out, &color_before, sizeof(out)) == 0);
+
+   /* A constant fragment shader has no CF bindings even when a reusable
+    * vertex shader exports float4 color. Preserve its nine UVS words and
+    * point-size selection without inventing a fragment interpolation input. */
+   f = (struct agx_ppp_hal300_graphics_fields) {
+      .fragment_program = UINT64_C(0x10000170700),
+      .point_size_output = true,
+      .vertex_color_output = true,
+   };
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   CHECK(out.bytes[4] == 0); /* No interpolated coefficients. */
+   for (unsigned i = 24; i < 36; ++i)
+      CHECK(out.bytes[i] == 0); /* No VIT pointer or CF binding count. */
+   CHECK(out.bytes[78] == 5); /* PSIZ and color vertex outputs. */
+   CHECK(out.bytes[88] == 9); /* All vertex output words stay live. */
+   const struct agx_ppp_hal300_graphics_core unused_before = out;
+   f.color_varying = true;
+   f.vertex_color_output = false;
+   f.varying_table = UINT64_C(0x10000000480);
+   f.cf_binding_count = 1;
+   CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   CHECK(memcmp(&out, &unused_before, sizeof(out)) == 0);
    puts("M5 native PPP graphics records: PASS");
    return 0;
 }

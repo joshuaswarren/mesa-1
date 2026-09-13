@@ -26,6 +26,20 @@ struct agx_m5_va_layout {
    uint64_t shader_start, shader_end;
 };
 
+/* Native 25G76 PPP pointer 0x58000 addresses VA 0x1000058000. Unlike
+ * shader/Ioto pointers and PPP-contained 48-bit bases, the VDM's reference
+ * to a PPP record is relative to the architectural GART base.
+ */
+static inline bool
+agx_m5_vdm_compact(uint64_t address, uint64_t *out)
+{
+   if (!out || address < AGX_M5_DRIVER_BASE || (address & 3) ||
+       address - AGX_M5_DRIVER_BASE >= (UINT64_C(1) << 39))
+      return false;
+   *out = address - AGX_M5_DRIVER_BASE;
+   return true;
+}
+
 static inline bool
 agx_m5_va_layout(uint64_t vm_start, uint64_t vm_end,
                  uint64_t kernel_min_size, uint64_t shader_base,

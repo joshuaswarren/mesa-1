@@ -4129,6 +4129,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
          .cull_mode = dyn->rs.cull_mode,
          .front_face_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
          .point_size_output = hw_vs->info.uvs.osel.opaque[0] == 0x40000,
+         .vertex_color_output = color_varying,
          .color_varying = color_varying,
          .flat_varying = color_varying && !color->smooth,
          .depth_less_write = depth_less_write,

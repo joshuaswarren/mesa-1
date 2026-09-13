@@ -19,6 +19,9 @@ struct agx_ppp_hal300_graphics_fields {
    unsigned cull_mode;
    bool front_face_ccw;
    bool point_size_output;
+   /* Vertex exports and fragment interpolation are independent. A fragment
+    * shader may leave the vertex shader's float4 output unused. */
+   bool vertex_color_output;
    bool color_varying;
    bool flat_varying;
    bool depth_less_write;

@@ -20,6 +20,27 @@ reject(uint64_t start, uint64_t end, uint64_t minimum, uint64_t shader)
 
 int main(void)
 {
+   uint64_t compact = 0;
+   assert(agx_m5_vdm_compact(UINT64_C(0x1000058000), &compact));
+   assert(compact == 0x58000);
+   /* Physical native-Gallium failure: dVDM_SSD fetched 0x6ffff8c000
+    * from the wrongly absolute PPP pointer 0x5ffff8c010. The architectural
+    * base must be removed exactly once before the hardware adds it back.
+    */
+   assert(agx_m5_vdm_compact(UINT64_C(0x5ffff8c010), &compact));
+   assert(compact == UINT64_C(0x4ffff8c010));
+   assert(compact + AGX_M5_DRIVER_BASE == UINT64_C(0x5ffff8c010));
+   assert(agx_m5_vdm_compact(AGX_M5_DRIVER_BASE, &compact) && compact == 0);
+   assert(agx_m5_vdm_compact(AGX_M5_DRIVER_BASE + (UINT64_C(1) << 39) - 4,
+                             &compact));
+   const uint64_t saved_compact = compact;
+   assert(!agx_m5_vdm_compact(AGX_M5_DRIVER_BASE - 4, &compact));
+   assert(!agx_m5_vdm_compact(AGX_M5_DRIVER_BASE + 1, &compact));
+   assert(!agx_m5_vdm_compact(AGX_M5_DRIVER_BASE + (UINT64_C(1) << 39), &compact));
+   assert(!agx_m5_vdm_compact(UINT64_MAX, &compact));
+   assert(!agx_m5_vdm_compact(AGX_M5_DRIVER_BASE, NULL));
+   assert(compact == saved_compact);
+
    struct agx_m5_va_layout layout;
    assert(agx_m5_va_layout(0x4000, vm_end, 0x20000000,
                            AGX_M5_SHADER_BASE, &layout));

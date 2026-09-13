@@ -987,6 +987,31 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
+   struct agx_device *dev = agx_device(pctx->screen);
+   const bool trace_read = dev->chip == AGX_CHIP_G17G &&
+                          (dev->debug & AGX_DBG_FAULTTRACE) &&
+                          (usage & PIPE_MAP_READ);
+   if (trace_read) {
+      fprintf(stderr, "M5_READBACK va=%#llx size=%llu format=%s modifier=%#llx valid=%u staging=%u box=%d,%d,%d,%d stride=%u\n",
+              (unsigned long long)rsrc->bo->va->addr,
+              (unsigned long long)rsrc->bo->size,
+              util_format_name(rsrc->layout.format),
+              (unsigned long long)rsrc->modifier,
+              agx_resource_valid(rsrc, level), staging_blit,
+              box->x, box->y, box->width, box->height,
+              util_format_get_stride(rsrc->layout.format, box->width));
+      const uint8_t *raw = agx_bo_map(rsrc->bo);
+      if (raw) {
+         size_t nonzero = 0;
+         for (size_t i = 0; i < rsrc->bo->size; ++i)
+            nonzero += raw[i] != 0;
+         fprintf(stderr, "M5_READBACK_RAW nonzero=%zu head=", nonzero);
+         for (unsigned i = 0; i < MIN2(rsrc->bo->size, 32); ++i)
+            fprintf(stderr, "%02x", raw[i]);
+         fputc('\n', stderr);
+      }
+   }
+
    /* Track the written buffer range */
    if (resource->target == PIPE_BUFFER) {
       /* Note the ordering: DISCARD|WRITE is valid, so clear before adding. */
@@ -1056,6 +1081,16 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
 
             ail_detile(map, dst, &rsrc->layout, level, transfer->base.stride,
                        box->x, box->y, box->width, box->height);
+            if (trace_read) {
+               size_t nonzero = 0;
+               for (size_t i = 0; i < transfer->base.layer_stride; ++i)
+                  nonzero += dst[i] != 0;
+               fprintf(stderr, "M5_READBACK_DETILED layer=%u nonzero=%zu head=",
+                       z, nonzero);
+               for (unsigned i = 0; i < MIN2(transfer->base.layer_stride, 32); ++i)
+                  fprintf(stderr, "%02x", dst[i]);
+               fputc('\n', stderr);
+            }
          }
       }
 
@@ -1412,7 +1447,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    /* G17P treats an absent ZLS allocation as an inactive depth surface.  Its
     * native render command keeps the clear register at 1.0 in that state;
     * zero is only a real clear value when depth or stencil storage exists. */
-   if (dev->chip == AGX_CHIP_G17P && !zres && !sres)
+   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) && !zres && !sres)
       c->isp_bgobjdepth = fui(1.0f);
 
    if ((dev->debug & AGX_DBG_NOCLUSTER) && dev->chip != AGX_CHIP_G17P)

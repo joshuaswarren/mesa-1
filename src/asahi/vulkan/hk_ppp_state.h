@@ -17,10 +17,8 @@ hk_ppp_emit_state(enum agx_chip chip, uint8_t **out, uint64_t gpu_base,
                    size_t size)
 {
    if (chip == AGX_CHIP_G17G) {
-      if (gpu_base < AGX_M5_DRIVER_BASE ||
-          gpu_base - AGX_M5_DRIVER_BASE >= (UINT64_C(1) << 39))
+      if (!agx_m5_vdm_compact(gpu_base, &gpu_base))
          return false;
-      gpu_base -= AGX_M5_DRIVER_BASE;
    }
    return agx_ppp_emit_state(chip, out, gpu_base, size);
 }
