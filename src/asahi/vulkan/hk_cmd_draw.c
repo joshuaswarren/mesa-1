@@ -4851,7 +4851,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
 static float
 hk_depth_bias_factor(VkFormat format, bool exact, bool force_unorm)
 {
-   if (format == VK_FORMAT_D16_UNORM) {
+   if (hk_depth_stencil_plane_format(format, 0) == VK_FORMAT_D16_UNORM) {
       return exact ? (1 << 16) : (1 << 15);
    } else if (force_unorm) {
       return exact ? (1ull << 24) : (1ull << 23);
@@ -6062,7 +6062,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       dbias_selected &&
       ((dyn->rs.depth_bias.representation ==
         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT) ||
-       (gfx->render.depth_att.vk_format == VK_FORMAT_D16_UNORM));
+       (hk_depth_stencil_plane_format(gfx->render.depth_att.vk_format, 0) ==
+        VK_FORMAT_D16_UNORM));
 
    if (dbias_selected) {
       /* Attempt to set dbias_is_int per the draw requirement. If this fails,
