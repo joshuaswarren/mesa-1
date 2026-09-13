@@ -8482,6 +8482,65 @@ TEST_F(AGX3PackBinary, GradientRetiresAsyncSourceBeforeNativeDfdx)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, InterpolationWaitDoesNotReadPendingRegisters)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   /* Interpolation overwrites the second independent load result. The first
+    * stays live across that wait and is consumed by the later IADD. */
+   agx_ldcf_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(1), 1);
+   agx_ldcf_to(b, agx_register(8, AGX_SIZE_32), agx_immediate(2), 1);
+   agx_index rhw = agx_register(8, AGX_SIZE_32);
+   agx_rhw_interp_agx3_to(b, rhw, agx_immediate(0), agx_immediate(0),
+                        AGX_INTERPOLATION_CENTER);
+   agx_persp_rcp_agx3_to(b, rhw, rhw, 0);
+   agx_index live = agx_register(0, AGX_SIZE_32);
+   live.discard = true;
+   agx_iadd_to(b, agx_register(2, AGX_SIZE_32), live, agx_immediate(7), 0);
+   agx_stop(b);
+
+   const auto binary = pack(b);
+   uint8_t correct[AGX3_ALU_MAX_LENGTH], corrupting[AGX3_ALU_MAX_LENGTH];
+   uint8_t correct_len = 0, corrupting_len = 0;
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_LDIMM, 8, 0, 0, 0, 0, 2,
+                              correct, &correct_len));
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 2,
+                              corrupting, &corrupting_len));
+   static const uint8_t source_free[] = {
+      0x4c, 0x80, 0x02, 0x00, 0x00, 0x40, 0x00, 0x00,
+   };
+   ASSERT_EQ(correct_len, sizeof(source_free));
+   EXPECT_EQ(memcmp(correct, source_free, sizeof(source_free)), 0);
+   /* Native LDIMM has no register sources. The old destination value is dead,
+    * and the pending r0 generation must not become an unmodelled carrier. */
+   EXPECT_NE(std::search(binary.begin(), binary.end(), correct,
+                         correct + correct_len), binary.end());
+   EXPECT_EQ(std::search(binary.begin(), binary.end(), corrupting,
+                         corrupting + corrupting_len), binary.end());
+}
+
+TEST_F(AGX3PackBinary, InterpolationWaitOverwritesBothDeadHalves)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_get_sr_to(b, agx_register(8, AGX_SIZE_16), AGX_SR_INPUT_SAMPLE_MASK);
+   agx_get_sr_to(b, agx_register(9, AGX_SIZE_16), AGX_SR_BACKFACING);
+   agx_index rhw = agx_register(8, AGX_SIZE_32);
+   agx_rhw_interp_agx3_to(b, rhw, agx_immediate(0), agx_immediate(0),
+                        AGX_INTERPOLATION_CENTER);
+   agx_persp_rcp_agx3_to(b, rhw, rhw, 0);
+   agx_stop(b);
+
+   const auto binary = pack(b);
+   uint8_t combined[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_LDIMM, 8, 0, 0, 0, 0, 3,
+                              combined, &len));
+   EXPECT_NE(std::search(binary.begin(), binary.end(), combined,
+                         combined + len), binary.end());
+}
+
 TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -8498,7 +8557,7 @@ TEST_F(AGX3PackBinary, ProjectiveRhwRetiresReusedCoefficientDestination)
    uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, true, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_LDIMM, 8, 0, 0, 0, 0, 1,
                                 bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_vary_projective_rhw(enc, 8, 0, false, bytes, &len));
@@ -8526,7 +8585,7 @@ TEST_F(AGX3PackBinary, LinearInterpRetiresReusedCoefficientDestination)
    uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 13, 1, true, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_LDIMM, 8, 0, 0, 0, 0, 1,
                                 bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_vary_interp_at_start(

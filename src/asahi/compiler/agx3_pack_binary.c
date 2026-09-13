@@ -3782,9 +3782,9 @@ agx3_emit_cnd(struct util_dynarray *emission, enum agx_isa_encoding enc,
  * Waiting early is always semantically safe (it only costs latency), so
  * rather than refusing, retire everything here. `band(r0, r0, r0)` is a true
  * no-op -- x & x == x preserves every bit -- and it is the same wait-carrying
- * form agx3_emit_alu() already uses as a prelude. Writing r0 is safe even if
- * r0 is an in-flight load's destination, because the wait retires before the
- * write, so the band stores back exactly what the load delivered.
+ * form agx3_emit_alu() already uses as a prelude. This requires r0 to be ready
+ * or its pending producer to be included in the mask. A partial wait for an
+ * unrelated destination must use a carrier whose accesses it covers.
  *
  * Emits one instruction per slot, matching the witnessed prelude usage.
  */
@@ -6365,15 +6365,32 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  !agx3_private_rhw_use(ctx, block, I)))
                AGX3_REFUSE(I);
             uint16_t interp_wait = wait;
-            /* Neither native f32interp form has witnessed scoreboard fields.
-             * Real GTK and Firefox shaders reuse LDCF destinations for both
-             * RHW and ordinary user interpolation, creating required WAW
-             * waits. Retire those dependencies with the grounded band no-op
-             * before emitting the unchanged native interpolation instead of
-             * inventing wait bits. */
+            /* Implicit-coordinate interpolation does not read its destination.
+             * Its wait therefore covers the old destination's producers, not
+             * an arbitrary r0. A synthetic r0 identity can race an unrelated
+             * load and write back the old pointer or only one of its halves.
+             *
+             * Carry exactly these WAW dependencies on a source-free LDIMM
+             * into the destination that interpolation immediately replaces.
+             * Join the required bits before writing either destination half.
+             * No temporary register or additional dependency is needed. */
             if (interp_wait) {
-               if (!agx3_retire_slots_noop(emission, enc, interp_wait))
+               /* Sample interpolation can read a token tied to its result. */
+               if (enc == AGX_ISA_ENCODING_AGX3B &&
+                   I->interpolation != AGX_INTERPOLATION_SAMPLE) {
+                  if (I->nr_dests != 1 ||
+                      !agx3_vary_reg32(I->dest[0]) ||
+                      agx_channels(I->dest[0]) != 1)
+                     AGX3_REFUSE(I);
+                  uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+                  if (!agx3_alu_compose(enc, AGX3_ALU_LDIMM,
+                                          I->dest[0].value, 0, 0, 0, 0,
+                                          interp_wait, bytes, &len) ||
+                      !agx3_append(emission, bytes, len))
+                     AGX3_REFUSE(I);
+               } else if (!agx3_retire_slots_noop(emission, enc, interp_wait)) {
                   AGX3_REFUSE(I);
+               }
                outstanding &= (uint16_t)~interp_wait;
                interp_wait = 0;
             }
