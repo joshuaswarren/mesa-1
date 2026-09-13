@@ -103,6 +103,16 @@ hk_files = files(
 )
 
 if with_tests
+  if host_machine.system() == 'linux'
+    hk_sparse_format_properties = executable(
+      'hk-sparse-format-properties',
+      files('tests/hk_sparse_format_properties.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+    )
+  endif
+
   test(
     'hk_bvh_depth_core',
     executable(
