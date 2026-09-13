@@ -56,6 +56,14 @@ hk_pack_g17p_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
    return true;
 }
 
+struct hk_g17p_buffer_texture_metadata {
+   uint32_t elements;
+   uint32_t offset_el;
+   uint64_t address;
+   uint32_t rgb32;
+   uint32_t reserved;
+};
+
 struct hk_sampled_image_descriptor_layout {
    uint8_t texture;
    uint8_t sampler;

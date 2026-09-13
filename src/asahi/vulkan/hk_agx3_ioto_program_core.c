@@ -267,6 +267,8 @@ hk_agx3_g17p_sampled_storage_pointers(
    uint64_t pointers[4])
 {
    if (!heap || !pointers || !heap->pbe_descriptor_set_va ||
+       !heap->write_control_va || (heap->write_control_va & 31) ||
+       heap->write_control_va > UINT64_MAX - 31 ||
        (heap->pbe_offset_B & 7) != 0 ||
        heap->pbe_descriptor_set_va > UINT64_MAX - heap->pbe_offset_B ||
        heap->pbe_descriptor_set_va + heap->pbe_offset_B > UINT64_MAX - 31)
@@ -277,7 +279,7 @@ hk_agx3_g17p_sampled_storage_pointers(
       return false;
 
    staged[2] = heap->pbe_descriptor_set_va + heap->pbe_offset_B;
-   staged[3] = UINT64_C(0xffff);
+   staged[3] = heap->write_control_va;
    memcpy(pointers, staged, sizeof(staged));
    return true;
 }
@@ -289,6 +291,8 @@ hk_agx3_g17p_indexed_storage_pointers(
 {
    if (!heap || !pointers || !heap->texture_heap_va ||
        !heap->sampler_heap_va || !heap->pbe_descriptor_set_va ||
+       !heap->write_control_va || (heap->write_control_va & 31) ||
+       heap->write_control_va > UINT64_MAX - 31 ||
        (heap->pbe_offset_B & 7) != 0 ||
        heap->pbe_descriptor_set_va > UINT64_MAX - heap->pbe_offset_B ||
        heap->pbe_descriptor_set_va + heap->pbe_offset_B > UINT64_MAX - 31)
@@ -298,7 +302,7 @@ hk_agx3_g17p_indexed_storage_pointers(
       heap->texture_heap_va,
       heap->sampler_heap_va,
       heap->pbe_descriptor_set_va + heap->pbe_offset_B,
-      UINT64_C(0xffff),
+      heap->write_control_va,
    };
    memcpy(pointers, staged, sizeof(staged));
    return true;

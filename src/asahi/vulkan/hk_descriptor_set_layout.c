@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_descriptor_set_layout.h"
+#include "asahi/lib/agx_abi.h"
 
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
@@ -67,25 +68,12 @@ hk_descriptor_stride_align_for_type(
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
       *stride = hk_storage_image_descriptor_layout(
                    agx_chip_descriptor_generation(pdev->dev.chip)).stride;
-      /* A buffer texture is lowered to a 2D hardware texture before
-       * agx_nir_lower_g17p_indexed_samplers() runs, and that pass admits the
-       * lowered shape (g17p_indexed_fetch_shape()'s `lowered_buffer`).  It
-       * then reads a 32-bit heap index at AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET
-       * (68) and hands it to the texture unit as an index into the device
-       * sampled-image heap.  The bare storage-image layout is 64 bytes, so
-       * without this the read lands past the descriptor -- on the next array
-       * element's texture descriptor, or past the set -- and the resulting
-       * index scales by the 32-byte heap stride into an address far outside
-       * the heap.  STORAGE_IMAGE already reserves these eight bytes; texel
-       * buffers were left out.
-       *
-       * write_buffer_view_desc() zero-fills the descriptor, so the reserved
-       * word reads as heap index 0, which hk_device.c pins to the null
-       * texture.  That is a black texel rather than a GMMU fault; giving
-       * buffer views a real heap entry is a separate change.
+      /* Native texture/PBE records occupy 64 bytes, followed by the two
+       * heap indices and 24 bytes of buffer size/offset/address metadata.
+       * The shader must never decode AGX2 software fields from Gen9 bytes.
        */
       if (pdev->dev.chip == AGX_CHIP_G17P)
-         *stride += 8;
+         *stride = AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE;
       *alignment = 8;
       break;
 

@@ -32,6 +32,7 @@ struct hk_buffer_view {
     * Zero on every other chip, which reads the descriptor bytes directly.
     */
    uint32_t sampled_heap_index;
+   struct hk_g17p_buffer_texture_metadata buffer_metadata;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer_view, vk.base, VkBufferView,

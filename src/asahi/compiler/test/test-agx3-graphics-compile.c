@@ -2105,6 +2105,197 @@ test_g17p_storage_read_zero_lod_compile(void)
    return true;
 }
 
+struct buffer_metadata_fixture {
+   uint32_t elements, tail, coord;
+   bool rgb32, saw_data;
+   unsigned loads;
+};
+
+static bool
+fold_buffer_descriptor(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct buffer_metadata_fixture *f = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = NULL;
+   if (intr->intrinsic == nir_intrinsic_load_from_texture_handle_agx) {
+      value = nir_imm_int64(b, 0x1000);
+   } else if (intr->intrinsic == nir_intrinsic_load_global_constant &&
+              nir_src_is_const(intr->src[0])) {
+      const uint64_t address = nir_src_as_uint(intr->src[0]);
+      switch (address) {
+      case 0x1000 + AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET:
+         value = nir_imm_int(b, f->elements);
+         break;
+      case 0x1000 + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET:
+         value = nir_imm_int(b, f->tail);
+         break;
+      case 0x1000 + AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET:
+         value = nir_imm_int(b, f->rgb32);
+         break;
+      case 0x1000 + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET:
+         value = nir_imm_int64(b, UINT64_C(0x123000000000));
+         break;
+      default:
+         if (!f->rgb32 || intr->def.num_components != 3 ||
+             address != UINT64_C(0x123000000000) +
+                        ((uint64_t)f->coord + f->tail) * 12)
+            return false;
+         value = nir_imm_ivec3(b, 11, 101, 83);
+         f->saw_data = true;
+         break;
+      }
+      f->loads++;
+   }
+   if (!value)
+      return false;
+   nir_def_rewrite_uses(&intr->def, value);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+static bool
+test_g17p_buffer_metadata(void)
+{
+   const struct {
+      uint32_t elements, tail, coord, x, y;
+      bool rgb32;
+   } cases[] = {
+      {64, 0, 6, 6, 0},
+      {64, 3, 63, 66, 0},
+      {16384, 1, 16383, 0, 1},
+      {64, 0, 64, 16383, 262143},
+      {0, 0, 6, 16383, 262143},
+      {64, 3, 6, 0, 0, true},
+   };
+   for (unsigned c = 0; c < ARRAY_SIZE(cases); ++c) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P buffer metadata");
+      nir_def *handle = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 0), .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_txf;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_BUF;
+      tex->dest_type = nir_type_uint32;
+      tex->coord_components = 1;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                      nir_imm_int(&b, cases[c].coord));
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                     .write_mask = 15, .align_mul = 16);
+      b.shader->info.num_ssbos = 1;
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+
+      struct buffer_metadata_fixture f = {
+         .elements = cases[c].elements, .tail = cases[c].tail,
+         .coord = cases[c].coord, .rgb32 = cases[c].rgb32,
+      };
+      bool progress;
+      do {
+         progress = nir_shader_intrinsics_pass(b.shader,
+            fold_buffer_descriptor, nir_metadata_control_flow, &f);
+         progress |= nir_opt_constant_folding(b.shader);
+         progress |= nir_opt_dead_cf(b.shader);
+         progress |= nir_opt_dce(b.shader);
+         progress |= nir_opt_copy_prop(b.shader);
+      } while (progress);
+
+      bool ok = false;
+      if (cases[c].rgb32) {
+         unsigned textures = 0;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  textures += instr->type == nir_instr_type_tex;
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic == nir_intrinsic_store_ssbo &&
+                      nir_src_is_const(intr->src[0])) {
+                     ok = nir_src_comp_as_uint(intr->src[0], 0) == 11 &&
+                          nir_src_comp_as_uint(intr->src[0], 1) == 101 &&
+                          nir_src_comp_as_uint(intr->src[0], 2) == 83 &&
+                          nir_src_comp_as_uint(intr->src[0], 3) == 1;
+                  }
+               }
+            }
+         }
+         ok &= f.saw_data && textures == 0;
+      } else {
+         const int coord = nir_tex_instr_src_index(tex, nir_tex_src_backend1);
+         ok = f.loads >= 3 && tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+              coord >= 0 && nir_src_is_const(tex->src[coord].src) &&
+              nir_src_comp_as_uint(tex->src[coord].src, 0) == cases[c].x &&
+              nir_src_comp_as_uint(tex->src[coord].src, 1) == cases[c].y;
+      }
+      ralloc_free(b.shader);
+      if (!ok) {
+         fprintf(stderr, "buffer metadata case %u failed\n", c);
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool
+test_g17p_buffer_image_metadata(void)
+{
+   for (unsigned tail = 0; tail < 4; ++tail) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P imageBuffer metadata");
+      nir_def *zero = nir_imm_int(&b, 0);
+      nir_def *handle = nir_bindless_image_agx(&b, zero, .desc_set = 0);
+      nir_def *coord = nir_imm_ivec4(&b, 16383, 0, 0, 0);
+      nir_def *value = nir_bindless_image_load(
+         &b, 4, 32, handle, coord, zero, zero,
+         .image_dim = GLSL_SAMPLER_DIM_BUF,
+         .format = PIPE_FORMAT_R8G8B8A8_UINT,
+         .access = ACCESS_NON_WRITEABLE);
+      nir_intrinsic_instr *load = nir_def_as_intrinsic(value);
+      nir_def *size = nir_bindless_image_size(
+         &b, 1, 32, handle, zero, .image_dim = GLSL_SAMPLER_DIM_BUF);
+      nir_export_agx(&b, value, .base = 0);
+      nir_export_agx(&b, size, .base = 8);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+      struct buffer_metadata_fixture f = {.elements = 16384, .tail = tail};
+      bool progress;
+      do {
+         progress = nir_shader_intrinsics_pass(b.shader,
+            fold_buffer_descriptor, nir_metadata_control_flow, &f);
+         progress |= nir_opt_constant_folding(b.shader);
+         progress |= nir_opt_dce(b.shader);
+      } while (progress);
+      bool size_ok = false;
+      nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_export_agx &&
+                nir_intrinsic_base(intr) == 8)
+               size_ok = nir_src_is_const(intr->src[0]) &&
+                         nir_src_as_uint(intr->src[0]) == 16384;
+         }
+      }
+      nir_scalar x = nir_scalar_resolved(load->src[1].ssa, 0);
+      nir_scalar y = nir_scalar_resolved(load->src[1].ssa, 1);
+      bool ok = size_ok && f.loads == 2 &&
+         nir_intrinsic_image_dim(load) == GLSL_SAMPLER_DIM_2D &&
+         nir_scalar_is_const(x) && nir_scalar_is_const(y) &&
+         nir_scalar_as_uint(x) == ((16383 + tail) & 16383) &&
+         nir_scalar_as_uint(y) == ((16383 + tail) >> 14);
+      if (!ok)
+         fprintf(stderr, "imageBuffer tail %u: size=%u loads=%u\n",
+                 tail, size_ok, f.loads);
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
 static bool
 test_g17p_native_cube_sample(void)
 {
@@ -3583,6 +3774,74 @@ test_indexed_compute_storage(void)
    key.reserved_preamble = 80;
    struct agx_shader_part part = {0};
    ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_buffer_fetch_r32_store(void)
+{
+   /* CTS buffer_view_memory_test_*_compute uses a textureBuffer followed by
+    * a scalar R32 image store after nir_opt_shrink_stores. Exercise the full
+    * metadata, indexed texture, PBE binding and native integer-state1 path. */
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P buffer fetch to R32 store");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *index = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *handle = nir_bindless_image_agx(&b, zero, .desc_set = 0);
+   nir_def *value = nir_build_tex(
+      &b, nir_texop_txf, .texture_handle = handle, .coord = index,
+      .lod = zero, .dim = GLSL_SAMPLER_DIM_BUF, .dest_type = nir_type_uint32);
+   nir_def *pbe = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 128), .desc_set = 0);
+   nir_bindless_image_store(
+      &b, pbe, nir_vec4(&b, index, index, zero, zero), zero,
+      nir_channel(&b, value, 0), zero, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .format = PIPE_FORMAT_R32_UINT, .src_type = nir_type_uint32,
+      .access = ACCESS_NON_READABLE);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+   struct buffer_metadata_fixture fixture = {.elements = 64};
+   bool progress;
+   do {
+      progress = nir_shader_intrinsics_pass(b.shader,
+         fold_buffer_descriptor, nir_metadata_control_flow, &fixture);
+      progress |= nir_opt_constant_folding(b.shader);
+      progress |= nir_opt_dead_cf(b.shader);
+      progress |= nir_opt_dce(b.shader);
+   } while (progress);
+   agx_preprocess_nir_g17p(b.shader);
+   struct agx_g17p_indexed_storage_binding binding = {0};
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader) &&
+             agx_nir_lower_g17p_indexed_storage(b.shader, &binding) &&
+             binding.pbe_offset_B == 128 && binding.pbe_set == 0;
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir_g17p(b.shader);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .promote_constants = true,
+      .reserved_preamble = 32,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary;
+   const uint8_t native[] = {
+      0xd7, 0x10, 0x54, 0x00, 0x40, 0x40, 0x00, 0x00,
+      0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
+   };
+   bool saw_native_store = false;
+   for (size_t i = 0; part.binary && i + sizeof(native) <= part.info.binary_size; ++i)
+      saw_native_store |= memcmp((uint8_t *)part.binary + i,
+                                 native, sizeof(native)) == 0;
+   if (!ok || !saw_native_store)
+      fprintf(stderr, "buffer R32 store: compile/binding=%u native=%u size=%u\n",
+              ok, saw_native_store, part.info.binary_size);
+   ok &= saw_native_store && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 20;
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
@@ -6177,6 +6436,13 @@ main(int argc, char **argv)
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--buffer-metadata-only")) {
+      const bool ok = test_g17p_buffer_metadata() &&
+                      test_g17p_buffer_image_metadata() &&
+                      test_buffer_fetch_r32_store();
+      fprintf(stderr, "G17P buffer metadata lowering: %s\n", ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--cube-sample-lowering-only")) {
       const bool ok = test_g17p_native_cube_sample() &&
                       test_g17p_native_cube_array_sample();
@@ -6340,6 +6606,12 @@ main(int argc, char **argv)
 
    if (!test_sampled_storage_lowering()) {
       fputs("sampled storage-image lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_buffer_metadata() ||
+       !test_g17p_buffer_image_metadata() || !test_buffer_fetch_r32_store()) {
+      fputs("buffer metadata lowering mismatch\n", stderr);
       all_ok = false;
    }
 

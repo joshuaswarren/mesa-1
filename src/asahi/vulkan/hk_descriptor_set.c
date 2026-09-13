@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_descriptor_set.h"
+#include "asahi/lib/agx_abi.h"
 
 #include "vk_acceleration_structure.h"
 #include "asahi/lib/agx_bo.h"
@@ -338,13 +339,17 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       hk_storage_image_descriptor_layout(generation);
    uint32_t heap_index = 0;
 
-   if ((!storage || hk_native_pbe_supported(generation)) &&
+   /* G17P imageBuffer reads use the native texture heap even though buffer
+    * writes cannot use the legacy PBE software descriptor. */
+   if ((!storage || generation == 9 || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
 
       desc.tex = view->tex;
-      if (storage)
+      if (storage && hk_native_pbe_supported(generation))
          desc.pbe = view->pbe;
+      else if (storage)
+         hk_set_null_native_pbe(generation, &desc.pbe);
       heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);
@@ -373,6 +378,14 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
              sizeof(heap_index));
       memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET, &heap_index,
              sizeof(heap_index));
+   }
+   if (heap_index &&
+       stride >= AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE) {
+      VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
+      static_assert(sizeof(view->buffer_metadata) == 24,
+                    "texel-buffer software descriptor ABI");
+      memcpy(packed + AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET,
+             &view->buffer_metadata, sizeof(view->buffer_metadata));
    }
    /* Write the binding's whole stride, not just the texture/PBE pair: the
     * reserved heap-index bytes live past native.stride, so a native.stride

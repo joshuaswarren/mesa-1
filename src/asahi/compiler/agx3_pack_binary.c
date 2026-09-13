@@ -1072,7 +1072,7 @@ static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I,
                         uint8_t slot, uint16_t wait_mask, bool final,
-                        bool stage_coordinates)
+                        bool stage_coordinates, bool separate_write_coords)
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
@@ -1145,7 +1145,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * them disjoint from imgwci's halves0/2. Native read-only indexed images,
     * like ordinary texture loads, use the bank0 coordinate ABI. */
    const uint16_t staging_coord =
-      (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image) || ms_array ? 16 : 0;
+      (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image) || ms_array ||
+            separate_write_coords ? 16 : 0;
    if (register_lod && slot != 1)
       return false;
    if (stage_coordinates) {
@@ -1263,7 +1264,8 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       I->src[4].type == AGX_INDEX_IMMEDIATE &&
       !I->src[4].memory && !I->src[4].abs && !I->src[4].neg &&
       ((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
-       (I->src[4].value == 1 && normalized));
+       (I->src[4].value == 1 &&
+        (normalized || I->format == AGX_FORMAT_I8)));
    /* The state operand's form and f70 are ORTHOGONAL, so a register state does
     * not imply normalized data.  metal-nt -arch applegpu_g17p, dynamically
     * indexed `array<texture2d<T, access::write>, 4>` so the state is a
@@ -1347,9 +1349,23 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                     (I->src[4].discard || I->src[4].kill),
       .normalized = normalized,
    };
-   if (!agx3_tex_encode_image_write_rgba8_2d(
-          enc, &d, imgwci, &imgwci_len) ||
-       !agx3_append(&staged, imgwci, imgwci_len) ||
+   bool encoded;
+   if (immediate_state && I->src[4].value == 1 && !normalized) {
+      /* Hk's mixed indexed-read/R32-write table contains texture and sampler
+       * heap pointers followed by one resolved PBE pointer at uniform half8.
+       * Apple's read/write witness instead used a PBE heap at half4 with
+       * descriptor index1. Copying that pair selected our sampler heap.
+       * Both staging slots passed the real-data hardware gate; retain the
+       * existing, shorter slot1 COPYs and consume that same slot here. */
+      struct agx3_image_write_desc resolved = d;
+      resolved.image_value = 0;
+      encoded = agx3_tex_encode_image_write_2d(
+         enc, &resolved, 8, 1, imgwci, &imgwci_len);
+   } else {
+      encoded = agx3_tex_encode_image_write_rgba8_2d(
+         enc, &d, imgwci, &imgwci_len);
+   }
+   if (!encoded || !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci instruction compose refusal\n");
@@ -5494,7 +5510,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned tile_loads_left = 0;
    unsigned tile_loads_seen = 0;
    unsigned tile_stores_left = 0;
-   unsigned image_loads_left = 0;
    unsigned image_writes_left = 0;
    unsigned texture_samples_left = 0;
    unsigned sample_group_members_left = 0;
@@ -5536,8 +5551,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             has_zs_emit = true;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
-         if (scan_I->op == AGX_OPCODE_IMAGE_LOAD)
-            image_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_WRITE)
             image_writes_left++;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
@@ -5751,13 +5764,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17p_vertex_load_policy =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_VERTEX &&
       device_loads_left > 0;
-   /* Native read_write and sample-to-write kernels assign their sole texture
+   /* Native read_write, buffer-read-to-write and sample-to-write kernels
+    * assign their sole texture
     * producer to slot 1 and imgwci waits on that slot. Select slot 1 from the
     * exact one-producer/one-write compute graph; the ordinary dependency pass
     * still derives the write's wait bit from the producer result registers. */
    const bool g17p_storage_image_protocol =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_COMPUTE &&
-      image_loads_left + texture_samples_left == 1 &&
       image_writes_left == 1 && texture_ops_left == 1;
 
    /* Assign one scoreboard timeline over the whole linearized shader, rather
@@ -5823,7 +5836,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if ((enc == AGX_ISA_ENCODING_AGX3B &&
               I->op == AGX_OPCODE_IMAGE_LOAD) ||
              (g17p_storage_image_protocol &&
-              I->op == AGX_OPCODE_TEXTURE_SAMPLE))
+              (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+               I->op == AGX_OPCODE_TEXTURE_LOAD)))
             e->preferred_slot = 1;
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_ZS_EMIT_AGX3)
@@ -6283,11 +6297,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 I->src[3].type != AGX_INDEX_IMMEDIATE) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
                ctx->stage == MESA_SHADER_COMPUTE;
+            /* Apple's texture_buffer<uint>::read followed by a 2D write
+             * uses read-coordinate halves 16/18, separate from imgwci's
+             * halves 0/2, and returns the read on slot 1. This is the same
+             * one-read/one-write contract as a read_write image. */
+            const bool separate_write_coords =
+               g17p_storage_image_protocol &&
+               I->op == AGX_OPCODE_TEXTURE_LOAD && I->dim == AGX_DIM_2D;
             if (staged) {
                const unsigned coord_base =
                   (I->op == AGX_OPCODE_IMAGE_LOAD &&
                    I->src[2].type == AGX_INDEX_IMMEDIATE) ||
-                        I->dim == AGX_DIM_2D_MS_ARRAY
+                        I->dim == AGX_DIM_2D_MS_ARRAY || separate_write_coords
                      ? 16
                      : 0;
                const unsigned coord_count =
@@ -6309,7 +6330,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                           ? (outstanding_here & 1u)
                           : 0);
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
-                                         final, staged))
+                                         final, staged, separate_write_coords))
                AGX3_REFUSE(I);
             continue;
          }

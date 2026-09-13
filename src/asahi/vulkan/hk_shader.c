@@ -964,8 +964,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_control_flow, NULL);
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
-            agx_chip_descriptor_generation(dev->dev.chip));
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      NIR_PASS(_, nir, agx_nir_lower_texture_with_buffer_metadata,
+               agx_chip_descriptor_generation(dev->dev.chip));
+   } else {
+      NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
+               agx_chip_descriptor_generation(dev->dev.chip));
+   }
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 
    if (dev->dev.chip == AGX_CHIP_G17P)

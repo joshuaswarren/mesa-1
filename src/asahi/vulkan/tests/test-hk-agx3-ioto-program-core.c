@@ -1601,6 +1601,7 @@ test_g17p_combined_sampler_pointers(void)
    const struct hk_agx3_g17p_sampled_storage_heap sampled_storage = {
       .sampled = client,
       .pbe_descriptor_set_va = UINT64_C(0x87fff10000),
+      .write_control_va = UINT64_C(0x87fff20000),
       .pbe_offset_B = 160,
    };
    uint64_t four[4] = {0};
@@ -1608,10 +1609,17 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(four[0] == UINT64_C(0x87ffed0040));
    CHECK(four[1] == UINT64_C(0x87ffef40e0));
    CHECK(four[2] == UINT64_C(0x87fff100a0));
-   CHECK(four[3] == UINT64_C(0xffff));
+   CHECK(four[3] == sampled_storage.write_control_va);
 
    const uint64_t four_before[4] = {four[0], four[1], four[2], four[3]};
    struct hk_agx3_g17p_sampled_storage_heap invalid = sampled_storage;
+   const uint64_t bad_controls[] = {0, 0xffff, UINT64_MAX};
+   for (unsigned i = 0; i < 3; ++i) {
+      invalid.write_control_va = bad_controls[i];
+      CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
+      CHECK(memcmp(four, four_before, sizeof(four)) == 0);
+   }
+   invalid = sampled_storage;
    invalid.pbe_offset_B++;
    CHECK(!hk_agx3_g17p_sampled_storage_pointers(&invalid, four));
    CHECK(memcmp(four, four_before, sizeof(four)) == 0);
@@ -1624,18 +1632,25 @@ test_g17p_combined_sampler_pointers(void)
       .texture_heap_va = UINT64_C(0x9000000000),
       .sampler_heap_va = UINT64_C(0x9100000000),
       .pbe_descriptor_set_va = UINT64_C(0x9200000000),
+      .write_control_va = UINT64_C(0x9300000000),
       .pbe_offset_B = 176,
    };
    CHECK(hk_agx3_g17p_indexed_storage_pointers(&indexed_storage, four));
    CHECK(four[0] == indexed_storage.texture_heap_va);
    CHECK(four[1] == indexed_storage.sampler_heap_va);
    CHECK(four[2] == UINT64_C(0x92000000b0));
-   CHECK(four[3] == UINT64_C(0xffff));
+   CHECK(four[3] == indexed_storage.write_control_va);
 
    const uint64_t indexed_before[4] = {
       four[0], four[1], four[2], four[3],
    };
    struct hk_agx3_g17p_indexed_storage_heap bad_indexed = indexed_storage;
+   for (unsigned i = 0; i < 3; ++i) {
+      bad_indexed.write_control_va = bad_controls[i];
+      CHECK(!hk_agx3_g17p_indexed_storage_pointers(&bad_indexed, four));
+      CHECK(memcmp(four, indexed_before, sizeof(four)) == 0);
+   }
+   bad_indexed = indexed_storage;
    bad_indexed.pbe_offset_B++;
    CHECK(!hk_agx3_g17p_indexed_storage_pointers(&bad_indexed, four));
    CHECK(memcmp(four, indexed_before, sizeof(four)) == 0);
