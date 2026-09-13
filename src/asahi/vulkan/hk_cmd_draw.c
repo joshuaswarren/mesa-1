@@ -2918,10 +2918,17 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    for (uint32_t i = 0; i < dyn->vp.viewport_count; i++) {
       const VkViewport *vp = &dyn->vp.viewports[i];
 
-      minx[i] = MIN2(vp->x, vp->x + vp->width);
-      miny[i] = MIN2(vp->y, vp->y + vp->height);
-      maxx[i] = MAX2(vp->x, vp->x + vp->width);
-      maxy[i] = MAX2(vp->y, vp->y + vp->height);
+      /* Clamp before converting to unsigned. During a Zink window shrink,
+       * the old inverted viewport can extend above the new attachment. A
+       * negative minimum must clip to zero, not wrap to a huge coordinate. */
+      minx[i] = CLAMP(MIN2(vp->x, vp->x + vp->width), 0.0f,
+                      (float)cmd->state.gfx.render.cr.width);
+      miny[i] = CLAMP(MIN2(vp->y, vp->y + vp->height), 0.0f,
+                      (float)cmd->state.gfx.render.cr.height);
+      maxx[i] = CLAMP(MAX2(vp->x, vp->x + vp->width), 0.0f,
+                      (float)cmd->state.gfx.render.cr.width);
+      maxy[i] = CLAMP(MAX2(vp->y, vp->y + vp->height), 0.0f,
+                      (float)cmd->state.gfx.render.cr.height);
    }
 
    /* Additionally clamp to the framebuffer so we don't rasterize
@@ -3726,9 +3733,14 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
          render->depth_att.vk_format == VK_FORMAT_D32_SFLOAT &&
          dyn->ds.depth.test_enable && dyn->ds.depth.write_enable &&
          dyn->ds.depth.compare_op == VK_COMPARE_OP_LESS;
-      const bool full_height =
-         (vp->y == 0 && vp->height == render->cr.height) ||
-         (vp->y == render->cr.height && vp->height == -(float)render->cr.height);
+      /* During a resize Zink can submit the new viewport against the previous
+       * swapchain extent. The HAL300 emitter intersects viewport and scissor
+       * with the attachment bounds, so they need not have identical sizes. */
+      const bool bounded_viewport =
+         vp->x >= -16384 && vp->x <= 16384 &&
+         vp->y >= -16384 && vp->y <= 16384 &&
+         vp->width > 0 && vp->width <= 16384 &&
+         vp->height != 0 && vp->height >= -16384 && vp->height <= 16384;
       /* Zink may enable polygon offset with all factors zero. The bounded
        * no-depth profile can retain its native disabled bias state in that
        * case; nonzero factors still require the general raster-state path. */
@@ -3738,7 +3750,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
           dyn->rs.depth_bias.clamp == 0.0f);
       /* Native M5 references cover opaque triangles with no inputs or one
        * smooth/flat float4 color, optionally with D32 LESS/write state.
-       * Full-frame viewport orientation is emitted by hk_flush_vp_state.
+       * Viewport offsets and orientation are emitted by hk_flush_vp_state.
        * Depth attachment storage/clears remain separately validated at submit.
        */
       if (!hw_vs || !fs || !linked || (!no_varyings && !color_varying) ||
@@ -3756,15 +3768,13 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
           !vk_rasterization_state_depth_clip_enable(&dyn->rs) ||
           dyn->ds.depth.bounds_test.enable || gfx->occlusion.mode ||
           dyn->vp.viewport_count != 1 || dyn->vp.scissor_count != 1 ||
-          vp->x != 0 || !full_height || vp->width != render->cr.width ||
+          !bounded_viewport ||
           vp->minDepth != 0 ||
           vp->maxDepth != 1 || scissor->offset.x || scissor->offset.y ||
-          scissor->extent.width != render->cr.width ||
-          scissor->extent.height != render->cr.height ||
           render->area.offset.x || render->area.offset.y ||
           render->area.extent.width != render->cr.width ||
           render->area.extent.height != render->cr.height) {
-         if (hk_g17p_launch_trace_enabled())
+         {
             fprintf(stderr, "M5 PPP profile: uvs=%u osel=%#x provoking=%u object=%u "
                     "depth=%u stencil=%u varyings=%#llx cf=%u/%u/%u "
                     "viewport=%g,%g,%g,%g,%g,%g negative_one=%u "
@@ -3783,12 +3793,11 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
                     scissor->extent.width, scissor->extent.height,
                     render->area.offset.x, render->area.offset.y,
                     render->area.extent.width, render->area.extent.height);
-         if (hk_g17p_launch_trace_enabled())
-            fprintf(stderr, "M5 PPP flags: position=%u psiz=%u full_height=%u "
+            fprintf(stderr, "M5 PPP flags: position=%u psiz=%u bounded_viewport=%u "
                     "color=%u layers=%u viewmask=%u samples=%u pass=%u/%u "
                     "writes=%u discard=%u polygon=%u line=%g bias=%u/%g/%g/%g clamp=%u "
                     "clip=%u bounds=%u query=%u viewports=%u scissors=%u size=%u,%u\n",
-                    position, position_psiz, full_height,
+                    position, position_psiz, bounded_viewport,
                     render->color_att_count, render->layer_count, render->view_mask,
                     render->tilebuffer.nr_samples,
                     linked ? linked->b.fragment_control.opaque[0] >> 29 : 0,
@@ -3801,13 +3810,13 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
                     dyn->ds.depth.bounds_test.enable, gfx->occlusion.mode,
                     dyn->vp.viewport_count, dyn->vp.scissor_count,
                     render->cr.width, render->cr.height);
-         if (hk_g17p_launch_trace_enabled())
             fprintf(stderr, "M5 PPP color_valid=%u depth_valid=%u depth_format=%u "
                             "depth_test=%u write=%u compare=%u counts=%#x/%#x\n",
                     color_varying, depth_less_write, render->depth_att.vk_format,
                     dyn->ds.depth.test_enable, dyn->ds.depth.write_enable,
                     dyn->ds.depth.compare_op, gfx->linked_varyings.counts_32.opaque[0],
                     gfx->linked_varyings.counts_16.opaque[0]);
+         }
          mesa_loge("M5 draw exceeds the native color/depth PPP profile");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
