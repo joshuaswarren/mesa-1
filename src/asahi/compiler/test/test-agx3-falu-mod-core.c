@@ -613,10 +613,186 @@ fma_mul_imm_vectors(void)
    return fail;
 }
 
+static unsigned
+m5_fma_immediate_vectors(void)
+{
+   /* Independent metal-nt applegpu_g17g output from eleven addend/minifloat,
+    * live-input, ABS and NEG programs. Expected bytes are Apple's output. */
+   const struct {
+      bool two;
+      uint16_t dest, src0, src1;
+      uint8_t immediate;
+      bool abs0, neg0, abs1, neg1;
+      struct agx3_falu_runtime runtime;
+      uint8_t size, bytes[16];
+   } vectors[] = {
+      {false, 0, 8, 0, 32, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x38,0x02,0x60,0x00,0x20,0x06,0x00,0x80}},
+      {false, 2, 10, 2, 32, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x19,0x03,0x1e,0x0b,0x21,0xa0,0x02,0x00}},
+      {false, 4, 12, 4, 32, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x29,0x05,0x1e,0x0d,0x21,0xa0,0x02,0x00}},
+      {false, 6, 14, 6, 32, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x39,0x07,0x1e,0x0f,0x21,0xa0,0x02,0x00}},
+      {false, 12, 12, 4, 32, false, false, false, false,
+       {.dest_cache=true, .cache={false,true}, .discard={true,false}, .wait_mask=128},
+       16, {0x29,0x80,0x07,0x1a,0x28,0x20,0xa3,0x1a,0x18,0x03,0x60,0x00,0x20,0x06,0x00,0x80}},
+      {false, 14, 14, 6, 32, false, false, false, false,
+       {.dest_cache=true, .cache={false,true}, .discard={true,false}, .wait_mask=0},
+       8, {0x79,0x87,0x36,0x0f,0x21,0xa0,0x02,0x00}},
+      {false, 8, 8, 0, 32, false, false, false, false,
+       {.dest_cache=true, .cache={false,true}, .discard={true,false}, .wait_mask=0},
+       8, {0x49,0x81,0x36,0x09,0x21,0xa0,0x02,0x00}},
+      {false, 10, 10, 2, 32, false, false, false, false,
+       {.dest_cache=true, .cache={false,true}, .discard={true,false}, .wait_mask=0},
+       8, {0x59,0x83,0x36,0x0b,0x21,0xa0,0x02,0x00}},
+      {false, 12, 4, 12, 32, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,true}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x3a,0x28,0x20,0xa3,0x1a,0x38,0x01,0x50,0x00,0x20,0x06,0x00,0x80}},
+      {false, 14, 6, 14, 32, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,true}, .wait_mask=0},
+       8, {0x79,0x0f,0x2e,0x87,0x21,0xa0,0x02,0x00}},
+      {false, 8, 0, 8, 32, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,true}, .wait_mask=0},
+       8, {0x49,0x09,0x2e,0x81,0x21,0xa0,0x02,0x00}},
+      {false, 10, 2, 10, 32, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,true}, .wait_mask=0},
+       8, {0x59,0x0b,0x2e,0x83,0x21,0xa0,0x02,0x00}},
+      {false, 0, 8, 0, 160, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x38,0x02,0x62,0x00,0x20,0x06,0x00,0x80}},
+      {false, 2, 10, 2, 160, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x19,0x03,0x1e,0x0b,0xa1,0xa0,0x02,0x00}},
+      {false, 4, 12, 4, 160, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x29,0x05,0x1e,0x0d,0xa1,0xa0,0x02,0x00}},
+      {false, 6, 14, 6, 160, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x39,0x07,0x1e,0x0f,0xa1,0xa0,0x02,0x00}},
+      {false, 0, 0, 8, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x27,0x2a,0x20,0x20,0xa3,0x02,0x38,0x00,0x60,0x00,0x20,0x06,0x00,0x80}},
+      {false, 2, 2, 10, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x19,0x0b,0x1e,0x03,0x21,0xa0,0x02,0x08}},
+      {false, 4, 4, 12, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x29,0x0d,0x1e,0x05,0x21,0xa0,0x02,0x08}},
+      {false, 6, 6, 14, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x39,0x0f,0x1e,0x07,0x21,0xa0,0x02,0x08}},
+      {false, 0, 8, 0, 32, false, false, true, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x38,0x02,0x60,0x00,0x60,0x06,0x00,0x80}},
+      {false, 2, 10, 2, 32, false, false, true, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x19,0x03,0x1e,0x0b,0x23,0xa0,0x02,0x00,0x00,0x00,0x01,0x00}},
+      {false, 4, 12, 4, 32, false, false, true, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x29,0x05,0x1e,0x0d,0x23,0xa0,0x02,0x00,0x00,0x00,0x01,0x00}},
+      {false, 6, 14, 6, 32, false, false, true, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x39,0x07,0x1e,0x0f,0x23,0xa0,0x02,0x00,0x00,0x00,0x01,0x00}},
+      {false, 0, 8, 0, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x27,0x0a,0x20,0x20,0xa3,0x02,0x38,0x02,0x60,0x00,0x20,0x06,0x00,0x80}},
+      {false, 2, 10, 2, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x19,0x03,0x1e,0x0b,0x21,0xa0,0x02,0x08}},
+      {false, 4, 12, 4, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x29,0x05,0x1e,0x0d,0x21,0xa0,0x02,0x08}},
+      {false, 6, 14, 6, 32, false, true, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       8, {0x39,0x07,0x1e,0x0f,0x21,0xa0,0x02,0x08}},
+      {false, 0, 8, 0, 32, true, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x38,0x02,0x60,0x08,0x20,0x06,0x00,0x80}},
+      {false, 2, 10, 2, 32, true, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x19,0x03,0x1e,0x0b,0x23,0xa0,0x02,0x00,0x00,0x00,0x02,0x00}},
+      {false, 4, 12, 4, 32, true, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x29,0x05,0x1e,0x0d,0x23,0xa0,0x02,0x00,0x00,0x00,0x02,0x00}},
+      {false, 6, 14, 6, 32, true, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,true}, .wait_mask=0},
+       12, {0x39,0x07,0x1e,0x0f,0x23,0xa0,0x02,0x00,0x00,0x00,0x02,0x00}},
+      {true, 0, 0, 32, 16, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x30,0x88,0x58,0x00,0x10,0x06,0x00,0x80}},
+      {true, 2, 2, 32, 16, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x19,0x03,0x0e,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 4, 4, 32, 16, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x29,0x05,0x0e,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 6, 6, 32, 16, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x39,0x07,0x0e,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 14, 0, 32, 16, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,false}, .wait_mask=128},
+       16, {0x39,0x80,0x07,0x0a,0x28,0x20,0xa3,0x1a,0x10,0x88,0x58,0x00,0x10,0x06,0x00,0x80}},
+      {true, 10, 2, 32, 16, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,false}, .wait_mask=0},
+       8, {0x59,0x83,0x26,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 12, 4, 32, 16, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,false}, .wait_mask=0},
+       8, {0x69,0x85,0x26,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 10, 6, 32, 16, false, false, false, false,
+       {.dest_cache=true, .cache={true,false}, .discard={false,false}, .wait_mask=0},
+       8, {0x59,0x87,0x26,0xa1,0x21,0x90,0x02,0x02}},
+      {true, 0, 0, 160, 144, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=128},
+       16, {0x29,0x00,0x07,0x0a,0x20,0x20,0xa3,0x02,0x30,0xa8,0x5a,0x00,0x10,0x06,0x00,0x80}},
+      {true, 2, 2, 160, 144, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x19,0x03,0x1e,0xa1,0xa1,0x90,0x02,0x02}},
+      {true, 4, 4, 160, 144, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x29,0x05,0x1e,0xa1,0xa1,0x90,0x02,0x02}},
+      {true, 6, 6, 160, 144, false, false, false, false,
+       {.dest_cache=false, .cache={false,false}, .discard={true,false}, .wait_mask=0},
+       8, {0x39,0x07,0x1e,0xa1,0xa1,0x90,0x02,0x02}},
+   };
+   unsigned fail = 0;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+      bool ok = vectors[i].two
+         ? agx3_falu_fma_two_imm(AGX_ISA_ENCODING_AGX3C, vectors[i].dest,
+              vectors[i].src0, vectors[i].src1, vectors[i].immediate,
+              &vectors[i].runtime, out, &size)
+         : agx3_falu_fma_addend_imm_mod(AGX_ISA_ENCODING_AGX3C, vectors[i].dest,
+              vectors[i].src0, vectors[i].src1, vectors[i].immediate,
+              vectors[i].abs0, vectors[i].neg0, vectors[i].abs1, vectors[i].neg1,
+              &vectors[i].runtime, out, &size);
+      if (!ok || size != vectors[i].size || memcmp(out, vectors[i].bytes, size)) {
+         fprintf(stderr, "M5 native FMA immediate vector %u failed\n", i);
+         fail++;
+      }
+   }
+   struct agx3_falu_runtime bad = {0};
+   uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+   fail += agx3_falu_fma_two_imm(AGX_ISA_ENCODING_AGX3C, 1, 2, 32, 16, &bad, out, &size);
+   fail += agx3_falu_fma_addend_imm(AGX_ISA_ENCODING_AGX3C, 0, 256, 4, 32, &bad, out, &size);
+   bad.wait_mask = 0;
+   bad.cache[0] = bad.discard[0] = true;
+   fail += agx3_falu_fma_two_imm(AGX_ISA_ENCODING_AGX3C, 0, 2, 32, 16, &bad, out, &size);
+   fail += agx3_falu_fma_addend_imm(AGX_ISA_ENCODING_AGX3C, 0, 2, 4, 32, &bad, out, &size);
+   printf("M5 FMA immediates: 44 Apple vectors and invalid registers/lifetimes: %u failures\n", fail);
+   return fail;
+}
+
+
 int
 main(void)
 {
    unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors() + fma_mul_imm_vectors() + m5_runtime_vectors();
+   fail += m5_fma_immediate_vectors();
    for (size_t i = 0; i < mod_vec_count; ++i) {
       const struct mod_vec *v = &mod_vecs[i];
       const enum agx_isa_encoding e =

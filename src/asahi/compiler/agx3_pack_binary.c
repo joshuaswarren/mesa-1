@@ -10156,7 +10156,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FFMA &&
              !I->saturate && I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
              agx3_mod_src_ok(I->src[0]) &&
@@ -10192,7 +10193,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FFMA &&
              !I->saturate && I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
