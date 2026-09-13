@@ -324,16 +324,16 @@ hk_g17p_compressed_image_to_buffer_copy_plan(
 static bool
 hk_g17p_uncompressed_upload_format(VkFormat format)
 {
-   switch (format) {
-   case VK_FORMAT_R8_UNORM:
-   case VK_FORMAT_R8G8B8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_SRGB:
-   case VK_FORMAT_B8G8R8A8_UNORM:
-   case VK_FORMAT_B8G8R8A8_SRGB:
-      return true;
-   default:
-      return false;
-   }
+   const uint32_t block_B = vk_format_get_blocksize(format);
+
+   /* This path copies raw format elements and never interprets their colour
+    * channels.  Admit every ordinary 1-, 2-, and 4-byte format instead of a
+    * semantic allowlist; the caller separately excludes depth/stencil and
+    * multi-plane images.  Wider elements remain on the graphics copy path:
+    * the raw 8-byte path is not yet qualified on G17P. */
+   return vk_format_get_blockwidth(format) == 1 &&
+          vk_format_get_blockheight(format) == 1 &&
+          (block_B == 1 || block_B == 2 || block_B == 4);
 }
 
 bool
@@ -346,13 +346,16 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       memset(plan, 0, sizeof(*plan));
 
    if (!copy || !plan || !hk_g17p_uncompressed_upload_format(copy->format) ||
-       copy->image_type != VK_IMAGE_TYPE_2D || copy->plane_count != 1 ||
+       (copy->image_type != VK_IMAGE_TYPE_1D &&
+        copy->image_type != VK_IMAGE_TYPE_2D) ||
+       copy->plane_count != 1 ||
        copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
        !hk_g17p_buffer_to_image_copy_supported(copy))
       return false;
 
    const uint32_t block_B = vk_format_get_blocksize(copy->format);
-   if ((block_B != 1 && block_B != 4) || buffer_offset % block_B)
+   if ((block_B != 1 && block_B != 2 && block_B != 4) ||
+       buffer_offset % block_B)
       return false;
 
    const uint32_t width = copy->copy_extent.width;
@@ -399,10 +402,12 @@ bool
 hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)
 {
+   const bool one_dimensional =
+      copy && copy->image_type == VK_IMAGE_TYPE_1D;
    const bool volume = copy && copy->image_type == VK_IMAGE_TYPE_3D;
    if (!copy || copy->chip != AGX_CHIP_G17P ||
        !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
-       (copy->image_type != VK_IMAGE_TYPE_2D && !volume) ||
+       (!one_dimensional && copy->image_type != VK_IMAGE_TYPE_2D && !volume) ||
        copy->samples != VK_SAMPLE_COUNT_1_BIT ||
        copy->mip_levels == 0 || copy->array_layers == 0 ||
        copy->mip_level >= copy->mip_levels || copy->mip_level >= 32 ||
@@ -416,6 +421,9 @@ hk_g17p_buffer_to_image_copy_supported(
        (volume ? copy->image_offset.z < 0 : copy->image_offset.z != 0) ||
        (!volume && copy->image_extent.depth != 1) ||
        (!volume && copy->copy_extent.depth != 1) ||
+       (one_dimensional &&
+        (copy->image_extent.height != 1 || copy->image_offset.y != 0 ||
+         copy->copy_extent.height != 1)) ||
        copy->image_extent.width == 0 || copy->image_extent.height == 0 ||
        copy->image_extent.depth == 0 || copy->copy_extent.width == 0 ||
        copy->copy_extent.height == 0 || copy->copy_extent.depth == 0 ||
@@ -429,7 +437,7 @@ hk_g17p_buffer_to_image_copy_supported(
       vk_format_get_ycbcr_info(copy->format);
 
    if (ycbcr && ycbcr->n_planes > 1) {
-      if (volume)
+      if (one_dimensional || volume)
          return false;
       uint32_t plane;
       switch (copy->aspect) {
