@@ -219,6 +219,15 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         enc != AGX_ISA_ENCODING_AGX3B))
       return false;
 
+   /* Fresh native calculate_{clamped,unclamped}_lod witnesses cover the
+    * ordinary derivative path only, returning packed X/Y float32 results. */
+   if (d->query_lod &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->width != AGX3_TEX_W32 ||
+        d->lod != AGX3_TEX_LOD_AUTO || (d->mask & ~3u) || d->array_layer ||
+        d->gather != AGX3_TEX_GATHER_NONE || d->shadow || d->offset ||
+        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
+      return false;
+
    if ((d->sample_group_nonterminal || d->sample_group_end) &&
        (enc != AGX_ISA_ENCODING_AGX3B ||
         d->lod == AGX3_TEX_LOD_GRADIENT ||
@@ -480,7 +489,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(23, 5);
    base[nb++] = (struct agx3_field_kv)KV(38, 1);
    base[nb++] = (struct agx3_field_kv)KV(52, 1);
-   if (d->gather == AGX3_TEX_GATHER_NONE && !d->shadow)
+   if (d->gather == AGX3_TEX_GATHER_NONE && !d->shadow && !d->query_lod)
       base[nb++] = (struct agx3_field_kv)KV(74, 1);
    base[nb++] = (struct agx3_field_kv)KV(89, 3);
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
@@ -544,7 +553,12 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       const bool staged_driver_array =
          !d->cube && d->lod == AGX3_TEX_LOD_AUTO &&
          d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
-      if (shadow_array || staged_driver_array) {
+      if (d->query_lod) {
+         /* No layer coordinate participates in the LOD derivative. */
+         ov[n++] = (struct agx3_field_kv)KV(29, 0);
+         ov[n++] = (struct agx3_field_kv)KV(37, 1);
+         ov[n++] = (struct agx3_field_kv)KV(77, 1);
+      } else if (shadow_array || staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(77, 2);
       } else {
          ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
@@ -600,6 +614,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    }
    if (d->shadow)
       ov[n++] = (struct agx3_field_kv)KV(143, 1);
+   if (d->query_lod)
+      ov[n++] = (struct agx3_field_kv)KV(146, 1);
    if (d->offset) {
       ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xy);
       ov[n++] = (struct agx3_field_kv)KV(51, 1);

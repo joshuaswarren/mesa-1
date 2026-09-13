@@ -2708,6 +2708,101 @@ test_image_write_state0_witnesses(void)
    return 0;
 }
 
+static int
+test_query_lod_witnesses(void)
+{
+   /* Native G17P calculate_clamped_lod / calculate_unclamped_lod. The
+    * component-only witnesses establish X/Y ordering independently. */
+   const struct agx3_tex_sample_desc base = {
+      .width = AGX3_TEX_W32,
+      .mask = 3,
+      .slot = 1,
+      .wait_mask = 1,
+      .coord_kill = true,
+      .final = true,
+      .query_lod = true,
+   };
+   static const struct {
+      bool three_d, cube, array;
+      unsigned mask;
+      const char *hex;
+   } rows[] = {
+      {false, false, false, 3, "05800ca8b0000000010020000100"},
+      {true,  false, false, 3, "05800ca8b0008001010020000100"},
+      {false, true,  false, 3, "05800ca8b0001000010020000100"},
+      {false, false, true,  3, "05800ca8b0000d00010020000100"},
+      {false, true,  true,  3, "05800ca8b0001301010020000100"},
+      {false, false, false, 1, "05800ca090000000010020000100"},
+      {false, false, false, 2, "05800ca890000000010020000100"},
+   };
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      struct agx3_tex_sample_desc d = base;
+      d.three_d = rows[i].three_d;
+      d.cube = rows[i].cube;
+      d.array = rows[i].array;
+      d.mask = rows[i].mask;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+      CHECK(length == 14 && hex_eq(bytes, length, rows[i].hex));
+   }
+   struct agx3_tex_sample_desc d = base;
+   d.texture_kind = d.sampler_kind = AGX3_TEX_OPERAND_UNIFORM;
+   d.texture_value = d.sampler_value = 12;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05e00ca8bc0000008103a0010100802000000000"));
+   d.texture_kind = d.sampler_kind = AGX3_TEX_OPERAND_REGISTER;
+   d.texture_value = d.sampler_value = 0;
+   d.texture_kill = d.sampler_kill = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05800ca8b00000000102a0010100a02800000000"));
+
+   /* A query shares the existing sample-group lifetime. Native two-query
+    * and query-plus-sample programs terminate only the second instruction. */
+   d = base;
+   d.final = false;
+   d.sample_group_nonterminal = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "05800c28b0000000000020000100"));
+   d = base;
+   d.dest = 4;
+   d.coord = 4;
+   d.wait_mask = 2;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "15820ca830010000010020000100"));
+   d.query_lod = false;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   CHECK(hex_eq(bytes, length, "15820ca830010000010010000100"));
+
+   d = base;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d.width = AGX3_TEX_W16;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.mask = 4;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.lod = AGX3_TEX_LOD_LEVEL;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.array = true;
+   d.array_layer = 4;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.gather = AGX3_TEX_GATHER_R;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.shadow = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.offset = true;
+   d.offset_xy = 1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   d = base;
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2724,7 +2819,8 @@ main(void)
        test_sample_mask_domain() || test_indexed_fetch_native() ||
        test_gradient_and_register_bias() ||
        test_offset_witnesses() || test_shadow_lod_witnesses() ||
-       test_3d_lod_witnesses() || test_image_write_state0_witnesses())
+       test_3d_lod_witnesses() || test_image_write_state0_witnesses() ||
+       test_query_lod_witnesses())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

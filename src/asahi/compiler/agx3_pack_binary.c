@@ -1425,6 +1425,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * rather than alias onto a real channel. */
    const bool gather = I->gather != AGX_GATHER_NONE;
    const bool shadow = I->shadow;
+   const bool query_lod = I->query_lod;
    const bool offset = I->offset;
    enum agx3_tex_gather gather_component = AGX3_TEX_GATHER_NONE;
    switch (I->gather) {
@@ -1517,7 +1518,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
-       agx_channels(I->src[0]) != (cube_array ? 4 :
+       agx_channels(I->src[0]) != (query_lod ? (three_d || cube ? 3 : 2) :
+                                    cube_array ? 4 :
                                     (array || three_d || cube) ? 3 : 2) ||
        (I->src[0].value & 3) || I->src[0].value > max_coord ||
        !valid_lod || !agx3_tex_imm(I->src[2], 0) ||
@@ -1555,7 +1557,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       I->query_lod || I->sparse ||
+       I->sparse ||
+       (query_lod &&
+        (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || shadow || offset ||
+         gather || I->dest[0].size != AGX_SIZE_32 || (I->mask & ~3u))) ||
        /* The coordinate offset rides in the sample's own f43/f51/f141 and is
         * orthogonal to the LOD shape, the array layer, the gather bit, the
         * depth comparison and the descriptor operand class -- see
@@ -1590,7 +1595,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * descriptor forms use the allocator-owned bank supplied below. */
    if (cube && immediate) {
       const unsigned coord_first = I->src[0].value;
-      const unsigned coord_last = coord_first + (cube_array ? 8 : 6);
+      const unsigned coord_last = coord_first + (cube_array && !query_lod ? 8 : 6);
       if (coord_first < 2 || (coord_first < 16 && coord_last > 14))
          return false;
    } else if (cube &&
@@ -1722,7 +1727,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * to the incompatible APPLE_FRAGMENT profile and is retained only by the
     * standalone texture encoder.
     */
-   if (array && !cube && (shadow || implicit_lod) &&
+   if (array && !cube && !query_lod && (shadow || implicit_lod) &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||
@@ -1797,6 +1802,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .sampler_kill = !sampler_immediate && I->src[4].kill,
       .gather = gather_component,
       .shadow = shadow,
+      .query_lod = query_lod,
       .offset = offset,
       .offset_xy = offset ? I->offset_xy : 0,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
@@ -1807,7 +1813,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                               : AGX3_TEX_LOD_AUTO,
       .lod_x64 = immediate_lod ? immediate_x64_field : 0,
       .array = array,
-      .array_layer = array ? I->src[0].value + (cube_array ? 6 : 4) : 0,
+      .array_layer = array && !query_lod
+                        ? I->src[0].value + (cube_array ? 6 : 4) : 0,
       .three_d = three_d,
       .cube = cube,
       .slot = slot,
@@ -6717,7 +6724,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      I->dim == AGX_DIM_CUBE_ARRAY) ? 8
                     : native_staged_coords ? 4
                     : I->lod_mode == AGX_LOD_MODE_LOD_GRAD ? 16
-                    : (staged_scalar || I->dim == AGX_DIM_2D_ARRAY ||
+                    : (staged_scalar ||
+                       (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||
                        I->dim == AGX_DIM_3D)
                        ? 8
                     : staged_compare ? 6

@@ -2408,6 +2408,80 @@ test_g17p_native_cube_sample(void)
 }
 
 static bool
+test_g17p_query_lod_compile(void)
+{
+   static const struct {
+      enum glsl_sampler_dim dim;
+      bool array;
+      unsigned coords;
+   } shapes[] = {
+      {GLSL_SAMPLER_DIM_2D, false, 2},
+      {GLSL_SAMPLER_DIM_3D, false, 3},
+      {GLSL_SAMPLER_DIM_CUBE, false, 3},
+      {GLSL_SAMPLER_DIM_2D, true, 2},
+      {GLSL_SAMPLER_DIM_CUBE, true, 3},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P LOD query");
+      nir_def *bary = nir_load_barycentric_pixel(
+         &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+      nir_def *coord = nir_load_interpolated_input(
+         &b, shapes[i].coords, 32, bary, nir_imm_int(&b, 0),
+         .io_semantics.location = VARYING_SLOT_VAR0,
+         .io_semantics.num_slots = 1);
+      nir_def *image =
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+      nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+      nir_def *heap_index = nir_load_global_constant(
+         &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2,
+         .access = ACCESS_CAN_SPECULATE);
+      nir_def *sampler = nir_bindless_sampler_agx(
+         &b, nir_imm_int(&b, 32), heap_index, .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_lod;
+      tex->sampler_dim = shapes[i].dim;
+      tex->is_array = shapes[i].array;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = shapes[i].coords;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+      nir_def_init(&tex->instr, &tex->def, 2, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      fs_store_colour(&b, nir_vec4(&b, nir_channel(&b, &tex->def, 0),
+                                   nir_channel(&b, &tex->def, 1),
+                                   nir_imm_float(&b, 0), nir_imm_float(&b, 1)));
+      b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+      b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+               AGX_DESCRIPTOR_GENERATION_9);
+      struct agx_g17p_combined_sampler_binding binding;
+      bool ok = tex->coord_components == shapes[i].coords &&
+                agx_nir_lower_g17p_combined_sampler(b.shader, &binding);
+      agx_preprocess_nir(b.shader);
+      fs_lower(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true, .reserved_preamble = 24,
+      };
+      struct agx_shader_part part = {0};
+      ok &= agx_compile_shader_nir(b.shader, &key, &part) &&
+            part.binary && !part.info.scratch_size &&
+            part.info.agx3_staging_known &&
+            part.info.agx3_staging_halfs ==
+               (shapes[i].dim == GLSL_SAMPLER_DIM_2D ? 4 : 8);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok) {
+         fprintf(stderr, "LOD query compile failed for shape %u\n", i);
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool
 test_g17p_native_cube_array_sample(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -6705,6 +6779,11 @@ main(int argc, char **argv)
 
    if (!test_g17p_native_cube_sample()) {
       fputs("native cube sample mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_query_lod_compile()) {
+      fputs("native LOD query compile mismatch\n", stderr);
       all_ok = false;
    }
 

@@ -5911,7 +5911,7 @@ agx3_mark_implicit_tex_coord_staging(agx_context *ctx)
          sample->op == AGX_OPCODE_TEXTURE_SAMPLE && sample->nr_srcs == 6 &&
          sample->lod_mode == AGX_LOD_MODE_AUTO_LOD &&
          sample->dim == AGX_DIM_2D && !sample->shadow && !sample->offset &&
-         !sample->query_lod && !sample->sparse &&
+         !sample->sparse &&
          sample->gather == AGX_GATHER_NONE;
       if (!plain_implicit || sample->src[0].type != AGX_INDEX_NORMAL ||
           sample->src[0].size != AGX_SIZE_32 ||

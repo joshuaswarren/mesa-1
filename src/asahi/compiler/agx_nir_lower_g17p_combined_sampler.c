@@ -59,6 +59,7 @@ g17p_decline(const char *why, const nir_tex_instr *tex,
 static bool
 g17p_sample_shape(const nir_tex_instr *tex)
 {
+   const bool query_lod = tex->op == nir_texop_lod;
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
@@ -72,7 +73,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
 
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
-       tex->op != nir_texop_tg4) ||
+       tex->op != nir_texop_tg4 && !query_lod) ||
        (tex->sampler_dim != GLSL_SAMPLER_DIM_2D && !three_d && !cube) ||
        /* 3D takes the implicit, immediate-bias and per-lane LOD shapes the
         * 2D dimension takes; only gradient3d, which stages six scalars
@@ -80,7 +81,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
        (three_d &&
         (tex->is_array || tex->is_shadow ||
          (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-          tex->op != nir_texop_txl && tex->op != nir_texop_txd))) ||
+          tex->op != nir_texop_txl && tex->op != nir_texop_txd && !query_lod))) ||
        /* A cube comparison publishes its reference through the same CEM
         * bracket the colour cube uses, with implicit or explicit zero LOD.
         * A colour cube also takes an explicit per-lane level, on the
@@ -96,11 +97,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * roughness-indexed probe lookup every image-based lighting shader
         * does, SuperTuxKart's IBL.frag included. */
        (cube &&
-        (tex->op != nir_texop_tex &&
+        (tex->op != nir_texop_tex && !query_lod &&
          !((!tex->is_shadow || shadow_level_zero) &&
             tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
-       tex->coord_components != (cube_array ? 4 :
+       tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
+                                cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
        (tex->backend_flags & ~(AGX_TEXTURE_FLAG_CLAMP_TO_0 |
                                AGX_TEXTURE_FLAG_NO_CLAMP)) != 0 ||
@@ -110,11 +112,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
         tex->dest_type != nir_type_uint32 &&
         tex->dest_type != nir_type_int32) ||
        tex->def.num_components !=
-          ((tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
+          (query_lod ? 2 : (tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
+       (query_lod && tex->dest_type != nir_type_float32) ||
        tex->def.bit_size != 32)
       return false;
 
-   if (tex->is_shadow) {
+   if (tex->is_shadow && !query_lod) {
       /* The depth comparison is orthogonal to the LOD shape: Apple's
        * depth2d sample_compare with level(k), level(reg), bias(k), bias(reg)
        * and gradient2d() each differ from the corresponding colour sample by
@@ -147,6 +150,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
    if (packed_offset)
       offset_src = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
    const bool has_offset = offset_src >= 0;
+   if (query_lod && has_offset)
+      return false;
    if (has_offset &&
        (!nir_src_is_const(tex->src[offset_src].src) ||
         nir_src_num_components(tex->src[offset_src].src) !=
@@ -161,7 +166,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
       return false;
 
    const unsigned expected_srcs =
-      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) + tex->is_shadow +
+      (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) +
+      (tex->is_shadow && !query_lod) +
       has_offset;
    if (tex->num_srcs != expected_srcs ||
        has_lod != (tex->op == nir_texop_txl) ||

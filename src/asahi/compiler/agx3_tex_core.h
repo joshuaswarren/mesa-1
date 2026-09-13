@@ -300,6 +300,9 @@ struct agx3_tex_sample_desc {
    bool sampler_kill;
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
    bool shadow;                 /* compare against the scalar in bank 4 */
+   /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
+    * Array queries take no layer and encode immediate layer zero. */
+   bool query_lod;
    bool offset;                 /* signed nibble-packed 2D texel offset */
    uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
    enum agx3_tex_sample_abi sample_abi;
