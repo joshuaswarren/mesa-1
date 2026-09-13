@@ -899,7 +899,7 @@ test_gradient_and_register_bias(void)
                                     bytes, &length));
       bad_gather = gd;
       bad_gather.cube = true;
-      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_gather,
                                     bytes, &length));
       bad_gather = gd;
       bad_gather.lod = AGX3_TEX_LOD_BIAS;
@@ -3204,10 +3204,57 @@ test_minimum_lod_witnesses(void)
    return 0;
 }
 
+/* Fresh G17P runtime-descriptor gather kernels, with native register numbers.
+ * These bytes test operand typing, packed layer preservation, f141=2 and the
+ * cube dimension independently of the IR packer. */
+static int
+test_runtime_gather_witnesses(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   CHECK(agx3_tex_stage_gather_offset(enc, 0, false, 0, 1, false, true,
+                                      bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600000400f0c00100"));
+   CHECK(agx3_tex_pack_ms_array_layer(enc, 14, 8, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055408031c0000f0880400"));
+   CHECK(agx3_tex_stage_gather_offset(enc, 16, true, 8, 6, false, true,
+                                      bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600204440f0e60300"));
+   CHECK(!agx3_tex_stage_gather_offset(enc, 128, false, 0, 1, false, false,
+                                       bytes, &len));
+   CHECK(!agx3_tex_stage_gather_offset(enc, 1, false, 0, 1, false, false,
+                                       bytes, &len));
+   for (unsigned shape = 0; shape < 6; ++shape) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 32,
+         .coord_kill = true, .final = true,
+         .texture_kind = AGX3_TEX_OPERAND_REGISTER,
+         .sampler_kind = AGX3_TEX_OPERAND_REGISTER,
+         .texture_value = 0, .sampler_value = 4,
+         .texture_kill = true, .sampler_kill = true,
+         .gather = AGX3_TEX_GATHER_R, .shadow = shape & 1,
+         .offset = shape < 4, .offset_register = shape < 4,
+         .array = shape == 2 || shape == 3, .cube = shape >= 4,
+      };
+      const char *native[] = {
+         "05800ca414004000010280010100a02800004000",
+         "05800ca414006000010280010100a02800004000",
+         "05800ca414004004010280010100a02800004000",
+         "05800ca414006004010280010100a02800004000",
+         "05800ca414001000010280010100a02800004000",
+         "05800ca414003000010280010100a02800004000",
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, native[shape]));
+   }
+   return 0;
+}
+
 int
 main(void)
 {
-   if (test_minimum_lod_witnesses() || test_register_lod() || test_fetch_lod() ||
+   if (test_runtime_gather_witnesses() || test_minimum_lod_witnesses() || test_register_lod() || test_fetch_lod() ||
        test_register_array_layer() || test_cube_coordinate_stage() ||
        test_multisample_fetch() ||
        test_multisample_sample_stage() ||

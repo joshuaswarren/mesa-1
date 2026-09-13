@@ -1411,7 +1411,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          bool sample_group_nonterminal, bool sample_group_end,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
                          uint8_t native_coord_slot,
-                         const uint16_t cem_scratch[3], bool vertex_stage)
+                         const uint16_t cem_scratch[3], bool vertex_stage,
+                         uint16_t array_scratch)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
@@ -1439,11 +1440,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    /* Explicit gradients. The four scalars are staged into their own banks
     * and the sample names coordinate bank 0, as every witness does. */
    const bool gradient_lod = I->lod_mode == AGX_LOD_MODE_LOD_GRAD || gradient_min;
-   /* textureGather. Every witness is a plain 2D implicit-LOD gather, so the
-    * gather bit rides on the ordinary implicit sample and nothing else about
-    * the instruction changes. The IR spells the components 1/3/5/7 in a
-    * three-bit field, so map them one by one: an unspelled value must refuse
-    * rather than alias onto a real channel. */
+   /* Gather uses the implicit-LOD selector for 2D, array and cube forms,
+    * including compute where it reads level zero. Map the IR component
+    * values 1/3/5/7 explicitly to the native two-bit selector. */
    const bool gather = I->gather != AGX_GATHER_NONE;
    const bool shadow = I->shadow;
    const bool query_lod = I->query_lod;
@@ -1528,6 +1527,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                   I->src[5].value == I->offset_xyz &&
                   !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
                   !I->src[5].cache && !I->src[5].discard && !I->src[5].kill));
+   const bool register_offset = offset && !I->offset_xyz && gather &&
+      agx3_tex_plain_reg(I->src[5]) && I->src[5].size == AGX_SIZE_32 &&
+      agx_channels(I->src[5]) == (shadow ? 2 : 1) &&
+      !(I->src[5].value & 1) && I->src[5].value + (shadow ? 2 : 0) <= 126;
    /* AGX3B coordinates are copied to the fixed staging bank before SMP. COPY
     * and CEM each name a seven-bit source half-register, so the entire vector
     * must end below half 128. AGX3C retains its independently recovered direct
@@ -1565,9 +1568,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (shadow
            ? (!agx3_tex_plain_reg(I->src[5]) ||
               I->src[5].size != AGX_SIZE_32 ||
-              agx_channels(I->src[5]) != 1 || I->src[5].value > 126 ||
-              (offset && !immediate_offset))
-           : offset ? !immediate_offset : !agx_is_null(I->src[5])) ||
+              agx_channels(I->src[5]) != (register_offset ? 2 : 1) ||
+              I->src[5].value > 126 ||
+              (offset && !immediate_offset && !register_offset))
+           : offset ? (!immediate_offset && !register_offset)
+                    : !agx_is_null(I->src[5])) ||
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !three_d &&
         !cube) ||
        (array && enc != AGX_ISA_ENCODING_AGX3B) ||
@@ -1599,7 +1604,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                    ((cube || (array && !offset && !vertex_stage)) &&
                     !implicit_lod &&
                     !shadow_level_zero))) ||
-       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
+       (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
 
@@ -1774,6 +1779,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * standalone texture encoder.
     */
    if (array && !cube && !query_lod && !combined_array_lod &&
+       !register_offset &&
        (vertex_stage || shadow || implicit_lod || offset) &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
@@ -1790,6 +1796,20 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                  stage_slot, 0, false, true,
                                  bytes, &len);
       if (!packed || !agx3_append(emission, bytes, len))
+         return false;
+   }
+
+   if (register_offset) {
+      if (array &&
+          (!agx3_tex_pack_ms_array_layer(
+              enc, I->src[0].value + 4, array_scratch,
+              I->src[0].cache, I->src[0].discard, bytes, &len) ||
+           !agx3_append(emission, bytes, len)))
+         return false;
+      if (!agx3_tex_stage_gather_offset(
+             enc, I->src[5].value + (shadow ? 2 : 0), array, array_scratch,
+             stage_slot, I->src[5].cache, I->src[5].discard, bytes, &len) ||
+          !agx3_append(emission, bytes, len))
          return false;
    }
 
@@ -1852,6 +1872,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .query_lod = query_lod,
       .offset = offset,
       .offset_xyz = offset ? I->offset_xyz : 0,
+      .offset_register = register_offset,
       .min_lod = min_lod,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
@@ -5879,7 +5900,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
        ctx->nir->info.fs.needs_full_quad_helper_invocations);
    bool uniform_half_used[512] = {false};
    bool has_dynamic_cube_sample = false;
-   bool has_ms_array_fetch = false;
+   bool has_packed_array_layer = false;
    unsigned observed_max_reg = ctx->max_reg;
    unsigned count = 0;
 
@@ -5901,7 +5922,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if ((scan_I->op == AGX_OPCODE_TEXTURE_LOAD ||
               scan_I->op == AGX_OPCODE_IMAGE_LOAD) &&
              scan_I->dim == AGX_DIM_2D_MS_ARRAY)
-            has_ms_array_fetch = true;
+            has_packed_array_layer = true;
+         if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             scan_I->dim == AGX_DIM_2D_ARRAY && scan_I->offset &&
+             !scan_I->offset_xyz)
+            has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
          if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
@@ -5996,11 +6021,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       ctx->max_reg = base + 7;
    }
 
-   /* Native MS-array sample publication needs one transient normalized-layer
-    * word. Keep it above every live RA operand, including any CEM scratch.
-    * It is consumed synchronously before SMP, so successive reads reuse it. */
+   /* MS-array reads and runtime-offset array gathers merge a normalized
+    * layer with another operand. Reserve one transient word above every
+    * live RA operand and CEM scratch; successive samples reuse it. */
    uint16_t ms_array_scratch = 0;
-   if (has_ms_array_fetch) {
+   if (has_packed_array_layer) {
       const unsigned base = (MAX2(observed_max_reg, ctx->max_reg) + 2) & ~1u;
       if (base > 190)
          goto fail;
@@ -6834,8 +6859,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
             const bool sample_group_nonterminal =
-               g17p_sample_group && sample_group_member &&
-               sample_group_members_remaining > 1;
+               (g17p_sample_group && sample_group_member &&
+                sample_group_members_remaining > 1) ||
+               /* Compute gathers use level zero without a fragment group. */
+               (enc == AGX_ISA_ENCODING_AGX3B &&
+                ctx->stage == MESA_SHADER_COMPUTE &&
+                I->gather != AGX_GATHER_NONE);
             bool sample_group_end = false;
             if (sample_group_member) {
                assert(sample_group_members_remaining > 0);
@@ -6935,7 +6964,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                sample_wait = staging_wait;
             }
             if ((ctx->stage != MESA_SHADER_FRAGMENT && !explicit_level &&
-                 !compute_gradient && !vertex_explicit_lod) ||
+                 !compute_gradient && !vertex_explicit_lod &&
+                 !(enc == AGX_ISA_ENCODING_AGX3B &&
+                   I->gather != AGX_GATHER_NONE)) ||
                 /* Keep the pixel-entry gate after all native coordinate
                  * staging and immediately before SMP, matching Apple. */
                 !agx3_emit_texture_sample(emission, enc, I, slot, sample_wait,
@@ -6943,7 +6974,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                           sample_group_end, open_pixel,
                                           &ctx->agx3_colour_link.entry_offset,
                                           native_coord_slot, cem_scratch,
-                                          ctx->stage == MESA_SHADER_VERTEX))
+                                          ctx->stage == MESA_SHADER_VERTEX,
+                                          ms_array_scratch))
                AGX3_REFUSE(I);
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -6979,7 +7011,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                     : (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
                        I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)
                          ? (I->dim == AGX_DIM_3D ? 32 : 16)
-                    : (staged_scalar ||
+                    : (staged_scalar || (I->offset && !I->offset_xyz) ||
                        (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||
                        I->dim == AGX_DIM_3D)
                        ? 8

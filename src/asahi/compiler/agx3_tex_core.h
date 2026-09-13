@@ -258,8 +258,9 @@ enum agx3_tex_lod {
  *    t.gather(s, uv, int2(0), component::z) 05800cb490000000010000001200  f145 2
  *    t.gather(s, uv, int2(0), component::w) 05800cbc90000000010000001200  f145 3
  *
- * Every witness is a plain 2D implicit-LOD gather: no array layer, no LOD
- * argument and no coordinate offset, so those stay refused.
+ * 2D-array and cube gathers share the same component selector. Runtime
+ * 2D offsets use f141=2 with the bank-6 publication declared below; immediate
+ * offsets retain f43/f51/f141. Gathers take no explicit LOD argument.
  */
 enum agx3_tex_gather {
    AGX3_TEX_GATHER_NONE = 0,
@@ -313,6 +314,7 @@ struct agx3_tex_sample_desc {
    bool query_lod;
    bool offset;                 /* signed nibble-packed 2D texel offset */
    uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
+   bool offset_register;         /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
 };
 
@@ -338,6 +340,11 @@ bool agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Pack the dynamic layer used by array fetches and driver-ABI samples. */
+bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+                                   bool array, uint16_t packed_layer,
+                                   uint8_t slot, bool cache, bool discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,

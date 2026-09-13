@@ -4185,8 +4185,11 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
           */
          if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              nir_src_is_const(instr->src[i].src) &&
-             nir_src_as_uint(instr->src[i].src) <= 0xfff) {
-            const uint32_t value = nir_src_as_uint(instr->src[i].src);
+             (instr->op == nir_texop_tg4 ||
+              nir_src_as_uint(instr->src[i].src) <= 0xfff)) {
+            uint32_t value = nir_src_as_uint(instr->src[i].src);
+            if (instr->op == nir_texop_tg4)
+               value = (value & 0xf) | ((value >> 12) & 0xf0);
             /* Apple's compiler emits an all-zero offset as a plain sample. */
             packed_offset = value ? agx_immediate(value) : agx_null();
          } else {
@@ -4329,11 +4332,9 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Pack shadow reference value (compare) and packed offset together */
    agx_index compare_offset = agx_null();
 
-   /* G17P carries the offset as an immediate field in the sample instruction
-    * and the comparator as a staged register, so the two cannot share this
-    * one vector operand. Hand the offset to the packer out of band and leave
-    * src[5] to the comparator alone; AGX2, whose hardware reads a register
-    * pair, keeps the combined form. */
+   /* G17P constant offsets live in the instruction, leaving src[5] to
+    * the comparator. Runtime gather offsets retain the combined vector;
+    * the packer publishes each value into its own native operand bank. */
    const bool offset_present = !agx_is_null(packed_offset);
    const uint16_t offset_xyz =
       packed_offset.type == AGX_INDEX_IMMEDIATE

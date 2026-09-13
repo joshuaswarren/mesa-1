@@ -325,8 +325,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
-         d->lod != AGX3_TEX_LOD_REGISTER) ||
-        d->gather != AGX3_TEX_GATHER_NONE))
+         d->lod != AGX3_TEX_LOD_REGISTER)))
       return false;
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
@@ -416,12 +415,15 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
       (d->lod == AGX3_TEX_LOD_BIAS || d->lod == AGX3_TEX_LOD_LEVEL);
    if (d->offset &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xyz == 0 ||
+       (enc != AGX_ISA_ENCODING_AGX3B ||
+        (!d->offset_register && d->offset_xyz == 0) ||
         d->offset_xyz > (d->three_d ? 0xfffu : 0xffu) ||
         d->cube || direct_array_immediate_lod))
       return false;
 
-   if (!d->offset && d->offset_xyz != 0)
+   if ((!d->offset && (d->offset_xyz != 0 || d->offset_register)) ||
+       (d->offset_register &&
+        (d->offset_xyz || d->gather == AGX3_TEX_GATHER_NONE || d->three_d)))
       return false;
 
    /* Metal's gather takes no LOD argument, so every gather witness is an
@@ -435,11 +437,16 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     *   depth.gather_compare(s, uv, r)        05800ca490002000010000001200  + f143
     *   depth.gather_compare(s, uv, r, off)   05800ca490002102018800001200  + f43/f51/f141
     *
-    * 3D and cube gathers are not witnessed and stay closed.
+    * Fresh runtime-descriptor cube and depthcube witnesses use the ordinary
+    * CEM coordinates with f144=1:
+    *   05800ca414001000010280010100a02800004000
+    *   05800ca414003000010280010100a02800004000
+    * Runtime 2D offsets set f141=2 and read the merged bank-6 operand.
+    * 3D gathers remain unsupported.
     */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
        (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
-        d->lod != AGX3_TEX_LOD_AUTO || d->three_d || d->cube))
+        d->lod != AGX3_TEX_LOD_AUTO || d->three_d))
       return false;
 
    /* Apple's depth sample_compare witnesses stage their reference value into
@@ -639,7 +646,9 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(143, 1);
    if (d->query_lod)
       ov[n++] = (struct agx3_field_kv)KV(146, 1);
-   if (d->offset) {
+   if (d->offset_register) {
+      ov[n++] = (struct agx3_field_kv)KV(141, 2);
+   } else if (d->offset) {
       ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xyz);
       ov[n++] = (struct agx3_field_kv)KV(51, 1);
       ov[n++] = (struct agx3_field_kv)KV(141, 1);
@@ -1074,6 +1083,41 @@ agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
          ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
    return agx3_bind_compose(enc, "pack_smpir", 0, base,
                             sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
+
+/* Native G17P gather offsets insert signed nibbles from two 16-bit
+ * registers into bits 12 and 28 of bank 6. Array gathers merge the normalized
+ * layer as the third operand, never as a separate bank-6 write.
+ * Runtime descriptor witnesses, slot 6, discarded inputs:
+ *   x=12, y=14:          1705540600183800f0e40100
+ *   x=16, y=17, layer=8: 1705540600204440f0e60300
+ */
+bool
+agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+                             bool array, uint16_t packed_layer,
+                             uint8_t slot, bool cache, bool discard,
+                             uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 126 ||
+       slot < 1 || slot > 6 || (cache && discard) ||
+       (array && ((packed_layer & 1) || packed_layer > 190)))
+      return false;
+
+   const struct agx3_field_kv fields[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(12, slot),
+      KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(30, src + 1), KV(37, 2), KV(38, 1), KV(39, cache), KV(41, discard),
+      KV(44, array ? packed_layer : 0), KV(51, array ? 2 : 1),
+      KV(52, 2), KV(55, array),
+      KV(74, 5), KV(75, 12), KV(76, 5), KV(77, 28),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                            sizeof(fields) / sizeof(fields[0]), NULL, 0,
+                            out, len);
 }
 
 /* The dynamic array-layer witness uses PACK_SMPIR like register LOD, but its

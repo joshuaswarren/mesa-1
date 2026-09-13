@@ -13766,3 +13766,85 @@ TEST_F(AGX3PackBinary, ChromiumHighRegisterMovesUseHalfPairIdentity)
                                << " src=" << move.src;
    }
 }
+
+/* The CTS abort combined a comparison and a runtime offset in src[5], then
+ * validated it as a single scalar. Exercise that exact vector shape and the
+ * array bank-6 merge in both graphics and compute shaders. */
+TEST_F(AGX3PackBinary, RuntimeGatherOffsetPreservesComparisonAndLayer)
+{
+   for (auto stage : {MESA_SHADER_FRAGMENT, MESA_SHADER_COMPUTE}) {
+      for (bool array : {false, true}) {
+         for (bool shadow : {false, true}) {
+            auto enc = AGX_ISA_ENCODING_AGX3B;
+            agx_builder *b = builder(enc);
+            b->shader->stage = stage;
+            agx_index dest = agx_register(24, AGX_SIZE_32);
+            dest.channels_m1 = 3;
+            agx_index coord = agx_register(8, AGX_SIZE_32);
+            coord.channels_m1 = array ? 2 : 1;
+            agx_index ref_offset = agx_register(16, AGX_SIZE_32);
+            ref_offset.channels_m1 = shadow ? 1 : 0;
+            auto *I = agx_texture_sample_to(
+               b, dest, coord, agx_immediate(0), agx_immediate(0),
+               agx_register(0, AGX_SIZE_64), agx_register(4, AGX_SIZE_64),
+               ref_offset, array ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
+               AGX_LOD_MODE_AUTO_LOD, 0, true, shadow, false,
+               AGX_GATHER_R, false);
+            I->mask = 15;
+            agx_stop(b);
+            agx_validate(b->shader, "runtime gather offset");
+            const auto code = pack(b);
+            uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+            ASSERT_TRUE(agx3_tex_stage_gather_offset(
+               enc, shadow ? 18 : 16, array, b->shader->max_reg - 1,
+               array ? 6 : 1, false, false, bytes, &len));
+            EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + len),
+                      code.end());
+            EXPECT_GE(b->shader->agx3_staging_halfs, 8);
+         }
+      }
+   }
+}
+
+TEST_F(AGX3PackBinary, IndexedGatherKeepsNativeHandles)
+{
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      for (bool shadow : {false, true}) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "indexed gather");
+         nir_def *image = nir_bindless_image_agx(&b, nir_imm_int(&b, 72),
+                                                  .desc_set = 1);
+         nir_def *smp = nir_bindless_sampler_agx(
+            &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 3, 16), .desc_set = 1);
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader,
+                                                    3 + shadow + (shape < 2));
+         tex->op = nir_texop_tg4;
+         tex->sampler_dim = shape == 2 ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
+         tex->is_array = shape == 1;
+         tex->is_shadow = shadow;
+         tex->is_new_style_shadow = false;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = shape ? 3 : 2;
+         unsigned i = 0;
+         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_coord,
+            shape ? nir_imm_vec3(&b, .5, .25, 1) : nir_imm_vec2(&b, .5, .25));
+         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, smp);
+         if (shadow)
+            tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                                 nir_imm_float(&b, .5));
+         if (shape < 2)
+            tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_offset,
+               nir_load_global_constant(&b, 2, 32, nir_imm_int64(&b, 0x10000),
+                                           .align_mul = 4));
+         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000), .align_mul = 4);
+         ASSERT_TRUE(agx_nir_lower_g17p_indexed_samplers(b.shader));
+         const int texture = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+         ASSERT_GE(texture, 0);
+         EXPECT_EQ(nir_src_bit_size(tex->src[texture].src), 64);
+         ralloc_free(b.shader);
+      }
+   }
+}

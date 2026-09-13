@@ -397,15 +397,12 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
             return 1;
          }
       } else if (s == 5) {
-         /* Compare/offset. On G17P the coordinate offset is an immediate
-          * field on the sample instruction (I->offset_xyz), not an operand,
-          * so agx_emit_tex() leaves this source to the comparator alone
-          * rather than collecting the two -- there is no register pair for
-          * the hardware to read. Without a comparator the immediate still
-          * rides here, one 32-bit value wide. */
+         /* G17P immediate offsets live in I->offset_xyz, leaving src[5]
+          * to the comparator. Runtime gather offsets instead occupy a full
+          * 32-bit value, appended after the comparator when present. */
          const bool offset_in_src =
             I->offset && !(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                           I->shadow);
+                           I->shadow && I->offset_xyz);
          return 2 * ((!!I->shadow) + (!!offset_in_src));
       } else {
          return size;

@@ -405,7 +405,11 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
       for (unsigned c = 0; c < offset->num_components; ++c) {
          nir_def *nibble = nir_iand_imm(b, nir_channel(b, offset, c), 0xF);
-         nir_def *shifted = nir_ishl_imm(b, nibble, 4 * c);
+         /* G17P runtime gathers feed two 16-bit inputs to PACK_SMPIR.
+          * Keep each nibble in its own half, including constants which the
+          * backend folds back to the compact SMP immediate. */
+         const unsigned stride = gen9 && tex->op == nir_texop_tg4 ? 16 : 4;
+         nir_def *shifted = nir_ishl_imm(b, nibble, stride * c);
 
          /* We pack with iadd instead of ior to let us fuse in the shift with an
           * iadd-lsl instruction.

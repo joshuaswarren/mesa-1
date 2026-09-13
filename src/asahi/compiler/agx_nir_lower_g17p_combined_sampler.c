@@ -100,7 +100,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * roughness-indexed probe lookup every image-based lighting shader
         * does, SuperTuxKart's IBL.frag included. */
        (cube &&
-        (tex->op != nir_texop_tex && !query_lod &&
+        (tex->op != nir_texop_tex && tex->op != nir_texop_tg4 && !query_lod &&
          !((!tex->is_shadow || shadow_level_zero) &&
             tex->op == nir_texop_txl))) ||
        tex->is_sparse ||
@@ -134,6 +134,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
           nir_src_num_components(tex->src[comparator].src) != 1 ||
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
           (tex->is_array && !offset_array && tex->op != nir_texop_tex &&
+           tex->op != nir_texop_tg4 &&
            !shadow_level_zero))
          return false;
    }
@@ -148,11 +149,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
-   /* A coordinate offset is an immediate with one nibble per coordinate
-    * (f43/f51/f141), witnessed in every LOD mode and on the gather; only a
-    * compile-time offset can reach that field. Without this the whole
-    * shader is disowned and falls back to the heap-descriptor form, which
-    * has no grounded encoding -- so a plain textureOffset() refuses. */
+   /* Ordinary samples use immediate offsets. Gathers also accept runtime
+    * offsets through PACK_SMPIR, so their descriptor rewrite must preserve
+    * both constant and dynamic operands. */
    int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
    const bool packed_offset = offset_src < 0;
    if (packed_offset)
@@ -177,10 +176,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
    if (query_lod && has_offset)
       return false;
    if (has_offset &&
-       (!nir_src_is_const(tex->src[offset_src].src) ||
+       ((tex->op != nir_texop_tg4 &&
+         !nir_src_is_const(tex->src[offset_src].src)) ||
         nir_src_num_components(tex->src[offset_src].src) !=
            (packed_offset ? 1u : three_d ? 3u : 2u) ||
-        (packed_offset && nir_src_as_uint(tex->src[offset_src].src) >
+        (packed_offset && tex->op != nir_texop_tg4 &&
+         nir_src_as_uint(tex->src[offset_src].src) >
                              (three_d ? 0xfffu : 0xffu)) || cube))
       return false;
 
@@ -196,8 +197,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
 
    /* Metal's gather takes no LOD argument, so no gather carries one. The
     * array layer, the coordinate offset and the depth comparison all
-    * compose with it; 3D and cube gathers are not witnessed. */
-   if (tex->op == nir_texop_tg4 && (three_d || cube || tex->component > 3))
+    * compose with it. Cube gathers use the existing CEM coordinate path;
+    * 3D gathers remain unsupported. */
+   if (tex->op == nir_texop_tg4 && (three_d || tex->component > 3))
       return false;
 
    /* An explicit gradient is four 32-bit scalars staged into their own
