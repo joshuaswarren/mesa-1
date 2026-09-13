@@ -5896,12 +5896,25 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             dev->dev.chip, g17p_native_bind_tail_emitted);
          uint64_t target = hk_cs_alloc_for_indirect(cs, size_B);
 
+         uint64_t empty_draw_jump = 0;
+         if (dev->dev.chip == AGX_CHIP_G17P) {
+            const uint64_t compact =
+               hk_g17p_vdm_compact(cmd, target + size_B);
+            if (!compact || compact >= (UINT64_C(1) << 40)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_OUT_OF_DEVICE_MEMORY);
+               return;
+            }
+            empty_draw_jump = compact;
+         }
+
          libagx_draw_robust_index(cmd, agx_1d(32), AGX_BARRIER_ALL | AGX_PREGFX,
                                   target, hk_heap(cmd), draw.b.ptr,
                                   draw.index_buffer, draw.index_buffer_range_B,
                                   draw.restart, dev->dev.chip, topology,
                                   draw_state_offset,
                                   g17p_native_bind_tail_emitted,
+                                  empty_draw_jump,
                                   draw.index_size);
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {

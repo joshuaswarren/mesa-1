@@ -435,7 +435,7 @@ test_agx3_live_vdm_draw(void)
             sizeof(robust_g17p));
    uint32_t *robust_end = agx_vdm_draw_robust_index(
       robust_packed, AGX_CHIP_G17P, robust_draw, (enum agx_primitive)9, 0,
-      false);
+      false, 0);
    CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
             sizeof(robust_g17p));
    ++checks;
@@ -449,7 +449,7 @@ test_agx3_live_vdm_draw(void)
             sizeof(robust_g17p_with_state));
    robust_end = agx_vdm_draw_robust_index(
       robust_packed, AGX_CHIP_G17P, robust_draw, (enum agx_primitive)9,
-      UINT32_C(0x48000), true);
+      UINT32_C(0x48000), true, 0);
    CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
             sizeof(robust_g17p_with_state));
    ++checks;
@@ -466,7 +466,7 @@ test_agx3_live_vdm_draw(void)
             sizeof(indexed_g15));
    robust_end = agx_vdm_draw_robust_index(
       robust_packed, AGX_CHIP_G15G, robust_draw, (enum agx_primitive)9,
-      UINT32_C(0x48000), true);
+      UINT32_C(0x48000), true, 0);
    CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
             sizeof(indexed_g15));
    ++checks;
@@ -485,7 +485,7 @@ test_agx3_live_vdm_draw(void)
    uint32_t *agx2_robust_end =
       agx_vdm_draw_robust_index(agx2_robust, AGX_CHIP_G13G, agx2_draw,
                                 (enum agx_primitive)9, UINT32_C(0x48000),
-                                true);
+                                true, 0);
    const size_t agx2_size =
       (uintptr_t)agx2_expected_end - (uintptr_t)agx2_expected;
    CHECK_EQ((uintptr_t)agx2_robust_end - (uintptr_t)agx2_robust, agx2_size);
@@ -494,6 +494,64 @@ test_agx3_live_vdm_draw(void)
    ++checks;
    if (memcmp(agx2_expected, agx2_robust, agx2_size)) {
       fprintf(stderr, "AGX2 robust indexed body changed\n");
+      exit(1);
+   }
+
+   /* Indirect-count predication zeros every record above the runtime count.
+    * A G17P direct indexed packet cannot encode either zero count, so the
+    * device-side builder must skip its fixed reservation with the grounded
+    * non-returning Stream Link instead of publishing a malformed draw. */
+   static const uint32_t empty_jump_with_state[] = {
+      UINT32_C(0x00048000), UINT32_C(0x8000005a), UINT32_C(0x12345678),
+   };
+   struct agx_draw empty_draw = robust_draw;
+   empty_draw.b.count[0] = 0;
+   memset(robust_packed, 0xcd, sizeof(robust_packed));
+   robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G17P, empty_draw,
+      (enum agx_primitive)9, UINT32_C(0x48000), true,
+      UINT64_C(0x5a12345678));
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(empty_jump_with_state));
+   ++checks;
+   if (memcmp(robust_packed, empty_jump_with_state,
+              sizeof(empty_jump_with_state)) ||
+       robust_packed[3] != UINT32_C(0xcdcdcdcd)) {
+      fprintf(stderr, "G17P empty robust indexed jump mismatch\n");
+      exit(1);
+   }
+
+   empty_draw = robust_draw;
+   empty_draw.b.count[1] = 0;
+   memset(robust_packed, 0xcd, sizeof(robust_packed));
+   robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G17P, empty_draw,
+      (enum agx_primitive)9, UINT32_C(0x48000), true,
+      UINT64_C(0x5a12345678));
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(empty_jump_with_state));
+   ++checks;
+   if (memcmp(robust_packed, empty_jump_with_state,
+              sizeof(empty_jump_with_state)) ||
+       robust_packed[3] != UINT32_C(0xcdcdcdcd)) {
+      fprintf(stderr, "G17P zero-instance robust indexed jump mismatch\n");
+      exit(1);
+   }
+
+   static const uint32_t empty_jump_without_state[] = {
+      UINT32_C(0x8000005a), UINT32_C(0x12345678),
+   };
+   memset(robust_packed, 0xcd, sizeof(robust_packed));
+   robust_end = agx_vdm_draw_robust_index(
+      robust_packed, AGX_CHIP_G17P, empty_draw,
+      (enum agx_primitive)9, 0, false, UINT64_C(0x5a12345678));
+   CHECK_EQ((uintptr_t)robust_end - (uintptr_t)robust_packed,
+            sizeof(empty_jump_without_state));
+   ++checks;
+   if (memcmp(robust_packed, empty_jump_without_state,
+              sizeof(empty_jump_without_state)) ||
+       robust_packed[2] != UINT32_C(0xcdcdcdcd)) {
+      fprintf(stderr, "G17P reused-state empty indexed jump mismatch\n");
       exit(1);
    }
 

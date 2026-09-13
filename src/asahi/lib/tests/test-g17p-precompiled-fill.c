@@ -2,6 +2,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "libagx_shaders.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -223,12 +224,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3030,
-       UINT64_C(0x8d7c6ab5123d9617)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3082,
-       UINT64_C(0xdfcd9d94c55ba91b)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3080,
-       UINT64_C(0x2dcb365483a53e61)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3278,
+       UINT64_C(0x7e03d6da51b3ba53)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3350,
+       UINT64_C(0xfc02bf46ab54d6e4)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3348,
+       UINT64_C(0x7b6b63e6e34e4782)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -241,13 +242,20 @@ main(void)
          (const void *)robust_blob;
       const uint8_t *robust_binary =
          (const uint8_t *)robust_blob + sizeof(*robust_info);
+      const uint64_t robust_hash =
+         fnv1a64(robust_binary, robust_info->binary_size);
+      if (robust_info->binary_size != robust_index[i].size ||
+          robust_hash != robust_index[i].hash)
+         fprintf(stderr,
+                 "robust-index[%u]: size=%u hash=%#" PRIx64 "\n", i,
+                 robust_info->binary_size, robust_hash);
       CHECK(robust_info->preamble_offset == 0);
       CHECK(robust_info->main_offset == 0);
       CHECK(robust_info->main_size == robust_index[i].size);
       CHECK(robust_info->binary_size == robust_index[i].size);
       CHECK(robust_info->nr_gprs == 56);
       CHECK(robust_info->nr_preamble_gprs == 0);
-      CHECK(robust_info->push_count == 28);
+      CHECK(robust_info->push_count == 32);
       CHECK(robust_info->workgroup_size[0] == 32);
       CHECK(robust_info->workgroup_size[1] == 1);
       CHECK(robust_info->workgroup_size[2] == 1);
@@ -256,8 +264,7 @@ main(void)
       CHECK(!robust_info->uses_txf);
       CHECK(robust_info->agx3_staging_known);
       CHECK(robust_info->agx3_staging_halfs == 0);
-      CHECK(fnv1a64(robust_binary, robust_info->binary_size) ==
-            robust_index[i].hash);
+      CHECK(robust_hash == robust_index[i].hash);
       CHECK(memcmp(robust_binary + robust_info->binary_size -
                       sizeof(robust_end),
                    robust_end, sizeof(robust_end)) == 0);
