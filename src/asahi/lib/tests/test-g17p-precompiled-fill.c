@@ -210,7 +210,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0x4a38f5b56045209b));
+         UINT64_C(0xe4728b6b39d5c26c));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -348,7 +348,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0xf86f3a06246d7ee3));
+         UINT64_C(0x979c24ee44181394));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -372,7 +372,7 @@ main(void)
        * from 09 to 01: the unconditional break must consume true directly.
        * Size, registers and every other helper byte are unchanged. */
       {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2962, 3090, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xaaf0fe24895afa6a)},
+       {1024, 1, 1}, 4, UINT64_C(0xe98ef2f818781ad2)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0x5a1a52f3cab87ab5)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

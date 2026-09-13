@@ -10289,6 +10289,39 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /* The generic selector's original f32-to-i32 vector had a fixed
+          * source-discard bit and no cache fields. That destroys a value that
+          * remains live for a following compare. Encode the actual post-RA
+          * lifetime state through the native flt2int fields instead. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
+             I->nr_srcs == 2 &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             (I->src[0].value == AGX_CONVERT_F_TO_S32 ||
+              I->src[0].value == AGX_CONVERT_F_TO_U32) &&
+             I->src[1].size == AGX_SIZE_32) {
+            if (I->nr_dests != 1 || I->saturate ||
+                I->round != AGX_ROUND_RTZ ||
+                I->src[0].abs || I->src[0].neg || I->src[0].memory ||
+                I->src[0].kill || I->src[0].cache || I->src[0].discard ||
+                !agx3_vary_reg32(I->dest[0]) ||
+                agx_channels(I->dest[0]) != 1 ||
+                !agx3_vary_reg32(I->src[1]) ||
+                agx_channels(I->src[1]) != 1 || I->src[1].abs ||
+                I->src[1].neg || I->src[1].kill ||
+                (I->src[1].cache && I->src[1].discard))
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_float_to_int32(
+                   enc, I->dest[0].value, I->src[1].value,
+                   I->src[0].value == AGX_CONVERT_F_TO_S32,
+                   agx3_post_ra_hint(I->src[1]), I->dest[0].cache, wait,
+                   bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&

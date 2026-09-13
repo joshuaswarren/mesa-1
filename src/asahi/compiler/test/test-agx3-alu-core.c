@@ -1549,6 +1549,19 @@ static void test_int_to_float_liveness(void)
    puts("Integer-to-float: four native signed/unsigned live/dead vectors PASS");
 }
 
+static void test_float_to_int32_liveness(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 4, 2, true, AGX3_ALU_HINT_CACHE, true, 0,
+      out, &len));
+   exact(out, len, "27075404030496480300");
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 4, 3, true, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
+   puts("Float-to-int32: native live-source cache vector PASS");
+}
+
 static void test_i32_to_f16(void)
 {
    uint8_t out[AGX3_ALU_MAX_LENGTH], len;
@@ -4846,6 +4859,7 @@ int main(void){
    test_native_u16_shift_right_immediate();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
+   test_float_to_int32_liveness();
    test_i32_to_f16();
    test_f16_to_int32();
    test_float_compare_select();

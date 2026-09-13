@@ -3492,6 +3492,25 @@ TEST_F(AGX3PackBinary, GTKHalfToInt32UsesNativeWidthAndPostRAState)
    EXPECT_EQ(pack(dependent), want);
 }
 
+TEST_F(AGX3PackBinary, FloatToInt32CarriesLiveSourceCacheState)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(4, AGX_SIZE_32);
+   agx_index source = agx_register(2, AGX_SIZE_32);
+   dest.cache = true;
+   source.cache = true;
+   agx_convert_to(b, dest, agx_immediate(AGX_CONVERT_F_TO_S32), source,
+                  AGX_ROUND_RTZ);
+   agx_stop(b);
+
+   const uint8_t native[] = {
+      0x27, 0x07, 0x54, 0x04, 0x03, 0x04, 0x96, 0x48, 0x03, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b),
+             std::vector<uint8_t>(std::begin(native), std::end(native)));
+}
+
 TEST_F(AGX3PackBinary, G17PHalfToInt32RejectsUngroundedShapes)
 {
    for (unsigned mode = 0; mode < 22; ++mode) {

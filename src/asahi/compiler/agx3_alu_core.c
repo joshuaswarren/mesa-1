@@ -637,6 +637,44 @@ agx3_alu_s16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 }
 
 bool
+agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                        bool is_signed, enum agx3_alu_hint hint,
+                        bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 128 ||
+       src >= 128 || (dest & 1) || (src & 1) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Apple's argument-evaluation witness keeps the converted float live:
+    *
+    *   27075404030496480300  d=r2, s=r1, signed, d.cache, s.cache
+    *
+    * Against the previously used fixed baseline, f11 is destination cache,
+    * f25 is source cache and f27 is source discard. They are lifetime fields,
+    * so derive them from post-RA state rather than baking in discard. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {23, 2}, {24, 2},
+      {41, is_signed ? 5 : 4}, {42, 1},
+   };
+   struct agx3_field_kv fields[11] = {
+      {2, dest},
+      {11, dest_cache},
+      {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 5;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){33 + slot,
+                                           !!(wait_mask & (1u << slot))};
+
+   return agx3_bind_compose(enc, "flt2int", 0, base, 6, fields, n, out, len);
+}
+
+bool
 agx3_alu_float_to_int16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                         bool src_16, bool is_signed, enum agx3_alu_hint hint,
                         bool dest_cache, uint16_t wait_mask,
