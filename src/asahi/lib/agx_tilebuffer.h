@@ -129,6 +129,8 @@ enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_WBOIT,
    AGX_G17P_MRT_RGBA8,
    AGX_G17P_MRT_R11G11B10,
+   AGX_G17P_MRT_RGBA32_QUAD,
+   AGX_G17P_MRT_R32_QUAD,
 };
 
 /* Classify the byte-grounded G17P dual-render-target layouts.  The

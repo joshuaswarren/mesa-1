@@ -5719,7 +5719,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
-   agx_instr *loads[3] = {0}, *stores[3] = {0}, *stop = NULL;
+   agx_instr *loads[4] = {0}, *stores[4] = {0}, *stop = NULL;
    agx_instr *first_wait = NULL;
    unsigned load_count = 0, store_count = 0;
    agx_foreach_block(ctx, block) {
@@ -5779,6 +5779,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    if (!stop || store_count < 2)
       return false;
 
+   /* Native four-target BG clear/reload has ascending stores and no ordinary
+    * colour transactions. Keep that program out of the epilog reordering. */
+   if (store_count == 4 && ctx->key->fs.ignore_tib_dependencies)
+      return false;
+
    if (load_count && !first_wait)
       return false;
 
@@ -5817,6 +5822,28 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    for (unsigned i = 0; i < store_count; ++i) {
       list_del(&stores[i]->link);
       list_addtail(&stores[i]->link, &stop->link);
+   }
+   if (store_count == 4 && !load_count) {
+      /* Scalar epilog inputs retain their fixed export ABI. Unlike a collect,
+       * a direct PRELOAD cannot be assigned into the quad's witnessed store
+       * bank by RA. Materialize only out-of-bank scalar inputs before the
+       * terminal store group, then let RA choose a legal free register. */
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(stores[0]));
+      for (unsigned i = 0; i < store_count; ++i) {
+         agx_index source = stores[i]->src[0];
+         if (source.type != AGX_INDEX_NORMAL || agx_channels(source) != 1)
+            continue;
+         agx_foreach_instr_global(ctx, I) {
+            if (I->op == AGX_OPCODE_PRELOAD && I->nr_dests == 1 &&
+                agx_is_equiv(I->dest[0], source) &&
+                I->src[0].type == AGX_INDEX_REGISTER && I->src[0].value >= 32) {
+               agx_index copy = agx_temp(ctx, source.size);
+               agx_mov_to(&b, copy, source);
+               stores[i]->src[0] = copy;
+               break;
+            }
+         }
+      }
    }
    ctx->agx3_mrt_tile_ops_ordered = true;
    return true;

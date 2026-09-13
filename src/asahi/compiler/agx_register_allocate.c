@@ -118,6 +118,7 @@ struct ra_ctx {
 
    /* SSA values that must begin in G17P's corpus-grounded low store bank. */
    BITSET_WORD *low_gpr;
+   unsigned tile_gpr_limit;
 
    /* SSA values read by G17P's seven-bit texture COPY/CEM source fields. */
    BITSET_WORD *texture_gpr;
@@ -370,7 +371,7 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
       limit = MIN2(limit, 128);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        BITSET_TEST(rctx->low_gpr, I->dest[d].value))
-      limit = MIN2(limit, 16);
+      limit = MIN2(limit, rctx->tile_gpr_limit);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        ra_class_for_index(I->dest[d]) == RA_GPR &&
        BITSET_TEST(rctx->texture_gpr, I->dest[d].value))
@@ -1779,6 +1780,37 @@ agx_ra(agx_context *ctx)
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
+   /* Four native raw32 stores need four simultaneously live payloads. Their
+    * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
+    * only the admitted quad payload bank, not general tile-store admission. */
+   unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
+   bool quad_tile =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT &&
+      (ctx->key->secondary || ctx->key->fs.ignore_tib_dependencies) &&
+      list_length(&ctx->blocks) == 1;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_TILE) {
+         unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
+         quad_tile &= width && (!quad_width || quad_width == width) &&
+            I->format == AGX_FORMAT_I32 && !I->explicit_coords &&
+            I->nr_srcs == 3 && I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value == 0xff && agx_is_null(I->src[2]);
+         quad_width = width;
+         if (!width || I->pixel_offset % width || I->pixel_offset / width >= 4 ||
+             (quad_mask & BITFIELD_BIT(I->pixel_offset / width))) {
+            quad_tile = false;
+         } else {
+            quad_mask |= BITFIELD_BIT(I->pixel_offset / width);
+         }
+         quad_stores++;
+      } else if (I->op == AGX_OPCODE_LD_TILE) {
+         quad_tile = false;
+      }
+   }
+   const unsigned tile_gpr_limit =
+      quad_tile && quad_stores == 4 && quad_mask == 15 ? 32 : 16;
+
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded
        * seven-bit operand forms. Constrain only these SSA webs. */
@@ -1905,6 +1937,7 @@ agx_ra(agx_context *ctx)
          .classes = classes,
          .visited = visited,
          .low_gpr = low_gpr,
+         .tile_gpr_limit = tile_gpr_limit,
          .texture_gpr = texture_gpr,
          .log2_gpr = log2_gpr,
          .high_gpr = high_gpr,

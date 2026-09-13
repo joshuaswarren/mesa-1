@@ -34,6 +34,7 @@
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_funop_core.h"
+#include "agx3_g17p_quad_eot.h"
 #include "agx3_iadd_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_local_tps_core.h"
@@ -1950,7 +1951,7 @@ static const char *agx3_trace_shader_name;
 static bool
 agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint8_t slot, uint16_t wait_mask,
-               bool first_load, bool last_load)
+               bool first_load, bool last_load, bool quad_store)
 {
    const bool load = I->op == AGX_OPCODE_LD_TILE;
    if ((!load && I->op != AGX_OPCODE_ST_TILE) ||
@@ -1984,7 +1985,12 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    /* AGX3b f13 varies independently in high-register store witnesses.  The
     * low-register, single-sample subset is the only one with a stable zero
     * selection that production IR can infer today. */
-   if (!load && enc == AGX_ISA_ENCODING_AGX3B && value.value >= 16)
+   /* Fresh four-target BG and ordinary fragments ground f13=0 for full
+    * raw32 payloads starting at half16/24 too. Other high-bank shapes retain
+    * the existing refusal. The caller proves the complete four-store graph. */
+   const bool quad_high = quad_store && !load && I->format == AGX_FORMAT_I32 &&
+      value.value < 32 && (I->mask == 1 || I->mask == 15);
+   if (!load && enc == AGX_ISA_ENCODING_AGX3B && value.value >= 16 && !quad_high)
       return false;
 
    uint8_t bytes[AGX3_TILE_MAX_LENGTH];
@@ -4922,15 +4928,17 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * Derive partition identity from the sorted physical tile offsets rather than
  * a format or workload name.  Every partition must have one terminal store;
  * loads are optional, and the pre-RA sink guarantees stores descend to the
- * zero-offset final release.  Three partitions are the complete native class
- * corpus (the third uses 128/64/192); anything wider stays fail-closed.
+ * zero-offset final release. The third class pair uses 128/64/192. Four
+ * identical R32/RGBA32 targets reuse class 12 across targets 3 and 0, with
+ * one shared lifetime. Wider layouts and four-target blending stay refused.
  */
 struct agx3_g17p_mrt_protocol {
    bool valid;
    uint8_t count;
-   uint16_t offsets[AGX3_G17P_MAX_COLOUR_PARTITIONS];
-   uint8_t loads[AGX3_G17P_MAX_COLOUR_PARTITIONS];
-   uint8_t stores[AGX3_G17P_MAX_COLOUR_PARTITIONS];
+   /* Four targets share three colour classes. Target 3 reuses class 0. */
+   uint16_t offsets[4];
+   uint8_t loads[4];
+   uint8_t stores[4];
 };
 
 /* A multisample background reload writes every sample of one tilebuffer
@@ -5086,6 +5094,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.count < 2)
       return (struct agx3_g17p_mrt_protocol){0};
 
+   if (p.count == 4 && ctx->key->fs.ignore_tib_dependencies)
+      return (struct agx3_g17p_mrt_protocol){0};
+
    for (unsigned i = 0; i < p.count; ++i) {
       for (unsigned j = i + 1; j < p.count; ++j) {
          if (p.offsets[j] < p.offsets[i]) {
@@ -5118,6 +5129,15 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
+      if (p.count == 4) {
+         const unsigned stride = p.offsets[1];
+         if ((stride != 4 && stride != 16) ||
+             I->op != AGX_OPCODE_ST_TILE || I->format != AGX_FORMAT_I32 ||
+             I->mask != (stride == 4 ? 1 : 15) || I->nr_srcs != 3 ||
+             I->nr_dests || !agx_is_null(I->src[2]) || partition < 0 ||
+             I->pixel_offset != (unsigned)partition * stride)
+            return (struct agx3_g17p_mrt_protocol){0};
+      }
       if (partition < 0 || I->nr_srcs < 2 ||
           I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1].type !=
              AGX_INDEX_IMMEDIATE ||
@@ -5140,14 +5160,57 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
 
    for (unsigned i = 0; i < p.count; ++i) {
       uint32_t read_class, write_class, combined_class;
-      if (p.stores[i] != 1 ||
+      /* Four-target blending is not inferred from the store-only witness. */
+      if (p.stores[i] != 1 || (p.count == 4 && p.loads[i]) ||
           !agx3_pixel_colour_partition_classes(
-             i, &read_class, &write_class, &combined_class))
+             i % 3, &read_class, &write_class, &combined_class))
          return (struct agx3_g17p_mrt_protocol){0};
    }
 
    p.valid = stopped && next_store == 0;
    return p;
+}
+
+/* Fresh G17P BG constructors for four identical R32/RGBA32 targets have no
+ * PIXWAIT/PIXREL in the shader and loader release 0x200. They store ascending
+ * offsets, unlike the ordinary four-target epilog's shared class-12 lifetime.
+ * Admit only the corresponding straight-line, single-sample store graph. */
+static bool
+agx3_g17p_quad_background_protocol(const agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       !ctx->key->fs.ignore_tib_dependencies ||
+       list_length(&ctx->blocks) != 1)
+      return false;
+
+   unsigned stores = 0, stride = 0;
+   bool stopped = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
+          I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
+         return false;
+      if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
+      } else if (I->op == AGX_OPCODE_ST_TILE) {
+         const unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
+         if (!width || (stores && width != stride) || stores >= 4 ||
+             I->format != AGX_FORMAT_I32 || I->nr_srcs != 3 ||
+             I->nr_dests != 0 || I->explicit_coords ||
+             I->src[1].type != AGX_INDEX_IMMEDIATE ||
+             I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
+             !agx_is_null(I->src[2]) || I->pixel_offset != stores * width)
+            return false;
+         stride = width;
+         stores++;
+      } else if (!agx_opcodes_info[I->op].can_eliminate &&
+                 I->op != AGX_OPCODE_TEXTURE_SAMPLE &&
+                 I->op != AGX_OPCODE_PRELOAD &&
+                 I->op != AGX_OPCODE_COLLECT && I->op != AGX_OPCODE_SPLIT) {
+         return false;
+      }
+   }
+   return stopped && stores == 4;
 }
 
 /* Prove complete shader-part shapes from post-RA IR. EXPORT is an ABI
@@ -5245,6 +5308,78 @@ agx3_g17p_colour_link_info(agx_context *ctx, bool opaque_protocol)
    ctx->agx3_colour_link = info;
 }
 
+static bool
+agx3_is_g17p_quad_eot(const agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
+       ctx->key->no_stop || ctx->key->g17p_rt0_eot_multisample ||
+       !ctx->key->g17p_rt0_eot_i32 || list_length(&ctx->blocks) != 1)
+      return false;
+
+   unsigned values[256];
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
+      values[i] = UINT_MAX;
+   unsigned x = UINT_MAX, y = UINT_MAX, stores = 0, stride = 0;
+   bool stopped = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped)
+         return false;
+      if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
+      } else if (I->op == AGX_OPCODE_GET_SR || I->op == AGX_OPCODE_MOV_IMM) {
+         if (I->nr_dests != 1 || I->nr_srcs ||
+             !agx3_src_is_register(I->dest[0]) ||
+             I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+             I->dest[0].value >= ARRAY_SIZE(values) || I->dest[0].value % 2)
+            return false;
+         const unsigned reg = I->dest[0].value;
+         /* A later constant must not replace either remembered coordinate.
+          * Dword register spans must also be disjoint. */
+         if ((x != UINT_MAX && reg < x + 2 && x < reg + 2) ||
+             (y != UINT_MAX && reg < y + 2 && y < reg + 2))
+            return false;
+         values[reg] = UINT_MAX;
+         if (I->op == AGX_OPCODE_MOV_IMM) {
+            if (I->imm > 48 || I->imm % 4)
+               return false;
+            values[reg] = I->imm;
+         } else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_X && x == UINT_MAX) {
+            x = reg;
+         } else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_Y && y == UINT_MAX) {
+            y = reg;
+         } else {
+            return false;
+         }
+      } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
+         if (stores >= 4 || I->nr_dests || I->nr_srcs != 4 ||
+             I->format != AGX_FORMAT_I32 || I->dim != AGX_DIM_2D ||
+             !I->explicit_coords ||
+             I->src[0].type != AGX_INDEX_IMMEDIATE || I->src[0].value != 0 ||
+             I->src[0].size != AGX_SIZE_16 ||
+             I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != stores ||
+             I->src[1].size != AGX_SIZE_16 ||
+             !agx3_src_is_register(I->src[2]) || I->src[2].abs || I->src[2].neg ||
+             I->src[2].size != AGX_SIZE_32 || agx_channels(I->src[2]) != 1 ||
+             I->src[2].value >= ARRAY_SIZE(values) ||
+             !agx3_src_is_register(I->src[3]) || I->src[3].abs || I->src[3].neg ||
+             I->src[3].size != AGX_SIZE_32 || agx_channels(I->src[3]) != 2 ||
+             x == UINT_MAX || y != x + 2 || I->src[3].value != x)
+            return false;
+         const unsigned offset = values[I->src[2].value];
+         if (stores == 1)
+            stride = offset;
+         if ((stores == 0 && offset != 0) ||
+             (stores > 0 && ((stride != 4 && stride != 16) || offset != stores * stride)))
+            return false;
+         stores++;
+      } else {
+         return false;
+      }
+   }
+   return stopped && stores == 4;
+}
+
 static enum agx3_alu_hint
 agx3_post_ra_hint(agx_index index)
 {
@@ -5262,6 +5397,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const unsigned initial_size = emission->size;
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;
+
+   if (agx3_is_g17p_quad_eot(ctx)) {
+      static_assert(sizeof(agx3_g17p_quad_eot) == 208, "native quad EOT");
+      ctx->max_reg = MAX2(ctx->max_reg, 7);
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 32);
+      return agx3_append(emission, agx3_g17p_quad_eot, sizeof(agx3_g17p_quad_eot));
+   }
 
    const bool r11g11b10_mrt_eot =
       agx3_is_g17p_dual_word_mrt_eot(ctx, enc, AGX_FORMAT_I32);
@@ -5702,6 +5844,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * partition and release each partition in descending order. */
    const struct agx3_g17p_mrt_protocol g17p_mrt =
       agx3_g17p_mrt_protocol(ctx);
+   const bool g17p_quad_background = agx3_g17p_quad_background_protocol(ctx);
    const bool g17p_msaa_background_stores =
       agx3_g17p_msaa_background_store_protocol(ctx);
    const bool g17p_colour_protocol =
@@ -5715,7 +5858,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * produces a syntactically valid shader that writes only partition zero. */
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
-       tile_stores_left > 1 && !g17p_mrt.valid &&
+       tile_stores_left > 1 && !g17p_mrt.valid && !g17p_quad_background &&
        !g17p_msaa_background_stores)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
@@ -5764,7 +5907,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
    ctx->agx3_colour_link.colour_partitions =
-      g17p_mrt.valid ? g17p_mrt.count
+      g17p_mrt.valid ? MIN2(g17p_mrt.count, 3)
                      : (g17p_colour_protocol || g17p_blend_protocol ? 1 : 0);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
@@ -6696,7 +6839,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint32_t read_class, write_class, combined_class;
                if (partition < 0 ||
                    !agx3_pixel_colour_partition_classes(
-                      partition, &read_class, &write_class, &combined_class))
+                      partition % 3, &read_class, &write_class, &combined_class))
                   AGX3_REFUSE(I);
 
                uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
@@ -6716,10 +6859,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   load ? read_class
                        : g17p_mrt.loads[partition] ? write_class
                                                   : combined_class;
-               if (!agx3_pixel_wait(enc, acquire, wait, bytes, &len) ||
-                   !agx3_append(emission, bytes, len) ||
-                   !agx3_emit_tile(emission, enc, I, slot, 0, false, false) ||
-                   (!load &&
+               /* Target3 opens class12 and leaves it held until target0.
+                * Do not reacquire it or release it between those stores. */
+               const bool shared_class = g17p_mrt.count == 4;
+               const bool acquire_class = !shared_class || partition != 0;
+               const bool release_class = !shared_class || partition != 3;
+               if ((acquire_class &&
+                    (!agx3_pixel_wait(enc, acquire, wait, bytes, &len) ||
+                     !agx3_append(emission, bytes, len))) ||
+                   !agx3_emit_tile(emission, enc, I, slot,
+                                   acquire_class ? 0 : wait, false, false, shared_class) ||
+                   (!load && release_class &&
                     (!agx3_pixel_release(enc, combined_class, last, 0, bytes,
                                         &len) ||
                      !agx3_append(emission, bytes, len))))
@@ -6739,7 +6889,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0))
                   AGX3_REFUSE(I);
             }
-            if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last))
+            if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
+                                g17p_quad_background))
                AGX3_REFUSE(I);
 
             if (g17p_pixel_protocol && I->op == AGX_OPCODE_ST_TILE && last) {

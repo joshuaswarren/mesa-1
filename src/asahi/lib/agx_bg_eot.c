@@ -42,8 +42,11 @@ agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
    const bool wboit_mrt = bin && bin->info.binary_size == 238 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
+   const bool quad_mrt = bin && bin->info.binary_size == 208 &&
+                         bin->info.nr_gprs == 8 &&
+                         bin->info.agx3_staging_halfs == 32;
    return bin && bin->binary &&
-          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt) &&
+          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt || quad_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;

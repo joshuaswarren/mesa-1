@@ -250,6 +250,41 @@ main(void)
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
 
+   /* Four native PBE entries share one argument table. Both witnessed tile
+    * strides use the same shader and sparse offset uniforms. */
+   for (unsigned stride = 4; stride <= 16; stride *= 4) {
+      struct agx3_g17p_rt0_eot_program_desc quad = eot;
+      quad.shader_binary_size = 208;
+      quad.staging_halfs = 32;
+      quad.attachment_count = 4;
+      quad.imageblock_offset1_B = stride;
+      quad.imageblock_offset2_B = 2 * stride;
+      quad.imageblock_offset3_B = 3 * stride;
+      quad.imageblock.sample_size_B = 4 * stride;
+      quad.imageblock.tile_size_px = stride == 16 ? 16 * 16 : 32 * 32;
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                             &eot_program));
+      CHECK(eot_program.length == 144);
+      quad.imageblock_offset3_B++;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+      quad.imageblock_offset3_B--;
+      quad.staging_halfs = 16;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+      quad.staging_halfs = 32;
+      quad.attachment_count = 3;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+      quad.attachment_count = 4;
+      quad.pbe_argument_va++;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+      quad.pbe_argument_va = UINT64_C(0xffffffffffe0);
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &quad,
+                                              &eot_program));
+   }
+
    /* The native layered array EOT is an 84-byte, eight-half program. It keeps
     * the same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch
     * span as the other admitted RT0 builtins. */
