@@ -128,11 +128,24 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
          desc[plane].sw.min_lod_fp16 = _mesa_float_to_half(min_lod);
          desc[plane].sw.min_lod_uint16 = min_lod;
-         const enum pipe_format integer = hk_scaled_texture_format(
-            hk_format_to_pipe_format(view->vk.format));
+         const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
+         const enum pipe_format integer = hk_scaled_texture_format(logical);
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
             desc[plane].sw.scaled_conversion =
                util_format_is_pure_sint(integer) ? 1 : 2;
+         if (generation == 9 && hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
+            const struct util_format_description *fmt = util_format_description(logical);
+            const VkComponentSwizzle swizzle[4] = {view->vk.swizzle.r, view->vk.swizzle.g,
+                                                  view->vk.swizzle.b, view->vk.swizzle.a};
+            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2);
+            for (unsigned c = 0; c < 4; ++c) {
+               unsigned component = swizzle[c] == VK_COMPONENT_SWIZZLE_IDENTITY ? c :
+                  swizzle[c] >= VK_COMPONENT_SWIZZLE_R ? swizzle[c] - VK_COMPONENT_SWIZZLE_R : 4;
+               if (component < 4 && fmt->swizzle[component] < PIPE_SWIZZLE_0)
+                  kind |= BITFIELD_BIT(3 + c);
+            }
+            desc[plane].sw.scaled_conversion = kind;
+         }
       }
    }
 

@@ -1,0 +1,57 @@
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageTests.cpp
+@@ -110,8 +110,16 @@
+ 	std::ostringstream				vertexSrc;
+ 	std::ostringstream				fragmentSrc;
+ 	const char*						texCoordSwizzle	= DE_NULL;
+-	const tcu::TextureFormat		format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
++	tcu::TextureFormat			format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
+ 
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageViewTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageViewTests.cpp
+@@ -124,8 +124,16 @@
+ 	std::ostringstream				vertexSrc;
+ 	std::ostringstream				fragmentSrc;
+ 	const char*						texCoordSwizzle	= DE_NULL;
+-	const tcu::TextureFormat		format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
++	tcu::TextureFormat			format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
+ 
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineSamplerTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineSamplerTests.cpp
+@@ -184,6 +184,14 @@
+ 	const char*						texCoordSwizzle	= DE_NULL;
+ 	tcu::TextureFormat				format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
++
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+ 

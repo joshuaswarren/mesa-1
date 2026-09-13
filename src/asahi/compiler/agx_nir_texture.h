@@ -11,6 +11,9 @@
 /* Indicates that the sampler should be overriden to clamp to 0 instead of 1 */
 #define AGX_TEXTURE_FLAG_CLAMP_TO_0 (1 << 1)
 
+/* Software border query for an unfiltered gather, rather than interpolation. */
+#define AGX_TEXTURE_FLAG_BORDER_UNFILTERED (1 << 2)
+
 /* Texel buffers lowered to (at most) 16384x16384 2D textures */
 #define AGX_TEXTURE_BUFFER_WIDTH      16384
 #define AGX_TEXTURE_BUFFER_MAX_HEIGHT 16384

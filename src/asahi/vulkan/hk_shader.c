@@ -1149,8 +1149,12 @@ hk_lower_multiview(nir_shader *nir)
 static nir_def *
 query_custom_border(nir_builder *b, nir_tex_instr *tex)
 {
-   return nir_build_texture_query(b, tex, nir_texop_custom_border_color_agx, 4,
-                                  tex->dest_type, false, false);
+   nir_def *border = nir_build_texture_query(
+      b, tex, nir_texop_custom_border_color_agx, 4, tex->dest_type, false, false);
+   if (tex->op == nir_texop_tg4)
+      nir_instr_as_tex(nir_def_instr(border))->backend_flags |=
+         AGX_TEXTURE_FLAG_BORDER_UNFILTERED;
+   return border;
 }
 
 static nir_def *
@@ -1261,6 +1265,20 @@ lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
    nir_def *value = &tex->def;
    nir_def *converted = nir_bcsel(b, nir_ieq_imm(b, kind, 1),
       nir_i2f32(b, value), nir_u2f32(b, value));
+   nir_def *scale = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 4), 0),
+                             nir_imm_float(b, 65535), nir_imm_float(b, 255));
+   nir_def *factors[4];
+   for (unsigned c = 0; c < value->num_components; ++c) {
+      unsigned component = tex->op == nir_texop_tg4 ? tex->component : c;
+      factors[c] = nir_bcsel(b,
+         nir_ine_imm(b, nir_iand_imm(b, kind, BITFIELD_BIT(3 + component)), 0),
+         scale, nir_imm_float(b, 1));
+   }
+   nir_def *normalized = nir_fmul(b, value, nir_vec(b, factors, value->num_components));
+   if (tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms || tex->op == nir_texop_tg4)
+      normalized = nir_fround_even(b, normalized);
+   converted = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 3),
+                           normalized, converted);
    nir_def *result = nir_bcsel(b, nir_ine_imm(b, kind, 0), converted, value);
    nir_def_rewrite_uses_after(value, result);
    return true;
@@ -1658,7 +1676,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
    }
 
-   if ((features & HK_FEAT_CUSTOM_BORDER) && !HK_PERF(dev, NOBORDER)) {
+   if (((features & HK_FEAT_CUSTOM_BORDER) || agx_native_graphics(&dev->dev)) &&
+       !HK_PERF(dev, NOBORDER)) {
       NIR_PASS(_, nir, agx_nir_lower_custom_border);
    }
 

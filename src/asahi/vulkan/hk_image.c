@@ -70,6 +70,34 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (p_format == PIPE_FORMAT_NONE)
       return 0;
 
+   enum pipe_format padded = hk_padded_image_format(p_format);
+   if (agx_native_graphics(&pdev->dev) && padded != p_format) {
+      /* Linear and external modifier layouts must retain the API's packed
+       * texel stride. This path is restricted to driver-owned optimal images. */
+      if (tiling != VK_IMAGE_TILING_OPTIMAL)
+         return 0;
+      VkFormatFeatureFlags2 rgb = VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+         VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+      const enum pipe_format integer = hk_scaled_texture_format(padded);
+      const enum pipe_format storage =
+         integer != PIPE_FORMAT_NONE ? integer : padded;
+      if (ail_pixel_format[storage].texturable) {
+         rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+                VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+         if (!util_format_is_pure_integer(storage) ||
+             hk_uscaled_normalized_format(padded) != PIPE_FORMAT_NONE)
+            rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      }
+      if (ail_pixel_format[storage].renderable)
+         rgb |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+      if (ail_pixel_format[padded].renderable) {
+         rgb |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
+         if (!util_format_is_pure_integer(padded))
+            rgb |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
+      }
+      return rgb;
+   }
+
    /* Keep compressed-family reporting atomic with the corresponding Vulkan
     * feature. The complete BC, ETC2/EAC and ASTC LDR format matrices are
     * hardware-qualified through the native G17P sampled/upload path. */
@@ -100,6 +128,19 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
        * formats. Linear filtering and attachment conversion are separate. */
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
                   VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+      if (hk_uscaled_normalized_format(p_format) != PIPE_FORMAT_NONE)
+         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      if (ail_pixel_format[hk_scaled_texture_format(p_format)].renderable) {
+         features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+         /* The dynamic scaled image-store lowering supports uniform 8/16-bit
+          * components. Packed scaled formats still use integer blit views. */
+         const unsigned bits = util_format_get_component_bits(
+            p_format, UTIL_FORMAT_COLORSPACE_RGB, 0);
+         if (bits == 8 || bits == 16)
+            features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                        VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                        VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
+      }
    }
 
    if (ail_pixel_format[p_format].texturable) {

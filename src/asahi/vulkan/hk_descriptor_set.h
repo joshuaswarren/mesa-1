@@ -40,7 +40,9 @@ struct hk_sampled_image_descriptor_sw {
 
    /* This is only used for txf, it can be separate from the other stuff */
    uint16_t min_lod_uint16;
-   /* Native sampled-image conversion: 0 = none, 1 = SINT, 2 = UINT. */
+   /* Low two bits: 0 = none, 1 = SINT, 2 = UINT, 3 = normalized USCALED.
+    * For kind 3, bit 2 selects 16 rather than 8 bits, and bits 3..6 mark
+    * swizzled output channels to rescale (constant zero/one stay unchanged). */
    uint16_t scaled_conversion;
    /* TODO: This should probably be a heap! */
    uint32_t border[4];

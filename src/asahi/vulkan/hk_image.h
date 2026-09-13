@@ -153,11 +153,59 @@ hk_scaled_texture_format(enum pipe_format format)
    SCALED(R16)
    SCALED(R16G16)
    SCALED(R16G16B16A16)
+   SCALED(R10G10B10A2)
+   SCALED(B10G10R10A2)
 #undef SCALED
    default: return PIPE_FORMAT_NONE;
    }
 }
 
+/* Unsigned scaled filtering can use the hardware UNORM filter: conversion
+ * back to the integer-valued float domain is affine and commutes with filtering. */
+static inline enum pipe_format
+hk_uscaled_normalized_format(enum pipe_format format)
+{
+   switch (format) {
+#define USCALED(base) \
+   case PIPE_FORMAT_##base##_USCALED: return PIPE_FORMAT_##base##_UNORM;
+   USCALED(R8) USCALED(R8G8) USCALED(R8G8B8) USCALED(R8G8B8A8)
+   USCALED(B8G8R8) USCALED(B8G8R8A8)
+   USCALED(R16) USCALED(R16G16) USCALED(R16G16B16) USCALED(R16G16B16A16)
+#undef USCALED
+   default: return PIPE_FORMAT_NONE;
+   }
+}
+
+/* Optimal RGB images use four-component storage. Transfers pack/unpack the
+ * three API components on the GPU; descriptors force alpha to one. */
+static inline enum pipe_format
+hk_padded_image_format(enum pipe_format format)
+{
+   switch (format) {
+#define RGB(bits, type) \
+   case PIPE_FORMAT_R##bits##G##bits##B##bits##_##type: \
+      return PIPE_FORMAT_R##bits##G##bits##B##bits##A##bits##_##type;
+   RGB(8, UNORM) RGB(8, SNORM) RGB(8, UINT) RGB(8, SINT) RGB(8, SRGB)
+   RGB(16, UNORM) RGB(16, SNORM) RGB(16, UINT) RGB(16, SINT) RGB(16, FLOAT)
+   RGB(8, USCALED) RGB(8, SSCALED)
+   RGB(16, USCALED) RGB(16, SSCALED)
+   RGB(32, UINT) RGB(32, SINT) RGB(32, FLOAT)
+#undef RGB
+#define BGR(type) \
+   case PIPE_FORMAT_B8G8R8_##type: return PIPE_FORMAT_B8G8R8A8_##type;
+   BGR(UNORM) BGR(SNORM) BGR(UINT) BGR(SINT) BGR(SRGB)
+   BGR(USCALED) BGR(SSCALED)
+#undef BGR
+   default: return format;
+   }
+}
+
+static inline bool
+hk_depth24_format(VkFormat format)
+{
+   return format == VK_FORMAT_D24_UNORM_S8_UINT ||
+          format == VK_FORMAT_X8_D24_UNORM_PACK32;
+}
 static inline bool
 hk_split_depth_stencil(VkFormat format)
 {
