@@ -4305,6 +4305,65 @@ test_g17p_eot_block_store(void)
    return ok;
 }
 
+static bool
+test_g17p_layered_eot_block_store(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P layered RT0 EOT");
+   nir_def *xy =
+      nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+   nir_def *coords =
+      nir_vec3(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1),
+               nir_u2u32(&b, nir_load_layer_id(&b)));
+   nir_image_store_block_agx(
+      &b, nir_imm_intN_t(&b, 0, 16), nir_imm_int(&b, 0), coords,
+      .format = PIPE_FORMAT_R8_UNORM, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .image_array = true, .explicit_coord = true);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   static const uint8_t expected[] = {
+      0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0xa9,0x14,0x26,
+      0x24,0xc3,0x10,0x46,
+      0x9f,0x10,0x54,0x00,0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,
+      0x9f,0x20,0x54,0x02,0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,
+      0x97,0x45,0x54,0x04,0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,
+      0x97,0x05,0x54,0x06,0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,
+      0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,0x28,0x75,0x00,0x00,
+      0x0e,0x00,0x00,0x00,
+   };
+
+   bool ok = compiled && part.info.binary_size == sizeof(expected) &&
+             part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+             part.info.agx3_staging_halfs == 8 &&
+             memcmp(part.binary, expected, sizeof(expected)) == 0;
+
+   ok &= sizeof(expected) == 84 && part.info.main_offset == 0 &&
+         part.info.main_size == 84;
+   if (!ok) {
+      fprintf(stderr,
+              "AGX3b layered EOT block-store compiler mismatch: "
+              "compiled=%u size=%u gprs=%u\n",
+              compiled, compiled ? part.info.binary_size : 0,
+              compiled ? part.info.nr_gprs : 0);
+      if (compiled) {
+         for (unsigned i = 0; i < part.info.binary_size; ++i)
+            fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
+         fputc('\n', stderr);
+      }
+   }
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 /*
  * Fragment shader sampling texture 0 through sampler 0 with implicit LOD.
  * Keep both index ABIs explicit: ordinary bound sampling reserves sampler 0
@@ -6311,6 +6370,7 @@ main(int argc, char **argv)
    } while (0)
 
    RUN(test_g17p_eot_block_store);
+   RUN(test_g17p_layered_eot_block_store);
    RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);
    RUN(test_g17p_background_clear);

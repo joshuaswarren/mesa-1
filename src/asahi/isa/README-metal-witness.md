@@ -197,6 +197,25 @@ grid-coordinate SR reads are unchanged and nothing computes a sample index,
 because the block store covers every sample of the tile. The array form, by
 contrast, really does add a PACK_IMGWIR and a `get_sr` for the layer.
 
+For U8NORM RT0, texture type 3 produces this complete 84-byte 2D-array text:
+
+```
+1c9c100634a810060c9d102624a91426
+24c310469f1054000004180050060b00
+9f2054020000140050060b0097455404
+00081000f0c000009705540600080000
+d0401000571054000000008028750000
+0e000000
+```
+
+Its SHA-256 is
+`69a97b1048833dc06dbe02360d9c34c54b46cc8a07ad782eb589b0ec5a6ac307`.
+The first four SR reads and two products are the same tile-origin calculation
+as the qualified 2D builtin: threadgroup position multiplied by dispatched
+group size for X and Y. The fifth SR supplies the layer. Native metadata field
+0 is 4 GPR dwords and fields 38/42 are both 16. Per-thread X/Y is not an
+equivalent EOT coordinate source: it restarts at every 32x32 tile.
+
 Sweeping internal format (0x75) x components (0x79) shows the transform is
 uniform across all five selectors the driver uses, byte for byte:
 
