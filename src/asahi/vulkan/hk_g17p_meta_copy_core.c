@@ -329,11 +329,13 @@ hk_g17p_uncompressed_upload_format(VkFormat format)
    /* This path copies raw format elements and never interprets their colour
     * channels.  Admit every ordinary 1-, 2-, and 4-byte format instead of a
     * semantic allowlist; the caller separately excludes depth/stencil and
-    * multi-plane images.  Wider elements remain on the graphics copy path:
-    * the raw 8-byte path is not yet qualified on G17P. */
+    * multi-plane images.  R32G32_UINT also needs the raw path because G17P's
+    * graphics upload does not preserve untouched array layers for that view.
+    * Other 8-byte formats remain unqualified and stay on the graphics path. */
    return vk_format_get_blockwidth(format) == 1 &&
           vk_format_get_blockheight(format) == 1 &&
-          (block_B == 1 || block_B == 2 || block_B == 4);
+          (block_B == 1 || block_B == 2 || block_B == 4 ||
+           format == VK_FORMAT_R32G32_UINT);
 }
 
 bool
@@ -354,7 +356,7 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       return false;
 
    const uint32_t block_B = vk_format_get_blocksize(copy->format);
-   if ((block_B != 1 && block_B != 2 && block_B != 4) ||
+   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8) ||
        buffer_offset % block_B)
       return false;
 

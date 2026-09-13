@@ -545,6 +545,13 @@ main(void)
    raw_upload.format = VK_FORMAT_R8G8_SRGB;
    CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 8, 16148, &raw_plan));
+   raw_upload.format = VK_FORMAT_R32G32_UINT;
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
+      &raw_upload, 64, 64360, &raw_plan));
+   CHECK(raw_plan.block_size_B == 8 &&
+         raw_plan.buffer_row_stride_B == 640 &&
+         raw_plan.buffer_slice_stride_B == 46080 &&
+         raw_plan.buffer_span_B == 64296);
    raw_upload.format = VK_FORMAT_R16G16B16A16_SFLOAT;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
