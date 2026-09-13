@@ -89,6 +89,7 @@ enum agx3_tex_sample_abi {
  * Evidence: .tmp/g17p-gallium2-evidence/texlodtype.{metal,nat}.
  */
 enum agx3_tex_level_kind {
+   AGX3_TEX_LEVEL_MINIMUM = 1,
    AGX3_TEX_LEVEL_FLOAT = 2,
    AGX3_TEX_LEVEL_INTEGER = 3,
 };
@@ -276,6 +277,9 @@ struct agx3_tex_sample_desc {
    uint8_t texture;     /* immediate texture-state index, 0..15 */
    uint8_t sampler;     /* immediate sampler-state index, 0..15 */
    enum agx3_tex_lod lod;
+   /* G17P f140=2 consumes a native bank-6 minimum, combined with the
+    * half-float bias or published beside explicit gradients. */
+   bool min_lod;
    uint16_t lod_x64;    /* level * 64 when LEVEL, bias * 64 when BIAS */
    uint8_t slot;
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
@@ -322,6 +326,11 @@ bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
                               bool src_cache, bool src_discard,
                               enum agx3_tex_level_kind kind,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                            uint16_t minimum, uint8_t slot, uint16_t wait_mask,
+                            bool src_cache, bool src_discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* The float-level form, which is what the filtered sample path stages. */
 bool agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,

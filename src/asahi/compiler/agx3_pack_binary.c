@@ -1414,6 +1414,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          const uint16_t cem_scratch[3], bool vertex_stage)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
+   const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
+   const bool gradient_min = I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN;
+   const bool min_lod = bias_min || gradient_min;
    /* An implicit-LOD sample with a constant bias: the same 12-bit x64
     * immediate operand as an explicit level, selected by f139 = 1 instead
     * of 2, and keeping the implicit-LOD marker.
@@ -1435,7 +1438,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool implicit_lod = I->lod_mode == AGX_LOD_MODE_AUTO_LOD || zero_bias;
    /* Explicit gradients. The four scalars are staged into their own banks
     * and the sample names coordinate bank 0, as every witness does. */
-   const bool gradient_lod = I->lod_mode == AGX_LOD_MODE_LOD_GRAD;
+   const bool gradient_lod = I->lod_mode == AGX_LOD_MODE_LOD_GRAD || gradient_min;
    /* textureGather. Every witness is a plain 2D implicit-LOD gather, so the
     * gather bit rides on the ordinary implicit sample and nothing else about
     * the instruction changes. The IR spells the components 1/3/5/7 in a
@@ -1484,6 +1487,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * share one operand test: a live single-channel 16-bit register. */
    const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
       I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1;
+   const bool bias_min_operand = agx3_tex_plain_reg(I->src[1]) &&
+      I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 1 &&
+      (I->src[1].value & 1) == 0 && I->src[1].value < 127;
    /* A 2D gradient is four 32-bit scalars in one aligned run, which the four
     * staging copies name two halves apart. */
    /* A 2D gradient is four 32-bit scalars in one aligned run; a 3D one is
@@ -1492,10 +1498,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const unsigned gradient_channels = three_d ? 6u : 4u;
    const bool gradient_operand = agx3_tex_plain_reg(I->src[1]) &&
       I->src[1].size == AGX_SIZE_32 &&
-      agx_channels(I->src[1]) == gradient_channels &&
+      agx_channels(I->src[1]) == gradient_channels + gradient_min &&
       (I->src[1].value & 1) == 0 &&
-      I->src[1].value + (2 * gradient_channels) - 2 < 128;
-   const bool valid_lod = explicit_lod ?
+      I->src[1].value + (2 * (gradient_channels + gradient_min)) - 2 < 128;
+   const bool valid_lod = bias_min ?
+      (enc == AGX_ISA_ENCODING_AGX3B && bias_min_operand) : explicit_lod ?
       (enc == AGX_ISA_ENCODING_AGX3B &&
        (valid_immediate_lod || scalar_lod_reg)) :
       biased_lod
@@ -1570,12 +1577,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (three_d &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!valid_immediate_lod && !implicit_lod && !biased_lod &&
-          !register_bias && !explicit_lod && !gradient_lod))) ||
+          !register_bias && !explicit_lod && !gradient_lod && !bias_min))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->sparse ||
+       (min_lod && (array || cube || vertex_stage ||
+                    (three_d && offset))) ||
        (query_lod &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || shadow || offset ||
          gather || I->dest[0].size != AGX_SIZE_32 || (I->mask & ~3u))) ||
@@ -1643,7 +1652,22 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool combined_array_lod = array && !cube &&
       (offset || vertex_stage) &&
       ((explicit_lod && !immediate_lod) || register_bias);
-   if (combined_array_lod) {
+   if (bias_min) {
+      if (!agx3_tex_stage_bias_min(
+             enc, I->src[1].value, I->src[1].value + 1, stage_slot, wait_mask,
+             I->src[1].cache, I->src[1].discard, bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      wait_mask = 0;
+   } else if (gradient_min) {
+      if (!agx3_tex_stage_typed_lod(
+             enc, I->src[1].value + 2 * gradient_channels, stage_slot,
+             wait_mask, I->src[1].cache, I->src[1].discard,
+             AGX3_TEX_LEVEL_MINIMUM, bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      wait_mask = 0;
+   } else if (combined_array_lod) {
       if (!agx3_tex_stage_array_lod(
              enc, I->src[0].value + 4, I->src[1].value, stage_slot, wait_mask,
              I->src[0].cache, I->src[0].discard,
@@ -1828,10 +1852,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .query_lod = query_lod,
       .offset = offset,
       .offset_xyz = offset ? I->offset_xyz : 0,
+      .min_lod = min_lod,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER
-             : register_bias  ? AGX3_TEX_LOD_BIAS_REGISTER
+             : register_bias || bias_min ? AGX3_TEX_LOD_BIAS_REGISTER
              : gradient_lod   ? AGX3_TEX_LOD_GRADIENT
                               : AGX3_TEX_LOD_AUTO,
       .lod_x64 = immediate_lod ? immediate_x64_field : 0,
@@ -2270,7 +2295,13 @@ agx3_expand_regs(agx_index idx, uint16_t *arr, unsigned n)
    if (!agx3_src_is_register(idx) || idx.memory)
       return n;
    const unsigned halves = agx_size_align_16(idx.size) * agx_channels(idx);
-   for (unsigned i = 0; i < halves && n < AGX3_SLOT_MAX_REGS; ++i)
+   /* Never silently omit the rest of an operand or later operands. In
+    * particular, texture/sampler handles follow the large gradient tuple. */
+   if (n > AGX3_SLOT_MAX_REGS || halves > AGX3_SLOT_MAX_REGS - n ||
+       idx.value >= AGX3_SLOT_GPR_TOKENS ||
+       halves > AGX3_SLOT_GPR_TOKENS - idx.value)
+      return AGX3_SLOT_MAX_REGS + 1;
+   for (unsigned i = 0; i < halves; ++i)
       arr[n++] = (uint16_t)(idx.value + i);
    return n;
 }
@@ -5830,7 +5861,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Explicit gradients carry their own staged derivatives and sit
              * outside f156 sample groups. Native AUTO/GRAD/AUTO groups the
              * two AUTO samples across the gradient without marking it. */
-            if (scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD)
+            if (scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
+                scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN)
                sample_group_members_left++;
          }
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
@@ -6173,6 +6205,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->agx3_tex_coords_staged && s == 0)
                continue;
             ns = agx3_expand_regs(I->src[s], e->src, ns);
+         }
+         if (nd > AGX3_SLOT_MAX_REGS || ns > AGX3_SLOT_MAX_REGS ||
+             (I->agx3_tex_coord_start && nd == AGX3_SLOT_MAX_REGS) ||
+             (I->agx3_tex_coords_staged && ns == AGX3_SLOT_MAX_REGS)) {
+            agx3_report_refusal(I, __LINE__);
+            goto fail;
          }
          if (I->agx3_tex_coord_start)
             e->dst[nd++] = AGX3_SLOT_TEX_COORD_TOKEN;
@@ -6734,7 +6772,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             assert(texture_samples_remaining > 0);
             texture_samples_remaining--;
             const bool sample_group_member =
-               I->lod_mode != AGX_LOD_MODE_LOD_GRAD;
+               I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
+               I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
             const bool sample_group_nonterminal =
                g17p_sample_group && sample_group_member &&
                sample_group_members_remaining > 1;
@@ -6761,7 +6800,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * unconditional epilog opener. */
             const bool implicit_derivatives =
                I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
-               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS;
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS ||
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
             const bool native_staged_coords = I->agx3_tex_coords_staged;
             const bool open_pixel =
                enc == AGX_ISA_ENCODING_AGX3B &&
@@ -6864,6 +6904,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * placement and scoreboard slot. */
             const bool staged_scalar =
                I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN ||
                (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
                 I->src[1].type != AGX_INDEX_IMMEDIATE);
             const bool staged_compare = I->shadow;
@@ -6876,7 +6917,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        ? (I->lod_mode == AGX_LOD_MODE_LOD_GRAD
                              ? (I->dim == AGX_DIM_3D ? 40 : 24)
                              : 16)
-                    : I->lod_mode == AGX_LOD_MODE_LOD_GRAD
+                    : (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
+                       I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)
                          ? (I->dim == AGX_DIM_3D ? 32 : 16)
                     : (staged_scalar ||
                        (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||

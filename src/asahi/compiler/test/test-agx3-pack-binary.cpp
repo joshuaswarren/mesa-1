@@ -106,6 +106,111 @@ class AGX3PackBinary : public testing::Test {
    }
 };
 
+TEST_F(AGX3PackBinary, MinimumLodStagesBiasLowAndMinimumHigh)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned half : {0u, 6u, 62u, 126u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_index pair = agx_register(half, AGX_SIZE_32);
+      pair.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, pair, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D,
+         AGX_LOD_MODE_AUTO_LOD_BIAS_MIN, 0, false, false, false,
+         AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      agx_validate(b->shader, "minimum LOD packed half pair");
+      const auto code = pack(b);
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_tex_stage_bias_min(enc, half, half + 1, 1, 0,
+                                          false, true, bytes, &len));
+      EXPECT_EQ(std::search(code.begin(), code.end(), bytes, bytes + len),
+                code.begin());
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 8u);
+      EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
+   }
+}
+
+TEST_F(AGX3PackBinary, MinimumLodGradientStagesAppendedHalfWithoutGroupEntry)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool three_d : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = three_d ? 2 : 1;
+      agx_index gradients = agx_register(32, AGX_SIZE_32);
+      const unsigned channels = three_d ? 6 : 4;
+      gradients.channels_m1 = channels;
+      gradients.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, gradients, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), three_d ? AGX_DIM_3D : AGX_DIM_2D,
+         AGX_LOD_MODE_LOD_GRAD_MIN, 0, false, false, false,
+         AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+      agx_validate(b->shader, "minimum LOD appended gradient half");
+      const auto code = pack(b);
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_tex_stage_typed_lod(enc, 32 + 2 * channels, 1, 0,
+                  false, true, AGX3_TEX_LEVEL_MINIMUM, bytes, &len));
+      EXPECT_EQ(std::search(code.begin(), code.end(), bytes, bytes + len),
+                code.begin());
+      EXPECT_EQ(b->shader->agx3_staging_halfs, three_d ? 32u : 16u);
+      EXPECT_FALSE(b->shader->agx3_colour_link.entry_emitted);
+   }
+}
+
+TEST_F(AGX3PackBinary, LargeGradientOperandsKeepLateDescriptorWait)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool minimum : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_device_load_to(b, agx_register(12, AGX_SIZE_32),
+                         agx_uniform(16, AGX_SIZE_64), agx_immediate(0),
+                         AGX_FORMAT_I32, 1, 0, false);
+      /* This load is independent and must not be drained by sample staging. */
+      agx_device_load_to(b, agx_register(96, AGX_SIZE_32),
+                         agx_uniform(16, AGX_SIZE_64), agx_immediate(4),
+                         AGX_FORMAT_I32, 1, 0, false);
+      agx_index dest = agx_register(64, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coords = agx_register(24, AGX_SIZE_32);
+      coords.channels_m1 = 2;
+      agx_index gradients = agx_register(32, AGX_SIZE_32);
+      gradients.channels_m1 = minimum ? 6 : 5;
+      auto *sample = agx_texture_sample_to(
+         b, dest, coords, gradients, agx_immediate(0),
+         agx_register(12, AGX_SIZE_64), agx_register(16, AGX_SIZE_64),
+         agx_null(), AGX_DIM_3D,
+         minimum ? AGX_LOD_MODE_LOD_GRAD_MIN : AGX_LOD_MODE_LOD_GRAD,
+         0, false, false, false, AGX_GATHER_NONE, false);
+      sample->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      if (minimum) {
+         ASSERT_TRUE(agx3_tex_stage_typed_lod(enc, 44, 3, 1, false, false,
+                                             AGX3_TEX_LEVEL_MINIMUM, bytes, &len));
+      } else {
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 24, 3, 1,
+                                              false, false, bytes, &len));
+      }
+      EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + len),
+                code.end());
+   }
+}
+
 TEST_F(AGX3PackBinary, StraightLineALU)
 {
    for (int e = 0; e < 2; ++e) {

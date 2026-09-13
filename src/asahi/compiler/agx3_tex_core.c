@@ -222,6 +222,18 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         enc != AGX_ISA_ENCODING_AGX3B))
       return false;
 
+   /* The native clamp corpus covers non-array fragment 2D/3D samples,
+    * including 2D comparison/offset and indexed descriptor operands. */
+   if (d->min_lod &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
+        d->vertex_stage || d->query_lod ||
+        (d->three_d && d->offset) ||
+        d->gather != AGX3_TEX_GATHER_NONE ||
+        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER ||
+        (d->lod != AGX3_TEX_LOD_BIAS_REGISTER &&
+         d->lod != AGX3_TEX_LOD_GRADIENT)))
+      return false;
+
    /* Fresh native calculate_{clamped,unclamped}_lod witnesses cover the
     * ordinary derivative path only, returning packed X/Y float32 results. */
    if (d->query_lod &&
@@ -529,7 +541,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[33];
+   struct agx3_field_kv ov[34];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -540,6 +552,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
    ov[n++] = (struct agx3_field_kv)KV(76, d->cube ? 4 : d->three_d ? 3 : 1);
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
+   if (d->min_lod)
+      ov[n++] = (struct agx3_field_kv)KV(140, 2);
 
    /* f156 is a group terminator, not a per-instruction implicit-LOD bit.
     * A lone AUTO/BIAS, staged register LOD, array, or cube sample forms a
@@ -983,7 +997,8 @@ agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || slot < 1 || slot > 6 ||
        (wait_mask & ~0x3f) || (src_cache && src_discard) ||
-       (kind != AGX3_TEX_LEVEL_FLOAT && kind != AGX3_TEX_LEVEL_INTEGER))
+       (kind != AGX3_TEX_LEVEL_MINIMUM && kind != AGX3_TEX_LEVEL_FLOAT &&
+        kind != AGX3_TEX_LEVEL_INTEGER))
       return false;
 
    const struct agx3_field_kv base[] = {
@@ -1019,6 +1034,46 @@ agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
    return agx3_tex_stage_typed_lod(enc, src, slot, wait_mask, src_cache,
                                    src_discard, AGX3_TEX_LEVEL_FLOAT, out,
                                    len);
+}
+
+/* Native bias+minimum publishes both halves in one PACK_SMPIR. f16 is the
+ * minimum, f30 the bias, regardless of their order in the source register.
+ * NIR packs bias low and minimum high, so the caller reverses their addresses.
+ * Two scalar publications would overwrite the shared bank-6 operand. */
+bool
+agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                        uint16_t minimum, uint8_t slot, uint16_t wait_mask,
+                        bool src_cache, bool src_discard,
+                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || minimum >= 128 || bias >= 256 ||
+       slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
+      KV(74, 1), KV(76, 2), KV(77, 16),
+   };
+   struct agx3_field_kv ov[13];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, minimum);
+   ov[n++] = (struct agx3_field_kv)KV(30, bias);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   ov[n++] = (struct agx3_field_kv)KV(39, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, src_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
 /* The dynamic array-layer witness uses PACK_SMPIR like register LOD, but its

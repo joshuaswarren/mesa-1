@@ -245,6 +245,26 @@ int main(void)
       CHECK(!agx3_slot_assign(p, 2, 6, r));
    }
 
+   /* Gradient/minimum operands must not hide later descriptor dependencies.
+    * The unrelated third load stays in flight across the sample. */
+   {
+      struct agx3_slot_instr sample = {0};
+      sample.is_async = true;
+      sample.nr_srcs = 28;
+      sample.nr_dsts = 1;
+      sample.dst[0] = 80;
+      for (unsigned i = 0; i < sample.nr_srcs; ++i)
+         sample.src[i] = 32 + i;
+      sample.src[20] = 12;
+      sample.src[24] = 16;
+      struct agx3_slot_instr p[] = {ld(12), ld(16), ld(200), sample, st(200)};
+      CHECK(agx3_slot_assign(p, 5, 6, r));
+      CHECK(r[3].slot == 4 && r[3].wait_mask == 3);
+      CHECK(r[4].wait_mask == 4);
+      p[3].nr_srcs = AGX3_SLOT_MAX_REGS + 1;
+      CHECK(!agx3_slot_assign(p, 5, 6, r));
+   }
+
    /* Malformed inputs. */
    CHECK(!agx3_slot_assign(NULL, 1, 6, r));
    { struct agx3_slot_instr p=ld(0); CHECK(!agx3_slot_assign(&p,1,0,r)); CHECK(!agx3_slot_assign(&p,1,9,r)); }

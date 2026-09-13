@@ -138,7 +138,11 @@ g17p_sample_shape(const nir_tex_instr *tex)
          return false;
    }
 
-   const bool has_bias =
+   const int packed_bias_min =
+      nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx);
+   const int minimum = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   const bool has_minimum = packed_bias_min >= 0 || minimum >= 0;
+   const bool has_bias = packed_bias_min >= 0 ||
       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0;
    const bool has_lod = nir_tex_instr_src_index(tex, nir_tex_src_lod) >= 0;
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
@@ -154,6 +158,22 @@ g17p_sample_shape(const nir_tex_instr *tex)
    if (packed_offset)
       offset_src = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
    const bool has_offset = offset_src >= 0;
+   /* Native bank-6 minimum operands are grounded for non-array 2D/3D
+    * fragment samples. The shared texture lowering has already combined a
+    * bias/minimum pair into one f16x2 source, or left the gradient minimum
+    * as a scalar half. Preserve that source while selecting native handles. */
+   if (has_minimum &&
+       (tex->is_array || cube || (three_d && has_offset) ||
+        (packed_bias_min >= 0 &&
+         (tex->op != nir_texop_txb || minimum >= 0 ||
+          nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||
+          nir_src_num_components(tex->src[packed_bias_min].src) != 1 ||
+          nir_src_bit_size(tex->src[packed_bias_min].src) != 32)) ||
+        (minimum >= 0 &&
+         (tex->op != nir_texop_txd ||
+          nir_src_num_components(tex->src[minimum].src) != 1 ||
+          nir_src_bit_size(tex->src[minimum].src) != 16))))
+      return false;
    if (query_lod && has_offset)
       return false;
    if (has_offset &&
@@ -167,7 +187,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const unsigned expected_srcs =
       (has_grad ? 5 : ((has_bias || has_lod) ? 4 : 3)) +
       (tex->is_shadow && !query_lod) +
-      has_offset;
+      has_offset + (minimum >= 0);
    if (tex->num_srcs != expected_srcs ||
        has_lod != (tex->op == nir_texop_txl) ||
        has_bias != (tex->op == nir_texop_txb) ||
