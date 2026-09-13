@@ -248,11 +248,13 @@ main(void)
 
    /* Keeping G17P fsat as its native standalone f32add.ep2 closes 416
     * producer shapes without inventing saturated forms for those producers. */
-   /* Multisample selectors are now sample-count tagged before the backend,
-    * keeping combinations which once encoded the wrong access refused. */
+   /* The multisample sample mask is now the register operand Apple's own
+    * 2x/4x fragments use (a live coverage read), so every 2x and 4x epilogue
+    * shape that the fabricated "coverage selector" immediate had to refuse
+    * now encodes: 110848 refusals -> 93952. */
    /* Apple's RGB565 framebuffer-fetch form grounds the W16 mask7 tile load,
     * closing the corresponding single-sample blend epilogs. */
-   const unsigned ceiling = 110848;
+   const unsigned ceiling = 93952;
    if (refused > ceiling) {
       fprintf(stderr,
               "G17P epilog matrix regressed: %u refusals, ceiling %u\n",
@@ -260,8 +262,8 @@ main(void)
       return 1;
    }
    const unsigned alpha_ceiling[2][2] = {
-      {27712, 27712},
-      {27712, 27712},
+      {23488, 23488},
+      {23488, 23488},
    };
    for (unsigned atoc = 0; atoc < 2; ++atoc) {
       for (unsigned ato1 = 0; ato1 < 2; ++ato1) {

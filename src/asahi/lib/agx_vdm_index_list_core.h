@@ -74,7 +74,8 @@ struct agx_vdm_index_list_direct_indexed {
 
 struct agx_vdm_index_list_indirect_nonindexed_info {
    uint8_t primitive;
-   uint64_t indirect_buffer; /* argument-buffer VA (base + offset) */
+   /* Native absolute argument-buffer VA. */
+   uint64_t indirect_buffer;
 };
 
 struct agx_vdm_index_list_indirect_indexed_info {
@@ -82,7 +83,8 @@ struct agx_vdm_index_list_indirect_indexed_info {
    bool restart_enable;
    enum agx_vdm_index_list_index_size index_size;
    uint64_t index_buffer;    /* index-buffer VA */
-   uint64_t indirect_buffer; /* argument-buffer VA */
+   /* Native absolute argument-buffer VA. */
+   uint64_t indirect_buffer;
    uint32_t restart_index;   /* State Update restart value */
    uint32_t index_buffer_size_word; /* index-buffer size in dwords, minus 1 */
 };

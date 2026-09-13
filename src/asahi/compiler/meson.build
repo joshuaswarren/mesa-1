@@ -332,6 +332,7 @@ if with_tests
       'agx3_alu_core_test',
       files(
         'agx3_alu_core.c',
+        'agx3_falu_mod_core.c',
         'agx3_compose/agx3_compose.c',
         'agx3_compose/agx3b_tables.c',
         'agx3_compose/agx3c_tables.c',
@@ -438,6 +439,29 @@ if with_tests
         'agx3_compose/agx3c_tables.c',
         'test/agx3_compose_corpus_vectors.c',
         'test/test-agx3-compose-corpus.c',
+      ),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  # The general compare-select encoder, driven by every real Apple fsel in the
+  # corpus. Vectors whose operand kinds are not understood must FAIL CLOSED and
+  # are asserted to fail, so the split between reproduced and refused stays
+  # visible instead of being hidden by a green total.
+  test(
+    'agx3_fsel_corpus',
+    executable(
+      'agx3_fsel_corpus_test',
+      files(
+        'agx3_alu_core.c',
+        'agx3_binder.c',
+        'agx3_compose/agx3_compose.c',
+        'agx3_compose/agx3b_tables.c',
+        'agx3_compose/agx3c_tables.c',
+        'test/test-agx3-fsel-corpus.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',

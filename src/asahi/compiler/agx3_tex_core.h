@@ -233,6 +233,13 @@ enum agx3_tex_lod {
 #define AGX3_TEX_GRADIENT_BANK_DDY_X 10u
 #define AGX3_TEX_GRADIENT_BANK_DDX_Y 12u
 #define AGX3_TEX_GRADIENT_BANK_DDY_Y 14u
+/* A gradient3d continues the same interleave into two more banks. Read off
+ * two literal-gradient kernels, where each staged value is the constant
+ * itself: gradient3d((1,2,4),(8,16,32)) puts 1/8/2/16/4/32 into banks
+ * 8/10/12/14/16/18, and gradient3d((64,128,0.25),(0.5,0.75,1.5)) puts
+ * 64/0.5/128/0.75/0.25/1.5 into the same six. */
+#define AGX3_TEX_GRADIENT_BANK_DDX_Z 16u
+#define AGX3_TEX_GRADIENT_BANK_DDY_Z 18u
 
 /*
  * textureGather.  f144 = 1 selects the gather and f145 carries the component
@@ -392,8 +399,9 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * Exact G17P storage-image write instruction from native direct and
  * argument-buffer-indexed `texture2d<..., access::write>` witnesses. The
  * instruction consumes fixed coordinate/data staging lanes populated by the
- * caller and waits on staging slot 2. `wait_mask` is the upstream texture
- * dependency consumed by the first data-staging write, not an imgwci field.
+ * caller and waits on staging slot 1. `wait_mask` is the upstream texture
+ * dependency consumed by the first data-staging write, not an imgwci field;
+ * it may name any of AGX3b's six producer slots.
  *
  * IMMEDIATE names the two descriptor-specialized states already used by the
  * public transfer paths: state 0/UINT and state 1/UNORM. REGISTER names an

@@ -2424,9 +2424,13 @@ dri2_wl_kopper_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
 static EGLint
 dri2_wl_kopper_query_buffer_age(_EGLDisplay *disp, _EGLSurface *surface)
 {
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surface);
+   EGLint age = kopperQueryBufferAge(dri2_surf->dri_drawable);
 
-   return kopperQueryBufferAge(dri2_surf->dri_drawable);
+   /* kopperQueryBufferAge finishes glthread and may acquire the swapchain
+    * image.  Always perform it before overriding the reported age. */
+   return dri2_dpy->force_zero_buffer_age ? 0 : age;
 }
 
 static const struct dri2_egl_display_vtbl dri2_wl_kopper_display_vtbl = {

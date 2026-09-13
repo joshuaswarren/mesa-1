@@ -251,6 +251,17 @@ main(void)
    CHECK(check_local(AGX_ISA_ENCODING_AGX3C, local, c_tg_add,
                      sizeof(c_tg_add)) == 0);
 
+   /* Own MSL compiled with Apple's offline G17P translator shows that
+    * returned exchanges at words[0] and words[1] differ only in this
+    * immediate byte-address field. Apply that grounded delta to the existing
+    * returned-add vector. */
+   struct agx3_local_atomic_desc returned_offset = local;
+   returned_offset.address = 4;
+   static const uint8_t b_tg_add_offset_4[] =
+      {0x67,0x03,0x54,0x03,0x00,0x02,0x00,0x00,0x22,0x01,0x00,0x04};
+   CHECK(check_local(AGX_ISA_ENCODING_AGX3B, returned_offset,
+                     b_tg_add_offset_4, sizeof(b_tg_add_offset_4)) == 0);
+
    local.op = AGX3_ATOMIC_UMIN;
    static const uint8_t b_tg_min[] =
       {0x67,0x03,0x54,0x03,0x00,0x02,0x00,0x00,0x22,0x00,0x40,0x07};

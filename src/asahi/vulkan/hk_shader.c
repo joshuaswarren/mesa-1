@@ -7,7 +7,10 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+
+#include "hk_nir_ray_tracing.h"
 #include "hk_nir_lower_robust_image.h"
+#include "hk_entrypoints.h"
 
 #include "poly/nir/poly_nir.h"
 #include "agx_debug.h"
@@ -38,6 +41,8 @@
 #include "vk_graphics_state.h"
 #include "vk_nir_convert_ycbcr.h"
 #include "vk_physical_device_features.h"
+#include "vk_common_entrypoints.h"
+#include "vk_enum_to_str.h"
 #include "vk_pipeline.h"
 #include "vk_pipeline_layout.h"
 #include "vk_shader.h"
@@ -52,6 +57,8 @@
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/lib/agx_uvs.h"
 #include "compiler/spirv/nir_spirv.h"
+
+#include <stdarg.h>
 
 #include "util/blob.h"
 #include "util/hash_table.h"
@@ -851,7 +858,18 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool support_lod_bias =
       agx_chip_sampler_generation(dev->dev.chip) == AGX_SAMPLER_GENERATION_GEN4;
 
-   NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
+   /* G17P's texture_load has no witnessed integer-offset form, and a txf
+    * offset is defined as plain integer coordinate addition, so fold it into
+    * the coordinate before descriptor binding rather than carrying a backend
+    * source the fetch encoder cannot express. Gallium already selects this
+    * path; without it here, texelFetchOffset() reaches the packer as a
+    * texture_load with a 32-bit immediate source, which trips
+    * agx_validate_sources() in a debug build and, in a release build, reaches
+    * an encoder with no offset field at all. */
+   if (dev->dev.chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, agx_nir_lower_g17p_texture_early, support_lod_bias);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
 
    struct hk_instance *instance = hk_physical_device_instance(
       (struct hk_physical_device *)dev->vk.physical);
@@ -874,6 +892,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             hk_buffer_addr_format(rs->uniform_buffers,
                                   rs->null_uniform_buffer_descriptor));
+
+   /* Ray queries lower to a software traversal loop of ALU and global loads.
+    * It has to run after descriptor lowering, because rq_initialize's
+    * acceleration-structure source must already be a resolved 64-bit address
+    * by the time the traversal reads a node through it, and before shared
+    * memory is laid out, because the pass introduces shader temporaries that
+    * nir_lower_vars_to_ssa still has to promote. */
+   if (nir->info.ray_queries > 0)
+      NIR_PASS(_, nir, hk_nir_lower_ray_queries);
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for
@@ -1537,7 +1564,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        shader->b.info.stage == MESA_SHADER_VERTEX) {
       const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
          .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
-         .position_only = shader->b.info.outputs == VARYING_BIT_POS,
          .has_preamble = shader->b.info.has_preamble,
          .nr_preamble_gprs = shader->b.info.nr_preamble_gprs,
          .preamble_scratch_size = shader->b.info.preamble_scratch_size,
@@ -1557,9 +1583,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
               dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
       if (!state_ok && hk_g17p_launch_trace_enabled())
          fprintf(stderr,
-                 "G17P vertex state refused: sw=%u pos_only=%u pre=%u/%u/%u "
+                 "G17P vertex state refused: sw=%u pre=%u/%u/%u "
                  "written=%" PRIx64 " off=%u/%u/%u/%u/%u size=%u user=%u\n",
-                 (unsigned)sw_stage, compiler_info.position_only,
+                 (unsigned)sw_stage,
                  compiler_info.has_preamble, compiler_info.nr_preamble_gprs,
                  compiler_info.preamble_scratch_size,
                  compiler_info.uvs_written, compiler_info.position_off,
@@ -1660,6 +1686,15 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
 
+   /* Set when G17P canonicalized an API request for per-sample fragment
+    * execution down to single-sample.  The collapse is exact at one
+    * rasterization sample and wrong at more, but rasterizationSamples is
+    * dynamic state, so the real count is only known per draw.  Carry the API
+    * intent to hk_flush_dynamic_state() and refuse there rather than silently
+    * shading once and reporting gl_SampleID == 0.
+    */
+   bool g17p_collapsed_sample_shading = false;
+
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
 
@@ -1687,12 +1722,22 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       nir->info.fs.uses_sample_shading |= key->fs.force_sample_shading;
 
-      /* G17P advertises only VK_SAMPLE_COUNT_1_BIT. Canonicalize sample
-       * builtins and qualifiers now, before split FS lowering observes
-       * uses_sample_shading and selects the legacy external sample loop. */
+      /* Canonicalize sample builtins and qualifiers now, before split FS
+       * lowering observes uses_sample_shading and selects the legacy external
+       * sample loop, which is AGX2 machine code (agx_linker.c).
+       *
+       * This is exact only at ONE rasterization sample, where per-sample and
+       * per-pixel invocation coincide.  We cannot condition it on the sample
+       * count here: rasterizationSamples is dynamic state (and shader objects
+       * may compile with no pipeline state at all), so the count is not known
+       * until the draw.  Record the intent instead; hk_flush_dynamic_state()
+       * refuses the draw if the count turns out to be greater than one.
+       */
       if (dev->dev.chip == AGX_CHIP_G17P &&
-          nir->info.fs.uses_sample_shading)
+          nir->info.fs.uses_sample_shading) {
+         g17p_collapsed_sample_shading = true;
          NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
+      }
 
       /* Force late-Z for Z/S self-deps. TODO: There's probably a less silly way
        * to do this.
@@ -1881,6 +1926,13 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          return result;
       }
    }
+
+   /* hk_compile_nir() runs after the collapse above, so by the time it fills
+    * hk_shader_info the NIR flag is already cleared.  Publish the API-level
+    * intent here, where every variant exists and has been compiled.
+    */
+   if (sw_stage == MESA_SHADER_FRAGMENT && g17p_collapsed_sample_shading)
+      hk_only_variant(obj)->info.fs.uses_sample_shading = true;
 
    *shader_out = obj;
    return VK_SUCCESS;
@@ -2229,6 +2281,283 @@ const struct vk_device_shader_ops hk_device_shader_ops = {
    .cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,
    .cmd_bind_shaders = hk_cmd_bind_shaders,
 };
+
+/*
+ * A refused graphics pipeline is invisible.  vkCreateGraphicsPipelines hands
+ * the application a bare VkResult; the application drops every draw that
+ * would have used the pipeline, the frame comes out blank, and nothing in the
+ * log says which pipeline died.  That is exactly how one unsupported pipeline
+ * shape hides inside a page whose other pipelines render.
+ *
+ * Only one refusal inside this driver is reachable from pipeline creation --
+ * the AGX3 packer in hk_compile_nir(), which names the stage it could not
+ * encode -- so a -8 with no packer line is not this driver refusing at all.
+ * Making that distinction requires the driver to say something on *every*
+ * failure, so wrap the common entrypoint and print the refused pipeline's
+ * shape: its index, its stages and their SPIR-V sizes, its create flags and
+ * graphics-pipeline-library subset, its dynamic state, and the fixed-function
+ * state a chip gate can plausibly reject.  Nothing is printed on success.
+ */
+struct hk_pipeline_strbuf {
+   char data[512];
+   size_t len;
+};
+
+static void PRINTFLIKE(2, 3)
+hk_pipeline_strbuf_appendf(struct hk_pipeline_strbuf *b, const char *fmt, ...)
+{
+   if (b->len + 1 >= sizeof(b->data))
+      return;
+
+   va_list ap;
+   va_start(ap, fmt);
+   int n = vsnprintf(b->data + b->len, sizeof(b->data) - b->len, fmt, ap);
+   va_end(ap);
+
+   if (n > 0)
+      b->len = MIN2(b->len + (size_t)n, sizeof(b->data) - 1);
+}
+
+static const char *
+hk_shader_stage_bit_name(VkShaderStageFlagBits stage)
+{
+   switch (stage) {
+   case VK_SHADER_STAGE_VERTEX_BIT:
+      return "vs";
+   case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+      return "tcs";
+   case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+      return "tes";
+   case VK_SHADER_STAGE_GEOMETRY_BIT:
+      return "gs";
+   case VK_SHADER_STAGE_FRAGMENT_BIT:
+      return "fs";
+   case VK_SHADER_STAGE_TASK_BIT_EXT:
+      return "task";
+   case VK_SHADER_STAGE_MESH_BIT_EXT:
+      return "mesh";
+   default:
+      return "unknown";
+   }
+}
+
+static size_t
+hk_pipeline_stage_spirv_size(const VkPipelineShaderStageCreateInfo *stage)
+{
+   if (stage->module != VK_NULL_HANDLE)
+      return vk_shader_module_from_handle(stage->module)->size;
+
+   /* VK_KHR_maintenance5 lets the SPIR-V ride in the stage's pNext with no
+    * VkShaderModule at all. */
+   const VkShaderModuleCreateInfo *inline_module =
+      vk_find_struct_const(stage->pNext, SHADER_MODULE_CREATE_INFO);
+
+   return inline_module ? inline_module->codeSize : 0;
+}
+
+static void
+hk_log_refused_graphics_pipeline(const VkGraphicsPipelineCreateInfo *info,
+                                 uint32_t index, uint32_t count,
+                                 VkResult result)
+{
+   mesa_loge("hk: vkCreateGraphicsPipelines refused pipeline %u of %u: %s",
+             index, count, vk_Result_to_str(result));
+
+   const VkPipelineCreateFlags2KHR flags =
+      vk_graphics_pipeline_create_flags(info);
+   const VkGraphicsPipelineLibraryCreateInfoEXT *gpl = vk_find_struct_const(
+      info->pNext, GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT);
+   const VkPipelineLibraryCreateInfoKHR *libs =
+      vk_find_struct_const(info->pNext, PIPELINE_LIBRARY_CREATE_INFO_KHR);
+
+   mesa_loge("hk:   flags=0x%" PRIx64 " gpl_subset=0x%x linked_libraries=%u",
+             (uint64_t)flags, gpl ? gpl->flags : 0u,
+             libs ? libs->libraryCount : 0u);
+
+   for (uint32_t s = 0; s < info->stageCount; s++) {
+      const VkPipelineShaderStageCreateInfo *stage = &info->pStages[s];
+
+      mesa_loge("hk:   stage %-4s entry \"%s\" spirv=%zu bytes flags=0x%x",
+                hk_shader_stage_bit_name(stage->stage),
+                stage->pName ? stage->pName : "(null)",
+                hk_pipeline_stage_spirv_size(stage), stage->flags);
+   }
+
+   if (info->pDynamicState) {
+      struct hk_pipeline_strbuf dyn = {0};
+
+      for (uint32_t d = 0; d < info->pDynamicState->dynamicStateCount; d++) {
+         hk_pipeline_strbuf_appendf(
+            &dyn, "%s%s", d ? " " : "",
+            vk_DynamicState_to_str(info->pDynamicState->pDynamicStates[d]));
+      }
+
+      mesa_loge("hk:   dynamic(%u): %s",
+                info->pDynamicState->dynamicStateCount, dyn.data);
+   } else {
+      mesa_loge("hk:   dynamic(0): all state static");
+   }
+
+   if (info->pInputAssemblyState) {
+      mesa_loge("hk:   ia: topology=%u restart=%u",
+                info->pInputAssemblyState->topology,
+                info->pInputAssemblyState->primitiveRestartEnable);
+   }
+
+   if (info->pVertexInputState) {
+      mesa_loge("hk:   vi: bindings=%u attributes=%u",
+                info->pVertexInputState->vertexBindingDescriptionCount,
+                info->pVertexInputState->vertexAttributeDescriptionCount);
+   }
+
+   if (info->pTessellationState) {
+      mesa_loge("hk:   tess: patch_control_points=%u",
+                info->pTessellationState->patchControlPoints);
+   }
+
+   if (info->pViewportState) {
+      mesa_loge("hk:   vp: viewports=%u scissors=%u",
+                info->pViewportState->viewportCount,
+                info->pViewportState->scissorCount);
+   }
+
+   if (info->pRasterizationState) {
+      const VkPipelineRasterizationStateCreateInfo *rs =
+         info->pRasterizationState;
+
+      mesa_loge("hk:   rs: discard=%u polygon=%u cull=0x%x front=%u "
+                "depth_clamp=%u depth_bias=%u line_width=%f",
+                rs->rasterizerDiscardEnable, rs->polygonMode, rs->cullMode,
+                rs->frontFace, rs->depthClampEnable, rs->depthBiasEnable,
+                rs->lineWidth);
+   }
+
+   if (info->pMultisampleState) {
+      const VkPipelineMultisampleStateCreateInfo *ms = info->pMultisampleState;
+
+      mesa_loge("hk:   ms: samples=%u sample_shading=%u min=%f "
+                "sample_mask=0x%x alpha_to_coverage=%u alpha_to_one=%u",
+                ms->rasterizationSamples, ms->sampleShadingEnable,
+                ms->minSampleShading,
+                ms->pSampleMask ? ms->pSampleMask[0] : 0xffffffffu,
+                ms->alphaToCoverageEnable, ms->alphaToOneEnable);
+   }
+
+   if (info->pDepthStencilState) {
+      const VkPipelineDepthStencilStateCreateInfo *ds =
+         info->pDepthStencilState;
+
+      mesa_loge("hk:   ds: test=%u write=%u op=%u bounds=%u stencil=%u",
+                ds->depthTestEnable, ds->depthWriteEnable, ds->depthCompareOp,
+                ds->depthBoundsTestEnable, ds->stencilTestEnable);
+   }
+
+   if (info->pColorBlendState) {
+      const VkPipelineColorBlendStateCreateInfo *cb = info->pColorBlendState;
+      struct hk_pipeline_strbuf att = {0};
+
+      for (uint32_t a = 0; a < cb->attachmentCount && cb->pAttachments; a++) {
+         hk_pipeline_strbuf_appendf(&att, "%s[%u]=en%u/mask%x",
+                                    a ? " " : "", a,
+                                    cb->pAttachments[a].blendEnable,
+                                    cb->pAttachments[a].colorWriteMask);
+      }
+
+      mesa_loge("hk:   cb: logic_op=%u/%u attachments=%u %s",
+                cb->logicOpEnable, cb->logicOp, cb->attachmentCount, att.data);
+   }
+
+   const VkPipelineRenderingCreateInfo *rendering =
+      vk_find_struct_const(info->pNext, PIPELINE_RENDERING_CREATE_INFO);
+
+   if (rendering) {
+      struct hk_pipeline_strbuf colors = {0};
+
+      for (uint32_t a = 0;
+           a < rendering->colorAttachmentCount &&
+           rendering->pColorAttachmentFormats;
+           a++) {
+         hk_pipeline_strbuf_appendf(
+            &colors, "%s%s", a ? " " : "",
+            vk_Format_to_str(rendering->pColorAttachmentFormats[a]));
+      }
+
+      mesa_loge("hk:   rendering: view_mask=0x%x color=%u [%s] depth=%s "
+                "stencil=%s",
+                rendering->viewMask, rendering->colorAttachmentCount,
+                colors.data, vk_Format_to_str(rendering->depthAttachmentFormat),
+                vk_Format_to_str(rendering->stencilAttachmentFormat));
+   } else {
+      mesa_loge("hk:   render_pass=%s subpass=%u",
+                info->renderPass != VK_NULL_HANDLE ? "yes" : "none",
+                info->subpass);
+   }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_CreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache,
+                           uint32_t createInfoCount,
+                           const VkGraphicsPipelineCreateInfo *pCreateInfos,
+                           const VkAllocationCallbacks *pAllocator,
+                           VkPipeline *pPipelines)
+{
+   VkResult result = vk_common_CreateGraphicsPipelines(
+      device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
+      pPipelines);
+
+   /* VK_PIPELINE_COMPILE_REQUIRED is the answer the application asked for
+    * with VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, not a
+    * refusal. */
+   if (result == VK_SUCCESS || result == VK_PIPELINE_COMPILE_REQUIRED ||
+       createInfoCount == 0)
+      return result;
+
+   /* vk_common_CreateGraphicsPipelines() zeroes pPipelines up front and
+    * returns on the first hard failure, so the first null handle names the
+    * pipeline that was refused. */
+   uint32_t failed = 0;
+   while (failed + 1 < createInfoCount && pPipelines[failed] != VK_NULL_HANDLE)
+      failed++;
+
+   hk_log_refused_graphics_pipeline(&pCreateInfos[failed], failed,
+                                    createInfoCount, result);
+   return result;
+}
+
+/*
+ * The compute entrypoint has the same blind spot, and a translation layer's
+ * internal compute pipelines (format conversion, mip generation, blits) fail
+ * the same way: the operation silently does nothing and the frame is wrong
+ * somewhere else entirely.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_CreateComputePipelines(VkDevice device, VkPipelineCache pipelineCache,
+                          uint32_t createInfoCount,
+                          const VkComputePipelineCreateInfo *pCreateInfos,
+                          const VkAllocationCallbacks *pAllocator,
+                          VkPipeline *pPipelines)
+{
+   VkResult result = vk_common_CreateComputePipelines(
+      device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
+      pPipelines);
+
+   if (result == VK_SUCCESS || result == VK_PIPELINE_COMPILE_REQUIRED ||
+       createInfoCount == 0)
+      return result;
+
+   uint32_t failed = 0;
+   while (failed + 1 < createInfoCount && pPipelines[failed] != VK_NULL_HANDLE)
+      failed++;
+
+   const VkComputePipelineCreateInfo *info = &pCreateInfos[failed];
+   mesa_loge("hk: vkCreateComputePipelines refused pipeline %u of %u: %s",
+             failed, createInfoCount, vk_Result_to_str(result));
+   mesa_loge("hk:   flags=0x%x stage entry \"%s\" spirv=%zu bytes "
+             "stage_flags=0x%x",
+             info->flags, info->stage.pName ? info->stage.pName : "(null)",
+             hk_pipeline_stage_spirv_size(&info->stage), info->stage.flags);
+   return result;
+}
 
 struct hk_linked_shader *
 hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,

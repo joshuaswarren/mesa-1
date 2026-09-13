@@ -15,7 +15,7 @@ import sys
 def check(clear, triangle, control):
     assert "G17P_NO_DRAW set, clear-only pass" in clear
     assert "G17P clear-only graphics: 32x32 samples=1 sample_control=0x88 " \
-           "process_empty_tiles=1 scissor=16 zbias=12" in clear
+           "process_empty_tiles=1 scissor=16 zbias=12 direct_resolve=0" in clear
     assert "command buffer recorded" in clear and "g17p-render-only: submitted" in clear
     assert "returned -" not in clear
     assert "vertex-ioto" not in clear and "fragment-ioto" not in clear

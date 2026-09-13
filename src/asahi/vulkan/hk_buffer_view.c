@@ -173,6 +173,21 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       memset(&view->pbe, 0, sizeof(view->pbe));
    }
 
+   /* G17P reaches a sampled texture through the device heap, so the view's
+    * texture descriptor has to live there and the descriptor carries only its
+    * index.  Without this the index stays 0 and every texel-buffer fetch
+    * resolves to the null texture.  Mirrors hk_image_view.c's per-plane
+    * hk_descriptor_table_add(). */
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      VkResult result = hk_descriptor_table_add(
+         device, &device->sampled_images, &view->tex,
+         hk_texture_descriptor_size(generation), &view->sampled_heap_index);
+      if (result != VK_SUCCESS) {
+         vk_buffer_view_destroy(&device->vk, pAllocator, &view->vk);
+         return result;
+      }
+   }
+
    *pBufferView = hk_buffer_view_to_handle(view);
 
    return VK_SUCCESS;
@@ -187,6 +202,10 @@ hk_DestroyBufferView(VkDevice _device, VkBufferView bufferView,
 
    if (!view)
       return;
+
+   if (view->sampled_heap_index)
+      hk_descriptor_table_remove(device, &device->sampled_images,
+                                 view->sampled_heap_index);
 
    vk_buffer_view_destroy(&device->vk, pAllocator, &view->vk);
 }

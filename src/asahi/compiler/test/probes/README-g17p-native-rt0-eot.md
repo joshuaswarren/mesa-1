@@ -68,6 +68,17 @@ the byte-offset uniform and IMGW reads the table pointer with RT index0.
 The complete 68-byte entry is uploaded directly into the existing CODE
 container at block+0x80, padded to128 bytes; LDSHDR f1 remains1.
 
+## The multisample sibling
+
+The attachment table's texture-type byte is at file offset 0x76 and takes the
+`Texture dimension` enum. Setting it to 4 (2D multisample) instead of 2 (2D)
+makes the same factory emit the program that stores the tile **unresolved**:
+same length, same registers, same metadata, three bytes different. The full
+sweep and the round-tripped encoder fields are in
+`isa/README-metal-witness.md`; the emitted programs are the
+`g17p_rt0_eot_ms` table in `agx3_pack_binary.c` and are asserted byte for byte
+by `test_g17p_multisample_eot_block_store`.
+
 ## Validation scope
 
 On J700 A18 Pro B1, native DM1, the old per-thread-coordinate program stored

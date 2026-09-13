@@ -28,9 +28,11 @@
 #include "hk_cs_root_size.h"
 #include "hk_descriptor_set.h"
 #include "hk_drm_render_core.h"
+#include "hk_ioto_arena_core.h"
 #include "hk_pipeline_statistics_core.h"
 
 #include "asahi/lib/agx_nir_lower_vbo.h"
+#include "util/hash_table.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -387,6 +389,40 @@ struct hk_cs {
    bool agx3_active_context_selector_valid;
    uint32_t agx3_raw_active_context_selector;
 
+   /* Render-state publications this G17P graphics stream has recorded.
+    * Every one of them overwrites the same context-0 state, so this -- not
+    * the draw count and not the bytes used -- is the depth that decides
+    * whether the stream faults. See hk_cmd_draw.c. */
+   unsigned g17p_state_publications;
+
+   /* Compact identity for a submitted G17P draw.  The full launch trace is
+    * intentionally enormous; this is enough to name the exact fragment
+    * program and draw that preceded a DM1 fragment timeout. */
+   struct {
+      uint64_t fragment_program;
+      uint64_t emitted_indirect_buffer;
+      uint32_t fragment_shader_hash;
+      uint32_t fragment_main_hash;
+      uint32_t fragment_ioto_hash;
+      uint32_t fragment_shader_size;
+      uint32_t fragment_main_size;
+      uint32_t fragment_ioto_size;
+      uint32_t api_count;
+      uint32_t api_instances;
+      uint32_t api_first;
+      int32_t api_base_vertex;
+      uint32_t api_first_instance;
+      uint32_t color_formats[HK_MAX_RTS];
+      uint32_t depth_format;
+      uint8_t color_count;
+      uint16_t draw_id;
+      uint8_t topology;
+      bool api_indexed;
+      bool api_indirect;
+      bool emitted_indexed;
+      bool emitted_indirect;
+   } g17p_draw_trace;
+
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
     * samplers (especially for GL/DX11-era engines).
@@ -501,6 +537,30 @@ struct hk_uploader {
    uint32_t capacity;
 };
 
+/*
+ * Bump arena for the G17P Ioto programs one command buffer records, with a
+ * content-addressed index so a program byte-identical to one already published
+ * costs nothing at all. See hk_ioto_arena_core.h for why programs cannot each
+ * have a BO.
+ */
+struct hk_ioto_arena {
+   /* Chunk currently being filled. Owned by hk_cmd_buffer::large_bos. */
+   struct agx_bo *bo;
+   uint8_t *map;
+   uint64_t base;
+   uint32_t cursor;
+   uint32_t capacity;
+
+   /* Program bytes -> address, over the chunks of this command buffer. */
+   struct hash_table *published;
+
+   /* Recording statistics, reported when the arena cannot grow. */
+   uint32_t programs;
+   uint32_t distinct;
+   uint64_t program_bytes;
+   uint64_t chunk_bytes;
+};
+
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -561,7 +621,55 @@ struct hk_cmd_buffer {
 
    /* Owned BOs and retained references needed by recorded commands. */
    struct util_dynarray large_bos;
+
+   /* Executable USC-window arena the G17P Ioto programs recorded by this
+    * command buffer are bump-allocated from. Its chunks are owned by
+    * large_bos, so it dies with the recording like every other program
+    * reference. */
+   struct hk_ioto_arena ioto;
+
 };
+
+/*
+ * One reservation inside the Ioto arena: where the program is to be composed,
+ * and the address the composer must be given for it.
+ */
+struct hk_ioto_reservation {
+   void *map;
+   uint64_t va;
+
+   /* Arena cursor before the reservation, so an identical program already
+    * published by this command buffer can give the space straight back. */
+   uint32_t rollback;
+};
+
+/*
+ * Reserve `size` bytes of executable USC-window space for one Ioto program.
+ * On failure the command buffer error is already set.
+ */
+bool hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
+                                 const char *label,
+                                 struct hk_ioto_reservation *reservation);
+
+/*
+ * Publish the `length` bytes composed at reservation->map. Returns the address
+ * the launch record must point at: either the reserved address, or that of a
+ * byte-identical program this command buffer already published, in which case
+ * the reservation is released.
+ *
+ * Reusing an earlier address is sound without assuming anything about whether
+ * a program embeds its own address: the bytes just composed for the reserved
+ * address are identical to the bytes the composer produced for the earlier
+ * one, so the earlier address holds exactly the program the composer sanctions
+ * for it.
+ */
+uint64_t hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
+                                     const struct hk_ioto_reservation *
+                                        reservation,
+                                     size_t length);
+
+/* Release the arena's bookkeeping. The chunks themselves are in large_bos. */
+void hk_ioto_arena_finish(struct hk_cmd_buffer *cmd);
 
 VK_DEFINE_HANDLE_CASTS(hk_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
@@ -672,6 +780,10 @@ hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 }
 
 bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+
+bool hk_g17p_split_trace_enabled(void);
+void hk_g17p_note_gfx_split(struct hk_cmd_buffer *cmd, const char *reason,
+                            unsigned commands, size_t remaining);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 
 static inline struct hk_cs *
@@ -786,6 +898,8 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
 bool hk_g17p_launch_trace_enabled(void);
+bool hk_g17p_draw_trace_enabled(void);
+bool hk_g17p_strong_dispatch_flush_enabled(void);
 bool hk_g17p_verbose_enabled(void);
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
                            size_t len);
@@ -975,6 +1089,36 @@ void hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 void hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              struct hk_shader *s, struct agx_grid grid,
                              struct agx_workgroup local_size);
+
+/*
+ * Saved application state around a driver-internal meta operation.  The
+ * acceleration-structure builder needs this as much as a blit does: the
+ * common build shaders bind their own compute pipeline and push constants,
+ * so a build recorded between two application dispatches would otherwise
+ * silently clobber them.
+ */
+struct hk_meta_save {
+   struct vk_vertex_input_state _dynamic_vi;
+   struct vk_sample_locations_state _dynamic_sl;
+   struct vk_dynamic_graphics_state dynamic;
+   struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
+   struct hk_addr_range vb0;
+   struct hk_descriptor_set *desc0;
+   bool has_push_desc0;
+   enum agx_visibility_mode occlusion;
+   struct hk_push_descriptor_set push_desc0;
+   VkQueryPipelineStatisticFlags pipeline_stats_flags;
+   uint8_t push[HK_MAX_PUSH_SIZE];
+};
+
+void hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                   VkPipelineBindPoint bind_point);
+void hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                 VkPipelineBindPoint bind_point);
+
+void hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer,
+                               uint32_t invocations_x, uint32_t invocations_y,
+                               uint32_t invocations_z);
 
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,

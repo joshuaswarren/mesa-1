@@ -217,10 +217,64 @@ test_tps(void)
    return failures;
 }
 
+/*
+ * f11, `narrow_extend`, is an AGX3c field: the AGX3b ldtg/sttg forms have no
+ * encoding for it at any width. Setting it from the operand width regardless
+ * of encoding refused every 8-bit threadgroup access on G17P, which is the
+ * bulk of the Vulkan compute block's refusals once
+ * VK_KHR_workgroup_memory_explicit_layout puts 8-bit types in shared memory.
+ *
+ * Pin both directions so the split cannot be re-broken: AGX3b must encode the
+ * 8-bit access with the bit clear and must refuse it set, while AGX3c keeps
+ * the bit (its own vectors above already cover the set case).
+ */
+static unsigned
+test_local_narrow_extend(void)
+{
+   unsigned failures = 0;
+   uint8_t out[AGX3_LOCAL_TPS_MAX_LENGTH];
+   uint8_t len;
+
+   for (unsigned store = 0; store < 2; ++store) {
+      struct agx3_local_desc d = {
+         .data = 4, .width = AGX3_MEM_W8, .mask = 0xf, .shift = 2,
+         .base_kind = AGX3_LOCAL_BASE_REGISTER, .base = 0,
+         .slot = store ? 0 : 6,
+      };
+
+      /* AGX3b: encodes with the bit clear ... */
+      len = 0;
+      d.narrow_extend = false;
+      const bool clear_ok =
+         store ? agx3_local_encode_store(AGX_ISA_ENCODING_AGX3B, &d, out, &len)
+               : agx3_local_encode_load(AGX_ISA_ENCODING_AGX3B, &d, out, &len);
+      if (!clear_ok) {
+         fprintf(stderr, "FAIL: AGX3b 8-bit %s refused with f11 clear\n",
+                 store ? "sttg" : "ldtg");
+         ++failures;
+      }
+
+      /* ... and must refuse it set, because the form cannot express it. */
+      len = 0;
+      d.narrow_extend = true;
+      const bool set_ok =
+         store ? agx3_local_encode_store(AGX_ISA_ENCODING_AGX3B, &d, out, &len)
+               : agx3_local_encode_load(AGX_ISA_ENCODING_AGX3B, &d, out, &len);
+      if (set_ok) {
+         fprintf(stderr, "FAIL: AGX3b 8-bit %s encoded f11 = 1, which has no "
+                         "form\n", store ? "sttg" : "ldtg");
+         ++failures;
+      }
+   }
+
+   return failures;
+}
+
 int
 main(void)
 {
-   const unsigned failures = test_local() + test_tps();
+   const unsigned failures =
+      test_local() + test_tps() + test_local_narrow_extend();
    if (failures)
       return 1;
 

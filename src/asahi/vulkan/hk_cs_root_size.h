@@ -8,9 +8,9 @@
 
 #define HK_CS_ROOT_SIZE       65536u
 /* Native G17P allocates its ordinary graphics control-stream root as one
- * 0x8000-byte object and concatenates draws in that root. Keeping the native
- * extent also leaves enough room for the conservative per-draw reservation
- * without forcing a link at the ~0x800-byte point reached by Neon.
+ * 0x8000-byte object and concatenates draws in that root. When it fills, an
+ * in-render VDM stream link continues into an upload chunk; a root-capacity
+ * boundary is not a retained-render boundary.
  */
 #define HK_G17P_VDM_ROOT_SIZE    32768u
 #define HK_G17P_VDM_INITIAL_SIZE 12u
@@ -30,14 +30,6 @@ hk_cs_space_fits(size_t remaining, size_t requested, size_t link_length)
 {
    return requested <= remaining && link_length <= remaining - requested &&
           HK_CS_SPACE_PADDING <= remaining - requested - link_length;
-}
-
-static inline bool
-hk_g17p_vdm_needs_render_split(enum agx_chip chip, unsigned commands,
-                               size_t remaining, size_t link_length)
-{
-   return chip == AGX_CHIP_G17P && commands > 0 &&
-          !hk_cs_space_fits(remaining, HK_GFX_DRAW_RESERVATION, link_length);
 }
 
 static inline bool

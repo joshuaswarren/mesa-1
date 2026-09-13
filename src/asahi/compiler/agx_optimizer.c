@@ -224,6 +224,16 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (src.neg)
          continue;
 
+      /* G17P's native subtraction takes two registers. Instruction selection
+       * deliberately materializes an immediate minuend for `c - x`; folding
+       * it back here would leave immediate-plus-negated-register, whose iadd
+       * modifier means narrow sign extension rather than arithmetic negate.
+       */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IADD &&
+          ((s == 0 && I->src[1].neg) || (s == 1 && I->src[0].neg)))
+         continue;
+
       agx_instr *def = defs[src.value];
       if (!def || def->op != AGX_OPCODE_MOV_IMM)
          continue;
@@ -267,6 +277,16 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
           s != 1)
          continue;
       if (I->op == AGX_OPCODE_SPLIT)
+         continue;
+
+      /*
+       * AGX3's immediate-lane shuffle holds the lane in a seven-bit field,
+       * so every lane a subgroup can name folds in.  Only an out-of-range
+       * constant -- undefined behaviour, but not a reason to refuse a shader
+       * -- has to keep its mov and go through the register-lane form.
+       */
+      if (I->op == AGX_OPCODE_SHUFFLE && s == 1 && ctx->key &&
+          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && def->imm > 0x7f)
          continue;
 
       if ((I->op == AGX_OPCODE_IMAGE_WRITE ||

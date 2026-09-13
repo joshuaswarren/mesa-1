@@ -48,6 +48,7 @@ static const struct debug_named_value agx_debug_options[] = {
    {"nosched",   AGX_DBG_NOSCHED,   "Do not schedule the shader"},
    {"spill",     AGX_DBG_SPILL,     "Spill (almost) everything"},
    {"nopromote", AGX_DBG_NOPROMOTE, "Do not promote constants to uniforms"},
+   {"refuse",    AGX_DBG_REFUSE,    "Name refused instructions, without dumping shaders"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -1472,6 +1473,24 @@ agx_local_base(nir_src src)
       return agx_src_index(&src);
 }
 
+static agx_index
+agx_local_atomic_base(agx_builder *b, nir_src src)
+{
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       nir_src_is_const(src)) {
+      const uint64_t address = nir_src_as_uint(src);
+
+      /* G17P has a witnessed 16-bit immediate byte-address field for
+       * threadgroup atomics, including returned exchanges at nonzero
+       * addresses. Keep aligned constants immediate instead of needlessly
+       * materializing the ungrounded returned register-address form. */
+      if (address <= UINT16_MAX && (address & 3) == 0)
+         return agx_immediate(address);
+   }
+
+   return agx_local_base(src);
+}
+
 static void
 agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
                 bool local)
@@ -1479,7 +1498,8 @@ agx_emit_atomic(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr,
    enum agx_atomic_opc op =
       translate_atomic_opcode(nir_intrinsic_atomic_op(instr));
    agx_index base =
-      local ? agx_local_base(instr->src[0]) : agx_src_index(&instr->src[0]);
+      local ? agx_local_atomic_base(b, instr->src[0])
+            : agx_src_index(&instr->src[0]);
    agx_index value = agx_src_index(&instr->src[local ? 1 : 2]);
    agx_index index = local ? agx_zero() : agx_src_index(&instr->src[1]);
 
@@ -1547,9 +1567,11 @@ format_for_bitsize(unsigned bitsize)
 static void
 agx_emit_local_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
 {
-   agx_index base = agx_local_base(instr->src[0]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
-   assert(base.size == AGX_SIZE_16);
+   agx_index address = agx_local_base(instr->src[0]);
+   const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   agx_index index = agx3 ? address : agx_zero();
+   assert(address.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(instr->def.bit_size);
    unsigned nr = instr->def.num_components;
@@ -1563,9 +1585,11 @@ static void
 agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
 {
    agx_index value = agx_src_index(&instr->src[0]);
-   agx_index base = agx_local_base(instr->src[1]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
-   assert(base.size == AGX_SIZE_16);
+   agx_index address = agx_local_base(instr->src[1]);
+   const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
+   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   agx_index index = agx3 ? address : agx_zero();
+   assert(address.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(nir_src_bit_size(instr->src[0]));
    unsigned mask = BITFIELD_MASK(
@@ -1692,16 +1716,14 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
    } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-              intr->intrinsic == nir_intrinsic_image_load &&
-              dim == GLSL_SAMPLER_DIM_2D && !is_array &&
-              nir_intrinsic_format(intr) == PIPE_FORMAT_R8G8B8A8_UINT &&
+              dim == GLSL_SAMPLER_DIM_2D && !is_array && !sparse &&
               nir_src_is_const(intr->src[3]) &&
               nir_src_as_uint(intr->src[3]) == 0) {
-      /* The bounded G17P storage-image path is descriptor-specialized to a
-       * non-mipmapped 2D image. Keep its semantic LOD zero immediate through
-       * RA: the generic AGX2 image path otherwise materializes it as a
-       * runtime uniform, while native G17P encodes this read with the exact
-       * immediate-LOD0 SMP form. */
+      /* Match texelFetch's constant-level handling. Image reads also use
+       * native SMP, whose immediate level-zero form needs no PACK_SMPIR
+       * staging. This applies to heap-indexed storage images and all formats;
+       * neither the resource operand nor the component type changes the LOD.
+       */
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
    }
@@ -1833,20 +1855,63 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
    agx_instr *write = agx_image_write(b, data, coords, lod, base, index, dim,
                                       nir_is_coherent(instr));
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      switch (nir_intrinsic_format(instr)) {
-      case PIPE_FORMAT_R8G8B8A8_UINT:
-         write->format = AGX_FORMAT_I8;
-         break;
-      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      /* imgwci.f70 follows the TYPE OF THE DATA the shader stores, not the
+       * destination surface's format. Metal never puts a pixel format in a
+       * shader -- a texture2d<float, access::write> is written the same way
+       * whichever surface is bound -- so f70 cannot be encoding one. Apple's
+       * own applegpu_g17p output for four kernels that differ only in the
+       * texture's data type, each `t.write(v, gid)`:
+       *
+       *   texture2d<float> d71054000040000000040000883a0900   f70:1 f71:2
+       *   texture2d<uint>  d71054000040000000040000881a0900   f70:0 f71:2
+       *   texture2d<int>   d71054000040000000040000881a0900   f70:0 f71:2
+       *   texture2d<half>  d71054000040000000040000882a0900   f70:1 f71:1
+       *
+       * int and uint are byte-identical, so f70 separates float from integer
+       * data; f71 is the data width, which the packer pins to 32-bit.
+       *
+       * Selecting on nir_intrinsic_format() reproduced that only for the
+       * three formats spelled out here and failed every other one closed --
+       * including a format-less image, which is what Vulkan's
+       * shaderStorageImageWriteWithoutFormat gives and what DXVK's clear and
+       * copy kernels all declare. Select on the stored type instead: it
+       * gives the same f70 for those three formats and is the rule Apple's
+       * compiler is following. */
+      nir_alu_type stored =
+         nir_alu_type_get_base_type(nir_intrinsic_src_type(instr));
+      if (stored == nir_type_invalid) {
+         /* Not every producer of an image store fills in src_type. Fall back
+          * to the declared format, which says the same thing whenever it is
+          * there at all. */
+         switch (nir_intrinsic_format(instr)) {
+         case PIPE_FORMAT_R8G8B8A8_UINT:
+         case PIPE_FORMAT_R32_UINT:
+            stored = nir_type_uint;
+            break;
+         case PIPE_FORMAT_R8G8B8A8_SINT:
+         case PIPE_FORMAT_R32_SINT:
+            stored = nir_type_int;
+            break;
+         case PIPE_FORMAT_R32_FLOAT:
+         case PIPE_FORMAT_R8G8B8A8_UNORM:
+         case PIPE_FORMAT_R10G10B10A2_UNORM:
+            stored = nir_type_float;
+            break;
+         default:
+            break;
+         }
+      }
+
+      switch (stored) {
+      case nir_type_float:
          write->format = AGX_FORMAT_U8NORM;
          break;
-      case PIPE_FORMAT_R10G10B10A2_UNORM:
-         /* Formatted float writes share the native normalized imgwci path;
-          * the PBE descriptor supplies the packed destination format. */
-         write->format = AGX_FORMAT_RGB10A2;
+      case nir_type_int:
+      case nir_type_uint:
+         write->format = AGX_FORMAT_I8;
          break;
       default:
-         /* The AGX3 packer remains fail-closed for unqualified formats. */
+         /* The AGX3 packer remains fail-closed for anything unwitnessed. */
          write->format = AGX_NUM_FORMATS;
          break;
       }
@@ -2055,6 +2120,19 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_load_sample_mask:
       return agx_get_sr_coverage_to(b, dst, AGX_SR_COVERAGE_MASK);
+
+   case nir_intrinsic_load_active_samples_agx:
+      /* Everywhere else this is a loop variable that the MSAA lowerings have
+       * already substituted. It survives to the backend only on G17P, where
+       * agx_nir_lower_g17p_tile_samples asks for the live coverage word as a
+       * real register operand for lstcol/lldcol: Apple's own multisample
+       * fragments read exactly this, native W16 SR39, and pass it straight to
+       * the tile access. Bits 0..3 are the covered samples -- the per-sample
+       * form ANDs this same word with 1/2/4/8. */
+      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             "only the G17P tile lowering leaves this for the backend");
+      assert(instr->def.bit_size == 16 && "16-bit sample mask");
+      return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
    case nir_intrinsic_load_helper_invocation:
       /* Compare special register to zero. We could lower this in NIR (letting
@@ -2363,8 +2441,23 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       b->shader->any_quad_divergent_shuffle |= b->shader->any_cf;
 
       /* Lane ID guaranteed to be uniform */
-      return agx_shuffle_to(b, dst, agx_src_index(&instr->src[0]),
-                            agx_src_index(&instr->src[1]));
+      agx_index lane = agx_src_index(&instr->src[1]);
+
+      /*
+       * AGX3's immediate-lane broadcast puts the lane in a seven-bit field,
+       * so lanes 0..127 -- every lane a subgroup can have -- encode directly.
+       * A constant outside that range is undefined behaviour rather than a
+       * program we must reject, so materialise it into the register-lane
+       * form, which takes any value, instead of refusing the shader.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          lane.type == AGX_INDEX_IMMEDIATE && lane.value > 0x7f) {
+         agx_index reg = agx_temp(b->shader, AGX_SIZE_32);
+         agx_mov_imm_to(b, reg, lane.value);
+         lane = reg;
+      }
+
+      return agx_shuffle_to(b, dst, agx_src_index(&instr->src[0]), lane);
    }
 
    case nir_intrinsic_quad_broadcast: {
@@ -2651,6 +2744,118 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+      /* A half fabs is initially represented as fadd(abs(x), -0.0h).  The
+       * G17P half-add form has no absolute-source field, and leaving this
+       * pseudo operation intact until after register allocation makes the
+       * packer refuse frexp/modf precision shaders.  fabs on an IEEE half is
+       * exactly a sign-bit clear, so lower that exact move to the grounded
+       * half BITOP path while the mask can still receive an SSA register. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FADD && I->nr_dests == 1 && I->nr_srcs == 2 &&
+          I->dest[0].size == AGX_SIZE_16 && !I->saturate &&
+          I->src[0].size == AGX_SIZE_16 && I->src[0].abs &&
+          !I->src[0].neg &&
+          agx_is_equiv(I->src[1], agx_immediate(UINT8_C(0x80)))) {
+         agx_index source = I->src[0];
+         source.abs = false;
+         agx_index mask = agx_mov_imm(&b, 16, UINT16_C(0x7fff));
+
+         I->op = AGX_OPCODE_BITOP;
+         I->src[0] = source;
+         I->src[1] = mask;
+         I->truth_table = 0x8; /* AND */
+      }
+
+      /* The grounded scalar-half FSEL and rounding forms do not carry float
+       * source modifiers. CTS reaches both through frexp/modf, with fabs
+       * folded into a comparator or floor input. Preserve every half bit by
+       * materializing abs/neg as sign-bit operations before RA instead of
+       * refusing the post-RA instruction. */
+      const bool half_fsel =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+         I->dest[0].size == AGX_SIZE_16;
+      const bool half_round =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         (I->op == AGX_OPCODE_FLOOR || I->op == AGX_OPCODE_CEIL) &&
+         I->nr_srcs == 1 && I->dest[0].size == AGX_SIZE_16;
+
+      if (half_fsel || half_round) {
+         const unsigned source_count = half_fsel ? 4 : 1;
+         for (unsigned s = 0; s < source_count; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+                I->src[s].size != AGX_SIZE_16 ||
+                (!I->src[s].abs && !I->src[s].neg))
+               continue;
+
+            const bool absolute = I->src[s].abs;
+            const bool negate = I->src[s].neg;
+            agx_index value = I->src[s];
+            value.abs = false;
+            value.neg = false;
+
+            if (absolute) {
+               agx_index mask = agx_mov_imm(&b, 16, UINT16_C(0x7fff));
+               agx_index result = agx_temp(ctx, AGX_SIZE_16);
+               agx_bitop_to(&b, result, value, mask, 0x8 /* AND */);
+               value = result;
+            }
+
+            if (negate) {
+               agx_index sign = agx_mov_imm(&b, 16, UINT16_C(0x8000));
+               agx_index result = agx_temp(ctx, AGX_SIZE_16);
+               agx_bitop_to(&b, result, value, sign, 0x6 /* XOR */);
+               value = result;
+            }
+
+            I->src[s] = value;
+         }
+      }
+
+      /* frexp's full-precision path compares zero against fabs(x) and
+       * selects two full floats.  G17P's zero-comparison FSEL is grounded
+       * only without source modifiers, so make fabs/fneg exact with integer
+       * sign-bit operations while the modified comparator is still SSA. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
+          I->dest[0].size == AGX_SIZE_32) {
+         const bool zero_first =
+            I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value == 0;
+         const bool zero_second =
+            I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value == 0;
+
+         if (zero_first != zero_second) {
+            const unsigned s = zero_first ? 1 : 0;
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE &&
+                I->src[s].size == AGX_SIZE_32 &&
+                (I->src[s].abs || I->src[s].neg)) {
+               const bool absolute = I->src[s].abs;
+               const bool negate = I->src[s].neg;
+               agx_index value = I->src[s];
+               value.abs = false;
+               value.neg = false;
+
+               if (absolute) {
+                  agx_index mask =
+                     agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+                  agx_index result = agx_temp(ctx, AGX_SIZE_32);
+                  agx_bitop_to(&b, result, value, mask, 0x8 /* AND */);
+                  value = result;
+               }
+
+               if (negate) {
+                  agx_index sign =
+                     agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+                  agx_index result = agx_temp(ctx, AGX_SIZE_32);
+                  agx_bitop_to(&b, result, value, sign, 0x6 /* XOR */);
+                  value = result;
+               }
+
+               I->src[s] = value;
+            }
+         }
+      }
 
       /* Chromium/Skia compares a negated f32 register for equality and then
        * selects two unrelated f32 registers. The only native FSEL negate bit
@@ -3259,6 +3464,48 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    }
 }
 
+void
+agx_materialize_agx3_cf_constants(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if ((I->op != AGX_OPCODE_IF_FCMP &&
+           I->op != AGX_OPCODE_WHILE_FCMP &&
+           I->op != AGX_OPCODE_BREAK_IF_FCMP) ||
+          I->nr_srcs != 2)
+         continue;
+
+      /* G17P's structured float-CF path is grounded for f32 register pairs
+       * and for literal zero. Firefox's WebRender fragment compares a live
+       * f32 against 1.0 (and later -10.0), which reaches AIR as a nonzero
+       * minifloat. Materialize only that missing register/minifloat axis into
+       * an exact f32 LDIMM before RA; this adds no speculative CF encoding and
+       * leaves the shorter native zero form byte-identical. */
+      for (unsigned s = 0; s < 2; ++s) {
+         const unsigned other = s ^ 1;
+         if (I->src[s].type != AGX_INDEX_IMMEDIATE ||
+             I->src[s].value == 0 ||
+             I->src[other].type == AGX_INDEX_IMMEDIATE ||
+             I->src[other].size != AGX_SIZE_32 || I->src[other].memory ||
+             I->src[other].abs || I->src[other].neg)
+            continue;
+
+         float value = agx_minifloat_decode(I->src[s].value);
+         if (I->src[s].abs)
+            value = fabsf(value);
+         if (I->src[s].neg)
+            value = -value;
+
+         uint32_t bits;
+         memcpy(&bits, &value, sizeof(bits));
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         I->src[s] = agx_mov_imm(&b, 32, bits);
+      }
+   }
+}
+
 /* Half-precision ALU instructions cannot encode 32-bit register sources.
  * Convert them explicitly. Immediate and null sources have no size bit. */
 static agx_index
@@ -3574,8 +3821,26 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
    case nir_op_imsubshl_agx:
       return agx_emit_imadshl_agx(b, instr, dst, s0, s1, agx_neg(s2), s3);
    case nir_op_isub:
+      /* The native G17P subtract form takes two registers. Do not route an
+       * immediate minuend through iadd's narrow-source sign-extension bit:
+       * that bit is not arithmetic negation and would turn `c - x` into
+       * `c + x`.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32 && s0.type == AGX_INDEX_IMMEDIATE)
+         s0 = agx_mov_imm(b, 32, s0.value);
       return agx_iadd_to(b, dst, s0, agx_neg(s1), 0);
    case nir_op_ineg:
+      /* G17P's iadd operand modifier is a narrow-source sign extension, not
+       * an arithmetic negate. Materialize the zero minuend so post-RA
+       * instruction selection reaches the native register-register isub
+       * form instead of silently encoding `0 + x`.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32) {
+         agx_index zero = agx_mov_imm(b, 32, 0);
+         return agx_iadd_to(b, dst, zero, agx_neg(s0), 0);
+      }
       return agx_iadd_to(b, dst, i0, agx_neg(s0), 0);
    case nir_op_imul:
       return agx_imad_to(b, dst, s0, s1, i0, 0);
@@ -4045,8 +4310,32 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Pack shadow reference value (compare) and packed offset together */
    agx_index compare_offset = agx_null();
 
-   if (!agx_is_null(compare) && !agx_is_null(packed_offset))
+   /* G17P carries the offset as an immediate field in the sample instruction
+    * and the comparator as a staged register, so the two cannot share this
+    * one vector operand. Hand the offset to the packer out of band and leave
+    * src[5] to the comparator alone; AGX2, whose hardware reads a register
+    * pair, keeps the combined form. */
+   const bool offset_present = !agx_is_null(packed_offset);
+   const uint8_t offset_xy =
+      packed_offset.type == AGX_INDEX_IMMEDIATE ? (uint8_t)packed_offset.value
+                                                : 0;
+
+   const bool g17p_split_offset =
+      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      packed_offset.type == AGX_INDEX_IMMEDIATE;
+
+   if (g17p_split_offset && !agx_is_null(compare))
+      packed_offset = agx_null();
+
+   if (!agx_is_null(compare) && !agx_is_null(packed_offset)) {
+      /* A 32-bit immediate inside a COLLECT is not a shape
+       * agx_validate_sources() models, and it exits the process rather than
+       * failing the shader closed. */
+      if (packed_offset.type == AGX_INDEX_IMMEDIATE)
+         packed_offset = agx_mov_imm(b, 32, packed_offset.value);
+
       compare_offset = agx_vec2(b, compare, packed_offset);
+   }
    else if (!agx_is_null(packed_offset))
       compare_offset = packed_offset;
    else if (!agx_is_null(compare))
@@ -4056,8 +4345,12 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    agx_instr *I = agx_texture_sample_to(
       b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
       agx_tex_dim(instr->sampler_dim, instr->is_array), lod_mode, 0,
-      !agx_is_null(packed_offset), !agx_is_null(compare),
+      offset_present, !agx_is_null(compare),
       instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
+
+   /* The packer reads the G17P offset from the instruction, not from src[5],
+    * so it survives being split away from the comparator above. */
+   I->offset_xy = offset_xy;
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
       I->op = AGX_OPCODE_TEXTURE_LOAD;
@@ -5603,6 +5896,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
 
+   agx_materialize_agx3_cf_constants(ctx);
+
    /* For correctness, lower uniform sources after copyprop (for correctness,
     * as copyprop creates uniform sources). To keep register pressure in
     * check, lower after CSE, since moves are cheaper than registers.
@@ -5684,6 +5979,13 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_lower_divergent_shuffle(ctx);
 
    agx_lower_pseudo(ctx);
+
+   /* AGX3's thread-private storage moves one 32-bit component per
+    * instruction, so a vector spill or scratch access has to become a run of
+    * scalar ones. Do it before the last-use pass, so each component's hints
+    * are computed against the instructions that actually survive. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      agx3_split_vector_stack_access(ctx);
 
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);
@@ -5855,6 +6157,55 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
    return true;
 }
 
+static bool
+agx_nir_lower_g17p_f16_classify(nir_builder *b, nir_alu_instr *alu,
+                                void *_data)
+{
+   if (alu->def.num_components != 1 ||
+       nir_src_bit_size(alu->src[0].src) != 16)
+      return false;
+
+   const bool is_nan =
+      alu->op == nir_op_fneu && nir_alu_srcs_equal(alu, alu, 0, 1);
+
+   bool is_inf = false;
+   nir_alu_instr *absolute = NULL;
+   if (alu->op == nir_op_feq) {
+      for (unsigned constant = 0; constant < 2; ++constant) {
+         const unsigned value = constant ^ 1;
+         nir_alu_instr *candidate = nir_src_as_alu(alu->src[value].src);
+         const double compare = nir_src_is_const(alu->src[constant].src)
+                                   ? nir_src_as_float(alu->src[constant].src)
+                                   : 0.0;
+
+         if (candidate && candidate->op == nir_op_fabs &&
+             nir_src_bit_size(candidate->src[0].src) == 16 &&
+             isinf(compare) && compare > 0.0) {
+            is_inf = true;
+            absolute = candidate;
+         }
+      }
+   }
+
+   if (!is_nan && !is_inf)
+      return false;
+
+   /* Classify the IEEE-754 binary16 encoding directly. Clearing the sign
+    * leaves +infinity at 0x7c00 and every NaN strictly above it. This is exact
+    * for quiet and signaling NaNs, both infinities, both zeros, subnormals,
+    * and finite values. Ordinary half compares stay on their native path. */
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *value = is_nan ? nir_ssa_for_alu_src(b, alu, 0)
+                           : nir_ssa_for_alu_src(b, absolute, 0);
+   nir_def *magnitude =
+      nir_iand_imm(b, nir_u2u32(b, value), UINT32_C(0x7fff));
+   nir_def *result = is_nan
+                        ? nir_ult(b, nir_imm_int(b, 0x7c00), magnitude)
+                        : nir_ieq_imm(b, magnitude, 0x7c00);
+   nir_def_replace(&alu->def, result);
+   return true;
+}
+
 /* Shared preprocessing with target-bounded subgroup choices. */
 static void
 agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
@@ -5901,6 +6252,11 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_opt_dce);
 
    NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   if (g17p) {
+      NIR_PASS(_, nir, nir_shader_alu_pass,
+               agx_nir_lower_g17p_f16_classify,
+               nir_metadata_control_flow, NULL);
+   }
    NIR_PASS(_, nir, nir_lower_frexp);
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
@@ -5950,7 +6306,12 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
 
    NIR_PASS(_, nir, nir_opt_sink, move_all);
    NIR_PASS(_, nir, nir_opt_move, move_all);
-   NIR_PASS(_, nir, agx_nir_lower_shared_bitsize);
+   /* Local-memory offsets are narrowed before the key-dependent optimizer so
+    * conversion lowering and cleanup remain part of the normal pipeline.
+    * G17P ordinary loads/stores use scalar-element indices; atomics retain
+    * their byte-addressed encoding.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_shared_bitsize, g17p);
 }
 
 void

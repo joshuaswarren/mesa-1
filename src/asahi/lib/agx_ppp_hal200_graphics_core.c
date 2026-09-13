@@ -225,10 +225,12 @@ agx_ppp_hal200_output_select_pack(enum agx_chip chip,
                                   bool fragment_varyings,
                                   bool fragment_reads_z, uint32_t *out)
 {
+   const uint32_t clip_distances = UINT32_C(0xffff);
    const uint32_t point_size = UINT32_C(1) << 18;
    const uint32_t viewport_target = UINT32_C(1) << 19;
    const uint32_t render_target = UINT32_C(1) << 20;
-   const uint32_t vertex_mask = point_size | viewport_target | render_target;
+   const uint32_t vertex_mask = clip_distances | point_size |
+                                viewport_target | render_target;
 
    if (chip != AGX_CHIP_G17P || !out ||
        (vertex_output_select & ~vertex_mask) ||

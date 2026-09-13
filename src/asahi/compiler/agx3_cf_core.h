@@ -47,7 +47,19 @@ enum agx3_cf_fcond {
    AGX3_CF_FCOND_GT = 2,
 };
 
-#define AGX3_CF_MAX_LENGTH 10u
+/*
+ * The longest control-flow form is fourteen bytes: `fcmp.ep2`, which is what
+ * an absolute-valued comparison source moves to.  This was 10 -- the length
+ * of `fcmp.ep1` -- so agx3_cf_fcmp_reg_abs() wrote four bytes past the end of
+ * every caller's buffer, all of which are sized by this macro.  Nothing
+ * caught it because the overrun lands in stack padding on the paths that
+ * reach it; building a caller with a stack protector aborts on the spot.
+ */
+#define AGX3_CF_MAX_LENGTH 14u
+/* `b`/`bn`, whose displacement agx3_cf_patch_branch() fills in later. This is
+ * the size a caller must RESERVE for a forward branch, which is not the same
+ * number as the buffer bound above. */
+#define AGX3_CF_BRANCH_LENGTH 10u
 #define AGX3_CF_MAX_FLAG_SLOT 5u /* slots 0..5 are witnessed */
 
 struct agx3_cf_source_hints {
@@ -130,11 +142,37 @@ bool agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc,
                           const struct agx3_cf_source_hints hints[2],
                           uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
+/* G17P register comparison with an absolute value on either f32 source. ABS
+ * is a longer encoding point (six bytes -> fourteen, ep0 -> ep2) carrying f14
+ * and f31, not a bit on the short form; see agx3_cf_core.c for the ladder. */
+bool agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc,
+                          enum agx3_cf_fcond cond, bool or_nan, unsigned slot,
+                          const uint16_t src[2], const bool abs[2],
+                          const struct agx3_cf_source_hints hints[2],
+                          uint16_t wait_mask,
+                          uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
 /* Float comparison against literal zero, retaining the actual source lifetime. */
 bool agx3_cf_fcmp_zero(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                         bool or_nan, unsigned slot, uint16_t source, bool source_16,
                         struct agx3_cf_source_hints hint, uint16_t wait_mask,
                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
+/* The same point comparing against a non-zero minifloat constant. f18 is the
+ * second operand and used to be pinned to zero, so `if (x < 1.0)` had no
+ * encoding at all -- the float twin of the icmp defect above. */
+bool agx3_cf_fcmp_zero_imm(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                           bool or_nan, unsigned slot, uint16_t source,
+                           bool source_16, uint8_t minifloat,
+                           struct agx3_cf_source_hints hint,
+                           uint16_t wait_mask,
+                           uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+bool agx3_cf_fcmp_minifloat(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                            bool or_nan, unsigned slot, uint16_t source,
+                            bool source_16, uint8_t minifloat,
+                            struct agx3_cf_source_hints hint,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 
 /* Exec-mask stack. cndst pushes (an `if`), with push count 1 or 2 (2 = a loop
  * entry that reserves a nesting level). cndlt is the loop/break test (push
@@ -145,6 +183,42 @@ bool agx3_cf_cndst(enum agx_isa_encoding enc, unsigned slot, bool invert,
 bool agx3_cf_cndlt(enum agx_isa_encoding enc, unsigned slot, bool invert,
                    uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 bool agx3_cf_cndef(enum agx_isa_encoding enc, uint8_t out[AGX3_CF_MAX_LENGTH],
+                   uint8_t *len);
+
+/*
+ * cndcf is cndlt's general form: the lanes it selects leave the current
+ * construct and stay inactive until `level_count` architectural exec-mask
+ * levels have been popped. cndlt is the compact four-byte encoding of exactly
+ * `level_count == 2`, which is why an ordinary loop break and the loop's own
+ * continue test both use it -- a loop owns two levels. Anything deeper needs
+ * this form, whose count field is sixteen bits wide.
+ *
+ * Witnessed with `metal-nt -arch applegpu_g17p` (.tmp/g17p-deep-break-evidence)
+ * from MSL that breaks out of a loop from inside 2..7 nested ifs, each
+ * condition reading a distinct `device const uint *` element so the Metal
+ * compiler cannot flatten them.  Apple's bytes, and ours, byte for byte:
+ *
+ *   ifs=2  cndcf slot1 count3   8f 05 54 03 00 01
+ *   ifs=3  cndcf slot1 count4   8f 05 54 04 00 01
+ *   ifs=4  cndcf slot1 count5   8f 05 54 05 00 01
+ *   ifs=5  cndcf slot1 count6   8f 05 54 06 00 01
+ *   ifs=6  cndcf slot1 count7   8f 05 54 07 00 01
+ *   ifs=7  cndcf slot1 count8   8f 05 54 08 00 01
+ *   break in an else arm        8f 05 54 03 00 09   (invert = f0, bit 43)
+ *   break in an INNER loop      8f 05 54 03 00 02   (slot 2, count still 3)
+ *
+ * The count is the number of levels open *inside the innermost loop*, loop
+ * included: an outer loop's levels do not raise it, which is exactly how
+ * Mesa's per-loop `loop_nesting` counter is defined. Negating the innermost
+ * condition changes the compare and leaves these bytes identical, so the
+ * break's sense lives in the compare, not in the count.
+ *
+ * The AGX3c constants mirror the sibling cnd encoders here (selector f3 = 28
+ * from AGX3c.xml's `f3eq28` predicate, as cndlt uses 31 and cndst 33); AGX3c
+ * parts have no captured witness for this operation.
+ */
+bool agx3_cf_cndcf(enum agx_isa_encoding enc, unsigned slot, bool invert,
+                   unsigned level_count, uint8_t out[AGX3_CF_MAX_LENGTH],
                    uint8_t *len);
 bool agx3_cf_cndend(enum agx_isa_encoding enc, unsigned pop_count,
                     uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);

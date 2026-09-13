@@ -388,6 +388,7 @@ dri2_drm_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
 static EGLint
 dri2_drm_query_buffer_age(_EGLDisplay *disp, _EGLSurface *surface)
 {
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surface);
 
    if (get_back_bo(dri2_surf) < 0) {
@@ -395,7 +396,10 @@ dri2_drm_query_buffer_age(_EGLDisplay *disp, _EGLSurface *surface)
       return -1;
    }
 
-   return dri2_surf->back->age;
+   /* Querying age also acquires the back buffer.  Preserve that side effect,
+    * but make Honeykrisp/Zink clients redraw the complete buffer until its
+    * partial-redraw path is qualified. */
+   return dri2_dpy->force_zero_buffer_age ? 0 : dri2_surf->back->age;
 }
 
 static _EGLImage *

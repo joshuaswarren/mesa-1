@@ -31,23 +31,45 @@ desc_ok(enum agx_isa_encoding enc, const struct agx3_scs_desc *d,
         bool is_load)
 {
    const unsigned slots = slot_count(enc);
-   const bool indexed =
-      d != NULL && d->address_kind == AGX3_SCS_ADDRESS_UNIFORM_INDEXED;
-   if (d == NULL || slots == 0 || !width_ok(d->width) || d->data >= 256 ||
+   if (d == NULL || slots == 0)
+      return false;
+
+   const bool uniform_indexed =
+      d->address_kind == AGX3_SCS_ADDRESS_UNIFORM_INDEXED;
+   const bool reg_indexed =
+      d->address_kind == AGX3_SCS_ADDRESS_REGISTER_INDEXED;
+   const bool reg_base = d->address_kind == AGX3_SCS_ADDRESS_REGISTER_BASE;
+   const bool register_based = reg_indexed || reg_base;
+   const bool has_index = uniform_indexed || reg_indexed;
+   const bool indexed = uniform_indexed;
+
+   /* Only AGX3b register-base and vector forms are witnessed; AGX3c fails
+    * closed on both, preserving this core's previous AGX3c boundary. */
+   if ((register_based || d->component_mask > 1) &&
+       enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   if (!width_ok(d->width) || d->data >= 256 ||
        d->wait_mask >= (1u << slots) ||
        (is_load && (d->slot < 1 || d->slot > slots)) ||
        (!is_load && d->slot != 0) || (is_load && d->value_kill) ||
        (!is_load && d->zero_extend) ||
        (!is_load && d->c_load_marker) ||
        (enc != AGX_ISA_ENCODING_AGX3C &&
-        (d->value_kill || d->zero_extend || d->c_load_marker)) ||
-       (d->address_kind != AGX3_SCS_ADDRESS_DIRECT && !indexed) ||
-       (!indexed && (d->index != 0 || d->uniform_base != 0)) ||
-       (indexed &&
-        (d->uniform_base >= 512 ||
-         d->index >=
-            (enc == AGX_ISA_ENCODING_AGX3B ? 192u : 512u) ||
-         d->value_kill)) ||
+        (d->zero_extend || d->c_load_marker)) ||
+       (d->address_kind != AGX3_SCS_ADDRESS_DIRECT && !indexed &&
+        !register_based) ||
+       (!has_index && d->index != 0) ||
+       (!uniform_indexed && d->uniform_base != 0) ||
+       (!register_based && d->base_register != 0) ||
+       (register_based && d->base_register >= 256) ||
+       (has_index &&
+        d->index >= (enc == AGX_ISA_ENCODING_AGX3B ? 192u : 512u)) ||
+       (uniform_indexed && (d->uniform_base >= 512 || d->value_kill)) ||
+       d->component_mask > 15 ||
+       d->address_selector > 4 ||
+       (!d->has_address_selector && register_based) ||
+       (d->has_address_selector && d->address_kind == AGX3_SCS_ADDRESS_DIRECT) ||
        (d->zero_extend &&
         (!indexed || !is_load || d->width == AGX3_MEM_W32)))
       return false;
@@ -75,10 +97,19 @@ encode(enum agx_isa_encoding enc, const struct agx3_scs_desc *d,
    base[nb++] = (struct agx3_field_kv)KV(9, 2);
    const bool indexed =
       d->address_kind == AGX3_SCS_ADDRESS_UNIFORM_INDEXED;
-   base[nb++] = (struct agx3_field_kv)KV(23, indexed ? 2 : 1);
-   base[nb++] = (struct agx3_field_kv)KV(24, indexed ? 2 : 1);
-   base[nb++] = (struct agx3_field_kv)KV(38, indexed ? 3 : 1);
-   base[nb++] = (struct agx3_field_kv)KV(39, indexed ? 2 : 1);
+   const bool reg_indexed =
+      d->address_kind == AGX3_SCS_ADDRESS_REGISTER_INDEXED;
+   const bool reg_base = d->address_kind == AGX3_SCS_ADDRESS_REGISTER_BASE;
+   const bool register_based = reg_indexed || reg_base;
+   const bool slot_a_register = indexed || reg_indexed;
+   /* Slot A: 1 = immediate, 2 = register.  Slot B: 1 = immediate,
+    * 2 = register, 3 = uniform.  Matches all four witnessed combinations. */
+   base[nb++] = (struct agx3_field_kv)KV(23, slot_a_register ? 2 : 1);
+   base[nb++] = (struct agx3_field_kv)KV(24, slot_a_register ? 2 : 1);
+   base[nb++] =
+      (struct agx3_field_kv)KV(38, indexed ? 3 : (register_based ? 2 : 1));
+   base[nb++] =
+      (struct agx3_field_kv)KV(39, (indexed || register_based) ? 2 : 1);
    base[nb++] = (struct agx3_field_kv)KV(54, 1);
    if (enc == AGX_ISA_ENCODING_AGX3C) {
       base[nb++] = (struct agx3_field_kv)KV(45, 15);
@@ -90,13 +121,19 @@ encode(enum agx_isa_encoding enc, const struct agx3_scs_desc *d,
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->data);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
-   ov[n++] = (struct agx3_field_kv)KV(68, 1);
+   ov[n++] = (struct agx3_field_kv)KV(
+      68, d->component_mask ? d->component_mask : 1u);
    ov[n++] = (struct agx3_field_kv)KV(71, (uint16_t)d->byte_offset);
-   if (indexed) {
+   if (slot_a_register)
       ov[n++] = (struct agx3_field_kv)KV(16, d->index);
+   if (indexed)
       ov[n++] = (struct agx3_field_kv)KV(32, d->uniform_base);
+   if (register_based)
+      ov[n++] = (struct agx3_field_kv)KV(31, d->base_register);
+   if (d->has_address_selector)
+      ov[n++] = (struct agx3_field_kv)KV(70, d->address_selector);
+   else if (indexed)
       ov[n++] = (struct agx3_field_kv)KV(70, d->width);
-   }
    if (is_load) {
       ov[n++] = (struct agx3_field_kv)KV(12, d->slot);
       if (enc == AGX_ISA_ENCODING_AGX3C) {
@@ -282,6 +319,57 @@ decode(enum agx_isa_encoding enc, const uint8_t *bytes, size_t length,
          return false;
    }
 
+   /*
+    * Trial decode.  Every candidate is re-encoded and compared byte-for-byte,
+    * so a wrong guess fails closed instead of reporting a wrong field.  The
+    * first candidate is exactly what this decoder tried before -- the address
+    * kind read from the mode bit, a single component and no explicit selector
+    * -- so previously accepted encodings still take the same path and yield
+    * the same descriptor.
+    *
+    * Later candidates cover the register-base kinds, whose base register
+    * shares slot B with the uniform field, and the vector component masks.
+    * Only AGX3b register-base forms are witnessed, matching desc_ok.
+    */
+   static const uint8_t mask_candidates[] = {1, 3, 15, 2, 4, 5, 6, 7,
+                                             8, 9, 10, 11, 12, 13, 14};
+   const enum agx3_scs_address_kind decoded_kind = d.address_kind;
+   const uint16_t decoded_index = d.index;
+   const uint16_t decoded_uniform = d.uniform_base;
+   /* Slot B's register operand occupies the low byte of the same word the
+    * uniform base is read from. */
+   const uint16_t slot_b_register = (uint16_t)(w2 & 0xffu);
+
+   for (unsigned kind_try = 0; kind_try < 3; ++kind_try) {
+      enum agx3_scs_address_kind kind = decoded_kind;
+      uint16_t index = decoded_index, uniform = decoded_uniform, base = 0;
+
+      if (kind_try == 1) {
+         if (enc != AGX_ISA_ENCODING_AGX3B)
+            continue;
+         kind = AGX3_SCS_ADDRESS_REGISTER_INDEXED;
+         index = decoded_index;
+         uniform = 0;
+         base = slot_b_register;
+      } else if (kind_try == 2) {
+         if (enc != AGX_ISA_ENCODING_AGX3B)
+            continue;
+         kind = AGX3_SCS_ADDRESS_REGISTER_BASE;
+         index = 0;
+         uniform = 0;
+         base = slot_b_register;
+      }
+
+      for (unsigned m = 0; m < sizeof(mask_candidates) / sizeof(uint8_t); ++m) {
+         for (unsigned sel = 0; sel < 6; ++sel) {
+            d.address_kind = kind;
+            d.index = index;
+            d.uniform_base = uniform;
+            d.base_register = base;
+            d.component_mask = mask_candidates[m];
+            d.has_address_selector = sel != 0;
+            d.address_selector = sel != 0 ? (uint8_t)(sel - 1) : 0u;
+
    for (unsigned slot = first_slot; slot <= last_slot; ++slot) {
       if (!(is_load && enc == AGX_ISA_ENCODING_AGX3C))
          d.slot = (uint8_t)slot;
@@ -299,6 +387,9 @@ decode(enum agx_isa_encoding enc, const uint8_t *bytes, size_t length,
       }
       if (is_load && enc == AGX_ISA_ENCODING_AGX3C)
          break;
+   }
+         }
+      }
    }
    return false;
 }

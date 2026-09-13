@@ -531,6 +531,15 @@ agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
  * image. Keep that reverse copy restricted to the original WSI binding shape;
  * its later swap is the operation that supplies the direct resolve target.
  */
+static bool
+agx_g17p_rgba8_resolve_format(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+          format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+          format == PIPE_FORMAT_R8G8B8X8_UNORM ||
+          format == PIPE_FORMAT_B8G8R8X8_UNORM;
+}
+
 bool
 agx_g17p_direct_resolve_blit_shape(const struct pipe_blit_info *info,
                                    bool source_multisampled)
@@ -551,8 +560,7 @@ agx_g17p_direct_resolve_blit_shape(const struct pipe_blit_info *info,
    return (util_res_sample_count(msaa) == 2 ||
            util_res_sample_count(msaa) == 4) &&
           util_res_sample_count(single) == 1 && src->format == dst->format &&
-          (src->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
-           src->format == PIPE_FORMAT_B8G8R8A8_UNORM) &&
+          agx_g17p_rgba8_resolve_format(src->format) &&
           (source_multisampled || wsi_seed) &&
           (single->target == PIPE_TEXTURE_2D ||
            single->target == PIPE_TEXTURE_RECT) &&
@@ -612,8 +620,7 @@ agx_g17p_staged_resolve_blit_shape(const struct pipe_blit_info *info)
           (src->target == PIPE_TEXTURE_2D ||
            src->target == PIPE_TEXTURE_RECT) &&
           src->last_level == 0 && src->array_size == 1 && src->depth0 == 1 &&
-          (src->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
-           src->format == PIPE_FORMAT_B8G8R8A8_UNORM) &&
+          agx_g17p_rgba8_resolve_format(src->format) &&
           info->src.level == 0 && info->src.box.z == 0 &&
           info->src.box.depth == 1 && info->src.format == src->format &&
           !(info->mask & ~PIPE_MASK_RGBA) && (info->mask & PIPE_MASK_RGBA) &&

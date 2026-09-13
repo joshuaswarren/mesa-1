@@ -189,6 +189,16 @@ struct PACKED agx_stage_uniforms {
    /* If lowered to bindless, sampler index in the heap */
    uint16_t sampler_handle[PIPE_MAX_SAMPLERS];
 
+   /* HAL200 register-indirect texture operands name local table slots. */
+   uint16_t texture_handle[PIPE_MAX_SAMPLERS];
+
+   /* G17P custom-border emulation uses a clamp-to-zero companion sampler.
+    * Negative means that the bound sampler has a native standard border. */
+   int16_t custom_border_sampler_handle[PIPE_MAX_SAMPLERS];
+
+   /* Logical API colour returned after texture swizzling. */
+   uint32_t custom_border[PIPE_MAX_SAMPLERS][4];
+
    /* LOD bias as float16 */
    uint16_t lod_bias[PIPE_MAX_SAMPLERS];
 };
@@ -242,9 +252,12 @@ struct agx_compiled_shader {
     */
    bool refusal_reported;
 
-   /* G17P vertex programs reserve uniform halves 0..7 for the native texture
-    * and sampler table pointers. */
-   bool g17p_vertex_texture_resources;
+   /* G17P graphics and compute programs reserve uniform halves 0..7 for the
+    * native texture and sampler table pointers when they access resources. */
+   bool g17p_texture_resources;
+
+   /* The variant contains Honeykrisp-style custom-border emulation. */
+   bool g17p_custom_border_emulation;
 
    /* Uniforms the driver must push */
    unsigned push_range_count;
@@ -461,6 +474,13 @@ struct agx_batch {
    struct agx_pool pool, pipeline_pool;
    struct util_dynarray g17p_vdm_aliases;
 
+   /* With AGX_DBG_FAULTTRACE, retain the small DRM command wrapper while this
+    * batch is in flight. Its referenced BOs and encoders already remain live
+    * until batch cleanup, allowing an asynchronous queue fault to be decoded
+    * when a later submit observes it. */
+   struct util_dynarray faulttrace_cmdbuf;
+   uint64_t faulttrace_seqid;
+
    /* We may enqueue both CDM and VDM work, possibly to the same batch for
     * geometry/tessellation.
     */
@@ -512,6 +532,7 @@ struct asahi_vs_shader_key {
     * compute job used to feed a TCS or GS.
     */
    bool hw;
+   bool custom_borders;
 };
 
 struct agx_vertex_elements {
@@ -526,7 +547,8 @@ struct agx_vertex_elements {
 struct asahi_fs_shader_key {
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
-   bool padding[7];
+   bool custom_borders;
+   bool padding[6];
 };
 static_assert(sizeof(struct asahi_fs_shader_key) == 40, "no holes");
 
@@ -884,6 +906,9 @@ struct agx_sampler_state {
    /* Packed custom border colour, or zero if none is required */
    struct agx_border_packed border;
 
+   /* Logical colour consumed by G17P's shader-backed border emulation. */
+   uint32_t custom_border[4];
+
    /* LOD bias packed as fp16, the form we'll pass to the shader */
    uint16_t lod_bias_as_fp16;
 };
@@ -1054,10 +1079,13 @@ bool agx_nir_layout_uniforms(nir_shader *shader,
 struct agx_lower_bindings_options {
    bool *uses_bindless_samplers;
    bool g17p_plain_txf_crawl;
+   bool g17p_native_sampler_handles;
+   unsigned bindful_sampler_count;
 };
 
 bool agx_nir_lower_bindings(nir_shader *shader,
-                            struct agx_lower_bindings_options *options);
+                       struct agx_lower_bindings_options *options);
+bool agx_nir_lower_custom_border_g17p(nir_shader *shader);
 bool agx_nir_rebind_g17p_texture_crawls(nir_shader *shader);
 
 bool agx_batch_is_active(struct agx_batch *batch);

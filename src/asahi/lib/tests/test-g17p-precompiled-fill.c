@@ -2,6 +2,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "libagx_shaders.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -52,6 +53,9 @@ main(void)
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
+          i == LIBAGX_COPY_IMAGE ||
+          i == LIBAGX_MIPMAP_UNORM8X4 ||
+          i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -69,6 +73,117 @@ main(void)
          CHECK(libagx_g17p[i] == NULL);
    }
 
+   /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
+    * copy-image launch per slice. Its native 2D grid and CPU-reduced tile
+    * geometry eliminate per-element division, trimming the binary from 4,056
+    * to 1,670 bytes and register use from 28 to 22 GPRs. If this precompiled
+    * entry disappears, Honeykrisp falls back to a command recording failure.
+    * Pin its launch ABI and complete generated binary so the fast path cannot
+    * silently drift while the inventory test stays green. */
+   const uint32_t *copy_image_blob =
+      libagx_g17p[LIBAGX_COPY_IMAGE];
+   CHECK(copy_image_blob != NULL);
+   if (!copy_image_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *copy_image_info =
+      (const void *)copy_image_blob;
+   const uint8_t *copy_image_binary =
+      (const uint8_t *)copy_image_blob + sizeof(*copy_image_info);
+   static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(copy_image_info->preamble_offset == 0);
+   CHECK(copy_image_info->main_offset == 0);
+   CHECK(copy_image_info->main_size == 1670);
+   CHECK(copy_image_info->binary_size == 1670);
+   CHECK(copy_image_info->nr_gprs == 22);
+   CHECK(copy_image_info->nr_preamble_gprs == 0);
+   CHECK(copy_image_info->push_count == 42);
+   CHECK(copy_image_info->workgroup_size[0] == 32);
+   CHECK(copy_image_info->workgroup_size[1] == 1);
+   CHECK(copy_image_info->workgroup_size[2] == 1);
+   CHECK(copy_image_info->local_size == 0);
+   CHECK(copy_image_info->imageblock_stride == 0);
+   CHECK(!copy_image_info->uses_txf);
+   CHECK(copy_image_info->agx3_staging_known);
+   CHECK(copy_image_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
+         UINT64_C(0x1807d7af823af8ae));
+   CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The G17P UNORM8 mip kernel replaces one firmware render job per level
+    * with a launch in the command buffer's merged compute stream. Its native
+    * 2D grid and CPU-reduced tile geometry avoid all per-pixel division,
+    * trimming the binary from 6,506 to 3,234 bytes and register use from 52 to
+    * 38 GPRs.
+    * Pin the complete binary and argument ABI: losing this table entry
+    * silently puts STK's thousands of startup mip renders back on the
+    * graphics fallback. */
+   const uint32_t *mipmap_blob =
+      libagx_g17p[LIBAGX_MIPMAP_UNORM8X4];
+   CHECK(mipmap_blob != NULL);
+   if (!mipmap_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *mipmap_info =
+      (const void *)mipmap_blob;
+   const uint8_t *mipmap_binary =
+      (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
+   CHECK(mipmap_info->preamble_offset == 0);
+   CHECK(mipmap_info->main_offset == 0);
+   CHECK(mipmap_info->main_size == 3234);
+   CHECK(mipmap_info->binary_size == 3234);
+   CHECK(mipmap_info->nr_gprs == 38);
+   CHECK(mipmap_info->nr_preamble_gprs == 0);
+   CHECK(mipmap_info->push_count == 28);
+   CHECK(mipmap_info->workgroup_size[0] == 32);
+   CHECK(mipmap_info->workgroup_size[1] == 1);
+   CHECK(mipmap_info->workgroup_size[2] == 1);
+   CHECK(mipmap_info->local_size == 0);
+   CHECK(mipmap_info->imageblock_stride == 0);
+   CHECK(!mipmap_info->uses_txf);
+   CHECK(mipmap_info->agx3_staging_known);
+   CHECK(mipmap_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
+         UINT64_C(0xb105d8e80674aeec));
+   CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The odd-extent companion consumes CPU-precomputed Q8 axes and reduced
+    * tile geometry. Its bounded 32-bit kernel is substantially smaller than
+    * the discarded divide-based prototype (3,474 bytes / 36 GPRs versus
+    * 14,854 / 66) while retaining the same 56-byte push ABI as the even
+    * kernel. */
+   const uint32_t *odd_mipmap_blob =
+      libagx_g17p[LIBAGX_MIPMAP_UNORM8X4_ODD];
+   CHECK(odd_mipmap_blob != NULL);
+   if (!odd_mipmap_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *odd_mipmap_info =
+      (const void *)odd_mipmap_blob;
+   const uint8_t *odd_mipmap_binary =
+      (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
+   CHECK(odd_mipmap_info->preamble_offset == 0);
+   CHECK(odd_mipmap_info->main_offset == 0);
+   CHECK(odd_mipmap_info->main_size == 3474);
+   CHECK(odd_mipmap_info->binary_size == 3474);
+   CHECK(odd_mipmap_info->nr_gprs == 36);
+   CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
+   CHECK(odd_mipmap_info->push_count == 28);
+   CHECK(odd_mipmap_info->workgroup_size[0] == 32);
+   CHECK(odd_mipmap_info->workgroup_size[1] == 1);
+   CHECK(odd_mipmap_info->workgroup_size[2] == 1);
+   CHECK(odd_mipmap_info->local_size == 0);
+   CHECK(odd_mipmap_info->imageblock_stride == 0);
+   CHECK(!odd_mipmap_info->uses_txf);
+   CHECK(odd_mipmap_info->agx3_staging_known);
+   CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
+         UINT64_C(0xc1ff576c0980c0bb));
+   CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
+                   sizeof(copy_image_end),
+                copy_image_end, sizeof(copy_image_end)) == 0);
+
    const uint32_t *byte_count_blob =
       libagx_g17p[LIBAGX_DRAW_INDIRECT_BYTE_COUNT];
    CHECK(byte_count_blob != NULL);
@@ -83,7 +198,7 @@ main(void)
    CHECK(byte_count_info->main_offset == 0);
    CHECK(byte_count_info->main_size == 332);
    CHECK(byte_count_info->binary_size == 332);
-   CHECK(byte_count_info->nr_gprs == 12);
+   CHECK(byte_count_info->nr_gprs == 16);
    CHECK(byte_count_info->nr_preamble_gprs == 0);
    CHECK(byte_count_info->push_count == 16);
    CHECK(byte_count_info->workgroup_size[0] == 1);
@@ -95,7 +210,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0x54af89fd897c5ccd));
+         UINT64_C(0x4a38f5b56045209b));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -109,12 +224,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3030,
-       UINT64_C(0x2682982277209dfc)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3082,
-       UINT64_C(0x673af284dd4e3784)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3080,
-       UINT64_C(0x68ae07cd3c59a05a)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3278,
+       UINT64_C(0x7e03d6da51b3ba53)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3350,
+       UINT64_C(0xfc02bf46ab54d6e4)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3348,
+       UINT64_C(0x7b6b63e6e34e4782)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -127,13 +242,20 @@ main(void)
          (const void *)robust_blob;
       const uint8_t *robust_binary =
          (const uint8_t *)robust_blob + sizeof(*robust_info);
+      const uint64_t robust_hash =
+         fnv1a64(robust_binary, robust_info->binary_size);
+      if (robust_info->binary_size != robust_index[i].size ||
+          robust_hash != robust_index[i].hash)
+         fprintf(stderr,
+                 "robust-index[%u]: size=%u hash=%#" PRIx64 "\n", i,
+                 robust_info->binary_size, robust_hash);
       CHECK(robust_info->preamble_offset == 0);
       CHECK(robust_info->main_offset == 0);
       CHECK(robust_info->main_size == robust_index[i].size);
       CHECK(robust_info->binary_size == robust_index[i].size);
       CHECK(robust_info->nr_gprs == 56);
       CHECK(robust_info->nr_preamble_gprs == 0);
-      CHECK(robust_info->push_count == 28);
+      CHECK(robust_info->push_count == 32);
       CHECK(robust_info->workgroup_size[0] == 32);
       CHECK(robust_info->workgroup_size[1] == 1);
       CHECK(robust_info->workgroup_size[2] == 1);
@@ -142,8 +264,7 @@ main(void)
       CHECK(!robust_info->uses_txf);
       CHECK(robust_info->agx3_staging_known);
       CHECK(robust_info->agx3_staging_halfs == 0);
-      CHECK(fnv1a64(robust_binary, robust_info->binary_size) ==
-            robust_index[i].hash);
+      CHECK(robust_hash == robust_index[i].hash);
       CHECK(memcmp(robust_binary + robust_info->binary_size -
                       sizeof(robust_end),
                    robust_end, sizeof(robust_end)) == 0);
@@ -213,8 +334,8 @@ main(void)
       (const uint8_t *)ia_blob + sizeof(*ia_info);
    CHECK(ia_info->preamble_offset == 0);
    CHECK(ia_info->main_offset == 0);
-   CHECK(ia_info->main_size == 1360);
-   CHECK(ia_info->binary_size == 1360);
+   CHECK(ia_info->main_size == 1364);
+   CHECK(ia_info->binary_size == 1364);
    CHECK(ia_info->nr_gprs == 26);
    CHECK(ia_info->nr_preamble_gprs == 0);
    CHECK(ia_info->push_count == 28);
@@ -227,7 +348,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0x3d4ea3afaa2e9e27));
+         UINT64_C(0xf86f3a06246d7ee3));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -246,8 +367,16 @@ main(void)
       uint16_t local_size;
       uint64_t hash;
    } statistics[] = {
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2938, 3066, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xd75a8ff635144550)},
+      /* Two bytes longer than it used to be, and one hash apart: the restart
+       * kernel breaks out of its loop from inside an enclosing block, and
+       * that break moved off the four-byte CNDLT (which spends only the
+       * loop's own two exec-mask levels) onto the six-byte CNDCF that carries
+       * a level count. The single added instruction is
+       * `8f 05 54 03 00 09` at +0x2c8 -- slot 1, inverted, three levels --
+       * which is byte-for-byte one of Apple's own applegpu_g17p encodings
+       * (see agx3_cf_cndcf()). Nothing else in the program moved. */
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2948, 3076, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0x726819b369700d85)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0x3b6988993fef71a1)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

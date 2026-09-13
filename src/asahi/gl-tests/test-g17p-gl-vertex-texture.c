@@ -15,6 +15,31 @@
 #define WIDTH  8
 #define HEIGHT 8
 
+static void
+print_driver_provenance(void)
+{
+   const GLubyte *version = glGetString(GL_VERSION);
+   printf("vertex-texture GL_VERSION: %s\n", version ? (const char *)version
+                                                     : "(null)");
+
+   FILE *maps = fopen("/proc/self/maps", "r");
+   if (!maps) {
+      perror("vertex-texture fopen(/proc/self/maps)");
+      return;
+   }
+
+   char *line = NULL;
+   size_t capacity = 0;
+   while (getline(&line, &capacity, maps) >= 0) {
+      if (strstr(line, "asahi_dri.so") || strstr(line, "libgallium-"))
+         printf("vertex-texture driver map: %s", line);
+   }
+
+   free(line);
+   fclose(maps);
+   fflush(stdout);
+}
+
 static GLuint
 compile_shader(GLenum stage, const char *source)
 {
@@ -111,6 +136,8 @@ main(void)
    if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
        !eglMakeCurrent(display, surface, surface, context))
       return 1;
+
+   print_driver_provenance();
 
    GLuint program = make_program();
    if (!program)

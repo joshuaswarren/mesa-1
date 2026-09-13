@@ -162,8 +162,8 @@ struct agx3_imad_desc {
    bool src_a_16;      /* multiplicand is a single 16-bit half */
    /*
     * f28: widen the multiplicand by sign rather than by zero. Only meaningful
-    * when the operand is narrower than the product, so a 32-bit multiply
-    * rejects it.
+    * when the operand is narrower than the product: 16->32 and 32->64 use it,
+    * while width-matched products reject it.
     */
    bool src_a_sign_extend;
    uint8_t multiplier; /* constant multiplied by src_a (immediate form) */
@@ -199,6 +199,23 @@ struct agx3_imad_desc {
    bool src_c_16;      /* addend is a single 16-bit half */
    bool src_c_64;      /* addend is a 64-bit register pair (slot-C width 3) */
    bool src_c_sign_extend; /* narrow addend is sign- rather than zero-extended */
+   /*
+    * Subtract the addend instead of adding it: `a*b - c`.  Apple spells this
+    * as a separate instruction, `imsub`, which AGX3b.xml already carries with
+    * a field layout identical to `imadd` -- only bit 7 of the opcode differs
+    * (imadd 0x9f, imsub 0x1f).  metal-nt -arch applegpu_g17p, one variable per
+    * kernel, everything else held fixed:
+    *
+    *   a*b + c   9f 00 56 00 02 08 00 40 d0 2f 2a 00
+    *   a*b - c   1f 00 56 00 02 08 00 40 d0 2f 2a 00
+    *   a*b + 1   9f 00 56 00 02 08 00 08 d0 26 0a 00
+    *   a*b - 1   1f 00 56 00 02 08 00 08 d0 26 0a 00
+    *
+    * so the same bit serves an immediate and a register addend.  This matches
+    * AGX2, where agx_pack.c allows `neg` only on IMAD's src[2] and puts it in
+    * a dedicated bit (bit 27) rather than treating it as a source modifier.
+    */
+   bool negate_addend;
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
 };
 

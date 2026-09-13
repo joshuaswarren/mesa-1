@@ -123,6 +123,7 @@ extern "C" {
 extern uint32_t zink_debug;
 extern bool zink_tracing;
 
+
 #ifdef __cplusplus
 }
 #endif
@@ -264,6 +265,45 @@ enum zink_debug {
    ZINK_DEBUG_NOGENERAL = (1<<22),
    ZINK_DEBUG_RPSTORES = (1<<23),
 };
+
+/* Bisect harness for ZINK_DEBUG=sync.
+ *
+ * `sync` is not one switch: it arms six independent sites, and the three in
+ * zink_draw.cpp do two separable things -- they end the render pass and they
+ * emit an all-commands memory barrier. On a driver where a barrier is a
+ * control-stream boundary those are different operations with different costs,
+ * so a workload that only needs one of them cannot be told apart while the
+ * flag arms all nine at once. ZINK_SYNC_SITES is a mask over them, default
+ * all-on, so `sync` behaves exactly as before unless the mask is set.
+ */
+enum zink_sync_site {
+   /* zink_context.c: barrier before a buffer copy, an image map/transfer and
+    * a resource copy. */
+   ZINK_SYNC_SITE_COPY_BUFFER      = (1 << 0),
+   ZINK_SYNC_SITE_COPY_IMAGE_MAP   = (1 << 1),
+   ZINK_SYNC_SITE_COPY_RESOURCE    = (1 << 2),
+   /* zink_draw.cpp: zink_draw(), zink_draw_mesh_tasks() and
+    * zink_launch_grid(). Each ends the render pass and then emits the
+    * barrier; the two halves are separately maskable because on a driver
+    * whose barrier is a control-stream boundary they are not the same
+    * operation. */
+   ZINK_SYNC_SITE_DRAW_BARRIER     = (1 << 3),
+   ZINK_SYNC_SITE_MESH_BARRIER     = (1 << 4),
+   ZINK_SYNC_SITE_DISPATCH_BARRIER = (1 << 5),
+   ZINK_SYNC_SITE_DRAW_ENDRP       = (1 << 6),
+   ZINK_SYNC_SITE_MESH_ENDRP       = (1 << 7),
+   ZINK_SYNC_SITE_DISPATCH_ENDRP   = (1 << 8),
+   ZINK_SYNC_SITE_ALL              = (1 << 9) - 1,
+};
+
+extern uint32_t zink_sync_sites;
+
+static inline bool
+zink_sync_site_armed(enum zink_sync_site site)
+{
+   return (zink_debug & ZINK_DEBUG_SYNC) && (zink_sync_sites & site);
+}
+
 
 enum zink_pv_emulation_primitive {
    ZINK_PVE_PRIMITIVE_NONE = 0,

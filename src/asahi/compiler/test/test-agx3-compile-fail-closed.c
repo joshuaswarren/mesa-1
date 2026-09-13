@@ -4,9 +4,12 @@
  */
 
 #include "agx_compile.h"
+#include "agx3_cf_core.h"
 #include "agx_compiler.h"
 #include "nir_builder.h"
+#include "util/half_float.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -470,8 +473,16 @@ check_g17p_subgroup_quad_compute(bool valid_lane)
    nir_def *lane = nir_load_subgroup_invocation(&b);
    nir_def *horizontal = nir_quad_swap_horizontal(&b, lane);
    nir_def *vertical = nir_quad_swap_vertical(&b, lane);
+   /*
+    * The lane is f29 on the quad forms exactly as on the SIMD ones, and
+    * Apple's own compiler encodes quad_broadcast(a, 4) as f29 = 4 -- a lane
+    * past the end of a quad is undefined behaviour in the source language,
+    * not something the ISA refuses. What the field genuinely cannot hold is
+    * a lane above seven bits, because the eighth spills into the source
+    * register, so that is what this checks.
+    */
    nir_def *broadcast =
-      nir_quad_broadcast(&b, lane, nir_imm_int(&b, valid_lane ? 3 : 4));
+      nir_quad_broadcast(&b, lane, nir_imm_int(&b, valid_lane ? 3 : 0x80));
    nir_def *sum = nir_iadd(&b, nir_iadd(&b, horizontal, vertical), broadcast);
    nir_store_global(&b, sum, nir_imm_int64(&b, 0x2000),
                     .align_mul = sizeof(uint32_t));
@@ -930,9 +941,13 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
          valid = false;
       }
 
-      /* hk_g17p_compute_uniform_ranges() refuses an odd base or size. */
-      if (valid && ((rodata->base_uniform & 1) != 0 ||
-                    (rodata->size_16 & 1) != 0 || rodata->size_16 > 512)) {
+      /* G17P's dword loader covers an odd final half with the binary's zeroed
+       * alignment padding, but its destination base remains dword aligned. */
+      const uint32_t loaded_halfs = ((uint32_t)rodata->size_16 + 1) & ~1u;
+      if (valid && ((rodata->base_uniform & 1) != 0 || loaded_halfs > 512 ||
+                    rodata->base_uniform > 512 - loaded_halfs ||
+                    (uint64_t)loaded_halfs * 2 >
+                       (uint64_t)part.info.binary_size - rodata->offset)) {
          fprintf(stderr,
                  "AGX3 constant-data rodata range (base %u, size_16 %u) is "
                  "not bindable by hk_g17p_compute_uniform_ranges()\n",
@@ -1292,6 +1307,53 @@ check_half_fma_compute(void)
 }
 
 static bool
+check_pk_immediate_fma_sequence(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P CTS pk_immediate FMA sequence");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *zero = nir_imm_floatN_t(&b, 0.0, 16);
+   nir_def *one = nir_imm_floatN_t(&b, 1.0, 16);
+   nir_def *two = nir_imm_floatN_t(&b, 2.0, 16);
+   nir_def *a = nir_load_global(&b, 2, 16, nir_imm_int64(&b, 0x1000),
+                                .align_mul = sizeof(uint32_t));
+   nir_def *multipliers[] = {
+      nir_vec2(&b, two, two),
+      nir_vec2(&b, zero, two),
+      nir_vec2(&b, two, zero),
+      nir_vec2(&b, two, one),
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(multipliers); ++i) {
+      nir_def *address = nir_imm_int64(&b, 0x2000 + i * sizeof(uint32_t));
+      nir_def *addend = nir_load_global(&b, 2, 16, address,
+                                        .align_mul = sizeof(uint32_t));
+      nir_store_global(&b, nir_ffma(&b, multipliers[i], a, addend), address,
+                       .align_mul = sizeof(uint32_t));
+   }
+
+   nir_store_global(&b, a, nir_imm_int64(&b, 0x3000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary != NULL &&
+                      part.info.binary_size > 4 && part.info.stats.instrs >= 12;
+   if (!valid)
+      fprintf(stderr, "G17P CTS pk_immediate FMA sequence failed\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_half_fms_compute(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1339,6 +1401,11 @@ check_half_abs_compute(void)
       .align_mul = sizeof(uint32_t));
    nir_def *half = nir_f2f16(&b, input);
    nir_def *absolute = nir_fabs(&b, half);
+   /* Keep a native-half use alongside the widening use. This is the
+    * frexp/modf shape CTS found: before the G17P fabs lowering, the half use
+    * reached the packer as an unencodable fadd d16, abs(src16), -0. */
+   nir_store_global(&b, absolute, nir_imm_int64(&b, 0x3000),
+                    .align_mul = sizeof(uint16_t));
    nir_store_global(&b, nir_f2f32(&b, absolute), nir_imm_int64(&b, 0x2000),
                     .align_mul = sizeof(uint32_t));
    agx_preprocess_nir(b.shader);
@@ -1348,7 +1415,7 @@ check_half_abs_compute(void)
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
    const bool valid = compiled && part.binary != NULL &&
-                      part.info.binary_size > 4 && part.info.stats.instrs >= 5;
+                      part.info.binary_size > 4 && part.info.stats.instrs >= 7;
    if (!valid)
       fprintf(stderr, "G17P shaderFloat16 abs lowering failed\n");
 
@@ -1505,7 +1572,9 @@ check_half_compare_select_compute(void)
    nir_def *c = nir_f2f16(&b, nir_channel(&b, input, 1));
    nir_def *if_true = nir_f2f16(&b, nir_channel(&b, input, 2));
    nir_def *if_false = nir_f2f16(&b, nir_channel(&b, input, 3));
-   nir_def *selected = nir_bcsel(&b, nir_flt(&b, a, c), if_true, if_false);
+   /* frexp compares against an absolute half before selecting a mantissa. */
+   nir_def *selected =
+      nir_bcsel(&b, nir_flt(&b, a, nir_fabs(&b, c)), if_true, if_false);
    nir_store_global(&b, nir_f2f32(&b, selected),
                     nir_imm_int64(&b, 0x2000),
                     .align_mul = sizeof(uint32_t));
@@ -1517,6 +1586,94 @@ check_half_compare_select_compute(void)
    const bool valid = compiled && part.binary && part.info.stats.instrs >= 8;
    if (!valid)
       fprintf(stderr, "G17P shaderFloat16 comparison select lowering failed\n");
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
+check_half_isnan_isinf_compute(void)
+{
+   for (unsigned bits = 0; bits <= UINT16_MAX; ++bits) {
+      const uint16_t magnitude = bits & UINT16_C(0x7fff);
+      const float value = _mesa_half_to_float(bits);
+      if ((magnitude > UINT16_C(0x7c00)) != !!isnan(value) ||
+          (magnitude == UINT16_C(0x7c00)) != !!isinf(value)) {
+         fprintf(stderr,
+                 "binary16 classification mismatch for bit pattern %#06x\n",
+                 bits);
+         return false;
+      }
+   }
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P shaderFloat16 isnan/isinf");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *input = nir_load_global(&b, 1, 32,
+                                    nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *half = nir_f2f16(&b, input);
+
+   const unsigned fp_math_ctrl = b.fp_math_ctrl;
+   b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
+   nir_def *is_nan = nir_fneu(&b, half, half);
+   nir_def *is_inf = nir_feq(&b, nir_fabs(&b, half),
+                             nir_imm_floatN_t(&b, INFINITY, 16));
+   b.fp_math_ctrl = fp_math_ctrl;
+
+   nir_def *result = nir_iadd(&b, nir_b2i32(&b, is_nan),
+                              nir_b2i32(&b, is_inf));
+   nir_store_global(&b, result, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir_g17p(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary != NULL &&
+                      part.info.binary_size > 4 && part.info.stats.instrs >= 7;
+   if (!valid)
+      fprintf(stderr, "G17P shaderFloat16 isnan/isinf lowering failed\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
+check_f32_abs_zero_compare_select_compute(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P f32 absolute zero comparison select");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *input = nir_load_global(&b, 3, 32,
+                                    nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *absolute = nir_fabs(&b, nir_channel(&b, input, 0));
+   nir_def *selected = nir_bcsel(
+      &b, nir_flt(&b, nir_imm_float(&b, 0.0f), absolute),
+      nir_channel(&b, input, 1), nir_channel(&b, input, 2));
+   nir_store_global(&b, selected, nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary != NULL &&
+                      part.info.binary_size > 4 && part.info.stats.instrs >= 7;
+   if (!valid)
+      fprintf(stderr, "G17P f32 absolute zero comparison select failed\n");
+
    free(part.binary);
    ralloc_free(b.shader);
    return valid;
@@ -1650,7 +1807,8 @@ check_half_floor_compute(void)
    b.shader->info.workgroup_size[2]=1;
    nir_def *input=nir_load_global(&b,1,32,nir_imm_int64(&b,0x1000),
                                    .align_mul=sizeof(uint32_t));
-   nir_def *result=nir_ffloor(&b,nir_f2f16(&b,input));
+   /* modf lowers through floor(abs(x)) for its magnitude path. */
+   nir_def *result=nir_ffloor(&b,nir_fabs(&b,nir_f2f16(&b,input)));
    nir_store_global(&b,nir_f2f32(&b,result),nir_imm_int64(&b,0x2000),
                     .align_mul=sizeof(uint32_t));
    agx_preprocess_nir(b.shader);
@@ -1681,6 +1839,107 @@ check_half_ceil_compute(void)
    const bool valid=compiled&&part.binary&&part.info.stats.instrs>=7;
    if(!valid) fprintf(stderr,"G17P shaderFloat16 ceil lowering failed\n");
    free(part.binary); ralloc_free(b.shader); return valid;
+}
+
+/*
+ * The acceleration-structure builder's radix-sort lookback loop breaks out
+ * from inside nested ifs. That shape used to refuse -- "no grounded AGX3
+ * encoding for break" -- because the packer only knew CNDLT, which spends
+ * exactly the loop's own two exec-mask levels. CNDCF carries the level count,
+ * so the break now encodes at any depth.
+ *
+ * Each condition reads a distinct device address, so nothing can be folded or
+ * proven, and each level stores before the next if opens, so the ifs cannot
+ * collapse into one.
+ */
+static bool
+check_deep_loop_break_compute(unsigned enclosing_ifs)
+{
+   static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+   nir_if *opened[8];
+
+   if (enclosing_ifs > ARRAY_SIZE(opened))
+      return false;
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P break under %u ifs",
+      enclosing_ifs);
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_loop *loop = nir_push_loop(&b);
+   {
+      /* The loop's own exit test: a depth-1 break, which stays on CNDLT. */
+      nir_def *guard = nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1000),
+                                       .align_mul = sizeof(uint32_t));
+      nir_break_if(&b, nir_ieq_imm(&b, guard, 0));
+
+      for (unsigned i = 0; i < enclosing_ifs; ++i) {
+         nir_def *v =
+            nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1008 + 8 * i),
+                            .align_mul = sizeof(uint32_t));
+         opened[i] = nir_push_if(&b, nir_ine_imm(&b, v, 0));
+         nir_store_global(&b, nir_imm_int(&b, i + 1),
+                          nir_imm_int64(&b, 0x2000 + 8 * i),
+                          .align_mul = sizeof(uint32_t));
+      }
+      nir_jump(&b, nir_jump_break);
+      for (unsigned i = enclosing_ifs; i-- > 0;)
+         nir_pop_if(&b, opened[i]);
+   }
+   nir_pop_loop(&b, loop);
+
+   nir_store_global(&b, nir_imm_int(&b, 0xfeed), nir_imm_int64(&b, 0x3000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+      fprintf(stderr, "G17P loop break under %u ifs was rejected\n",
+              enclosing_ifs);
+      ralloc_free(b.shader);
+      return false;
+   }
+
+   bool valid =
+      part.binary != NULL && part.info.binary_size > sizeof(end) &&
+      memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
+             end, sizeof(end)) == 0;
+
+   /* Folding an enclosing if into the break subtracts at most one level, so
+    * two or more enclosing ifs cannot land back on CNDLT: the wide form has
+    * to be there, with a count somewhere in [3, ifs + 2]. */
+   if (valid && enclosing_ifs >= 2) {
+      bool found = false;
+      for (unsigned count = 3; count <= enclosing_ifs + 2 && !found; ++count) {
+         for (unsigned invert = 0; invert < 2 && !found; ++invert) {
+            uint8_t want[AGX3_CF_MAX_LENGTH];
+            uint8_t len = 0;
+            if (!agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 0, invert != 0, count,
+                               want, &len))
+               continue;
+            for (unsigned at = 0; at + len <= part.info.binary_size; at += 2) {
+               if (!memcmp((const uint8_t *)part.binary + at, want, len)) {
+                  found = true;
+                  break;
+               }
+            }
+         }
+      }
+      if (!found) {
+         fprintf(stderr,
+                 "G17P loop break under %u ifs emitted no CNDCF\n",
+                 enclosing_ifs);
+         valid = false;
+      }
+   }
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
 }
 
 static bool
@@ -1783,6 +2042,12 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--pk-immediate-fma-only")) {
+      const bool valid = check_pk_immediate_fma_sequence();
+      fprintf(stderr, "G17P CTS pk_immediate FMA sequence: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--half-fms-only")) {
       const bool valid = check_half_fms_compute();
       fprintf(stderr, "G17P shaderFloat16 FMS: %s\n",
@@ -1837,6 +2102,18 @@ main(int argc, char **argv)
    if (argc == 2 && !strcmp(argv[1], "--half-compare-only")) {
       const bool valid = check_half_compare_select_compute();
       fprintf(stderr, "G17P shaderFloat16 comparison select: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--half-classify-only")) {
+      const bool valid = check_half_isnan_isinf_compute();
+      fprintf(stderr, "G17P shaderFloat16 isnan/isinf: %s\n",
+              valid ? "PASS" : "FAIL");
+      return valid ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--f32-abs-select-only")) {
+      const bool valid = check_f32_abs_zero_compare_select_compute();
+      fprintf(stderr, "G17P f32 absolute zero comparison select: %s\n",
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
@@ -1896,6 +2173,10 @@ main(int argc, char **argv)
 
    if (!check_uniform_alu_policy())
       return 1;
+   for (unsigned ifs = 0; ifs <= 6; ++ifs) {
+      if (!check_deep_loop_break_compute(ifs))
+         return 1;
+   }
    if (!check_agx2_legacy_printf_address_accepted())
       return 1;
    if (!check_mixed_fma_neg_compute())
@@ -1921,6 +2202,10 @@ main(int argc, char **argv)
    if (!check_half_divide_compute())
       return 1;
    if (!check_half_compare_select_compute())
+      return 1;
+   if (!check_half_isnan_isinf_compute())
+      return 1;
+   if (!check_f32_abs_zero_compare_select_compute())
       return 1;
    if (!check_half_sqrt_compute())
       return 1;

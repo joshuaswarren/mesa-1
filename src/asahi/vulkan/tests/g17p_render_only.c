@@ -28,10 +28,16 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#if defined(G17P_GRAPHICS_SIDE_EFFECTS) || defined(G17P_FRAGMENT_SIDE_EFFECTS)
+#define G17P_ANY_SIDE_EFFECTS 1
 #include "g17p_vulkan_graphics_side_effects_frag.h"
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
 #include "g17p_vulkan_graphics_side_effects_vert.h"
 #define G17P_VERTEX_SPV g17p_vulkan_graphics_side_effects_vert_spv
+#else
+#include "g17p_wsi_triangle_vert.h"
+#define G17P_VERTEX_SPV g17p_wsi_triangle_vert_spv
+#endif
 #define G17P_FRAGMENT_SPV g17p_vulkan_graphics_side_effects_frag_spv
 #else
 #include "g17p_wsi_triangle_frag.h"
@@ -50,7 +56,7 @@
 #define IMAGE_HEIGHT 32
 #endif
 #define IMAGE_BYTES (IMAGE_WIDTH * IMAGE_HEIGHT * 4)
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 #define SIDE_EFFECT_GUARD UINT32_C(0xc09b5eed)
 struct side_effect_output {
    uint32_t prefix_guard[4];
@@ -75,10 +81,10 @@ VK_FN(vkCreateInstance);
 VK_FN(vkCreateDebugUtilsMessengerEXT);
 VK_FN(vkEnumeratePhysicalDevices);
 VK_FN(vkGetPhysicalDeviceProperties);
-#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
 VK_FN(vkGetPhysicalDeviceFeatures);
 #endif
-#ifdef G17P_CONDITIONAL_RENDERING
+#if defined(G17P_CONDITIONAL_RENDERING) || defined(G17P_REPEAT_DRAW)
 VK_FN(vkGetPhysicalDeviceFeatures2);
 #endif
 VK_FN(vkGetPhysicalDeviceMemoryProperties);
@@ -99,7 +105,7 @@ VK_FN(vkCreateImageView);
 VK_FN(vkCreateRenderPass);
 VK_FN(vkCreateShaderModule);
 VK_FN(vkCreatePipelineLayout);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 VK_FN(vkCreateDescriptorSetLayout);
 VK_FN(vkCreateDescriptorPool);
 VK_FN(vkAllocateDescriptorSets);
@@ -113,18 +119,22 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBeginRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
-#ifdef G17P_CONDITIONAL_RENDERING
 VK_FN(vkCmdBindIndexBuffer);
-#endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
 VK_FN(vkCmdBindDescriptorSets);
 #endif
 VK_FN(vkCmdDraw);
+VK_FN(vkCmdDrawIndirect);
+VK_FN(vkCmdDrawIndexed);
+VK_FN(vkCmdDrawIndexedIndirect);
+#ifdef G17P_REPEAT_DRAW
+VK_FN(vkCmdSetStencilReference);
+VK_FN(vkResetFences);
+VK_FN(vkUnmapMemory);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
 VK_FN(vkCmdBeginConditionalRenderingEXT);
 VK_FN(vkCmdClearAttachments);
-VK_FN(vkCmdDrawIndexed);
-VK_FN(vkCmdDrawIndirect);
 VK_FN(vkCmdDrawIndirectCount);
 VK_FN(vkCmdEndConditionalRenderingEXT);
 #endif
@@ -341,10 +351,10 @@ main(
    LOAD_INSTANCE(instance, vkGetDeviceProcAddr);
    LOAD_INSTANCE(instance, vkEnumeratePhysicalDevices);
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceProperties);
-#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#if defined(G17P_OCCLUSION_QUERY) || defined(G17P_ANY_SIDE_EFFECTS)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures);
 #endif
-#ifdef G17P_CONDITIONAL_RENDERING
+#if defined(G17P_CONDITIONAL_RENDERING) || defined(G17P_REPEAT_DRAW)
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceFeatures2);
 #endif
    LOAD_INSTANCE(instance, vkGetPhysicalDeviceMemoryProperties);
@@ -438,12 +448,19 @@ main(
    free(query_queues);
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    VkPhysicalDeviceFeatures physical_features;
    vkGetPhysicalDeviceFeatures(physical, &physical_features);
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    if (!physical_features.vertexPipelineStoresAndAtomics ||
        !physical_features.fragmentStoresAndAtomics)
       die("G17P graphics shader side effects were not explicitly enabled");
+#else
+   if (!physical_features.fragmentStoresAndAtomics)
+      die("G17P fragment shader side effects are not advertised");
+   if (physical_features.vertexPipelineStoresAndAtomics)
+      die("fragment capability unexpectedly enabled vertex side effects");
+#endif
 #endif
 
 #ifdef G17P_CONDITIONAL_RENDERING
@@ -482,6 +499,26 @@ main(
       VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME;
 #endif
 
+#ifdef G17P_REPEAT_DRAW
+   const bool repeat_integer_bias = getenv("G17P_REPEAT_INTEGER_DEPTH_BIAS");
+   VkPhysicalDeviceDepthBiasControlFeaturesEXT bias_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT,
+   };
+   if (repeat_integer_bias) {
+      VkPhysicalDeviceFeatures2 available = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+         .pNext = &bias_features,
+      };
+      vkGetPhysicalDeviceFeatures2(physical, &available);
+      if (!bias_features.depthBiasControl ||
+          !bias_features.leastRepresentableValueForceUnormRepresentation)
+         die("forced UNORM depth bias is not advertised");
+      bias_features.floatRepresentation = VK_FALSE;
+      bias_features.depthBiasExact = VK_FALSE;
+   }
+   const char *const bias_extension = VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME;
+#endif
+
    const float queue_priority = 1.0f;
    const VkDeviceQueueCreateInfo queue_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -496,6 +533,11 @@ main(
       .enabledExtensionCount = 1,
       .ppEnabledExtensionNames = &conditional_extension,
 #endif
+#ifdef G17P_REPEAT_DRAW
+      .pNext = repeat_integer_bias ? &bias_features : NULL,
+      .enabledExtensionCount = repeat_integer_bias ? 1 : 0,
+      .ppEnabledExtensionNames = repeat_integer_bias ? &bias_extension : NULL,
+#endif
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
 #ifdef G17P_OCCLUSION_QUERY
@@ -505,9 +547,11 @@ main(
          .robustBufferAccess = VK_TRUE,
 #endif
       },
-#elif defined(G17P_GRAPHICS_SIDE_EFFECTS)
+#elif defined(G17P_ANY_SIDE_EFFECTS)
       .pEnabledFeatures = &(const VkPhysicalDeviceFeatures){
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
          .vertexPipelineStoresAndAtomics = VK_TRUE,
+#endif
          .fragmentStoresAndAtomics = VK_TRUE,
       },
 #endif
@@ -530,7 +574,7 @@ main(
    LOAD_DEVICE(device, vkCreateRenderPass);
    LOAD_DEVICE(device, vkCreateShaderModule);
    LOAD_DEVICE(device, vkCreatePipelineLayout);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCreateDescriptorSetLayout);
    LOAD_DEVICE(device, vkCreateDescriptorPool);
    LOAD_DEVICE(device, vkAllocateDescriptorSets);
@@ -544,18 +588,22 @@ main(
    LOAD_DEVICE(device, vkCmdBeginRenderPass);
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
-#ifdef G17P_CONDITIONAL_RENDERING
    LOAD_DEVICE(device, vkCmdBindIndexBuffer);
-#endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
 #endif
    LOAD_DEVICE(device, vkCmdDraw);
+   LOAD_DEVICE(device, vkCmdDrawIndirect);
+   LOAD_DEVICE(device, vkCmdDrawIndexed);
+   LOAD_DEVICE(device, vkCmdDrawIndexedIndirect);
+#ifdef G17P_REPEAT_DRAW
+   LOAD_DEVICE(device, vkCmdSetStencilReference);
+   LOAD_DEVICE(device, vkResetFences);
+   LOAD_DEVICE(device, vkUnmapMemory);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
    LOAD_DEVICE(device, vkCmdBeginConditionalRenderingEXT);
    LOAD_DEVICE(device, vkCmdClearAttachments);
-   LOAD_DEVICE(device, vkCmdDrawIndexed);
-   LOAD_DEVICE(device, vkCmdDrawIndirect);
    LOAD_DEVICE(device, vkCmdDrawIndirectCount);
    LOAD_DEVICE(device, vkCmdEndConditionalRenderingEXT);
 #endif
@@ -592,10 +640,20 @@ main(
       {4.0f, 4.0f}, {6.0f, 4.0f}, {4.0f, 6.0f},
    };
    const size_t vertex_bytes = sizeof(vertices) * (alternate_geometry ? 2 : 1);
+   /* The first four words also form an arrays-indirect draw of three
+    * vertices. Keep the index data separate from both draw records. */
+   const VkDrawIndexedIndirectCommand repeat_indirect = {3, 1, 0, 0, 0};
+   const uint32_t repeat_indices[] = {0, 1, 2};
+   const VkDeviceSize repeat_index_offset =
+      vertex_bytes + sizeof(repeat_indirect);
+   const VkDeviceSize vertex_allocation_size =
+      repeat_index_offset + sizeof(repeat_indices);
    const VkBufferCreateInfo vertex_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = vertex_bytes,
-      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+      .size = vertex_allocation_size,
+      .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
    VkBuffer vertex_buffer;
@@ -618,10 +676,14 @@ main(
    check(vkBindBufferMemory(device, vertex_buffer, vertex_memory, 0),
          "vkBindBufferMemory(vertex)");
    void *vertex_map = NULL;
-   check(vkMapMemory(device, vertex_memory, 0, vertex_bytes, 0,
+   check(vkMapMemory(device, vertex_memory, 0, vertex_allocation_size, 0,
                      &vertex_map),
          "vkMapMemory(vertex)");
    memcpy(vertex_map, vertices, sizeof(vertices));
+   memcpy((uint8_t *)vertex_map + vertex_bytes, &repeat_indirect,
+          sizeof(repeat_indirect));
+   memcpy((uint8_t *)vertex_map + repeat_index_offset, repeat_indices,
+          sizeof(repeat_indices));
    if (alternate_geometry)
       memcpy((uint8_t *)vertex_map + sizeof(vertices), clipped_vertices,
              sizeof(clipped_vertices));
@@ -677,7 +739,7 @@ main(
           sizeof(expected_conditional));
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    const VkBufferCreateInfo side_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = sizeof(struct side_effect_output),
@@ -896,12 +958,16 @@ main(
    check(vkCreateShaderModule(device, &frag_module_info, NULL, &frag_module),
          "vkCreateShaderModule(fragment)");
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    const VkDescriptorSetLayoutBinding side_binding = {
       .binding = 0,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      .stageFlags =
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+         VK_SHADER_STAGE_VERTEX_BIT |
+#endif
+         VK_SHADER_STAGE_FRAGMENT_BIT,
    };
    const VkDescriptorSetLayoutCreateInfo side_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -954,7 +1020,7 @@ main(
 
    const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
       .setLayoutCount = 1,
       .pSetLayouts = &side_layout,
 #endif
@@ -1012,8 +1078,20 @@ main(
       .scissorCount = 1,
       .pScissors = &scissor,
    };
+#ifdef G17P_REPEAT_DRAW
+   const VkDepthBiasRepresentationInfoEXT bias_representation = {
+      .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+      .depthBiasRepresentation =
+         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT,
+   };
+#endif
    const VkPipelineRasterizationStateCreateInfo raster = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+#ifdef G17P_REPEAT_DRAW
+      .pNext = repeat_integer_bias ? &bias_representation : NULL,
+      .depthBiasEnable = repeat_integer_bias,
+      .depthBiasConstantFactor = repeat_integer_bias ? 1.0f : 0.0f,
+#endif
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_NONE,
       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
@@ -1032,6 +1110,16 @@ main(
       .attachmentCount = 1,
       .pAttachments = &blend_attachment,
    };
+#ifdef G17P_REPEAT_DRAW
+   const bool repeat_stencil = getenv("G17P_REPEAT_STENCIL_REFERENCE") != NULL;
+   unsigned repeats = G17P_REPEAT_DRAW;
+   const VkDynamicState repeat_dynamic = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
+   const VkPipelineDynamicStateCreateInfo repeat_dynamic_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 1,
+      .pDynamicStates = &repeat_dynamic,
+   };
+#endif
    const VkGraphicsPipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
       .stageCount = 2,
@@ -1042,6 +1130,9 @@ main(
       .pRasterizationState = &raster,
       .pMultisampleState = &multisample,
       .pColorBlendState = &blend,
+#ifdef G17P_REPEAT_DRAW
+      .pDynamicState = repeat_stencil ? &repeat_dynamic_info : NULL,
+#endif
       .layout = pipeline_layout,
       .renderPass = render_pass,
    };
@@ -1108,9 +1199,14 @@ next_render_frame:;
             "vkAllocateCommandBuffers");
    }
    VkCommandBuffer command_buffer = command_buffers[0];
+   VkCommandBuffer blit_command = VK_NULL_HANDLE;
    const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+#ifdef G17P_REPEAT_DRAW
+      .flags = 0, /* Reusable after completion for retained-context tests. */
+#else
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+#endif
    };
 #ifdef G17P_VDM_CAPACITY
    for (unsigned command = 0; command < COMMAND_BUFFER_COUNT; ++command) {
@@ -1156,7 +1252,11 @@ next_render_frame:;
 #endif
    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                      pipeline);
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_REPEAT_DRAW
+   if (repeat_stencil)
+      vkCmdSetStencilReference(command_buffer, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+#endif
+#ifdef G17P_ANY_SIDE_EFFECTS
    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline_layout, 0, 1, &side_set, 0, NULL);
 #endif
@@ -1164,6 +1264,10 @@ next_render_frame:;
       alternate_geometry && (frame_index & 1) ? sizeof(vertices) : 0;
    vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer,
                           &vertex_offset);
+#ifdef G17P_REPEAT_DRAW
+   vkCmdBindIndexBuffer(command_buffer, vertex_buffer, repeat_index_offset,
+                        VK_INDEX_TYPE_UINT32);
+#endif
 #ifdef G17P_CONDITIONAL_RENDERING
    if (indexed_draw)
       vkCmdBindIndexBuffer(command_buffer, conditional_buffer, 16,
@@ -1207,6 +1311,46 @@ next_render_frame:;
    vkCmdEndConditionalRenderingEXT(command_buffer);
 #else
    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+#if defined(G17P_REPEAT_DRAW)
+   /* Identical draws with nothing recorded in between. Honeykrisp takes the
+    * unchanged-state early return for every one after the first, so they are
+    * body-only draws that reuse the render state the first draw latched --
+    * the case that must NOT collect an inter-draw VDM barrier.
+    *
+    * G17P_REPEAT_DRAW_COUNT raises the count without a second binary, so a
+    * host-side sweep can ask how a stream's shape and byte cost grow with the
+    * number of draws it carries.  Combine it with ASAHI_MESA_DEBUG=dirty to
+    * make every repeat republish render state, which is what a real Zink
+    * workload does and what a body-only repeat deliberately does not. */
+   {
+      const char *requested = getenv("G17P_REPEAT_DRAW_COUNT");
+      const char *indirect_mode = getenv("G17P_REPEAT_INDIRECT");
+      const bool mixed_indexed = indirect_mode && !strcmp(indirect_mode, "2");
+
+      if (requested) {
+         const unsigned long parsed = strtoul(requested, NULL, 10);
+
+         if (parsed >= 1 && parsed <= 4096)
+            repeats = (unsigned)parsed;
+      }
+
+      for (unsigned repeat = 1; repeat < repeats; ++repeat) {
+         if (repeat_stencil)
+            vkCmdSetStencilReference(command_buffer,
+                                      VK_STENCIL_FACE_FRONT_AND_BACK, repeat);
+         if (mixed_indexed && repeat % 4 == 3)
+            vkCmdDrawIndexedIndirect(command_buffer, vertex_buffer,
+                                     vertex_bytes, 1, sizeof(repeat_indirect));
+         else if (mixed_indexed && repeat % 4 == 2)
+            vkCmdDrawIndexed(command_buffer, 3, 1, 0, 0, 0);
+         else if (indirect_mode && (repeat & 1))
+            vkCmdDrawIndirect(command_buffer, vertex_buffer, vertex_bytes,
+                              1, sizeof(repeat_indirect));
+         else
+            vkCmdDraw(command_buffer, 3, 1, 0, 0);
+      }
+   }
+#endif
 #endif
 #if defined(G17P_TINY_RENDER_RECORD)
    }
@@ -1228,7 +1372,6 @@ next_render_frame:;
 
 
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
-   VkCommandBuffer blit_command = VK_NULL_HANDLE;
    if (blit_test || readback_test) {
       command_allocate.commandPool = command_pools[0];
       check(vkAllocateCommandBuffers(device, &command_allocate, &blit_command),
@@ -1338,11 +1481,18 @@ next_render_frame:;
       return EXIT_SUCCESS;
    }
 #endif
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
+#ifdef G17P_FRAGMENT_SIDE_EFFECTS
+   if (getenv("G17P_FRAGMENT_SIDE_EFFECTS_RECORD_ONLY")) {
+      puts("g17p-fragment-side-effects: record-only PASS");
+      return EXIT_SUCCESS;
+   }
+#else
    if (getenv("G17P_GRAPHICS_SIDE_EFFECTS_RECORD_ONLY")) {
       puts("g17p-graphics-side-effects: record-only PASS");
       return EXIT_SUCCESS;
    }
+#endif
 #endif
 
    const VkFenceCreateInfo fence_info = {
@@ -1378,6 +1528,66 @@ next_render_frame:;
       return EXIT_FAILURE;
    }
 
+#if defined(G17P_REPEAT_DRAW)
+   unsigned submissions = 1;
+   const char *requested_submits = getenv("G17P_REPEAT_SUBMITS");
+   if (requested_submits) {
+      char *end;
+      const unsigned long n = strtoul(requested_submits, &end, 10);
+      if (*end || n == 0 || n > 128)
+         die("G17P_REPEAT_SUBMITS must be in 1..128");
+      submissions = n;
+   }
+   uint8_t *repeat_pixels = NULL;
+   if (getenv("G17P_REPEAT_READBACK")) {
+      if (!image_host_visible)
+         die("repeat pixel verification requires host-visible memory");
+      check(vkMapMemory(device, image_memory, 0, IMAGE_BYTES, 0,
+                        (void **)&repeat_pixels), "vkMapMemory(repeat image)");
+   }
+   const uint8_t repeat_expected[] = {0xff, 0x47, 0x0d, 0xff};
+   for (unsigned iteration = 0; iteration < submissions; ++iteration) {
+      if (iteration > 0) {
+         /* Completed work no longer owns this image. Poisoning it prevents
+          * an empty or dropped subsequent submit from passing on old pixels.
+          * The render pass discards the prior layout/content on every use. */
+         if (repeat_pixels)
+            memset(repeat_pixels, 0xa5, IMAGE_BYTES);
+         check(vkResetFences(device, 1, &fence), "vkResetFences(repeat)");
+         check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit(repeat)");
+         check(vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000)),
+               "vkWaitForFences(repeat)");
+      }
+      if (repeat_pixels) {
+         for (unsigned pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+            if (memcmp(repeat_pixels + 4 * pixel, repeat_expected, 4)) {
+               fprintf(stderr, "repeat submission %u: pixel %u differs\n",
+                       iteration + 1, pixel);
+               die("repeat submission failed exact pixel verification");
+            }
+         }
+         fprintf(stderr, "repeat submission %u/%u: %u/%u pixels exact\n",
+                 iteration + 1, submissions, IMAGE_WIDTH * IMAGE_HEIGHT,
+                 IMAGE_WIDTH * IMAGE_HEIGHT);
+      }
+   }
+   if (repeat_pixels) {
+      sleep(3);
+      for (unsigned pixel = 0; pixel < IMAGE_WIDTH * IMAGE_HEIGHT; ++pixel) {
+         if (memcmp(repeat_pixels + 4 * pixel, repeat_expected, 4))
+            die("repeat target changed after final completion");
+      }
+      vkUnmapMemory(device, image_memory);
+   }
+   printf("g17p-vulkan-repeat-draw: %u draws recorded and "
+          "submitted %u times on one device and queue\n",
+          repeats, submissions);
+   /* The shim validates framing and stream counts but does not execute.
+    * Hardware qualification must also use the exact pixel oracle below. */
+   if (!getenv("G17P_REPEAT_READBACK"))
+      return EXIT_SUCCESS;
+#endif
+
 #ifdef G17P_CONDITIONAL_RENDERING
    if (submit_only) {
       printf("g17p-vulkan-conditional-rendering-graphics: SUBMIT PASS — "
@@ -1393,12 +1603,13 @@ next_render_frame:;
       die("conditional predicate or guards changed");
 #endif
 
-#ifdef G17P_GRAPHICS_SIDE_EFFECTS
+#ifdef G17P_ANY_SIDE_EFFECTS
    for (unsigned i = 0; i < 4; ++i) {
       if (side_map->prefix_guard[i] != SIDE_EFFECT_GUARD ||
           side_map->suffix_guard[i] != SIDE_EFFECT_GUARD)
          die("graphics side effect crossed an SSBO guard");
    }
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    if (side_map->vertex_atomic != 3 ||
        side_map->vertex_values[0] != UINT32_C(0x17000000) ||
        side_map->vertex_values[1] != UINT32_C(0x17000001) ||
@@ -1406,13 +1617,25 @@ next_render_frame:;
        side_map->fragment_atomic != IMAGE_WIDTH * IMAGE_HEIGHT ||
        side_map->fragment_value != UINT32_C(0xf17e0001))
       die("vertex/fragment SSBO stores or atomics are not exact");
+#else
+   if (side_map->vertex_atomic != 0 || side_map->vertex_values[0] != 0 ||
+       side_map->vertex_values[1] != 0 || side_map->vertex_values[2] != 0 ||
+       side_map->fragment_atomic != IMAGE_WIDTH * IMAGE_HEIGHT ||
+       side_map->fragment_value != UINT32_C(0xf17e0001))
+      die("fragment SSBO stores or atomics are not exact");
+#endif
 
    const struct side_effect_output stable_side = *side_map;
    sleep(3);
    if (memcmp(side_map, &stable_side, sizeof(stable_side)) != 0)
       die("graphics side effects changed after three seconds");
+#ifdef G17P_GRAPHICS_SIDE_EFFECTS
    puts("g17p-graphics-side-effects: vertex/fragment stores, atomics, guards "
         "and three-second stability exact");
+#else
+   puts("g17p-fragment-side-effects: fragment stores, atomics, untouched "
+        "vertex fields, guards and three-second stability exact");
+#endif
 #endif
 
 #ifdef G17P_OCCLUSION_QUERY
@@ -1480,30 +1703,114 @@ next_render_frame:;
    check(vkMapMemory(device, image_memory, 0, IMAGE_BYTES, 0,
                      (void **)&pixels),
          "vkMapMemory(image)");
-   unsigned exact = 0;
-   uint32_t first = 0;
-   for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; i++) {
-      const uint8_t r = pixels[i * 4 + 0], g = pixels[i * 4 + 1];
-      const uint8_t b = pixels[i * 4 + 2], a = pixels[i * 4 + 3];
-      if (i == 0)
-         first = ((uint32_t)r << 24) | ((uint32_t)g << 16) |
-                 ((uint32_t)b << 8) | a;
+   /* Classify every pixel into exactly three buckets. The expected colour is a
+    * shader immediate and the clear is opaque black, so "still the clear
+    * value" (never stored) and "some third value" (stored wrong) are different
+    * failures with different causes, and a bare "is it non-black" test reports
+    * the second one as a pass. */
+   static const uint8_t cleared_pixel[4] = {0x00, 0x00, 0x00, 0xff};
+   uint8_t expected_pixel[4] = {0xff, 0x47, 0x0d, 0xff};
 #ifdef G17P_CONDITIONAL_RENDERING
-      const bool pixel_matches =
-         expect_execute
-            ? (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff)
-            : (r == 0 && g == 0 && b == 0 && a == 0xff);
-      if (pixel_matches)
+   if (!expect_execute)
+      memcpy(expected_pixel, cleared_pixel, sizeof(expected_pixel));
 #else
-      if (alternate_geometry && (frame_index & 1)
-             ? (r == 0 && g == 0 && b == 0 && a == 0xff)
-             : (r == 0xff && g == 0x47 && b == 0x0d && a == 0xff))
+   if (alternate_geometry && (frame_index & 1))
+      memcpy(expected_pixel, cleared_pixel, sizeof(expected_pixel));
 #endif
+
+   char *classes = malloc(IMAGE_WIDTH * IMAGE_HEIGHT);
+   if (!classes)
+      die("out of memory classifying the render target");
+
+   unsigned exact = 0, still_cleared = 0, wrong = 0;
+   uint32_t first = 0;
+   unsigned first_bad = UINT32_MAX;
+   uint32_t first_bad_value = 0;
+   for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; i++) {
+      const uint8_t *p = &pixels[i * 4];
+      const uint32_t value = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                             ((uint32_t)p[2] << 8) | p[3];
+      if (i == 0)
+         first = value;
+
+      if (memcmp(p, expected_pixel, sizeof(expected_pixel)) == 0) {
+         classes[i] = '#';
          exact++;
+         continue;
+      }
+
+      if (memcmp(p, cleared_pixel, sizeof(cleared_pixel)) == 0) {
+         classes[i] = '.';
+         still_cleared++;
+      } else {
+         classes[i] = '?';
+         wrong++;
+      }
+
+      if (first_bad == UINT32_MAX) {
+         first_bad = i;
+         first_bad_value = value;
+      }
    }
+
+   const uint32_t expected_value = ((uint32_t)expected_pixel[0] << 24) |
+                                   ((uint32_t)expected_pixel[1] << 16) |
+                                   ((uint32_t)expected_pixel[2] << 8) |
+                                   expected_pixel[3];
    fprintf(stderr,
-           "g17p-render-only: pixels exact=%u/%u first=%#010x\n",
-           exact, IMAGE_WIDTH * IMAGE_HEIGHT, first);
+           "g17p-render-only: pixels exact=%u/%u cleared=%u wrong=%u "
+           "first=0x%08x expected=0x%08x\n",
+           exact, IMAGE_WIDTH * IMAGE_HEIGHT, still_cleared, wrong, first,
+           expected_value);
+   if (first_bad != UINT32_MAX)
+      fprintf(stderr,
+              "g17p-render-only: first non-exact pixel (%u,%u)=0x%08x\n",
+              first_bad % IMAGE_WIDTH, first_bad / IMAGE_WIDTH,
+              first_bad_value);
+
+   /* Report the granularity of any loss. A fragment SIMD group covers an 8x4
+    * pixel footprint and a derivative quad covers 2x2, so counting how many of
+    * each are uniform decides, from a single run, whether pixels are lost per
+    * pixel, per quad, or per SIMD group. The previous map sampled one row in
+    * four and one column in two, which cannot tell those apart. */
+   struct {
+      unsigned w, h;
+      const char *name;
+   } shapes[2] = {{2, 2, "quads(2x2)"}, {8, 4, "simd-groups(8x4)"}};
+   for (unsigned s = 0; s < 2; ++s) {
+      unsigned total = 0, mixed = 0;
+      for (unsigned by = 0; by < IMAGE_HEIGHT; by += shapes[s].h) {
+         for (unsigned bx = 0; bx < IMAGE_WIDTH; bx += shapes[s].w) {
+            const char first_class = classes[by * IMAGE_WIDTH + bx];
+            bool uniform = true;
+            for (unsigned y = by; y < by + shapes[s].h && y < IMAGE_HEIGHT; ++y)
+               for (unsigned x = bx; x < bx + shapes[s].w && x < IMAGE_WIDTH;
+                    ++x)
+                  uniform &= classes[y * IMAGE_WIDTH + x] == first_class;
+            total++;
+            mixed += !uniform;
+         }
+      }
+      fprintf(stderr, "g17p-render-only: %s mixed=%u/%u\n", shapes[s].name,
+              mixed, total);
+   }
+
+   /* Every row, every column: the map is the evidence, so it must not
+    * subsample. '#' is exact, '.' is the untouched clear, '?' is a third
+    * value. */
+   if (IMAGE_WIDTH <= 128 && IMAGE_HEIGHT <= 128) {
+      char *row = malloc(IMAGE_WIDTH + 1);
+      if (!row)
+         die("out of memory printing the render target");
+      row[IMAGE_WIDTH] = 0;
+      for (unsigned y = 0; y < IMAGE_HEIGHT; y++) {
+         memcpy(row, classes + (size_t)y * IMAGE_WIDTH, IMAGE_WIDTH);
+         fprintf(stderr, "g17p-render-only: %3u |%s|\n", y, row);
+      }
+      free(row);
+   }
+   free(classes);
+
    fprintf(stderr, "g17p-render-only: frame=%u/%u pixels_exact=%u/%u\n",
            frame_index + 1, frame_count, exact, IMAGE_WIDTH * IMAGE_HEIGHT);
    if ((blit_test || readback_test) && exact == IMAGE_WIDTH * IMAGE_HEIGHT) {
@@ -1520,7 +1827,7 @@ next_render_frame:;
             "vkWaitForFences(blit)");
       unsigned copied = 0, sentinel = 0;
       for (unsigned i = 0; i < IMAGE_WIDTH * IMAGE_HEIGHT; ++i) {
-         copied += !memcmp(blit_pixels + 4*i, "\xff\x47\x0d\xff", 4);
+         copied += !memcmp(blit_pixels + 4*i, expected_pixel, 4);
          sentinel += !memcmp(blit_pixels + 4*i, "\xa5\xa5\xa5\xa5", 4);
       }
       fprintf(stderr, "g17p-render-only: %s pixels exact=%u/%u sentinel=%u first=%02x%02x%02x%02x\n",
@@ -1537,15 +1844,7 @@ next_render_frame:;
       pixels = blit_pixels;
       exact = copied;
    }
-   for (unsigned y = 0; y < IMAGE_HEIGHT; y += 4) {
-      char row[IMAGE_WIDTH / 2 + 1];
-      for (unsigned x = 0; x < IMAGE_WIDTH; x += 2) {
-         const uint8_t *p = &pixels[(y * IMAGE_WIDTH + x) * 4];
-         row[x / 2] = (p[0] | p[1] | p[2]) ? '#' : '.';
-      }
-      row[IMAGE_WIDTH / 2] = 0;
-      fprintf(stderr, "g17p-render-only: |%s|\n", row);
-   }
+
    const char *output_path = getenv("AGX_RENDER_OUTPUT");
    if (output_path) {
       FILE *output = fopen(output_path, "wb");
@@ -1565,7 +1864,11 @@ next_render_frame:;
          sleep(60);
    }
    if (exact != IMAGE_WIDTH * IMAGE_HEIGHT)
+#ifdef G17P_CONDITIONAL_RENDERING
       die("render target differs from exact conditional result");
+#else
+      die("render target differs from the exact expected colour");
+#endif
    if (memcmp(vertex_map, vertices, sizeof(vertices)) != 0)
       die("vertex source changed during query render");
 

@@ -4949,7 +4949,7 @@ zink_copy_buffer(struct zink_context *ctx, struct zink_resource *dst, struct zin
    ctx->bs->has_unsync |= unsync;
    zink_batch_reference_resource_rw(ctx, src, false);
    zink_batch_reference_resource_rw(ctx, dst, true);
-   if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_COPY_BUFFER))) {
       VkMemoryBarrier mb;
       mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
       mb.pNext = NULL;
@@ -5082,7 +5082,7 @@ zink_copy_image_buffer(struct zink_context *ctx, struct zink_resource *dst, stru
    }
    if (!aspects)
       aspects = img->aspect;
-   if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+   if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_COPY_IMAGE_MAP))) {
       VkMemoryBarrier mb;
       mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
       mb.pNext = NULL;
@@ -5295,7 +5295,7 @@ zink_resource_copy_region(struct pipe_context *pctx,
       zink_batch_reference_resource_rw(ctx, src, false);
       zink_batch_reference_resource_rw(ctx, dst, true);
 
-      if (unlikely(zink_debug & ZINK_DEBUG_SYNC)) {
+      if (unlikely(zink_sync_site_armed(ZINK_SYNC_SITE_COPY_RESOURCE))) {
          VkMemoryBarrier mb;
          mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
          mb.pNext = NULL;

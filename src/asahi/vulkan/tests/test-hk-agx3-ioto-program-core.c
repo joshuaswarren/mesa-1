@@ -9,8 +9,11 @@
 #include "asahi/lib/agx_ioto_state_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 
+#include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static unsigned checks;
 
@@ -1047,6 +1050,112 @@ test_g17p_basic_graphics_program(void)
       CHECK(memcmp(program.bytes, full_program.bytes, program.length) != 0);
    }
    resource.uniform_ranges = full_vertex;
+
+   /* Exact Firefox indexed-vertex range pressure: native sampled-image heap,
+    * attribute bases, clamps, direct indexed-draw parameters, a root with
+    * three descriptor sets, and the two-half promoted constant at uniform 72.
+    * These are six independently addressed CProg inputs; the generic loader
+    * already bounds their load chunks and complete program size. */
+   const struct agx3_ioto_uniform_range firefox_indexed_vertex[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 16, .address = 0x2000},
+      {.start_halfs = 24, .size_halfs = 8, .address = 0x3000},
+      {.start_halfs = 32, .size_halfs = 4, .address = 0x4000},
+      {.start_halfs = 48, .size_halfs = 16, .address = 0x5000},
+      {.start_halfs = 72, .size_halfs = 2, .address = 0x6000},
+   };
+   resource = vertex;
+   resource.uniform_ranges = firefox_indexed_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_indexed_vertex);
+   resource.shader_binary_size = 512;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &resource, &program));
+   const struct hk_agx3_g17p_graphics_program firefox_program = program;
+   for (unsigned r = 0; r < ARRAY_SIZE(firefox_indexed_vertex); ++r) {
+      struct agx3_ioto_uniform_range changed[
+         ARRAY_SIZE(firefox_indexed_vertex)];
+      memcpy(changed, firefox_indexed_vertex, sizeof(changed));
+      changed[r].address += 0x40;
+      resource.uniform_ranges = changed;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &resource, &program));
+      CHECK(program.length == firefox_program.length &&
+            memcmp(program.bytes, firefox_program.bytes, program.length) != 0);
+   }
+   resource.uniform_ranges = firefox_indexed_vertex;
+
+   /* The complete vertex worst case: the six above plus a gl_DrawID range.
+    * The Ioto loader bounds a program by load chunks and body size, never by
+    * how many ranges produced them, so the driver budget must admit all seven
+    * or a legal program is refused fail-closed. */
+   const struct agx3_ioto_uniform_range firefox_drawid_vertex[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 24, .address = 0x2000},
+      {.start_halfs = 32, .size_halfs = 12, .address = 0x3000},
+      {.start_halfs = 44, .size_halfs = 4, .address = 0x4000},
+      {.start_halfs = 48, .size_halfs = 2, .address = 0x4400},
+      {.start_halfs = 56, .size_halfs = 16, .address = 0x5000},
+      {.start_halfs = 72, .size_halfs = 2, .address = 0x6000},
+   };
+   CHECK(ARRAY_SIZE(firefox_drawid_vertex) <= HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
+   size_t drawid_bound = 0;
+   CHECK(hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, firefox_drawid_vertex,
+      ARRAY_SIZE(firefox_drawid_vertex), &drawid_bound));
+   CHECK(drawid_bound != 0);
+   resource = vertex;
+   resource.uniform_ranges = firefox_drawid_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_drawid_vertex);
+   resource.shader_binary_size = 512;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &resource, &program));
+   const struct hk_agx3_g17p_graphics_program drawid_program = program;
+   for (unsigned r = 0; r < ARRAY_SIZE(firefox_drawid_vertex); ++r) {
+      struct agx3_ioto_uniform_range changed[
+         ARRAY_SIZE(firefox_drawid_vertex)];
+      memcpy(changed, firefox_drawid_vertex, sizeof(changed));
+      changed[r].address += 0x40;
+      resource.uniform_ranges = changed;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &resource, &program));
+      CHECK(program.length == drawid_program.length &&
+            memcmp(program.bytes, drawid_program.bytes, program.length) != 0);
+   }
+
+   /* A uniform range is loaded in 32-bit dwords, so an odd size_halfs is not
+    * representable and is rejected outright. The gl_DrawID range used to be
+    * spelled with size_halfs = 1, which is why every gl_DrawID vertex program
+    * was refused even with range budget to spare. */
+   struct agx3_ioto_uniform_range odd_draw_id[
+      ARRAY_SIZE(firefox_drawid_vertex)];
+   memcpy(odd_draw_id, firefox_drawid_vertex, sizeof(odd_draw_id));
+   odd_draw_id[4].size_halfs = 1;
+   size_t odd_bound = 456;
+   CHECK(!hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, odd_draw_id, ARRAY_SIZE(odd_draw_id), &odd_bound));
+   CHECK(odd_bound == 456);
+   resource.uniform_ranges = odd_draw_id;
+   CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,
+                                                       &resource, &program));
+
+   /* One range beyond the budget stays refused: the budget is derived from
+    * the collector, not a soft hint. */
+   struct agx3_ioto_uniform_range over_budget[
+      HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
+   for (unsigned i = 0; i < ARRAY_SIZE(over_budget); ++i)
+      over_budget[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 2 * i, .size_halfs = 2,
+         .address = 0x1000 + 0x40 * i};
+   size_t over_bound = 789;
+   CHECK(!hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, ARRAY_SIZE(over_budget), &over_bound));
+   CHECK(over_bound == 789);
+
+   resource = vertex;
+   resource.uniform_ranges = firefox_indexed_vertex;
+   resource.uniform_range_count = ARRAY_SIZE(firefox_indexed_vertex);
+   resource.shader_binary_size = 512;
+
    size_t untouched = 123;
    CHECK(!hk_agx3_g17p_graphics_program_bound(AGX_CHIP_G17S, full_vertex,
                                                ARRAY_SIZE(full_vertex), &untouched));
@@ -1407,6 +1516,18 @@ test_g17p_combined_sampler_pointers(void)
    CHECK(pointers[0] == UINT64_C(0x10000020040));
    CHECK(pointers[1] == UINT64_C(0x100000800e0));
 
+   /* Explicit null descriptors use software index zero. They select the
+    * reserved robust sampler at native heap entry zero, never an underflowed
+    * register descriptor. The canonical biased base has the same result. */
+   struct hk_agx3_g17p_combined_sampler_heap null_heap = heap;
+   null_heap.sampler_index = 0;
+   CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
+   CHECK(pointers[0] == UINT64_C(0x10000020040));
+   CHECK(pointers[1] == UINT64_C(0x10000080000));
+   null_heap.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+   CHECK(hk_agx3_g17p_combined_sampler_pointers(&null_heap, pointers));
+   CHECK(pointers[1] == UINT64_C(0x10000080000));
+
    /* Native ESL consumes these two qwords, not the inline 32-byte records
     * that they address. Both hardware table indices select entry zero.
     */
@@ -1436,10 +1557,6 @@ test_g17p_combined_sampler_pointers(void)
 
    const uint64_t before[2] = {pointers[0], pointers[1]};
    struct hk_agx3_g17p_combined_sampler_heap bad = heap;
-   bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX - 1;
-   CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
-   CHECK(memcmp(pointers, before, sizeof(before)) == 0);
-   bad = heap;
    bad.sampler_index = HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX + 1024;
    CHECK(!hk_agx3_g17p_combined_sampler_pointers(&bad, pointers));
    CHECK(memcmp(pointers, before, sizeof(before)) == 0);
@@ -1544,6 +1661,29 @@ test_g17p_root_range(void)
    CHECK(!hk_agx3_g17p_root_range(12, 0, 0, &range));
    CHECK(memcmp(&range, &before, sizeof(range)) == 0);
 
+   struct agx3_ioto_uniform_range rodata = {0};
+   CHECK(hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(rodata.start_halfs == 8 && rodata.size_halfs == 2 &&
+         rodata.address == UINT64_C(0x10000030004));
+   CHECK(hk_agx3_g17p_rodata_range(
+      12, 3, UINT64_C(0x10000030000), 8, 128, &rodata));
+   CHECK(rodata.start_halfs == 12 && rodata.size_halfs == 4 &&
+         rodata.address == UINT64_C(0x10000030008));
+   const struct agx3_ioto_uniform_range rodata_before = rodata;
+   CHECK(!hk_agx3_g17p_rodata_range(
+      9, 1, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      510, 3, UINT64_C(0x10000030000), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030000), 126, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+   CHECK(!hk_agx3_g17p_rodata_range(
+      8, 1, UINT64_C(0x10000030002), 4, 128, &rodata));
+   CHECK(memcmp(&rodata, &rodata_before, sizeof(rodata)) == 0);
+
    struct agx3_ioto_uniform_range blend = {0};
    CHECK(hk_agx3_g17p_fragment_blend_constants_range(
       4, UINT64_C(0x10000028040), &blend));
@@ -1579,6 +1719,9 @@ test_g17p_rt0_background_programs(void)
    CHECK(hk_agx3_g17p_rt0_bg_shader_resources_match(
       HK_AGX3_G17P_RT0_BG_CLEAR,
       HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS, false));
+   CHECK(hk_agx3_g17p_rt0_bg_shader_resources_match(
+      HK_AGX3_G17P_RT0_BG_CLEAR,
+      HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS, false));
    CHECK(!hk_agx3_g17p_rt0_bg_shader_resources_match(
       HK_AGX3_G17P_RT0_BG_CLEAR, HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS - 1,
       false));
@@ -1627,6 +1770,18 @@ test_g17p_rt0_background_programs(void)
       AGX_CHIP_G17P, &rgba8_mrt_clear, &rgba8_mrt_clear_program));
    CHECK(rgba8_mrt_clear_program.length ==
          AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+
+   struct hk_agx3_g17p_rt0_bg_program_desc r11_mrt_clear = clear;
+   r11_mrt_clear.clear_push_halfs =
+      HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS;
+   struct hk_agx3_g17p_rt0_bg_program r11_mrt_clear_program;
+   CHECK(hk_agx3_g17p_rt0_bg_program_generate(
+      AGX_CHIP_G17P, &r11_mrt_clear, &r11_mrt_clear_program));
+   CHECK(r11_mrt_clear_program.length <=
+         AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE);
+   r11_mrt_clear.clear_push_halfs--;
+   CHECK(!hk_agx3_g17p_rt0_bg_program_generate(
+      AGX_CHIP_G17P, &r11_mrt_clear, &r11_mrt_clear_program));
 
    /* m1n1 g17p_triangle_source.py, split where HAL200 inserts LoadShader and
     * the default profile-loader prefix before the trailing COPY records. */
@@ -2424,6 +2579,62 @@ test_g17p_precompiled_fill_program(void)
    CHECK(program.launch.shader_va == desc.shader_va);
    CHECK(program.launch.g17p_native_compute_live_bound);
 
+   /* A meta-copy dispatch changes only its command-buffer-local program VA
+    * and the address of the one root range. Reusing the cached structural
+    * template must be byte-for-byte identical to a fresh full compose. */
+   const struct agx3_ioto_uniform_range moved_args = {
+      .start_halfs = args.start_halfs,
+      .size_halfs = args.size_halfs,
+      .address = UINT64_C(0x1000012c000),
+   };
+   struct hk_agx3_g17p_compute_program_desc moved_desc = desc;
+   moved_desc.program_va = UINT64_C(0x10000170000);
+   moved_desc.uniform_ranges = &moved_args;
+   struct hk_agx3_g17p_compute_program fresh, relocated;
+   CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &moved_desc,
+                                               &fresh));
+   CHECK(hk_agx3_g17p_compute_program_relocate_single_range(
+      AGX_CHIP_G17P, &moved_desc, &args, &program, &relocated));
+   CHECK(fresh.length == relocated.length);
+   CHECK(memcmp(fresh.bytes, relocated.bytes, fresh.length) == 0);
+   CHECK(memcmp(&fresh.launch, &relocated.launch,
+                sizeof(fresh.launch)) == 0);
+
+   uint8_t mapped[HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE];
+   memset(mapped, 0xa5, sizeof(mapped));
+   uint16_t mapped_length = 0;
+   struct agx3_compute_program mapped_launch;
+   CHECK(hk_agx3_g17p_compute_program_relocate_single_range_to(
+      AGX_CHIP_G17P, &moved_desc, &args, &program, mapped, sizeof(mapped),
+      &mapped_length, &mapped_launch));
+   CHECK(mapped_length == fresh.length);
+   CHECK(memcmp(mapped, fresh.bytes, fresh.length) == 0);
+   CHECK(memcmp(&mapped_launch, &fresh.launch, sizeof(mapped_launch)) == 0);
+   for (size_t i = mapped_length; i < sizeof(mapped); ++i)
+      CHECK(mapped[i] == 0xa5);
+
+   uint8_t too_small[HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE];
+   memset(too_small, 0x5a, sizeof(too_small));
+   uint16_t too_small_length = 0x5a5a;
+   struct agx3_compute_program too_small_launch;
+   memset(&too_small_launch, 0x5a, sizeof(too_small_launch));
+   CHECK(!hk_agx3_g17p_compute_program_relocate_single_range_to(
+      AGX_CHIP_G17P, &moved_desc, &args, &program, too_small,
+      fresh.length - 1, &too_small_length, &too_small_launch));
+   CHECK(too_small_length == 0x5a5a);
+   CHECK(too_small[0] == 0x5a && too_small[sizeof(too_small) - 1] == 0x5a);
+   const uint8_t *too_small_launch_bytes = (const uint8_t *)&too_small_launch;
+   for (size_t i = 0; i < sizeof(too_small_launch); ++i)
+      CHECK(too_small_launch_bytes[i] == 0x5a);
+
+   struct hk_agx3_g17p_compute_program unchanged = relocated;
+   struct agx3_ioto_uniform_range too_large = moved_args;
+   too_large.size_halfs = 130;
+   moved_desc.uniform_ranges = &too_large;
+   CHECK(!hk_agx3_g17p_compute_program_relocate_single_range(
+      AGX_CHIP_G17P, &moved_desc, &args, &program, &relocated));
+   CHECK(memcmp(&unchanged, &relocated, sizeof(relocated)) == 0);
+
    const struct agx3_compute_direct_grid grid = {
       .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
       .size = {96, 4, 1},
@@ -2465,6 +2676,207 @@ test_g17p_precompiled_fill_program(void)
    return 0;
 }
 
+static uint64_t
+elapsed_ns(const struct timespec *start, const struct timespec *end)
+{
+   return (uint64_t)(end->tv_sec - start->tv_sec) * UINT64_C(1000000000) +
+          (uint64_t)(end->tv_nsec - start->tv_nsec);
+}
+
+static int
+benchmark_g17p_single_range_relocation(void)
+{
+   enum { iterations = 20000 };
+   struct agx3_cdm_direct_template_sources sources;
+   if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                  &sources))
+      return 1;
+
+   const struct agx3_ioto_uniform_range template_range = {
+      .start_halfs = 0,
+      .size_halfs = 14,
+      .address = UINT64_C(0x10000024000),
+   };
+   const struct hk_agx3_g17p_compute_program_desc template_desc = {
+      .program_va = UINT64_C(0x100000b0000),
+      .shader_va = UINT64_C(0x100000003c0),
+      .uniform_ranges = &template_range,
+      .uniform_range_count = 1,
+      .shader_binary_size = 58,
+      .nr_gprs = 16,
+      .compiler_d_valid = true,
+      .compiler_d = 0,
+      .launch_sources = sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct hk_agx3_g17p_compute_program template, output;
+   if (!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &template_desc,
+                                               &template))
+      return 1;
+
+   struct timespec start, end;
+   volatile uint64_t checksum = 0;
+   clock_gettime(CLOCK_MONOTONIC, &start);
+   for (uint64_t i = 0; i < iterations; ++i) {
+      const struct agx3_ioto_uniform_range range = {
+         .start_halfs = template_range.start_halfs,
+         .size_halfs = template_range.size_halfs,
+         .address = UINT64_C(0x10000100000) + (i * 0x40),
+      };
+      struct hk_agx3_g17p_compute_program_desc desc = template_desc;
+      desc.program_va = UINT64_C(0x10001000000) + (i * 0x40);
+      desc.uniform_ranges = &range;
+      if (!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc,
+                                                  &output))
+         return 1;
+      checksum += output.bytes[0] + output.length + output.launch.program_va;
+   }
+   clock_gettime(CLOCK_MONOTONIC, &end);
+   const uint64_t compose_ns = elapsed_ns(&start, &end);
+
+   clock_gettime(CLOCK_MONOTONIC, &start);
+   for (uint64_t i = 0; i < iterations; ++i) {
+      const struct agx3_ioto_uniform_range range = {
+         .start_halfs = template_range.start_halfs,
+         .size_halfs = template_range.size_halfs,
+         .address = UINT64_C(0x10000100000) + (i * 0x40),
+      };
+      struct hk_agx3_g17p_compute_program_desc desc = template_desc;
+      desc.program_va = UINT64_C(0x10001000000) + (i * 0x40);
+      desc.uniform_ranges = &range;
+      if (!hk_agx3_g17p_compute_program_relocate_single_range(
+             AGX_CHIP_G17P, &desc, &template_range, &template, &output))
+         return 1;
+      checksum += output.bytes[0] + output.length + output.launch.program_va;
+   }
+   clock_gettime(CLOCK_MONOTONIC, &end);
+   const uint64_t relocate_ns = elapsed_ns(&start, &end);
+
+   printf("G17P Ioto benchmark: %u iterations, compose=%" PRIu64
+          " ns (%" PRIu64 " ns/call), relocate=%" PRIu64
+          " ns (%" PRIu64 " ns/call), speedup=%.2fx, checksum=%" PRIu64
+          "\n",
+          iterations, compose_ns, compose_ns / iterations, relocate_ns,
+          relocate_ns / iterations, (double)compose_ns / relocate_ns,
+          checksum);
+   return 0;
+}
+
+/* SuperTuxKart 1.4's advanced ("deferred") pipeline, transcribed from
+ * stk-code/src/graphics/rtts.cpp.  Every framebuffer the game builds must be
+ * admitted by the G17P bounded RT0 contract, because a refusal is not a
+ * degraded frame: hk_CmdBeginRendering() (hk_cmd_draw.c:1064) records
+ * VK_ERROR_FEATURE_NOT_PRESENT, Zink's zink_batch.c:777 turns that into
+ * is_device_lost and skips vkQueueSubmit, and the whole frame is dropped.
+ *
+ * Formats follow rtts.cpp:86-105.  With GL_EXT_color_buffer_float present -
+ * which Honeykrisp advertises and SuperTuxKart logs as "EXT Color Buffer
+ * Float Present" - rgba is RGBA16F, red is R16F, red32 is R32F and
+ * diffuse/specular is R11F_G11F_B10F (rtts.cpp:92).  Without it every target
+ * collapses to 8-bit (rtts.cpp:97-104).
+ *
+ * The game builds exactly two multi-attachment framebuffers, both at
+ * attachment-1 byte offset 4: FBO_SP (rtts.cpp:180-182) and
+ * FBO_COMBINED_DIFFUSE_SPECULAR (rtts.cpp:193-195).  It never builds a
+ * mixed-format pair, a third colour target, or a multisampled MRT, so the
+ * classifier's remaining fail-closed shapes are out of SuperTuxKart's reach.
+ */
+struct stk_framebuffer {
+   const char *name;
+   enum pipe_format format[2];
+   unsigned count;
+   enum agx_g17p_mrt_layout mrt;
+};
+
+static int
+test_stk_advanced_pipeline_framebuffers(void)
+{
+   /* rtts.cpp:92 - GL_EXT_color_buffer_float present (Honeykrisp's case). */
+   static const struct stk_framebuffer hdr[] = {
+      {"FBO_COLORS", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_NORMAL_AND_DEPTHS", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SP",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_RGBA_1", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_RGBA_2", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_COMBINED_DIFFUSE_SPECULAR",
+       {PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R11G11B10_FLOAT}, 2,
+       AGX_G17P_MRT_R11G11B10},
+      {"FBO_TMP1_WITH_DS", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_HALF1_R", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_HALF1", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_HALF2", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_RGBA_3", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SSAO", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_LINEAR_DEPTH", {PIPE_FORMAT_R32_FLOAT}, 1},
+      {"FBO_HALF2_R", {PIPE_FORMAT_R16_FLOAT}, 1},
+      {"FBO_QUARTER1", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_QUARTER2", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      /* rtts.cpp:253-262 - the ten bloom/lens targets share rgba. */
+      {"FBO_BLOOM_1024", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+      {"FBO_LENS_128", {PIPE_FORMAT_R16G16B16A16_FLOAT}, 1},
+   };
+
+   /* rtts.cpp:97-104 - the 8-bit fallback path. */
+   static const struct stk_framebuffer ldr[] = {
+      {"FBO_COLORS", {PIPE_FORMAT_R8G8B8A8_UNORM}, 1},
+      {"FBO_SP",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_COMBINED_DIFFUSE_SPECULAR",
+       {PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM}, 2,
+       AGX_G17P_MRT_RGBA8},
+      {"FBO_HALF1_R", {PIPE_FORMAT_R8_UNORM}, 1},
+      {"FBO_LINEAR_DEPTH", {PIPE_FORMAT_R8_UNORM}, 1},
+   };
+
+   const struct stk_framebuffer *sets[] = {hdr, ldr};
+   const unsigned counts[] = {ARRAY_SIZE(hdr), ARRAY_SIZE(ldr)};
+
+   for (unsigned s = 0; s < ARRAY_SIZE(sets); ++s) {
+      for (unsigned i = 0; i < counts[s]; ++i) {
+         const struct stk_framebuffer *fb = &sets[s][i];
+         enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+         for (unsigned rt = 0; rt < fb->count; ++rt)
+            formats[rt] = fb->format[rt];
+
+         struct agx_tilebuffer_layout tib =
+            agx_build_tilebuffer_layout(formats, fb->count, 1, false);
+
+         if (!hk_agx3_g17p_rt0_tile_layout_supported(&tib)) {
+            fprintf(stderr,
+                    "FAIL line %d: SuperTuxKart %s is fail-closed on G17P\n",
+                    __LINE__, fb->name);
+            return 1;
+         }
+         ++checks;
+
+         CHECK(agx_g17p_classify_mrt(&tib) == fb->mrt);
+
+         /* Both of SuperTuxKart's MRT framebuffers pack attachment 1 at byte
+          * offset 4 in an 8-byte sample.  Nothing in the game asks for the
+          * offset-8 or 16-byte shapes. */
+         if (fb->count == 2) {
+            CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
+            CHECK(agx_tilebuffer_offset_B(&tib, 1) == 4);
+            CHECK(tib.sample_size_B == 8);
+         }
+      }
+   }
+
+   /* rtts.cpp:296-299 - the cascaded shadow framebuffer has no colour
+    * attachment and four layers.  hk clears `layered` before the bounded RT0
+    * check (hk_agx3_ioto_program_core.c:85-87), so it must be admitted. */
+   enum pipe_format none[AGX_MAX_RENDER_TARGETS] = {0};
+   struct agx_tilebuffer_layout shadow =
+      agx_build_tilebuffer_layout(none, 0, 1, true);
+   CHECK(shadow.layered);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&shadow));
+
+   return 0;
+}
+
 int
 main(void)
 {
@@ -2480,7 +2892,12 @@ main(void)
        test_g17p_rt0_background_programs() ||
        test_g17p_rt0_background_staging() ||
        test_g17p_rt0_background_pass_control() ||
-       test_g17p_single_layer_rt0_layout() || test_alias())
+       test_g17p_single_layer_rt0_layout() ||
+       test_stk_advanced_pipeline_framebuffers() || test_alias())
+      return 1;
+
+   if (getenv("HK_G17P_PROGRAM_RELOCATION_BENCH") &&
+       benchmark_g17p_single_range_relocation())
       return 1;
 
    printf("Honeykrisp AGX3 Ioto program core: %u checks passed\n", checks);

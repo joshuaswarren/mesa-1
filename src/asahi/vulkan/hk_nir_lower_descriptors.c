@@ -220,6 +220,14 @@ load_descriptor_for_idx_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    uint32_t binding = nir_intrinsic_binding(intrin);
    index = nir_iadd(b, index, intrin->src[0].ssa);
 
+   /* A buffer descriptor is a vec4 (address, size, ...); an acceleration
+    * structure is a bare 64-bit BVH address, and rq_initialize consumes it
+    * as one.  Loading it as a vec4 would both read past the descriptor and
+    * hand the ray-query lowering the wrong-shaped value. */
+   if (nir_intrinsic_desc_type(intrin) ==
+       nir_descriptor_type_acceleration_structure)
+      return load_descriptor(b, 1, 64, set, binding, index, 0, ctx);
+
    return load_descriptor(b, 4, 32, set, binding, index, 0, ctx);
 }
 

@@ -20,7 +20,11 @@
 #define HK_MIN_TEXEL_BUFFER_ALIGNMENT    16
 #define HK_MIN_UBO_ALIGNMENT             64
 #define HK_MAX_VIEWPORTS                 16
-#define HK_MAX_DESCRIPTOR_SIZE           72
+/* The largest per-descriptor stride any binding can take. G17P storage images
+ * occupy 80 bytes and round to 96 so every array element's PBE half remains
+ * 32-byte aligned. Mutable descriptors must be large enough for that member.
+ */
+#define HK_MAX_DESCRIPTOR_SIZE           96
 #define HK_MAX_PUSH_DESCRIPTORS          32
 #define HK_MAX_DESCRIPTOR_SET_SIZE       (1u << 30)
 #define HK_MAX_INLINE_UNIFORM_BLOCK_SIZE (1u << 16)

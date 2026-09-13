@@ -397,12 +397,22 @@ agx_ioto_decode_program_record(enum agx_chip chip, const void *stream,
 
    /* G17P's ordinary, coverage and background fragment releases are GPU0-only
     * six-byte encodings emitted by the bounded program composers. They are
-    * not the GPU1 PIXREL form in the public record table; recognize only the
-    * three exact byte-witnessed payloads so a program walk cannot lose its
-    * boundary. */
+    * not the GPU1 PIXREL form in the public record table, so the boundary is
+    * carried by an exact payload list rather than a mask.
+    *
+    * Byte three selects the release variant and the colour partition count.
+    * hk_agx3_g17p_basic_graphics_program_generate() emits, for one, two and
+    * three partitions, 0xf3/0xc3/0x03 ordinary and 0xf2/0xc2/0x02 coverage --
+    * the set asserted by test_g17p_basic_graphics_program_partitions() -- plus
+    * 0x00 for the bounded clear/reload background release. Listing only the
+    * single-partition pair left every multi-partition fragment program
+    * undecodable: a vkQuake world frame renders through two colour partitions,
+    * so its release is 0xc3 and a program walk lost its boundary there. */
    if (chip == AGX_CHIP_G17P && available >= 6 && bytes[0] == 0x07 &&
        bytes[1] == 0x02 && bytes[2] == 0x54 &&
-       (bytes[3] == 0xf3 || bytes[3] == 0xf2 || bytes[3] == 0x00) &&
+       (bytes[3] == 0xf3 || bytes[3] == 0xc3 || bytes[3] == 0x03 ||
+        bytes[3] == 0xf2 || bytes[3] == 0xc2 || bytes[3] == 0x02 ||
+        bytes[3] == 0x00) &&
        bytes[4] == 0x02 &&
        bytes[5] == 0x00) {
       out->kind = AGX_IOTO_PROGRAM_RECORD_IOTO;

@@ -390,6 +390,7 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
                          enum agx_primitive topology,
                          uint32_t draw_state_context_offset,
                          uint32_t render_state_emitted,
+                         uint64_t empty_draw_jump,
                          enum agx_index_size index_size__3)
 {
    uint tid = get_sub_group_local_id();
@@ -471,6 +472,6 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
    if (first) {
       agx_vdm_draw_robust_index(vdm, chip, draw, topology,
                                 draw_state_context_offset,
-                                render_state_emitted != 0);
+                                render_state_emitted != 0, empty_draw_jump);
    }
 }

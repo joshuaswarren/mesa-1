@@ -48,6 +48,27 @@ check_layout(unsigned generation, unsigned texture_size,
 }
 
 static void
+check_g17p_storage_binding_alignment(void)
+{
+   const struct hk_storage_image_descriptor_layout storage =
+      hk_storage_image_descriptor_layout(9);
+
+   assert(storage.stride + HK_G17P_STORAGE_SW_SIZE == 80);
+   assert(HK_G17P_STORAGE_ALIGNMENT == 32);
+   assert(HK_G17P_STORAGE_STRIDE == 96);
+
+   /* CTS compute.pipeline.basic.copy_ssbo_to_image_small binds a 16-byte
+    * SSBO descriptor first. The following storage-image record must advance
+    * to 32 before adding the PBE half at +32. Every array element must retain
+    * that alignment too. */
+   const unsigned binding_offset = HK_G17P_STORAGE_ALIGNMENT;
+   assert(((binding_offset + storage.pbe) & 31) == 0);
+   for (unsigned element = 0; element < 8; ++element)
+      assert(((binding_offset + element * HK_G17P_STORAGE_STRIDE +
+               storage.pbe) & 31) == 0);
+}
+
+static void
 check_gen9_layer_mode_preserved(struct AGX_TEXTURE semantic)
 {
    struct hk_native_texture_descriptor unaligned, aligned;
@@ -316,6 +337,22 @@ check_gen9_bc_textures(void)
 int
 main(void)
 {
+   uint64_t atomic_sw = 0;
+   assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
+                                       &atomic_sw));
+   assert((atomic_sw & ((UINT64_C(1) << 27) - 1)) == 3);
+   assert(((atomic_sw >> 27) & 0xf) == 6);
+   assert(((atomic_sw >> 31) & 0xf) == 5);
+   assert(((atomic_sw >> 35) & ((UINT64_C(1) << 27) - 1)) == 0x80);
+   assert((atomic_sw >> 62) == 2);
+   assert(!hk_pack_g17p_image_atomic_sw(1, 64, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 48, 64, 0x4000, 1,
+                                        &atomic_sw));
+   assert(!hk_pack_g17p_image_atomic_sw(0, 64, 64, 0x4000, 3,
+                                        &atomic_sw));
+   check_g17p_storage_binding_alignment();
+
    check_gen9_bc1_rgba_texture();
    check_gen9_etc2_rgba8_texture();
    check_gen9_astc_4x4_texture();

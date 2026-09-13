@@ -720,6 +720,60 @@ fs_finish(nir_builder *b)
    return b->shader;
 }
 
+static unsigned
+count_sample_mask(nir_shader *s)
+{
+   unsigned count = 0;
+
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_sample_mask_agx)
+               count++;
+         }
+      }
+   }
+
+   return count;
+}
+
+/*
+ * agx_nir_lower_frag_sidefx gives a side-effecting fragment shader an all-live
+ * late test, and Honeykrisp preprocesses every shader twice (hk_preprocess_nir,
+ * then hk_lower_nir). The test must survive that as exactly one sample_mask:
+ * two of them run the depth/stencil test twice for every sample, which the
+ * contract in agx_nir_lower_sample_mask.c forbids. The FragDepth lowering this
+ * replaced was idempotent through info.outputs_written; the sample-mask
+ * lowering has to check for itself, so pin the invariant here.
+ */
+static bool
+test_frag_sidefx_late_test_once(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P fragment side effects");
+   b.shader->info.internal = true;
+   fs_store_colour(&b, nir_load_preamble(&b, 4, 32, .base = 4));
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.writes_memory = true;
+
+   agx_preprocess_nir(b.shader);
+   const unsigned once = count_sample_mask(b.shader);
+   agx_preprocess_nir(b.shader);
+   const unsigned twice = count_sample_mask(b.shader);
+
+   const bool ok = once == 1 && twice == 1;
+   if (!ok)
+      fprintf(stderr,
+              "frag side effects: late tests after one preprocess=%u, after "
+              "two=%u, expected 1 and 1\n",
+              once, twice);
+
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static bool
 test_g17p_background_clear(void)
 {
@@ -1306,6 +1360,22 @@ build_fs_interpolated_at_sample(void)
 
    fs_store_colour(&b, colour);
    b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* Retain the two coverage updates in the faulting Hyprland fragment: a
+ * dynamic no-tests discard followed by the final depth/stencil test. */
+static nir_shader *
+build_fs_discard_then_tests(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P discard then tests FS");
+   nir_def *target = nir_iand_imm(
+      &b, nir_load_preamble(&b, 1, 16, .base = 0), 1);
+   nir_sample_mask_agx(&b, target, nir_imm_intN_t(&b, 0, 16));
+   nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                       nir_imm_intN_t(&b, 0xff, 16));
+   fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
    return fs_finish(&b);
 }
 
@@ -2049,7 +2119,18 @@ test_indexed_sampler_sets(void)
 static bool
 test_indexed_storage_image_read(void)
 {
-   for (unsigned mode = 0; mode < 4; ++mode) {
+   /* mode 0 is the fully specified positive case.  1 and 3 used to be
+    * negatives because g17p_indexed_image_fetch_shape() admitted only
+    * PIPE_FORMAT_R8G8B8A8_UNORM and only non-array 2D; neither was a
+    * constraint.  agx3_emit_texture_fetch() never reads I->format, and
+    * metal-nt -arch applegpu_g17p emits byte-identical code for
+    * texture2d<float>, texture2d<uint> and texture2d<int> read(), so the
+    * component type is in the descriptor.  3D and 2D array are dimensions the
+    * same encoder already takes. Storage cube and cube-array descriptors are
+    * also 2D arrays, matching agx_emit_image_load()'s existing dimension
+    * transform. Mode 2 keeps the negative coverage on coherent access. */
+   for (unsigned mode = 0; mode < 7; ++mode) {
+      const bool expect_lowered = mode != 2;
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options,
          "indexed read-only storage image");
@@ -2070,9 +2151,10 @@ test_indexed_storage_image_read(void)
                                 zero, zero);
       nir_def *value = nir_bindless_image_load(
          &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
-         .image_dim = mode == 3 ? GLSL_SAMPLER_DIM_3D
-                                : GLSL_SAMPLER_DIM_2D,
-         .image_array = false,
+         .image_dim = mode == 3     ? GLSL_SAMPLER_DIM_3D
+                      : mode >= 5   ? GLSL_SAMPLER_DIM_CUBE
+                                    : GLSL_SAMPLER_DIM_2D,
+         .image_array = mode == 4 || mode == 6,
          .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
                              : PIPE_FORMAT_R8G8B8A8_UNORM,
          .access = ACCESS_RESTRICT | ACCESS_NON_WRITEABLE |
@@ -2125,6 +2207,9 @@ test_indexed_storage_image_read(void)
               index->intrinsic == nir_intrinsic_load_global_constant &&
               index->def.bit_size == 32 && original_handles == 1 &&
               native_handles == 1 && heap_index_loads == 2 && set4_loads == 1;
+      } else if (expect_lowered) {
+         ok = lowered && read && original_handles == 1 &&
+              native_handles == 1 && set4_loads == 1;
       } else {
          ok = !lowered && original_handles == 1 && native_handles == 0;
       }
@@ -2147,6 +2232,21 @@ lower_test_descriptor_set(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def_replace(&intr->def,
                    nir_load_preamble(b, 1, 64,
                                      .base = 4 * nir_intrinsic_desc_set(intr)));
+   return true;
+}
+
+static bool
+lower_test_g17p_descriptor_set(nir_builder *b, nir_intrinsic_instr *intr,
+                               UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_descriptor_set_agx)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def,
+                   nir_load_preamble(b, 1, 64,
+                                     .base = AGX_ABI_FUNI_ROOT + 4 +
+                                             4 * nir_intrinsic_desc_set(intr)));
    return true;
 }
 
@@ -2232,6 +2332,53 @@ test_g17p_nonzero_fetch_lod_compile(void)
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+test_g17p_storage_read_zero_lod_compile(void)
+{
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P storage image level zero");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *gid = nir_load_global_invocation_id(&b, 32);
+      nir_def *zero = nir_imm_int(&b, 0);
+      nir_def *coord = nir_vec4(&b, nir_channel(&b, gid, 0),
+                               nir_channel(&b, gid, 1), zero, zero);
+      const enum pipe_format format = mode == 2 ? PIPE_FORMAT_R8G8B8A8_UINT
+                                                : PIPE_FORMAT_R32_UINT;
+      nir_def *handle = mode == 0 ? nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 64), .desc_set = 0) : zero;
+      nir_def *value = mode == 0 ? nir_bindless_image_load(
+         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         .image_dim = GLSL_SAMPLER_DIM_2D, .format = format,
+         .access = ACCESS_NON_WRITEABLE) : nir_image_load(
+         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         .image_dim = GLSL_SAMPLER_DIM_2D, .format = format,
+         .access = ACCESS_NON_WRITEABLE);
+      nir_export_agx(&b, nir_channel(&b, value, 0), .base = 0);
+
+      bool ok = mode != 0 || agx_nir_lower_g17p_indexed_samplers(b.shader);
+      NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+               lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+      agx_preprocess_nir(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .promote_constants = true,
+         .reserved_preamble = 16,
+      };
+      struct agx_shader_part part = {0};
+      ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary &&
+            part.info.uses_txf && !contains_integer_lod_stage(&part);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
 }
 
 static bool
@@ -2401,11 +2548,12 @@ test_g17p_native_cube_array_sample(void)
    bool native_smp = false;
    /* The combined HK ABI keeps the descriptor pointers in r8:r11 and the
     * post-RA layer in r15. This is the exact SMP tail produced from that ABI;
-    * its cube/array/layer selectors are independently identical to Apple's
-    * dynamic cube-array sample witness. */
+    * its cube/array/layer selectors match Apple's dynamic cube-array witness,
+    * while f83/f112 retain the driver's independently qualified 0/4 profile.
+    */
    static const uint8_t hk_native_smp[] = {
       0x05,0x80,0x0c,0xb8,0x30,0x25,0x13,
-      0xb5,0x01,0x00,0x10,0x00,0x12,0x00,
+      0xb5,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    for (unsigned off = 0;
         part.binary && off + sizeof(hk_native_smp) <= part.info.binary_size;
@@ -2438,6 +2586,40 @@ custom_border_sample(nir_builder *b, nir_def *image, nir_def *sampler,
 }
 
 static bool
+g17p_register_sample_group_is_global(const struct agx_shader_part *part,
+                                     unsigned expected)
+{
+   const uint8_t *code = part->binary;
+   unsigned samples = 0, unterminated = 0;
+
+   for (unsigned off = 0; off + 20 <= part->info.binary_size; ++off) {
+      const uint8_t *p = code + off;
+
+      /* SMP.EP4 with register texture and sampler operands. The descriptor
+       * fields vary with RA, while these selector bytes are fixed by Apple's
+       * argument-buffer witnesses. f156 is bit 7 of byte 3 in this form. */
+      if (p[2] != 0x0c || p[9] != 0x02 || p[10] != 0x90 ||
+          p[11] != 0x01 || (p[12] != 0x01 && p[12] != 0x12) ||
+          p[13] != 0x00 ||
+          !(p[15] & 0x20))
+         continue;
+
+      samples++;
+      unterminated += !(p[3] & 0x80);
+      off += 19;
+   }
+
+   const unsigned expected_unterminated = expected > 1 ? expected - 1 : 0;
+   if (samples != expected || unterminated != expected_unterminated) {
+      fprintf(stderr,
+              "indexed SMP.EP4 count/unterminated %u/%u, expected %u/%u\n",
+              samples, unterminated, expected, expected_unterminated);
+      return false;
+   }
+   return true;
+}
+
+static bool
 test_custom_border_samplers(bool dynamic, unsigned invalid)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -2465,8 +2647,10 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
    nir_def *mixed = nir_flrp(&b, &clamp->def, &ordinary->def, border);
    nir_pop_if(&b, branch);
    nir_def *result = nir_if_phi(&b, mixed, &ordinary->def);
-   nir_store_output(&b, result, nir_imm_int(&b, 0), .write_mask = 15,
-                    .src_type = nir_type_float32);
+   for (unsigned c = 0; c < 4; ++c)
+      nir_export_agx(&b, nir_channel(&b, result, c),
+                     .base = AGX_ABI_FOUT_COLOUR(0) + 2 * c);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
 
    bool lowered = agx_nir_lower_g17p_indexed_samplers(b.shader);
    bool ok = lowered == (invalid == 0);
@@ -2497,7 +2681,7 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
          nir_alu_instr *subtract = wide ? nir_def_as_alu_or_null(wide->src[0].src.ssa) : NULL;
          nir_alu_instr *extend = subtract ? nir_def_as_alu_or_null(subtract->src[0].src.ssa) : NULL;
          ok &= wide && wide->op == nir_op_u2u64 && subtract &&
-               subtract->op == nir_op_iadd && extend &&
+               subtract->op == nir_op_usub_sat && extend &&
                extend->op == nir_op_u2u32 && extend->src[0].src.ssa == original[i];
       }
       if (!dynamic) {
@@ -2508,7 +2692,147 @@ test_custom_border_samplers(bool dynamic, unsigned invalid)
                   nir_src_as_uint(samples[i]->src[si].src) == (i ? 56 : 52);
          }
       }
+
+      if (dynamic) {
+         /* This is the indexed two-sample/control-flow shape used by desktop
+          * compositors. Keep the check through RA and binary scheduling: both
+          * descriptor loads must retire before SMP consumes their register
+          * indices, including the saturating sampler-heap rebase above. */
+         struct agx_shader_key key = {
+            .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+            .no_preamble = true,
+            .reserved_preamble = 128,
+         };
+         fs_lower(b.shader);
+         NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+                  lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+         agx_preprocess_nir_g17p(b.shader);
+         struct agx_shader_part part = {0};
+         const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+         ok &= compiled && part.binary != NULL &&
+               part.info.g17p_sampled_fragment &&
+               g17p_register_sample_group_is_global(&part, 2);
+         free(part.binary);
+      }
    }
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_indexed_sampler_rebase_boundaries(void)
+{
+   static const uint16_t indices[] = {0, 1, 27, 28, 29, 43, 44, UINT16_MAX};
+
+   for (unsigned i = 0; i < ARRAY_SIZE(indices); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options,
+         "G17P indexed sampler rebase boundary");
+      nir_def *image =
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+      nir_def *sampler = nir_bindless_sampler_agx(
+         &b, nir_imm_int(&b, 32), nir_imm_intN_t(&b, indices[i], 16),
+         .desc_set = 0);
+      nir_tex_instr *tex = custom_border_sample(
+         &b, image, sampler, nir_imm_vec2(&b, 0.25f, 0.75f), 0);
+      nir_export_agx(&b, nir_channel(&b, &tex->def, 0),
+                     .base = AGX_ABI_FOUT_COLOUR(0));
+
+      bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+      const int si = nir_tex_instr_src_index(
+         tex, nir_tex_src_sampler_handle);
+      const int ti = nir_tex_instr_src_index(
+         tex, nir_tex_src_texture_offset);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      const uint32_t expected = indices[i] > 28 ? indices[i] - 28 : 0;
+      ok &= si >= 0 && ti >= 0 &&
+            nir_src_is_const(tex->src[si].src) &&
+            nir_src_as_uint(tex->src[si].src) == expected &&
+            nir_src_bit_size(tex->src[si].src) == 64 &&
+            nir_src_bit_size(tex->src[ti].src) == 64;
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+
+   return true;
+}
+
+static nir_tex_instr *
+indexed_sample(nir_builder *b, nir_def *set, uint32_t descriptor_offset_B,
+               enum glsl_sampler_dim dim, bool array, nir_def *coord)
+{
+   nir_def *image = nir_bindless_image_agx(
+      b, nir_imm_int(b, descriptor_offset_B), .desc_set = 0);
+   nir_def *sampler_index = nir_load_global_constant(
+      b, 1, 16,
+      nir_iadd_imm(b, set, descriptor_offset_B + 40), .align_mul = 2);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      b, nir_imm_int(b, descriptor_offset_B + 32), sampler_index,
+      .desc_set = 0);
+   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 3);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = dim;
+   tex->is_array = array;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(b, &tex->instr);
+   return tex;
+}
+
+static bool
+test_indexed_array_and_3d_compile(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P indexed compositor array and 3D samples");
+   nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+   nir_tex_instr *array = indexed_sample(
+      &b, set, 0, GLSL_SAMPLER_DIM_2D, true,
+      nir_vec3(&b, nir_imm_float(&b, 0.25f), nir_imm_float(&b, 0.75f),
+               nir_imm_float(&b, 1.0f)));
+   nir_tex_instr *three_d = indexed_sample(
+      &b, set, 72, GLSL_SAMPLER_DIM_3D, false,
+      nir_imm_vec3(&b, 0.125f, 0.5f, 0.875f));
+   nir_def *result = nir_fadd(&b, &array->def, &three_d->def);
+   for (unsigned c = 0; c < 4; ++c)
+      nir_export_agx(&b, nir_channel(&b, result, c),
+                     .base = AGX_ABI_FOUT_COLOUR(0) + 2 * c);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+   nir_tex_instr *samples[] = {array, three_d};
+   for (unsigned i = 0; i < ARRAY_SIZE(samples); ++i) {
+      const int ti = nir_tex_instr_src_index(
+         samples[i], nir_tex_src_texture_offset);
+      const int si = nir_tex_instr_src_index(
+         samples[i], nir_tex_src_sampler_handle);
+      ok &= ti >= 0 && si >= 0 &&
+            nir_src_bit_size(samples[i]->src[ti].src) == 64 &&
+            nir_src_bit_size(samples[i]->src[si].src) == 64;
+   }
+
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+            lower_test_g17p_descriptor_set, nir_metadata_control_flow, NULL);
+   agx_preprocess_nir_g17p(b.shader);
+   fs_lower(b.shader);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .no_stop = true,
+      .reserved_preamble = AGX_ABI_FUNI_ROOT + 8,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) && part.binary != NULL &&
+         part.info.g17p_sampled_fragment && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 &&
+         g17p_register_sample_group_is_global(&part, 2);
+   free(part.binary);
    ralloc_free(b.shader);
    return ok;
 }
@@ -2591,6 +2915,118 @@ test_indexed_fetch_sets(void)
          sampler_loads==1 && set_mask==((1u<<0)|(1u<<3)|(1u<<7));
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+test_indexed_dynamic_fetch_lod(void)
+{
+   const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_COMPUTE,
+   };
+   bool all_ok = true;
+
+   for (unsigned stage = 0; stage < ARRAY_SIZE(stages); ++stage) {
+      for (unsigned dimension = 0; dimension < 3; ++dimension) {
+         const bool array = dimension == 1;
+         const bool three_d = dimension == 2;
+
+         for (unsigned bits = 16; bits <= 32; bits += 16) {
+            nir_builder b = nir_builder_init_simple_shader(
+               stages[stage], &agx_nir_options, "indexed dynamic fetch LOD");
+            b.shader->info.workgroup_size[0] = 1;
+            b.shader->info.workgroup_size[1] = 1;
+            b.shader->info.workgroup_size[2] = 1;
+            nir_def *lod = nir_load_global_constant(
+               &b, 1, bits, nir_imm_int64(&b, 0x10000), .align_mul = 4);
+            nir_def *handle = nir_bindless_image_agx(
+               &b, nir_imm_int(&b, 72), .desc_set = 3);
+            nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+            tex->op = nir_texop_txf;
+            tex->sampler_dim =
+               three_d ? GLSL_SAMPLER_DIM_3D : GLSL_SAMPLER_DIM_2D;
+            tex->is_array = array;
+            tex->coord_components = array || three_d ? 3 : 2;
+            tex->dest_type = nir_type_float32;
+            tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+            tex->src[0] = nir_tex_src_for_ssa(
+               nir_tex_src_backend1,
+               array || three_d ? nir_imm_ivec3(&b, 3, 4, 1)
+                                : nir_imm_ivec2(&b, 3, 4));
+            tex->src[1] =
+               nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+            tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_builder_instr_insert(&b, &tex->instr);
+
+            if (stages[stage] == MESA_SHADER_VERTEX) {
+               for (unsigned c = 0; c < 4; ++c)
+                  nir_store_uvs_agx(&b, nir_channel(&b, &tex->def, c),
+                                    nir_imm_intN_t(&b, c, 16));
+               b.shader->info.outputs_written = VARYING_BIT_POS;
+            } else if (stages[stage] == MESA_SHADER_FRAGMENT) {
+               fs_store_colour(&b, &tex->def);
+            } else {
+               nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
+                                .align_mul = 16, .write_mask = 15);
+            }
+
+            bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
+            if (three_d) {
+               /* Do not turn an unimplemented 3D register-LOD form into an
+                * accepted native descriptor path as a side effect. */
+               all_ok &= !ok &&
+                  nir_tex_instr_src_index(
+                     tex, nir_tex_src_texture_handle) >= 0;
+               ralloc_free(b.shader);
+               continue;
+            }
+
+            const int li =
+               nir_tex_instr_src_index(tex, nir_tex_src_lod);
+            const int ti =
+               nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+            ok &= li >= 0 && ti >= 0;
+            if (ok) {
+               nir_def *lowered_lod = tex->src[li].src.ssa;
+               ok &= lowered_lod->bit_size == 32 &&
+                     !nir_src_is_const(tex->src[li].src) &&
+                     nir_src_bit_size(tex->src[ti].src) == 64;
+               if (bits == 32) {
+                  ok &= lowered_lod == lod;
+               } else {
+                  nir_alu_instr *convert = nir_src_as_alu(tex->src[li].src);
+                  ok &= convert && convert->op == nir_op_u2u32 &&
+                        convert->src[0].src.ssa == lod;
+               }
+            }
+
+            if (ok) {
+               NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+                        lower_test_descriptor_set, nir_metadata_control_flow,
+                        NULL);
+               agx_preprocess_nir_g17p(b.shader);
+               struct agx_shader_key key = {
+                  .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                  .no_preamble = true,
+               };
+               struct agx_shader_part part = {0};
+               ok = agx_compile_shader_nir(b.shader, &key, &part) &&
+                    part.binary;
+               free(part.binary);
+            }
+
+            if (!ok)
+               fprintf(stderr,
+                       "dynamic indexed txf stage=%u array=%u bits=%u "
+                       "failed\n",
+                       stages[stage], array, bits);
+            all_ok &= ok;
+            ralloc_free(b.shader);
+         }
+      }
+   }
+
+   return all_ok;
 }
 
 /* vkCmdResolveImage lowers each multisample read to txf_ms after packing the
@@ -2937,7 +3373,8 @@ build_cs_storage_image(unsigned mode)
    b.shader->info.workgroup_size[2] = 1;
 
    const enum pipe_format format =
-      mode == 1 ? PIPE_FORMAT_R16G16B16A16_UINT
+      mode >= 6 ? PIPE_FORMAT_R32_UINT
+      : mode == 1 ? PIPE_FORMAT_R16G16B16A16_UINT
                 : PIPE_FORMAT_R8G8B8A8_UINT;
    const enum glsl_sampler_dim dim =
       mode == 2 ? GLSL_SAMPLER_DIM_3D
@@ -2960,9 +3397,11 @@ build_cs_storage_image(unsigned mode)
    }
    if (mode == 5)
       nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, gid, 0), 4));
-   nir_def *value = nir_bindless_image_load(
-      &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
-      .image_array = false, .format = format, .access = ACCESS_RESTRICT);
+   nir_def *value = mode >= 6
+      ? nir_imm_ivec4(&b, 9, 8, 7, 6)
+      : nir_bindless_image_load(
+           &b, 4, 32, texture, coord, zero, zero, .image_dim = dim,
+           .image_array = false, .format = format, .access = ACCESS_RESTRICT);
    if (mode == 5) {
       nir_store_scratch(&b, value, zero, .write_mask = 0xf, .align_mul = 16);
       nir_pop_if(&b, NULL);
@@ -2972,7 +3411,14 @@ build_cs_storage_image(unsigned mode)
       &b, pbe, coord, zero,
       mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
       .image_dim = dim, .image_array = false, .format = format,
-      .access = ACCESS_RESTRICT);
+      .access = ACCESS_RESTRICT | (mode == 7 ? ACCESS_COHERENT : 0));
+   if (mode == 7) {
+      nir_bindless_image_atomic(
+         &b, 32, pbe, coord, zero, nir_imm_int(&b, 1),
+         .atomic_op = nir_atomic_op_iadd, .image_dim = dim,
+         .image_array = false, .format = format,
+         .access = ACCESS_RESTRICT | ACCESS_COHERENT);
+   }
    if (mode == 5)
       nir_pop_if(&b, NULL);
    return b.shader;
@@ -2981,7 +3427,7 @@ build_cs_storage_image(unsigned mode)
 static bool
 test_storage_image_lowering(void)
 {
-   for (unsigned mode = 0; mode < 6; ++mode) {
+   for (unsigned mode = 0; mode < 8; ++mode) {
       nir_shader *nir = build_cs_storage_image(mode);
       struct agx_g17p_storage_image_binding binding = {
          .texture_offset_B = UINT32_MAX,
@@ -2989,7 +3435,7 @@ test_storage_image_lowering(void)
       };
       const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
       unsigned bindless_handles = 0, bindless_ops = 0;
-      unsigned ordinary_loads = 0, ordinary_stores = 0;
+      unsigned ordinary_loads = 0, ordinary_stores = 0, atomics = 0;
       nir_foreach_function_impl(impl, nir) {
          nir_foreach_block(block, impl) {
             nir_foreach_instr(instr, block) {
@@ -3000,20 +3446,26 @@ test_storage_image_lowering(void)
                bindless_handles += op == nir_intrinsic_bindless_image_agx;
                bindless_ops += op == nir_intrinsic_bindless_image_load ||
                                op == nir_intrinsic_bindless_image_store;
+               atomics += op == nir_intrinsic_bindless_image_atomic ||
+                          op == nir_intrinsic_bindless_image_atomic_swap;
                ordinary_loads += op == nir_intrinsic_image_load;
                ordinary_stores += op == nir_intrinsic_image_store;
             }
          }
       }
 
-      const bool ok = mode == 0 || mode == 4 || mode == 5
+      const bool ok = mode == 0 || mode == 4 || mode == 5 || mode == 6 ||
+                      mode == 7
          ? lowered && binding.texture_offset_B == 64 &&
               binding.pbe_offset_B == 96 &&
-              bindless_handles == (mode == 4 ? 1 : 0) &&
-              bindless_ops == 0 && ordinary_loads == 1 && ordinary_stores == 1
+              binding.write_only == (mode == 6) &&
+              bindless_handles == (mode == 4 || mode == 7 ? 1 : 0) &&
+              bindless_ops == 0 && ordinary_loads == (mode >= 6 ? 0 : 1) &&
+              ordinary_stores == 1 && atomics == (mode == 7 ? 1 : 0)
          : !lowered && binding.texture_offset_B == UINT32_MAX &&
               binding.pbe_offset_B == UINT32_MAX && bindless_handles == 2 &&
-              bindless_ops == 2 && ordinary_loads == 0 && ordinary_stores == 0;
+              bindless_ops == 2 && ordinary_loads == 0 &&
+              ordinary_stores == 0 && atomics == 0;
       ralloc_free(nir);
       if (!ok)
          return false;
@@ -3412,6 +3864,162 @@ test_indexed_compute_storage(void)
    return ok;
 }
 
+/* Apple's builtin end-of-tile factory, asked for a 2D-multisample attachment
+ * (texture type 4) instead of a 2D one (texture type 2), emits a second
+ * program per selector. The pair differs in exactly three bytes and two
+ * encoder fields -- PACK_IMGWIR field 5 (4 -> 6) and IMGWBLK field 30
+ * (1 -> 2) -- and no instruction is added, because the block store covers
+ * every sample of the tile. That is the whole of "G17P can store an
+ * unresolved multisample surface"; see isa/README-metal-witness.md for how
+ * the witnesses were generated and round-tripped.
+ */
+static bool
+test_g17p_multisample_eot_block_store(void)
+{
+   /* Native U8NORM key 0x10020300 with texture type 4: selector 0x75 -> 0x72. */
+   static const uint8_t expected_u8norm[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0x28, 0x72, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   /* Native I32 key with texture type 4: selector 0x35 -> 0x32. */
+   static const uint8_t expected_i32[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0x28, 0x32, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+
+   /* The resolving forms of the same two selectors, unchanged. */
+   static const uint8_t expected_u8norm_resolved[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0xa8, 0x75, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t expected_i32_resolved[] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
+      0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
+      0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00,
+      0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00,
+      0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+
+   /* Compile one end-of-tile store. dim selects the IMGWBLK dimension the
+    * shader asks for; the key states which Apple builtin the caller means.
+    * Returning the emitted bytes lets the caller assert both the match and
+    * the refusals. */
+   struct eot_case {
+      bool key_multisample;
+      enum pipe_format format;
+      uint8_t words;
+      bool i32;
+      bool i32_four_words;
+      bool i32_signed_four_words;
+      const uint8_t *expected;
+      size_t expected_size;
+   };
+   const struct eot_case cases[] = {
+      /* The two witnessed selectors, unresolved. */
+      {true, PIPE_FORMAT_R8_UNORM, 0, false, false, false, expected_u8norm,
+       sizeof(expected_u8norm)},
+      {true, PIPE_FORMAT_R32_UINT, 1, true, false, false, expected_i32,
+       sizeof(expected_i32)},
+      /* The same graphs without the key must still emit the resolving
+       * programs, byte for byte. Their only difference from the pair above is
+       * the three witnessed bytes, so this is what proves the key -- not some
+       * incidental compiler state -- is what selects between them. */
+      {false, PIPE_FORMAT_R8_UNORM, 0, false, false, false,
+       expected_u8norm_resolved, sizeof(expected_u8norm_resolved)},
+      {false, PIPE_FORMAT_R32_UINT, 1, true, false, false,
+       expected_i32_resolved, sizeof(expected_i32_resolved)},
+      /* The distinct 84-byte signed four-word I32 builtin has no multisample
+       * witness, so it must fail closed rather than store a resolving 2D
+       * program into a multisample surface. */
+      {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, NULL, 0},
+   };
+
+   bool ok = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      const struct eot_case *c = &cases[i];
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P MSAA RT0 EOT");
+      nir_def *coords =
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+      nir_image_store_block_agx(&b, nir_imm_intN_t(&b, 0, 16),
+                                nir_imm_int(&b, 0), coords, .format = c->format,
+                                .image_dim = GLSL_SAMPLER_DIM_2D,
+                                .explicit_coord = true);
+      agx_preprocess_nir(b.shader);
+
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .g17p_rt0_eot_multisample = c->key_multisample,
+         .g17p_rt0_eot_words = c->words,
+         .g17p_rt0_eot_i32 = c->i32,
+         .g17p_rt0_eot_i32_four_words = c->i32_four_words,
+         .g17p_rt0_eot_i32_signed_four_words = c->i32_signed_four_words,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+
+      bool case_ok;
+      if (c->expected) {
+         case_ok = compiled && part.binary &&
+                   part.info.binary_size == c->expected_size &&
+                   part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+                   part.info.agx3_staging_halfs == 8 &&
+                   memcmp(part.binary, c->expected, c->expected_size) == 0;
+      } else {
+         case_ok = !compiled;
+      }
+
+      if (!case_ok) {
+         fprintf(stderr,
+                 "G17P multisample EOT case %u: compiled=%u size=%u "
+                 "expected=%s\n",
+                 i, compiled, compiled ? part.info.binary_size : 0,
+                 c->expected ? "bytes" : "refusal");
+         if (compiled && part.binary) {
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[j]);
+            fputc('\n', stderr);
+         }
+         ok = false;
+      }
+
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+
+   return ok;
+}
+
 static bool
 test_g17g_eot_block_store(void)
 {
@@ -3668,6 +4276,83 @@ test_g17p_eot_block_store(void)
    if (rgba8_mrt_compiled)
       free(part.binary);
    ralloc_free(rgba8_mrt.shader);
+
+   /* SuperTuxKart's deferred targets are two packed B10G11R11 images. The
+    * tilebuffer carries each as one raw I32 word in partitions 0 and 4. */
+   nir_builder r11_mrt = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P R11G11B10 MRT EOT");
+   coords = nir_trim_vector(
+      &r11_mrt, nir_load_global_invocation_id(&r11_mrt, 32), 2);
+   nir_image_store_block_agx(
+      &r11_mrt, nir_imm_intN_t(&r11_mrt, 0, 16),
+      nir_imm_int(&r11_mrt, 0), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   nir_image_store_block_agx(
+      &r11_mrt, nir_imm_intN_t(&r11_mrt, 1, 16),
+      nir_imm_int(&r11_mrt, 4), coords, .format = PIPE_FORMAT_R32_UINT,
+      .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
+   agx_preprocess_nir(r11_mrt.shader);
+
+   nir_shader *r11_ungated_shader = nir_shader_clone(NULL, r11_mrt.shader);
+   memset(&part, 0xa5, sizeof(part));
+   key.g17p_rt0_eot_i32 = true;
+   key.g17p_rt0_eot_words = 1;
+   const bool r11_ungated =
+      agx_compile_shader_nir(r11_ungated_shader, &key, &part);
+   const struct agx_shader_part empty_part = {0};
+   ok &= !r11_ungated &&
+         memcmp(&part, &empty_part, sizeof(part)) == 0;
+   ralloc_free(r11_ungated_shader);
+
+   key.g17p_r11g11b10_mrt_eot = true;
+   memset(&part, 0, sizeof(part));
+   const bool r11_mrt_compiled =
+      agx_compile_shader_nir(r11_mrt.shader, &key, &part);
+   uint8_t expected_r11_mrt[sizeof(expected_rgba8_mrt)];
+   memcpy(expected_r11_mrt, expected_rgba8_mrt,
+          sizeof(expected_rgba8_mrt));
+   expected_r11_mrt[101] = 0x35;
+   expected_r11_mrt[113] = 0x35;
+   ok &= r11_mrt_compiled &&
+         part.info.binary_size == sizeof(expected_r11_mrt) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(expected_r11_mrt) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 16 &&
+         memcmp(part.binary, expected_r11_mrt,
+                sizeof(expected_r11_mrt)) == 0;
+   if (r11_mrt_compiled)
+      free(part.binary);
+   ralloc_free(r11_mrt.shader);
+
+   /* The gate does not admit a different partition or an unrelated mixed
+    * raw/normalized pair; both failures leave no partial command text. */
+   nir_builder wrong_r11_mrt = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "unsupported G17P raw MRT");
+   coords = nir_trim_vector(
+      &wrong_r11_mrt, nir_load_global_invocation_id(&wrong_r11_mrt, 32), 2);
+   nir_image_store_block_agx(
+      &wrong_r11_mrt, nir_imm_intN_t(&wrong_r11_mrt, 0, 16),
+      nir_imm_int(&wrong_r11_mrt, 0), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   nir_image_store_block_agx(
+      &wrong_r11_mrt, nir_imm_intN_t(&wrong_r11_mrt, 1, 16),
+      nir_imm_int(&wrong_r11_mrt, 8), coords,
+      .format = PIPE_FORMAT_R32_UINT, .image_dim = GLSL_SAMPLER_DIM_2D,
+      .explicit_coord = true);
+   agx_preprocess_nir(wrong_r11_mrt.shader);
+   memset(&part, 0xa5, sizeof(part));
+   const bool wrong_r11_compiled =
+      agx_compile_shader_nir(wrong_r11_mrt.shader, &key, &part);
+   ok &= !wrong_r11_compiled &&
+         memcmp(&part, &empty_part, sizeof(part)) == 0;
+   if (wrong_r11_compiled)
+      free(part.binary);
+   ralloc_free(wrong_r11_mrt.shader);
+   key.g17p_r11g11b10_mrt_eot = false;
+   key.g17p_rt0_eot_i32 = false;
+   key.g17p_rt0_eot_words = 0;
 
    /* Genuine applegpu-nt builtin EOT key0x04021100: scalar I32 tile store. */
    nir_builder i32 = nir_builder_init_simple_shader(
@@ -4948,6 +5633,47 @@ build_fs_glmark2_terrain_offset(void)
    return fs_finish(&b);
 }
 
+/* terrain's procedural-noise kernel forms `1.0 - abs(x) - abs(y)` at full
+ * precision, which reaches the backend as an f32 FMA whose multiplier is a
+ * minifloat immediate and whose other two operands are absolute registers --
+ * an immediate operand and a source modifier on one encoding point at once.
+ * That combination used to have no home in either the immediate packer or the
+ * modifier packer, so it refused the whole fragment shader; see
+ * agx3_falu_fma_mul_imm_mod() for Apple's bytes. */
+static nir_shader *
+build_fs_glmark2_terrain_noise(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 glmark2 terrain noise FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *v32 = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, v32, 0);
+   nir_def *y = nir_channel(&b, v32, 1);
+
+   /* h = 1.0 - |x| - |y| */
+   nir_def *h = nir_fsub(&b, nir_fsub(&b, nir_imm_float(&b, 1.0),
+                                      nir_fabs(&b, x)),
+                         nir_fabs(&b, y));
+   /* half * |x| + |y|: the immediate multiplier standing beside two absolute
+    * register operands, exactly as the refusal printed it. */
+   nir_def *scaled = nir_ffma(&b, nir_imm_float(&b, 0.5), nir_fabs(&b, x),
+                              nir_fabs(&b, y));
+   /* a negated immediate multiplier folds into the minifloat's sign bit */
+   nir_def *negated = nir_ffma(&b, nir_imm_float(&b, -0.5), x,
+                               nir_fabs(&b, y));
+   /* and the addend's own negation rides the f65 bit */
+   nir_def *sub = nir_ffma(&b, nir_imm_float(&b, 0.25), nir_fabs(&b, x),
+                           nir_fneg(&b, nir_fabs(&b, y)));
+
+   fs_store_colour(&b, nir_vec4(&b, h, scaled, negated, sub));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
 struct agx3_graphics_case {
    const char *name;
    nir_shader *(*build)(void);
@@ -4968,6 +5694,7 @@ struct agx3_graphics_case {
    bool expected_g17p_front_facing;
    bool expected_g17p_explicit_sample;
    bool expected_g17p_sample_group;
+   bool expected_g17p_balanced_coverage;
 };
 
 static bool
@@ -5340,8 +6067,12 @@ static const struct agx3_graphics_case cases[] = {
     .g17p_only = true},
    {"fs-glmark2-terrain-offset", build_fs_glmark2_terrain_offset, true,
     .g17p_only = true},
+   {"fs-glmark2-terrain-noise", build_fs_glmark2_terrain_noise, true,
+    .g17p_only = true},
 
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
+   {"fs-discard-then-tests", build_fs_discard_then_tests, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true},
    {"fs-sample-mask-in", build_fs_sample_mask_in, true, .g17p_only = true,
     .expected_g17p_sample_mask_input = true},
    {"fs-front-facing", build_fs_front_facing, true, .g17p_only = true,
@@ -5530,6 +6261,25 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
                     enc_name(enc), c->name);
       }
 
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_balanced_coverage) {
+         /* The actual discard lowering emits a no-tests update followed by
+          * a testing update. Only the latter owns a class-1 transaction. */
+         const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+         const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+         unsigned acquired = 0, released = 0;
+         for (unsigned i = 0; i + sizeof(acquire) <= part.info.binary_size;
+              ++i) {
+            const uint8_t *bytes = (const uint8_t *)part.binary + i;
+            acquired += !memcmp(bytes, acquire, sizeof(acquire));
+            released += !memcmp(bytes, release, sizeof(release));
+         }
+         result = acquired == 1 && released == 1;
+         if (!result)
+            fprintf(stderr, "%s %s: coverage acquired %u, released %u\n",
+                    enc_name(enc), c->name, acquired, released);
+      }
+
       if (result && c->lower_combined_sampler) {
          nir_shader *reference_nir = build_fs_texture_compact_native();
          struct agx_shader_part reference = {0};
@@ -5657,18 +6407,25 @@ main(int argc, char **argv)
       printf("G17P RT0 and WBOIT MRT EOT: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--msaa-eot-only")) {
+      const bool ok = test_g17p_multisample_eot_block_store();
+      printf("G17P multisample RT0 EOT: %s\n", ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--custom-border-only")) {
       bool ok = test_custom_border_samplers(false, false) &&
                 test_custom_border_samplers(true, false) &&
                 test_custom_border_samplers(true, 1) &&
                 test_custom_border_samplers(true, 2) &&
+                test_indexed_sampler_rebase_boundaries() &&
                 test_indexed_sampler_sets() && test_indexed_fetch_sets();
       printf("custom border runtime branch, exact indices, mixed reads: %s\n",
              ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-fetch-only")) {
-      const bool ok=test_indexed_fetch_sets() &&
+      const bool ok=test_indexed_dynamic_fetch_lod() &&
+                    test_indexed_fetch_sets() &&
                     test_indexed_multisample_fetch() &&
                     test_g17p_nonzero_fetch_lod_compile();
       printf("mixed indexed texture reads, multisample resolve, sets and arrays: %s\n",ok?"PASS":"FAIL");
@@ -5676,10 +6433,18 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-samplers-only")) {
       const bool ok = test_indexed_sampler_sets() &&
+                      test_indexed_sampler_rebase_boundaries() &&
+                      test_indexed_array_and_3d_compile() &&
                       test_indexed_compute_sample() &&
-                      test_indexed_storage_image_read();
+                      test_indexed_storage_image_read() &&
+                      test_g17p_storage_read_zero_lod_compile();
       printf("indexed graphics/compute sampler and image reads: %s\n",
              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
+   if (argc == 2 && !strcmp(argv[1], "--storage-read-lod-only")) {
+      const bool ok = test_g17p_storage_read_zero_lod_compile();
+      printf("storage-image level-zero compilation: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--indexed-storage-only")) {
@@ -5805,23 +6570,40 @@ main(int argc, char **argv)
       AGX_ISA_ENCODING_AGX3B,
       AGX_ISA_ENCODING_AGX3C,
    };
-   bool all_ok = test_custom_border_samplers(false, 0) &&
-                 test_custom_border_samplers(true, 0) &&
-                 test_custom_border_samplers(true, 1) &&
-                 test_custom_border_samplers(true, 2);
+   bool all_ok = true;
 
-   if (!test_g17g_native_flat_colour())
-      all_ok = false;
+   /* Name whichever check failed. An && chain short-circuits, so the ones
+    * after the first failure never ran, and none of these reported anything
+    * on their own -- between them a failure was a bare exit status with an
+    * empty log, which is indistinguishable from the test not having run. */
+#define CHECK_NAMED(label, expr)                                               \
+   do {                                                                        \
+      if (!(expr)) {                                                           \
+         fputs(label " failed\n", stderr);                                     \
+         all_ok = false;                                                       \
+      }                                                                        \
+   } while (0)
 
-   if (!test_g17p_quad_control_modes())
-      all_ok = false;
-   if (!test_g17p_divergent_quad_loop())
-      all_ok = false;
-   if (!test_g17p_alpha_coverage_boundary())
-      all_ok = false;
+   CHECK_NAMED("g17g_native_flat_colour", test_g17g_native_flat_colour());
 
-   if (!test_g17p_vkcube_fragment_main())
-      all_ok = false;
+   CHECK_NAMED("custom_border_samplers(plain)",
+               test_custom_border_samplers(false, 0));
+   CHECK_NAMED("custom_border_samplers(custom)",
+               test_custom_border_samplers(true, 0));
+   CHECK_NAMED("custom_border_samplers(custom,1)",
+               test_custom_border_samplers(true, 1));
+   CHECK_NAMED("custom_border_samplers(custom,2)",
+               test_custom_border_samplers(true, 2));
+   CHECK_NAMED("indexed_sampler_rebase_boundaries",
+               test_indexed_sampler_rebase_boundaries());
+   CHECK_NAMED("indexed_array_and_3d_compile",
+               test_indexed_array_and_3d_compile());
+   CHECK_NAMED("g17p_quad_control_modes", test_g17p_quad_control_modes());
+   CHECK_NAMED("g17p_divergent_quad_loop", test_g17p_divergent_quad_loop());
+   CHECK_NAMED("g17p_alpha_coverage_boundary",
+               test_g17p_alpha_coverage_boundary());
+   CHECK_NAMED("g17p_vkcube_fragment_main", test_g17p_vkcube_fragment_main());
+#undef CHECK_NAMED
 
    if (!test_g17p_gallium_vertex_param_abi()) {
       fputs("Gallium vertex-parameter ABI is not LDDEV aligned\n", stderr);
@@ -5863,6 +6645,11 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
+   if (!test_indexed_dynamic_fetch_lod()) {
+      fputs("dynamic indexed texel-fetch LOD lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
    if (!test_g17p_nonzero_fetch_lod_compile()) {
       fputs("G17P nonzero texel-fetch LOD lost its uint staging\n", stderr);
       all_ok = false;
@@ -5875,6 +6662,11 @@ main(int argc, char **argv)
 
    if (!test_indexed_storage_image_read()) {
       fputs("indexed storage-image read lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_storage_read_zero_lod_compile()) {
+      fputs("storage-image constant level zero used runtime LOD staging\n", stderr);
       all_ok = false;
    }
 
@@ -5908,33 +6700,39 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_g17p_eot_block_store())
-      all_ok = false;
+   /* Each of these reports on its own only when it can say something useful
+    * about *how* it differed. Name the one that failed regardless, so a
+    * failure is never a bare exit status with an empty log. */
+#define RUN(fn)                                                                \
+   do {                                                                        \
+      if (!fn()) {                                                             \
+         fputs(#fn " failed\n", stderr);                                       \
+         all_ok = false;                                                       \
+      }                                                                        \
+   } while (0)
 
-   if (!test_g17g_eot_block_store())
-      all_ok = false;
-
-   if (!test_g17p_background_reload_staging())
-      return 1;
-   if (!test_g17p_background_clear())
-      all_ok = false;
-   if (!test_g17p_background_f16_clear_narrowing())
-      all_ok = false;
-   if (!test_g17p_half_norm8_epilog())
-      all_ok = false;
-   if (!test_g17p_half_rgb10_epilog())
-      all_ok = false;
-   if (!test_g17p_fragment_io_matrix())
-      all_ok = false;
-   if (!test_g17p_pipeline_statistics_fs_prolog())
-      all_ok = false;
+   RUN(test_g17p_eot_block_store);
+   RUN(test_g17p_multisample_eot_block_store);
+   RUN(test_g17p_background_reload_staging);
+   RUN(test_g17p_background_clear);
+   RUN(test_g17p_background_f16_clear_narrowing);
+   RUN(test_g17p_half_norm8_epilog);
+   RUN(test_g17p_fragment_io_matrix);
+   RUN(test_g17p_pipeline_statistics_fs_prolog);
+   RUN(test_frag_sidefx_late_test_once);
+   RUN(test_g17g_eot_block_store);
+   RUN(test_g17p_half_rgb10_epilog);
+#undef RUN
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {
       for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
          if (cases[i].g17p_only && encodings[e] != AGX_ISA_ENCODING_AGX3B)
             continue;
-         if (!run_case(&cases[i], encodings[e]))
+         if (!run_case(&cases[i], encodings[e])) {
+            fprintf(stderr, "%s %s: case failed\n", enc_name(encodings[e]),
+                    cases[i].name);
             all_ok = false;
+         }
       }
    }
 

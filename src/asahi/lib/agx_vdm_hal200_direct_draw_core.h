@@ -129,8 +129,10 @@ struct agx_vdm_hal200_indirect_draw_fields {
    uint8_t index_size_B;
    bool restart_enable;
    uint32_t restart_index;
+   /* Native absolute 48-bit address. */
    uint64_t index_buffer;
    uint32_t index_buffer_range_B;
+   /* Native absolute 48-bit argument-buffer address. */
    uint64_t indirect_buffer;
 };
 

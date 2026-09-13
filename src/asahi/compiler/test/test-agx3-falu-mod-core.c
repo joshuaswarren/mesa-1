@@ -469,10 +469,125 @@ fma_two_vectors(void)
    return fail;
 }
 
+/*
+ * FMA with a minifloat MULTIPLIER and modifier-bearing register operands.
+ * Apple's own applegpu_g17p output for the five cells, from
+ * .tmp/g17p-terrain-fma-imm-abs/fmaimm.metal; each kernel is
+ * `o[i] = fma(<k>, <b>, <c>)` over device loads, so both register operands
+ * are dead after the FMA (f29/f63) and it waits on the loads' slot (f102).
+ *
+ * The third vector is the one glmark2's terrain noise kernel needs: an
+ * immediate multiplier standing on the same encoding point as two absolute
+ * register operands.  The fourth records that a negated immediate multiplier
+ * is the minifloat's sign bit, not a modifier bit.
+ */
+static unsigned
+fma_mul_imm_vectors(void)
+{
+   const struct agx3_falu_runtime rt = {
+      .cache = {false, false, false},
+      .discard = {false, true, true},
+      .dest_cache = false,
+      .wait_mask = 0x20,
+   };
+   const struct {
+      const char *name;
+      uint8_t mul;
+      uint16_t src1, addend;
+      struct agx3_falu_mods m;
+      unsigned size;
+      uint8_t bytes[16];
+   } vectors[] = {
+      {"fma(0.5, b, c)", 32, 0, 4, {0}, 8,
+       {0x09,0x01,0x0e,0xa1,0x81,0x04,0x02,0xc2}},
+      {"fma(0.5, fabs(b), c)", 32, 0, 4, {.src1_abs = true}, 12,
+       {0x09,0x01,0x0e,0xa1,0x83,0x04,0x02,0x02,0x00,0x80,0x01,0x00}},
+      {"fma(0.5, fabs(b), fabs(c))", 32, 0, 4,
+       {.src1_abs = true, .addend_abs = true}, 12,
+       {0x09,0x01,0x0e,0xa1,0x8b,0x04,0x02,0x02,0x00,0x80,0x01,0x00}},
+      {"fma(-0.5, b, c)", 160, 0, 4, {0}, 8,
+       {0x09,0x01,0x1e,0xa1,0x81,0x04,0x02,0xc2}},
+      {"fma(0.5, fabs(b), -fabs(c))", 32, 0, 4,
+       {.src1_abs = true, .addend_abs = true, .addend_neg = true}, 12,
+       {0x09,0x01,0x0e,0xa1,0x9b,0x04,0x02,0x02,0x00,0x80,0x01,0x00}},
+
+      /* The remaining cells of the kind x width x modifier x saturate grid on
+       * this form, witnessed rather than assumed: orthogonality is grounded
+       * for f32add/f32mul/f32fma/fsel and the bitwise ops, not for the ISA at
+       * large, so each cell that the encoder admits gets its own kernel
+       * (fmaimm2.metal).  f14 saturates beside the immediate; f26 narrows the
+       * multiplicand and f60 the addend, each beside its own abs bit. */
+      {"saturate(fma(0.5, fabs(b), fabs(c)))", 32, 0, 4,
+       {.src1_abs = true, .addend_abs = true, .saturate = true}, 12,
+       {0x09,0x01,0x0e,0xa1,0x8b,0x04,0x02,0x02,0x00,0x82,0x01,0x00}},
+      {"saturate(fma(0.5, b, c))", 32, 0, 4, {.saturate = true}, 10,
+       {0x09,0x01,0x0e,0xa1,0x82,0x04,0x02,0x02,0x00,0x82}},
+      {"fma(0.5, half b, c)", 32, 4, 0, {.src1_16 = true}, 8,
+       {0x09,0x04,0x0e,0xa1,0x81,0x00,0x02,0xc2}},
+      {"fma(0.5, b, half c)", 32, 0, 4, {.addend_16 = true}, 8,
+       {0x09,0x01,0x0e,0xa1,0x81,0x04,0x00,0xc2}},
+      {"fma(0.5, fabs(half b), fabs(c))", 32, 4, 0,
+       {.src1_16 = true, .src1_abs = true, .addend_abs = true}, 12,
+       {0x09,0x04,0x0e,0xa1,0x8b,0x00,0x02,0x02,0x00,0x80,0x01,0x00}},
+
+      /* Apple has no f31 in this form. Asked for a negated multiplicand it
+       * folds the sign into the minifloat and leaves f30/f64 alone, which is
+       * exact because k * -b == -k * b -- so these two are written with the
+       * sign already folded, as the packer folds it. */
+      {"fma(0.5, -fabs(b), c) folded", 160, 0, 4, {.src1_abs = true}, 12,
+       {0x09,0x01,0x1e,0xa1,0x83,0x04,0x02,0x02,0x00,0x80,0x01,0x00}},
+      {"fma(0.5, -b, fabs(c)) folded", 160, 0, 4, {.addend_abs = true}, 8,
+       {0x09,0x01,0x1e,0xa1,0x89,0x04,0x02,0xc2}},
+   };
+   unsigned fail = 0;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+      if (!agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3B, 0, vectors[i].mul,
+                                     vectors[i].src1, vectors[i].addend,
+                                     &vectors[i].m, &rt, out, &size) ||
+          size != vectors[i].size ||
+          memcmp(out, vectors[i].bytes, size) != 0) {
+         fprintf(stderr, "FMA minifloat multiplier %s failed: ",
+                 vectors[i].name);
+         for (unsigned j = 0; j < size; ++j)
+            fprintf(stderr, "%02x", out[j]);
+         fprintf(stderr, " size=%u\n", size);
+         fail++;
+      }
+   }
+
+   /* There is no f35 register slot in this form, so a multiplier-side
+    * modifier or lifetime hint has nowhere to go and must be refused rather
+    * than dropped: the caller has to fold it into the minifloat.  The
+    * multiplicand's negate is refused for the second reason above -- f31 is
+    * unwitnessed beside an immediate multiplier, so it fails closed instead
+    * of being emitted on the strength of the other slots' behaviour. */
+   {
+      const struct agx3_falu_mods bad[] = {
+         {.src0_neg = true}, {.src0_abs = true}, {.src0_16 = true},
+         {.src1_neg = true},
+      };
+      for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+         uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+         if (agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3B, 0, 32, 0, 4,
+                                       &bad[i], &rt, out, &size)) {
+            fprintf(stderr,
+                    "FMA minifloat multiplier accepted unwitnessed mods %u\n", i);
+            fail++;
+         }
+      }
+   }
+
+   printf("native FMA minifloat multiplier: twelve Apple modifier/width/"
+          "saturate/sign-fold vectors: "
+          "%u failures\n", fail);
+   return fail;
+}
+
 int
 main(void)
 {
-   unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors() + m5_runtime_vectors();
+   unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors() + fma_mul_imm_vectors() + m5_runtime_vectors();
    for (size_t i = 0; i < mod_vec_count; ++i) {
       const struct mod_vec *v = &mod_vecs[i];
       const enum agx_isa_encoding e =

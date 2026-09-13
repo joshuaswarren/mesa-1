@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_hal200_direct_draw_core.h"
+#include "agx_abi.h"
 #include "agx_vdm_index_list_core.h"
 
 #include <assert.h>
@@ -183,6 +184,42 @@ static void check_native_indexed_domain(void)
 }
 
 static void
+check_null_indices(void)
+{
+   for (unsigned bytes = 1; bytes <= 4; bytes *= 2) {
+      for (unsigned i = 0; i < 3; ++i) {
+         const uint32_t counts[] = {3, 4097, UINT32_MAX};
+         const struct agx_vdm_hal200_indexed_draw_fields fields = {
+            .primitive = 0,
+            .draw_state_context_offset = 0x48000,
+            .index_size_B = bytes,
+            .index_buffer = AGX_ZERO_PAGE_ADDRESS,
+            .index_buffer_range_B = 4,
+            .index_count = counts[i],
+            .instance_count = 2,
+            .base_vertex = -7,
+         };
+         struct agx_vdm_hal200_indexed_draw packet;
+         assert(agx_vdm_hal200_indexed_draw_pack(AGX_CHIP_G17P,
+                                               &fields, &packet));
+         assert(word_at(packet.bytes, 4) == 0);
+         assert(word_at(packet.bytes, 5) == counts[i]);
+         assert(word_at(packet.bytes, 6) == 2);
+         assert(word_at(packet.bytes, 7) == (uint32_t)-7);
+         /* One dword minus one. Never widen the zero page's fetch bound. */
+         assert(word_at(packet.bytes, 8) == 0);
+      }
+   }
+   uint64_t address;
+   uint32_t size;
+   assert(!agx_vdm_hal200_index_range(0x1000, 4, 0, 3, 4, &address, &size));
+   assert(!agx_vdm_hal200_index_range(AGX_ZERO_PAGE_ADDRESS, 4, 1, 3, 4,
+                                    &address, &size));
+   assert(!agx_vdm_hal200_index_range(AGX_ZERO_PAGE_ADDRESS, 8, 0, 3, 4,
+                                    &address, &size));
+}
+
+static void
 check_native_indirect(void)
 {
    const struct agx_vdm_hal200_indirect_draw_fields indexed = {
@@ -207,6 +244,15 @@ check_native_indirect(void)
    assert(packed.length == sizeof(indexed_expected));
    assert(!memcmp(packed.bytes, indexed_expected, sizeof(indexed_expected)));
 
+   /* A second indirect draw with unchanged state must start with its restart
+    * packet, not a PPP address whose header was never emitted. */
+   uint8_t stream[AGX_VDM_HAL200_INDIRECT_INDEXED_DRAW_LENGTH];
+   size_t emitted;
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  false, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(indexed_expected) - 4);
+   assert(!memcmp(stream, indexed_expected + 1, emitted));
+
    const struct agx_vdm_hal200_indirect_draw_fields nonindexed = {
       .draw_state_context_offset = 0x48000,
       .primitive = 6,
@@ -220,6 +266,33 @@ check_native_indirect(void)
    assert(packed.length == sizeof(nonindexed_expected));
    assert(!memcmp(packed.bytes, nonindexed_expected,
                   sizeof(nonindexed_expected)));
+
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  false, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(nonindexed_expected) - 4);
+   assert(!memcmp(stream, nonindexed_expected + 1, emitted));
+   assert(agx_vdm_hal200_draw_emit(AGX_CHIP_G17P, packed.bytes, packed.length,
+                                  true, stream, sizeof(stream), &emitted));
+   assert(emitted == sizeof(nonindexed_expected));
+   assert(!memcmp(stream, nonindexed_expected, emitted));
+
+   /* Hardware uses the full user-heap VA in this field. In particular, the
+    * 0x10_0000_0000 render-context base must not be subtracted as it is for
+    * PPP and VDM stream-link pointers. This is the exact address shape that
+    * exposed the regression in queued mixed direct/indirect rendering. */
+   const struct agx_vdm_hal200_indirect_draw_fields user_heap = {
+      .draw_state_context_offset = 0x48000,
+      .primitive = 6,
+      .indirect_buffer = UINT64_C(0x5ffdee0040),
+   };
+   static const uint32_t user_heap_expected[] = {
+      0x00048000, 0x64040600, 0x0000005f, 0xfdee0040,
+   };
+   assert(agx_vdm_hal200_indirect_draw_pack(AGX_CHIP_G17P, &user_heap,
+                                             &packed));
+   assert(packed.length == sizeof(user_heap_expected));
+   assert(!memcmp(packed.bytes, user_heap_expected,
+                  sizeof(user_heap_expected)));
 
    struct agx_vdm_hal200_indirect_draw_fields bad = indexed;
    bad.draw_state_context_offset |= 1;
@@ -243,6 +316,7 @@ main(void)
    check_indexed();
    check_native_indexed_domain();
    check_native_indirect();
+   check_null_indices();
    const struct agx_vdm_hal200_direct_draw_fields fields = {
       .draw_state_context_offset = 0x48000,
       .primitive = 6,

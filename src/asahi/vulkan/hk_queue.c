@@ -34,6 +34,7 @@
 #include <xf86drm.h>
 #include "util/list.h"
 #include "util/macros.h"
+#include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
@@ -298,7 +299,8 @@ static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_render *c)
 {
-   size_t len = cs->stream_linked ? 65536 /* XXX */ : (cs->current - cs->start);
+   size_t len = cs->stream_linked ? hk_cs_root_size(dev->dev.chip, false)
+                                  : (cs->current - cs->start);
    len = asahi_g17p_vdm_bisect(dev, cs, len);
    const uint8_t *submitted_start = cs->start;
    uint64_t submitted_full = cs->addr;
@@ -486,6 +488,53 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->ts_frag.end.offset = cs->timestamp.end.offset_B;
    }
 
+   if (hk_g17p_draw_trace_enabled() && dev->dev.chip == AGX_CHIP_G17P &&
+       cs->stats.cmds) {
+      static int sequence;
+      const unsigned submit_sequence = p_atomic_inc_return(&sequence);
+
+      fprintf(stderr,
+              "G17P draw submit: seq=%u vdm=%" PRIx64
+              " draws=%u calls=%u publications=%u draw-id=%u topology=%u"
+              " api-indexed=%u api-indirect=%u api-count=%u"
+              " api-instances=%u api-first=%u api-base-vertex=%d"
+              " api-first-instance=%u emitted-indexed=%u"
+              " emitted-indirect=%u emitted-buffer=%" PRIx64
+              " fragment-program=%" PRIx64
+              " main=%08x/%u linked=%08x/%u ioto=%08x/%u"
+              " size=%ux%u samples=%u"
+              " sample-size=%u sampler-count=%u colors=%u[",
+              submit_sequence, (uint64_t)c->vdm_ctrl_stream_base,
+              cs->stats.cmds, cs->stats.calls,
+              cs->g17p_state_publications,
+              cs->g17p_draw_trace.draw_id, cs->g17p_draw_trace.topology,
+              cs->g17p_draw_trace.api_indexed,
+              cs->g17p_draw_trace.api_indirect,
+              cs->g17p_draw_trace.api_count,
+              cs->g17p_draw_trace.api_instances,
+              cs->g17p_draw_trace.api_first,
+              cs->g17p_draw_trace.api_base_vertex,
+              cs->g17p_draw_trace.api_first_instance,
+              cs->g17p_draw_trace.emitted_indexed,
+              cs->g17p_draw_trace.emitted_indirect,
+              cs->g17p_draw_trace.emitted_indirect_buffer,
+              cs->g17p_draw_trace.fragment_program,
+              cs->g17p_draw_trace.fragment_main_hash,
+              cs->g17p_draw_trace.fragment_main_size,
+              cs->g17p_draw_trace.fragment_shader_hash,
+              cs->g17p_draw_trace.fragment_shader_size,
+              cs->g17p_draw_trace.fragment_ioto_hash,
+              cs->g17p_draw_trace.fragment_ioto_size, c->width_px,
+              c->height_px, c->samples, c->sample_size_B, c->sampler_count,
+              cs->g17p_draw_trace.color_count);
+      for (unsigned i = 0; i < cs->g17p_draw_trace.color_count; ++i) {
+         fprintf(stderr, "%s%u", i ? "," : "",
+                 cs->g17p_draw_trace.color_formats[i]);
+      }
+      fprintf(stderr, "] depth=%u\n", cs->g17p_draw_trace.depth_format);
+      fflush(stderr);
+   }
+
    hk_g17p_trace_render_command(dev, c);
 }
 
@@ -637,6 +686,19 @@ max_commands_per_submit(struct hk_device *dev)
       HK_PERF(dev, BATCH), dev->dev.params.max_commands_per_submission);
 }
 
+/* One aggregate line per Vulkan queue submit.  Unlike the per-stream launch
+ * and draw diagnostics, this is cheap enough to leave enabled for a complete
+ * STK cold start and exposes whether texture work reached CDM without
+ * perturbing production batching. */
+static bool
+hk_g17p_submit_trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_SUBMIT_TRACE", false);
+   return enabled != 0;
+}
+
 static VkResult
 queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
                     unsigned ring_idx)
@@ -663,6 +725,13 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
          &dev->external_bos.list, struct asahi_ccmd_submit_res);
       virt.extres = util_dynarray_begin(&dev->external_bos.list);
    }
+
+   /* G17P command, VIT, and HAL200 bind-state uploads use write-combined GEM
+    * mappings.  Diagnose whether the GPU can observe a doorbell before those
+    * CPU stores have drained, without changing the default submission path. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       getenv("HK_G17P_SUBMIT_DMB") != NULL)
+      __sync_synchronize();
 
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
 
@@ -1229,6 +1298,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
 
    unsigned nr_vdm = 0, nr_cdm = 0;
+   unsigned nr_draws = 0, nr_dispatches = 0, nr_flushes = 0, nr_merged = 0;
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
@@ -1254,6 +1324,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_cdm_command(dev, cs, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_cdm++;
+            nr_dispatches += cs->stats.cmds;
+            nr_flushes += cs->stats.flushes;
+            nr_merged += cs->stats.merged;
          } else {
             assert(cs->type == HK_CS_VDM);
             perf_debug(cmdbuf, "%u: Submitting VDM with %u API draws, %u draws",
@@ -1268,8 +1341,25 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_vdm_command(dev, cs, &cmd);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
+            nr_draws += cs->stats.cmds;
          }
       }
+   }
+
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_submit_trace_enabled()) {
+      static int sequence;
+      const unsigned submit_sequence = p_atomic_inc_return(&sequence);
+      const unsigned limit = max_commands_per_submit(dev);
+      const unsigned ioctls = DIV_ROUND_UP(command_count, limit);
+      fprintf(stderr,
+              "G17P submit trace: seq=%u streams=%u vdm=%u cdm=%u draws=%u "
+              "dispatches=%u flushes=%u merged=%u command-buffers=%u "
+              "waits=%u signals=%u ioctls=%u limit=%u\n",
+              submit_sequence, command_count, nr_vdm, nr_cdm, nr_draws,
+              nr_dispatches, nr_flushes, nr_merged,
+              submit->command_buffer_count, wait_count, submit->signal_count,
+              ioctls, limit);
+      fflush(stderr);
    }
 
    if ((dev->dev.debug & AGX_DBG_TRACE) && hk_agxdecode_trace_armed()) {

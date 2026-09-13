@@ -168,8 +168,11 @@ main(void)
    static const uint8_t transparent_black_u8[4] = {0, 0, 0, 0};
    static const float opaque_white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
    static const uint8_t opaque_white_u8[4] = {255, 255, 255, 255};
+   static const float custom[4] = {0.25f, 0.5f, 0.75f, 0.125f};
+   static const uint8_t custom_u8[4] = {64, 128, 191, 32};
    if (!draw_border(transparent_black, transparent_black_u8, noop) ||
-       !draw_border(opaque_white, opaque_white_u8, noop))
+       !draw_border(opaque_white, opaque_white_u8, noop) ||
+       !draw_border(custom, custom_u8, noop))
       return 1;
 
    glDeleteVertexArrays(1, &vao);
@@ -179,7 +182,7 @@ main(void)
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
-   puts(noop ? "G17P native standard border samplers submitted"
-             : "G17P native standard border sampler pixels exact");
+   puts(noop ? "G17P native standard/custom border samplers submitted"
+             : "G17P native standard/custom border sampler pixels exact");
    return 0;
 }

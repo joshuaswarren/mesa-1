@@ -23,7 +23,16 @@ hk_descriptor_table_grow_locked(struct hk_device *dev,
    assert(new_alloc > table->alloc && new_alloc <= table->max_alloc);
 
    const uint32_t new_bo_size = new_alloc * table->desc_size;
-   new_bo = agx_bo_create(&dev->dev, new_bo_size, 0, 0, "Descriptor table");
+
+   /* The table is allocated at full capacity and only the entries handed out
+    * by hk_descriptor_table_add() are ever written, so every unallocated slot
+    * is read exactly as it came from the allocator.  A fresh kernel BO is
+    * zeroed -- entry 0's reserved null texture semantics depend on that -- but
+    * a BO recycled from the userspace cache is not, and a stale slot's 44-bit
+    * address field is dereferenced verbatim by an out-of-range heap index.
+    */
+   new_bo = agx_bo_create(&dev->dev, new_bo_size, 0, AGX_BO_ZERO_ON_REUSE,
+                          "Descriptor table");
 
    if (new_bo == NULL) {
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,

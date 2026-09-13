@@ -525,6 +525,16 @@ test_g17p_vdm_payload_context_address(void)
    assert(AGX_G17P_VDM_USER_BASE + compact == payload);
    assert(AGX_G17P_VDM_USER_BASE + payload == observed_fault);
 
+   uint64_t expanded = UINT64_MAX;
+   assert(agx_g17p_vdm_payload_expand(compact, 16, &expanded));
+   assert(expanded == payload);
+
+   /* Serializing the full VA into a context-relative field reproduces the
+    * hardware fault exactly: validation must add the base unconditionally,
+    * not accept an already-large value as an absolute address. */
+   assert(agx_g17p_vdm_payload_expand(payload, 16, &expanded));
+   assert(expanded == observed_fault);
+
    assert(agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_BASE, &compact));
    assert(compact == 0);
    assert(agx_g17p_vdm_payload_compact(AGX_G17P_VDM_USER_LIMIT - 4,
@@ -540,6 +550,16 @@ test_g17p_vdm_payload_context_address(void)
    assert(!agx_g17p_vdm_payload_compact(payload + 1, &compact));
    assert(compact == UINT64_C(0xdeadbeef));
    assert(!agx_g17p_vdm_payload_compact(payload, NULL));
+
+   expanded = UINT64_C(0xdeadbeef);
+   assert(!agx_g17p_vdm_payload_expand(AGX_G17P_VDM_USER_SIZE, 1,
+                                       &expanded));
+   assert(expanded == UINT64_C(0xdeadbeef));
+   assert(!agx_g17p_vdm_payload_expand(AGX_G17P_VDM_USER_SIZE - 4, 8,
+                                       &expanded));
+   assert(expanded == UINT64_C(0xdeadbeef));
+   assert(!agx_g17p_vdm_payload_expand(compact, 0, &expanded));
+   assert(!agx_g17p_vdm_payload_expand(compact, 4, NULL));
 }
 
 int

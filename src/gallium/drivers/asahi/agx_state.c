@@ -587,6 +587,7 @@ agx_create_sampler_state(struct pipe_context *pctx,
          so->uses_custom_border = true;
          so->border_colour = AGX_BORDER_COLOUR_CUSTOM;
          agx_pack_border(&so->border, border.ui, format);
+         memcpy(so->custom_border, border.ui, sizeof(so->custom_border));
       }
    }
 
@@ -636,6 +637,10 @@ agx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
    struct agx_context *ctx = agx_context(pctx);
 
    ctx->stage[shader].dirty |= AGX_STAGE_DIRTY_SAMPLER;
+   if (shader == MESA_SHADER_VERTEX)
+      ctx->dirty |= AGX_DIRTY_VS_PROG;
+   else if (shader == MESA_SHADER_FRAGMENT)
+      ctx->dirty |= AGX_DIRTY_FS_PROG;
 
    for (unsigned i = 0; i < count; i++) {
       unsigned p = start + i;
@@ -1733,12 +1738,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
-      compiled->g17p_vertex_texture_resources =
-         dev->chip == AGX_CHIP_G17P && stage == MESA_SHADER_VERTEX &&
-         nir->info.stage == MESA_SHADER_VERTEX &&
-         BITSET_LAST_BIT(nir->info.textures_used) != 0;
+      compiled->g17p_texture_resources =
+         dev->chip == AGX_CHIP_G17P &&
+         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_COMPUTE) &&
+         (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
+          BITSET_LAST_BIT(nir->info.images_used) != 0);
       const unsigned uniform_base =
-         compiled->g17p_vertex_texture_resources
+         compiled->g17p_texture_resources
             ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
             : 0;
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
@@ -1811,6 +1817,15 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    perf_debug(dev, "Compiling %s shader variant #%u",
               _mesa_shader_stage_to_abbrev(so->type),
               _mesa_hash_table_num_entries(so->variants));
+
+   const bool custom_borders =
+      dev->chip == AGX_CHIP_G17P &&
+      ((so->type == MESA_SHADER_FRAGMENT && key_->fs.custom_borders) ||
+       ((so->type == MESA_SHADER_VERTEX ||
+         so->type == MESA_SHADER_TESS_EVAL) &&
+        key_->vs.custom_borders));
+   if (custom_borders)
+      NIR_PASS(_, nir, agx_nir_lower_custom_border_g17p);
 
    struct agx_unlinked_uvs_layout uvs = {0};
    bool translucent = false;
@@ -1897,6 +1912,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    struct agx_compiled_shader *compiled = agx_compile_nir(
       dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
       false, 0, attrib_components_read);
+   compiled->g17p_custom_border_emulation = custom_borders;
 
    if (so->type == MESA_SHADER_FRAGMENT) {
       /* XXX: don't replicate this all over the driver */
@@ -2109,6 +2125,11 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    struct agx_lower_bindings_options binding_options = {
       .uses_bindless_samplers = &so->uses_bindless_samplers,
       .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
+      .g17p_native_sampler_handles = dev->chip == AGX_CHIP_G17P,
+      .bindful_sampler_count =
+         dev->chip == AGX_CHIP_G17P
+            ? AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS
+            : 16,
    };
    NIR_PASS(_, nir, agx_nir_lower_bindings, &binding_options);
 
@@ -2579,6 +2600,7 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    struct asahi_vs_shader_key key = {
       .hw = !((ctx->stage[MESA_SHADER_TESS_EVAL].shader && !ctx->in_tess) ||
               ctx->stage[MESA_SHADER_GEOMETRY].shader),
+      .custom_borders = ctx->stage[MESA_SHADER_VERTEX].custom_borders,
    };
 
    agx_update_shader(ctx, &ctx->vs, MESA_SHADER_VERTEX,
@@ -2588,7 +2610,7 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
    struct agx_fast_link_key link_key = {
       .prolog.vs.hw = key.hw,
       .prolog.vs.uniform_base =
-         ctx->vs->g17p_vertex_texture_resources
+         ctx->vs->g17p_texture_resources
             ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
             : 0,
       .prolog.vs.sw_index_size_B = key.hw ? 0 : index_size_B,
@@ -2737,6 +2759,7 @@ agx_update_fs(struct agx_batch *batch)
 
    /* Get main shader */
    struct asahi_fs_shader_key key = {0};
+   key.custom_borders = ctx->stage[MESA_SHADER_FRAGMENT].custom_borders;
 
    if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch) {
       key.nr_samples = nr_samples;
@@ -3110,9 +3133,12 @@ sampler_count(struct agx_context *ctx, mesa_shader_stage stage)
 static inline enum agx_sampler_states
 translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
 {
+   struct agx_device *dev = agx_device(ctx->base.screen);
+
    /* Clamp to binding table maximum, anything larger will be bindless */
    return agx_translate_sampler_state_count(MIN2(sampler_count(ctx, stage), 16),
-                                            ctx->stage[stage].custom_borders);
+                                            dev->chip != AGX_CHIP_G17P &&
+                                               ctx->stage[stage].custom_borders);
 }
 
 static uint32_t
@@ -3318,6 +3344,11 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
    batch->texture_count[stage] = nr_tex_descriptors;
    batch->stage_uniforms[stage].texture_base = T_tex.gpu;
+
+   if (dev->chip == AGX_CHIP_G17P) {
+      for (unsigned i = 0; i < PIPE_MAX_SAMPLERS; ++i)
+         batch->stage_uniforms[stage].texture_handle[i] = i;
+   }
 }
 
 uint16_t
@@ -3358,7 +3389,13 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
       : AGX_SAMPLER_LENGTH + (custom_borders ? AGX_BORDER_LENGTH : 0);
 
    if (g17p) {
-      const unsigned count = nr_samplers;
+      /* Keep ordinary sampler handles stable at i+1.  If any sampler needs a
+       * custom border, reserve a disjoint clamp-to-zero bank at slot 33, as
+       * Honeykrisp does with its second sampler plane. */
+      const unsigned count = custom_borders
+                                ? AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE +
+                                     ctx->stage[stage].sampler_count
+                                : nr_samplers;
       struct agx_ptr T = agx_pool_alloc_aligned(
          &batch->pool, sampler_length * count, 64);
       memset(T.cpu, 0, sampler_length * count);
@@ -3391,7 +3428,40 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
                   state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
                cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
                cfg.seamful_cube_maps = !state->seamless_cube_map;
-               cfg.border_colour = sampler->border_colour;
+               cfg.border_colour = sampler->uses_custom_border
+                                      ? AGX_BORDER_COLOUR_OPAQUE_WHITE
+                                      : sampler->border_colour;
+            }
+
+            if (sampler->uses_custom_border) {
+               uint16_t clamp_handle;
+               if (!agx_gallium_g17p_custom_border_handle(dev->chip, i,
+                                                            &clamp_handle))
+                  agx_native_descriptor_rejected(dev,
+                                                 "custom-border sampler");
+
+               uint8_t *clamp = (uint8_t *)T.cpu +
+                                sampler_length * clamp_handle;
+               agx_pack(clamp, SAMPLER_HAL200, cfg) {
+                  cfg.minimum_lod = state->min_lod;
+                  cfg.maximum_lod = state->max_lod;
+                  cfg.maximum_anisotropy = util_next_power_of_two(
+                     MAX2(state->max_anisotropy, 1));
+                  cfg.magnify = agx_filters[state->mag_img_filter];
+                  cfg.minify = agx_filters[state->min_img_filter];
+                  cfg.mip_filter =
+                     agx_mip_filter_from_pipe(state->min_mip_filter);
+                  cfg.wrap_s = agx_wrap_from_pipe(state->wrap_s);
+                  cfg.wrap_t = agx_wrap_from_pipe(state->wrap_t);
+                  cfg.wrap_r = agx_wrap_from_pipe(state->wrap_r);
+                  cfg.pixel_coordinates = state->unnormalized_coords;
+                  cfg.compare_func = agx_compare_funcs[state->compare_func];
+                  cfg.compare_enable =
+                     state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
+                  cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
+                  cfg.seamful_cube_maps = !state->seamless_cube_map;
+                  cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+               }
             }
          } else {
             agx_pack(out, SAMPLER_HAL200, cfg) {
@@ -3497,13 +3567,15 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       batch->texture_count[stage] != 0 &&
       (stage == MESA_SHADER_FRAGMENT ||
        (stage == MESA_SHADER_VERTEX &&
-        cs->g17p_vertex_texture_resources));
+        cs->g17p_texture_resources));
 
    if (batch->texture_count[stage] && !resource_pair)
       return 0;
    if (resource_pair) {
       if (!batch->stage_uniforms[stage].texture_base ||
-          !batch->samplers[stage] || batch->ctx->stage[stage].custom_borders)
+          !batch->samplers[stage] ||
+          (batch->ctx->stage[stage].custom_borders &&
+           !cs->g17p_custom_border_emulation))
          return 0;
       const uint64_t pointers[2] = {
          batch->stage_uniforms[stage].texture_base,
@@ -3560,6 +3632,17 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
          source += (8 - start) * 2;
          length = end - 8;
          start = 8;
+      }
+
+      /* Native Ioto moves uniform dwords. A single live 16-bit stage sysval
+       * (for example the custom-border companion sentinel) therefore needs
+       * its adjacent half uploaded as harmless padding. The stage table is a
+       * fixed driver allocation, so prove that adjacent half is in bounds. */
+      if ((length & 1) && push->table == AGX_SYSVAL_STAGE(stage)) {
+         if ((uint64_t)push->offset + ((uint64_t)length + 1) * 2 >
+             sizeof(struct agx_stage_uniforms))
+            return 0;
+         ++length;
       }
       if (!table || (start & 1) || (length & 1) ||
           count == ARRAY_SIZE(ranges))
@@ -7195,13 +7278,46 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
 
    struct agx_device *dev = agx_device(ctx->base.screen);
    if (dev->chip == AGX_CHIP_G17P) {
-      struct agx3_ioto_uniform_range ranges[AGX_MAX_PUSH_RANGES + 1];
+      struct agx3_ioto_uniform_range ranges[AGX_MAX_PUSH_RANGES + 2];
       size_t range_count = 0;
+      const bool resource_pair = batch->texture_count[stage] != 0;
+
+      if (resource_pair) {
+         if (!cs->g17p_texture_resources ||
+             !batch->stage_uniforms[stage].texture_base ||
+             !batch->samplers[stage] ||
+             batch->ctx->stage[stage].custom_borders)
+            agx_native_descriptor_rejected(dev,
+                                           "compute texture resources");
+
+         const uint64_t pointers[2] = {
+            batch->stage_uniforms[stage].texture_base,
+            batch->samplers[stage],
+         };
+         const uint64_t pointer_va = agx_pool_upload_aligned(
+            &batch->pool, pointers, sizeof(pointers), 8);
+         if (!pointer_va)
+            agx_native_descriptor_rejected(dev,
+                                           "compute texture pointers");
+
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = 0,
+            .size_halfs = AGX_ABI_G17P_TEXTURE_POINTER_HALFS,
+            .address = pointer_va,
+         };
+      } else if (cs->g17p_texture_resources) {
+         agx_native_descriptor_rejected(dev, "compute texture table");
+      }
+
       for (unsigned i = 0; i < cs->push_range_count; ++i) {
          const struct agx_push_range *push = &cs->push[i];
          const uint64_t table = batch->uniforms.tables[push->table];
          if (push->table == AGX_SYSVAL_TABLE_PARAMS && !table)
             continue;
+         if (resource_pair && push->uniform <
+                                AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
+            agx_native_descriptor_rejected(dev,
+                                           "compute texture ABI overlap");
          if (!table || (push->uniform & 1) || (push->length & 1) ||
              !push->length || range_count == ARRAY_SIZE(ranges))
             agx_native_descriptor_rejected(dev, "compute uniform range");

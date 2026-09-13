@@ -3565,8 +3565,30 @@ zink_shader_spirv_compile(struct zink_screen *screen, struct zink_shader *zs, st
       ret = VKSCR(CreateShaderModule)(screen->dev, &smci, NULL, &obj.mod);
    else
       ret = VKSCR(CreateShadersEXT)(screen->dev, 1, &sci, NULL, &obj.obj);
-   ASSERTED bool success = zink_screen_handle_vkresult(screen, ret);
-   assert(success);
+   if (!zink_screen_handle_vkresult(screen, ret)) {
+      /*
+       * A driver may legitimately refuse a shader it cannot encode -- on
+       * Honeykrisp/G17P an unimplemented AGX3 instruction returns
+       * VK_ERROR_FEATURE_NOT_PRESENT from here.  This used to be an
+       * `assert(success)`, which is compiled out of a release build, so the
+       * failure was swallowed and a VK_NULL_HANDLE object was returned as if
+       * it had been created.
+       *
+       * That null is worse than no shader at all: CmdBindShadersEXT reads
+       * VK_NULL_HANDLE as "unbind this stage", so the draw does not fail --
+       * it runs with the stage silently missing, which is exactly how a
+       * compiler refusal escapes into a submitted command stream.  Name the
+       * failure and return the null object, and let the draw path treat a
+       * program with a missing stage as unbindable.
+       */
+      mesa_loge("ZINK: %s failed (%s) for the %s stage; no shader object",
+                (can_shobj && screen->info.have_EXT_shader_object)
+                   ? "vkCreateShadersEXT" : "vkCreateShaderModule",
+                vk_Result_to_str(ret),
+                _mesa_shader_stage_to_string(zs->info.stage));
+      obj.obj = VK_NULL_HANDLE;
+      obj.mod = VK_NULL_HANDLE;
+   }
    return obj;
 }
 

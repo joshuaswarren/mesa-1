@@ -238,21 +238,24 @@ test_g17p_native_compute_join(void)
    CHECK(agx3_g17p_native_compute_program_bind(&indirect_program_desc,
                                                 &indirect_program));
 
+   struct agx3_compute_program helper_program = indirect_program;
+   helper_program.program_va = UINT64_C(0x100000b0100);
+   helper_program.launch_template.word1 = 0x88;
    const struct agx3_g17p_native_indirect_dispatch indirect = {
-      .helper_program_va = UINT64_C(0x100000b0100),
+      .helper_program = &helper_program,
       .geometry_va = UINT64_C(0x100001014c0),
-      .inline_global_size = {96, 1, 1},
-      .local_size = {32, 1, 1},
    };
+   /* The direct record names the helper and its own resource template.
+    * The compact record names the application, in mode 2, and its geometry. */
    static const uint8_t expected_indirect[] = {
-      0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00, 0x01,
-      0x00, 0x2c, 0x00, 0x00, 0x01, 0x00, 0x00, 0x40,
-      0x60, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-      0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x08, 0x00, 0x88, 0x00, 0x00, 0x01,
+      0x04, 0x2c, 0x00, 0x00, 0x01, 0x00, 0x00, 0x40,
+      0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
       0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
       0x60, 0x01, 0x00, 0x60,
       0x00, 0x00, 0x08, 0x10, 0x00, 0x00, 0x00, 0x01,
-      0x04, 0x2c, 0x00, 0x00, 0x01, 0x00, 0x00, 0x40,
+      0x00, 0x2c, 0x00, 0x00, 0x01, 0x00, 0x00, 0x40,
       0x00, 0x01, 0x00, 0x00, 0xc0, 0x14, 0x10, 0x00,
       0x60, 0x01, 0x00, 0x60,
    };
@@ -275,7 +278,9 @@ test_g17p_native_compute_join(void)
       [0 ... sizeof(indirect_bytes) - 1] = 0x4d,
    };
    struct agx3_g17p_native_indirect_dispatch bad_indirect = indirect;
-   bad_indirect.helper_program_va |= 1;
+   struct agx3_compute_program bad_helper = helper_program;
+   bad_helper.program_va |= 1;
+   bad_indirect.helper_program = &bad_helper;
    struct agx3_compute_dispatch_sink bad_indirect_sink = {
       .data = indirect_bytes,
       .capacity = sizeof(indirect_bytes),
@@ -895,11 +900,11 @@ test_g17p_usc_window_va_is_encoded_without_constants(void)
    CHECK(reconstructed == program_va);
 
    /* Indirect record: same two fields, plus the helper's pointer pair. */
+   struct agx3_compute_program helper_program = program;
+   helper_program.program_va = UINT64_C(0x11fffe8000);
    const struct agx3_g17p_native_indirect_dispatch indirect = {
-      .helper_program_va = UINT64_C(0x11fffe8000),
+      .helper_program = &helper_program,
       .geometry_va = UINT64_C(0x11fffe0000),
-      .inline_global_size = {64, 1, 1},
-      .local_size = {32, 1, 1},
    };
    uint8_t indirect_bytes[AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE];
    struct agx3_compute_dispatch_sink indirect_sink = {
@@ -909,15 +914,14 @@ test_g17p_usc_window_va_is_encoded_without_constants(void)
    CHECK(agx3_g17p_native_indirect_compute_dispatch_append(
       &program, &indirect, &indirect_sink));
    CHECK((load_le32(indirect_bytes + 4) >> 22) == 0);
-   CHECK(load_le32(indirect_bytes + 8) == (uint32_t)(program_va >> 6));
+   CHECK(load_le32(indirect_bytes + 8) == (uint32_t)(helper_program.program_va >> 6));
    CHECK(load_le32(indirect_bytes + 12) == UINT32_C(0x40000000));
 
-   const uint8_t *helper =
+   const uint8_t *main =
       indirect_bytes + AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
-   CHECK((load_le32(helper + 4) >> 22) == 0);
-   CHECK(load_le32(helper + 8) ==
-         (uint32_t)(indirect.helper_program_va >> 6));
-   CHECK(load_le32(helper + 12) == UINT32_C(0x40000000));
+   CHECK((load_le32(main + 4) >> 22) == 0);
+   CHECK(load_le32(main + 8) == (uint32_t)(program_va >> 6));
+   CHECK(load_le32(main + 12) == UINT32_C(0x40000000));
    return true;
 }
 

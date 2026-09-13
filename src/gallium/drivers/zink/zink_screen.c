@@ -129,6 +129,13 @@ DEBUG_GET_ONCE_FLAGS_OPTION(zink_debug, "ZINK_DEBUG", zink_debug_options, 0)
 uint32_t
 zink_debug;
 
+/* Which of the ZINK_DEBUG=sync sites stay armed. See enum zink_sync_site. */
+DEBUG_GET_ONCE_NUM_OPTION(zink_sync_sites_option, "ZINK_SYNC_SITES",
+                          ZINK_SYNC_SITE_ALL)
+
+uint32_t
+zink_sync_sites = ZINK_SYNC_SITE_ALL;
+
 
 static const struct debug_named_value
 zink_descriptor_options[] = {
@@ -896,6 +903,35 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->query_time_elapsed = screen->timestamp_valid_bits > 0;
 
    caps->texture_multisample = true;
+
+   /* A Vulkan device may advertise no multisample colour framebuffer at all --
+    * every bit of framebufferColorSampleCounts above VK_SAMPLE_COUNT_1_BIT is
+    * clear.  Apple G17P is one: its end-of-tile store cannot yet write a
+    * multisample surface, so Honeykrisp reports one sample.
+    *
+    * st_extensions.c then computes MaxSamples = 0, and compute_version()'s
+    * OpenGL 3.0 term `(MaxSamples >= 4 || FakeSWMSAA)` is the ONLY term that
+    * fails, capping desktop GL at 2.1 and withdrawing the core profile
+    * entirely, even though every GL 4.x extension and GLSL 4.60 are present.
+    * (Measured on G17P: forcing the Vulkan limit to 4 moved the same driver
+    * from 2.1 compat/no core straight to 3.3 core with nothing else changed.)
+    *
+    * pipe_caps.fake_sw_msaa is Mesa's mechanism for exactly this hardware --
+    * freedreno sets it for a3xx, softpipe sets it always -- and its effect
+    * here is deliberately narrow.  It raises MaxSamples from 0 to 1 and sets
+    * FakeSWMSAA, so the version gate passes and the multisample entry points
+    * are exposed at one sample.  It does NOT change what an allocation does:
+    * ARB_internalformat_query already reports SAMPLES = {1} for every format
+    * on such a device, and _mesa_check_sample_count() refuses samples > 1
+    * against that query both before and after this cap, so a request for 4x
+    * fails identically either way.  Nothing new is promised about MSAA.
+    *
+    * This retires itself: a device that gains a real multisample framebuffer
+    * limit takes the ordinary path and reports its true MaxSamples.
+    */
+   caps->fake_sw_msaa =
+      !(screen->info.props.limits.framebufferColorSampleCounts &
+        ~(VkSampleCountFlags)VK_SAMPLE_COUNT_1_BIT);
 
    caps->fragment_shader_interlock = screen->info.have_EXT_fragment_shader_interlock;
 
@@ -3395,6 +3431,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    glsl_type_singleton_init_or_ref();
    zink_debug = debug_get_option_zink_debug();
+   zink_sync_sites =
+      (uint32_t)debug_get_option_zink_sync_sites_option() & ZINK_SYNC_SITE_ALL;
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_AUTO)
       zink_descriptor_mode = debug_get_option_zink_descriptor_mode();
 

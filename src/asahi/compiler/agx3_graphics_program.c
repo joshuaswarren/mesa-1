@@ -363,6 +363,7 @@ agx3_g17p_rt0_bg_shader_resources_match(enum agx3_g17p_rt0_bg_op op,
    case AGX3_G17P_RT0_BG_CLEAR:
       return (push_count == AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
               push_count == AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS ||
+              push_count == AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS ||
               push_count == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS) &&
              !uses_txf;
    case AGX3_G17P_RT0_BG_RELOAD:
@@ -391,6 +392,7 @@ agx3_g17p_rt0_bg_program_generate(
           desc->sampler_pointer_va ||
           (clear_push_halfs != AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
            clear_push_halfs != AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
@@ -472,6 +474,8 @@ agx3_g17p_rt0_bg_program_generate(
        (desc->op == AGX3_G17P_RT0_BG_CLEAR &&
         written >
            (desc->clear_push_halfs == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+            : desc->clear_push_halfs == AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
             : desc->clear_push_halfs == AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE

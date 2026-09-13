@@ -158,7 +158,7 @@ check_shared_codec_equivalence(void)
          store.data = (uint16_t)data;
          CHECK(agx3_tile_store(target->encoding, store.data, AGX3_TILE_W8,
                                store.component_mask, store.tile_offset,
-                               AGX3_TILE_COV_1X, store.wait_mask, expected,
+                               AGX3_TILE_SAMPLE_1X, store.wait_mask, expected,
                                &length));
          CHECK(hk_agx3_pack_tile_store(target->chip, &store, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -170,7 +170,7 @@ check_shared_codec_equivalence(void)
          load.dest = (uint16_t)dest;
          CHECK(agx3_tile_load(target->encoding, load.dest, AGX3_TILE_W8,
                               load.slot, load.component_mask, load.tile_offset,
-                              AGX3_TILE_COV_1X, 0, load.first, load.last,
+                              AGX3_TILE_SAMPLE_1X, 0, load.first, load.last,
                               expected, &length));
          CHECK(hk_agx3_pack_tile_load(target->chip, &load, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -182,7 +182,7 @@ check_shared_codec_equivalence(void)
          store.width = load.width = widths[w];
          CHECK(agx3_tile_store(target->encoding, store.data,
                                shared_width(store.width), store.component_mask,
-                               store.tile_offset, AGX3_TILE_COV_1X,
+                               store.tile_offset, AGX3_TILE_SAMPLE_1X,
                                store.wait_mask, expected, &length));
          CHECK(hk_agx3_pack_tile_store(target->chip, &store, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -190,7 +190,7 @@ check_shared_codec_equivalence(void)
          CHECK(agx3_tile_load(target->encoding, load.dest,
                               shared_width(load.width), load.slot,
                               load.component_mask, load.tile_offset,
-                              AGX3_TILE_COV_1X, 0, load.first, load.last,
+                              AGX3_TILE_SAMPLE_1X, 0, load.first, load.last,
                               expected, &length));
          CHECK(hk_agx3_pack_tile_load(target->chip, &load, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -202,7 +202,7 @@ check_shared_codec_equivalence(void)
          store.component_mask = (uint8_t)mask;
          CHECK(agx3_tile_store(target->encoding, store.data, AGX3_TILE_W8,
                                store.component_mask, store.tile_offset,
-                               AGX3_TILE_COV_1X, store.wait_mask, expected,
+                               AGX3_TILE_SAMPLE_1X, store.wait_mask, expected,
                                &length));
          CHECK(hk_agx3_pack_tile_store(target->chip, &store, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -214,14 +214,14 @@ check_shared_codec_equivalence(void)
          store.tile_offset = load.tile_offset = (uint16_t)offset;
          CHECK(agx3_tile_store(target->encoding, store.data, AGX3_TILE_W8,
                                store.component_mask, store.tile_offset,
-                               AGX3_TILE_COV_1X, store.wait_mask, expected,
+                               AGX3_TILE_SAMPLE_1X, store.wait_mask, expected,
                                &length));
          CHECK(hk_agx3_pack_tile_store(target->chip, &store, &instruction));
          if (check_instruction(&instruction, expected, length))
             return 1;
          CHECK(agx3_tile_load(target->encoding, load.dest, AGX3_TILE_W8,
                               load.slot, load.component_mask, load.tile_offset,
-                              AGX3_TILE_COV_1X, 0, load.first, load.last,
+                              AGX3_TILE_SAMPLE_1X, 0, load.first, load.last,
                               expected, &length));
          CHECK(hk_agx3_pack_tile_load(target->chip, &load, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -233,7 +233,7 @@ check_shared_codec_equivalence(void)
          store.wait_mask = wait ? (uint16_t)(1u << (wait - 1)) : 0;
          CHECK(agx3_tile_store(target->encoding, store.data, AGX3_TILE_W8,
                                store.component_mask, store.tile_offset,
-                               AGX3_TILE_COV_1X, store.wait_mask, expected,
+                               AGX3_TILE_SAMPLE_1X, store.wait_mask, expected,
                                &length));
          CHECK(hk_agx3_pack_tile_store(target->chip, &store, &instruction));
          if (check_instruction(&instruction, expected, length))
@@ -248,7 +248,7 @@ check_shared_codec_equivalence(void)
             load.last = (boundary & 2) != 0;
             CHECK(agx3_tile_load(target->encoding, load.dest, AGX3_TILE_W8,
                                  load.slot, load.component_mask,
-                                 load.tile_offset, AGX3_TILE_COV_1X, 0,
+                                 load.tile_offset, AGX3_TILE_SAMPLE_1X, 0,
                                  load.first, load.last, expected, &length));
             CHECK(hk_agx3_pack_tile_load(target->chip, &load, &instruction));
             if (check_instruction(&instruction, expected, length))

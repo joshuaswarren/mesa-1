@@ -205,6 +205,15 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 4u);
 
+   enum pipe_format rgba8_aliases[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8X8_UNORM,
+      PIPE_FORMAT_B8G8R8A8_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(rgba8_aliases, 2, 1, false);
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_RGBA8);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 4u);
+
    tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
    EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
@@ -356,6 +365,100 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
    tib = agx_build_tilebuffer_layout(rgb9e5, 1, 1, false);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R9G9B9E5_FLOAT, &key);
+   EXPECT_EQ(key.g17p_rt0_eot_words, 0);
+   EXPECT_FALSE(key.g17p_rt0_eot_i32);
+}
+
+TEST(Tilebuffer, G17PRGBX8IntegerEOTKey)
+{
+   const enum pipe_format formats[] = {
+      PIPE_FORMAT_R8G8B8X8_UINT,
+      PIPE_FORMAT_R8G8B8A8_UINT,
+      PIPE_FORMAT_B8G8R8X8_UINT,
+      PIPE_FORMAT_B8G8R8A8_UINT,
+      PIPE_FORMAT_R8G8B8X8_SINT,
+      PIPE_FORMAT_R8G8B8A8_SINT,
+      PIPE_FORMAT_B8G8R8X8_SINT,
+      PIPE_FORMAT_B8G8R8A8_SINT,
+   };
+
+   for (enum pipe_format format : formats) {
+      enum pipe_format rt[AGX_MAX_RENDER_TARGETS] = {format};
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(rt, 1, 1, false);
+      EXPECT_EQ(tib.sample_size_B, 8);
+      EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0),
+                PIPE_FORMAT_R8_UINT);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+      struct agx_shader_key key = {};
+      agx_g17p_configure_rt0_eot_key(format, &key);
+      EXPECT_EQ(key.g17p_rt0_eot_words, 1);
+      EXPECT_FALSE(key.g17p_rt0_eot_i32);
+   }
+}
+
+TEST(Tilebuffer, G17PRGBX8Multisample)
+{
+   for (enum pipe_format format : {PIPE_FORMAT_R8G8B8X8_UNORM,
+                                   PIPE_FORMAT_B8G8R8X8_UNORM}) {
+      enum pipe_format rt[AGX_MAX_RENDER_TARGETS] = {format};
+      for (unsigned samples : {2u, 4u}) {
+         struct agx_tilebuffer_layout tib =
+            agx_build_tilebuffer_layout(rt, 1, samples, false);
+         EXPECT_EQ(tib.sample_size_B, 8);
+         EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0),
+                   PIPE_FORMAT_R8_UNORM);
+         EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      }
+   }
+}
+
+TEST(Tilebuffer, G17PRGB32EOTKey)
+{
+   static const struct {
+      enum pipe_format logical;
+      bool signed_format;
+   } formats[] = {
+      {PIPE_FORMAT_R32G32B32X32_FLOAT, false},
+      {PIPE_FORMAT_R32G32B32X32_UINT, false},
+      {PIPE_FORMAT_R32G32B32X32_SINT, true},
+   };
+
+   for (const auto &format : formats) {
+      enum pipe_format rt[AGX_MAX_RENDER_TARGETS] = {format.logical};
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(rt, 1, 1, false);
+      EXPECT_EQ(tib.sample_size_B, 16);
+      EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0), PIPE_FORMAT_R32_UINT);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+      struct agx_shader_key key = {};
+      agx_g17p_configure_rt0_eot_key(format.logical, &key);
+      EXPECT_EQ(key.g17p_rt0_eot_words, 4);
+      EXPECT_TRUE(key.g17p_rt0_eot_i32);
+      EXPECT_EQ(key.g17p_rt0_eot_i32_four_words, !format.signed_format);
+      EXPECT_EQ(key.g17p_rt0_eot_i32_signed_four_words,
+                format.signed_format);
+
+      tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      tib = agx_build_tilebuffer_layout(rt, 1, 1, true);
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   }
+
+   /* Compact three-lane RGB32 is an emulated texture-buffer-only format, not
+    * the four-lane RGBX render-target family admitted above. */
+   enum pipe_format compact[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R32G32B32_FLOAT,
+   };
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(compact, 1, 1, false);
+   EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0), PIPE_FORMAT_NONE);
+   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   struct agx_shader_key key = {};
+   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R32G32B32_FLOAT, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
    EXPECT_FALSE(key.g17p_rt0_eot_i32);
 }

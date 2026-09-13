@@ -98,6 +98,22 @@ hk_agx3_g17p_direct_color_resolve_supported(
           hk_agx3_g17p_rt0_tile_layout_supported(tib);
 }
 
+bool
+hk_agx3_g17p_multisample_store_supported(struct agx_tilebuffer_layout *tib,
+                                         unsigned color_attachment_count,
+                                         bool store_source,
+                                         unsigned target_samples)
+{
+   /* The mirror image of the direct resolve: this is the one path that keeps
+    * the samples. It needs storeOp = STORE, a target whose sample count is
+    * exactly the tile's, and the same bounded single-target tile layout the
+    * native EOT substitution covers. */
+   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+          color_attachment_count == 1 && store_source &&
+          target_samples == tib->nr_samples &&
+          hk_agx3_g17p_rt0_tile_layout_supported(tib);
+}
+
 static bool
 hk_agx3_g17p_graphics_state_tail(
    const struct hk_agx3_g17p_graphics_program_desc *desc,
@@ -245,12 +261,17 @@ hk_agx3_g17p_combined_sampler_pointers(
 {
    if (!heap || !pointers || heap->descriptor_set_va == 0 ||
        heap->sampler_heap_va == 0 || (heap->texture_offset_B & 7) != 0 ||
-       heap->sampler_element_size_B != 32 ||
-       heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX)
+       heap->sampler_element_size_B != 32)
       return false;
 
+   /* The software descriptor ABI uses zero for a null sampler. Native heap
+    * entry zero is the reserved robust sampler, while application samplers
+    * retain the legacy +28 bias. Saturating this rebase keeps both encodings
+    * on the same native entry and cannot underflow into unmapped memory. */
    const uint32_t native_index =
-      heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+      heap->sampler_index < HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX
+         ? 0
+         : heap->sampler_index - HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
    if (native_index >= heap->sampler_count)
       return false;
 
@@ -330,6 +351,32 @@ hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
 }
 
 bool
+hk_agx3_g17p_rodata_range(uint16_t base_halfs, uint16_t size_halfs,
+                          uint64_t bo_va, uint32_t offset_B,
+                          uint64_t bo_size_B,
+                          struct agx3_ioto_uniform_range *range)
+{
+   const uint32_t loaded_halfs = ((uint32_t)size_halfs + 1) & ~1u;
+
+   if (!range || !bo_va || !size_halfs || (base_halfs & 1) ||
+       loaded_halfs > 512 || base_halfs > 512 - loaded_halfs ||
+       offset_B > bo_size_B || bo_va > UINT64_MAX - offset_B)
+      return false;
+
+   const uint64_t loaded_bytes = (uint64_t)loaded_halfs * 2;
+   const uint64_t address = bo_va + offset_B;
+   if (loaded_bytes > bo_size_B - offset_B || (address & 3))
+      return false;
+
+   *range = (struct agx3_ioto_uniform_range){
+      .start_halfs = base_halfs,
+      .size_halfs = loaded_halfs,
+      .address = address,
+   };
+   return true;
+}
+
+bool
 hk_agx3_g17p_fragment_blend_constants_range(
    uint16_t start_halfs, uint64_t blend_constants_va,
    struct agx3_ioto_uniform_range *range)
@@ -380,6 +427,7 @@ hk_agx3_g17p_rt0_bg_program_generate(
           desc->sampler_pointer_va ||
           (clear_push_halfs != HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
@@ -484,6 +532,8 @@ hk_agx3_g17p_rt0_bg_program_generate(
        (desc->op == HK_AGX3_G17P_RT0_BG_CLEAR &&
         written >
            (desc->clear_push_halfs == HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
+            : desc->clear_push_halfs == HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
             : desc->clear_push_halfs == HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE
@@ -680,6 +730,93 @@ hk_agx3_g17p_compute_program_generate(
    staged.launch = common.launch;
    *program = staged;
    return true;
+}
+
+bool
+hk_agx3_g17p_compute_program_relocate_single_range_to(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   void *program_bytes, size_t capacity, uint16_t *program_length,
+   struct agx3_compute_program *launch_out)
+{
+   /* Up to 128 halves fit in one GPU0 allocator round. Consequently a single
+    * range materializes its absolute base exactly once at the start of the
+    * program; later chunks use bounded byte offsets from that same base. */
+   if (chip != AGX_CHIP_G17P || !desc || !template_range ||
+       !template_program || !program_bytes || !program_length || !launch_out ||
+       desc->uniform_range_count != 1 || !desc->uniform_ranges ||
+       desc->uniform_ranges[0].size_halfs == 0 ||
+       desc->uniform_ranges[0].size_halfs > 128 ||
+       desc->uniform_ranges[0].start_halfs != template_range->start_halfs ||
+       desc->uniform_ranges[0].size_halfs != template_range->size_halfs ||
+       (desc->uniform_ranges[0].start_halfs & 1) ||
+       (desc->uniform_ranges[0].size_halfs & 1) ||
+       (desc->uniform_ranges[0].address & 3) ||
+       (template_range->address & 3) ||
+       template_program->length == 0 ||
+       template_program->length > sizeof(template_program->bytes) ||
+       template_program->length > capacity)
+      return false;
+
+   uint8_t old_low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t old_high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t new_low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t new_high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t old_low_len, old_high_len, new_low_len, new_high_len;
+   const uint64_t target_address = desc->uniform_ranges[0].address;
+   if (!agx_ioto_load_pack_ldimm(chip, 0,
+                                 (uint32_t)template_range->address,
+                                 old_low, &old_low_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 2,
+                                 (uint32_t)(template_range->address >> 32),
+                                 old_high, &old_high_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 0, (uint32_t)target_address,
+                                 new_low, &new_low_len) ||
+       !agx_ioto_load_pack_ldimm(chip, 2,
+                                 (uint32_t)(target_address >> 32),
+                                 new_high, &new_high_len) ||
+       old_low_len != new_low_len || old_high_len != new_high_len ||
+       (size_t)old_low_len + old_high_len > template_program->length ||
+       memcmp(template_program->bytes, old_low, old_low_len) ||
+       memcmp(template_program->bytes + old_low_len, old_high,
+              old_high_len))
+      return false;
+
+   const struct agx3_g17p_native_compute_program_desc launch_desc = {
+      .program_va = desc->program_va,
+      .shader_va = desc->shader_va,
+      .launch_sources = desc->launch_sources,
+   };
+   struct agx3_compute_program launch;
+   if (!agx3_g17p_native_compute_program_bind(&launch_desc, &launch))
+      return false;
+
+   /* Everything that can fail has been checked. Copy only the live program,
+    * not the 6 KiB maximum-size backing array. The old staging assignment
+    * cleared and copied that whole array on every meta-copy dispatch, turning
+    * a two-record address relocation into about 12 KiB of memory traffic. */
+   memcpy(program_bytes, template_program->bytes, template_program->length);
+   memcpy(program_bytes, new_low, new_low_len);
+   memcpy((uint8_t *)program_bytes + new_low_len, new_high, new_high_len);
+   *program_length = template_program->length;
+   *launch_out = launch;
+   return true;
+}
+
+bool
+hk_agx3_g17p_compute_program_relocate_single_range(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   struct hk_agx3_g17p_compute_program *program)
+{
+   if (!program)
+      return false;
+
+   return hk_agx3_g17p_compute_program_relocate_single_range_to(
+      chip, desc, template_range, template_program, program->bytes,
+      sizeof(program->bytes), &program->length, &program->launch);
 }
 
 bool

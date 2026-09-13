@@ -27,6 +27,7 @@ extern "C" {
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_funop_core.h"
+#include "agx3_iadd_core.h"
 #include "agx3_local_tps_core.h"
 #include "agx3_mem_core.h"
 #include "agx3_pack.h"
@@ -881,7 +882,15 @@ TEST_F(AGX3PackBinary, HalfUVRefusesUngroundedModes)
       if (mode == 7) wide.size = AGX_SIZE_16;
       agx_instr *mul = agx_fmul_to(b, agx_register(2, AGX_SIZE_32), wide, half);
       mul->saturate = mode == 8;
-      EXPECT_TRUE(pack(b, false).empty());
+      /* f14 is the saturate bit and it sits on the same encoding point as the
+       * slot widths, so `saturate(a * b)` over a mixed pair is one
+       * instruction: Apple's own is 09011d0401000082, f14 = 1 with f43 = 1.
+       * The modifier rows above it stay refused -- no witness puts abs or neg
+       * on a MULTIPLY's half slot. */
+      if (mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -951,7 +960,13 @@ TEST_F(AGX3PackBinary, WebGLAbsScaleMixedWidthRefusesUngroundedModes)
       agx_instr *mul = agx_fmul_to(b, dest, wide, half);
       mul->saturate = mode == 12;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
+      /* Saturation is f14 on the same encoding point as the slot widths and
+       * the modifier bits: Apple's saturate(a * b) over a mixed pair is
+       * 09011d0401000082. Everything else here is still out of domain. */
+      if (mode == 12)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -982,6 +997,24 @@ TEST_F(AGX3PackBinary, HalfMultiplyMinifloatMatchesNativeAndRefusesModifier)
                agx_immediate(0x40));
    agx_stop(b);
    EXPECT_TRUE(pack(b, false).empty());
+}
+
+TEST_F(AGX3PackBinary, HalfMultiplyOddSourcesHasExactFmaFallback)
+{
+   uint8_t native[AGX3_ALU_MAX_LENGTH], len = 0;
+   const uint16_t src[] = {3, 5};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+   };
+
+   /* This is the exact post-RA CTS reflect() shape. The compact multiply
+    * cannot combine both odd half registers with its load wait. */
+   ASSERT_FALSE(agx3_alu_hmul(AGX_ISA_ENCODING_AGX3B, 6, src, hints,
+                              false, UINT16_C(0x5), native, &len));
+
+   ASSERT_TRUE(agx3_alu_hfma_addend_minifloat(
+      AGX_ISA_ENCODING_AGX3B, 6, src, UINT8_C(0x80), hints, false,
+      UINT16_C(0x5), native, &len));
 }
 
 TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
@@ -1027,6 +1060,11 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
    agx_stop(b);
    EXPECT_GT(pack(b).size(), 4u);
 
+   /* An absolute comparator against a NON-ZERO minifloat. The refusal here
+    * was the admission gate, not the encoding: against Apple's own
+    * (fabs(a) < c) ? 1.0h : 0.0h, 1203190523b00300208000800100, the
+    * immediate form 120309a123b00302208000800100 changes only f59 (the
+    * second slot's kind) and the operand field (f52 -> f51). */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    compare = agx_register(2, AGX_SIZE_32);
    compare.abs = true;
@@ -1034,7 +1072,7 @@ TEST_F(AGX3PackBinary, MinifloatMixedSelectMatchesNativeAndRefusesModifier)
                   agx_immediate(0x30), agx_immediate(255), agx_immediate(0),
                   AGX_FCOND_EQ);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectCanonicalizesExactly)
@@ -1239,7 +1277,33 @@ TEST_F(AGX3PackBinary, GtkNegatedMinifloatSelectRefusesUngroundedForms)
                                      if_false, condition);
       I->saturate = form == SATURATE;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /*
+       * Eight of these were recording what had been measured rather than what
+       * the encoding refuses, and each now has an Apple witness:
+       *
+       *   FULL_DEST       the result width is a field, f11 / f25
+       *   COMPARE_HALF    the comparator widths are f43 and f60, and f65
+       *                   composes with them: 12051d06850302c8
+       *   COMPARE_ABS     f47 with a minifloat comparator:
+       *                   120309a123b00302208000800100
+       *   COMPARE_ABS_NEG f47 and f65 on one instruction:
+       *                   12051d0787030208800200800100
+       *   THRESHOLD_ABS   a minifloat's sign is bit 7, so |k| and -k are
+       *   THRESHOLD_NEG   constant folding, which is how Apple spells
+       *                   `-a < 0.5f` as `a > -0.5f`: 120319a122b002c22080
+       *   NAN_CONDITION_* ltn/gtn are the ordered relation with the two
+       *                   selected values exchanged, which this path already
+       *                   did for a zero comparator
+       */
+      const bool grounded =
+         form == FULL_DEST || form == COMPARE_HALF || form == COMPARE_ABS ||
+         form == COMPARE_ABS_NEG || form == THRESHOLD_ABS ||
+         form == THRESHOLD_NEG || form == NAN_CONDITION_LT ||
+         form == NAN_CONDITION_GT;
+      if (grounded)
+         EXPECT_FALSE(pack(b).empty());
+      else
+         EXPECT_TRUE(pack(b, false).empty());
    }
 }
 
@@ -1304,8 +1368,15 @@ TEST_F(AGX3PackBinary, AlphaCoverageBoundarySelectMatchesNative)
    EXPECT_EQ(build(COMPARE_NEG, false),
              std::vector<uint8_t>(negated, negated + sizeof(negated)));
 
+   /* An absolute comparator against a minifloat, and an absolute value taken
+    * on that minifloat, are both grounded now: f47 composes with an immediate
+    * comparator (120309a123b00302208000800100) and a minifloat's sign is bit
+    * 7, so |k| is constant folding rather than an encoding question. */
+   EXPECT_FALSE(build(COMPARE_ABS, false).empty());
+   EXPECT_FALSE(build(THRESHOLD_ABS, false).empty());
+
    for (unsigned bad = COMPARE_ABS; bad <= SATURATE; ++bad) {
-      if (bad == COMPARE_NEG)
+      if (bad == COMPARE_NEG || bad == COMPARE_ABS || bad == THRESHOLD_ABS)
          continue;
       SCOPED_TRACE(bad);
       EXPECT_TRUE(build((enum modifier)bad, true).empty());
@@ -1364,9 +1435,33 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   /* No Apple witness permits the negate modifier on the other operand. */
+   /* The negate on the OTHER operand is f65 with nothing rearranged: it is
+    * the slot the field names, so the relation and the operand order both
+    * stand. `a < -b` is Apple's 02011d03228103c82080, one bit away from its
+    * 02011d03228102c02080 twin for `a > b`. */
    b = builder(enc);
    a = agx_register(8, AGX_SIZE_32);
+   c = agx_register(16, AGX_SIZE_32);
+   c.neg = true;
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+
+   const uint16_t second_src[] = {8, 16};
+   ASSERT_TRUE(agx3_alu_fcmp_select_imm_width_neg_second(
+      enc, 1, second_src, glow_width, glow_hints, AGX_FCOND_LT, 255, 0,
+      true, false, 0, bytes, &len));
+   want.clear();
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* Mixing the negate with an absolute source still has no witness: ABS is
+    * a longer endpoint that carries no f65, so it fails closed rather than
+    * dropping one of the two modifiers. */
+   b = builder(enc);
+   a = agx_register(8, AGX_SIZE_32);
+   a.abs = true;
    c = agx_register(16, AGX_SIZE_32);
    c.neg = true;
    agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
@@ -1466,7 +1561,19 @@ TEST_F(AGX3PackBinary, F32PlusHalfRefusesUngroundedModes)
       agx_instr *add = agx_fadd_to(b, dest, f32, f16);
       add->saturate = mode == 8;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* A modifier on a mixed-width add is Apple's own instruction, not a
+       * different one: the slot widths f43/f26 and the modifier bits
+       * f47/f48/f30/f31 belong to one encoding point and compose freely.
+       * `a - b`, `b - a`, `a + fabs(b)` and `saturate(a + b)` over a
+       * float/half pair are 09011c0400c8, 09041c0100c8, 09011c04020000800200
+       * and 09011c0401000082. Modes 4..7 are lifetime and alignment, which
+       * stay refused. */
+      if (mode >= 1 && mode <= 3)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else if (mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -1483,45 +1590,53 @@ TEST_F(AGX3PackBinary, AbsoluteF32PlusHalfMatchesGlitchShaderShape)
    const auto code = pack(b);
    ASSERT_EQ(code.size(), 14u);
 
+   /* abs and neg on the same mixed-width source used to be refused as
+    * unwitnessed. Apple's `b - fabs(a)` is 09041c01020800800200: f47 and f48
+    * together, with f43 = 2 and f26 = 1. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    f32 = agx_register(8, AGX_SIZE_32);
    f32.abs = f32.neg = true;
    agx_fadd_to(b, agx_register(8, AGX_SIZE_32), f32, f16);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, U16ToF32PreservesHalfLivenessAndLoadWait)
 {
-   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
-   agx_builder *b = builder(enc);
-   agx_get_sr_to(b, agx_register(0, AGX_SIZE_32), AGX_SR_THREAD_POSITION_IN_GRID_X);
-   agx_index even = agx_register(0, AGX_SIZE_16);
-   agx_index odd = agx_register(1, AGX_SIZE_16);
-   even.discard = false;
-   odd.discard = true;
-   agx_convert_to(b, agx_register(4, AGX_SIZE_32),
-                   agx_immediate(AGX_CONVERT_U16_TO_F), even, AGX_ROUND_RTE);
-   agx_convert_to(b, agx_register(6, AGX_SIZE_32),
-                   agx_immediate(AGX_CONVERT_U16_TO_F), odd, AGX_ROUND_RTE);
-   agx_stop(b);
-   struct agx3_sr_desc sr = {};
-   sr.dest = 0;
-   sr.width = AGX3_SR_W32;
-   sr.sr = 23;
-   sr.slot = 1;
-   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-   std::vector<uint8_t> want;
-   ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
-   append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_u16_to_f32(enc, 4, 0, AGX3_ALU_HINT_NONE, 1, bytes, &len));
-   append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_u16_to_f32(enc, 6, 1, AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
-   append(want, bytes, len);
-   struct agx3_encoded_end end;
-   ASSERT_TRUE(agx3_pack_end(enc, &end));
-   append(want, end.bytes, end.length);
-   EXPECT_EQ(pack(b), want);
+   for (const auto enc : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
+      SCOPED_TRACE(enc);
+      agx_builder *b = builder(enc);
+      agx_get_sr_to(b, agx_register(0, AGX_SIZE_32),
+                    AGX_SR_THREAD_POSITION_IN_GRID_X);
+      agx_index even = agx_register(0, AGX_SIZE_16);
+      agx_index odd = agx_register(1, AGX_SIZE_16);
+      even.discard = false;
+      odd.discard = true;
+      agx_convert_to(b, agx_register(4, AGX_SIZE_32),
+                      agx_immediate(AGX_CONVERT_U16_TO_F), even, AGX_ROUND_RTE);
+      agx_convert_to(b, agx_register(6, AGX_SIZE_32),
+                      agx_immediate(AGX_CONVERT_U16_TO_F), odd, AGX_ROUND_RTE);
+      agx_stop(b);
+      struct agx3_sr_desc sr = {};
+      sr.dest = 0;
+      sr.width = AGX3_SR_W32;
+      sr.sr = 23;
+      sr.slot = 1;
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      std::vector<uint8_t> want;
+      ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_alu_u16_to_f32(enc, 4, 0, AGX3_ALU_HINT_NONE, 1,
+                                    bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_alu_u16_to_f32(enc, 6, 1, AGX3_ALU_HINT_DISCARD, 0,
+                                    bytes, &len));
+      append(want, bytes, len);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
 }
 
 TEST_F(AGX3PackBinary, G17PHalfImmediateRetiresOverwriteWait)
@@ -1562,8 +1677,9 @@ TEST_F(AGX3PackBinary, U16ToF32RejectsRemainingUnwitnessedDomains)
 {
    for (unsigned variant = 0; variant < 6; ++variant) {
       SCOPED_TRACE(variant);
-      /* S16-to-f32 is now independently witnessed alongside U16-to-f32. */
-      if (variant == 4)
+      /* M5 U16-to-f32 and G17P S16-to-f32 are supported; the positive
+       * liveness test above also checks the M5 encoding and producer wait. */
+      if (variant == 0 || variant == 4)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -1808,6 +1924,86 @@ TEST_F(AGX3PackBinary, G17PNarrowImmediateMADMatchesNative)
    EXPECT_EQ(pack(mul), want_mul);
 }
 
+TEST_F(AGX3PackBinary, FirefoxNarrowRegisterMADMatchesGroundedCore)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(24, AGX_SIZE_16);
+   agx_index a = agx_register(32, AGX_SIZE_16);
+   agx_index m = agx_register(25, AGX_SIZE_16);
+   agx_index c = agx_register(24, AGX_SIZE_16);
+   agx_imad_to(b, dest, a, m, c, 0);
+   agx_stop(b);
+
+   const struct agx3_imad_desc d = {
+      .dest = 24, .dest_16 = true,
+      .src_a = 32, .src_a_16 = true,
+      .multiplier_is_register = true, .multiplier_reg = 25,
+      .multiplier_16 = true,
+      .src_c = 24, .src_c_16 = true,
+   };
+   uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* Only the plain half addend has a native witness for the narrow result. */
+   for (unsigned variant = 0; variant < 3; ++variant) {
+      agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index bad_c = agx_register(24, variant == 2 ? AGX_SIZE_32
+                                                      : AGX_SIZE_16);
+      bad_c.abs = variant == 0;
+      bad_c.neg = variant == 1;
+      agx_imad_to(bad, dest, a, m, bad_c, 0);
+      agx_stop(bad);
+      EXPECT_TRUE(pack(bad, false).empty()) << variant;
+   }
+}
+
+TEST_F(AGX3PackBinary, FirefoxWideningHalfMultiplyMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(34, AGX_SIZE_32);
+   agx_index a = agx_register(25, AGX_SIZE_16);
+   agx_index m = agx_register(33, AGX_SIZE_16);
+   agx_imad_to(b, dest, a, m, agx_zero(), 0);
+   agx_stop(b);
+
+   struct agx3_imad_desc d = {};
+   d.dest = 34;
+   d.src_a = 25;
+   d.src_a_16 = true;
+   d.src_a_sign_extend = true;
+   d.multiplier_is_register = true;
+   d.multiplier_reg = 33;
+   d.multiplier_16 = true;
+   d.multiplier_sign_extend = true;
+   d.no_addend = true;
+   uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   for (unsigned variant = 0; variant < 5; ++variant) {
+      agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index bad_a = variant == 0 ? agx_register(24, AGX_SIZE_32) : a;
+      agx_index bad_m = m;
+      if (variant == 4)
+         bad_m.abs = true;
+      agx_index bad_c = variant == 1 ? agx_immediate(1) : agx_zero();
+      agx_instr *I = agx_imad_to(bad, dest, bad_a, bad_m, bad_c,
+                                 variant == 2 ? 1 : 0);
+      I->saturate = variant == 3;
+      agx_stop(bad);
+      EXPECT_TRUE(pack(bad, false).empty()) << variant;
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PNarrowShiftSevenMatchesNativePair)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -2003,6 +2199,23 @@ TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
    EXPECT_EQ(pack(b), std::vector<uint8_t>(native, native + sizeof(native)));
 }
 
+TEST_F(AGX3PackBinary, HalfComparisonSelectsFullRegisters)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(0, AGX_SIZE_16);
+   agx_index c = agx_register(9, AGX_SIZE_16);
+   agx_index if_true = agx_register(10, AGX_SIZE_32);
+   agx_index if_false = agx_register(4, AGX_SIZE_32);
+   a.abs = a.discard = true;
+   c.cache = true;
+   if_true.discard = if_false.discard = true;
+   agx_fcmpsel_to(b, agx_register(4, AGX_SIZE_32), a, c, if_true, if_false,
+                  AGX_FCOND_LT);
+   agx_stop(b);
+
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselShapes)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -2064,7 +2277,14 @@ TEST_F(AGX3PackBinary, HyprlandHalfMinifloatFselRefusesUngroundedModes)
                                        if_false, AGX_FCOND_GE);
       fsel->saturate = mode == 9;
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* The result width (mode 1) and an immediate selected value (mode 8)
+       * are independent fields of this endpoint, not separate instructions:
+       * Apple's own `select(v.x, v.y, a >= 0.5f)` is 12050da1850302c2, whose
+       * f51 carries the minifloat and whose f11 carries the half result. */
+      if (mode == 1 || mode == 8)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -2129,7 +2349,13 @@ TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatRefusesModifiers)
          compare.cache = compare.discard = true;
       agx_fcmpsel_to(b, dest, threshold, compare, if_true, if_false,
                      AGX_FCOND_GE);
-      EXPECT_TRUE(pack(b, false).empty());
+      /* The result width is its own field (f11, or f25 on the shifted
+       * destination block) and composes with an absolute comparator; the
+       * ledger already carried the pair. */
+      if (mode == 1)
+         EXPECT_FALSE(pack(b).empty()) << "mode=" << mode;
+      else
+         EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
 }
 
@@ -2160,14 +2386,15 @@ TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
 
    const uint16_t src[] = {34, 20, 24, 0};
    const bool compare_abs[] = {true, true};
+   const bool compare_neg[] = {false, false};
    const bool immediate[] = {false, true};
    const enum agx3_alu_hint hints[] = {
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_NONE};
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    ASSERT_TRUE(agx3_alu_fcmp_select_reg_imm(
-      AGX_ISA_ENCODING_AGX3B, 26, src, false, compare_abs, immediate,
-      hints, AGX_FCOND_EQ, false, true, 0, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 26, src, false, compare_abs, compare_neg,
+      immediate, hints, AGX_FCOND_EQ, false, true, 0, bytes, &len));
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
    std::vector<uint8_t> want;
@@ -2260,7 +2487,7 @@ TEST_F(AGX3PackBinary, FmulMinifloatPreservesWaitLivenessAndCommutativity)
    }
 }
 
-TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
+TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatUsesGroundedPair)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index src = agx_abs(agx_register(2, AGX_SIZE_32));
@@ -2269,9 +2496,41 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
                agx_immediate(0x40));
    agx_stop(b);
 
-   std::vector<uint8_t> want = {
-      0x09, 0xc1, 0x05, 0x83, 0x82, 0x00,
-   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_fadd_abs_negzero(
+      AGX_ISA_ENCODING_AGX3B, 0, 2, true, AGX3_ALU_HINT_CACHE, 0,
+      bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x40, false, false,
+      AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQtHiQStage6)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(64, AGX_SIZE_32);
+   dest.cache = true;
+   agx_fmul_to(b, dest, agx_abs(agx_register(2, AGX_SIZE_32)),
+               agx_immediate(0x40));
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_fadd_abs_negzero(
+      AGX_ISA_ENCODING_AGX3B, 64, 2, true, AGX3_ALU_HINT_NONE, 0,
+      bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_mod(
+      AGX_ISA_ENCODING_AGX3B, 64, 64, 0x40, true, false,
+      AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
+   append(want, bytes, len);
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
    append(want, end.bytes, end.length);
@@ -2281,8 +2540,13 @@ TEST_F(AGX3PackBinary, FmulAbsoluteMinifloatMatchesQuickshell)
 TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
 {
    for (unsigned variant = 1; variant < 10; ++variant) {
-      /* Absolute and scalar-half sources now have exact native witnesses. */
-      if (variant == 5 || variant == 8)
+      /* Absolute f32 sources have an exact grounded two-instruction lowering;
+       * scalar-half sources have an exact native witness. So does variant 1,
+       * a 32-bit source narrowed into a half destination: f10 selects the
+       * destination width independently of f26, and Apple emits the
+       * mixed-width multiply directly. See the focused tests above and
+       * FmulMinifloatNarrowsIntoHalfDestination below. */
+      if (variant == 1 || variant == 5 || variant == 8)
          continue;
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(4, variant == 1 ? AGX_SIZE_16 : AGX_SIZE_32);
@@ -2316,6 +2580,117 @@ TEST_F(AGX3PackBinary, M5MinifloatMultiplyMatchesNative)
       0x19,0xb9,0x15,0x03,0x80,0x00, 0x0e,0x00,0x00,0x00,
    };
    EXPECT_EQ(pack(b), expected);
+}
+
+/*
+ * `packHalf2x16(vec2(x * k, ...))`: agx_optimizer_fmov_rev() folds the f2f16
+ * into the multiply, so the packer sees a 32-bit source, a minifloat operand
+ * and a HALF destination. That form is Apple's own -- f10 is the destination
+ * width -- and used to fail the whole shader closed.
+ */
+TEST_F(AGX3PackBinary, FmulMinifloatNarrowsIntoHalfDestination)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_16), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple's witness is `11 a1 15 03 80 c0`; a bare test has no producer to
+    * wait on, so only the scoreboard field (f85) differs. The literal Apple
+    * bytes are asserted at encoder level in test-agx3-alu-core.c. */
+   const uint8_t native[] = {0x11, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* The 32-bit destination keeps the bytes it always had. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_32);
+   src.discard = true;
+   agx_fmul_to(b, agx_register(2, AGX_SIZE_32), src, agx_immediate(0x20));
+   agx_stop(b);
+   const auto wide = pack(b);
+   const uint8_t native32[] = {0x19, 0xa1, 0x15, 0x03, 0x80, 0x00};
+   ASSERT_EQ(wide.size(), sizeof(native32) + 4);
+   EXPECT_EQ(memcmp(wide.data(), native32, sizeof(native32)), 0);
+}
+
+/*
+ * `sqrt(abs(x))` and `inversesqrt(abs(x))`. A bare .abs on either member of
+ * this family refused the shader; f30 carries it, witnessed one field at a
+ * time against Apple.
+ */
+TEST_F(AGX3PackBinary, RsqrtFamilyCarriesAbsoluteSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_32);
+   src.abs = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq = pack(b);
+   /* Apple: `af 01 56 00 02 00 b0 c0 00 00`; byte 2 drops to 0x54 here
+    * because there is no scoreboard slot to wait on. */
+   const uint8_t rsq_abs[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0xc0, 0x00, 0x00};
+   ASSERT_EQ(rsq.size(), sizeof(rsq_abs) + 4);
+   EXPECT_EQ(memcmp(rsq.data(), rsq_abs, sizeof(rsq_abs)), 0);
+
+   /* A negated source is separately witnessed on the same form. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_32);
+   src.neg = true;
+   src.discard = true;
+   agx_rsqrt_to(b, agx_register(0, AGX_SIZE_32), src);
+   agx_stop(b);
+   const auto rsq_n = pack(b);
+   const uint8_t rsq_neg[] = {0xaf, 0x01, 0x54, 0x00, 0x02,
+                              0x00, 0xb0, 0x40, 0x01, 0x00};
+   ASSERT_EQ(rsq_n.size(), sizeof(rsq_neg) + 4);
+   EXPECT_EQ(memcmp(rsq_n.data(), rsq_neg, sizeof(rsq_neg)), 0);
+
+   /* The half form has no modifier witness and stays closed. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(2, AGX_SIZE_16);
+   src.abs = true;
+   agx_rsqrt_to(b, agx_register(2, AGX_SIZE_16), src);
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
+/*
+ * `int16_t(x) + k`. A bare 16-bit integer source is sign-extended -- that is
+ * what agx_optimizer_signext() means by dropping the SIGNEXT and asserting
+ * the survivor carries no ABS -- and the register+immediate form refused it
+ * while the register+register form beside it already encoded.
+ */
+TEST_F(AGX3PackBinary, IaddImmediateSignExtendsBareHalfSource)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(0, AGX_SIZE_16);
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto code = pack(b);
+   /* Apple: `o[i] = int(short a[i]) + 7`, f15 = 7 and f43 = 1. */
+   const uint8_t native[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                             0x0e, 0x00, 0x08, 0x15, 0x0c};
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
+
+   /* An ABS source is the zero-extending form, and keeps its own bytes:
+    * f43 clear, exactly as Apple's `uint(ushort a[i]) + 7`. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   src = agx_register(0, AGX_SIZE_16);
+   src.abs = true;
+   src.discard = true;
+   agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
+   agx_stop(b);
+   const auto zext = pack(b);
+   const uint8_t native_u[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                               0x0e, 0x00, 0x08, 0x15, 0x04};
+   ASSERT_EQ(zext.size(), sizeof(native_u) + 4);
+   EXPECT_EQ(memcmp(zext.data(), native_u, sizeof(native_u)), 0);
 }
 
 TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
@@ -2441,6 +2816,36 @@ TEST_F(AGX3PackBinary, RegisterSubtractDestinationDoesNotAliasInputs)
       EXPECT_NE(I->dest[0].value, I->src[1].value);
    }
    EXPECT_EQ(subtracts, 1u);
+}
+
+TEST_F(AGX3PackBinary, G17POptimizerKeepsImmediateMinuendInRegister)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_index lhs = agx_mov_imm(b, 32, 29);
+   agx_index rhs = agx_register(0, AGX_SIZE_32);
+   agx_index result = agx_temp(b->shader, AGX_SIZE_32);
+   agx_iadd_to(b, result, lhs, agx_neg(rhs), 0);
+   agx_st_vary(b, agx_immediate(0), result);
+   agx_stop(b);
+
+   agx_optimizer_forward(b->shader);
+
+   unsigned subtracts = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_srcs != 2 || !I->src[1].neg)
+         continue;
+
+      ++subtracts;
+      EXPECT_EQ(I->src[0].type, AGX_INDEX_NORMAL);
+   }
+   EXPECT_EQ(subtracts, 1u);
+
+   agx_ra(b->shader);
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, RegisterAndDestinationDoesNotAliasInputs)
@@ -2729,11 +3134,39 @@ TEST_F(AGX3PackBinary, SimdBroadcastImmediateWitnesses)
    }
 }
 
-TEST_F(AGX3PackBinary, SimdBroadcastRefusesUnwitnessedLane)
+/* The lane is the whole seven-bit f29, so every lane a subgroup can name
+ * encodes -- lane 31, which ends every subgroup scan, included. Only a lane
+ * the field cannot hold is refused. */
+TEST_F(AGX3PackBinary, SimdBroadcastEncodesEveryLane)
 {
+   for (unsigned lane : {1u, 5u, 31u, 63u, 127u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_shuffle_to(b, agx_register(4, AGX_SIZE_32),
+                     agx_register(0, AGX_SIZE_32), agx_immediate(lane));
+      agx_stop(b);
+
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      const struct agx3_subgroup_shuffle_desc desc = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 4,
+         .src = 0,
+         .lane = (uint16_t)lane,
+      };
+      ASSERT_TRUE(
+         agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc, bytes,
+                                      &length));
+      std::vector<uint8_t> want;
+      append(want, bytes, length);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_shuffle_to(b, agx_register(4, AGX_SIZE_32),
-                  agx_register(0, AGX_SIZE_32), agx_immediate(1));
+                  agx_register(0, AGX_SIZE_32), agx_immediate(128));
    agx_stop(b);
    pack(b, /*expect_ok=*/false);
 }
@@ -2826,6 +3259,44 @@ TEST_F(AGX3PackBinary, G17PHalfFMAImmediateAddend)
                agx_register(3, AGX_SIZE_16), agx_immediate(56));
    agx_stop(bad);
    pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, G17PHalfFMARetiresLoadBeforeNoWaitForm)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_get_sr_to(b, agx_register(14, AGX_SIZE_32),
+                 AGX_SR_THREAD_POSITION_IN_GRID_X);
+   agx_hfma_to(b, agx_register(6, AGX_SIZE_16),
+               agx_register(2, AGX_SIZE_16),
+               agx_register(3, AGX_SIZE_16),
+               agx_register(14, AGX_SIZE_16));
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   struct agx3_sr_desc sr = {};
+   sr.dest = 14;
+   sr.width = AGX3_SR_W32;
+   sr.sr = 23;
+   sr.slot = 1;
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   const uint16_t src[] = {2, 3, 14};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+   };
+   ASSERT_TRUE(agx3_alu_hfma(enc, 6, src, hints, false, false, false, 0,
+                              bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, G17PHalfSaturateMatchesNative)
@@ -2953,14 +3424,39 @@ TEST_F(AGX3PackBinary, G17PI32ToHalfMatchesNative)
    append(want_signed, end.bytes, end.length);
    EXPECT_EQ(pack(signed_dead), want_signed);
 
-   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   /* A CACHED source used to be refused here.  f27 carries it, exactly as f29
+    * carries discard, and test-agx3-alu-core.c holds the byte-exact Apple
+    * vector for both.  What this level has to show is that the packer reaches
+    * that encoder and that the cache hint is the ONLY thing it changes, so
+    * pack the same convert twice and diff. */
+   agx_builder *plain = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_convert_to(plain, agx_register(0, AGX_SIZE_16),
+                  agx_immediate(AGX_CONVERT_U32_TO_F),
+                  agx_register(2, AGX_SIZE_32), AGX_ROUND_RTE);
+   agx_stop(plain);
+   const std::vector<uint8_t> plain_bytes = pack(plain);
+
+   agx_builder *cached_src = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index cached = agx_register(2, AGX_SIZE_32);
    cached.cache = true;
-   agx_convert_to(bad, agx_register(0, AGX_SIZE_16),
+   agx_convert_to(cached_src, agx_register(0, AGX_SIZE_16),
                   agx_immediate(AGX_CONVERT_U32_TO_F), cached,
                   AGX_ROUND_RTE);
-   agx_stop(bad);
-   pack(bad, /*expect_ok=*/false);
+   agx_stop(cached_src);
+   const std::vector<uint8_t> cached_bytes = pack(cached_src);
+
+   ASSERT_EQ(plain_bytes.size(), cached_bytes.size());
+   unsigned differing_bytes = 0, differing_bits = 0;
+   for (size_t i = 0; i < plain_bytes.size(); ++i) {
+      const uint8_t delta = plain_bytes[i] ^ cached_bytes[i];
+      if (!delta)
+         continue;
+      differing_bytes++;
+      differing_bits += __builtin_popcount(delta);
+   }
+   EXPECT_EQ(differing_bytes, 1u);
+   EXPECT_EQ(differing_bits, 1u);
+   EXPECT_NE(plain_bytes, cached_bytes);
 }
 
 TEST_F(AGX3PackBinary, GTKHalfToInt32UsesNativeWidthAndPostRAState)
@@ -3104,7 +3600,10 @@ TEST_F(AGX3PackBinary, QuadImmediateNativeWitnesses)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
+/* Apple's own quad butterfly carries the slot-6 wait for its device load in
+ * f49, so this no longer costs a synchronous identity prelude to retire the
+ * producer first. */
+TEST_F(AGX3PackBinary, QuadImmediateXorWaitsForDeviceLoad)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    const agx_index value = agx_register(4, AGX_SIZE_32);
@@ -3116,10 +3615,7 @@ TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
    agx_stop(b);
 
    std::vector<uint8_t> want;
-   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
-   ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 0, 0,
-                                0, 0, 0, 1u << 5, bytes, &length));
-   append(want, bytes, length);
+   uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    const struct agx3_subgroup_shuffle_desc shuffle = {
       .quad = true,
       .op = AGX3_SUBGROUP_SHUFFLE_XOR,
@@ -3127,6 +3623,7 @@ TEST_F(AGX3PackBinary, QuadImmediateXorRetiresDeviceLoad)
       .dest = 6,
       .src = 4,
       .lane = 1,
+      .wait_mask = 1u << 5,
       .src_live = true,
    };
    ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &shuffle,
@@ -4235,6 +4732,57 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
    }
 }
 
+TEST_F(AGX3PackBinary, TextureCoordinateCollectStaysLowUnderPressure)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+   /* Keep the whole 128-half TEX source bank live when the coordinate COLLECT
+    * is reached. Preloads make that pressure deterministic: the allocator
+    * must relocate one live value to place this exact direct-COLLECT texture
+    * source below half 128, rather than accidentally finding an unused hole. */
+   agx_index live[64];
+   for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+      live[i] = agx_preload(b, agx_register(2 * i, AGX_SIZE_32));
+
+   agx_index xy[2] = {
+      agx_mov_imm(b, 32, 0x41000000),
+      agx_mov_imm(b, 32, 0x41800000),
+   };
+   agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+   agx_instr *collect = agx_collect_to(b, coord, 2);
+   collect->src[0] = xy[0];
+   collect->src[1] = xy[1];
+
+   agx_index tex_dest = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+   agx_instr *tex = agx_texture_sample_to(
+      b, tex_dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_uniform(0, AGX_SIZE_64), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   tex->op = AGX_OPCODE_TEXTURE_LOAD;
+   tex->mask = 15;
+   agx_instr *split = agx_split(b, 4, tex_dest);
+   for (unsigned i = 0; i < 4; ++i)
+      split->dest[i] = agx_temp(b->shader, AGX_SIZE_32);
+
+   /* Preserve the synthetic pressure across the COLLECT/TEX pair. */
+   agx_index sum = agx_fadd(b, live[0], split->dest[0]);
+   for (unsigned i = 1; i < ARRAY_SIZE(live); ++i)
+      sum = agx_fadd(b, sum, live[i]);
+   agx_export(b, sum, 8);
+   agx_stop(b);
+
+   agx_pressure_schedule(b->shader);
+   agx_ra(b->shader);
+
+   ASSERT_EQ(tex->op, AGX_OPCODE_TEXTURE_LOAD);
+   ASSERT_EQ(tex->src[0].type, AGX_INDEX_REGISTER);
+   EXPECT_LT(tex->src[0].value, 128u);
+   EXPECT_LE(tex->src[0].value + 4, 128u);
+}
+
 TEST_F(AGX3PackBinary, ThreeJSVertexTextureCoordinatesStayLowUnderPressure)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -4321,6 +4869,66 @@ TEST_F(AGX3PackBinary, ThreeJSVertexTextureCoordinatesStayLowUnderPressure)
    bad_tex->mask = 15;
    agx_stop(bad);
    EXPECT_TRUE(pack(bad, false).empty());
+}
+
+TEST_F(AGX3PackBinary, TextureResultShuffleKeepsHalfCopiesInLowBank)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+   /* Fill every low-bank pair except r6/r7, then keep only r7l live there.
+    * This makes r6/r7 the unique cheapest region for the constrained vec2
+    * coordinate. XBR has this exact lifetime: preserving the r7l predicate
+    * used to generate the unsupported `mov1 r71h, r7l`. */
+   agx_index live[62];
+   unsigned next = 0;
+   for (unsigned reg = 0; reg < 128; reg += 2) {
+      if (reg != 12 && reg != 14)
+         live[next++] = agx_preload(b, agx_register(reg, AGX_SIZE_32));
+   }
+   ASSERT_EQ(next, ARRAY_SIZE(live));
+   agx_index half_live = agx_preload(b, agx_register(14, AGX_SIZE_16));
+
+   agx_index xy[2] = {
+      agx_preload(b, agx_register(128, AGX_SIZE_32)),
+      agx_preload(b, agx_register(130, AGX_SIZE_32)),
+   };
+   agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+   agx_instr *collect = agx_collect_to(b, coord, 2);
+   collect->src[0] = xy[0];
+   collect->src[1] = xy[1];
+
+   agx_index tex_dest = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+   agx_instr *tex = agx_texture_sample_to(
+      b, tex_dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_uniform(0, AGX_SIZE_64), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   tex->op = AGX_OPCODE_TEXTURE_LOAD;
+   tex->mask = 15;
+   agx_instr *split = agx_split(b, 4, tex_dest);
+   for (unsigned i = 0; i < 4; ++i)
+      split->dest[i] = agx_temp(b->shader, AGX_SIZE_32);
+
+   agx_index sum = agx_fadd(b, live[0], split->dest[0]);
+   for (unsigned i = 1; i < ARRAY_SIZE(live); ++i)
+      sum = agx_fadd(b, sum, live[i]);
+   agx_iadd_to(b, agx_temp(b->shader, AGX_SIZE_16), half_live,
+               agx_immediate(0), 0);
+   agx_export(b, sum, 8);
+   agx_stop(b);
+
+   agx_ra(b->shader);
+
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op == AGX_OPCODE_MOV && I->dest[0].size == AGX_SIZE_16)
+         EXPECT_LT(I->dest[0].value, 128u);
+   }
+
+   agx_lower_pseudo(b->shader);
+   agx_opt_register_cache(b->shader);
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
@@ -4490,6 +5098,9 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
       agx_immediate(0), offset, AGX_DIM_2D,
       AGX_LOD_MODE_AUTO_LOD, 0, true, false, false, AGX_GATHER_NONE, false);
    I->mask = 15;
+   /* The packed offset reaches the packer on the instruction, not through
+    * src[5]: a comparison sample needs that operand for its reference. */
+   I->offset_xy = 0xf1;
    agx_stop(b);
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
@@ -4696,6 +5307,7 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       d.slot = 1;
       d.wait_mask = 1;
       d.final = true;
+      d.coord_kill = enc == AGX_ISA_ENCODING_AGX3C;
       d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
@@ -5124,7 +5736,7 @@ TEST_F(AGX3PackBinary, TileStoreSingleSampleFormats)
          uint8_t tile[AGX3_TILE_MAX_LENGTH];
          uint8_t tile_len = 0;
          ASSERT_TRUE(agx3_tile_store(enc, 0, f.width, mask, 24,
-                                     AGX3_TILE_COV_1X, 0, tile, &tile_len));
+                                     AGX3_TILE_SAMPLE_1X, 0, tile, &tile_len));
          struct agx3_encoded_end end;
          ASSERT_TRUE(agx3_pack_end(enc, &end));
          std::vector<uint8_t> want;
@@ -5160,11 +5772,11 @@ TEST_F(AGX3PackBinary, TileLoadStoreWaitSurvivesFallthroughBlock)
       std::vector<uint8_t> want;
       const unsigned load_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 1;
       ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, load_slot, 15, 16,
-                                 AGX3_TILE_COV_1X, 0, true, true, tile,
+                                 AGX3_TILE_SAMPLE_1X, 0, true, true, tile,
                                  &tile_len));
       append(want, tile, tile_len);
       ASSERT_TRUE(agx3_tile_store(enc, 0, AGX3_TILE_W32, 15, 16,
-                                  AGX3_TILE_COV_1X,
+                                  AGX3_TILE_SAMPLE_1X,
                                   1u << (load_slot - 1), tile, &tile_len));
       append(want, tile, tile_len);
       struct agx3_encoded_end end;
@@ -5174,33 +5786,24 @@ TEST_F(AGX3PackBinary, TileLoadStoreWaitSurvivesFallthroughBlock)
    }
 }
 
-TEST_F(AGX3PackBinary, G17PMultisampleTileSelectorsMatchNative)
+TEST_F(AGX3PackBinary, G17PMultisampleTileSampleOperandIsARegister)
 {
-   const struct {
-      unsigned tagged_mask;
-      enum agx3_tile_coverage coverage;
-   } stores[] = {
-      {0x20, AGX3_TILE_COV_2X_BROADCAST},
-      {0x21, AGX3_TILE_COV_2X_SAMPLE_0},
-      {0x22, AGX3_TILE_COV_2X_SAMPLE_1},
-      {0x40, AGX3_TILE_COV_4X_BROADCAST},
-      {0x41, AGX3_TILE_COV_4X_SAMPLE_0},
-      {0x42, AGX3_TILE_COV_4X_SAMPLE_1},
-      {0x44, AGX3_TILE_COV_4X_SAMPLE_2},
-      {0x48, AGX3_TILE_COV_4X_SAMPLE_3},
-   };
-
-   for (const auto &v : stores) {
+   /* Apple's multisample colour stores source the sample mask from a live
+    * register -- the coverage word, or that word ANDed with one sample bit.
+    * The packer must carry an IR register straight into that operand. */
+   for (unsigned reg : {8u, 9u, 10u, 11u}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index value = agx_register(0, AGX_SIZE_16);
       value.channels_m1 = 1;
-      agx_st_tile(b, value, agx_immediate(v.tagged_mask), agx_null(),
-                  AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_index mask = agx_register(reg, AGX_SIZE_16);
+      mask.kill = true;
+      agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0, false);
       agx_stop(b);
 
       uint8_t tile[AGX3_TILE_MAX_LENGTH], tile_len = 0;
-      ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
-                                  15, 0, v.coverage, 0, tile, &tile_len));
+      ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8, 15,
+                                  0, agx3_tile_sample_reg(reg, true), 0, tile,
+                                  &tile_len));
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
       std::vector<uint8_t> want;
@@ -5209,22 +5812,15 @@ TEST_F(AGX3PackBinary, G17PMultisampleTileSelectorsMatchNative)
       EXPECT_EQ(pack(b), want);
    }
 
-   /* Untagged raw masks and an all-sample lldcol reduction remain closed. */
-   {
+   /* The only immediate the operand accepts is Mesa's whole-pixel spelling,
+    * which becomes Apple's 1x immediate. A raw numeric mask has no witness
+    * and must not be invented. */
+   for (unsigned imm : {0u, 1u, 0x3u, 0xfu, 0x20u, 0x40u}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index value = agx_register(0, AGX_SIZE_16);
       value.channels_m1 = 1;
-      agx_st_tile(b, value, agx_immediate(1), agx_null(), AGX_FORMAT_U8NORM,
-                  15, 0, false);
-      agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
-   }
-   {
-      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
-      agx_index value = agx_register(0, AGX_SIZE_16);
-      value.channels_m1 = 1;
-      agx_ld_tile_to(b, value, agx_immediate(0x20), agx_null(),
-                     AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_st_tile(b, value, agx_immediate(imm), agx_null(),
+                  AGX_FORMAT_U8NORM, 15, 0, false);
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty());
    }
@@ -5242,18 +5838,15 @@ TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
 
       std::vector<uint8_t> want;
       for (unsigned i = 0; i < samples; ++i) {
-         const unsigned tagged = (samples == 2 ? 0x20 : 0x40) | (1u << i);
-         agx_st_tile(b, value, agx_immediate(tagged), agx_null(),
-                     AGX_FORMAT_U8NORM, 15, 0, false);
+         agx_index mask = agx_register(8 + i, AGX_SIZE_16);
+         mask.kill = true;
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0,
+                     false);
 
          uint8_t tile[AGX3_TILE_MAX_LENGTH], tile_len = 0;
-         const enum agx3_tile_coverage coverage =
-            static_cast<enum agx3_tile_coverage>(
-               (samples == 2 ? AGX3_TILE_COV_2X_SAMPLE_0
-                             : AGX3_TILE_COV_4X_SAMPLE_0) + i);
-         ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0,
-                                     AGX3_TILE_W8, 15, 0, coverage, 0,
-                                     tile, &tile_len));
+         ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
+                                     15, 0, agx3_tile_sample_reg(8 + i, true),
+                                     0, tile, &tile_len));
          append(want, tile, tile_len);
       }
       agx_stop(b);
@@ -5264,16 +5857,36 @@ TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
       EXPECT_EQ(pack(b), want);
    }
 
-   /* A duplicate selector is not a complete sample domain. */
+   /* Register allocation is free to reuse one mask register for stores that
+    * kill it, and on the real four-sample reload it does. A mask recomputed
+    * between the stores is a different mask, so that shape is admitted --
+    * refusing it refused the only shader this protocol exists for. */
    {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_index value = agx_register(0, AGX_SIZE_16);
       value.channels_m1 = 1;
-      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
-                  AGX_FORMAT_U8NORM, 15, 0, false);
-      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
-                  AGX_FORMAT_U8NORM, 15, 0, false);
+      for (unsigned i = 0; i < 4; ++i) {
+         agx_mov_imm_to(b, agx_register(8, AGX_SIZE_16), 1u << i);
+         agx_index mask = agx_register(8, AGX_SIZE_16);
+         mask.kill = true;
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0,
+                     false);
+      }
+      agx_stop(b);
+      EXPECT_FALSE(pack(b).empty());
+   }
+
+   /* A repeated mask register with nothing redefining it is one mask twice,
+    * not a complete sample domain. */
+   {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      agx_index mask = agx_register(8, AGX_SIZE_16);
+      agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0, false);
+      agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0, false);
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty());
    }
@@ -5285,9 +5898,9 @@ TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_index value = agx_register(0, AGX_SIZE_16);
       value.channels_m1 = 1;
-      agx_st_tile(b, value, agx_immediate(0x21), agx_null(),
+      agx_st_tile(b, value, agx_register(8, AGX_SIZE_16), agx_null(),
                   AGX_FORMAT_U8NORM, 15, 0, false);
-      agx_st_tile(b, value, agx_immediate(0x22), agx_null(),
+      agx_st_tile(b, value, agx_register(9, AGX_SIZE_16), agx_null(),
                   AGX_FORMAT_U8NORM, 15, 0, false);
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty());
@@ -5315,11 +5928,11 @@ TEST_F(AGX3PackBinary, TileLoadSequenceBoundaryMarkers)
       const unsigned first_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 1;
       const unsigned second_slot = enc == AGX_ISA_ENCODING_AGX3B ? 6 : 2;
       ASSERT_TRUE(agx3_tile_load(enc, 0, AGX3_TILE_W32, first_slot, 15, 0,
-                                 AGX3_TILE_COV_1X, 0, true, false, tile,
+                                 AGX3_TILE_SAMPLE_1X, 0, true, false, tile,
                                  &tile_len));
       append(want, tile, tile_len);
       ASSERT_TRUE(agx3_tile_load(enc, 8, AGX3_TILE_W32, second_slot, 15, 16,
-                                 AGX3_TILE_COV_1X, 0, false, true, tile,
+                                 AGX3_TILE_SAMPLE_1X, 0, false, true, tile,
                                  &tile_len));
       append(want, tile, tile_len);
       struct agx3_encoded_end end;
@@ -5667,6 +6280,38 @@ TEST_F(AGX3PackBinary, LocalLoadAddStoreCarriesWait)
    }
 }
 
+TEST_F(AGX3PackBinary, LocalVectorUsesScalarElementIndex)
+{
+   for (int e = 0; e < 2; ++e) {
+      const enum agx_isa_encoding enc =
+         e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      agx_index base = agx_uniform(8, AGX_SIZE_16);
+      agx_local_store(b, agx_register(0, AGX_SIZE_32), base,
+                      agx_immediate(4), AGX_FORMAT_I32, 0xf);
+      agx_stop(b);
+
+      struct agx3_local_desc st = {};
+      st.data = 0;
+      st.width = AGX3_MEM_W32;
+      st.mask = 0xf;
+      st.shift = 2;
+      st.base_kind = AGX3_LOCAL_BASE_UNIFORM;
+      st.base = 8;
+      st.index = 4;
+      uint8_t sb[AGX3_LOCAL_TPS_MAX_LENGTH];
+      uint8_t sl = 0;
+      ASSERT_TRUE(agx3_local_encode_store(enc, &st, sb, &sl));
+
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      std::vector<uint8_t> want;
+      append(want, sb, sl);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
 TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
 {
    for (int e = 0; e < 2; ++e) {
@@ -5984,7 +6629,7 @@ TEST_F(AGX3PackBinary, StructuredIfAndForwardBranch)
       ASSERT_TRUE(agx3_cf_cndst(enc, 0, false, 1, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, true, bytes, &len));
-      ASSERT_EQ(len, AGX3_CF_MAX_LENGTH);
+      ASSERT_EQ(len, AGX3_CF_BRANCH_LENGTH);
       ASSERT_TRUE(agx3_cf_patch_branch(enc, true, bytes, 10));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_cndend(enc, 1, bytes, &len));
@@ -6027,7 +6672,7 @@ TEST_F(AGX3PackBinary, NestedLoopEntryBackedgeAndPop)
       ASSERT_TRUE(agx3_cf_cndlt(enc, 1, false, bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_branch(enc, false, bytes, &len));
-      ASSERT_EQ(len, AGX3_CF_MAX_LENGTH);
+      ASSERT_EQ(len, AGX3_CF_BRANCH_LENGTH);
       ASSERT_TRUE(agx3_cf_patch_branch(enc, false, bytes, -14));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_cf_cndend(enc, 2, bytes, &len));
@@ -6072,6 +6717,45 @@ TEST_F(AGX3PackBinary, FloatRelationAndCanonicalElse)
       append(want, end.bytes, end.length);
 
       EXPECT_EQ(pack(b), want);
+   }
+}
+
+TEST_F(AGX3PackBinary, FirefoxFloatIfMinifloatsMaterializeToGroundedRegisters)
+{
+   for (float constant : {1.0f, -10.0f}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->nir = rzalloc(mem_ctx, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+      agx_index source = agx_mov_imm(b, 32, 0x40000000);
+      agx_if_fcmp(b, source, agx_immediate_f(constant), 1, AGX_FCOND_EQ,
+                  false, NULL);
+      agx_stop(b);
+
+      agx_materialize_agx3_cf_constants(b->shader);
+
+      uint32_t expected;
+      memcpy(&expected, &constant, sizeof(expected));
+      unsigned matching_constant = 0, compares = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         matching_constant +=
+            I->op == AGX_OPCODE_MOV_IMM && I->imm == expected;
+         if (I->op == AGX_OPCODE_IF_FCMP) {
+            ++compares;
+            EXPECT_EQ(I->src[0].type, AGX_INDEX_NORMAL);
+            EXPECT_EQ(I->src[1].type, AGX_INDEX_NORMAL);
+            EXPECT_EQ(I->src[0].size, AGX_SIZE_32);
+            EXPECT_EQ(I->src[1].size, AGX_SIZE_32);
+         }
+      }
+      EXPECT_EQ(matching_constant, 1u);
+      EXPECT_EQ(compares, 1u);
+
+      agx_ra(b->shader);
+      agx_lower_pseudo(b->shader);
+      agx_opt_register_cache(b->shader);
+      EXPECT_FALSE(pack(b).empty());
    }
 }
 
@@ -6260,7 +6944,7 @@ TEST_F(AGX3PackBinary, G17PAlphaProtocolAcquiresBeforeLoadReleasesAfterStore)
    /* The intervening store consumes the actual outstanding tile-load slot. */
    uint8_t store[AGX3_TILE_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_tile_store(AGX_ISA_ENCODING_AGX3B, 0, AGX3_TILE_W8,
-                               15, 0, AGX3_TILE_COV_1X, 1u << 5, store, &len));
+                               15, 0, AGX3_TILE_SAMPLE_1X, 1u << 5, store, &len));
    ASSERT_EQ(len, 12u);
    EXPECT_TRUE(std::equal(store, store+len, bin.begin()+sizeof(prefix)));
 }
@@ -6836,7 +7520,7 @@ TEST_F(AGX3PackBinary, G17PWriteWaitFollowsPackingAndPreservesScoreboard)
             agx_ld_tile_to(b, loaded, agx_immediate(AGX_ALL_SAMPLES),
                           agx_null(), AGX_FORMAT_U8NORM, 15, 0, false);
             ASSERT_TRUE(agx3_tile_load(enc, 12, AGX3_TILE_W8, 6, 15, 0,
-               AGX3_TILE_COV_1X, 0, true, true, bytes, &len));
+               AGX3_TILE_SAMPLE_1X, 0, true, true, bytes, &len));
             append(want, bytes, len);
             agx_index unpacked = agx_register(8, AGX_SIZE_32);
             unpacked.channels_m1 = 1;
@@ -6869,7 +7553,7 @@ TEST_F(AGX3PackBinary, G17PWriteWaitFollowsPackingAndPreservesScoreboard)
          agx_st_tile(b, packed, agx_immediate(AGX_ALL_SAMPLES), agx_null(),
                      AGX_FORMAT_U8NORM, 15, 0, false);
          ASSERT_TRUE(agx3_tile_store(enc, 0, AGX3_TILE_W8, 15, 0,
-                                    AGX3_TILE_COV_1X, 0, bytes, &len));
+                                    AGX3_TILE_SAMPLE_1X, 0, bytes, &len));
          append(want, bytes, len);
          append(want, release_end, sizeof(release_end));
          agx_stop(b);
@@ -7674,6 +8358,107 @@ TEST_F(AGX3PackBinary, SideEffectBeforeWideTerminalVertexOutputs)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 102u);
 }
 
+/* WebRender materializes the constant final output after the preceding fifty
+ * stores.  Those stores are not a syntactically terminal bundle, but each is
+ * copied to its unique staging address before the late producer can reuse its
+ * GPR.  The first old refusal was therefore output 4, not an unsupported UVSW
+ * field: the nonterminal staging mode was arbitrarily limited to six outputs. */
+TEST_F(AGX3PackBinary, FirefoxDenseOutputsAllowLatePureProducer)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned count : {40u, 51u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+
+      for (unsigned c = 0; c + 1 < count; ++c)
+         agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+      agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f800000);
+      agx_st_vary(b, agx_immediate(count - 1),
+                  agx_register(24, AGX_SIZE_32));
+      agx_stop(b);
+
+      const auto bytes = pack(b);
+      EXPECT_FALSE(bytes.empty()) << count;
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * count) << count;
+   }
+}
+
+/* Firefox 155's WebRender vertex program is the same shape with 49 dense
+ * outputs: its final store's source GPR is also read by an earlier store, so
+ * the late pure producer is only safe because every earlier value has already
+ * been copied to its own staging address.  That safety argument does not
+ * depend on the number of outputs, and the captured 40/51 pair was only ever
+ * what happened to be captured -- pinning it refused Firefox at st_vary #4 and
+ * left the browser with no WebRender pipeline at all. */
+TEST_F(AGX3PackBinary, FirefoxDenseOutputsAcceptAnyGroundedWidth)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned count : {5u, 39u, 40u, 49u, 51u, AGX3_MAX_VERTEX_OUTPUTS}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+
+      for (unsigned c = 0; c + 1 < count; ++c)
+         agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+      agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f800000);
+      agx_st_vary(b, agx_immediate(count - 1),
+                  agx_register(24, AGX_SIZE_32));
+      agx_stop(b);
+
+      const auto bytes = pack(b);
+      EXPECT_FALSE(bytes.empty()) << count;
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * count) << count;
+   }
+
+   /* The width ceiling still fails closed. */
+   agx_builder *too_wide = builder(enc);
+   too_wide->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
+      agx_st_vary(too_wide, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(too_wide, agx_register(24, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(too_wide, agx_immediate(AGX3_MAX_VERTEX_OUTPUTS),
+               agx_register(24, AGX_SIZE_32));
+   agx_stop(too_wide);
+   EXPECT_TRUE(pack(too_wide, false).empty());
+}
+
+TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+
+   for (unsigned c = 0; c < 50; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f000000);
+   agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
+   agx_stop(b);
+
+   EXPECT_TRUE(pack(b, false).empty());
+
+   /* The late producer must be the exclusive source of the final store.  If
+    * the last store reads some other register the staged value it publishes is
+    * unrelated to the producer, so the suffix is not the grounded shape. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c < 50; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(b, agx_register(26, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+
+   /* A late producer that lands before the final store's predecessors, rather
+    * than immediately ahead of the final store, is likewise not the shape. */
+   b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned c = 0; c < 49; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
+   agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(b, agx_immediate(49), agx_register(24, AGX_SIZE_32));
+   agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
+   agx_stop(b);
+   EXPECT_TRUE(pack(b, false).empty());
+}
+
 TEST_F(AGX3PackBinary, ReorderedWideVertexOutputsMatchNativeStagingProtocol)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -7813,6 +8598,44 @@ TEST_F(AGX3PackBinary, FragmentHelperCoverageMatchesNativeAtomicPipeline)
    EXPECT_EQ(pack(b), native);
 }
 
+TEST_F(AGX3PackBinary, G17PDiscardDoesNotReleaseUnacquiredPixelClass)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (const std::vector<unsigned> &masks :
+        {std::vector<unsigned>{0}, {2}, {0, 0, 2}}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      for (unsigned flags : masks)
+         agx_sample_mask_1x_agx3(b, agx_register(0, AGX_SIZE_16),
+                                 agx_register(4, AGX_SIZE_32), flags);
+      agx_stop(b);
+
+      /* Apple G17P kill_fetch emits an early discard MOVMSK without a
+       * class-1 wait or release. Its later testing MOVMSK is bracketed by
+       * PIXWAIT(1)/PIXREL(1). kill_memory independently has two unbracketed
+       * discard MOVMSKs before its bracketed late depth test. */
+      std::vector<uint8_t> want;
+      const uint8_t entry[] = {0x87, 0x02, 0x54, 0x00, 0x06, 0x00};
+      const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+      const uint8_t mask[] = {0x57, 0x14, 0x54, 0x00, 0x00, 0x01};
+      const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+      append(want, entry, sizeof(entry));
+      for (unsigned flags : masks) {
+         uint8_t copy[AGX3_STAGE_MAX_LENGTH], length = 0;
+         ASSERT_TRUE(agx3_stage_copy_source(enc, 0, 4, false, 1, 0, copy,
+                                            &length));
+         append(want, copy, length);
+         if (flags == 2)
+            append(want, acquire, sizeof(acquire));
+         append(want, mask, sizeof(mask));
+         if (flags == 2)
+            append(want, release, sizeof(release));
+      }
+      want.insert(want.end(), {0x0e, 0, 0, 0});
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
 TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -7927,6 +8750,116 @@ TEST_F(AGX3PackBinary, M5PixelCoordinateZeroExtendUsesCopyAndClear)
    EXPECT_EQ(pack(b), want);
 }
 
+
+/* SIGNEXT lowers this exact Firefox vertex-shader shape to IADD after RA.
+ * A bare half is signed in AGX IR, while ABS denotes zero extension. */
+TEST_F(AGX3PackBinary, FirefoxVertexHalfSignExtendUsesNativeIadd)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(34, AGX_SIZE_32);
+   dest.cache = true;
+   agx_iadd_to(b, dest, agx_register(26, AGX_SIZE_16), agx_immediate(0), 0);
+   agx_stop(b);
+
+   const struct agx3_iadd_desc d = {
+      .dest = 34,
+      .immediate = 0,
+      .src = 26,
+      .src_16 = true,
+      .sign_extend = true,
+      .dest_cache = true,
+   };
+   uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, FirefoxFragmentSignedHalfAccumulatorUsesNativeIadd)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index half = agx_register(22, AGX_SIZE_16);
+   half.cache = true;
+   agx_iadd_to(b, agx_register(30, AGX_SIZE_32),
+               agx_register(30, AGX_SIZE_32), half, 0);
+   agx_stop(b);
+
+   struct agx3_iadd_desc d = {};
+   d.src_a_is_register = true;
+   d.src_a_reg = 30;
+   d.dest = 30;
+   d.src = 22;
+   d.src_16 = true;
+   d.sign_extend = true;
+   uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   /* Addition commutes: reverse Firefox's second physical allocation onto
+    * the same grounded slot-A32 + slot-B16 instruction. */
+   agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_iadd_to(bad, agx_register(30, AGX_SIZE_32),
+               agx_register(22, AGX_SIZE_16),
+               agx_register(30, AGX_SIZE_32), 0);
+   agx_stop(bad);
+   EXPECT_EQ(pack(bad), want);
+
+   bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_iadd_to(bad, agx_register(30, AGX_SIZE_32),
+               agx_register(30, AGX_SIZE_32),
+               agx_register(22, AGX_SIZE_16), 1);
+   agx_stop(bad);
+   EXPECT_TRUE(pack(bad, false).empty());
+
+   bad = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_instr *sat = agx_iadd_to(bad, agx_register(30, AGX_SIZE_32),
+                                agx_register(30, AGX_SIZE_32),
+                                agx_register(22, AGX_SIZE_16), 0);
+   sat->saturate = true;
+   agx_stop(bad);
+   EXPECT_TRUE(pack(bad, false).empty());
+}
+
+TEST_F(AGX3PackBinary, FirefoxHalfArithmeticShiftMatchesNative)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(35, AGX_SIZE_16);
+   src.cache = true;
+   agx_index amount = agx_immediate(1);
+   agx_asr_to(b, agx_register(25, AGX_SIZE_16), src, amount);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_alu_asr_imm16(
+      AGX_ISA_ENCODING_AGX3B, 25, 35, 1, AGX3_ALU_HINT_CACHE, false, 0,
+      bytes, &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   for (unsigned variant = 0; variant < 4; ++variant) {
+      agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index bad_src = variant == 0 ? agx_register(34, AGX_SIZE_32)
+                                       : agx_register(35, AGX_SIZE_16);
+      agx_index bad_amount = agx_immediate(variant == 1 ? 16 : 1);
+      if (variant == 2)
+         bad_src.abs = true;
+      agx_instr *bad_I = agx_asr_to(
+         bad, agx_register(25, AGX_SIZE_16), bad_src, bad_amount);
+      bad_I->saturate = variant == 3;
+      agx_stop(bad);
+      EXPECT_TRUE(pack(bad, false).empty()) << variant;
+   }
+}
 /*
  * agx_lower_uniform_sources() materializes a move for every generic-ALU
  * uniform source. At 32 bits it reached agx3_copy_encode_uniform_to_reg32();
@@ -8329,6 +9262,25 @@ TEST_F(AGX3PackBinary, NativeBfeilExtractPreservesSourceLifetime)
       ASSERT_EQ(code.size(),16);
       EXPECT_EQ(memcmp(code.data(),expected[dynamic],12),0);
    }
+}
+
+TEST_F(AGX3PackBinary, HalfBfeilRetainsCachedDynamicShift)
+{
+   auto build = [this](bool cache_shift) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(10, AGX_SIZE_16);
+      value.discard = true;
+      agx_index shift = agx_register(16, AGX_SIZE_32);
+      shift.cache = cache_shift;
+      agx_bfeil_to(b, agx_register(4, AGX_SIZE_16), agx_immediate(0),
+                   value, shift, 0);
+      agx_stop(b);
+      return pack(b);
+   };
+
+   /* The dynamic-shift endpoint has no source-cache bit. NONE retains the
+    * shift register, so the cached and ordinary post-RA forms are exact. */
+   EXPECT_EQ(build(true), build(false));
 }
 
 TEST_F(AGX3PackBinary, BfeilKeepsNonzeroMergeBaseClosed)
@@ -8943,17 +9895,21 @@ TEST_F(AGX3PackBinary, ReciprocalWidthsRefuseUngroundedModes)
          src = agx_immediate(0);
       if (mode == 12)
          src = agx_uniform(0, AGX_SIZE_16);
+      /* 192, not 128: f2 and f18 of f32rcp ep0 accept [0, 191] in Apple's own
+       * composer tables, with 192 distinct encodings and no aliasing, and the
+       * packer's gate now agrees with them rather than refusing sixty-four
+       * addressable registers. */
       if (mode == 14) {
          dest.size = AGX_SIZE_16;
-         dest.value = 128;
+         dest.value = 192;
       }
       if (mode == 15)
-         src.value = 128;
+         src.value = 192;
       if (mode == 16)
-         dest.value = 128;
+         dest.value = 192;
       if (mode == 17) {
          src.size = AGX_SIZE_32;
-         src.value = 128;
+         src.value = 192;
       }
 
       agx_instr *rcp = agx_rcp_to(b, dest, src);
@@ -8961,6 +9917,23 @@ TEST_F(AGX3PackBinary, ReciprocalWidthsRefuseUngroundedModes)
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
+}
+
+/* The gap the old gate left: a reciprocal whose destination is a register the
+ * form can address but the packer refused.  Three of the ten distinct programs
+ * three.js compiles for webgl_geometry_cube, webgl_animation_keyframes and
+ * webgl_materials_physical_clearcoat died on this shape, and hk_shader.c turns
+ * a packer refusal into VK_ERROR_FEATURE_NOT_PRESENT for the whole pipeline. */
+TEST_F(AGX3PackBinary, ReciprocalEncodesAboveTheOldRegisterGate)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(140, AGX_SIZE_32);
+   agx_index src = agx_register(86, AGX_SIZE_32);
+   src.abs = true;
+   src.cache = true;
+   agx_rcp_to(b, dest, src);
+   agx_stop(b);
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfReciprocalSqrtMatchesNativeAndRefusesModifier)
@@ -9204,8 +10177,18 @@ TEST_F(AGX3PackBinary, FselZeroNativeLifetimeAndCompareOrder)
    }
 }
 
-TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
+TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselEncodesBySwap)
 {
+   /* `-a == c` with both selected values in registers. f65 names the SECOND
+    * comparator only, so Apple spells this by exchanging the operands and
+    * reversing the relation -- equality being its own reverse. The exchange
+    * itself is witnessed on the register-select form:
+    *
+    *    a >= c    12051d07850302c0
+    *   -a >= c    12071d05850303c8   operands exchanged, f110 5 -> 6, f65
+    *
+    * so the shape that used to fail Chromium's pipeline closed is the
+    * plain select with one field set. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index a = agx_register(2, AGX_SIZE_32);
    a.neg = a.cache = true;
@@ -9216,7 +10199,7 @@ TEST_F(AGX3PackBinary, ChromiumNegatedRegisterEqualityFselStaysFailClosed)
    agx_fcmpsel_to(b, agx_register(10, AGX_SIZE_32), a, c, t, f,
                   AGX_FCOND_EQ);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
@@ -9255,6 +10238,17 @@ TEST_F(AGX3PackBinary, HalfCompareGnomeLoopBreakAndBothBranchFixups)
    EXPECT_EQ(memcmp(code.data()+38,pop_native,sizeof(pop_native)),0);
 }
 
+/*
+ * agx_lower_pseudo spells an AGX3 unconditional break as the always-true
+ * identity r0l == r0l; this pins the cached/killed normalization of that
+ * identity, and the level count NEST 2 turns into.
+ *
+ * A loop owns two architectural exec-mask levels, so a break that escapes the
+ * loop plus one enclosing block has to stay inactive for three -- CNDCF with
+ * count 3, which is Apple's byte-exact form for that shape. CNDLT is the same
+ * operation pinned to count 2 and covers only the NEST 1 break, which
+ * HalfCompareGnomeLoopBreakAndBothBranchFixups above asserts.
+ */
 TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -9286,7 +10280,8 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
                                   AGX3_CF_ICOND_EQ, 1, src, live, 0,
                                   bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_cf_cndlt(AGX_ISA_ENCODING_AGX3B, 1, true, bytes, &len));
+   ASSERT_TRUE(
+      agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, 3, bytes, &len));
    append(want, bytes, len);
    const size_t branch_offset = want.size();
    ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
@@ -9300,6 +10295,89 @@ TEST_F(AGX3PackBinary, CachedHalfIdentityUnconditionalLoopBreak)
    append(want, end.bytes, end.length);
 
    EXPECT_EQ(pack(b), want);
+}
+
+/*
+ * The same break, but escaping enclosing ifs as well. Apple's compiler emits
+ * CNDCF with a level count equal to the number of architectural levels open
+ * inside the loop: the loop's two plus one per enclosing if, i.e. NEST + 1.
+ * Witnessed byte for byte for two through seven nested ifs -- see
+ * agx3_cf_cndcf()'s comment and test-agx3-cf-core.c.
+ */
+TEST_F(AGX3PackBinary, IdentityBreakEscapingNestedIfsUsesNativeLevelCount)
+{
+   for (unsigned ifs = 1; ifs <= 5; ++ifs) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_push_exec(b, 1);
+      agx_block *body = agx_test_block(b->shader);
+      agx_block *after = agx_test_block(b->shader);
+      agx_builder lb = agx_init_builder(b->shader, agx_after_block(body));
+      agx_index cond = agx_register(3, AGX_SIZE_16);
+      for (unsigned i = 0; i < ifs; ++i)
+         agx_if_icmp(&lb, cond, agx_immediate(0), 1, AGX_ICOND_UEQ, true,
+                     NULL);
+      agx_index r0l = agx_register(0, AGX_SIZE_16);
+      r0l.cache = true;
+      r0l.kill = true;
+      agx_break_if_icmp(&lb, r0l, r0l, ifs + 1, false, AGX_ICOND_UEQ, after);
+      for (unsigned i = 0; i < ifs; ++i)
+         agx_pop_exec(&lb, 1);
+      agx_jmp_exec_any(&lb, body);
+      agx_pop_exec(&lb, 1);
+      agx_builder ab = agx_init_builder(b->shader, agx_after_block(after));
+      agx_stop(&ab);
+
+      uint8_t bytes[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      std::vector<uint8_t> want;
+      ASSERT_TRUE(
+         agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 6, false, 2, bytes, &len));
+      append(want, bytes, len);
+      const size_t body_offset = want.size();
+
+      const struct agx3_cf_source_hints plain = {false, false};
+      for (unsigned i = 0; i < ifs; ++i) {
+         ASSERT_TRUE(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
+                                                AGX3_CF_ICOND_EQ, 0, 3, 0,
+                                                plain, 0, bytes, &len));
+         append(want, bytes, len);
+         ASSERT_TRUE(
+            agx3_cf_cndst(AGX_ISA_ENCODING_AGX3B, 0, true, 1, bytes, &len));
+         append(want, bytes, len);
+      }
+
+      const uint16_t src[] = {0, 0};
+      const struct agx3_cf_source_hints live[] = {{false, false},
+                                                  {false, false}};
+      ASSERT_TRUE(agx3_cf_icmp_reg16(AGX_ISA_ENCODING_AGX3B,
+                                     AGX3_CF_ICOND_EQ, 1, src, live, 0, bytes,
+                                     &len));
+      append(want, bytes, len);
+      /* NEST is ifs + 1, so the native level count is ifs + 2. */
+      ASSERT_TRUE(agx3_cf_cndcf(AGX_ISA_ENCODING_AGX3B, 1, true, ifs + 2,
+                                bytes, &len));
+      append(want, bytes, len);
+
+      for (unsigned i = 0; i < ifs; ++i) {
+         ASSERT_TRUE(
+            agx3_cf_cndend(AGX_ISA_ENCODING_AGX3B, 1, bytes, &len));
+         append(want, bytes, len);
+      }
+
+      const size_t branch_offset = want.size();
+      ASSERT_TRUE(agx3_cf_branch(AGX_ISA_ENCODING_AGX3B, false, bytes, &len));
+      ASSERT_TRUE(agx3_cf_patch_branch(AGX_ISA_ENCODING_AGX3B, false, bytes,
+                                       (int64_t)body_offset -
+                                          (int64_t)branch_offset));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_cf_cndend(AGX_ISA_ENCODING_AGX3B, 2, bytes, &len));
+      append(want, bytes, len);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+
+      EXPECT_EQ(pack(b), want) << "ifs=" << ifs;
+   }
 }
 
 TEST_F(AGX3PackBinary, HalfZeroGnomeSamplerIndexSurvivesBranch)
@@ -9856,7 +10934,7 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
    static const uint8_t native_sample[] = {
       0x25,0x80,0x0c,0xb8,0xb0,0x00,0x13,
-      0xb5,0x01,0x00,0x10,0x00,0x12,0x00,
+      0xb5,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,
@@ -10071,7 +11149,7 @@ TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
    }
 }
 
-TEST_F(AGX3PackBinary, ArraySampleDirectLayerAndLifetime)
+TEST_F(AGX3PackBinary, ArraySampleStagesDriverLayerAndLifetime)
 {
    for (unsigned hint = 0; hint < 3; ++hint) {
       auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -10102,6 +11180,10 @@ TEST_F(AGX3PackBinary, ArraySampleDirectLayerAndLifetime)
       ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 2, 1, 0,
                                            hint == 1, hint == 2,
                                            bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 4, 1, 0,
+                                             hint == 1, hint == 2,
+                                             bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
       append(want, bytes, len);
@@ -10427,30 +11509,355 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
    }
 }
 
-/* Only the plain 2D implicit gather is witnessed: an array gather, and a
- * gather carrying any LOD argument, must fail closed. */
-TEST_F(AGX3PackBinary, GatherRefusesUnwitnessedShapes)
+/* Metal's gather takes no LOD argument, so a gather carrying one has no
+ * witness and must fail closed.  The array layer does compose with it:
+ * `texture2d_array::gather(s, uv, layer)` is 05800ca490000db4010000001200,
+ * the ordinary array sample's f77/f31/f37 plus the gather's f144. */
+TEST_F(AGX3PackBinary, GatherRefusesALodButTakesAnArrayLayer)
 {
-   for (unsigned shape = 0; shape < 2; ++shape) {
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      const bool array = shape != 1;
       auto enc = AGX_ISA_ENCODING_AGX3B;
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_index dest = agx_register(8, AGX_SIZE_32);
       dest.channels_m1 = 3;
       agx_index coord = agx_register(20, AGX_SIZE_32);
-      coord.channels_m1 = shape == 0 ? 2 : 1;
+      coord.channels_m1 = array ? 2 : 1;
       auto *I = agx_texture_sample_to(
          b, dest, coord,
-         shape == 1 ? agx_immediate(agx_minifloat_encode(0.5f))
-                    : agx_immediate(0),
+         shape == 0 ? agx_immediate(0)
+                    : agx_immediate(agx_minifloat_encode(0.5f)),
          agx_immediate(0), agx_immediate(0), agx_immediate(0), agx_null(),
-         shape == 0 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
-         shape == 1 ? AGX_LOD_MODE_AUTO_LOD_BIAS : AGX_LOD_MODE_AUTO_LOD, 0,
+         array ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
+         shape == 0 ? AGX_LOD_MODE_AUTO_LOD : AGX_LOD_MODE_AUTO_LOD_BIAS, 0,
          false, false, false, AGX_GATHER_G, false);
       I->mask = 15;
       agx_stop(b);
-      pack(b, /*expect_ok=*/false);
+      /* shape 0: array gather, no LOD -> encodes.
+       * shape 1: 2D gather with an immediate bias -> refuses.
+       * shape 2: array gather with an immediate bias -> refuses. */
+      pack(b, /*expect_ok=*/shape == 0);
    }
+}
+
+/*
+ * The coordinate offset reaches the sample instruction as an immediate, in
+ * every LOD mode. Before this, the packer took an offset only on a plain
+ * implicit sample -- and the NIR combined-sampler gate disowned any shader
+ * carrying one, so even that path was unreachable and a bare textureOffset()
+ * refused the whole shader.
+ */
+TEST_F(AGX3PackBinary, OffsetSampleRidesEveryLodMode)
+{
+   struct row {
+      enum agx_lod_mode mode;
+      const char *name;
+   };
+   static const row rows[] = {
+      {AGX_LOD_MODE_AUTO_LOD, "implicit"},
+      {AGX_LOD_MODE_AUTO_LOD_BIAS, "immediate bias"},
+      {AGX_LOD_MODE_LOD_MIN, "immediate level"},
+      {AGX_LOD_MODE_LOD_GRAD, "gradient"},
+   };
+
+   for (const row &r : rows) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(20, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_index lod = agx_immediate(0);
+      if (r.mode == AGX_LOD_MODE_AUTO_LOD_BIAS)
+         lod = agx_immediate(agx_minifloat_encode(0.5f));
+      else if (r.mode == AGX_LOD_MODE_LOD_MIN)
+         lod = agx_immediate(agx_minifloat_encode(2.0f));
+      else if (r.mode == AGX_LOD_MODE_LOD_GRAD) {
+         lod = agx_register(24, AGX_SIZE_32);
+         lod.channels_m1 = 3;
+      }
+      /* Signed nibble pair (y << 4) | x -- offset (1, 1), the value
+       * agx_nir_lower_texture() packs into nir_tex_src_backend2. */
+      agx_index offset = agx_immediate(0x11);
+      offset.size = AGX_SIZE_32;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), offset, AGX_DIM_2D, r.mode, 0,
+         /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      I->offset_xy = 0x11;
+      agx_stop(b);
+      SCOPED_TRACE(r.name);
+      pack(b, /*expect_ok=*/true);
+   }
+}
+
+/*
+ * The same offset on the sample instruction itself, checked byte for byte.
+ * Apple's `t.sample(s, uv, int2(1,1))` is 05800cb8b0000102018810001200 and
+ * differs from its offset-free control by exactly f43 = 17, f51 = 1 and
+ * f141 = 1. The stream around the sample (coordinate staging, the fragment
+ * pixel entry) is checked by its own tests, so this one only asserts that
+ * the sample instruction the packer emitted carries that field triple.
+ */
+TEST_F(AGX3PackBinary, OffsetSampleMatchesNativeFieldTriple)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(20, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_index offset = agx_immediate(0x11);
+   offset.size = AGX_SIZE_32;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   I->offset_xy = 0x11;
+   agx_stop(b);
+   const std::vector<uint8_t> stream = pack(b);
+
+   /* The same sample with no offset, so the difference really is the triple
+    * and not something the shape changed along the way. */
+   agx_builder *b2 = builder(enc);
+   b2->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   auto *I2 = agx_texture_sample_to(
+      b2, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      false, false, false, AGX_GATHER_NONE, false);
+   I2->mask = 15;
+   agx_stop(b2);
+   const std::vector<uint8_t> plain = pack(b2);
+
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 8;
+   d.width = AGX3_TEX_W32;
+   d.mask = 15;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want_plain(bytes, bytes + len);
+   d.offset = true;
+   d.offset_xy = 0x11;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want_offset(bytes, bytes + len);
+
+   EXPECT_NE(want_plain, want_offset);
+   EXPECT_NE(std::search(stream.begin(), stream.end(), want_offset.begin(),
+                         want_offset.end()),
+             stream.end());
+   EXPECT_NE(std::search(plain.begin(), plain.end(), want_plain.begin(),
+                         want_plain.end()),
+             plain.end());
+}
+
+/*
+ * The depth comparison is orthogonal to the LOD shape. Apple's depth2d
+ * sample_compare with level(2), bias(0.5), level(reg), bias(reg) and
+ * gradient2d() each differ from the corresponding colour sample by f143
+ * alone; before this, only the implicit form was admitted.
+ */
+TEST_F(AGX3PackBinary, ShadowSampleRidesEveryLodMode)
+{
+   struct row {
+      enum agx_lod_mode mode;
+      const char *name;
+   };
+   static const row rows[] = {
+      {AGX_LOD_MODE_AUTO_LOD, "implicit"},
+      {AGX_LOD_MODE_AUTO_LOD_BIAS, "immediate bias"},
+      {AGX_LOD_MODE_LOD_MIN, "immediate level"},
+      {AGX_LOD_MODE_LOD_GRAD, "gradient"},
+   };
+
+   for (const row &r : rows) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_index compare = agx_register(2, AGX_SIZE_32);
+      compare.discard = true;
+      agx_index lod = agx_immediate(0);
+      if (r.mode == AGX_LOD_MODE_AUTO_LOD_BIAS)
+         lod = agx_immediate(agx_minifloat_encode(0.5f));
+      else if (r.mode == AGX_LOD_MODE_LOD_MIN)
+         lod = agx_immediate(agx_minifloat_encode(2.0f));
+      else if (r.mode == AGX_LOD_MODE_LOD_GRAD) {
+         lod = agx_register(16, AGX_SIZE_32);
+         lod.channels_m1 = 3;
+      }
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), compare, AGX_DIM_2D, r.mode, 0, false,
+         /*shadow=*/true, false, AGX_GATHER_NONE, false);
+      I->mask = 1;
+      agx_stop(b);
+      SCOPED_TRACE(r.name);
+      pack(b, /*expect_ok=*/true);
+   }
+}
+
+/*
+ * gather_compare: the ordinary gather plus f143, returning four texels and so
+ * carrying the full f75 mask rather than the single component every other
+ * comparison carries. A comparison whose mask does not match its shape must
+ * still refuse.
+ */
+TEST_F(AGX3PackBinary, ShadowGatherKeepsTheFourTexelMask)
+{
+   for (unsigned mask : {15u, 1u}) {
+      auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      key.no_stop = true;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_index compare = agx_register(2, AGX_SIZE_32);
+      compare.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         false, /*shadow=*/true, false, AGX_GATHER_R, false);
+      I->mask = mask;
+      agx_stop(b);
+      pack(b, /*expect_ok=*/mask == 15u);
+   }
+}
+
+/*
+ * A comparison sample takes a coordinate offset. Apple's
+ * depth2d::sample_compare(s, uv, ref, int2(1,1)) is
+ * 1d800ca090002102018800001200 -- the plain comparison plus the same
+ * f43/f51/f141 triple every other sample takes.
+ *
+ * The reason this could not be encoded before was not the ISA: agx_emit_tex()
+ * collected the comparator and the packed offset into one src[5] vector, and
+ * the comparator staging cannot take that apart. The offset now rides on the
+ * instruction (I->offset_xy) and src[5] belongs to the comparator alone.
+ */
+TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   agx_index compare = agx_register(2, AGX_SIZE_32);
+   compare.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I->mask = 1;
+   I->offset_xy = 0x11;
+   agx_stop(b);
+   const std::vector<uint8_t> stream = pack(b);
+
+   struct agx3_tex_sample_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_TEX_W32;
+   d.mask = 1;
+   d.lod = AGX3_TEX_LOD_AUTO;
+   d.slot = 1;
+   d.wait_mask = 1;
+   d.final = true;
+   d.shadow = true;
+   d.offset = true;
+   d.offset_xy = 0x11;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+   const std::vector<uint8_t> want(bytes, bytes + len);
+   EXPECT_NE(std::search(stream.begin(), stream.end(), want.begin(),
+                         want.end()),
+             stream.end());
+
+   /* An offset the instruction does not carry must refuse rather than encode
+    * as offset (0,0), which native spells as the plain form. */
+   agx_builder *b2 = builder(enc);
+   b2->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+   auto *I2 = agx_texture_sample_to(
+      b2, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
+   I2->mask = 1;
+   agx_stop(b2);
+   pack(b2, /*expect_ok=*/false);
+}
+
+/*
+ * REGRESSION GUARD. agx_opt_cse.c's instrs_equal() is hand-written and
+ * enumerates the instruction's immediates one at a time, so a new field that
+ * is not added there lets two otherwise-identical instructions collapse into
+ * one. I->offset_xy is such a field: without its line in instrs_equal(), two
+ * samples of the same texture at the same coordinate but *different* texel
+ * offsets would CSE together and the second would silently read the first's
+ * texels.
+ *
+ * This asserts the two are not equal. Delete the offset_xy line from
+ * instrs_equal() and this test fails.
+ */
+TEST_F(AGX3PackBinary, DifferentTexelOffsetsDoNotCSETogether)
+{
+   auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+
+   agx_index d0 = agx_register(8, AGX_SIZE_32);
+   d0.channels_m1 = 3;
+   agx_index d1 = agx_register(16, AGX_SIZE_32);
+   d1.channels_m1 = 3;
+
+   agx_index off = agx_immediate(0x11);
+   off.size = AGX_SIZE_32;
+
+   auto *a = agx_texture_sample_to(
+      b, d0, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   a->mask = 15;
+   a->offset_xy = 0x11;
+
+   auto *c = agx_texture_sample_to(
+      b, d1, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      /*offset=*/true, false, false, AGX_GATHER_NONE, false);
+   c->mask = 15;
+   c->offset_xy = 0x22; /* the only difference */
+
+   EXPECT_NE(a->offset_xy, c->offset_xy);
+   EXPECT_FALSE(agx_instrs_equal_for_cse(a, c));
+
+   /* ... and two with the same offset still compare equal, so the guard is
+    * not simply always-false. */
+   c->offset_xy = 0x11;
+   c->dest[0] = d0;
+   EXPECT_TRUE(agx_instrs_equal_for_cse(a, c));
 }
 
 TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)
@@ -10645,7 +12052,7 @@ TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
-TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
+TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsStageDriverLayer)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -10671,6 +12078,9 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 6, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 24, 6, 0, false, false,
+                                          bytes, &len));
+   append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    struct agx3_tex_sample_desc d = {};
@@ -10695,7 +12105,7 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsUseDirectLayer)
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
-TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
+TEST_F(AGX3PackBinary, ArrayDriverLayerAcceptsHighRegistersWithoutWrap)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -10720,6 +12130,9 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
    append(want, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 122, 6, 0, false, false,
                                          bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 124, 6, 0, false, false,
+                                          bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
@@ -10761,7 +12174,7 @@ TEST_F(AGX3PackBinary, ArraySampleAcceptsHighCoordinateRegistersWithoutWrap)
 TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
 {
    static const uint8_t native[AGX3_IMAGE_WRITE_LENGTH] = {
-      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
       0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
    };
    uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH];
@@ -10783,7 +12196,15 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
    ASSERT_EQ(len, sizeof(native));
    EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
 
-   for (unsigned wait : {2u, 3u, 0x40u}) {
+   for (unsigned wait : {2u, 3u, 0x20u, 0x3fu}) {
+      d.wait_mask = wait;
+      ASSERT_TRUE(agx3_tex_encode_image_write_rgba8_2d(
+         AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+      ASSERT_EQ(len, sizeof(native));
+      EXPECT_EQ(memcmp(bytes, native, sizeof(native)), 0);
+   }
+
+   for (unsigned wait : {0x40u, 0x7fu}) {
       memset(bytes, 0xa5, sizeof(bytes));
       len = 0xa5;
       d.wait_mask = wait;
@@ -10861,10 +12282,10 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
       AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
 }
 
-TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShapes)
+TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
 {
    static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {
-      0xd7, 0x20, 0x54, 0x00, 0x20, 0x40, 0x00, 0x00,
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
       0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00,
    };
 
@@ -10887,8 +12308,9 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShape
          mode == 3);
       agx_stop(b);
 
-      const std::vector<uint8_t> code = pack(b, mode == 0);
-      if (mode == 0) {
+      const bool valid = mode == 0 || mode == 3;
+      const std::vector<uint8_t> code = pack(b, valid);
+      if (valid) {
          EXPECT_TRUE(b->shader->agx3_staging_known);
          EXPECT_EQ(b->shader->agx3_staging_halfs, 20);
          static const uint8_t read_coords[] = {
@@ -10897,35 +12319,31 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripDerivesLoadDependencyAndRejectsShape
          EXPECT_NE(std::search(code.begin(), code.end(), read_coords,
                                read_coords + sizeof(read_coords)),
                    code.end());
-         static const uint8_t coord_x[] = {
-            0x02, 0x01, 0x2f, 0x0d, 0x83, 0x00, 0x45,
-            0x02, 0x20, 0x0c, 0x00, 0x04, 0x00, 0x00,
-         };
-         static const uint8_t coord_y[] = {
-            0x12, 0x03, 0x2f, 0x0d, 0x83, 0x02, 0x45,
-            0x02, 0x20, 0x0c, 0x00, 0x04, 0x00, 0x00,
-         };
-         const auto first_coord = std::search(code.begin(), code.end(),
-                                               coord_x,
-                                               coord_x + sizeof(coord_x));
-         ASSERT_NE(first_coord, code.end());
-         ASSERT_GE(std::distance(first_coord, code.end()),
-                   static_cast<ptrdiff_t>(sizeof(coord_x) + sizeof(coord_y)));
-         EXPECT_TRUE(std::equal(coord_y, coord_y + sizeof(coord_y),
-                                first_coord + sizeof(coord_x)));
+         std::vector<uint8_t> coordinates;
+         uint8_t coordinate[AGX3_STAGE_MAX_LENGTH], coordinate_len = 0;
+         ASSERT_TRUE(agx3_stage_copy_source(
+            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 0,
+            coordinate, &coordinate_len));
+         append(coordinates, coordinate, coordinate_len);
+         ASSERT_TRUE(agx3_stage_copy_source(
+            AGX_ISA_ENCODING_AGX3B, 2, 2, false, 1, 0,
+            coordinate, &coordinate_len));
+         append(coordinates, coordinate, coordinate_len);
+         EXPECT_NE(std::search(code.begin(), code.end(), coordinates.begin(),
+                               coordinates.end()), code.end());
 
          const auto first = std::search(code.begin(), code.end(), imgwci,
                                         imgwci + sizeof(imgwci));
          ASSERT_NE(first, code.end());
          /* The native witness consumes the image-load scoreboard signal once:
           * the first data-staging COPY waits on slot 1, while the remaining
-          * components only join the same slot-2 staging transaction. */
+          * components only join the same slot-1 staging transaction. */
          const unsigned data_dest[4] = {4, 6, 12, 14};
          std::vector<uint8_t> staging;
          for (unsigned c = 0; c < 4; ++c) {
             uint8_t copy[AGX3_STAGE_MAX_LENGTH], len = 0;
             ASSERT_TRUE(agx3_stage_copy_source(
-               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 2,
+               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1,
                c == 0 ? 1 : 0, copy, &len));
             append(staging, copy, len);
          }
@@ -11085,4 +12503,216 @@ TEST_F(AGX3PackBinary, ComputedRgb10WriteUsesNativeStateOneProtocol)
    EXPECT_NE(std::search(code.begin(), code.end(), imgwci,
                          imgwci + sizeof(imgwci)),
              code.end());
+}
+
+
+/*
+ * The six shapes a three.js frame was refused on.
+ *
+ * Measured on hardware: Chromium loading shadowmap_pointlight, lights_spotlight
+ * and animation_keyframes with AGX_MESA_DEBUG=shaders printed 307 refusals in
+ * one run, which reduce to six once register and immediate numbers are
+ * normalised. Every one is a source modifier, an operand width, or an operand
+ * KIND -- three axes that are independent fields of a single AGX3 encoding
+ * point, and which the packer modelled as separate encoders. A shape sitting
+ * on two axes at once then had no home in either.
+ *
+ * Each case below is the refusal line verbatim, and each encoding is grounded
+ * in the byte ladders quoted at the encoders themselves.
+ */
+TEST_F(AGX3PackBinary, ThreeJsRefusedShapesEncode)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+
+   /* 113x  fcmpsel [d16:reg s0=32:reg.abs.discard s1=16:imm s2=16:imm
+    *                s3=16:imm cond=1 chan=1]
+    * An absolute comparator against a non-zero minifloat. The gate demanded
+    * an immediate comparator of exactly zero; f51 holds any minifloat. */
+   {
+      agx_builder *b = builder(enc);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      a.abs = true;
+      a.discard = true;
+      agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, agx_immediate(0x20),
+                     agx_immediate(0x30), agx_immediate(0), AGX_FCOND_LT);
+      agx_stop(b);
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t len = 0;
+      struct agx3_fsel_desc d = {};
+      d.dest = 2;
+      d.dest_16 = true;
+      d.cmp0 = 2;
+      d.cmp0_hint = AGX3_ALU_HINT_DISCARD;
+      d.cmp0_abs = true;
+      d.cmp1_is_immediate = true;
+      d.cmp1 = 0x20;
+      d.sel0_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel0 = 0x30;
+      d.sel1_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel1 = 0;
+      d.sel_16 = true;
+      d.condition = AGX_FCOND_LT;
+      ASSERT_TRUE(agx3_alu_fcmp_select(enc, &d, bytes, &len));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      std::vector<uint8_t> want;
+      append(want, bytes, len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* 84x  fadd [d32:reg s0=16:reg s1=32:reg.neg cond=0 chan=1]
+    * A half added to a negated full float. The width lives in f43/f26 and the
+    * negate in f48/f31, on one encoding point; the packer had one encoder for
+    * widths without modifiers and another for modifiers without widths. */
+   {
+      agx_builder *b = builder(enc);
+      agx_index f16 = agx_register(4, AGX_SIZE_16);
+      agx_index f32 = agx_register(0, AGX_SIZE_32);
+      f32.neg = true;
+      f32.discard = true;
+      f16.discard = true;
+      agx_fadd_to(b, agx_register(0, AGX_SIZE_32), f16, f32);
+      agx_stop(b);
+      /* Apple's own `b - a`, `float a`, `half b`: 09041c0100c8. The wait bit
+       * f57 belongs to the loads in that kernel, which this shape has not
+       * got, so the ladder row is reproduced through the encoder. */
+      struct agx3_falu_mods m = {};
+      m.src0_neg = true;
+      m.src1_16 = true;
+      struct agx3_falu_runtime rt = {};
+      rt.discard[0] = true;
+      rt.discard[1] = true;
+      rt.wait_mask = 0x20;
+      uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(
+         agx3_falu_add_mod_runtime(enc, 0, 0, 4, &m, &rt, bytes, &len));
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+                (std::vector<uint8_t>{0x09, 0x04, 0x1c, 0x01, 0x00, 0xc8}));
+      EXPECT_FALSE(pack(b).empty());
+   }
+
+   /* 80x  fcmpsel [d16:reg s0=32:reg.neg s1=32:reg.neg s2=16:reg s3=16:imm
+    *               cond=5 chan=1]
+    * Both comparators negated. Apple's own bytes for `-a >= -c` and `a <= c`
+    * are the same instruction, so this is the relation flip and nothing else;
+    * the encoder must produce exactly the plain select's bytes. */
+   {
+      auto build = [&](bool negated, enum agx_fcond cond) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(8, AGX_SIZE_32);
+         agx_index c = agx_register(16, AGX_SIZE_32);
+         a.neg = c.neg = negated;
+         agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, c,
+                        agx_register(6, AGX_SIZE_16), agx_immediate(0), cond);
+         agx_stop(b);
+         return pack(b);
+      };
+      const auto negated = build(true, AGX_FCOND_GE);
+      const auto flipped = build(false, AGX_FCOND_LE);
+      EXPECT_FALSE(negated.empty());
+      EXPECT_EQ(negated, flipped);
+
+      /* One negate is f65, with the operands and the relation left alone. */
+      agx_builder *b = builder(enc);
+      agx_index a = agx_register(8, AGX_SIZE_32);
+      agx_index c = agx_register(16, AGX_SIZE_32);
+      c.neg = true;
+      agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), a, c,
+                     agx_register(6, AGX_SIZE_16), agx_immediate(0),
+                     AGX_FCOND_GE);
+      agx_stop(b);
+      const auto second = pack(b);
+      const auto plain = build(false, AGX_FCOND_GE);
+      ASSERT_EQ(second.size(), plain.size());
+      unsigned differing = 0;
+      for (unsigned i = 0; i < second.size(); ++i)
+         differing += second[i] != plain[i];
+      EXPECT_EQ(differing, 1u);
+   }
+
+   /* 19x  bitop [d32:reg s0=32:reg.neg s1=16:imm cond=0 chan=1]
+    * A value move carrying a folded fneg or fabs. agx_lower_pseudo() now puts
+    * the float move back rather than handing the bitwise encoding a modifier
+    * it has no field for. */
+   {
+      for (unsigned k = 0; k < 3; ++k) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(8, AGX_SIZE_32);
+         a.neg = k != 1;
+         a.abs = k != 0;
+         agx_mov_to(b, agx_register(0, AGX_SIZE_32), a);
+         agx_stop(b);
+         agx_lower_pseudo(b->shader);
+         EXPECT_FALSE(pack(b).empty()) << "k=" << k;
+      }
+   }
+
+   /* 9x  bitop [d32:reg s0=32:reg.discard s1=16:imm cond=0 chan=1]
+    * A bitwise operation against an immediate. The operand kind is f37 on the
+    * register form's own encoding point, with the constant in f29. */
+   {
+      const unsigned tables[] = {AGX3_SEL_TT_AND, AGX3_SEL_TT_OR,
+                                 AGX3_SEL_TT_XOR};
+      for (unsigned i = 0; i < ARRAY_SIZE(tables); ++i) {
+         agx_builder *b = builder(enc);
+         agx_index a = agx_register(0, AGX_SIZE_32);
+         a.discard = true;
+         agx_bitop_to(b, agx_register(0, AGX_SIZE_32), a, agx_immediate(0xff),
+                      tables[i]);
+         agx_stop(b);
+         EXPECT_FALSE(pack(b).empty()) << "truth table " << tables[i];
+      }
+      /* Apple's own `a & 0xff`, with the load's wait on it. */
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(agx3_alu_bit_imm(enc, AGX3_ALU_BAND, false, 0, 0, 0xff,
+                                   AGX3_ALU_HINT_DISCARD, 0x20, bytes, &len));
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+                (std::vector<uint8_t>{0x0b, 0x01, 0x1f, 0xff, 0x10, 0x02, 0x00,
+                                      0x80, 0x00, 0x00}));
+   }
+}
+
+/* Chromium's animation_keyframes vertex shader needs 97 full registers and
+ * moves values in both directions across AGX3b iadd's r95 boundary. Pin the
+ * exact native half-pair identities, including the destination-cache hint
+ * exposed by the captured shader. */
+TEST_F(AGX3PackBinary, ChromiumHighRegisterMovesUseHalfPairIdentity)
+{
+   static const struct {
+      unsigned dest;
+      unsigned src;
+      bool dest_cache;
+      uint8_t bytes[20];
+   } moves[] = {
+      {8, 192, false,
+       {0x43, 0x40, 0x0f, 0x81, 0x02, 0x0b, 0x00, 0x00, 0x00, 0x00,
+        0x43, 0x40, 0x0f, 0x81, 0x0e, 0x0b, 0x00, 0x00, 0x00, 0x00}},
+      {192, 0, true,
+       {0x03, 0x00, 0x8f, 0x81, 0x02, 0x1a, 0x00, 0x00, 0x00, 0x00,
+        0x03, 0x00, 0x8f, 0x81, 0x0e, 0x1a, 0x00, 0x00, 0x00, 0x00}},
+      {254, 192, false,
+       {0xf3, 0x40, 0xcf, 0x81, 0x02, 0x1b, 0x00, 0x00, 0x00, 0x00,
+        0xf3, 0x40, 0xcf, 0x81, 0x0e, 0x1b, 0x00, 0x00, 0x00, 0x00}},
+   };
+
+   for (const auto &move : moves) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index src = agx_register(move.src, AGX_SIZE_32);
+      src.discard = true;
+      agx_index dest = agx_register(move.dest, AGX_SIZE_32);
+      dest.cache = move.dest_cache;
+      agx_bitop_to(b, dest, src, agx_immediate(0), AGX3_SEL_TT_MOV);
+      agx_stop(b);
+
+      std::vector<uint8_t> want(std::begin(move.bytes), std::end(move.bytes));
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+
+      EXPECT_EQ(pack(b), want) << "dest=" << move.dest
+                               << " src=" << move.src;
+   }
 }

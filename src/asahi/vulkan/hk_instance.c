@@ -12,6 +12,7 @@
 #include "vulkan/wsi/wsi_common.h"
 
 #include "util/build_id.h"
+#include "util/u_debug.h"
 #include "util/driconf.h"
 #include "util/mesa-blake3.h"
 #include "util/u_debug.h"
@@ -160,6 +161,14 @@ hk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       debug_get_bool_option("HK_DEBUG_LOGGING", false);
 
    hk_init_dri_options(instance);
+
+   /* Every vk_command_buffer_set_error() in the recording path is silent
+    * unless the application installed a debug-utils messenger: the shader or
+    * draw shape is refused, the command buffer goes INVALID, and the
+    * application submits it anyway.  HK_DEBUG_RECORD names the refusal with
+    * its file and line so a missing draw can be attributed offline. */
+   if (debug_get_bool_option("HK_DEBUG_RECORD", false))
+      instance->vk.enable_debug_logging = true;
 
    instance->vk.physical_devices.try_create_for_drm =
       hk_create_drm_physical_device;

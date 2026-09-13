@@ -749,7 +749,7 @@ d12_agx3_encode_tile_store(enum agx_chip chip,
        !d12_agx3_tile_width(desc->width, &width) ||
        (encoding == AGX_ISA_ENCODING_AGX3B && desc->data >= 16) ||
        !agx3_tile_store(encoding, desc->data, width, desc->mask,
-                        desc->tile_offset, AGX3_TILE_COV_1X, desc->wait_mask,
+                        desc->tile_offset, AGX3_TILE_SAMPLE_1X, desc->wait_mask,
                         out->bytes, &length) ||
        length > sizeof(out->bytes)) {
       memset(out, 0, sizeof(*out));
@@ -775,7 +775,7 @@ d12_agx3_encode_tile_load(enum agx_chip chip,
    if (!desc || !d12_agx3_tile_target_encoding(chip, &encoding) ||
        !d12_agx3_tile_width(desc->width, &width) ||
        !agx3_tile_load(encoding, desc->dest, width, desc->slot, desc->mask,
-                       desc->tile_offset, AGX3_TILE_COV_1X, 0, desc->first,
+                       desc->tile_offset, AGX3_TILE_SAMPLE_1X, 0, desc->first,
                        desc->last, out->bytes, &length) ||
        length > sizeof(out->bytes)) {
       memset(out, 0, sizeof(*out));

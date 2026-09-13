@@ -128,9 +128,10 @@ enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_NONE,
    AGX_G17P_MRT_WBOIT,
    AGX_G17P_MRT_RGBA8,
+   AGX_G17P_MRT_R11G11B10,
 };
 
-/* Classify the two byte-grounded G17P dual-render-target layouts.  The
+/* Classify the byte-grounded G17P dual-render-target layouts.  The
  * background/EOT frontends use this common result to select their matching
  * shader, clear-uniform, and PBE-table contracts. */
 enum agx_g17p_mrt_layout

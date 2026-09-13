@@ -21,15 +21,14 @@ extern "C" {
  * A native A18 Pro indirect dispatch is a pair of CDM records (see
  * agx3_g17p_native_indirect_compute_dispatch_append):
  *
- *   1. a 0x2c main launch, shaped exactly like a direct launch but with bit 23
- *      set in word 0, whose inline dimension words are ignored, and
- *   2. a compact 0x1c helper launch that names a second program plus the
- *      address of a six-u32 "geometry" block.
+ *   1. a 0x2c direct helper launch with one invocation, and
+ *   2. a compact 0x1c application launch in indirect-local mode, naming the
+ *      address of a six-u32 geometry block.
  *
- * The helper program runs first from the caller's point of view: it publishes
- * the geometry block that the main record then consumes.  Nothing in the
- * command stream carries the runtime dimensions, so the helper is the only
- * thing that can turn an indirect argument buffer into a launch geometry.
+ * The helper publishes geometry before the compact application record
+ * consumes it. Bit 23 of the direct record is a program-template field,
+ * not an indirect-mode flag. Swapping these programs runs the application
+ * with the helper's inline dimensions and leaves geometry unproduced.
  *
  * GEOMETRY LAYOUT.  Six little-endian u32:
  *
@@ -62,7 +61,7 @@ extern "C" {
 /* The LDSHDR "f1" program kinds observed in the two output-positive G17P
  * indirect witnesses.  A direct dispatch announces DIRECT_ADD3; the indirect
  * pair announces INDIRECT_ADD3 for the main program and GRID_HELPER for the
- * compact helper program.  These are witness names, not decoded semantics. */
+ * geometry helper program. These are witness names, not decoded semantics. */
 #define AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1                                      \
    AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_INDIRECT_ADD3
 #define AGX3_G17P_GRID_HELPER_LDSHDR_F1                                        \

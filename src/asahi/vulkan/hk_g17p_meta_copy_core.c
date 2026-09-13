@@ -5,10 +5,94 @@
 
 #include "hk_g17p_meta_copy_core.h"
 #include "util/compiler.h"
+#include "util/u_math.h"
 #include "vk_format.h"
 
 #include <limits.h>
 #include <string.h>
+
+bool
+hk_g17p_build_mip_axis(uint32_t src_extent, uint32_t dst_extent,
+                       uint32_t *entries)
+{
+   if (!entries || !src_extent || !dst_extent || src_extent > UINT16_MAX + 1u ||
+       !(src_extent == dst_extent ||
+         src_extent == (uint64_t)dst_extent * 2u ||
+         src_extent == (uint64_t)dst_extent * 2u + 1u))
+      return false;
+
+   if (src_extent == dst_extent) {
+      for (uint32_t i = 0; i < dst_extent; ++i)
+         entries[i] = i;
+      return true;
+   }
+
+   /* vk_meta computes the normalized scale in double on the CPU, casts it to
+    * f32 push data, then applies it to FragCoord with an FFMA. */
+   const float scale = (float)(1.0 / (double)dst_extent);
+   for (uint32_t i = 0; i < dst_extent; ++i) {
+      /* This work happens once while recording the dispatch, not per pixel. */
+      const float uv = ((float)i + 0.5f) * scale;
+      const float source = uv * (float)src_extent - 0.5f;
+      uint32_t lower = (uint32_t)source;
+      uint32_t weight = (uint32_t)((source - (float)lower) * 256.0f + 0.5f);
+
+      if (weight == 256) {
+         ++lower;
+         weight = 0;
+      }
+
+      if (lower >= src_extent)
+         lower = src_extent - 1;
+
+      entries[i] = lower | (weight << 16);
+   }
+
+   return true;
+}
+
+uint8_t
+hk_g17p_filter_unorm8(uint8_t a, uint8_t b, uint8_t c, uint8_t d,
+                      uint8_t wx, uint8_t wy)
+{
+   const uint32_t ix = 256u - wx;
+   const uint32_t iy = 256u - wy;
+   const uint32_t value = a * ix * iy + b * wx * iy +
+                          c * ix * wy + d * wx * wy;
+   const uint32_t fixed4 = (value + 2048u) >> 12;
+   uint32_t out = fixed4 >> 4;
+   const uint32_t remainder = fixed4 & 15u;
+
+   out += remainder > 8u || (remainder == 8u && out < 128u);
+   return out;
+}
+
+bool
+hk_g17p_tile_address_config_init(
+   uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
+   struct hk_g17p_tile_address_config *config)
+{
+   if (config)
+      memset(config, 0, sizeof(*config));
+
+   if (!config || !stride_el || !tile_width_el || !tile_height_el ||
+       (tile_width_el & (tile_width_el - 1)) ||
+       (tile_height_el & (tile_height_el - 1)))
+      return false;
+
+   const uint32_t width_log2 = util_logbase2(tile_width_el);
+   const uint32_t height_log2 = util_logbase2(tile_height_el);
+   if (width_log2 > 7 || height_log2 > 7)
+      return false;
+
+   *config = (struct hk_g17p_tile_address_config){
+      .tiles_per_row =
+         ((uint64_t)stride_el + tile_width_el - 1) >> width_log2,
+      .tile_width_log2 = width_log2,
+      .tile_height_log2 = height_log2,
+   };
+   return true;
+}
 
 bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
@@ -178,6 +262,9 @@ hk_g17p_compressed_copy_plan(
       ((uint64_t)width + block_w - 1) / block_w;
    const uint32_t blocks_y =
       ((uint64_t)height + block_h - 1) / block_h;
+   if (blocks_x > UINT32_MAX / blocks_y)
+      return false;
+
    const uint64_t buffer_row_blocks =
       ((uint64_t)row_px + block_w - 1) / block_w;
    const uint64_t buffer_image_rows =
@@ -234,14 +321,100 @@ hk_g17p_compressed_image_to_buffer_copy_plan(
                                        true, plan);
 }
 
+static bool
+hk_g17p_uncompressed_upload_format(VkFormat format)
+{
+   const uint32_t block_B = vk_format_get_blocksize(format);
+
+   /* This path copies raw format elements and never interprets their colour
+    * channels.  Admit every ordinary 1-, 2-, and 4-byte format instead of a
+    * semantic allowlist; the caller separately excludes depth/stencil and
+    * multi-plane images.  R32G32_UINT also needs the raw path because G17P's
+    * graphics upload does not preserve untouched array layers for that view.
+    * Other 8-byte formats remain unqualified and stay on the graphics path. */
+   return vk_format_get_blockwidth(format) == 1 &&
+          vk_format_get_blockheight(format) == 1 &&
+          (block_B == 1 || block_B == 2 || block_B == 4 ||
+           format == VK_FORMAT_R32G32_UINT);
+}
+
+bool
+hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   const struct hk_g17p_buffer_to_image_copy *copy,
+   VkDeviceSize buffer_offset, VkDeviceSize buffer_size,
+   struct hk_g17p_uncompressed_copy_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   if (!copy || !plan || !hk_g17p_uncompressed_upload_format(copy->format) ||
+       (copy->image_type != VK_IMAGE_TYPE_1D &&
+        copy->image_type != VK_IMAGE_TYPE_2D &&
+        copy->image_type != VK_IMAGE_TYPE_3D) ||
+       copy->plane_count != 1 ||
+       copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+       !hk_g17p_buffer_to_image_copy_supported(copy))
+      return false;
+
+   const uint32_t block_B = vk_format_get_blocksize(copy->format);
+   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8) ||
+       buffer_offset % block_B)
+      return false;
+
+   const uint32_t width = copy->copy_extent.width;
+   const uint32_t height = copy->copy_extent.height;
+   if (width > UINT32_MAX / height)
+      return false;
+
+   const uint32_t row_el =
+      copy->buffer_row_length ? copy->buffer_row_length : width;
+   const uint32_t image_height =
+      copy->buffer_image_height ? copy->buffer_image_height : height;
+   const bool volume = copy->image_type == VK_IMAGE_TYPE_3D;
+   const uint32_t first_slice =
+      volume ? copy->image_offset.z : copy->base_array_layer;
+   const uint32_t slice_count = volume
+      ? copy->copy_extent.depth
+      : (copy->layer_count == VK_REMAINING_ARRAY_LAYERS
+            ? copy->array_layers - copy->base_array_layer
+            : copy->layer_count);
+
+   uint64_t row_B, slice_B, span = 0, term;
+   if (!hk_u64_mul(row_el, block_B, &row_B) || row_B > UINT32_MAX ||
+       !hk_u64_mul(image_height, row_B, &slice_B) ||
+       !hk_u64_mul(slice_count - 1, slice_B, &span) ||
+       !hk_u64_mul(height - 1, row_B, &term) ||
+       !hk_u64_add(span, term, &span) ||
+       !hk_u64_mul(width, block_B, &term) ||
+       !hk_u64_add(span, term, &span) || buffer_offset > buffer_size ||
+       span > buffer_size - buffer_offset)
+      return false;
+
+   *plan = (struct hk_g17p_uncompressed_copy_plan){
+      .block_size_B = block_B,
+      .base_x_el = copy->image_offset.x,
+      .base_y_el = copy->image_offset.y,
+      .width_el = width,
+      .height_el = height,
+      .first_slice = first_slice,
+      .slice_count = slice_count,
+      .buffer_row_stride_B = row_B,
+      .buffer_slice_stride_B = slice_B,
+      .buffer_span_B = span,
+   };
+   return true;
+}
+
 bool
 hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy)
 {
+   const bool one_dimensional =
+      copy && copy->image_type == VK_IMAGE_TYPE_1D;
    const bool volume = copy && copy->image_type == VK_IMAGE_TYPE_3D;
    if (!copy || copy->chip != AGX_CHIP_G17P ||
        !hk_g17p_transfer_dst_layout_supported(copy->layout) ||
-       (copy->image_type != VK_IMAGE_TYPE_2D && !volume) ||
+       (!one_dimensional && copy->image_type != VK_IMAGE_TYPE_2D && !volume) ||
        copy->samples != VK_SAMPLE_COUNT_1_BIT ||
        copy->mip_levels == 0 || copy->array_layers == 0 ||
        copy->mip_level >= copy->mip_levels || copy->mip_level >= 32 ||
@@ -255,6 +428,9 @@ hk_g17p_buffer_to_image_copy_supported(
        (volume ? copy->image_offset.z < 0 : copy->image_offset.z != 0) ||
        (!volume && copy->image_extent.depth != 1) ||
        (!volume && copy->copy_extent.depth != 1) ||
+       (one_dimensional &&
+        (copy->image_extent.height != 1 || copy->image_offset.y != 0 ||
+         copy->copy_extent.height != 1)) ||
        copy->image_extent.width == 0 || copy->image_extent.height == 0 ||
        copy->image_extent.depth == 0 || copy->copy_extent.width == 0 ||
        copy->copy_extent.height == 0 || copy->copy_extent.depth == 0 ||
@@ -268,7 +444,7 @@ hk_g17p_buffer_to_image_copy_supported(
       vk_format_get_ycbcr_info(copy->format);
 
    if (ycbcr && ycbcr->n_planes > 1) {
-      if (volume)
+      if (one_dimensional || volume)
          return false;
       uint32_t plane;
       switch (copy->aspect) {
@@ -301,17 +477,25 @@ hk_g17p_buffer_to_image_copy_supported(
       return false;
    }
 
-   switch (plane_format) {
-   case VK_FORMAT_R8_UNORM:
-   case VK_FORMAT_R8G8_UNORM:
-   case VK_FORMAT_B8G8R8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_UNORM:
-   case VK_FORMAT_R8G8B8A8_UINT:
-   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-      break;
-   default:
+   /* A hardcoded allowlist here refused copies the driver advertises as
+    * supported, and the consequence is far worse than one lost image: the
+    * refusal fails vkEndCommandBuffer, so Zink skips vkQueueSubmit for the
+    * WHOLE frame and latches device_lost, after which nothing that process
+    * draws ever reaches the GPU again -- with no GL error at any point.
+    * SuperTuxKart hangs that way, and vkQuake's black world was one refused
+    * R32_UINT lightmap upload invalidating the staging batch it shares with
+    * every other texture.
+    *
+    * What the generic vk_meta path below actually needs is colour-attachment
+    * support, which is exactly ail_pixel_format[].renderable -- the same bit
+    * hk_get_format_features() reports as COLOR_ATTACHMENT. Ask that instead.
+    * Formats that are not renderable still fail closed and fall back to the
+    * ordinary copy path. */
+   if (!copy->plane_format_renderable)
       return false;
-   }
+   /* Multi-plane destinations select their plane format above; a renderable
+    * plane is still required for each one. */
+   (void)plane_format;
 
    const uint32_t width =
       (copy->image_extent.width / width_scale) >> copy->mip_level;

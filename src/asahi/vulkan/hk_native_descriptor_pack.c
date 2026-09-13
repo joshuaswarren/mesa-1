@@ -77,6 +77,20 @@ hk_pack_native_texture(unsigned generation,
           legacy->height > 16384)
          return false;
 
+      /* Stride and Depth share word1[61:46], sixteen bits, and the genxml
+       * modifiers put stride >> 4 and depth - 1 there.  util_bitpack_uint()
+       * is `v << start`, so a value that does not fit runs past the field and
+       * into "Page-aligned layers" (126) and "Extended" (127) -- with only a
+       * debug-build assert to catch it.  Refuse instead.  Nothing hk builds
+       * reaches either bound today (the widest stride is a buffer texture's
+       * AGX_TEXTURE_BUFFER_WIDTH * 16 - 16, and maxImageArrayLayers is far
+       * below 65536), so this is a guard on a latent overrun rather than a
+       * behaviour change. */
+      if (legacy->layout == AGX_LAYOUT_LINEAR
+             ? ((legacy->stride >> 4) > 0xffffu)
+             : (legacy->depth > 0x10000u))
+         return false;
+
       /* HAL200 encodeImageReadState (4d238c, 4d2270..4d22e8) clears
        * word1[62] for an ordinary non-array 2D texture. Its conditional
        * layer-mode writer is not the inherited AIL page-aligned-allocation
@@ -209,7 +223,13 @@ hk_pack_native_pbe(unsigned generation,
    const bool array = generation == 9 &&
                       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
                       legacy->layers > 1;
-   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
+   /* The end-of-tile store is the only producer of a multisample write
+    * target, and it only ever addresses one non-array layer. */
+   const bool multisample =
+      generation == 9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
+   if ((!array && !multisample &&
+        legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
@@ -217,9 +237,14 @@ hk_pack_native_pbe(unsigned generation,
         legacy->layout != AGX_LAYOUT_TWIDDLED &&
         legacy->layout != AGX_LAYOUT_GPU) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
-       legacy->samples != AGX_SAMPLE_COUNT_2 ||
+       (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
+                       legacy->samples != AGX_SAMPLE_COUNT_4)
+                    : legacy->samples != AGX_SAMPLE_COUNT_2) ||
        legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        (!array && legacy->layers != 1) ||
+       (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
+                        legacy->level != 0 || legacy->levels != 1 ||
+                        legacy->unk_mipmapped || legacy->compressed)) ||
        (generation != 9 && (legacy->level != 0 || legacy->levels != 1 ||
                             legacy->unk_mipmapped)) ||
        legacy->srgb || legacy->extended ||
@@ -251,7 +276,11 @@ hk_pack_native_pbe(unsigned generation,
       .page_aligned_layers = legacy->page_aligned_layers,
    };
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = array
+   const bool valid = multisample
+      ? agx_pbe_agx3_2d_multisample_pack(
+           generation, &fields,
+           legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
+      : array
       ? (legacy->level == 0 && legacy->levels == 1 &&
          !legacy->unk_mipmapped &&
          agx_pbe_agx3_2d_array_pack(generation, &fields, legacy->layers,

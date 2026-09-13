@@ -21,6 +21,9 @@
 #include "nir_lower_blend.h"
 #include "shader_enums.h"
 
+/* Mesa's "every sample" spelling, shared with agx_nir_lower_tilebuffer. */
+#define ALL_SAMPLES 0xFF
+
 /*
  * Insert code into a fragment shader to lower polygon stipple. The stipple is
  * passed in a sideband, rather than requiring a texture binding. This is
@@ -269,17 +272,49 @@ agx_nir_vs_prolog_raw(nir_builder *b, const void *key)
    agx_nir_vs_prolog_impl(b, key, true);
 }
 
+/*
+ * Map a lowered load_input to its slot in the vertex input ABI.
+ *
+ * The prolog publishes every attribute component as a full 32-bit value in
+ * its own pair of half-registers: agx_nir_vs_prolog_impl() fetches with
+ * nir_load_input(b, 4, 32, ...) and exports each channel at
+ * AGX_ABI_VIN_ATTRIB(4 * attrib + comp) = 2 * (8 + i), two halves apart.
+ * struct agx_vs_prolog_key carries no bit sizes at all -- only a component
+ * mask in these same 32-bit slot units -- so the prolog cannot publish
+ * anything narrower even in principle.
+ *
+ * A main shader may still declare a narrower input, since we advertise
+ * VK_KHR_16bit_storage's storageInputOutput16. That does not change the slot
+ * arithmetic: lowered NIR IO keeps nir_intrinsic_component() in 32-bit slot
+ * components even for 16-bit loads (nir_validate asserts component +
+ * num_components <= 4), and the only way two 16-bit values share one
+ * component is nir_io_semantics::high_16bits, which nir_lower_io never sets
+ * and which is produced for varyings alone (nir_lower_mediump's 16-bit
+ * varying slots and nir_opt_vectorize_io, neither of which we run). So one
+ * declared component is still exactly one 32-bit ABI slot, and all the main
+ * shader has to do is narrow the value the prolog handed it.
+ */
+static unsigned
+vs_input_abi_slot(nir_intrinsic_instr *intr)
+{
+   ASSERTED nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   assert(!sem.high_16bits && "VS inputs never share a 32-bit slot");
+   assert(intr->def.bit_size <= 32 && "64-bit attributes need two ABI slots");
+
+   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
+   unsigned comp = nir_intrinsic_component(intr);
+   assert(comp + intr->def.num_components <= 4);
+
+   return 4 * idx + comp;
+}
+
 static bool
 gather_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
 
-   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
-   unsigned comp = nir_intrinsic_component(intr);
-
-   assert(intr->def.bit_size == 32 && "todo: push conversions up?");
-   unsigned base = 4 * idx + comp;
+   unsigned base = vs_input_abi_slot(intr);
 
    b->cursor = nir_before_instr(&intr->instr);
    BITSET_WORD *comps_read = data;
@@ -305,16 +340,33 @@ lower_input_to_prolog(nir_builder *b, nir_intrinsic_instr *intr, void *_data)
    if (intr->intrinsic != nir_intrinsic_load_input)
       return false;
 
-   unsigned idx = nir_src_as_uint(intr->src[0]) + nir_intrinsic_base(intr);
-   unsigned comp = nir_intrinsic_component(intr);
-
-   assert(intr->def.bit_size == 32 && "todo: push conversions up?");
-   unsigned base = 4 * idx + comp;
+   unsigned base = vs_input_abi_slot(intr);
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *val =
-      nir_load_exported_agx(b, intr->def.num_components, intr->def.bit_size,
-                            .base = AGX_ABI_VIN_ATTRIB(base));
+
+   /* Always read the ABI slot at its published width. Loading at the narrow
+    * width would be silently wrong rather than merely slow: agx_load_exported
+    * strides the base by the DESTINATION size, so a 16-bit load would take
+    * component 1 out of component 0's high half.
+    */
+   nir_def *val = nir_load_exported_agx(b, intr->def.num_components, 32,
+                                        .base = AGX_ABI_VIN_ATTRIB(base));
+
+   if (intr->def.bit_size != 32) {
+      /* The prolog's vertex fetch already converted the attribute into the
+       * 32-bit slot with the format's own numeric type (agx_nir_lower_vbo
+       * emits f2f32/i2i32/u2u32), so narrowing by the declared base type
+       * recovers the value exactly.
+       */
+      nir_alu_type base_type =
+         nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr));
+
+      assert((base_type == nir_type_float || base_type == nir_type_int ||
+              base_type == nir_type_uint) &&
+             "narrow vertex input without a numeric type");
+
+      val = nir_convert_to_bit_size(b, val, base_type, intr->def.bit_size);
+   }
 
    nir_def_replace(&intr->def, val);
    return true;
@@ -793,6 +845,27 @@ agx_nir_lower_fs_output_to_epilog_for_device(
    return lower_fs_output_to_epilog(s, out, chip == AGX_CHIP_G17P);
 }
 
+/*
+ * Give a G17P tile access the sample-mask source its hardware form actually
+ * takes.
+ *
+ * At one sample the operand is the whole-pixel immediate, which is what Mesa
+ * already spells as ALL_SAMPLES, so nothing has to happen.
+ *
+ * At two or four samples there is no immediate form at all. Apple's compiler
+ * reads the live coverage word out of a special register and passes that
+ * register as the mask -- raw for a per-pixel shader ("every sample this
+ * fragment covers"), ANDed with a one-hot bit for each iteration of an
+ * unrolled per-sample shader. Reproduce exactly those two shapes.
+ *
+ * A non-constant mask is already an expression in a register (the per-sample
+ * lowerings build `mask & active_samples`), so it is left alone and reaches
+ * the packer as the register form by itself. Note that in a fast-linked
+ * sample-shading epilog `active_samples` is the ABI loop-bit register rather
+ * than the hardware coverage word, so such a store is not additionally masked
+ * by coverage; sample-rate shading is its own unverified feature and is not
+ * claimed here.
+ */
 static bool
 lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -809,30 +882,38 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    const unsigned samples = *(const unsigned *)data;
-   unsigned encoded;
    if (samples == 1) {
       /* Per-sample epilogs still carry a dynamic active-sample mask, but
-       * there is only sample zero. The native 1x tile instruction has no
-       * sample operand; preserve its whole-pixel form for these epilogs. */
-      encoded = 0xff;
-   } else {
-      if (!nir_src_is_const(intr->src[src]))
+       * there is only sample zero. The native 1x tile instruction takes the
+       * whole-pixel immediate; preserve its form for these epilogs. */
+      if (nir_src_is_const(intr->src[src]) &&
+          nir_src_as_uint(intr->src[src]) == ALL_SAMPLES)
          return false;
 
-      const unsigned mask = nir_src_as_uint(intr->src[src]);
-      if (mask != 0xff &&
-          (!util_is_power_of_two_nonzero(mask) || mask >= (1u << samples)))
-         return false;
-
-      encoded = (samples << 4) | (mask == 0xff ? 0 : mask);
+      b->cursor = nir_before_instr(&intr->instr);
+      nir_src_rewrite(&intr->src[src],
+                      nir_imm_intN_t(b, ALL_SAMPLES, 16));
+      return true;
    }
 
-   if (nir_src_is_const(intr->src[src]) &&
-       nir_src_as_uint(intr->src[src]) == encoded)
+   /* Already a live expression: the per-sample lowerings have ANDed the mask
+    * with an active-sample register, which is the register form. */
+   if (!nir_src_is_const(intr->src[src]))
+      return false;
+
+   const unsigned mask = nir_src_as_uint(intr->src[src]);
+   if (mask != ALL_SAMPLES &&
+       (mask == 0 || mask >= (1u << samples)))
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_src_rewrite(&intr->src[src], nir_imm_intN_t(b, encoded, 16));
+
+   nir_def *coverage = nir_load_active_samples_agx(b);
+   nir_def *sel = (mask == ALL_SAMPLES)
+                     ? coverage
+                     : nir_iand(b, coverage, nir_imm_intN_t(b, mask, 16));
+
+   nir_src_rewrite(&intr->src[src], sel);
    return true;
 }
 

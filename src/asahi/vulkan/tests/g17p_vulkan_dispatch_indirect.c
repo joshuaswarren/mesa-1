@@ -2,29 +2,15 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Offline proof that vkCmdDispatchIndirect RECORDS a native G17P indirect
- * launch pair.  This probe deliberately stops at vkEndCommandBuffer: it runs
- * under the noop drm-shim, where nothing executes, so it must never claim
- * anything about what the GPU does.  What it does establish, without hardware:
+ * Record direct -> indirect transitions and inspect the real G17P launch
+ * programs. The direct record must run the geometry helper, followed by a
+ * compact indirect application record consuming its six-word geometry.
  *
- *   - the device-level grid helper compiled and is accepted by the native
- *     compute gate (otherwise the dispatch refuses and the command buffer
- *     ends in VK_ERROR_FEATURE_NOT_PRESENT),
- *   - a direct dispatch still records unchanged in the same command buffer,
- *   - the recorded pair is the witnessed shape: a direct-sized main record
- *     with bit 23 set in word 0, followed by the compact 0x10080000 helper
- *     record naming the helper program and the geometry block, and
- *   - two indirect dispatches in one command buffer get distinct geometry
- *     blocks and distinct argument addresses, so one cannot overwrite the
- *     geometry the other is waiting on.
- *
- * The recorded bytes are read back out of the driver's own launch trace,
- * which is the only channel a Vulkan client has into the command stream.
- *
- * `--execute` additionally submits one indirect dispatch and checks the buffer
- * the shader was supposed to write.  That mode is meaningless under the shim
- * -- nothing runs, so it reports the sentinel and fails -- and exists so a
- * single hardware boot can answer whether the recorded pair actually launches.
+ * The sequential variant reproduces the CTS atomic counter: DispatchBase
+ * (2,3,4; 1,1,1) then DispatchIndirect (3,3,1), with only the final shader-to-host
+ * barrier. --execute checks counter 10 and guards; --submit-only validates
+ * submission under the shim. --cpu-reference runs the same API workload on
+ * a CPU Vulkan implementation, without claiming G17P execution.
  */
 
 #define VK_NO_PROTOTYPES
@@ -40,20 +26,22 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef G17P_SEQUENTIAL_DISPATCH
+#include "g17p_vulkan_sequential_dispatch_spv.h"
+#else
 #include "g17p_vulkan_compute_spv.h"
+#endif
 
 #define T8140_DEVICE_ID 0x8140
 #define ELEMENT_COUNT   32
 
-/* agx3_compute_program_core.h: 44-byte main record + 28-byte helper record. */
-#define MAIN_RECORD_SIZE   44u
-#define HELPER_RECORD_SIZE 28u
+/* 44-byte direct geometry helper + 28-byte indirect application record. */
+#define HELPER_RECORD_SIZE 44u
+#define MAIN_RECORD_SIZE   28u
 #define PAIR_SIZE          (MAIN_RECORD_SIZE + HELPER_RECORD_SIZE)
 
-/* The bit that turns the direct-shaped main record into the geometry-consuming
- * form, and the compact helper record's config word. */
-#define INDIRECT_MAIN_BIT     UINT32_C(0x00800000)
-#define HELPER_CONFIG_WORD    UINT32_C(0x10080000)
+/* CDM mode 2 reads global and local sizes from the geometry address. */
+#define INDIRECT_MODE 2u
 #define RECORD_TAIL_WORD      UINT32_C(0x60000160)
 
 #define VK_FN(name) static PFN_##name name
@@ -95,6 +83,7 @@ VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindDescriptorSets);
 VK_FN(vkCmdDispatch);
+VK_FN(vkCmdDispatchBase);
 VK_FN(vkCmdDispatchIndirect);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkGetDeviceQueue);
@@ -104,7 +93,11 @@ VK_FN(vkDestroyFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
 
+#ifdef G17P_SEQUENTIAL_DISPATCH
+static const char *const NAME = "g17p-vulkan-sequential-dispatch";
+#else
 static const char *const NAME = "g17p-vulkan-dispatch-indirect";
+#endif
 
 static void
 die(const char *what)
@@ -172,6 +165,7 @@ find_memory_type(const VkPhysicalDeviceMemoryProperties *properties,
 /* One recorded indirect dispatch, as the driver's own launch trace reports it.
  * `pair` is the exact command-stream span the encoder appended. */
 struct recorded_indirect {
+   uint64_t main_program_va;
    uint64_t args_va;
    uint64_t geometry_va;
    uint64_t helper_program_va;
@@ -224,14 +218,23 @@ parse_trace(const char *path, struct recorded_indirect *out, size_t max)
       die("cannot reopen the captured launch trace");
 
    size_t count = 0;
+   uint64_t main_program_va = 0;
    char line[8192];
    while (fgets(line, sizeof(line), f)) {
+      const char *main_program = strstr(line, "G17P program[main]:");
+      if (main_program) {
+         unsigned kind;
+         if (sscanf(main_program, "G17P program[main]: kind=%u va=%" SCNx64,
+                    &kind, &main_program_va) != 2)
+            die("main program trace did not parse");
+      }
       const char *launch = strstr(line, "G17P indirect launch: ");
       if (launch) {
          if (count == max)
             die("more indirect dispatches were traced than expected");
          struct recorded_indirect *r = &out[count];
          memset(r, 0, sizeof(*r));
+         r->main_program_va = main_program_va;
          if (sscanf(launch,
                     "G17P indirect launch: args=%" SCNx64 " geometry=%" SCNx64
                     " helper_program=%" SCNx64 " local=%ux%ux%u",
@@ -293,31 +296,27 @@ verify(const struct recorded_indirect *r, unsigned index,
               axis, r->local[axis], expected_local[axis]);
    }
 
-   const uint8_t *main_record = r->pair;
-   const uint8_t *helper = r->pair + MAIN_RECORD_SIZE;
+   const uint8_t *helper = r->pair;
+   const uint8_t *main_record = r->pair + HELPER_RECORD_SIZE;
 
-   const uint32_t main_word0 = le32(main_record);
-   REQUIRE((main_word0 & INDIRECT_MAIN_BIT) != 0,
-           "dispatch %u main word0 %08x does not set the indirect bit", index,
-           main_word0);
-   REQUIRE(le32(main_record + MAIN_RECORD_SIZE - 4) == RECORD_TAIL_WORD,
-           "dispatch %u main record tail is %08x", index,
-           le32(main_record + MAIN_RECORD_SIZE - 4));
-
-   REQUIRE(le32(helper) == HELPER_CONFIG_WORD,
-           "dispatch %u helper config word is %08x, not %08x", index,
-           le32(helper), HELPER_CONFIG_WORD);
-   REQUIRE(le32(helper + HELPER_RECORD_SIZE - 4) == RECORD_TAIL_WORD,
-           "dispatch %u helper record tail is %08x", index,
-           le32(helper + HELPER_RECORD_SIZE - 4));
+   REQUIRE(((le32(helper) >> 27) & 3) == 0,
+           "dispatch %u geometry producer is not a direct launch", index);
+   REQUIRE(((le32(main_record) >> 27) & 3) == INDIRECT_MODE,
+           "dispatch %u application is not an indirect-local launch", index);
+   for (unsigned word = 4; word < 10; ++word)
+      REQUIRE(le32(helper + 4 * word) == 1,
+              "dispatch %u helper dimensions must be 1x1x1", index);
+   REQUIRE(le32(main_record + MAIN_RECORD_SIZE - 4) == RECORD_TAIL_WORD &&
+              le32(helper + HELPER_RECORD_SIZE - 4) == RECORD_TAIL_WORD,
+           "dispatch %u changed existing barrier framing", index);
 
    /* The geometry address is stored high word first.  Assembling it the other
     * way round would still look like a plausible 64-bit value, so check it
     * against the address the driver reported allocating. */
    const uint64_t geometry =
-      ((uint64_t)le32(helper + 16) << 32) | le32(helper + 20);
+      ((uint64_t)le32(main_record + 16) << 32) | le32(main_record + 20);
    REQUIRE(geometry == r->geometry_va,
-           "dispatch %u helper geometry %" PRIx64 " != allocated %" PRIx64,
+           "dispatch %u application geometry %" PRIx64 " != allocated %" PRIx64,
            index, geometry, r->geometry_va);
    REQUIRE(geometry != 0 && (geometry & 3) == 0,
            "dispatch %u geometry %" PRIx64 " is not a usable u32 array", index,
@@ -332,6 +331,8 @@ verify(const struct recorded_indirect *r, unsigned index,
 
    const uint64_t main_program =
       decode_program_pointer(main_record, le32(main_record + 4));
+   REQUIRE(main_program == r->main_program_va,
+           "dispatch %u compact record does not name the application program", index);
    REQUIRE(main_program != helper_program,
            "dispatch %u main and helper share program %" PRIx64, index,
            main_program);
@@ -340,12 +341,16 @@ verify(const struct recorded_indirect *r, unsigned index,
 int
 main(int argc, char **argv)
 {
-   bool execute = false;
+   bool execute = false, submit_only = false, cpu_reference = false;
    for (int i = 1; i < argc; ++i) {
       if (!strcmp(argv[i], "--execute"))
          execute = true;
+      else if (!strcmp(argv[i], "--submit-only"))
+         execute = submit_only = true;
+      else if (!strcmp(argv[i], "--cpu-reference"))
+         execute = cpu_reference = true;
       else
-         die("usage: g17p-vulkan-dispatch-indirect [--execute]");
+         die("usage: probe [--execute|--submit-only|--cpu-reference]");
    }
 
    /* Turn the launch trace on before the driver caches the option. */
@@ -363,7 +368,7 @@ main(int argc, char **argv)
 
    const VkApplicationInfo application_info = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-      .pApplicationName = "g17p-vulkan-dispatch-indirect",
+      .pApplicationName = NAME,
       .applicationVersion = 1,
       .pEngineName = "none",
       .engineVersion = 1,
@@ -403,7 +408,8 @@ main(int argc, char **argv)
    VkPhysicalDeviceProperties properties;
    for (uint32_t i = 0; i < physical_count; ++i) {
       vkGetPhysicalDeviceProperties(physical_devices[i], &properties);
-      if (properties.deviceID == T8140_DEVICE_ID) {
+      if (cpu_reference ? properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU
+                        : properties.deviceID == T8140_DEVICE_ID) {
          physical = physical_devices[i];
          break;
       }
@@ -477,6 +483,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindDescriptorSets);
    LOAD_DEVICE(device, vkCmdDispatch);
+   LOAD_DEVICE(device, vkCmdDispatchBase);
    LOAD_DEVICE(device, vkCmdDispatchIndirect);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkGetDeviceQueue);
@@ -523,13 +530,15 @@ main(int argc, char **argv)
       .usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
-   /* args[2] is the only one an execute run may dispatch: the shader writes
-    * values[gl_GlobalInvocationID.x] for ELEMENT_COUNT elements and declares
-    * local_size 32, so exactly one group covers the buffer and nothing else
-    * does. */
+   /* The first two argument buffers exercise independent recorded launches;
+    * args[2] supplies the executable workload for the selected shader. */
    VkBuffer args[3];
    VkDeviceMemory args_memory[3];
+#ifdef G17P_SEQUENTIAL_DISPATCH
+   static const uint32_t args_values[3][3] = {{3, 3, 1}, {5, 2, 1}, {3, 3, 1}};
+#else
    static const uint32_t args_values[3][3] = {{2, 3, 1}, {5, 1, 1}, {1, 1, 1}};
+#endif
    for (unsigned i = 0; i < 3; ++i) {
       check(vkCreateBuffer(device, &args_info, NULL, &args[i]),
             "vkCreateBuffer(indirect)");
@@ -596,7 +605,11 @@ main(int argc, char **argv)
    const VkDescriptorBufferInfo descriptor_buffer = {
       .buffer = buffer,
       .offset = 0,
+#ifdef G17P_SEQUENTIAL_DISPATCH
+      .range = sizeof(uint32_t),
+#else
       .range = buffer_size,
+#endif
    };
    const VkWriteDescriptorSet descriptor_write = {
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -627,6 +640,7 @@ main(int argc, char **argv)
          "vkCreatePipelineLayout");
    const VkComputePipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT,
       .stage =
          {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -683,7 +697,7 @@ main(int argc, char **argv)
    /* A direct dispatch first: it must keep recording exactly as before, so a
     * regression in the shared program builder shows up here and not only on
     * hardware. */
-   vkCmdDispatch(command_buffer, 1, 1, 1);
+   vkCmdDispatchBase(command_buffer, 2, 3, 4, 1, 1, 1);
    vkCmdDispatchIndirect(command_buffer, args[0], 0);
    vkCmdDispatchIndirect(command_buffer, args[1], 0);
    const VkResult end_result = vkEndCommandBuffer(command_buffer);
@@ -712,10 +726,15 @@ main(int argc, char **argv)
       parse_trace(trace_path, recorded, sizeof(recorded) / sizeof(*recorded));
    unlink(trace_path);
 
-   REQUIRE(count == 2, "traced %zu indirect dispatches, recorded 2", count);
+   if (!cpu_reference)
+      REQUIRE(count == 2, "traced %zu indirect dispatches, recorded 2", count);
 
-   /* The compute shader declares local_size = (32, 1, 1). */
+   /* Match each variant's shader local size. */
+#ifdef G17P_SEQUENTIAL_DISPATCH
+   static const uint32_t expected_local[3] = {1, 1, 1};
+#else
    static const uint32_t expected_local[3] = {32, 1, 1};
+#endif
    for (unsigned i = 0; i < count && i < 2; ++i)
       verify(&recorded[i], i, recorded[i].args_va, expected_local);
 
@@ -728,22 +747,23 @@ main(int argc, char **argv)
       REQUIRE(recorded[0].geometry_va != recorded[1].geometry_va,
               "both dispatches share geometry block %" PRIx64,
               recorded[0].geometry_va);
-      REQUIRE(memcmp(recorded[0].pair + MAIN_RECORD_SIZE + 16,
-                     recorded[1].pair + MAIN_RECORD_SIZE + 16, 8) != 0,
-              "both helper records name the same geometry address");
+      REQUIRE(memcmp(recorded[0].pair + HELPER_RECORD_SIZE + 16,
+                     recorded[1].pair + HELPER_RECORD_SIZE + 16, 8) != 0,
+              "both application records name the same geometry address");
    }
 
    if (execute) {
-      /* One indirect dispatch whose runtime group count covers the buffer
-       * exactly, submitted for real.  Under the shim this reports the prefill
-       * sentinel, which means "no GPU here", not "the launch is wrong" -- so
-       * only run it on hardware. */
+      /* Submit the executable workload. The shim verifies the stream only;
+       * hardware and CPU-reference runs also check results and guard words. */
       uint32_t *mapped;
       check(vkMapMemory(device, memory, 0, buffer_size, 0, (void **)&mapped),
             "vkMapMemory");
       for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
          mapped[i] = UINT32_C(0xA5A50000) | i;
 
+#ifdef G17P_SEQUENTIAL_DISPATCH
+      mapped[0] = 0;
+#endif
       VkCommandBuffer execute_cb;
       check(vkAllocateCommandBuffers(device, &command_buffer_info,
                                      &execute_cb),
@@ -753,6 +773,9 @@ main(int argc, char **argv)
       vkCmdBindPipeline(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
       vkCmdBindDescriptorSets(execute_cb, VK_PIPELINE_BIND_POINT_COMPUTE,
                               pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+#ifdef G17P_SEQUENTIAL_DISPATCH
+      vkCmdDispatchBase(execute_cb, 2, 3, 4, 1, 1, 1);
+#endif
       vkCmdDispatchIndirect(execute_cb, args[2], 0);
       const VkBufferMemoryBarrier host_barrier = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -783,44 +806,25 @@ main(int argc, char **argv)
          .pCommandBuffers = &execute_cb,
       };
       check(vkQueueSubmit(queue, 1, &submit_info, fence), "vkQueueSubmit");
-      check(vkWaitForFences(device, 1, &fence, true, UINT64_MAX),
+      check(vkWaitForFences(device, 1, &fence, true, UINT64_C(5000000000)),
             "vkWaitForFences");
 
-      /* Classify rather than just compare: "the grid never launched" and "the
-       * grid launched with the wrong dimensions" are different bugs, and the
-       * geometry block is exactly what decides between them. */
-      unsigned untouched = 0, wrong = 0, correct = 0;
-      for (uint32_t i = 0; i < ELEMENT_COUNT; ++i) {
-         const uint32_t expected = UINT32_C(0x12340000) + (2 * i) + 3;
-         if (mapped[i] == expected)
-            correct++;
-         else if (mapped[i] == (UINT32_C(0xA5A50000) | i))
-            untouched++;
-         else
-            wrong++;
-      }
-
-      if (correct != ELEMENT_COUNT) {
-         failures++;
-         fprintf(stderr,
-                 "%s: FAIL execute correct=%u untouched=%u wrong=%u of %u\n",
-                 NAME, correct, untouched, wrong, ELEMENT_COUNT);
-         if (untouched == ELEMENT_COUNT)
-            fprintf(stderr,
-                    "%s:   -> nothing ran. Either the helper never published "
-                    "the geometry block or the main record never consumed "
-                    "it; this is not a shader bug.\n",
-                    NAME);
-         else if (untouched)
-            fprintf(stderr,
-                    "%s:   -> a PREFIX of %u elements ran. The pair launched, "
-                    "but with a smaller grid than 1 group of 32 threads, so "
-                    "the geometry block holds threadgroups where it should "
-                    "hold global threads.\n",
-                    NAME, correct);
+      if (!submit_only) {
+#ifdef G17P_SEQUENTIAL_DISPATCH
+         REQUIRE(mapped[0] == 10, "counter=%u expected=10", mapped[0]);
+         for (unsigned i = 1; i < ELEMENT_COUNT; ++i)
+            REQUIRE(mapped[i] == (UINT32_C(0xa5a50000) | i),
+                    "guard word %u changed to %08x", i, mapped[i]);
+         if (!failures)
+            printf("%s: counter=10 guards=124 PASS%s\n", NAME,
+                   cpu_reference ? " (CPU reference only)" : "");
+#else
+         for (uint32_t i = 0; i < ELEMENT_COUNT; ++i)
+            REQUIRE(mapped[i] == UINT32_C(0x12340000) + (2 * i) + 3,
+                    "element %u got %08x", i, mapped[i]);
+#endif
       } else {
-         printf("%s: execute PASS - the indirect grid launched %u threads\n",
-                NAME, ELEMENT_COUNT);
+         printf("%s: one primary buffer submitted; counter unchecked\n", NAME);
       }
 
       vkDestroyFence(device, fence, NULL);
@@ -858,8 +862,7 @@ main(int argc, char **argv)
       printf("\n");
    }
 
-   printf("%s: PASS - two indirect dispatches recorded as native G17P "
-          "launch pairs (recording only; nothing executed)\n",
-          NAME);
+   printf("%s: %s PASS\n", NAME, cpu_reference ? "CPU reference"
+          : execute ? "submission" : "native recording");
    return EXIT_SUCCESS;
 }

@@ -851,8 +851,31 @@ agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
                           struct agx_draw draw,
                           enum agx_primitive topology,
                           uint32_t draw_state_context_offset,
-                          bool render_state_emitted)
+                          bool render_state_emitted,
+                          uint64_t empty_draw_jump)
 {
+   /* G17P's native direct indexed packet requires both counts to be nonzero.
+    * Indirect-count predication deliberately zeros records above the runtime
+    * count, so those slots cannot contain a direct packet. Jump over the
+    * fixed-size GPU-generated slot instead. The host supplies the compact
+    * context-relative address immediately after this reservation, matching
+    * the same non-returning Stream Link used when a CPU-authored VDM chunk
+    * fills. A freshly emitted bind tail still requires its selector before
+    * any other VDM block. Emit that selector before the link so the link
+    * header is not decoded as a context-relative state address. No draw
+    * executes and the following CPU-authored command remains the only parser
+    * target.
+    */
+   if (chip == AGX_CHIP_G17P &&
+       (draw.b.count[0] == 0 || draw.b.count[1] == 0)) {
+      if (render_state_emitted)
+         *out++ = draw_state_context_offset;
+
+      *out++ = 0x80000000u | (uint32_t)(empty_draw_jump >> 32);
+      *out++ = (uint32_t)empty_draw_jump;
+      return out;
+   }
+
    const uint64_t ib =
       draw.index_buffer + agx_indices_to_B(draw.start, draw.index_size);
    const uint32_t range_B =

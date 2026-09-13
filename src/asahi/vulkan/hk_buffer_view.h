@@ -22,6 +22,16 @@ struct hk_buffer_view {
    struct vk_buffer_view vk;
    struct hk_native_texture_descriptor tex;
    struct hk_native_pbe_descriptor pbe;
+   /*
+    * G17P samples through the device sampled-image heap, not through the
+    * descriptor bytes: agx_nir_lower_g17p_indexed_samplers() reads a 32-bit
+    * index at AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET and hands it to the texture
+    * unit.  Image views allocate one of these per plane; buffer views did not,
+    * so every texel-buffer fetch read heap entry 0, which hk_device.c pins to
+    * the null texture -- a black texel for every samplerBuffer on G17P.
+    * Zero on every other chip, which reads the descriptor bytes directly.
+    */
+   uint32_t sampled_heap_index;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer_view, vk.base, VkBufferView,

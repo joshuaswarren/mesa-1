@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_descriptor_set.h"
+
+#include "vk_acceleration_structure.h"
 #include "asahi/lib/agx_bo.h"
 #include "util/half_float.h"
 #include "vulkan/vulkan_core.h"
@@ -15,6 +17,7 @@
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_agx3_ioto_program_core.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
@@ -47,6 +50,26 @@ desc_ubo_data(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    return (char *)set->mapped_ptr + offset;
 }
 
+static void write_desc(struct hk_descriptor_set *set, uint32_t binding,
+                       uint32_t elem, const void *desc_data, size_t desc_size);
+
+/*
+ * An acceleration structure descriptor is just its BVH address; the software
+ * traversal walks it with global loads.  A null handle writes zero, which the
+ * traversal treats as an empty structure.
+ */
+static void
+write_accel_struct_desc(struct hk_descriptor_set *set,
+                        VkAccelerationStructureKHR _accel_struct,
+                        uint32_t binding, uint32_t elem)
+{
+   VK_FROM_HANDLE(vk_acceleration_structure, accel_struct, _accel_struct);
+   uint64_t addr =
+      accel_struct ? vk_acceleration_structure_get_va(accel_struct) : 0;
+
+   write_desc(set, binding, elem, &addr, sizeof(addr));
+}
+
 static void
 write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
            const void *desc_data, size_t desc_size)
@@ -71,6 +94,17 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    /* "Zero" initialize */
    for (unsigned i = 0; i < 3; ++i) {
       hk_set_null_native_texture(generation, &desc[i].tex);
+
+      /* G17P's native sampler heap reserves entry zero for robust null
+       * sampling. The descriptor-set ABI stores application indices with the
+       * legacy +28 bias, so encode that same base for an explicit null
+       * descriptor. A zero clamp companion means "custom border present";
+       * -1 is the canonical no-border sentinel. */
+      if (generation == 9) {
+         desc[i].sw.sampler_index =
+            HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX;
+         desc[i].sw.clamp_0_sampler_index_or_negative = -1;
+      }
    }
 
    uint8_t plane_count = 1;
@@ -167,35 +201,67 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    const struct hk_storage_image_descriptor_layout native =
       hk_storage_image_descriptor_layout(generation);
    bool supported = false;
+   bool texture_supported = false;
 
    if (info && info->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
 
+      /* This used to also require R8G8B8A8_UINT/UNORM, which made every other
+       * storage format fall into the !supported branch below and be written as
+       * a NULL descriptor -- silently, because vkUpdateDescriptorSets cannot
+       * fail.  That included the formats Vulkan mandates storage support for
+       * (r32_uint/sint/sfloat, r32g32*, r32g32b32a32*, r16g16b16a16*,
+       * r8g8b8a8_snorm/sint), so dEQP-VK.api.info.format_properties fails
+       * either way: silently wrong if advertised, non-conformant if not.
+       *
+       * The allowlist was conservative rather than necessary.  The PBE packer
+       * has no format gate at all: agx_pbe_agx3_core.c's fields_valid()
+       * accepts any uncompressed channel layout with type <= 5, and
+       * hk_pack_native_pbe() passes channels/type straight through.  Measured
+       * under the drm-shim, an R32G32B32A32_UINT view packs valid=1 and its
+       * descriptor differs from the RGBA8_UINT one only in the channel/type
+       * field (224a88.. -> 224e88..).
+       *
+       * So gate on what the packer actually accepts -- storage_pbe_valid
+       * already carries every real constraint -- plus the shape limits this
+       * fallback is built for.  Whether such a store LANDS is a hardware
+       * question that no offline check can answer; it is queued as a probe.
+       */
       const bool native_basic =
          hk_native_pbe_hardware_supported(generation) &&
          view->plane_count == 1 &&
          view->vk.image->samples == VK_SAMPLE_COUNT_1_BIT &&
          view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
-         (view->vk.format == VK_FORMAT_R8G8B8A8_UINT ||
-          view->vk.format == VK_FORMAT_R8G8B8A8_UNORM) &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
-      if (supported) {
+      /* A readable native texture does not require a writable PBE. In
+       * particular, linear storage views have a valid texture descriptor
+       * even when the native PBE packer cannot represent their layout.
+       * Keep imageLoad/imageSize bound to that view instead of replacing
+       * both halves with a null descriptor because stores are unsupported.
+       */
+      texture_supported = supported ||
+         (generation == 9 && view->plane_count == 1);
+      if (texture_supported) {
          /* Storage images are always single plane */
          assert(view->plane_count == 1);
          uint8_t plane = 0;
 
          desc.tex = view->planes[plane].ro_storage;
-         desc.pbe = view->planes[plane].storage;
          desc.texture_heap_index =
             view->planes[plane].storage_heap_index;
       }
+      if (supported) {
+         const uint8_t plane = 0;
+         desc.pbe = view->planes[plane].storage;
+         desc.atomic_sw = view->planes[plane].storage_atomic_sw;
+      }
    }
 
-   if (!supported) {
+   if (!texture_supported)
       hk_set_null_native_texture(generation, &desc.tex);
+   if (!supported)
       hk_set_null_native_pbe(generation, &desc.pbe);
-   }
 
    uint8_t packed[HK_MAX_DESCRIPTOR_SIZE] = {0};
    memcpy(packed + native.texture, &desc.tex,
@@ -205,6 +271,9 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_STORAGE_HEAP_INDEX_OFFSET + sizeof(uint64_t))
       memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
              &desc.texture_heap_index, sizeof(desc.texture_heap_index));
+   if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
+      memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
+             sizeof(desc.atomic_sw));
    if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64
@@ -267,6 +336,7 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
    const unsigned generation = set->layout->descriptor_generation;
    const struct hk_storage_image_descriptor_layout native =
       hk_storage_image_descriptor_layout(generation);
+   uint32_t heap_index = 0;
 
    if ((!storage || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
@@ -275,6 +345,7 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       desc.tex = view->tex;
       if (storage)
          desc.pbe = view->pbe;
+      heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);
       hk_set_null_native_pbe(generation, &desc.pbe);
@@ -284,7 +355,31 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
    memcpy(packed + native.texture, &desc.tex,
           hk_texture_descriptor_size(generation));
    memcpy(packed + native.pbe, &desc.pbe, hk_pbe_descriptor_size(generation));
-   write_desc(set, binding, elem, packed, native.stride);
+   /* G17P reaches a texture through the device heap; the descriptor carries
+    * only the index, which hk_descriptor_stride_align_for_type() reserved the
+    * eight extra bytes for.  Leaving it zero resolves to the pinned null
+    * texture, so every texel buffer read black.
+    *
+    * Both offsets are written because both readers exist in
+    * agx_nir_lower_g17p_combined_sampler.c and a buffer view has one texture
+    * for both: a texel fetch (nir_tex, the lowered 2D txf) takes
+    * AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET, while an imageLoad on an imageBuffer
+    * takes AGX_G17P_STORAGE_HEAP_INDEX_OFFSET.  The two live in the reserved
+    * eight bytes at 64 and 68 and do not overlap. */
+   const uint32_t stride = set->layout->binding[binding].stride;
+   if (heap_index &&
+       stride >= AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET + sizeof(heap_index)) {
+      memcpy(packed + AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET, &heap_index,
+             sizeof(heap_index));
+      memcpy(packed + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET, &heap_index,
+             sizeof(heap_index));
+   }
+   /* Write the binding's whole stride, not just the texture/PBE pair: the
+    * reserved heap-index bytes live past native.stride, so a native.stride
+    * write would drop them.  write_storage_image_view_desc() already does
+    * this; texel buffers were the one caller that did not, which is the
+    * second half of why their index was always zero. */
+   write_desc(set, binding, elem, packed, MIN2(stride, sizeof(packed)));
 }
 
 static void
@@ -356,6 +451,19 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                   VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
          }
          break;
+
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
+         const VkWriteDescriptorSetAccelerationStructureKHR *write_accel =
+            vk_find_struct_const(write->pNext,
+                                 WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR);
+         for (uint32_t j = 0; j < write->descriptorCount; j++) {
+            write_accel_struct_desc(set,
+                                    write_accel->pAccelerationStructures[j],
+                                    write->dstBinding,
+                                    write->dstArrayElement + j);
+         }
+         break;
+      }
 
       case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK: {
          const VkWriteDescriptorSetInlineUniformBlock *write_inline =
@@ -518,6 +626,18 @@ hk_CreateDescriptorPool(VkDevice _device,
 
    list_inithead(&pool->sets);
 
+   /* The heap must be a valid empty heap before anything can fail: the error
+    * paths below run hk_destroy_descriptor_pool(), which calls
+    * util_vma_heap_finish() and walks heap->holes.  On a vk_object_zalloc'd
+    * pool that list head is all zeroes, so walking it dereferences NULL and
+    * the application takes a SIGSEGV instead of the VkResult it asked for.
+    * Firefox hit exactly this on G17P: one failed "Descriptor pool" BO -- the
+    * VM was already carrying a sticky error from an earlier submission --
+    * turned an orderly VK_ERROR_OUT_OF_DEVICE_MEMORY into a browser crash
+    * inside hk_destroy_descriptor_pool().
+    */
+   util_vma_heap_init(&pool->heap, 0, 0);
+
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
@@ -560,7 +680,21 @@ hk_CreateDescriptorPool(VkDevice _device,
    bo_size += HK_MIN_UBO_ALIGNMENT * pCreateInfo->maxSets;
 
    if (bo_size) {
-      pool->bo = agx_bo_create(&dev->dev, bo_size, 0, 0, "Descriptor pool");
+      /* Descriptor-set memory is never fully written: a binding the
+       * application declares and never updates -- PARTIALLY_BOUND, an
+       * unwritten array element, the deliberately over-allocated
+       * variable-count tail -- is still dereferenced by the shader.  On every
+       * other chip an unmapped or nonsense address read out of those bytes is
+       * absorbed by hardware soft fault; G17P halts with a GMMU reason-3
+       * fault and takes the device with it, so the bytes have to be
+       * predictable.  A recycled cache BO carries whatever the previous
+       * owner (a command slab, an upload pool, a geometry heap) left behind,
+       * which is exactly the shape of a wild descriptor address.
+       */
+      const enum agx_bo_flags pool_flags =
+         dev->dev.chip == AGX_CHIP_G17P ? AGX_BO_ZERO_ON_REUSE : 0;
+      pool->bo =
+         agx_bo_create(&dev->dev, bo_size, 0, pool_flags, "Descriptor pool");
       if (!pool->bo) {
          hk_destroy_descriptor_pool(dev, pAllocator, pool);
          return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -572,9 +706,9 @@ hk_CreateDescriptorPool(VkDevice _device,
        * make that extra space available to the client.
        */
       assert(pool->bo->size >= bo_size);
+      /* Re-initialising is safe: the heap above was created empty, so there
+       * are no holes to leak here. */
       util_vma_heap_init(&pool->heap, pool->bo->va->addr, pool->bo->size);
-   } else {
-      util_vma_heap_init(&pool->heap, 0, 0);
    }
 
    *pDescriptorPool = hk_descriptor_pool_to_handle(pool);
@@ -650,6 +784,17 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
          vk_object_free(&dev->vk, NULL, set);
          return result;
       }
+
+      /* Zeroing the pool BO on reuse is not enough on its own: a pool
+       * outlives its sets, and vkFreeDescriptorSets/vkResetDescriptorPool
+       * return the range to the VMA heap with the destroyed set's bytes
+       * intact.  The next set allocated over that range would otherwise
+       * inherit a live-looking texture, PBE or buffer address belonging to an
+       * object that has since been destroyed.  All-zero reads as the reserved
+       * null texture / heap index 0, which is bound and safe.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P)
+         memset(set->mapped_ptr, 0, set->size);
    }
 
    vk_descriptor_set_layout_ref(&layout->vk);
@@ -837,6 +982,16 @@ hk_descriptor_set_write_template(
             write_dynamic_buffer_desc(
                set, info, entry->binding, entry->array_element + j,
                entry->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+         }
+         break;
+
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+         for (uint32_t j = 0; j < entry->array_count; j++) {
+            const VkAccelerationStructureKHR *accel_struct =
+               data + entry->offset + j * entry->stride;
+
+            write_accel_struct_desc(set, *accel_struct, entry->binding,
+                                    entry->array_element + j);
          }
          break;
 

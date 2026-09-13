@@ -9,6 +9,7 @@
 #include "vulkan/vulkan_core.h"
 
 #include "agx_helpers.h"
+#include "agx_bg_eot_key.h"
 #include "agx_nir_texture.h"
 #include "agx_pack.h"
 #include "hk_device.h"
@@ -367,7 +368,8 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
 
 static bool
 pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
-         enum hk_desc_usage usage, struct hk_native_pbe_descriptor *out)
+         enum hk_desc_usage usage, struct hk_native_pbe_descriptor *out,
+         uint64_t *atomic_sw_out)
 {
    const unsigned generation =
       agx_chip_descriptor_generation(dev->dev.chip);
@@ -385,8 +387,6 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layer = view->vk.base_array_layer;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
-   const struct util_format_description *desc =
-      util_format_description(p_format);
 
    bool eot =
       usage == HK_DESC_USAGE_BG_EOT || usage == HK_DESC_USAGE_LAYERED_BG_EOT;
@@ -397,6 +397,12 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    if (eot)
       p_format = util_format_linear(p_format);
 
+   if (eot && dev->dev.chip == AGX_CHIP_G17P)
+      p_format = agx_g17p_rt0_pbe_format(p_format);
+
+   const struct util_format_description *desc =
+      util_format_description(p_format);
+
    bool msaa = view->vk.image->samples > 1;
    struct hk_3d denom = view_denominator(view);
 
@@ -405,6 +411,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
                         : view->vk.layer_count;
 
    struct AGX_PBE cfg = {AGX_PBE_header};
+   if (atomic_sw_out)
+      *atomic_sw_out = 0;
    {
       cfg.dimension =
          translate_image_view_type(view->vk.view_type, msaa, layers > 1,
@@ -529,6 +537,24 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.layer_stride_sw = layout->layer_stride_B;
          }
       }
+
+      /* Gen9's architectural PBE consumes all 32 bytes, so it cannot reuse
+       * AGX2 words 4/5 as software metadata.  Preserve the same compact ABI in
+       * the descriptor's dedicated tail: level offset [0:26], log2 tile width
+       * [27:30], log2 tile height [31:34], layer stride [35:61], and log2
+       * sample count [62:63].  The
+       * shader-side Gen9 decoder consumes this word independently of the
+       * native PBE. */
+      if (atomic_sw_out && generation == 9 && !cfg.extended &&
+          (layout->writeable_image || usage == HK_DESC_USAGE_EMRT)) {
+         if (!hk_pack_g17p_image_atomic_sw(
+                ail_get_level_offset_B(layout, cfg.level),
+                layout->tilesize_el[level].width_el,
+                layout->tilesize_el[level].height_el,
+                layout->layer_stride_B, msaa ? image->vk.samples : 1,
+                atomic_sw_out))
+            return false;
+      }
    }
 
    return hk_pack_native_pbe(generation, out, &cfg);
@@ -610,14 +636,16 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       }
 
       view->planes[p].storage_pbe_valid = pack_pbe(
-         dev, view, p, HK_DESC_USAGE_STORAGE, &view->planes[p].storage);
+         dev, view, p, HK_DESC_USAGE_STORAGE, &view->planes[p].storage,
+         &view->planes[p].storage_atomic_sw);
       view->planes[p].eot_pbe_valid =
-         pack_pbe(dev, view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].eot);
+         pack_pbe(dev, view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].eot,
+                  NULL);
       view->planes[p].emrt_pbe_valid = pack_pbe(
-         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe);
+         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe, NULL);
       view->planes[p].layered_eot_pbe_valid =
          pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
-                  &view->planes[p].layered_eot);
+                  &view->planes[p].layered_eot, NULL);
    }
 
    return VK_SUCCESS;

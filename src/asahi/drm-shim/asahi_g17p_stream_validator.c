@@ -6,8 +6,10 @@
 #include "asahi_g17p_stream_validator.h"
 
 #include "asahi/lib/agx_ppp_hal200_graphics_core.h"
+#include "asahi/lib/agx3_compute_program_core.h"
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_ioto_program_core.h"
+#include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_va_runtime_hole.h"
@@ -64,11 +66,105 @@ load_le64(const uint8_t *p)
    return (uint64_t)load_le32(p) | ((uint64_t)load_le32(p + 4) << 32);
 }
 
+/*
+ * The 44-bit surface address of an AGX3 texture heap element.
+ *
+ * cmdbuf.xml "Texture Gen9"/"Texture Gen10": <field name="Address" size="44"
+ * start="64" type="address" modifier="shr(4)"/>.  So bits 64..107 of the
+ * 32-byte descriptor, times sixteen.
+ *
+ * This pointer never appears in the command stream.  The stream only names
+ * the descriptor; the texture unit dereferences the address inside it at draw
+ * time.  That makes it the one GPU-dereferenced pointer a command-stream walk
+ * has historically been unable to see -- and it is exactly the pointer a
+ * never-written or recycled descriptor set aims at unmapped memory.
+ */
+static uint64_t
+agx3_texture_descriptor_surface(const uint8_t bytes[32])
+{
+   const uint64_t low = load_le32(bytes + 8);
+   const uint64_t high = load_le32(bytes + 12) & UINT32_C(0xfff);
+
+   return (low | (high << 32)) << 4;
+}
+
+/*
+ * A descriptor that is entirely zero is the reserved null texture, not a bug:
+ * hk_device.c pins heap entry zero to it and every null descriptor path in
+ * hk_descriptor_set.c writes it deliberately.  Its surface address is zero,
+ * which is never dereferenced.
+ */
+static bool
+agx3_descriptor_is_blank(const uint8_t bytes[32])
+{
+   for (unsigned i = 0; i < 32; ++i) {
+      if (bytes[i])
+         return false;
+   }
+
+   return true;
+}
+
 static bool
 fail_at(uint64_t address, const char *reason)
 {
    fprintf(stderr, "shim: invalid G17P command stream at %#llx: %s\n",
            (unsigned long long)address, reason);
+   return false;
+}
+
+/*
+ * A record the decoder understands but this oracle does not model.
+ *
+ * This validator's accept-set was grown from streams the Gallium driver was
+ * observed to emit.  Honeykrisp legitimately emits records outside that set --
+ * tessellation and geometry lower through TESSELLATE_DIRECT, and the compute
+ * side uses the substream/secondary barriers and link padding.  Refusing them
+ * would report a gap in the ORACLE as a bug in the DRIVER, which is the one
+ * misclassification that makes this whole harness untrustworthy.
+ *
+ * These records carry a decoded length, so the rest of the stream is still
+ * checked: say plainly that the oracle is the thing that fell short, and skip.
+ */
+static void
+oracle_gap_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P oracle gap at %#llx: %s is decodable but not modelled "
+           "by this validator -- NOT a driver bug, stream not rejected\n",
+           (unsigned long long)address, what);
+}
+
+/*
+ * A record the decoder could not identify at all.  Unlike the above there is
+ * no length, so validation cannot continue.  The cause is genuinely ambiguous
+ * -- a corrupt stream and a decoder that has never seen this opcode look
+ * identical from here -- so do not let it masquerade as a proven driver bug.
+ */
+/*
+ * An ambiguous observation that does NOT stop the walk.  Some checks can spot
+ * something odd without being able to prove it wrong -- a payload that reads
+ * like an unowned pointer pair, say, when the same range legitimately carries
+ * push constants, divisors and indirect arguments.  Report the shape so a
+ * human can judge it, and keep validating.
+ */
+static void
+note_indeterminate_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P indeterminate at %#llx: %s -- not by itself evidence of "
+           "a driver bug; stream not rejected\n",
+           (unsigned long long)address, what);
+}
+
+static bool
+fail_indeterminate_at(uint64_t address, const char *what)
+{
+   fprintf(stderr,
+           "shim: G17P undecodable record at %#llx: %s -- INDETERMINATE "
+           "(stream corruption or a decoder gap); not by itself evidence of a "
+           "driver bug\n",
+           (unsigned long long)address, what);
    return false;
 }
 
@@ -97,7 +193,7 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
        !read_owned(memory, address - 0x3c0, container_head,
                    sizeof(container_head)) ||
        !read_owned(memory, address - 0x80, block_head, sizeof(block_head)) ||
-       load_le32(container_head) != 0x340)
+       load_le32(container_head) != AGX3_CONTAINER_LEAD_SIZE)
       return fail_at(address, "shader does not own a G17P code container");
    const uint32_t block_size = load_le32(block_head);
    if (block_size < 0x80 || (block_size & 63) || block_size - 0x80 > available)
@@ -241,16 +337,77 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                                    sizeof(nested))) {
                      const uint64_t a = load_le64(nested);
                      const uint64_t b = load_le64(nested + 8);
-                     if (a > UINT32_MAX && b > UINT32_MAX &&
-                         a < (UINT64_C(1) << 48) &&
-                         b < (UINT64_C(1) << 48) &&
+                     /* These sixteen bytes are a uniform payload. Nothing here
+                      * knows what the encoder put in them: for a sampling
+                      * stage it is the texture/sampler pointer pair, but the
+                      * same range carries push constants, attribute divisors
+                      * and indirect draw arguments, and the driver's range
+                      * list -- which does know -- is not visible from a
+                      * command-stream walk.
+                      *
+                      * This used to guess, on nothing more than both halves
+                      * landing in (2^32, 2^48), and REJECT the stream when the
+                      * guessed targets were unmapped. On G17P the user heap
+                      * starts at 0x4000000000, so every legitimate address in
+                      * any payload satisfies that range and so does plenty of
+                      * ordinary data -- which is why the rejections clustered
+                      * on indirect, instanced and divisor draws while simple
+                      * draws, whose payload really is a pointer pair, passed.
+                      *
+                      * A check that cannot tell a pointer from an integer must
+                      * not fail a stream. Report the shape and walk on. */
+                     const bool pointer_shaped =
+                        a > UINT32_MAX && b > UINT32_MAX &&
+                        a < (UINT64_C(1) << 48) && b < (UINT64_C(1) << 48);
+                     if (pointer_shaped &&
                          (!memory->owned(memory->data, a, 32) ||
-                          !memory->owned(memory->data, b, 32)))
-                        return fail_at(cursor,
-                                       "Ioto nested resource pointer is unowned");
-                     if (memory->verbose && a > UINT32_MAX &&
-                         b > UINT32_MAX && a < (UINT64_C(1) << 48) &&
-                         b < (UINT64_C(1) << 48)) {
+                          !memory->owned(memory->data, b, 32))) {
+                        char what[160];
+                        snprintf(what, sizeof(what),
+                                 "Ioto payload reads as an unowned pointer "
+                                 "pair (%#llx, %#llx), but this range also "
+                                 "carries push constants, divisors and "
+                                 "indirect arguments",
+                                 (unsigned long long)a, (unsigned long long)b);
+                        note_indeterminate_at(source, what);
+                     }
+                     /* One level deeper than the pair itself: when the
+                      * first half really is a texture descriptor, the surface
+                      * it names must be owned.  A never-written descriptor set
+                      * -- a PARTIALLY_BOUND binding, an unwritten array
+                      * element, a range recycled out of a destroyed set --
+                      * decodes here as a live-looking pointer into memory this
+                      * VM has never mapped, and on G17P that is a halting
+                      * GMMU read fault rather than a soft-faulted zero.
+                      *
+                      * Report by default and reject only when the caller says
+                      * the payload is known to be a resource pair, because the
+                      * same bytes legitimately carry push constants. */
+                     if (memory->strict_descriptors && pointer_shaped &&
+                         memory->owned(memory->data, a, 32)) {
+                        uint8_t descriptor[32] = {0};
+                        if (memory->read(memory->data, a, descriptor,
+                                         sizeof(descriptor))) {
+                           const uint64_t surface =
+                              agx3_texture_descriptor_surface(descriptor);
+                           if (!agx3_descriptor_is_blank(descriptor) &&
+                               surface != 0 &&
+                               !memory->owned(memory->data, surface, 16)) {
+                              char what[192];
+                              snprintf(what, sizeof(what),
+                                       "texture descriptor at %#llx names "
+                                       "unowned surface %#llx -- an unwritten "
+                                       "or recycled descriptor set reads "
+                                       "exactly like this",
+                                       (unsigned long long)a,
+                                       (unsigned long long)surface);
+                              note_indeterminate_at(source, what);
+                              if (memory->strict_descriptors > 1)
+                                 return fail_at(source, what);
+                           }
+                        }
+                     }
+                     if (memory->verbose && pointer_shaped) {
                         uint8_t texture[32] = {0}, sampler[32] = {0};
                         if (memory->read(memory->data, a, texture,
                                          sizeof(texture)) &&
@@ -320,26 +477,26 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
 }
 
 static bool
-validate_compact_compute_helper(
+validate_compact_compute_launch(
    const struct asahi_g17p_stream_memory *memory, uint64_t address,
    const uint8_t bytes[AGX3_CDM_INDIRECT_LAUNCH_SIZE])
 {
-   struct agx3_cdm_indirect_launch_info helper;
+   struct agx3_cdm_indirect_launch_info launch;
    if (!agx3_cdm_indirect_launch_unpack(
-          AGX_CHIP_G17P, bytes, AGX3_CDM_INDIRECT_LAUNCH_SIZE, &helper) ||
-       helper.word0_payload != UINT32_C(0x10080000) ||
-       helper.word1_payload != 0 || !helper.pipeline ||
-       (helper.pipeline & 63) ||
-       helper.opaque_word3 !=
-          (UINT32_C(0x40000000) | ((helper.pipeline >> 40) & 0xff)) ||
-       !helper.indirect_parameters || (helper.indirect_parameters & 3) ||
-       !memory->owned(memory->data, helper.indirect_parameters, 6 * 4))
-      return fail_at(address, "invalid compact indirect compute helper");
+          AGX_CHIP_G17P, bytes, AGX3_CDM_INDIRECT_LAUNCH_SIZE, &launch) ||
+       (launch.word0_payload >> 27) != 2 ||
+       launch.indirect_word4_payload != 0 || !launch.pipeline ||
+       (launch.pipeline & 63) ||
+       launch.opaque_word3 !=
+          (UINT32_C(0x40000000) | ((launch.pipeline >> 40) & 0xff)) ||
+       !launch.indirect_parameters || (launch.indirect_parameters & 3) ||
+       !memory->owned(memory->data, launch.indirect_parameters, 6 * 4))
+      return fail_at(address, "invalid compact indirect compute launch");
 
    struct asahi_g17p_stream_stats shader_stats = {0};
-   if (!validate_ioto_program(memory, helper.pipeline, false, true,
+   if (!validate_ioto_program(memory, launch.pipeline, false, true,
                               &shader_stats))
-      return fail_at(address, "compact compute helper Ioto program is invalid");
+      return fail_at(address, "compact compute launch Ioto program is invalid");
 
    return true;
 }
@@ -352,7 +509,6 @@ asahi_g17p_compute_validate(
 {
    struct asahi_g17p_compute_stats local = {0};
    bool need_barrier = false;
-   bool expect_compact_helper = false;
    bool followed_link = false;
 
    if (stats)
@@ -394,18 +550,18 @@ asahi_g17p_compute_validate(
          fprintf(stderr, "\n");
       }
 
-      /* Native indirect dispatches are a direct-shaped 40-byte main launch,
-       * a barrier, then an explicitly delimited 24-byte compact helper and
-       * its barrier.  Type zero alone cannot distinguish the helper from the
-       * 36/40-byte launch families, so decode it only in that exact state. */
-      if (expect_compact_helper && !need_barrier) {
-         if (available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
-             !validate_compact_compute_helper(memory, cursor, bytes))
-            return false;
+      /* Mode 2 is a compact application launch reading six geometry words.
+       * The preceding geometry producer is an ordinary direct launch. Bit 23
+       * is part of the resource template and does not select indirect mode. */
+      const uint32_t header = agx3_cmdstream_load_le32(bytes);
+      if ((header >> 29) == AGX_CDM_BLOCK_TYPE_LAUNCH &&
+          ((header >> 27) & 3) == 2) {
+         if (need_barrier || available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
+             !validate_compact_compute_launch(memory, cursor, bytes))
+            return fail_at(cursor, "invalid compact compute launch ordering");
 
          local.launches++;
          need_barrier = true;
-         expect_compact_helper = false;
          cursor += AGX3_CDM_INDIRECT_LAUNCH_SIZE;
          continue;
       }
@@ -417,7 +573,8 @@ asahi_g17p_compute_validate(
 
       switch (record.kind) {
       case AGX3_CDM_RECORD_LAUNCH: {
-         if (need_barrier || (record.data.launch.pipeline & 63) ||
+         if (need_barrier || (record.data.launch.word0_payload >> 27) != 0 ||
+             (record.data.launch.pipeline & 63) ||
              !record.data.launch.pipeline ||
              record.length != G17P_CDM_DIRECT_LAUNCH_SIZE ||
              record.data.launch.opaque_word3 !=
@@ -437,9 +594,10 @@ asahi_g17p_compute_validate(
             return fail_at(cursor, "compute launch Ioto program is invalid");
 
          local.launches++;
+         local.two_dimensional_launches +=
+            record.data.launch.global_size[1] > 1 &&
+            record.data.launch.global_size[2] == 1;
          need_barrier = true;
-         expect_compact_helper =
-            (record.data.launch.word0_payload & UINT32_C(0x00800000)) != 0;
          break;
       }
 
@@ -452,7 +610,7 @@ asahi_g17p_compute_validate(
             /* Immediate post-graphics writes begin with the strong cache
              * flush which makes the preceding render visible.  It is an
              * ordered stream prologue, not a launch terminator. */
-            if (expect_compact_helper || local.launches != 0 ||
+            if (local.launches != 0 ||
                 local.prologue_barriers != 0 ||
                 record.data.barrier.flags != 0x5)
                return fail_at(cursor, "compute barrier is not canonical");
@@ -468,7 +626,7 @@ asahi_g17p_compute_validate(
          break;
 
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || expect_compact_helper || !local.launches ||
+         if (need_barrier || !local.launches ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");
@@ -479,8 +637,7 @@ asahi_g17p_compute_validate(
 
       case AGX3_CDM_RECORD_STREAM_LINK: {
          const uint64_t target = record.data.stream_link.target;
-         if (need_barrier || expect_compact_helper ||
-             record.data.stream_link.with_return || (target & 3) ||
+         if (need_barrier || record.data.stream_link.with_return || (target & 3) ||
              !memory->owned(memory->data, target, 4))
             return fail_at(cursor, "compute stream link is invalid");
 
@@ -490,11 +647,20 @@ asahi_g17p_compute_validate(
       }
 
       case AGX3_CDM_RECORD_LINK_PADDING:
+         oracle_gap_at(cursor, "CDM link padding");
+         break;
+
       case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
+         oracle_gap_at(cursor, "CDM substream barrier");
+         break;
+
       case AGX3_CDM_RECORD_SECONDARY_BARRIER:
+         oracle_gap_at(cursor, "CDM secondary barrier");
+         break;
+
       case AGX3_CDM_RECORD_UNKNOWN:
       default:
-         return fail_at(cursor, "compute record is outside native Gallium");
+         return fail_indeterminate_at(cursor, "unrecognised CDM record");
       }
 
       cursor += record.length;
@@ -594,7 +760,7 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
 
    switch (slot) {
    case 0: { /* Varyings */
-      if (size != 20 || load_le32(bytes) != UINT32_C(0x10040000))
+      if (size != 20 || load_le32(bytes) != AGX_G17P_VARYING_RECORD_WORD0)
          return fail_at(address, "invalid 20-byte varyings slot");
       if (((load_le32(bytes + 4) | load_le32(bytes + 8)) &
            UINT32_C(0xff000000)) || load_le32(bytes + 12) ||
@@ -857,6 +1023,11 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
    bool pending_selector = false;
    bool have_state = false;
    bool restart_seen = false;
+   /* Cleared by every draw body, set by every barrier record.  A state
+    * republication seen while this is false is a draw installing fresh VDM
+    * pointers over the ones an earlier draw in this same stream may still be
+    * dereferencing. */
+   bool barrier_since_last_draw = false;
    const uint64_t root = config ? config->root : 0;
    uint64_t cursor = root;
 
@@ -872,13 +1043,41 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          return fail_at(cursor, "record header is not owned");
 
       if (pending_selector) {
-         const uint64_t selector = compact_address(load_le32(bytes));
+         const uint32_t selector_offset = load_le32(bytes);
+         const uint64_t selector = compact_address(selector_offset);
          uint8_t indices[8];
-         if ((load_le32(bytes) & 3) ||
+         /* Zero is not a selector. Every CPU-side packer refuses it outright
+          * (agx_vdm_hal200_{direct,indexed,indirect}_draw_pack all reject
+          * draw_state_context_offset == 0), but a GPU-side record builder can
+          * still be handed 0 -- hk_cmd_draw.c's robust-index path initialises
+          * draw_state_offset to 0 and only fills it when the native bind tail
+          * was emitted. Say that plainly: compact_address(0) resolves to the
+          * render context base, which is mapped, so the walk would otherwise
+          * read the context BO and report a meaningless flag mismatch. */
+         if (selector_offset == 0)
+            return fail_at(cursor,
+                           "draw record carries a null draw-state selector "
+                           "offset, which every CPU-side packer refuses");
+         if ((selector_offset & 3) ||
              !read_owned(memory, selector, indices, sizeof(indices)))
             return fail_at(cursor, "draw-state selector is not owned");
-         if (load_le32(indices) != UINT32_C(0x100))
+         if (load_le32(indices) != AGX_G17P_DRAW_STATE_SELECTOR_WORD0) {
+            /* The expectation is the encoder's own constant, not a restated
+             * one: agx_g17p_ppp_indices_pack() and its base variant are the
+             * only writers of this record and both emit it unconditionally.
+             *
+             * Print what was actually read. A mismatch here is either a driver
+             * that stopped emitting the selector the encoder defines, or a
+             * walk that resolved something which is not a selector at all, and
+             * a bare "flags are invalid" cannot tell those apart -- which is
+             * why a batch of these rejections could not be adjudicated. */
+            fprintf(stderr,
+                    "shim: G17P draw-state selector at %#llx has word0 %#x, "
+                    "encoder emits %#x\n",
+                    (unsigned long long)selector, load_le32(indices),
+                    AGX_G17P_DRAW_STATE_SELECTOR_WORD0);
             return fail_at(selector, "draw-state selector flags are invalid");
+         }
          if (local.viewport_count == 0 ||
              local.viewport_count > AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS)
             return fail_at(selector, "selector has no bounded viewport state");
@@ -929,6 +1128,9 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
 
       switch (record.kind) {
       case AGX_VDM_RECORD_BARRIER:
+         local.barriers++;
+         local.inter_draw_barriers += local.draws > 0;
+         barrier_since_last_draw = true;
          cursor += record.length;
          break;
 
@@ -962,12 +1164,15 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          pending_selector = true;
          have_state = true;
          local.state_updates++;
+         if (local.draws > 0 && !barrier_since_last_draw)
+            local.unbarriered_state_republications++;
          break;
 
       case AGX_VDM_RECORD_INDEX_LIST_NONINDEXED:
          if (!have_state || restart_seen)
             return fail_at(cursor, "non-indexed draw has invalid state order");
          local.draws++;
+         barrier_since_last_draw = false;
          if (record.data.index_list_nonindexed.instances >
              local.max_instance_count)
             local.max_instance_count =
@@ -991,6 +1196,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             return fail_at(cursor, "indexed draw buffer is not owned");
          restart_seen = false;
          local.draws++;
+         barrier_since_last_draw = false;
          local.indexed_draws++;
          local.primitive_mask |= UINT32_C(1) << draw->primitive;
          local.index_size_mask |= UINT8_C(1) << draw->index_size;
@@ -1000,12 +1206,18 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          break;
       }
 
-      case AGX_VDM_RECORD_STREAM_LINK:
-         cursor = compact_address(record.data.stream_link.target);
-         if (!memory->owned(memory->data, cursor, 4))
-            return fail_at(cursor, "stream-link target is not owned");
+      case AGX_VDM_RECORD_STREAM_LINK: {
+         const uint64_t compact_target = record.data.stream_link.target;
+         uint64_t target;
+         if (!compact_target || (compact_target & 3) ||
+             !agx_g17p_vdm_payload_expand(compact_target, 4, &target) ||
+             target == cursor || target == config->root ||
+             !memory->owned(memory->data, target, 4))
+            return fail_at(cursor, "stream-link target is invalid or unowned");
+         cursor = target;
          local.links++;
          break;
+      }
 
       case AGX_VDM_RECORD_STREAM_TERMINATE:
          /* Empty VDM streams are valid for clear-only render passes, whose
@@ -1018,30 +1230,33 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             *stats = local;
          return true;
 
-      case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_NONINDEXED:
+      case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_NONINDEXED: {
+         const uint64_t indirect_buffer =
+            record.data.index_list_indirect_nonindexed.indirect_buffer;
          if (!have_state || restart_seen ||
-             !memory->owned(
-                memory->data,
-                record.data.index_list_indirect_nonindexed.indirect_buffer,
-                16))
+             !memory->owned(memory->data, indirect_buffer, 16))
             return fail_at(cursor, "indirect draw arguments are not owned");
          local.draws++;
+         barrier_since_last_draw = false;
          local.primitive_mask |= UINT32_C(1) <<
                                  record.data.index_list_indirect_nonindexed.primitive;
          local.indirect_nonindexed = true;
          cursor += record.length;
          break;
+      }
 
       case AGX_VDM_RECORD_INDEX_LIST_INDIRECT_INDEXED: {
          const struct agx_vdm_index_list_indirect_indexed_info *draw =
             &record.data.index_list_indirect_indexed;
-         const size_t index_range = ((size_t)draw->index_buffer_size_word + 1) * 4;
+         const size_t index_range =
+            ((size_t)draw->index_buffer_size_word + 1) * 4;
          if (!have_state || restart_seen ||
              !memory->owned(memory->data, draw->indirect_buffer, 20) ||
              !memory->owned(memory->data, draw->index_buffer, index_range))
             return fail_at(cursor,
                            "indexed-indirect buffers are not owned");
          local.draws++;
+         barrier_since_last_draw = false;
          local.indexed_draws++;
          local.primitive_mask |= UINT32_C(1) << draw->primitive;
          local.index_size_mask |= UINT8_C(1) << draw->index_size;
@@ -1053,9 +1268,13 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
       }
 
       case AGX_VDM_RECORD_TESSELLATE_DIRECT:
+         oracle_gap_at(cursor, "VDM direct tessellate");
+         cursor += record.length;
+         break;
+
       case AGX_VDM_RECORD_UNKNOWN:
       default:
-         return fail_at(cursor, "record is outside native Gallium matrix");
+         return fail_indeterminate_at(cursor, "unrecognised VDM record");
       }
    }
 

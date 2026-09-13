@@ -882,11 +882,17 @@ main(void)
       if (!expect_submit_failure) {
          if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE", "1", 1))
             die("failed to enable exact G17P compute-stream validation");
+         /* This count is also the compressed-upload performance contract.
+          * Upload and readback must emit one launch per slice, never one per
+          * compressed block.  The old nested block copy recorded nine
+          * launches for this tiny image and 65,536 for one 1024x1024 slice. */
          if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS",
 #ifdef G17P_COMPRESSED_READBACK
-                    "17,17,0,0",
+                    /* Two-slice upload + sample + two-slice readback. */
+                    "5,5,0,0",
 #else
-                    "9,9,0,0",
+                    /* Two-slice upload + sample. */
+                    "3,3,0,0",
 #endif
                     1))
             die("failed to select exact compressed 3D stream counts");

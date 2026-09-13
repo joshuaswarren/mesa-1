@@ -167,11 +167,23 @@ main(void)
       AGX_CHIP_G17P, UINT32_C(0x00040000), false, true,
       &output_select));
    assert(output_select == UINT32_C(0x00240000));
+   /* Apple position + smooth float2 + [[point_size]] keeps size 7 and sets
+    * the point-size selector; merging the fragment varying gives 0x50000. */
+   assert(agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00040000), true, false,
+      &output_select));
+   assert(output_select == UINT32_C(0x00050000));
+   /* Native clip3 preserves the compiler's first three clip-distance bits
+    * and merges the fragment-owned varying bit into the same HAL200 word. */
+   assert(agx_ppp_hal200_output_select_pack(
+      AGX_CHIP_G17P, UINT32_C(0x00000007), true, false,
+      &output_select));
+   assert(output_select == UINT32_C(0x00010007));
    assert(!agx_ppp_hal200_output_select_pack(
       AGX_CHIP_G17P, UINT32_C(0x00080000), false, false,
       &output_select));
    assert(!agx_ppp_hal200_output_select_pack(
-      AGX_CHIP_G17P, UINT32_C(0x00000001), false, false,
+      AGX_CHIP_G17P, UINT32_C(0x00020000), false, false,
       &output_select));
    assert(!agx_ppp_hal200_output_select_pack(
       AGX_CHIP_G17S, 0, false, false, &output_select));

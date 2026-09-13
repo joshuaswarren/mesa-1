@@ -122,6 +122,9 @@ hk_agx3_vertex_program_info(
    const bool writes_layer_viewport =
       compiler_info &&
       compiler_info->clip_off == compiler_info->layer_viewport_off + 1;
+   /* Derive this from the final UVS layout. Vulkan I/O lowering clears
+    * outputs_written before backend compilation, so a separate semantic bit
+    * can be stale even when the emitted position-only layout is complete. */
    const bool position_only =
       compiler_info && compiler_info->user_size == 0 && !writes_psiz &&
       !writes_layer_viewport;
@@ -138,8 +141,7 @@ hk_agx3_vertex_program_info(
        (compiler_info->clip_off != compiler_info->layer_viewport_off &&
         compiler_info->clip_off != compiler_info->layer_viewport_off + 1) ||
        compiler_info->uvs_size != compiler_info->clip_off ||
-       compiler_info->position_only != position_only ||
-       (compiler_info->position_only && compiler_info->uvs_written != 0) ||
+       (position_only && compiler_info->uvs_written != 0) ||
        compiler_info->user_size > HK_AGX3_G17P_MAX_USER_WORDS ||
        util_bitcount64(compiler_info->uvs_written) > compiler_info->user_size)
       return false;
@@ -193,13 +195,13 @@ hk_agx3_g17g_vertex_program_info(
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,
    struct agx_vdm_state_update_program_info *program)
 {
-   const bool position = compiler_info && compiler_info->position_only &&
-                         compiler_info->uvs_size == 4;
+   const bool position = compiler_info && compiler_info->uvs_size == 4 &&
+                         compiler_info->uvs_written == 0;
    /* Dynamic-topology pipelines retain the default point-size output even
     * for triangle draws. Use the shared UVS footprint encoding for that
     * fifth word; layer/viewport output remains a separate profile.
     */
-   const bool position_psiz = compiler_info && !compiler_info->position_only &&
+   const bool position_psiz = compiler_info &&
       compiler_info->uvs_size == 5 && compiler_info->psiz_off == 4 &&
       compiler_info->layer_viewport_off == 5 && compiler_info->clip_off == 5 &&
       compiler_info->uvs_written == 0;
@@ -209,7 +211,7 @@ hk_agx3_g17g_vertex_program_info(
     * with HAL300's pre-HAL300 flags absent. Fragment coefficient state is
     * validated independently before any draw can be submitted.
     */
-   const bool color = compiler_info && !compiler_info->position_only &&
+   const bool color = compiler_info &&
       compiler_info->user_size == 4 &&
       compiler_info->uvs_written == BITFIELD64_BIT(VARYING_SLOT_VAR0) &&
       compiler_info->psiz_off == 8 &&

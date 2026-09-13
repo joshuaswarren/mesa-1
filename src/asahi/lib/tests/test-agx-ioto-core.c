@@ -545,11 +545,23 @@ check_program_records(void)
       0x67, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9a,
       0xbc, 0xde, 0xf0, 0x24, 0x68, 0xac, 0xe0,
    };
+   /* Byte three carries the release variant and the colour partition count.
+    * The composer emits ordinary 0xf3/0xc3/0x03 and coverage 0xf2/0xc2/0x02
+    * for one, two and three partitions, plus 0x00 for the bounded background
+    * release; decoding must admit the whole set, not just one partition. */
    static const uint8_t g17p_pixrel[][6] = {
       {0x07, 0x02, 0x54, 0xf3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xc3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x03, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0xf2, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xc2, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x02, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0x00, 0x02, 0x00},
    };
+   /* A partition byte the composer never emits must still lose the walk
+    * rather than be silently accepted as a release. */
+   static const uint8_t g17p_not_pixrel[6] = {0x07, 0x02, 0x54,
+                                              0xc4, 0x02, 0x00};
 
    for (unsigned i = 0; i < sizeof(g17p_pixrel) / sizeof(g17p_pixrel[0]);
         ++i) {
@@ -564,6 +576,14 @@ check_program_records(void)
       CHECK(!agx_ioto_decode_program_record(
          AGX_CHIP_G16G, g17p_pixrel[i], sizeof(g17p_pixrel[i]), &record,
          &consumed));
+   }
+
+   {
+      struct agx_ioto_program_record record;
+      size_t consumed = 99;
+      CHECK(!agx_ioto_decode_program_record(AGX_CHIP_G17P, g17p_not_pixrel,
+                                            sizeof(g17p_not_pixrel), &record,
+                                            &consumed));
    }
 
    for (size_t i = 0; i < sizeof(all_targets) / sizeof(all_targets[0]); ++i) {

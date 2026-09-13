@@ -209,13 +209,41 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->no_addend &&
        (d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend))
       return false;
-   /*
-    * Sign extension is a property of widening an operand into a wider result.
-    * A 32-bit product does not widen anything, so refuse the bits there rather
-    * than dropping them: an unwitnessed combination must fail closed.
-    */
-   if (!d->dest_64 && (d->src_a_sign_extend || d->multiplier_sign_extend))
-      return false;
+   /* Sign extension is meaningful for 16->32 as well as 32->64 products.
+    * The grounded 16->32 form is specifically a paired-half pure multiply;
+    * its native witnesses are both-signed and both-unsigned, not mixed. */
+   const bool widening_half_product =
+      !d->dest_16 && !d->dest_64 && d->src_a_16 &&
+      d->multiplier_is_register && d->multiplier_16 && d->no_addend;
+   if (d->dest_64) {
+      /* A 32->64 product widens operands that are already 32-bit, so a narrow
+       * operand carrying the bit is unwitnessed here. */
+      if ((d->src_a_sign_extend && d->src_a_16) ||
+          (d->multiplier_sign_extend && d->multiplier_16))
+         return false;
+   } else if (widening_half_product) {
+      /* Paired-half pure multiply into a 32-bit result: the native witnesses
+       * are both-signed and both-unsigned, never mixed. */
+      if (d->src_a_sign_extend != d->multiplier_sign_extend)
+         return false;
+   } else {
+      /* Any other 32-bit product.  "A 32-bit product does not widen anything"
+       * only holds when the operand is itself 32 bits; a 16-bit multiplicand
+       * widens by exactly one step and Apple sets f28 for it:
+       *
+       *   int(short  a) * 129 + int(short  c)
+       *      9f 00 56 00 02 02 04 02 10 2a 66 00     f24 = 1, f28 = 1
+       *   int(ushort a) * 129 + int(ushort c)
+       *      9f 00 56 00 02 02 04 02 10 2a 22 00     f24 = 1, f28 = 0
+       *
+       * so gate slot A's bit on slot A being narrow. No witness exercises a
+       * narrow register multiplier with a 32-bit result outside the paired-
+       * half form above, so the multiplier's bit still fails closed. */
+      if (d->src_a_sign_extend && !d->src_a_16)
+         return false;
+      if (d->multiplier_sign_extend)
+         return false;
+   }
    /* The 8-bit immediate multiplier has no sign-extend bit of its own. */
    if (!d->multiplier_is_register && d->multiplier_sign_extend)
       return false;
@@ -224,13 +252,15 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    /*
     * Fresh G17P ushort witnesses ground both narrow source-B classes.  The
     * register form is a low-half multiply, so signed and unsigned MSL produce
-    * the same instruction.  Keep register C and every widening bit closed:
-    * neither has a meaning for a 16-bit result in the witnessed domain.
+    * the same instruction. Current G17P Metal also witnesses a plain half
+    * register C for ushort a*b+c. Keep wider C and every widening bit closed:
+    * none has a meaning for a 16-bit result in the witnessed domain.
     */
    if (d->dest_16 &&
        (!d->src_a_16 ||
         (d->multiplier_is_register ? !d->multiplier_16 : d->no_addend) ||
-        (!d->addend_is_immediate && !d->no_addend) ||
+        (!d->addend_is_immediate && !d->no_addend &&
+         !d->src_c_16) ||
         d->src_a_sign_extend || d->multiplier_sign_extend ||
         d->src_c_sign_extend))
       return false;
@@ -325,7 +355,12 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
          ov[n++] = (struct agx3_field_kv)KV((m5 ? 61 : 60) + i, 1);
    }
 
-   return agx3_bind_compose(encoding, m5 ? "imadd32" : "imadd", 0,
-                            baseline, nbaseline, ov, n,
-                            out, len);
+   /* A negated addend is Apple's `imsub`: same fields, one opcode bit. A
+    * pure multiply has no addend to negate, so refuse that rather than emit a
+    * form nothing witnesses. */
+   if (d->negate_addend && (d->no_addend || m5))
+      return false;
+
+   return agx3_bind_compose(encoding, m5 ? "imadd32" : (d->negate_addend ? "imsub" : "imadd"), 0,
+                            baseline, nbaseline, ov, n, out, len);
 }

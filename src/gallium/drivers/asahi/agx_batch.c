@@ -230,6 +230,8 @@ agx_batch_init(struct agx_context *ctx,
    util_dynarray_init(&batch->depth_bias, ctx);
    util_dynarray_init(&batch->timestamps, ctx);
    util_dynarray_init(&batch->g17p_vdm_aliases, ctx);
+   util_dynarray_init(&batch->faulttrace_cmdbuf, ctx);
+   batch->faulttrace_seqid = 0;
 
    batch->clear = 0;
    batch->draw = 0;
@@ -380,6 +382,7 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    util_dynarray_fini(&batch->depth_bias);
    util_dynarray_fini(&batch->timestamps);
    util_dynarray_fini(&batch->g17p_vdm_aliases);
+   util_dynarray_fini(&batch->faulttrace_cmdbuf);
 
    if (!(dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC))) {
       agx_batch_print_stats(dev, batch);
@@ -819,6 +822,66 @@ asahi_add_attachment(struct attachments *att, struct agx_resource *rsrc)
    };
 }
 
+static void
+agx_cmdtrace_dump_cmdbuf(struct agx_device *dev, struct agx_batch *batch,
+                         struct util_dynarray *cmdbuf, const char *role,
+                         uint64_t seqid, int submit_errno)
+{
+   fprintf(stderr,
+           "asahi: cmdtrace role=%s queue=%u batch=%u seqid=%" PRIu64
+           " syncobj=%u draws=%u errno=%d cmdbuf-bytes=%u\n",
+           role, batch->ctx->queue_id, agx_batch_idx(batch), seqid,
+           batch->syncobj, batch->draws, submit_errno, cmdbuf->size);
+
+   if (!cmdbuf->size)
+      return;
+
+   /* G17P VDM encodes compact aliases rather than the allocator-owned BO
+    * addresses tracked by agxdecode. Add decoder-only views for the lifetime
+    * of this dump so it can follow the encoder and every aliased PPP payload
+    * without changing any GPU mapping. */
+   const unsigned payload_alias_count = util_dynarray_num_elements(
+      &batch->g17p_vdm_aliases, struct agx_g17p_vdm_alias);
+   const unsigned alias_count =
+      (batch->vdm.g17p_vdm_alias != 0) + payload_alias_count;
+   struct agx_bo *alias_bos = calloc(alias_count, sizeof(*alias_bos));
+   struct agx_va *alias_vas = calloc(alias_count, sizeof(*alias_vas));
+   unsigned alias_index = 0;
+
+   if (alias_bos && alias_vas && batch->vdm.g17p_vdm_alias) {
+      alias_bos[alias_index] = *batch->vdm.bo;
+      alias_vas[alias_index] = (struct agx_va){
+         .addr = batch->vdm.g17p_vdm_alias,
+         .size_B = batch->vdm.bo->size,
+      };
+      alias_bos[alias_index].handle = UINT32_MAX - alias_index;
+      alias_bos[alias_index].va = &alias_vas[alias_index];
+      agxdecode_track_alloc(dev->agxdecode, &alias_bos[alias_index++]);
+   }
+
+   if (alias_bos && alias_vas) {
+      util_dynarray_foreach(&batch->g17p_vdm_aliases,
+                            struct agx_g17p_vdm_alias, entry) {
+         alias_bos[alias_index] = *entry->bo;
+         alias_vas[alias_index] = (struct agx_va){
+            .addr = entry->address,
+            .size_B = entry->bo->size,
+         };
+         alias_bos[alias_index].handle = UINT32_MAX - alias_index;
+         alias_bos[alias_index].va = &alias_vas[alias_index];
+         agxdecode_track_alloc(dev->agxdecode, &alias_bos[alias_index++]);
+      }
+   }
+
+   agxdecode_drm_cmdbuf(dev->agxdecode, &dev->params, cmdbuf, true);
+   agxdecode_next_frame();
+
+   while (alias_index)
+      agxdecode_track_free(dev->agxdecode, &alias_bos[--alias_index]);
+   free(alias_vas);
+   free(alias_bos);
+}
+
 void
 agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                  struct drm_asahi_cmd_compute *compute,
@@ -1101,6 +1164,12 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       fprintf(stderr, "NEO_SUBMIT queue=%u batch=%u seq=%llu draws=%u render=%u compute=%u bytes=%zu\n",
               ctx->queue_id, agx_batch_idx(batch), (unsigned long long)seqid,
               batch->draws, !!render, !!compute, (size_t)cmdbuf.size);
+
+   if (dev->debug & AGX_DBG_FAULTTRACE) {
+      util_dynarray_append_array(&batch->faulttrace_cmdbuf, uint8_t,
+                                 cmdbuf.data, cmdbuf.size);
+      batch->faulttrace_seqid = seqid;
+   }
    int ret = dev->ops.submit(dev, &submit, &virt);
    const int submit_errno =
       ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
@@ -1110,6 +1179,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
               ret, submit_errno);
 
    u_rwlock_rdunlock(&screen->destroy_lock);
+
+   if (!ret && (dev->debug & AGX_DBG_ASYNCTRACE))
+      agx_cmdtrace_dump_cmdbuf(dev, batch, &cmdbuf, "accepted-current",
+                               seqid, 0);
 
    if (ret) {
       if (compute) {
@@ -1125,6 +1198,28 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             strerror(submit_errno),
             c->width_px, c->height_px, c->utile_width_px, c->utile_height_px,
             c->layers, c->samples);
+      }
+
+      /* Unlike `trace`, faulttrace does not wait after or decode successful
+       * submissions, so it preserves the compositor's queue chronology. BO
+       * tracking was armed at device open and each submitted batch retained
+       * its small DRM command wrapper. A wait-queue-timeline failure is
+       * observed by the current (rejected) submit but was caused by an earlier
+       * in-flight submit, so decode those candidates before the observer. */
+      if (dev->debug & AGX_DBG_FAULTTRACE) {
+         unsigned i;
+         foreach_submitted(ctx, i) {
+            struct agx_batch *candidate = &ctx->batches.slots[i];
+            agx_cmdtrace_dump_cmdbuf(
+               dev, candidate, &candidate->faulttrace_cmdbuf,
+               "in-flight-prior", candidate->faulttrace_seqid, submit_errno);
+         }
+
+         agx_cmdtrace_dump_cmdbuf(dev, batch, &batch->faulttrace_cmdbuf,
+                                  "rejected-current", seqid, submit_errno);
+      } else if (dev->debug & AGX_DBG_ASYNCTRACE) {
+         agx_cmdtrace_dump_cmdbuf(dev, batch, &cmdbuf, "rejected-current",
+                                  seqid, submit_errno);
       }
 
       agx_retire_failed_submit(ctx, batch, syncs, shared_bos,

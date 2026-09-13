@@ -7,6 +7,7 @@
  * bytes (and keep the length) without disturbing the operands.
  */
 #include "agx3_alu_core.h"
+#include "agx3_falu_mod_core.h"
 #include "agx3_alu_core_vectors.c"
 #include <stdio.h>
 #include <string.h>
@@ -770,82 +771,26 @@ test_fmul_minifloat(void)
 static void
 test_fmul_minifloat_modifiers(void)
 {
-   static const struct {
-      uint16_t src, imm;
-      bool dest_cache;
-      enum agx3_alu_hint hint;
-      uint16_t wait;
-      uint8_t bytes[6];
-   } native[] = {
-      {0, 0x40, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xc1, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0x20, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xa1, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0x38, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xb9, 0x15, 0x01, 0x82, 0x00}},
-      {0, 0xc0, false, AGX3_ALU_HINT_DISCARD, 0,
-       {0x09, 0xc1, 0x1d, 0x01, 0x82, 0x00}},
-      {0, 0x40, true, AGX3_ALU_HINT_DISCARD, 1,
-       {0x09, 0xc1, 0x35, 0x01, 0x82, 0x20}},
-      {2, 0x40, false, AGX3_ALU_HINT_CACHE, 0,
-       {0x09, 0xc1, 0x05, 0x83, 0x82, 0x00}},
-   };
-   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
-   for (unsigned i = 0; i < sizeof(native) / sizeof(native[0]); ++i) {
-      assert(agx3_alu_fmul_minifloat_mod(
-         AGX_ISA_ENCODING_AGX3B, 0, native[i].src, native[i].imm,
-         native[i].dest_cache, true, native[i].hint,
-         native[i].wait, out, &len));
-      assert(len == sizeof(native[i].bytes));
-      assert(!memcmp(out, native[i].bytes, len));
-   }
-
-   unsigned matrix = 0;
+   unsigned rejected = 0;
    for (unsigned imm = 0; imm <= UINT8_MAX; ++imm) {
       for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
          for (unsigned hint = AGX3_ALU_HINT_NONE;
               hint <= AGX3_ALU_HINT_CACHE; ++hint) {
             for (unsigned wait = 0; wait < 64; ++wait) {
-               uint8_t plain[AGX3_ALU_MAX_LENGTH], absolute[AGX3_ALU_MAX_LENGTH];
-               uint8_t plain_len = 0xa5, absolute_len = 0xa5;
-               bool plain_ok = agx3_alu_fmul_minifloat_mod(
+               uint8_t absolute[AGX3_ALU_MAX_LENGTH];
+               uint8_t absolute_len = 0xa5;
+               memset(absolute, 0xa5, sizeof(absolute));
+               assert(!agx3_alu_fmul_minifloat_mod(
                   AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
-                  false, hint, wait, plain, &plain_len);
-               bool absolute_ok = agx3_alu_fmul_minifloat_mod(
-                  AGX_ISA_ENCODING_AGX3B, 254, 128, imm, dest_cache,
-                  true, hint, wait, absolute, &absolute_len);
-               assert(plain_ok == absolute_ok);
-               if (!plain_ok)
-                  continue;
-               assert(plain_len == 6 && absolute_len == plain_len);
-               assert(!(plain[4] & 0x02) && (absolute[4] & 0x02));
-               absolute[4] &= ~0x02;
-               assert(!memcmp(plain, absolute, plain_len));
-               matrix++;
+                  true, hint, wait, absolute, &absolute_len));
+               assert(absolute_len == 0xa5 && absolute[0] == 0xa5);
+               rejected++;
             }
          }
       }
    }
-
-   memset(out, 0xa5, sizeof(out));
-   len = 99;
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3C, 0, 0, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(len == 99 && out[0] == 0xa5);
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 1, 0, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 0, 1, 0x40, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-   assert(!agx3_alu_fmul_minifloat_mod(
-      AGX_ISA_ENCODING_AGX3B, 0, 0, 0x100, false, true,
-      AGX3_ALU_HINT_DISCARD, 0, out, &len));
-
-   printf("G17P absolute minifloat FMUL: five direct and one texture-wait "
-          "Apple witnesses, %u orthogonal immediate/lifetime/wait forms and "
-          "strict negatives PASS\n", matrix);
+   printf("G17P absolute minifloat FMUL: %u ungrounded fused encodings "
+          "rejected PASS\n", rejected);
 }
 
 static void test_fmul_half_minifloat_to_f32(void)
@@ -941,6 +886,12 @@ static void test_u16_to_f32(void)
 }
 static void exact(const uint8_t *bytes, uint8_t length, const char *hex)
 {
+   if (strlen(hex) != (size_t)length*2) {
+      fprintf(stderr, "length mismatch: expected %s (%zu bytes), got ",
+              hex, strlen(hex)/2);
+      for (unsigned j=0;j<length;++j) fprintf(stderr, "%02x", bytes[j]);
+      fputc('\n', stderr);
+   }
    assert(strlen(hex) == (size_t)length*2);
    for (unsigned i=0;i<length;++i) {
       unsigned value;
@@ -1354,6 +1305,135 @@ test_float_compare_zero(void)
    puts("FSEL zero: six exact mixed-width native lifetime witnesses PASS");
 }
 
+/*
+ * A HALF-WIDTH COMPARATOR on the general compare-select.
+ *
+ * agx3_alu_fcmp_select() is the endpoint that takes a register in a select
+ * slot (as opposed to two selected immediates). It pinned both comparators to
+ * 32 bits -- their width fields f43/f60 were hardcoded to 2 and their register
+ * numbers were required to be even -- so a highp value compared against a
+ * mediump one refused the whole shader closed.
+ *
+ * That is not an exotic shape. It is what three.js's point-light shadow
+ * fragment compiles to: cubeToUV()'s `absV.z >= almostOne` chain compares a
+ * 32-bit component against a half-precision texel-size term and selects
+ * between an immediate and a register. Under the G17P drm-shim the packer
+ * refused
+ *
+ *    agx3_pack_binary.c:8001: no grounded AGX3 encoding for fcmpsel
+ *      [d16:reg34 s0=32:reg34.discard s1=16:reg37.cache s2=16:imm1
+ *       s3=16:reg50.discard cond=5 chan=1 mask=0x0 fmt=0 shift=0]
+ *
+ * and vkCreateGraphicsPipelines returned VK_ERROR_FEATURE_NOT_PRESENT.
+ *
+ * The width fields are Apple's, not inferred. Two kernels built with
+ * `metal-nt -arch applegpu_g17p`, identical but for the second comparator's
+ * width (`(x <= y) ? 1.0h : z` with y a float, then y a half):
+ *
+ *    both comparators 32-bit   12 03 19 05 26 b0 03 c0 80 06
+ *    comparator 1 16-bit       12 03 19 04 26 b0 03 c0 80 05
+ *
+ * One bit moves for the width -- byte 3 bit 0, which is exactly where this
+ * encoder deposits f60 -- and the comparator register keeps the same value
+ * (4) across the pair. The other changed byte is the selected register, which
+ * Apple's allocator placed differently; note it lands on an ODD half (5),
+ * which the old even-only rule also refused.
+ */
+static void
+test_fcmp_select_half_comparator(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+
+   /* The refused three.js instruction, verbatim. */
+   struct agx3_fsel_desc d = {
+      .dest = 34,
+      .dest_16 = true,
+      .cmp0 = 34,
+      .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp0_16 = false,
+      .cmp1 = 37,
+      .cmp1_hint = AGX3_ALU_HINT_CACHE,
+      .cmp1_16 = true,
+      .sel0_kind = AGX3_FSEL_SEL_IMMEDIATE,
+      .sel0 = 1,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER,
+      .sel1 = 50,
+      .sel_16 = true,
+      .condition = 5,
+   };
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   exact(out, len, "12234da4268112002032");
+
+   /* The same instruction with a 32-bit comparator differs only in the width
+    * field and in the register number -- the length and every other byte are
+    * unchanged, so widening is not silently selecting a different endpoint. */
+   uint8_t wide[AGX3_ALU_MAX_LENGTH], wide_len;
+   struct agx3_fsel_desc d32 = d;
+   d32.cmp1_16 = false;
+   d32.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d32, wide, &wide_len));
+   exact(wide, wide_len, "12234da5268102002032");
+   assert(wide_len == len);
+
+   /* Holding the register number and moving only the width isolates the bit:
+    * byte 3, bit 0, the same bit Apple's two kernels differ in. */
+   struct agx3_fsel_desc even16 = d;
+   even16.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &even16, out, &len));
+   exact(out, len, "12234da4268102002032");
+   {
+      unsigned differing = 0;
+      for (unsigned i = 0; i < len; ++i)
+         differing += (unsigned)__builtin_popcount((unsigned)(out[i] ^ wide[i]));
+      assert(differing == 1);
+      assert((out[3] ^ wide[3]) == 0x01);
+   }
+
+   /* The first comparator takes the same treatment, odd half included. */
+   struct agx3_fsel_desc first = d;
+   first.cmp0_16 = true;
+   first.cmp0 = 35;
+   first.cmp1_16 = false;
+   first.cmp1 = 36;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &first, out, &len));
+   assert(len == wide_len && memcmp(out, wide, len) != 0);
+
+   /* Fail-closed rules that must survive. Both comparators at half width is
+    * not witnessed on either entry point, a 32-bit comparator is a register
+    * pair and still may not start on an odd half, and an immediate compare
+    * slot always declares width 2. */
+   struct agx3_fsel_desc both = d;
+   both.cmp0_16 = true;
+   both.cmp0 = 34;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &both, out, &len));
+
+   struct agx3_fsel_desc odd32 = d;
+   odd32.cmp1_16 = false;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &odd32, out, &len));
+
+   struct agx3_fsel_desc odd_first = d;
+   odd_first.cmp0 = 35;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &odd_first, out, &len));
+
+   struct agx3_fsel_desc imm = d;
+   imm.cmp1_is_immediate = true;
+   imm.cmp1 = 0;
+   imm.cmp1_16 = true;
+   uint8_t imm_bytes[AGX3_ALU_MAX_LENGTH] = {0}, imm_len = 0;
+   const bool imm_ok =
+      agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &imm, imm_bytes, &imm_len);
+   struct agx3_fsel_desc imm32 = imm;
+   imm32.cmp1_16 = false;
+   uint8_t imm32_bytes[AGX3_ALU_MAX_LENGTH] = {0}, imm32_len = 0;
+   const bool imm32_ok = agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &imm32,
+                                              imm32_bytes, &imm32_len);
+   assert(imm_ok == imm32_ok);
+   assert(imm_len == imm32_len &&
+          memcmp(imm_bytes, imm32_bytes, imm_len) == 0);
+
+   puts("FSEL half comparator: three.js point-shadow shape encodes PASS");
+}
+
 static void
 test_float_compare_select(void)
 {
@@ -1374,6 +1454,34 @@ test_float_compare_select(void)
       AGX_ISA_ENCODING_AGX3B, 4, mixed_src, mixed_hints, 0, true, 0,
       out, &len));
    exact(out, len, "2289278a05860000");
+   const uint16_t half_half_src[] = {8, 9, 0, 4};
+   const enum agx3_alu_hint half_half_hints[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   const bool no_abs[] = {false, false};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, no_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f08800413c0");
+   const bool first_abs[] = {true, false};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, first_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800100");
+   const bool second_abs[] = {false, true};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, second_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800200");
+   const bool both_abs[] = {true, true};
+   assert(agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3B, 0, half_half_src, half_half_hints, both_abs,
+      1 /* lt */, false, 32, out, &len));
+   exact(out, len, "02081f0883001300800400800300");
+   assert(!agx3_alu_fcmp_select_f16_f16_f32(
+      AGX_ISA_ENCODING_AGX3C, 0, half_half_src, half_half_hints, first_abs,
+      1 /* lt */, false, 32, out, &len));
    const uint16_t lightmap_src[] = {46, 52, 26, 36};
    const enum agx3_alu_hint lightmap_hints[] = {
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
@@ -1501,11 +1609,21 @@ static void test_i32_to_f16(void)
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
-   assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
-                               AGX3_ALU_HINT_CACHE, false, 0, out, &len));
+   /* A CACHED source used to be refused; f27 carries it, the way f29 carries
+    * discard.  Apple's own live-source kernel, recovered by composing with
+    * the registers held equal rather than by diffing two kernels whose
+    * register allocation differs: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 4, 0, true,
+                              AGX3_ALU_HINT_CACHE, false, 0x20, out, &len));
+   exact(out, len, "a707560402008a60");
+   /* and its dead-source twin, which our field set already reproduced: */
+   assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
+                              AGX3_ALU_HINT_DISCARD, false, 0x20, out, &len));
+   exact(out, len, "a70756020204a860");
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 2, false,
                                AGX3_ALU_HINT_NONE, false, 0x40, out, &len));
-   puts("Native i32-to-f16: five exact Apple vectors and refusals PASS");
+   puts("Native i32-to-f16: exact Apple vectors incl. cached source, and "
+        "refusals PASS");
 }
 
 static void
@@ -1736,12 +1854,18 @@ static void test_native_u16_arithmetic(void)
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       2, 255, 0, true, false, 32, out, &len));
    exact(out, len, "02091d01a2ff02c82080");
-   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+   /* f65 is an ordinary field, not a property of one witnessed shape: it
+    * composes with every relation and with a 32-bit result. These two used
+    * to be refusals here, on the strength of nothing having been measured
+    * rather than of anything having been ruled out. */
+   assert(agx3_alu_fcmp_select_imm_width_neg_second(
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       1, 255, 0, true, false, 32, out, &len));
-   assert(!agx3_alu_fcmp_select_imm_width_neg_second(
+   exact(out, len, "02091d01a2ff03c82080");
+   assert(agx3_alu_fcmp_select_imm_width_neg_second(
       AGX_ISA_ENCODING_AGX3B, 0, neg_src, full_width, dead,
       2, 255, 0, false, false, 32, out, &len));
+   exact(out, len, "02091f01a2ff02c82080");
    puts("Native u16 ALU and mixed-width FSEL: six native byte vectors PASS");
 }
 
@@ -1932,6 +2056,17 @@ static void test_native_asr32(void)
    puts("M5 ASR32:4 native vectors and invalid operands PASS");
 }
 
+static void test_native_asr16(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+   assert(agx3_alu_asr_imm16(AGX_ISA_ENCODING_AGX3B,2,2,1,
+                              AGX3_ALU_HINT_DISCARD,false,32,bytes,&length));
+   exact(bytes,length,"a7015602020404606200");
+   assert(!agx3_alu_asr_imm16(AGX_ISA_ENCODING_AGX3B,2,2,16,
+                               AGX3_ALU_HINT_DISCARD,false,32,bytes,&length));
+   puts("Native ASR16 exact Apple immediate/dead vector PASS");
+}
+
 static void test_native_narrow_multiply(void)
 {
    const uint16_t src[]={0,2};
@@ -1964,6 +2099,124 @@ static void test_native_half_multiply(void)
       exact(bytes,len,live?"2000050100c0":"10021d0300c0");
    }
    puts("Native half multiply: two complete Apple live/dead vectors PASS");
+}
+
+static void test_wait_code_forms_fail_closed(void)
+{
+   /* Two wait ENCODINGS exist and agx3_alu_compose() must not mix them up.
+    *
+    * The ten-byte integer forms carry a six-bit MASK: iadd's f45..f50 land in
+    * byte1 bits 4..7 and byte2 bits 0..1, so a pinned slot plus a requested
+    * slot is simply "wait both" -- an over-wait, conservative and safe.
+    *
+    * The compact float forms instead carry a three-bit CODE naming ONE slot,
+    * values 1..6, in byte5 bits 5..7. f32add's f52..f57 deposit
+    * 0x20/0x40/0x60/0x80/0xa0/0xc0 there, and each of those six was witnessed
+    * from Apple in a single kernel that issues six device loads and consumes
+    * them in reverse: every consumer's code matched the f12 signal slot of the
+    * lddev that produced its source. agx3_alu_table.h pins f52 (code 1) in the
+    * f32add baseline as if it were a form constant, so asking for slot 2 used
+    * to deposit both and emit 09 01 04 05 00 e0 -- code 7, a value Apple never
+    * emits and which names no slot. That is a wrong value in the instruction
+    * stream, so it must refuse; agx3_emit_alu() then retires the slot with a
+    * synchronous prelude and the shader still compiles. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const enum agx_isa_encoding B = AGX_ISA_ENCODING_AGX3B;
+
+   /* Slot 1 is the pinned code, so it still encodes, byte-for-byte as before. */
+   assert(agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 0, bytes, &len));
+   exact(bytes, len, "090104050020");
+   assert(agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 1u << 0, bytes, &len));
+   exact(bytes, len, "090104050020");
+
+   /* Slot 2 must NOT come back as code 7, and neither must any mask that
+    * would merge two codes. */
+   assert(!agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 1u << 1, bytes, &len));
+   assert(!agx3_alu_compose(B, AGX3_ALU_FADD, 0, 4, 0, 0, 0, 0x3u, bytes, &len));
+
+   /* The mask forms are untouched: pinned slot 6 plus the requested slot. */
+   assert(agx3_alu_compose(B, AGX3_ALU_IADD, 0, 4, 0, 0, 0, 1u << 1, bytes, &len));
+   exact(bytes, len, "9f215600020800a81305");
+   assert(agx3_alu_compose(B, AGX3_ALU_IADD, 0, 4, 0, 0, 0, 0x3u, bytes, &len));
+   exact(bytes, len, "9f315600020800a81305");
+
+   /* inv/BNOT deposits every slot now that its wait list exists; before, all
+    * 64 masks produced the same unwaited-except-slot-6 bytes. */
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0, 1u << 0, bytes, &len));
+   exact(bytes, len, "0b052600012800800000");
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0, 1u << 3, bytes, &len));
+   exact(bytes, len, "0b052600010800a00000");
+   assert(agx3_alu_compose(B, AGX3_ALU_BNOT, 0, 4, 0, 0, 0,
+                           (1u << 0) | (1u << 3), bytes, &len));
+   exact(bytes, len, "0b052600012800a00000");
+
+   puts("Wait-code forms fail closed: f32add slot2/slot1+2 refused instead of "
+        "emitting code 7; mask forms and inv unchanged PASS");
+}
+
+static void test_native_half_saturating_arithmetic(void)
+{
+   /* applegpu_g17p, macOS 26 Metal toolchain. Each saturating vector is the
+    * unsaturated one with G17P's f14 set, which moves it from the six-byte
+    * ep1 point to the eight-byte ep2 point; the two field vectors differ in
+    * f14 alone. The live/dead pairs additionally pin which lifetime bit
+    * belongs to which source: f28 is source 0 (f17), f45 is source 1 (f34).
+    *   saturate(a[i] * b[i])          10 03 1d 02 01 00 00 82
+    *   saturate(a[i] + b[i])          10 03 1c 02 01 00 00 82
+    *   saturate(x * y), y still live  18 03 0d 02 01 00 00 82
+    *   saturate(x * y), x still live  18 02 15 03 01 00 00 82
+    *   saturate(x + y), y still live  18 03 0c 02 01 00 00 82
+    *   saturate(x + y), x still live  18 02 14 03 01 00 00 82 */
+   static const struct {
+      bool multiply;
+      uint16_t dest, src0, src1;
+      enum agx3_alu_hint hint0, hint1;
+      const char *bytes;
+   } vectors[] = {
+      {true,  2, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+       "10031d0201000082"},
+      {false, 2, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+       "10031c0201000082"},
+      {true,  3, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+       "18030d0201000082"},
+      {true,  3, 2, 3, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+       "1802150301000082"},
+      {false, 3, 3, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+       "18030c0201000082"},
+      {false, 3, 2, 3, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD,
+       "1802140301000082"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(*vectors); ++i) {
+      const uint16_t src[2] = {vectors[i].src0, vectors[i].src1};
+      const enum agx3_alu_hint hints[2] = {vectors[i].hint0, vectors[i].hint1};
+      assert((vectors[i].multiply ? agx3_alu_hmul_saturate : agx3_alu_hadd_saturate)(
+                AGX_ISA_ENCODING_AGX3B, vectors[i].dest, src, hints, false, 32,
+                bytes, &len));
+      exact(bytes, len, vectors[i].bytes);
+   }
+
+   /* The unsaturated encoders must not have moved: f14 = 0 is byte-identical
+    * to omitting the field at every encoding point. */
+   {
+      const uint16_t src[2] = {3, 2};
+      const enum agx3_alu_hint hints[2] = {AGX3_ALU_HINT_DISCARD,
+                                           AGX3_ALU_HINT_DISCARD};
+      assert(agx3_alu_hmul(AGX_ISA_ENCODING_AGX3B, 2, src, hints, false, 32,
+                           bytes, &len));
+      exact(bytes, len, "10031d0200c0");
+      assert(agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 2, src, hints, false, 32,
+                           bytes, &len));
+      exact(bytes, len, "10031c0200c0");
+
+      /* Fail closed off G17P and on an out-of-range wait. */
+      assert(!agx3_alu_hmul_saturate(AGX_ISA_ENCODING_AGX3C, 2, src, hints,
+                                     false, 32, bytes, &len));
+      assert(!agx3_alu_hadd_saturate(AGX_ISA_ENCODING_AGX3B, 2, src, hints,
+                                     false, 0x40, bytes, &len));
+   }
+   puts("Native saturating half multiply/add: six exact Apple vectors plus "
+        "unsaturated parity and bounds PASS");
 }
 
 static void test_native_half_multiply_minifloat(void)
@@ -2861,12 +3114,13 @@ static void test_native_select_reg_imm(void)
    const char *golden[]={"02011d03860a00c02081","32011d03060700c02081",
       "02011f03860a00c02081","02051f07060200c02081"};
    const bool no_abs[]={false,false};
+   const bool no_neg[]={false,false};
    const bool imm[]={false,true};
    for(unsigned i=0;i<4;i++) {
       const enum agx3_alu_hint hints[]={AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,
          (i&1)?AGX3_ALU_HINT_NONE:AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_NONE};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?6:0,src[i],false,no_abs,imm,
+      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?6:0,src[i],false,no_abs,no_neg,imm,
          hints,0,i<2,false,32,bytes,&len));
       exact(bytes,len,golden[i]);
    }
@@ -2877,7 +3131,7 @@ static void test_native_select_reg_imm(void)
       const enum agx3_alu_hint hints[]={live?AGX3_ALU_HINT_NONE:AGX3_ALU_HINT_DISCARD,
          AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
-      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,0,inputs,true,no_abs,immediate,
+      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,0,inputs,true,no_abs,no_neg,immediate,
          hints,2,true,false,32,bytes,&len));
       exact(bytes,len,live?"02030581228102c22080":"02010d81228102c22080");
    }
@@ -2895,7 +3149,7 @@ static void test_native_select_reg_imm(void)
          (i&1)?live_hint:AGX3_ALU_HINT_DISCARD};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?1:0,registers[i],
-         false,no_abs,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
+         false,no_abs,no_neg,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
       exact(bytes,len,reg_golden[i]);
    }
    puts("Native register-register FSEL: four exact 16/32-bit live/dead vectors PASS");
@@ -2909,10 +3163,167 @@ static void test_native_select_reg_imm(void)
          (i&1)?live_hint:AGX3_ALU_HINT_DISCARD};
       uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
       assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,i==1?1:0,
-         zero_registers[i],true,no_abs,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
+         zero_registers[i],true,no_abs,no_neg,reg_immediate,hints,1,i<2,i==1,32,bytes,&len));
       exact(bytes,len,zero_golden[i]);
    }
    puts("Native zero-compare register FSEL: four exact 16/32-bit live/dead vectors PASS");
+
+   /* A negated SECOND comparator, at both result widths. Apple's own
+    * applegpu_g17p output for `select(x, y, a < -b)` against the same kernel
+    * written `a < b`:
+    *
+    *   32-bit result   a <  b   02011f03820a03c08006
+    *                   a < -b   02011f03820a03c88006
+    *   16-bit result   a <  b   02011d03820b0320800a
+    *                   a < -b   02011d03820b0328800a
+    *
+    * One field apart (f65) in the same encoding point, so the negate does not
+    * escalate the form the way the absolute modifiers do. `-a < b` came back
+    * as 02031d01820b0228800a: f65 again, with the operands swapped and the
+    * relation flipped, so there is no bit on the first comparator and that
+    * side must stay refused. */
+   {
+      const bool neg_second[] = {false, true};
+      const bool neg_first[] = {true, false};
+      const bool no_neg[] = {false, false};
+      const uint16_t neg_src32[] = {0, 2, 10, 6};
+      const uint16_t neg_src16[] = {0, 2, 11, 10};
+      const enum agx3_alu_hint dead[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+      uint8_t nbytes[AGX3_ALU_MAX_LENGTH];
+      uint8_t nlen;
+
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, no_neg,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011f03820a03c08006");
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, neg_second,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011f03820a03c88006");
+
+      /* The 16-bit pair is checked as a DELTA. Apple's kernel waits on a
+       * different scoreboard slot than this encoder can spell (f102 rather
+       * than the f107 every checked-in 16-bit vector carries), so its bytes
+       * are not reproducible here operand-for-operand -- but the negate's
+       * effect is: Apple's pair moves byte 6 from 0x20 to 0x28, and so does
+       * this encoder's, from 0xc0 to 0xc8. Same bit, same byte, same form. */
+      uint8_t plain16[AGX3_ALU_MAX_LENGTH];
+      uint8_t plain16_len;
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src16, false, no_abs, no_neg,
+         reg_immediate, dead, 1, true, false, 32, plain16, &plain16_len));
+      exact(plain16, plain16_len, "02011d03820b03c0800a");
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src16, false, no_abs, neg_second,
+         reg_immediate, dead, 1, true, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011d03820b03c8800a");
+      assert(nlen == plain16_len);
+      for (unsigned i = 0; i < nlen; ++i)
+         assert(nbytes[i] == (i == 7 ? (uint8_t)(plain16[i] | 0x08)
+                                     : plain16[i]));
+
+      /*
+       * Three combinations stood refused here as unwitnessed. Each now has a
+       * witness, so each flips -- and none flips because it started failing.
+       *
+       * 1. A negated FIRST comparator. The comment above this block already
+       *    records Apple's `-a < b` as 02031d01820b0228800a, "f65 again, with
+       *    the operands swapped and the relation flipped": the rewrite was
+       *    observed and then declined. Performing it must give byte-for-byte
+       *    what the caller would get by doing the swap itself, so assert the
+       *    identity rather than a copied literal.
+       */
+      const uint16_t neg_swapped32[] = {2, 0, 10, 6};
+      const enum agx3_alu_hint dead_swapped[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+      uint8_t by_hand[AGX3_ALU_MAX_LENGTH];
+      uint8_t by_hand_len;
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_src32, false, no_abs, neg_first,
+         reg_immediate, dead, 1, false, false, 32, nbytes, &nlen));
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, neg_swapped32, false, no_abs, neg_second,
+         reg_immediate, dead_swapped, 2, false, false, 32, by_hand,
+         &by_hand_len));
+      assert(nlen == by_hand_len && memcmp(nbytes, by_hand, nlen) == 0);
+
+      /*
+       * 2. The negate mixed with an ABSOLUTE comparator. Fresh applegpu_g17p
+       *    kernels, one field apart, decomposed through tools/decomp.c:
+       *
+       *      (fabs(a) <  c) ? 1.0h : 0.0h   1203190523b00300208000800100
+       *      (fabs(a) < -c) ? 1.0h : 0.0h   1203190523b00308208000800100
+       *
+       *    f47 and f65 on one fourteen-byte instruction, which retires the
+       *    note that said they cannot compose. The third row is the swap with
+       *    an abs riding along -- Apple exchanges f35/f52 (2/4 -> 4/2), flips
+       *    f110 lt -> gt, and carries the abs with the operand it belonged to,
+       *    which is exactly what this encoder does:
+       *
+       *      (-a < fabs(c)) ? 1.0h : 0.0h   1205190323b00208208000800100
+       */
+      const bool one_abs[] = {true, false};
+      const bool second_abs[] = {false, true};
+      const bool imm_selects[] = {true, true};
+      const uint16_t abs_neg_src[] = {2, 4, 48, 0};
+      const enum agx3_alu_hint abs_neg_hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 2, abs_neg_src, false, one_abs, no_neg,
+         imm_selects, abs_neg_hints, 1, true, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "1203190523b00300208000800100");
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 2, abs_neg_src, false, one_abs, neg_second,
+         imm_selects, abs_neg_hints, 1, true, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "1203190523b00308208000800100");
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 2, abs_neg_src, false, second_abs, neg_first,
+         imm_selects, abs_neg_hints, 1, true, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "1205190323b00208208000800100");
+
+      /* The same pair with a full-width result, on its own endpoint. That
+       * kernel's first comparator lands in r0 rather than r2. */
+      const uint16_t abs_neg_src32[] = {0, 4, 48, 0};
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, abs_neg_src32, false, one_abs, neg_second,
+         imm_selects, abs_neg_hints, 1, false, false, 32, nbytes, &nlen));
+      exact(nbytes, nlen, "02011b0523b00308208000800100");
+
+      /*
+       * 3. A negate against the exact immediate ZERO. -0.0 and +0.0 compare
+       *    equal, so the negate cannot change the result and must not change
+       *    the bytes. Apple agrees on the other side of the same identity:
+       *    `-a < 0.0f` and `a > 0.0f` are one instruction, 1203098122b002c22080
+       *    both. Assert the identity, which is what the fold claims.
+       */
+      /* compare_zero pins the second comparator to the literal 0, and an
+       * immediate slot carries no lifetime hint. */
+      const uint16_t zero_src32[] = {0, 0, 10, 6};
+      const enum agx3_alu_hint zero_hints[] = {
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+      uint8_t zero_plain[AGX3_ALU_MAX_LENGTH];
+      uint8_t zero_plain_len;
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, zero_src32, true, no_abs, no_neg,
+         reg_immediate, zero_hints, 1, false, false, 32, zero_plain,
+         &zero_plain_len));
+      assert(agx3_alu_fcmp_select_reg_imm(
+         AGX_ISA_ENCODING_AGX3B, 0, zero_src32, true, no_abs, neg_second,
+         reg_immediate, zero_hints, 1, false, false, 32, nbytes, &nlen));
+      assert(nlen == zero_plain_len &&
+             memcmp(nbytes, zero_plain, nlen) == 0);
+
+      /* Still refused, and still unwitnessed: a negate on a SELECTED value.
+       * Those slots carry a value rather than an arithmetic operand and have
+       * no modifier field at all -- the packer refuses them before reaching
+       * this encoder, and nothing here invents one. */
+   }
+   puts("Native FSEL comparator negation: nine exact vectors and two rewrite identities PASS");
 
    /* Own Metal kernels isolate fabs on each comparator and retain all three
     * selected-operand forms used by update_lightmap. */
@@ -2923,41 +3334,41 @@ static void test_native_select_reg_imm(void)
       AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE};
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
-      false,both_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+      false,both_abs,no_neg,reg0_imm,no_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201030307040000208000800300");
 
    const bool left_abs[]={true,false},right_abs[]={false,true};
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
-      false,left_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+      false,left_abs,no_neg,reg0_imm,no_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201030307040000208000800100");
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
-      false,right_abs,reg0_imm,no_hints,0,false,false,32,bytes,&len));
+      false,right_abs,no_neg,reg0_imm,no_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201030307040000208000800200");
 
    const uint16_t abs_regreg[]={0,2,4,6};
    const enum agx3_alu_hint regreg_hints[]={AGX3_ALU_HINT_NONE,
       AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_NONE,AGX3_ALU_HINT_DISCARD};
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_regreg,
-      false,both_abs,reg_immediate,regreg_hints,0,false,false,32,bytes,&len));
+      false,both_abs,no_neg,reg_immediate,regreg_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201070307040000800600800300");
 
    const uint16_t abs_zeroreg[]={0,2,0,4};
    const bool zeroreg_imm[]={true,false};
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_zeroreg,
-      false,both_abs,zeroreg_imm,no_hints,0,false,false,32,bytes,&len));
+      false,both_abs,no_neg,zeroreg_imm,no_hints,0,false,false,32,bytes,&len));
    exact(bytes,len,"3201030327800000000400800300");
 
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
-      false,both_abs,reg0_imm,no_hints,1,false,false,32,bytes,&len));
+      false,both_abs,no_neg,reg0_imm,no_hints,1,false,false,32,bytes,&len));
    exact(bytes,len,"3201030303040300208000800300");
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_regreg,
-      false,both_abs,reg_immediate,regreg_hints,1,false,false,32,bytes,&len));
+      false,both_abs,no_neg,reg_immediate,regreg_hints,1,false,false,32,bytes,&len));
    exact(bytes,len,"3201070303040300800600800300");
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_zeroreg,
-      false,both_abs,zeroreg_imm,no_hints,1,false,false,32,bytes,&len));
+      false,both_abs,no_neg,zeroreg_imm,no_hints,1,false,false,32,bytes,&len));
    exact(bytes,len,"3201030323800300000400800300");
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3B,6,abs_reg0,
-      false,both_abs,reg0_imm,no_hints,2,false,false,32,bytes,&len));
+      false,both_abs,no_neg,reg0_imm,no_hints,2,false,false,32,bytes,&len));
    exact(bytes,len,"3201030303040200208000800300");
 
    /* Hyprland's colour conversion compares a full value against one
@@ -2979,7 +3390,7 @@ static void test_native_select_reg_imm(void)
    };
    for (unsigned i=0;i<sizeof(abs_ordered)/sizeof(abs_ordered[0]);++i) {
       assert(agx3_alu_fcmp_select_reg_imm(
-         AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,abs_second,
+         AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,abs_second,no_neg,
          reg_immediate,abs_second_hints,abs_ordered[i].condition,false,false,
          32,bytes,&len));
       exact(bytes,len,abs_ordered[i].bytes);
@@ -2988,13 +3399,132 @@ static void test_native_select_reg_imm(void)
    const uint16_t abs_first_src[]={4,2,6,0};
    const bool abs_first[]={true,false};
    assert(agx3_alu_fcmp_select_reg_imm(
-      AGX_ISA_ENCODING_AGX3B,0,abs_first_src,false,abs_first,reg_immediate,
+      AGX_ISA_ENCODING_AGX3B,0,abs_first_src,false,abs_first,no_neg,reg_immediate,
       abs_second_hints,6,false,false,32,bytes,&len));
    exact(bytes,len,"0205070307060300800000800100");
    assert(!agx3_alu_fcmp_select_reg_imm(
-      AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,both_abs,reg_immediate,
+      AGX_ISA_ENCODING_AGX3B,0,abs_second_src,false,both_abs,no_neg,reg_immediate,
       abs_second_hints,5,false,false,32,bytes,&len));
    puts("Native absolute-comparison FSEL: fifteen exact G17P vectors PASS");
+}
+
+/*
+ * A NEGATED comparison source on `fcmpsel`.
+ *
+ * f65 names the second comparator and only that one. Apple has no bit for a
+ * negated FIRST source: it spells `-a > b` as `b < -a`, exchanging the
+ * operands and reversing the relation. Every vector below is
+ * metal-nt -arch applegpu_g17p, one kernel per row, the reproducer's own
+ * shape -- a 32-bit result selecting 1 and 0 from two loaded floats.
+ *
+ * The last two rows are what make the rewrite a fact rather than a reading.
+ * `a < -b` sets f65 with the operands left alone, so f65 is slot 1's bit; and
+ * `-a < -b` comes back byte-identical to `a > b`, with no f65 at all, so
+ * negating both sides is the relation flip on its own.
+ */
+static void test_native_select_negated_comparator(void)
+{
+   static const struct {
+      const char *what;
+      bool neg0, neg1;
+      unsigned condition;
+      const char *bytes;
+   } rows[] = {
+      {" a >  b", false, false, 2 /* gt */, "02011d03228102c02080"},
+      {"-a >  b", true,  false, 2 /* gt */, "02031d01228103c82080"},
+      {"-a <  b", true,  false, 1 /* lt */, "02031d01228102c82080"},
+      {"-a >= b", true,  false, 5 /* ge */, "02031d01268103c82080"},
+      {"-a <= b", true,  false, 6 /* le */, "02031d01268102c82080"},
+      {"-a == b", true,  false, 0 /* eq */, "02031d01268100c82080"},
+      {" a < -b", false, true,  1 /* lt */, "02011d03228103c82080"},
+      {"-a < -b", true,  true,  1 /* lt */, "02011d03228102c02080"},
+   };
+
+   const uint16_t src[] = {0, 2};
+   const bool src_16[] = {false, false};
+   const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_DISCARD,
+                                       AGX3_ALU_HINT_DISCARD};
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      const bool neg[] = {rows[i].neg0, rows[i].neg1};
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_fcmp_select_imm_width_neg(
+         AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, neg,
+         rows[i].condition, 1, 0, true, false, 32, bytes, &len));
+      exact(bytes, len, rows[i].bytes);
+   }
+
+   /* Unmodified sources reach the same bytes through the plain encoder, so
+    * the negate path adds no encoding of its own for them. */
+   const bool no_neg[] = {false, false};
+   uint8_t through_neg[AGX3_ALU_MAX_LENGTH], neg_len;
+   uint8_t plain[AGX3_ALU_MAX_LENGTH], plain_len;
+   assert(agx3_alu_fcmp_select_imm_width_neg(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, no_neg, 2 /* gt */, 1,
+      0, true, false, 32, through_neg, &neg_len));
+   assert(agx3_alu_fcmp_select_imm_width(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, 2 /* gt */, 1, 0, true,
+      false, 32, plain, &plain_len));
+   assert(neg_len == plain_len && !memcmp(through_neg, plain, neg_len));
+
+   /* The NaN-ordering relations have no witness on this form and the caller
+    * rewrites them before it gets here, so they still fail closed. */
+   const bool neg_first[] = {true, false};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(!agx3_alu_fcmp_select_imm_width_neg(
+      AGX_ISA_ENCODING_AGX3B, 0, src, src_16, hints, neg_first, 3 /* ltn */,
+      1, 0, true, false, 32, bytes, &len));
+
+   puts("Negated FSEL comparator: eight exact G17P vectors PASS");
+}
+
+/*
+ * RTZ float to a 16-bit integer, from a HALF source.
+ *
+ * The source width is its own field (f24), independent of the result width
+ * (f10) and of the signed/unsigned mode (f41). Each pair below changes one
+ * of those three and nothing else, applegpu_g17p:
+ */
+static void test_native_float_to_int16(void)
+{
+   static const struct {
+      const char *what;
+      bool src_16, is_signed;
+      uint16_t dest, src, wait;
+      enum agx3_alu_hint hint;
+      const char *bytes;
+   } rows[] = {
+      {"short(float)",  false, true,  2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204b0c80200"},
+      {"short(half)",   true,  true,  2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204a8c80200"},
+      {"ushort(half)",  true,  false, 2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204a8080300"},
+      {"ushort(float)", false, false, 2, 2, 32, AGX3_ALU_HINT_DISCARD,
+       "270756020204b0080300"},
+      /* No wait: the clamp-then-convert shape, whose input is already live. */
+      {"short(half) nowait", true, true, 2, 2, 0, AGX3_ALU_HINT_DISCARD,
+       "270754020204a8c80200"},
+      /* A half source may sit in an ODD half; a 32-bit one may not. */
+      {"short(half odd)", true, true, 3, 3, 0, AGX3_ALU_HINT_DISCARD,
+       "270754030206a8c80200"},
+   };
+
+   for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
+      uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+      assert(agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3B, rows[i].dest,
+                                     rows[i].src, rows[i].src_16,
+                                     rows[i].is_signed, rows[i].hint, false,
+                                     rows[i].wait, bytes, &len));
+      exact(bytes, len, rows[i].bytes);
+   }
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(!agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3B, 2, 3, false, true,
+                                   AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(!agx3_alu_float_to_int16(AGX_ISA_ENCODING_AGX3C, 2, 2, true, true,
+                                   AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+
+   puts("Half-source float-to-short: six exact G17P vectors PASS");
 }
 
 static void test_native_half_min(void)
@@ -3392,6 +3922,12 @@ test_native_reciprocal_widths(void)
       {0, 2, 32, false, true, false, false, true,
        AGX3_ALU_HINT_CACHE, "af005600030402442000"},
 
+      /* The exact shape three.js was refused on: a full-precision reciprocal
+       * of an absolute value, cached, with a destination above the old 128
+       * gate.  Bytes from Apple's own composer tables for f32rcp ep0. */
+      {140, 86, 0, false, false, true, false, false,
+       AGX3_ALU_HINT_CACHE, "af00548c02ac02486000"},
+
       /* Odd half input, no dependency, and texture producer slot zero. */
       {0, 3, 32, false, true, false, false, false,
        AGX3_ALU_HINT_DISCARD, "af005600020610442000"},
@@ -3441,16 +3977,24 @@ test_native_reciprocal_widths(void)
    }
    assert(forms == 6144);
 
+   /* The register fields accept [0, 191]; 192 is where Apple's tables stop,
+    * and where the refusal now is.  This positive case has to run before the
+    * refusal sweep below, which checks that a refusal leaves `len` alone. */
+   assert(agx3_alu_rcp(
+      AGX_ISA_ENCODING_AGX3B, 190, 190, true, true, false, false,
+      AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
+   assert(len == 10);
+
    memset(bytes, 0xa5, sizeof(bytes));
    len = 0xa5;
    assert(!agx3_alu_rcp(
       AGX_ISA_ENCODING_AGX3C, 0, 0, false, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
-      AGX_ISA_ENCODING_AGX3B, 128, 0, true, true, false, false,
+      AGX_ISA_ENCODING_AGX3B, 192, 0, true, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
-      AGX_ISA_ENCODING_AGX3B, 0, 128, true, true, false, false,
+      AGX_ISA_ENCODING_AGX3B, 0, 192, true, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
       AGX_ISA_ENCODING_AGX3B, 1, 0, false, true, false, false,
@@ -3855,7 +4399,7 @@ static void test_gpu1_float_compare_select(void)
          AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
       };
       assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
-         i == 3 ? 190 : 14, src, true, no_abs, immediate, hints,
+         i == 3 ? 190 : 14, src, true, no_abs, no_abs, immediate, hints,
          i == 1 ? 1 : 2, false, i == 3, i == 3 ? 0x81 : 0, out, &len));
       assert(len == sizeof(expected[i]) && !memcmp(out, expected[i], len));
    }
@@ -3863,10 +4407,10 @@ static void test_gpu1_float_compare_select(void)
    const bool immediate[2] = {false, true};
    const enum agx3_alu_hint hints[4] = {0};
    assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
-      14, src, true, no_abs, immediate, hints, 2, true, false, 0, out, &len));
+      14, src, true, no_abs, no_abs, immediate, hints, 2, true, false, 0, out, &len));
    src[3] = 1; /* A minifloat payload is not an integer result immediate. */
    assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
-      14, src, true, no_abs, immediate, hints, 2, false, false, 0, out, &len));
+      14, src, true, no_abs, no_abs, immediate, hints, 2, false, false, 0, out, &len));
 }
 
 static void
@@ -3903,6 +4447,536 @@ test_gpu1_minifloat_scale(void)
       false, true, AGX3_ALU_HINT_DISCARD, 0, bytes, &len));
 }
 
+
+
+/*
+ * Source modifiers on the reciprocal-square-root family.
+ *
+ * `inversesqrt(abs(x))` and `sqrt(abs(x))` -- the standard safe forms of both
+ * idioms -- had no encoding at all: f30 was simply not modelled on these two
+ * forms, though f32log2/f32exp2/f32rcp have carried it for a while.
+ *
+ * Apple's own bytes, `metal-nt -arch applegpu_g17p`, one kernel per modifier,
+ * each a single-field difference from the plain control. Every vector was
+ * recovered by re-composing through this encoder, so these are facts about
+ * the encoder rather than readings of a disassembler.
+ */
+static void
+test_native_f32_rsqrt_modifiers(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* o[i] = rsqrt(a[i]) -- the control the three below differ from. */
+   static const uint8_t plain[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                   0x00, 0xb0, 0x40, 0x00, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                false, bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+
+   /* o[i] = rsqrt(-a[i])  -- f31 alone. */
+   static const uint8_t neg[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                 0x00, 0xb0, 0x40, 0x01, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, true,
+                                false, bytes, &len));
+   assert(len == sizeof(neg) && !memcmp(bytes, neg, len));
+
+   /* o[i] = rsqrt(fabs(a[i])) -- f30 alone. */
+   static const uint8_t abs_[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                  0x00, 0xb0, 0xc0, 0x00, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                true, bytes, &len));
+   assert(len == sizeof(abs_) && !memcmp(bytes, abs_, len));
+
+   /* o[i] = rsqrt(-fabs(a[i])) -- both, which is what makes them separable. */
+   static const uint8_t both[] = {0xaf, 0x01, 0x56, 0x00, 0x02,
+                                  0x00, 0xb0, 0xc0, 0x01, 0x00};
+   assert(agx3_alu_f32rsqrt_mod(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, true,
+                                true, bytes, &len));
+   assert(len == sizeof(both) && !memcmp(bytes, both, len));
+
+   /* The unmodified wrapper must keep emitting the control exactly. */
+   assert(agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, bytes,
+                            &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+}
+
+/*
+ * The square-root step carries the same absolute-value bit. Apple compiles
+ * sqrt() to this step followed by a multiply with the original input, so
+ * `sqrt(abs(x))` sets f30 here and nowhere else.
+ *
+ *   o[i] = sqrt(a[i])        2f 01 56 04 03 00 92 40 00 00
+ *   o[i] = sqrt(fabs(a[i]))  2f 01 56 04 03 00 92 c0 00 00
+ */
+static void
+test_native_sqrt_step_absolute(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   static const uint8_t plain[] = {0x2f, 0x01, 0x56, 0x04, 0x03,
+                                   0x00, 0x92, 0x40, 0x00, 0x00};
+   assert(agx3_alu_sqrt_step_mod(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                 AGX3_ALU_HINT_CACHE, true, 1u << 5, false,
+                                 bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+
+   static const uint8_t abs_[] = {0x2f, 0x01, 0x56, 0x04, 0x03,
+                                  0x00, 0x92, 0xc0, 0x00, 0x00};
+   assert(agx3_alu_sqrt_step_mod(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                 AGX3_ALU_HINT_CACHE, true, 1u << 5, true,
+                                 bytes, &len));
+   assert(len == sizeof(abs_) && !memcmp(bytes, abs_, len));
+
+   /* The plain wrapper is unchanged. */
+   assert(agx3_alu_sqrt_step(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                             AGX3_ALU_HINT_CACHE, true, 1u << 5, bytes, &len));
+   assert(len == sizeof(plain) && !memcmp(bytes, plain, len));
+}
+
+/*
+ * The multiply's destination width (f10) is selected independently of its
+ * source width (f26), so a 32-bit value scaled by a minifloat lands directly
+ * in a half register. That is the instruction `packHalf2x16(vec2(x * k, ...))`
+ * produces once the f2f16 folds into the multiply, and it had no encoding.
+ *
+ *   o[i] = a[i] * 0.5f        (float o)  19 a1 15 03 80 c0   f10 = 2
+ *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
+ *   o[i] = half(a[i] * 2.0f)             11 c1 15 03 80 c0   f17 = 64
+ */
+static void
+test_native_fmul_minifloat_narrow(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* 32-bit destination: the control, and byte-identical to what the
+    * unmodified entry point already emitted. */
+   static const uint8_t wide[] = {0x19, 0xa1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, false, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(wide) && !memcmp(bytes, wide, len));
+   assert(agx3_alu_fmul_minifloat_mod(AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20,
+                                      false, false, AGX3_ALU_HINT_DISCARD,
+                                      1u << 5, bytes, &len));
+   assert(len == sizeof(wide) && !memcmp(bytes, wide, len));
+
+   /* Half destination: one field different. */
+   static const uint8_t narrow[] = {0x11, 0xa1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(narrow) && !memcmp(bytes, narrow, len));
+
+   /* The immediate still sweeps as the minifloat operand. */
+   static const uint8_t narrow2[] = {0x11, 0xc1, 0x15, 0x03, 0x80, 0xc0};
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x40, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(len == sizeof(narrow2) && !memcmp(bytes, narrow2, len));
+
+   /* A half destination may be an odd register half; a 32-bit one may not. */
+   assert(agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 3, 2, 0x20, false, false, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+
+   /* Neither destination width has a grounded fused ABS form. */
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, false,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+
+   /* AGX3c has no witness for any of this. */
+   assert(!agx3_alu_fmul_minifloat_narrow(
+      AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, false, false, true,
+      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+}
+
+
+/*
+ * The subtract's slot-B shift (f54).
+ *
+ * `x * -7` is strength-reduced to `x - (x << 3)`, so a shifted integer
+ * subtract is an ordinary shape rather than an exotic one, and every such
+ * multiply failed the whole shader closed while it had no encoding. It is
+ * NOT a degenerate self-subtraction that should fold to zero: with the shift
+ * it computes -7x.
+ *
+ * Apple, one kernel per shift, `o[i] = a[i] - (c[i] << N)`.
+ */
+static void
+test_native_isub_shift(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const uint16_t src[2] = {0, 4};
+   const enum agx3_alu_hint hints[2] = {AGX3_ALU_HINT_DISCARD,
+                                        AGX3_ALU_HINT_DISCARD};
+
+   static const uint8_t sh[5][10] = {
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x17, 0x05},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xe8, 0x16, 0x05},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x16, 0x15},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xe8, 0x16, 0x15},
+      {0x1f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0xa8, 0x16, 0x05},
+   };
+   for (uint8_t n = 0; n <= 4; ++n) {
+      assert(agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B,
+                                        AGX3_ALU_ISUB, 0, src, hints, n,
+                                        1u << 5, bytes, &len));
+      assert(len == 10 && !memcmp(bytes, sh[n], 10));
+   }
+
+   /* The unshifted wrapper keeps emitting exactly the N = 0 bytes. */
+   assert(agx3_alu_integer_reg(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_ISUB, 0, src,
+                               hints, 1u << 5, bytes, &len));
+   assert(len == 10 && !memcmp(bytes, sh[0], 10));
+
+   /* Apple stops emitting this form at N = 5, so 5 is refused rather than
+    * extrapolated, and the ADD's shifted form belongs to agx3_iadd_encode. */
+   assert(!agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_ISUB,
+                                      0, src, hints, 5, 1u << 5, bytes,
+                                      &len));
+   assert(!agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_IADD,
+                                      0, src, hints, 1, 1u << 5, bytes,
+                                      &len));
+}
+
+
+/*
+ * The compare-select's absolute-value sources.
+ *
+ * ABS is not a modifier bit on the ten-byte fsel: Apple moves to a
+ * fourteen-byte endpoint (ep20..27 -> ep28..35) whose destination field block
+ * is shifted by +14. Depositing a bit into the short endpoint would compose
+ * cleanly and encode a different instruction, so the long endpoint is modelled
+ * separately. f47 and f64 are the two sources' bits, separable because
+ * fabs(a) < fabs(b) sets both. Every vector below is Apple's own, one kernel
+ * per field.
+ */
+static void
+fsel_abs_is(unsigned condition, uint8_t if_true, uint8_t if_false,
+            bool dest_16, const bool src_abs[2], const uint8_t *expect)
+{
+   /* Apple's half-destination kernels put the first comparison source in
+    * register half 2 and the 32-bit ones in half 0; the destination follows
+    * the same allocation. Match it so the bytes are comparable. */
+   const uint16_t src[2] = {(uint16_t)(dest_16 ? 2 : 0), 4};
+   const bool w32[2] = {false, false};
+   const enum agx3_alu_hint dd[2] = {AGX3_ALU_HINT_DISCARD,
+                                     AGX3_ALU_HINT_DISCARD};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   assert(agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3B, dest_16 ? 2 : 0, src, w32, dd, condition,
+      if_true, if_false, dest_16, false, 32, src_abs, bytes, &len));
+   assert(len == 14 && !memcmp(bytes, expect, 14));
+}
+
+static void
+test_native_fcmp_select_absolute(void)
+{
+   const bool abs0[2] = {true, false};
+   const bool abs1[2] = {false, true};
+   const bool abs01[2] = {true, true};
+
+   /* (fabs(a) < b) ? 1.0h : 0.0h -- the baseline the rest differ from. */
+   static const uint8_t base[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* condition alone */
+   static const uint8_t c_gt[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t c_eq[]  = {0x12,0x03,0x19,0x05,0x27,0xb0,0x00,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t c_ge[]  = {0x12,0x03,0x19,0x05,0x27,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* if_true alone: 2.0h then 4.0h */
+   static const uint8_t t_2[]   = {0x12,0x03,0x19,0x05,0x23,0xc0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t t_4[]   = {0x12,0x03,0x19,0x05,0x23,0xd0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   /* if_false alone */
+   static const uint8_t f_1[]   = {0x12,0x03,0x19,0x05,0x23,0x80,0x03,
+                                   0x00,0x20,0xb0,0x00,0x80,0x01,0x00};
+   static const uint8_t f_2[]   = {0x12,0x03,0x19,0x05,0x23,0x80,0x03,
+                                   0x00,0x20,0xc0,0x00,0x80,0x01,0x00};
+   /* which source carries ABS */
+   static const uint8_t a_1[]   = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x02,0x00};
+   static const uint8_t a_01[]  = {0x12,0x03,0x19,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x03,0x00};
+   /* a 32-bit destination is a different endpoint again (ep30) */
+   static const uint8_t w_lt[]  = {0x02,0x01,0x1b,0x05,0x23,0xb0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t w_gt[]  = {0x02,0x01,0x1b,0x05,0x23,0xb0,0x02,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+   static const uint8_t w_t2[]  = {0x02,0x01,0x1b,0x05,0x23,0xc0,0x03,
+                                   0x00,0x20,0x80,0x00,0x80,0x01,0x00};
+
+   fsel_abs_is(1, 48, 0, true,  abs0,  base);
+   fsel_abs_is(2, 48, 0, true,  abs0,  c_gt);
+   fsel_abs_is(0, 48, 0, true,  abs0,  c_eq);
+   fsel_abs_is(5, 48, 0, true,  abs0,  c_ge);
+   fsel_abs_is(1, 64, 0, true,  abs0,  t_2);
+   fsel_abs_is(1, 80, 0, true,  abs0,  t_4);
+   fsel_abs_is(1, 0, 48, true,  abs0,  f_1);
+   fsel_abs_is(1, 0, 64, true,  abs0,  f_2);
+   fsel_abs_is(1, 48, 0, true,  abs1,  a_1);
+   fsel_abs_is(1, 48, 0, true,  abs01, a_01);
+   fsel_abs_is(1, 48, 0, false, abs0,  w_lt);
+   fsel_abs_is(2, 48, 0, false, abs0,  w_gt);
+   fsel_abs_is(1, 64, 0, false, abs0,  w_t2);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   const uint16_t src[2] = {2, 4};
+   const bool w32[2] = {false, false};
+   const enum agx3_alu_hint dd[2] = {AGX3_ALU_HINT_DISCARD,
+                                     AGX3_ALU_HINT_DISCARD};
+
+   /* Without an absolute source this is the SHORT endpoint, and emitting the
+    * long form would change bytes that already work: refuse instead. */
+   const bool none[2] = {false, false};
+   assert(!agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3B, 2, src, w32, dd, 1, 48, 0, true, false, 32,
+      none, bytes, &len));
+
+   /* The short endpoint is untouched: it still encodes, and still at ten
+    * bytes rather than being pulled onto the long form. Its exact bytes are
+    * owned by the tests that already cover it -- this only pins that adding
+    * the absolute-value endpoint did not divert it. */
+   len = 0;
+   assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B, 2, src, w32,
+                                         dd, 1, 48, 0, true, false, 32,
+                                         bytes, &len));
+   assert(len == 10);
+
+   /* AGX3c has no witness for any of this. */
+   len = 0;
+   assert(!agx3_alu_fcmp_select_imm_width_abs(
+      AGX_ISA_ENCODING_AGX3C, 2, src, w32, dd, 1, 48, 0, true, false, 32,
+      abs0, bytes, &len));
+}
+
+/*
+ * The three axes a three.js frame was refused on: an operand's WIDTH, an
+ * operand's KIND and a source MODIFIER are ordinary fields of one encoding
+ * point and compose freely. Every vector below is Apple's own, from
+ * metal-nt -arch applegpu_g17p, recovered through tools/decomp.c.
+ */
+static void test_threejs_width_kind_modifier_axes(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH];
+   uint8_t len = 0;
+
+   /* f32add over a float/half pair. `float a` in one slot, `half b` in the
+    * other; f43 and f26 are the two slots' widths, f47/f48 and f30/f31 their
+    * modifiers, and f14 saturates whatever the widths are. */
+   {
+      static const struct {
+         const char *why;
+         bool s0_16, s1_16, s0_abs, s0_neg, s1_abs, s1_neg, sat;
+         uint16_t s0, s1;
+         const char *want;
+      } rows[] = {
+         {"a - b",        true,  false, false, true,  false, false, false,
+          4, 0, "09011c0400c8"},
+         {"b - a",        false, true,  false, true,  false, false, false,
+          0, 4, "09041c0100c8"},
+         {"a + fabs(b)",  true,  false, true,  false, false, false, false,
+          4, 0, "09011c04020000800200"},
+         {"fabs(a) + b",  true,  false, false, false, true,  false, false,
+          4, 0, "09011c04020000800100"},
+         {"b - fabs(a)",  false, true,  true,  true,  false, false, false,
+          0, 4, "09041c01020800800200"},
+         {"-a - b",       false, true,  false, true,  false, true,  false,
+          0, 4, "09041c0101080280"},
+         {"saturate(a+b)", true, false, false, false, false, false, true,
+          4, 0, "09011c0401000082"},
+         {"saturate(b-a)", false, true, false, true,  false, false, true,
+          0, 4, "09041c0101080082"},
+      };
+      for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+         struct agx3_falu_mods m = {0};
+         struct agx3_falu_runtime rt = {0};
+         m.src0_16 = rows[i].s0_16;
+         m.src1_16 = rows[i].s1_16;
+         m.src0_abs = rows[i].s0_abs;
+         m.src0_neg = rows[i].s0_neg;
+         m.src1_abs = rows[i].s1_abs;
+         m.src1_neg = rows[i].s1_neg;
+         m.saturate = rows[i].sat;
+         rt.discard[0] = rt.discard[1] = true;
+         rt.wait_mask = 0x20;
+         assert(agx3_falu_add_mod_runtime(enc, 0, rows[i].s0, rows[i].s1, &m,
+                                          &rt, bytes, &len));
+         exact(bytes, len, rows[i].want);
+      }
+   }
+
+   /* The same pair on f32mul, and the ffma addend's own width field f60. */
+   {
+      struct agx3_falu_mods m = {0};
+      struct agx3_falu_runtime rt = {0};
+      m.src0_neg = true;
+      m.src1_16 = true;
+      rt.discard[0] = rt.discard[1] = true;
+      rt.wait_mask = 0x20;
+      assert(agx3_falu_mul_mod_runtime(enc, 0, 0, 4, &m, &rt, bytes, &len));
+      exact(bytes, len, "09041d0100c8");
+
+      struct agx3_falu_runtime frt = {0};
+      frt.discard[0] = frt.discard[1] = frt.discard[2] = true;
+      frt.wait_mask = 0x20;
+
+      struct agx3_falu_mods f = {0};
+      f.addend_16 = true;
+      assert(agx3_falu_fma_mod_runtime(enc, 0, 4, 0, 8, &f, &frt, bytes,
+                                       &len));
+      exact(bytes, len, "09011e05810800c0");
+      f.addend_neg = true;
+      assert(agx3_falu_fma_mod_runtime(enc, 0, 4, 0, 8, &f, &frt, bytes,
+                                       &len));
+      exact(bytes, len, "09011e05910800c0");
+
+      struct agx3_falu_mods g = {0};
+      g.src1_16 = true;
+      assert(agx3_falu_fma_mod_runtime(enc, 0, 0, 8, 4, &g, &frt, bytes,
+                                       &len));
+      exact(bytes, len, "09081e01810402c0");
+   }
+
+   /* fsel: an absolute comparator against a minifloat IMMEDIATE. Against the
+    * register row it changes only f59, the slot's kind, and the operand
+    * field f52 -> f51. Refusing every non-zero immediate recorded what had
+    * been measured, not what the field can hold.
+    *
+    * The bytes below are the ep33 placement of the destination block, which
+    * is the one Apple's own corpus uses (four vectors in
+    * test/agx3_compose_corpus_vectors.c) and the one this encoder reaches
+    * first. Apple's fresh kernels for the same two shapes take the ep28
+    * placement instead -- 1203190523b00300208000800100 and
+    * 120309a123b00302208000800100 -- and tools/decomp.c gives the two
+    * exactly the same operand field vector, differing only in f3/f11/f12
+    * against f17/f25/f26 with f0 and f24 fixed. Two encodings of one
+    * instruction, not two instructions. */
+   {
+      struct agx3_fsel_desc d;
+      memset(&d, 0, sizeof(d));
+      d.dest = 2;
+      d.dest_16 = true;
+      d.cmp0 = 2;
+      d.cmp0_hint = AGX3_ALU_HINT_DISCARD;
+      d.cmp0_abs = true;
+      d.sel0_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel0 = 48;
+      d.sel1_kind = AGX3_FSEL_SEL_IMMEDIATE;
+      d.sel1 = 0;
+      d.sel_16 = true;
+      d.condition = 1;
+      d.wait_mask = 32;
+
+      struct agx3_fsel_desc reg = d;
+      reg.cmp1 = 4;
+      reg.cmp1_hint = AGX3_ALU_HINT_DISCARD;
+      assert(agx3_alu_fcmp_select(enc, &reg, bytes, &len));
+      exact(bytes, len, "12031d0523b00300208000800100");
+
+      struct agx3_fsel_desc imm = d;
+      imm.cmp1_is_immediate = true;
+      imm.cmp1 = 32;
+      assert(agx3_alu_fcmp_select(enc, &imm, bytes, &len));
+      exact(bytes, len, "12030da123b00302208000800100");
+
+      /* A minifloat carries its sign in bit 7, so `-a < k` is `a > -k`:
+       * constant folding, not a second encoding. */
+      struct agx3_fsel_desc neg = imm;
+      neg.cmp0_neg = true;
+      assert(agx3_alu_fcmp_select(enc, &neg, bytes, &len));
+      exact(bytes, len, "12031da123b00202208000800100");
+   }
+
+   /* fsel: the negate algebra on the register-select form. Both comparators
+    * negated is the relation flip alone, which means the two descriptors must
+    * produce the same bytes. */
+   {
+      uint16_t src[4] = {8, 16, 6, 0};
+      const bool abs[2] = {false, false};
+      const bool imm[2] = {false, true};
+      const enum agx3_alu_hint hints[4] = {
+         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
+         AGX3_ALU_HINT_NONE};
+      const bool both[2] = {true, true};
+      const bool none[2] = {false, false};
+      const bool second[2] = {false, true};
+      uint8_t flipped[AGX3_ALU_MAX_LENGTH];
+      uint8_t flipped_len = 0;
+
+      assert(agx3_alu_fcmp_select_reg_imm(enc, 2, src, false, abs, both, imm,
+                                          hints, 5, true, false, 0, bytes,
+                                          &len));
+      assert(agx3_alu_fcmp_select_reg_imm(enc, 2, src, false, abs, none, imm,
+                                          hints, 6, true, false, 0, flipped,
+                                          &flipped_len));
+      assert(len == flipped_len && memcmp(bytes, flipped, len) == 0);
+
+      /* One negate is f65, with the operands and the relation left alone:
+       * exactly one byte differs from the plain select. */
+      uint8_t plain[AGX3_ALU_MAX_LENGTH];
+      uint8_t plain_len = 0;
+      assert(agx3_alu_fcmp_select_reg_imm(enc, 2, src, false, abs, second, imm,
+                                          hints, 5, true, false, 0, bytes,
+                                          &len));
+      assert(agx3_alu_fcmp_select_reg_imm(enc, 2, src, false, abs, none, imm,
+                                          hints, 5, true, false, 0, plain,
+                                          &plain_len));
+      assert(len == plain_len);
+      unsigned differing = 0;
+      for (unsigned i = 0; i < len; ++i)
+         differing += bytes[i] != plain[i];
+      assert(differing == 1);
+   }
+
+   /* bitop against an immediate: the operand kind is f37 on the register
+    * form's own encoding point, with the constant in f29. A narrow result
+    * narrows f10 and f24 and NOT f38, because an immediate operand declares
+    * width 2 whatever the destination is. */
+   {
+      static const struct {
+         enum agx3_alu_op op;
+         bool narrow;
+         uint16_t dest, src;
+         uint8_t imm;
+         const char *want;
+      } rows[] = {
+         {AGX3_ALU_BAND, false, 0, 0, 0xff, "0b011fff100200800000"},
+         {AGX3_ALU_BOR,  false, 0, 0, 0xff, "0b011fff120a00800000"},
+         {AGX3_ALU_BXOR, false, 0, 0, 0xff, "0b011eff120a00800000"},
+         {AGX3_ALU_BAND, false, 0, 0, 0x7f, "0b010fff100200800000"},
+         {AGX3_ALU_BXOR, false, 0, 0, 0x01, "0b010e81120a00800000"},
+         {AGX3_ALU_BAND, true,  2, 2, 0xff, "13021fff100200800000"},
+         {AGX3_ALU_BOR,  true,  2, 2, 0x80, "13021f81020a00800000"},
+      };
+      for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+         assert(agx3_alu_bit_imm(enc, rows[i].op, rows[i].narrow, rows[i].dest,
+                                 rows[i].src, rows[i].imm,
+                                 AGX3_ALU_HINT_DISCARD, 0x20, bytes, &len));
+         exact(bytes, len, rows[i].want);
+      }
+      /* A truth table with no witnessed immediate form still fails closed. */
+      assert(!agx3_alu_bit_imm(enc, AGX3_ALU_BNOT, false, 0, 0, 0xff,
+                               AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   }
+
+   puts("three.js width/kind/modifier axes: 23 exact G17P vectors PASS");
+}
 int main(void){
    test_gpu1_minifloat_scale();
    test_gpu1_popcount();
@@ -3913,6 +4987,11 @@ int main(void){
    test_native_bit_andc();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
+   test_native_f32_rsqrt_modifiers();
+   test_native_sqrt_step_absolute();
+   test_native_fmul_minifloat_narrow();
+   test_native_isub_shift();
+   test_native_fcmp_select_absolute();
    test_native_f32_log2_exp2();
    test_native_f32_log2_exp2_modifiers();
    test_native_f32_floor_ceil();
@@ -3923,6 +5002,8 @@ int main(void){
    test_native_half_inverse();
    test_native_half_multiply();
    test_native_half_multiply_minifloat();
+   test_native_half_saturating_arithmetic();
+   test_wait_code_forms_fail_closed();
    test_native_minifloat_mixed_select();
    test_native_half_minifloat_select_f32();
    test_native_fadd_mixed_half();
@@ -3947,15 +5028,20 @@ int main(void){
    test_native_half_floor();
    test_native_half_ceil();
    test_native_asr32();
+   test_native_asr16();
    test_native_extract32();
    test_blur_half_arithmetic();
    test_native_u16_arithmetic();
+   test_native_select_negated_comparator();
+   test_native_float_to_int16();
    test_native_u16_shift_right_immediate();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
    test_i32_to_f16();
    test_f16_to_int32();
    test_float_compare_select();
+   test_fcmp_select_half_comparator();
+   test_threejs_width_kind_modifier_axes();
    test_float_compare_zero();
    test_integer_lifetimes();
    test_bitwise_lifetimes();

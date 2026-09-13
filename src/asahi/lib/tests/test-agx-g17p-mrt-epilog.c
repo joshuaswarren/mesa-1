@@ -25,6 +25,40 @@ blend_mode(bool additive)
 }
 
 static bool
+test_r11g11b10_mrt_layout(void)
+{
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R11G11B10_FLOAT,
+      PIPE_FORMAT_R11G11B10_FLOAT,
+   };
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(formats, 2, 1, false);
+   if (agx_g17p_classify_mrt(&tib) != AGX_G17P_MRT_R11G11B10 ||
+       agx_tilebuffer_offset_B(&tib, 0) != 0 ||
+       agx_tilebuffer_offset_B(&tib, 1) != 4 || tib.sample_size_B != 8)
+      return false;
+
+   struct agx_tilebuffer_layout bad = tib;
+   bad._offset_B[1] = 8;
+   if (agx_g17p_classify_mrt(&bad) != AGX_G17P_MRT_NONE)
+      return false;
+
+   bad = tib;
+   bad.logical_format[1] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   if (agx_g17p_classify_mrt(&bad) != AGX_G17P_MRT_NONE)
+      return false;
+
+   bad = tib;
+   bad.logical_format[2] = PIPE_FORMAT_R11G11B10_FLOAT;
+   if (agx_g17p_classify_mrt(&bad) != AGX_G17P_MRT_NONE)
+      return false;
+
+   bad = tib;
+   bad.nr_samples = 2;
+   return agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE;
+}
+
+static bool
 compile_epilog(const struct agx_fs_epilog_link_info *link,
                enum pipe_format rt1_format, bool rt0_additive,
                bool rt1_additive, struct agx_shader_part *part)
@@ -222,6 +256,9 @@ test_wboit_background_clear(void)
 int
 main(void)
 {
+   if (!test_r11g11b10_mrt_layout())
+      return 1;
+
    if (!test_wboit_background_clear())
       return 1;
 

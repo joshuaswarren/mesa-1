@@ -46,6 +46,15 @@ libagx_space_bits(uint x)
    return accum;
 }
 
+static uint
+libagx_space_bits_7(uint x)
+{
+   uint accum = 0;
+   for (uint i = 0; i < 7; ++i)
+      accum |= (x & (1u << i)) << i;
+   return accum;
+}
+
 KERNEL(32)
 libagx_detile(global uint8_t *dest, global uint8_t *src,
               uint dest_pitch_B, uint width_el, uint height_el,
@@ -80,8 +89,8 @@ libagx_detile(global uint8_t *dest, global uint8_t *src,
  * 16-byte BC block is copied to or from one 16-byte RGBA32 pixel.
  *
  * CPU command recording validates every rectangle against the logical image
- * or placed footprint before this kernel is dispatched.  The id guard is a
- * second line of defence against an over-wide launch.
+ * or placed footprint before this kernel is dispatched.  The coordinate
+ * guard is a second line of defence against an over-wide launch.
  */
 static uint
 libagx_copy_image_offset(uint x, uint y, uint pitch_B, uint stride_el,
@@ -101,32 +110,175 @@ libagx_copy_image_offset(uint x, uint y, uint pitch_B, uint stride_el,
    return (tile_idx * tile_area_el + morton_el) * blocksize_B;
 }
 
+/* Variant for hot raw copies whose power-of-two tile geometry is reduced on
+ * the CPU. G17P AIL transfer tiles have at most 128 elements per axis, so the
+ * specialized Morton encoder only expands seven bits. This keeps division,
+ * bit scans and seven dead bit-expansion steps out of every element while
+ * preserving the generic helper for kernels with the existing ABI. */
+static uint
+libagx_copy_image_offset_pow2(uint x, uint y, uint pitch_B,
+                              uint tiles_per_row, uint tile_width_log2,
+                              uint tile_height_log2, uint blocksize_B,
+                              uint tiled)
+{
+   if (!tiled)
+      return y * pitch_B + x * blocksize_B;
+
+   uint tile_width_el = 1u << tile_width_log2;
+   uint tile_height_el = 1u << tile_height_log2;
+   uint tile_idx = (y >> tile_height_log2) * tiles_per_row +
+                   (x >> tile_width_log2);
+   uint tile_area_el = 1u << (tile_width_log2 + tile_height_log2);
+   uint morton_el = libagx_space_bits_7(x & (tile_width_el - 1)) |
+                    (libagx_space_bits_7(y & (tile_height_el - 1)) << 1);
+
+   return (tile_idx * tile_area_el + morton_el) * blocksize_B;
+}
+
 KERNEL(32)
 libagx_copy_image(global uint8_t *dest, global uint8_t *src,
                   uint width_el, uint height_el,
                   uint dest_x_el, uint dest_y_el,
                   uint src_x_el, uint src_y_el,
                   uint dest_pitch_B, uint src_pitch_B,
-                  uint dest_stride_el, uint src_stride_el,
-                  uint dest_tile_width_el, uint dest_tile_height_el,
-                  uint src_tile_width_el, uint src_tile_height_el,
+                  uint dest_tiles_per_row, uint src_tiles_per_row,
+                  uint dest_tile_width_log2, uint dest_tile_height_log2,
+                  uint src_tile_width_log2, uint src_tile_height_log2,
                   uint blocksize_B, uint dest_tiled, uint src_tiled)
 {
-   uint id = cl_global_id.x;
-   if (id >= width_el * height_el)
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= width_el || y >= height_el)
       return;
 
-   uint x = id % width_el;
-   uint y = id / width_el;
-   uint dest_offset_B = libagx_copy_image_offset(
-      dest_x_el + x, dest_y_el + y, dest_pitch_B, dest_stride_el,
-      dest_tile_width_el, dest_tile_height_el, blocksize_B, dest_tiled);
-   uint src_offset_B = libagx_copy_image_offset(
-      src_x_el + x, src_y_el + y, src_pitch_B, src_stride_el,
-      src_tile_width_el, src_tile_height_el, blocksize_B, src_tiled);
+   uint dest_offset_B = libagx_copy_image_offset_pow2(
+      dest_x_el + x, dest_y_el + y, dest_pitch_B, dest_tiles_per_row,
+      dest_tile_width_log2, dest_tile_height_log2, blocksize_B, dest_tiled);
+   uint src_offset_B = libagx_copy_image_offset_pow2(
+      src_x_el + x, src_y_el + y, src_pitch_B, src_tiles_per_row,
+      src_tile_width_log2, src_tile_height_log2, blocksize_B, src_tiled);
 
    for (uint b = 0; b < blocksize_B; ++b)
       dest[dest_offset_B + b] = src[src_offset_B + b];
+}
+
+/* Round an unsigned four-sample average like G17P's linear sampler followed
+ * by a normalized colour write. Exact output ties move toward code 128. This
+ * avoids the still-unqualified G17P float-to-integer convert encoding. */
+static uint8_t
+libagx_average4_unorm8(uint a, uint b, uint c, uint d)
+{
+   uint sum = a + b + c + d;
+   uint quotient = sum >> 2;
+   uint remainder = sum & 3u;
+   return (uint8_t)(quotient +
+                    (remainder > 2u ||
+                     (remainder == 2u && quotient < 128u)));
+}
+
+/*
+ * Exact full-level 2x downsample for ordinary four-channel UNORM8 images.
+ * RGBA and BGRA are both channel-order agnostic here: each stored byte is
+ * filtered independently and written back in the same order.
+ */
+KERNEL(32)
+libagx_mipmap_unorm8x4(global uint8_t *dest, global uint8_t *src,
+                       uint dest_width_px, uint dest_height_px,
+                       uint src_scale_x, uint src_scale_y,
+                       uint dest_tiles_per_row, uint src_tiles_per_row,
+                       uint dest_tile_width_log2, uint dest_tile_height_log2,
+                       uint src_tile_width_log2, uint src_tile_height_log2)
+{
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= dest_width_px || y >= dest_height_px)
+      return;
+
+   uint dest_offset = libagx_copy_image_offset_pow2(
+      x, y, 0, dest_tiles_per_row, dest_tile_width_log2,
+      dest_tile_height_log2, 4, 1);
+   uint src_x = x * src_scale_x;
+   uint src_y = y * src_scale_y;
+   uint src00 = libagx_copy_image_offset_pow2(
+      src_x, src_y, 0, src_tiles_per_row, src_tile_width_log2,
+      src_tile_height_log2, 4, 1);
+   uint src10 = libagx_copy_image_offset_pow2(
+      src_x + src_scale_x - 1, src_y, 0, src_tiles_per_row,
+      src_tile_width_log2, src_tile_height_log2, 4, 1);
+   uint src01 = libagx_copy_image_offset_pow2(
+      src_x, src_y + src_scale_y - 1, 0, src_tiles_per_row,
+      src_tile_width_log2, src_tile_height_log2, 4, 1);
+   uint src11 = libagx_copy_image_offset_pow2(
+      src_x + src_scale_x - 1, src_y + src_scale_y - 1, 0,
+      src_tiles_per_row, src_tile_width_log2, src_tile_height_log2, 4, 1);
+
+   for (uint channel = 0; channel < 4; ++channel) {
+      dest[dest_offset + channel] = libagx_average4_unorm8(
+         src[src00 + channel], src[src10 + channel],
+         src[src01 + channel], src[src11 + channel]);
+   }
+}
+
+/*
+ * Exact odd-size full-level downsample for four-channel UNORM8 images.  The
+ * CPU builds one packed Q8 coordinate entry per destination X and Y, avoiding
+ * every per-pixel divide and all 64-bit arithmetic here.  G17P's sampler
+ * rounds the four-tap result half-up to four fractional colour bits; its
+ * normalized write rounds exact ties toward the midpoint code 128.
+ */
+KERNEL(32)
+libagx_mipmap_unorm8x4_odd(global uint8_t *dest, global uint8_t *src,
+                           global uint *axis,
+                           uint dest_width_px, uint dest_height_px,
+                           uint dest_tiles_per_row, uint src_tiles_per_row,
+                           uint dest_tile_width_log2,
+                           uint dest_tile_height_log2,
+                           uint src_tile_width_log2,
+                           uint src_tile_height_log2)
+{
+   uint x = cl_global_id.x;
+   uint y = cl_global_id.y;
+   if (x >= dest_width_px || y >= dest_height_px)
+      return;
+
+   uint x_entry = axis[x];
+   uint y_entry = axis[dest_width_px + y];
+   uint src_x0 = x_entry & 0xffffu;
+   uint src_y0 = y_entry & 0xffffu;
+   uint wx = (x_entry >> 16) & 0xffu;
+   uint wy = (y_entry >> 16) & 0xffu;
+   uint src_x1 = src_x0 + (wx != 0u);
+   uint src_y1 = src_y0 + (wy != 0u);
+
+   uint dest_offset = libagx_copy_image_offset_pow2(
+      x, y, 0, dest_tiles_per_row, dest_tile_width_log2,
+      dest_tile_height_log2, 4, 1);
+   uint src00 = libagx_copy_image_offset_pow2(
+      src_x0, src_y0, 0, src_tiles_per_row, src_tile_width_log2,
+      src_tile_height_log2, 4, 1);
+   uint src10 = libagx_copy_image_offset_pow2(
+      src_x1, src_y0, 0, src_tiles_per_row, src_tile_width_log2,
+      src_tile_height_log2, 4, 1);
+   uint src01 = libagx_copy_image_offset_pow2(
+      src_x0, src_y1, 0, src_tiles_per_row, src_tile_width_log2,
+      src_tile_height_log2, 4, 1);
+   uint src11 = libagx_copy_image_offset_pow2(
+      src_x1, src_y1, 0, src_tiles_per_row, src_tile_width_log2,
+      src_tile_height_log2, 4, 1);
+   uint ix = 256u - wx;
+   uint iy = 256u - wy;
+
+   for (uint channel = 0; channel < 4; ++channel) {
+      uint value = src[src00 + channel] * ix * iy +
+                   src[src10 + channel] * wx * iy +
+                   src[src01 + channel] * ix * wy +
+                   src[src11 + channel] * wx * wy;
+      uint fixed4 = (value + 2048u) >> 12;
+      uint out = fixed4 >> 4;
+      uint remainder = fixed4 & 15u;
+      out += remainder > 8u || (remainder == 8u && out < 128u);
+      dest[dest_offset + channel] = (uint8_t)out;
+   }
 }
 
 /*

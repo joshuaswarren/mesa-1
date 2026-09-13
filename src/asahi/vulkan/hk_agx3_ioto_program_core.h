@@ -73,7 +73,27 @@ struct hk_agx3_g17p_graphics_program_desc {
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
-#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 5u
+
+/*
+ * The number of independently addressed uniform ranges a single graphics
+ * program can publish. Aliases the composer's capacity so the driver and
+ * agx3_g17p_graphics_program_bound() can never disagree about it.
+ *
+ * The worst case is a vertex program, which can request all seven:
+ *
+ *   1. vertex attribute bases              nr_attribs != 0
+ *   2. vertex attribute clamps             nr_attribs != 0
+ *   3. draw parameters                     uses_base_param
+ *   4. draw ID                             uses_draw_id
+ *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
+ *   6. root descriptor                     agx3_uses_root || set_count
+ *   7. promoted constants                  rodata.size_16 != 0
+ *
+ * The combined-sampler range is not in that list: it is fragment-only, and
+ * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
+ * this derivation against the collector.
+ */
+#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_RANGES
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 
 bool hk_agx3_g17p_graphics_program_bound(
@@ -141,6 +161,14 @@ bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
                              uint64_t root_va,
                              struct agx3_ioto_uniform_range *range);
 
+/* Publish promoted constants through G17P's dword-granular Ioto loader.
+ * Compiler binaries pad the rodata blob before the aligned code entry, so an
+ * odd final half may be covered by loading the following padding half. */
+bool hk_agx3_g17p_rodata_range(uint16_t base_halfs, uint16_t size_halfs,
+                               uint64_t bo_va, uint32_t offset_B,
+                               uint64_t bo_size_B,
+                               struct agx3_ioto_uniform_range *range);
+
 /* Load the four fragment blend constants at an even uniform-half base. The
  * standard ABI uses half4; HAL200 may relocate the epilog range when native
  * texture/sampler table pointers occupy halves0..7. */
@@ -150,9 +178,10 @@ bool hk_agx3_g17p_fragment_blend_constants_range(
 
 /* Build the bounded G17P vertex or fragment Ioto program.  A zero-range
  * fragment uses the valid ordinary-FS PIXREL suffix; a zero-range vertex uses
- * the distinct compute/vertex profile suffix. Up to three dword-aligned
+ * the distinct compute/vertex profile suffix. Up to six dword-aligned
  * absolute uniform ranges add the CProg loads used by vertex attributes,
- * descriptor roots, or the bounded native texture/sampler pair above. */
+ * draw parameters, descriptor roots, promoted constants, or the bounded
+ * native texture/sampler pair above. */
 bool hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);
@@ -165,6 +194,7 @@ enum hk_agx3_g17p_rt0_bg_op {
 
 #define HK_AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
 #define HK_AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
+#define HK_AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
 #define HK_AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 
 /* Resource spec for the bounded one-RT background shaders, not an ordinary
@@ -246,6 +276,15 @@ bool hk_agx3_g17p_single_layer_rendering(uint32_t view_mask,
 bool hk_agx3_g17p_rt0_tile_layout_supported(
    struct agx_tilebuffer_layout *tib);
 
+/* Admit the unresolved multisample colour store. Requires the caller to have
+ * confirmed the named one-boot hardware probe: the end-of-tile program and
+ * the multisample PBE descriptor are both byte-witnessed from Apple's own
+ * encoders, but no G17P silicon has executed the pair. */
+bool hk_agx3_g17p_multisample_store_supported(struct agx_tilebuffer_layout *tib,
+                                              unsigned color_attachment_count,
+                                              bool store_source,
+                                              unsigned target_samples);
+
 bool hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source);
@@ -302,6 +341,25 @@ struct hk_agx3_g17p_compute_program {
 bool hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program);
+
+/* Reuse a generated one-range program by replacing its sole absolute range
+ * address and rebinding the command-buffer-local program VA. The template is
+ * accepted only while the load schedule is provably unchanged. */
+bool hk_agx3_g17p_compute_program_relocate_single_range(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   struct hk_agx3_g17p_compute_program *program);
+
+/* Relocate directly into the caller's executable allocation. This is the
+ * recording fast path: unlike the convenience wrapper above, it does not
+ * materialize another maximum-size program object before the upload. */
+bool hk_agx3_g17p_compute_program_relocate_single_range_to(
+   enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
+   const struct agx3_ioto_uniform_range *template_range,
+   const struct hk_agx3_g17p_compute_program *template_program,
+   void *program_bytes, size_t capacity, uint16_t *program_length,
+   struct agx3_compute_program *launch);
 
 bool hk_agx3_g17p_native_compute_dispatch_append(
    const struct agx3_compute_program *program,

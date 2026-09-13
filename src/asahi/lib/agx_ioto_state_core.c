@@ -375,6 +375,47 @@ agx_ioto_state_pack_spectpr(enum agx_chip chip,
       AGX_IOTO_SPECTPR_SIZE, agx_ioto_state_encode_spectpr);
 }
 
+/* The two-bit sample selector inside the SPECLM word, and the switch that
+ * lets one boot decide what it should be.
+ *
+ * ONLY the one-sample value is witnessed. All three captured seeds are
+ * one-sample records, and their selector reads 2. The values for two and four
+ * samples were completed by assuming the field is a LUT of the shape this ISA
+ * uses elsewhere ([1,2,0], [2,0,1,3,4], ...) and rotating, i.e. by guessing.
+ *
+ * Two facts say that guess is the thing to check first. Apple's own
+ * SpecLM::encodeImageBlockData (AGXMetalG17P, 0x216af6848) derives the
+ * selector as plain log2 -- `cset (samples == 2)` then `csel #2 (samples == 4)`
+ * gives 1 -> 0, 2 -> 1, 4 -> 2 -- which is not the mapping below, and its byte
+ * size field agrees with ours exactly, so the disagreement is specific to this
+ * field. And on hardware both 2x and 4x resolve to exactly half brightness in
+ * every channel, which is what a resolve that believes there are twice as many
+ * samples as there are produces.
+ *
+ * AGX_SPECLM_SAMPLE_CODE=<0..3> forces the selector for multisample
+ * configurations only; one sample keeps its witnessed value either way. Sweep
+ * it against g17p-msaa2-triangle: whichever value makes the resolve exact IS
+ * the witness, and this guess can be replaced by it.
+ */
+static int agx_ioto_g17p_sample_code_override = -1;
+
+void
+agx_ioto_g17p_set_speclm_sample_code(int code)
+{
+   agx_ioto_g17p_sample_code_override = (code >= 0 && code <= 3) ? code : -1;
+}
+
+unsigned
+agx_ioto_g17p_speclm_sample_bits(unsigned samples)
+{
+   if (samples != 1 && agx_ioto_g17p_sample_code_override >= 0)
+      return (unsigned)agx_ioto_g17p_sample_code_override << 7;
+
+   /* Selector 2 at one sample is the witnessed value. The other two are the
+    * standing guess described above. */
+   return samples == 1 ? 0x0100u : samples == 4 ? 0x0080u : 0x0000u;
+}
+
 bool
 agx_ioto_g17p_fragment_speclm_build(
    const struct agx_ioto_g17p_imageblock *imageblock, void *output,
@@ -393,8 +434,15 @@ agx_ioto_g17p_fragment_speclm_build(
        (sample_size_B &&
         ((samples != 1 && samples != 2 && samples != 4) ||
          (sample_size_B & 7) || sample_size_B > 64 ||
-         sample_size_B * samples * imageblock->tile_size_px >= 32768)))
+         sample_size_B * samples * imageblock->tile_size_px > 32768u)))
       return false;
+
+   /* The imageblock bound here is structural -- a tile larger than 32 KiB has
+    * nowhere to live. Which tile a given format and sample count actually gets
+    * is agx_select_tile_size()'s policy, and that stays one byte more
+    * conservative than this unless AGX_TILE_32K says otherwise, so nothing
+    * reaches exactly 32768 by default.
+    */
 
    /* Fresh HAL200 LdShdrTransformFragment witnesses recover three complete
     * one-sample, eight-byte geometry records.  The low six bits of word 2
@@ -432,9 +480,7 @@ agx_ioto_g17p_fragment_speclm_build(
       memcpy(&word1, staged + 2, sizeof(word1));
       word1 &= ~UINT16_C(0x3f80);
       word1 |= (uint16_t)((sample_size_B >> 3) << 9);
-      word1 |= samples == 1 ? UINT16_C(0x0100)
-               : samples == 4 ? UINT16_C(0x0080)
-                              : UINT16_C(0x0000);
+      word1 |= (uint16_t)agx_ioto_g17p_speclm_sample_bits(samples);
       memcpy(staged + 2, &word1, sizeof(word1));
    }
 

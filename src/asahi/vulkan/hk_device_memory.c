@@ -13,6 +13,8 @@
 
 #include "asahi/lib/agx_bo.h"
 #include "util/u_atomic.h"
+#include "util/u_debug.h"
+#include "vk_common_entrypoints.h"
 
 #include <inttypes.h>
 #include <sys/mman.h>
@@ -170,6 +172,9 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
    const VkExportMemoryAllocateInfo *export_info =
       vk_find_struct_const(pAllocateInfo->pNext, EXPORT_MEMORY_ALLOCATE_INFO);
+   const VkMemoryOpaqueCaptureAddressAllocateInfo *capture_info =
+      vk_find_struct_const(pAllocateInfo->pNext,
+                           MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO);
    const VkMemoryType *type = &pdev->mem_types[pAllocateInfo->memoryTypeIndex];
 
    VkExternalMemoryHandleTypeFlagBits handle_types = 0;
@@ -220,6 +225,14 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       }
    }
 
+   if (mem->vk.alloc_flags &
+       VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT) {
+      mem->opaque_capture_address =
+         capture_info && capture_info->opaqueCaptureAddress
+            ? capture_info->opaqueCaptureAddress
+            : mem->bo->va->addr;
+   }
+
    /* Shadow map in case this is used for a sparse resident buffer */
    int ret = agx_bo_bind(&dev->dev, mem->bo,
                          agx_rw_addr_to_ro(&dev->dev, mem->bo->va->addr),
@@ -229,6 +242,8 @@ hk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_add_ext_bo(dev, mem->bo);
+
+   agx_g17p_va_lifetime_trace(&dev->dev, "hk-allocate", mem->bo);
 
    if (fd_info && fd_info->handleType) {
       /* From the Vulkan spec:
@@ -273,6 +288,27 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
    const VkMemoryType *type = &pdev->mem_types[mem->vk.memory_type_index];
    struct hk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
    p_atomic_add(&heap->used, -((int64_t)mem->bo->size));
+
+   agx_g17p_va_lifetime_trace(&dev->dev, "hk-free-request", mem->bo);
+
+   /* Correctness A/B for a pending fragment reading an imported client
+    * image after its read-only shadow was unmapped. Shared/imported BOs skip
+    * the ordinary mapped BO cache and GEM-close immediately at refcount zero.
+    * Waiting every current queue before that close distinguishes a missing
+    * resource-retirement dependency from an unrelated GPU address bug.
+    *
+    * This is deliberately opt-in and G17P-only: it serializes shared-memory
+    * destruction and is a diagnostic containment, not the eventual
+    * per-resource timeline-retirement implementation.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED)) &&
+       debug_get_bool_option("HK_G17P_WAIT_SHARED_MEMORY_FREE", false)) {
+      mesa_logi_once("G17P shared-memory free queue-idle containment enabled");
+      VkResult result = vk_common_DeviceWaitIdle(device);
+      if (result != VK_SUCCESS)
+         mesa_loge("G17P shared-memory free wait failed: %d", result);
+   }
 
    if (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED))
       hk_remove_ext_bo(dev, mem->bo);
@@ -412,15 +448,18 @@ hk_GetMemoryFdKHR(VkDevice device, const VkMemoryGetFdInfoKHR *pGetFdInfo,
       return VK_SUCCESS;
    default:
       assert(!"unsupported handle type");
-      return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+                       "vkGetMemoryFdKHR: unsupported handle type 0x%x",
+                       pGetFdInfo->handleType);
    }
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL
 hk_GetDeviceMemoryOpaqueCaptureAddress(
    UNUSED VkDevice device,
-   UNUSED const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
+   const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo)
 {
-   /* Addresses are replayed at buffer and image creation, not memory. */
-   return 0;
+   VK_FROM_HANDLE(hk_device_memory, memory, pInfo->memory);
+
+   return memory->opaque_capture_address;
 }
