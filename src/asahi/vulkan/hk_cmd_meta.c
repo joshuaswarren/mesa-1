@@ -1971,7 +1971,7 @@ hk_g17p_block_copy_format(struct hk_device *dev, VkFormat format)
 static struct hk_g17p_buffer_to_image_copy
 hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
                            const VkCopyBufferToImageInfo2 *info,
-                           const VkBufferImageCopy2 *region)
+                           const VkBufferImageCopy2 *region, VkFormat format)
 {
    return (struct hk_g17p_buffer_to_image_copy){
       .chip = dev->dev.chip,
@@ -1979,15 +1979,15 @@ hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
        * shared validity gate does.  Every format admitted by the narrow raw
        * planner is renderable on G17P. */
       .plane_format_renderable = true,
-      .format = image->vk.format,
+      .format = format,
       .layout = info->dstImageLayout,
       .image_type = image->vk.image_type,
       .samples = image->vk.samples,
-      .plane_count = image->plane_count,
+      .plane_count = 1,
       .mip_levels = image->vk.mip_levels,
       .array_layers = image->vk.array_layers,
       .image_extent = image->vk.extent,
-      .aspect = region->imageSubresource.aspectMask,
+      .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       .mip_level = region->imageSubresource.mipLevel,
       .base_array_layer = region->imageSubresource.baseArrayLayer,
       .layer_count = region->imageSubresource.layerCount,
@@ -1999,19 +1999,53 @@ hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
 }
 
 static bool
+hk_g17p_buffer_upload_plane(const struct hk_image *image,
+                            VkImageAspectFlags aspect, uint8_t *plane,
+                            VkFormat *format)
+{
+   if (aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+      if (image->plane_count != 1)
+         return false;
+   } else if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+      if (!vk_format_has_depth(image->vk.format))
+         return false;
+   } else if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
+      if (!vk_format_has_stencil(image->vk.format))
+         return false;
+   } else {
+      return false;
+   }
+
+   *plane = hk_image_aspects_to_plane(image, aspect);
+   *format = aspect_format(image->vk.format, aspect);
+   return *plane < image->plane_count && *format != VK_FORMAT_UNDEFINED;
+}
+
+static bool
 hk_g17p_copy_uncompressed_buffer_to_image_supported(
    struct hk_device *dev, const struct hk_buffer *buffer,
    const struct hk_image *image, const VkCopyBufferToImageInfo2 *info)
 {
-   if (dev->dev.chip != AGX_CHIP_G17P || image->plane_count != 1 ||
-       image->planes[0].layout.tiling != AIL_TILING_GPU ||
-       image->planes[0].layout.compressed || info->regionCount == 0)
+   if (dev->dev.chip != AGX_CHIP_G17P || info->regionCount == 0)
       return false;
 
    for (uint32_t r = 0; r < info->regionCount; ++r) {
       const VkBufferImageCopy2 *region = &info->pRegions[r];
+      uint8_t plane;
+      VkFormat format;
+      if (!hk_g17p_buffer_upload_plane(
+             image, region->imageSubresource.aspectMask, &plane, &format))
+         return false;
+
+      const struct ail_layout *layout = &image->planes[plane].layout;
+      if ((layout->tiling != AIL_TILING_GPU &&
+           layout->tiling != AIL_TILING_LINEAR) ||
+          layout->compressed ||
+          (layout->tiling == AIL_TILING_LINEAR && image->vk.mip_levels != 1))
+         return false;
+
       const struct hk_g17p_buffer_to_image_copy copy =
-         hk_g17p_buffer_upload_desc(dev, image, info, region);
+         hk_g17p_buffer_upload_desc(dev, image, info, region, format);
       struct hk_g17p_uncompressed_copy_plan plan;
       if (!hk_g17p_uncompressed_buffer_to_image_copy_plan(
              &copy, region->bufferOffset, buffer->vk.size, &plan))
@@ -2027,13 +2061,22 @@ hk_g17p_copy_uncompressed_buffer_to_image(
    struct hk_image *image, const VkCopyBufferToImageInfo2 *info)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const struct ail_layout *layout = &image->planes[0].layout;
-   const uint64_t base_dst = hk_image_base_address(image, 0);
 
    for (uint32_t r = 0; r < info->regionCount; ++r) {
       const VkBufferImageCopy2 *region = &info->pRegions[r];
+      uint8_t plane;
+      VkFormat format;
+      if (!hk_g17p_buffer_upload_plane(
+             image, region->imageSubresource.aspectMask, &plane, &format)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
+      const struct ail_layout *layout = &image->planes[plane].layout;
+      const uint64_t base_dst = hk_image_base_address(image, plane);
+      const bool dest_tiled = layout->tiling == AIL_TILING_GPU;
       const struct hk_g17p_buffer_to_image_copy copy =
-         hk_g17p_buffer_upload_desc(dev, image, info, region);
+         hk_g17p_buffer_upload_desc(dev, image, info, region, format);
       struct hk_g17p_uncompressed_copy_plan plan;
       if (!hk_g17p_uncompressed_buffer_to_image_copy_plan(
              &copy, region->bufferOffset, buffer->vk.size, &plan)) {
@@ -2042,13 +2085,15 @@ hk_g17p_copy_uncompressed_buffer_to_image(
       }
 
       const uint32_t level = region->imageSubresource.mipLevel;
-      const struct ail_tile tile = layout->tilesize_el[level];
-      struct hk_g17p_tile_address_config tile_config;
-      if (!hk_g17p_tile_address_config_init(
-             layout->stride_el[level], tile.width_el, tile.height_el,
-             &tile_config)) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
-         return;
+      struct hk_g17p_tile_address_config tile_config = {0};
+      if (dest_tiled) {
+         const struct ail_tile tile = layout->tilesize_el[level];
+         if (!hk_g17p_tile_address_config_init(
+                layout->stride_el[level], tile.width_el, tile.height_el,
+                &tile_config)) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+            return;
+         }
       }
       const uint64_t base_src =
          hk_buffer_address_ro(buffer, region->bufferOffset);
@@ -2057,12 +2102,14 @@ hk_g17p_copy_uncompressed_buffer_to_image(
          .height_el = plan.height_el,
          .dest_x_el = plan.base_x_el,
          .dest_y_el = plan.base_y_el,
+         .dest_pitch_B =
+            dest_tiled ? 0 : ail_get_linear_stride_B(layout, level),
          .src_pitch_B = plan.buffer_row_stride_B,
          .dest_tiles_per_row = tile_config.tiles_per_row,
          .dest_tile_width_log2 = tile_config.tile_width_log2,
          .dest_tile_height_log2 = tile_config.tile_height_log2,
          .blocksize_B = plan.block_size_B,
-         .dest_tiled = true,
+         .dest_tiled = dest_tiled,
          .src_tiled = false,
       };
 
