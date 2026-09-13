@@ -10968,13 +10968,6 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
       nir->info.fs.needs_full_quad_helper_invocations = true;
    }
 
-   /* Lower VK_KHR_cooperative_matrix to the G13 HW matrix instruction before
-    * vars_to_scratch can spill the 8x8 cmat temps. AGX_SIMDMAT=0 skips it.
-    */
-   if (agx_simdmat_enabled())
-      NIR_PASS(_, nir, agx_nir_lower_simdmat, 32);
-
-
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    /* Lower large arrays to scratch and small arrays to csel */
@@ -11103,6 +11096,30 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
 void
 agx_preprocess_nir(nir_shader *nir)
 {
+   /* Lower VK_KHR_cooperative_matrix before vars_to_scratch can spill the cmat
+    * temps. This entry point is the AGX2 (G13) path: the G13 matrix tile spans
+    * all 32 lanes of a subgroup, so the HW path requires fully-populated
+    * subgroups: compute stage, static workgroup size, size a multiple of 32.
+    * Everything else lowers through the software path (agx_nir_lower_cmat.c) --
+    * a valid shader is never rejected. On by default; AGX_SIMDMAT=0 disables
+    * it. The g17p/m5 variants keep their own chip pipelines untouched.
+    */
+   if (agx_simdmat_enabled()) {
+      bool full_subgroups =
+         nir->info.stage == MESA_SHADER_COMPUTE &&
+         !nir->info.workgroup_size_variable &&
+         nir->info.workgroup_size[0] && nir->info.workgroup_size[1] &&
+         nir->info.workgroup_size[2] &&
+         (((uint64_t)nir->info.workgroup_size[0] *
+              nir->info.workgroup_size[1] * nir->info.workgroup_size[2]) %
+          32) == 0;
+
+      if (full_subgroups)
+         NIR_PASS(_, nir, agx_nir_lower_simdmat, 32);
+      else
+         NIR_PASS(_, nir, agx_nir_lower_cmat);
+   }
+
    agx_preprocess_nir_internal(nir, false, false);
 }
 

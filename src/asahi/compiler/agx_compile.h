@@ -602,8 +602,8 @@ void agx_preprocess_nir_g17p(nir_shader *nir);
 bool agx3_nir_lower_scratch_words(nir_shader *nir);
 void agx_preprocess_nir_m5(nir_shader *nir);
 
-/* VK_KHR_cooperative_matrix on the G13 simd_matrix unit. On by default;
- * AGX_SIMDMAT=0 disables it.
+/* VK_KHR_cooperative_matrix on the G13 simd_matrix unit, with a software
+ * fallback for partial subgroups. On by default; AGX_SIMDMAT=0 disables it.
  */
 static inline bool
 agx_simdmat_enabled(void)
