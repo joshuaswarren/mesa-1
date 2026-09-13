@@ -5054,7 +5054,7 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    I->mask = 15;
    /* The packed offset reaches the packer on the instruction, not through
     * src[5]: a comparison sample needs that operand for its reference. */
-   I->offset_xy = 0xf1;
+   I->offset_xyz = 0xf1;
    agx_stop(b);
 
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
@@ -5071,7 +5071,7 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    const struct agx3_tex_sample_desc sample = {
       .dest = 8, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
       .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
-      .final = true, .offset = true, .offset_xy = 0xf1,
+      .final = true, .offset = true, .offset_xyz = 0xf1,
    };
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
    append(want, bytes, len);
@@ -11822,10 +11822,83 @@ TEST_F(AGX3PackBinary, OffsetSampleRidesEveryLodMode)
          agx_immediate(0), offset, AGX_DIM_2D, r.mode, 0,
          /*offset=*/true, false, false, AGX_GATHER_NONE, false);
       I->mask = 15;
-      I->offset_xy = 0x11;
+      I->offset_xyz = 0x11;
       agx_stop(b);
       SCOPED_TRACE(r.name);
       pack(b, /*expect_ok=*/true);
+   }
+}
+
+TEST_F(AGX3PackBinary, Texture3DOffsetKeepsSignedZNibbleThroughValidation)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(16, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   agx_index offset = agx_immediate(0x837); /* (7, 3, -8), from CTS */
+   offset.size = AGX_SIZE_32;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0),
+      agx_register(0, AGX_SIZE_64), agx_register(4, AGX_SIZE_64),
+      offset, AGX_DIM_3D, AGX_LOD_MODE_AUTO_LOD, 0, true, false, false,
+      AGX_GATHER_NONE, false);
+   I->mask = 15;
+   I->offset_xyz = 0x837;
+   agx_stop(b);
+   agx_validate(b->shader, "3D immediate offset");
+   pack(b);
+   EXPECT_EQ(I->offset_xyz, 0x837u);
+}
+
+/* The array layer and register LOD share one private operand word. Check
+ * the full IR path emits the native combined publication exactly once. */
+TEST_F(AGX3PackBinary, OffsetArrayCombinesLayerAndRegisterLod)
+{
+   for (bool shadow : {false, true}) {
+      for (auto mode : {AGX_LOD_MODE_LOD_MIN, AGX_LOD_MODE_AUTO_LOD_BIAS}) {
+         const auto enc = AGX_ISA_ENCODING_AGX3B;
+         agx_builder *b = builder(enc);
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         agx_index dest = agx_register(16, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         agx_index coord = agx_register(8, AGX_SIZE_32);
+         coord.channels_m1 = 2;
+         coord.discard = true;
+         agx_index lod = agx_register(13, AGX_SIZE_16);
+         lod.discard = true;
+         agx_index off = agx_immediate(0x87);
+         off.size = AGX_SIZE_32;
+         auto *I = agx_texture_sample_to(
+            b, dest, coord, lod, agx_immediate(0),
+            agx_register(0, AGX_SIZE_64), agx_register(4, AGX_SIZE_64),
+            shadow ? agx_register(24, AGX_SIZE_32) : off,
+            AGX_DIM_2D_ARRAY, mode, 0, true, shadow, false,
+            AGX_GATHER_NONE, false);
+         I->mask = shadow ? 1 : 15;
+         I->offset_xyz = 0x87;
+         agx_stop(b);
+         const auto stream = pack(b);
+         const uint8_t combined[] = {
+            0x17, 0x05, 0x54, 0x06, 0x00, 0x18,
+            0x34, 0x00, 0xf0, 0xe4, 0x25, 0x00,
+         };
+         auto first = std::search(stream.begin(), stream.end(),
+                                  std::begin(combined), std::end(combined));
+         ASSERT_NE(first, stream.end());
+         EXPECT_EQ(std::search(first + sizeof(combined), stream.end(),
+                               std::begin(combined), std::end(combined)),
+                   stream.end());
+         unsigned publications = 0;
+         for (size_t i = 0; i + 4 <= stream.size(); i += 2) {
+            if (stream[i] == 0x17 && stream[i + 1] == 0x05 &&
+                stream[i + 2] == 0x54 && stream[i + 3] == 0x06)
+               publications++;
+         }
+         EXPECT_EQ(publications, 1u);
+         EXPECT_EQ(b->shader->agx3_staging_halfs, 8u);
+      }
    }
 }
 
@@ -11854,7 +11927,7 @@ TEST_F(AGX3PackBinary, OffsetSampleMatchesNativeFieldTriple)
       agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
       /*offset=*/true, false, false, AGX_GATHER_NONE, false);
    I->mask = 15;
-   I->offset_xy = 0x11;
+   I->offset_xyz = 0x11;
    agx_stop(b);
    const std::vector<uint8_t> stream = pack(b);
 
@@ -11883,7 +11956,7 @@ TEST_F(AGX3PackBinary, OffsetSampleMatchesNativeFieldTriple)
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    const std::vector<uint8_t> want_plain(bytes, bytes + len);
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    const std::vector<uint8_t> want_offset(bytes, bytes + len);
 
@@ -11986,7 +12059,7 @@ TEST_F(AGX3PackBinary, ShadowGatherKeepsTheFourTexelMask)
  * The reason this could not be encoded before was not the ISA: agx_emit_tex()
  * collected the comparator and the packed offset into one src[5] vector, and
  * the comparator staging cannot take that apart. The offset now rides on the
- * instruction (I->offset_xy) and src[5] belongs to the comparator alone.
+ * instruction (I->offset_xyz) and src[5] belongs to the comparator alone.
  */
 TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
 {
@@ -12006,7 +12079,7 @@ TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
       agx_immediate(0), compare, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
       /*offset=*/true, /*shadow=*/true, false, AGX_GATHER_NONE, false);
    I->mask = 1;
-   I->offset_xy = 0x11;
+   I->offset_xyz = 0x11;
    agx_stop(b);
    const std::vector<uint8_t> stream = pack(b);
 
@@ -12020,7 +12093,7 @@ TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
    d.final = true;
    d.shadow = true;
    d.offset = true;
-   d.offset_xy = 0x11;
+   d.offset_xyz = 0x11;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    const std::vector<uint8_t> want(bytes, bytes + len);
@@ -12046,12 +12119,12 @@ TEST_F(AGX3PackBinary, ShadowSampleTakesACoordinateOffset)
  * REGRESSION GUARD. agx_opt_cse.c's instrs_equal() is hand-written and
  * enumerates the instruction's immediates one at a time, so a new field that
  * is not added there lets two otherwise-identical instructions collapse into
- * one. I->offset_xy is such a field: without its line in instrs_equal(), two
+ * one. I->offset_xyz is such a field: without its line in instrs_equal(), two
  * samples of the same texture at the same coordinate but *different* texel
  * offsets would CSE together and the second would silently read the first's
  * texels.
  *
- * This asserts the two are not equal. Delete the offset_xy line from
+ * This asserts the two are not equal. Delete the offset_xyz line from
  * instrs_equal() and this test fails.
  */
 TEST_F(AGX3PackBinary, DifferentTexelOffsetsDoNotCSETogether)
@@ -12075,21 +12148,27 @@ TEST_F(AGX3PackBinary, DifferentTexelOffsetsDoNotCSETogether)
       agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
       /*offset=*/true, false, false, AGX_GATHER_NONE, false);
    a->mask = 15;
-   a->offset_xy = 0x11;
+   a->offset_xyz = 0x11;
 
    auto *c = agx_texture_sample_to(
       b, d1, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
       agx_immediate(0), off, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
       /*offset=*/true, false, false, AGX_GATHER_NONE, false);
    c->mask = 15;
-   c->offset_xy = 0x22; /* the only difference */
+   c->offset_xyz = 0x22; /* the only difference */
 
-   EXPECT_NE(a->offset_xy, c->offset_xy);
+   EXPECT_NE(a->offset_xyz, c->offset_xyz);
    EXPECT_FALSE(agx_instrs_equal_for_cse(a, c));
 
-   /* ... and two with the same offset still compare equal, so the guard is
-    * not simply always-false. */
-   c->offset_xy = 0x11;
+   /* Preserve the third nibble too: equal X/Y with different Z must not
+    * merge after the comparator has occupied src[5]. */
+   a->dim = c->dim = AGX_DIM_3D;
+   a->src[0].channels_m1 = c->src[0].channels_m1 = 2;
+   c->offset_xyz = 0x111;
+   EXPECT_FALSE(agx_instrs_equal_for_cse(a, c));
+
+   /* Equal full-width offsets still compare equal. */
+   c->offset_xyz = 0x11;
    c->dest[0] = d0;
    EXPECT_TRUE(agx_instrs_equal_for_cse(a, c));
 }

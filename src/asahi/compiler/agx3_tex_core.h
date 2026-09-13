@@ -304,7 +304,7 @@ struct agx3_tex_sample_desc {
     * Array queries take no layer and encode immediate layer zero. */
    bool query_lod;
    bool offset;                 /* signed nibble-packed 2D texel offset */
-   uint8_t offset_xy;           /* x in bits 3:0, y in bits 7:4 */
+   uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
    enum agx3_tex_sample_abi sample_abi;
 };
 
@@ -324,13 +324,18 @@ bool agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                        uint16_t wait_mask, bool src_cache, bool src_discard,
                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* Pack the dynamic layer/sample word used by array texel fetches into the
- * separately witnessed PACK_SMPIR form. Filtered G17P array samples instead
- * name their layer register directly in SMP. */
+/* Pack the dynamic layer used by array fetches and driver-ABI samples. */
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
-                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish the layer and per-lane half-float LOD together into operand bank 6. */
+bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
+                              uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                              bool layer_cache, bool layer_discard,
+                              bool lod_cache, bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Run one axis of the native cube-coordinate calculation.  Three axes with
  * the fixed reciprocal between axis 0 and 1 are required before sampling. */

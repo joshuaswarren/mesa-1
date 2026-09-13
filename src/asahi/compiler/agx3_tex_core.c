@@ -390,21 +390,23 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * slot plan here, so the collision is refused rather than silently
     * dropping one of the two values.
     *
-    * 3D and cube offsets are not witnessed and stay closed, and so is a
-    * register descriptor pair: the immediate and uniform pairs above each
-    * take the offset orthogonally, but the register pair has no offset
-    * witness of its own.
+    * Fresh runtime-indexed G17P argument-buffer witnesses use the driver
+    * profile and the same offset fields with register descriptors. The 3D
+    * form extends f43 to twelve bits, one signed nibble per coordinate.
+    * Driver array offsets use the staged f77=2 layer in every LOD mode;
+    * immediate LOD then uses f29/f37, leaving f43 for the offset. The direct
+    * APPLE_FRAGMENT layer still has the immediate-slot collision above.
     */
-   const bool array_immediate_lod =
-      d->array &&
+   const bool direct_array_immediate_lod =
+      d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
       (d->lod == AGX3_TEX_LOD_BIAS || d->lod == AGX3_TEX_LOD_LEVEL);
    if (d->offset &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xy == 0 ||
-        d->three_d || d->cube || array_immediate_lod ||
-        tk == AGX3_TEX_OPERAND_REGISTER || sk == AGX3_TEX_OPERAND_REGISTER))
+       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xyz == 0 ||
+        d->offset_xyz > (d->three_d ? 0xfffu : 0xffu) ||
+        d->cube || direct_array_immediate_lod))
       return false;
 
-   if (!d->offset && d->offset_xy != 0)
+   if (!d->offset && d->offset_xyz != 0)
       return false;
 
    /* Metal's gather takes no LOD argument, so every gather witness is an
@@ -450,7 +452,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
-        ((d->array || d->cube) && d->lod != AGX3_TEX_LOD_AUTO &&
+        ((d->cube || (d->array && !d->offset)) &&
+         d->lod != AGX3_TEX_LOD_AUTO &&
          !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0 &&
            !(d->array && d->cube)))))
       return false;
@@ -482,6 +485,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool apple_fragment_abi =
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
    const bool shadow_array = d->shadow && d->array;
+   const bool staged_driver_array =
+      d->array && !d->cube &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->shadow || d->lod == AGX3_TEX_LOD_AUTO || d->offset);
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
    unsigned nb = 0;
@@ -550,9 +557,6 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * witnesses use the direct f31/f37 path as part of their complete 4/8
        * ABI; cube arrays retain their independently witnessed direct path.
        */
-      const bool staged_driver_array =
-         !d->cube && d->lod == AGX3_TEX_LOD_AUTO &&
-         d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
       if (d->query_lod) {
          /* No layer coordinate participates in the LOD derivative. */
          ov[n++] = (struct agx3_field_kv)KV(29, 0);
@@ -575,7 +579,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    if (d->lod == AGX3_TEX_LOD_AUTO) {
       /* AUTO has no explicit LOD operand. Its group marker is emitted above. */
    } else if (d->lod == AGX3_TEX_LOD_BIAS) {
-      if (d->array) {
+      if (d->array && !staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
       } else {
@@ -597,7 +601,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       /* A level-zero comparison keeps the packed f77=2 layer operand.
        * Native array_compare_zero therefore uses f29/f37 for the level,
        * just like a non-array sample, rather than the direct-layer f43. */
-      if (d->array && !shadow_array) {
+      if (d->array && !shadow_array && !staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
       } else {
@@ -617,7 +621,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    if (d->query_lod)
       ov[n++] = (struct agx3_field_kv)KV(146, 1);
    if (d->offset) {
-      ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xy);
+      ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xyz);
       ov[n++] = (struct agx3_field_kv)KV(51, 1);
       ov[n++] = (struct agx3_field_kv)KV(141, 1);
    }
@@ -1051,6 +1055,54 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+/* Runtime-indexed texture2d_array and depth2d_array sample witnesses publish
+ * layer half 12 and LOD half 13 on slot 6 with the same single instruction:
+ *
+ *   level(reg), bias(reg): 1705540600183400f0e42500
+ *   layer alone:          1705540600180000f0e40400
+ *
+ * Exact recomposition isolates f30/f37/f41 as the second register operand,
+ * f76=2 as its float type, and f77=16 as its position in the packed word.
+ * Two independent publications to bank 6 would overwrite the first operand.
+ */
+bool
+agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
+                         uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                         bool layer_cache, bool layer_discard,
+                         bool lod_cache, bool lod_discard,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || layer >= 128 || (layer & 1) ||
+       lod >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       (layer_cache && layer_discard) || (lod_cache && lod_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
+      KV(74, 4), KV(76, 2), KV(77, 16),
+   };
+   struct agx3_field_kv ov[13];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, layer);
+   ov[n++] = (struct agx3_field_kv)KV(30, lod);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, layer_discard);
+   ov[n++] = (struct agx3_field_kv)KV(39, lod_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, lod_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
 /* Apple's G17P cube path first runs one CEM calculation for each axis.  The

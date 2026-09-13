@@ -4173,16 +4173,16 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_backend2:
-         /* G17P's witnessed 2D texture offset is an immediate byte in SMP,
-          * with signed x/y nibbles. Keep the constant produced by
+         /* G17P's texture offset is an immediate in SMP, with signed
+          * x/y nibbles and a third z nibble for 3D. Keep the constant from
           * agx_nir_lower_texture in that form instead of materializing a GPR
           * that the native instruction does not read.
           */
          if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              nir_src_is_const(instr->src[i].src) &&
-             nir_src_as_uint(instr->src[i].src) <= UINT8_MAX) {
+             nir_src_as_uint(instr->src[i].src) <= 0xfff) {
             const uint32_t value = nir_src_as_uint(instr->src[i].src);
-            /* Apple's compiler emits offset (0, 0) as a plain sample. */
+            /* Apple's compiler emits an all-zero offset as a plain sample. */
             packed_offset = value ? agx_immediate(value) : agx_null();
          } else {
             packed_offset = index;
@@ -4330,9 +4330,9 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     * src[5] to the comparator alone; AGX2, whose hardware reads a register
     * pair, keeps the combined form. */
    const bool offset_present = !agx_is_null(packed_offset);
-   const uint8_t offset_xy =
-      packed_offset.type == AGX_INDEX_IMMEDIATE ? (uint8_t)packed_offset.value
-                                                : 0;
+   const uint16_t offset_xyz =
+      packed_offset.type == AGX_INDEX_IMMEDIATE
+         ? (uint16_t)packed_offset.value : 0;
 
    const bool g17p_split_offset =
       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -4364,7 +4364,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
 
    /* The packer reads the G17P offset from the instruction, not from src[5],
     * so it survives being split away from the comparator above. */
-   I->offset_xy = offset_xy;
+   I->offset_xyz = offset_xyz;
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
       I->op = AGX_OPCODE_TEXTURE_LOAD;

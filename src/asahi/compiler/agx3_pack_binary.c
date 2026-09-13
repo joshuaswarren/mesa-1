@@ -1498,9 +1498,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * than through src[5], because a comparison sample needs that operand for
     * its reference value. src[5] still carries the immediate when there is no
     * comparator, and the two must agree. */
-   const bool immediate_offset = offset && I->offset_xy > 0 &&
+   const bool immediate_offset = offset && I->offset_xyz > 0 &&
       (shadow || (I->src[5].type == AGX_INDEX_IMMEDIATE &&
-                  I->src[5].value == I->offset_xy &&
+                  I->src[5].value == I->offset_xyz &&
                   !I->src[5].memory && !I->src[5].abs && !I->src[5].neg &&
                   !I->src[5].cache && !I->src[5].discard && !I->src[5].kill));
    /* AGX3B coordinates are copied to the fixed staging bank before SMP. COPY
@@ -1561,23 +1561,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (query_lod &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || shadow || offset ||
          gather || I->dest[0].size != AGX_SIZE_32 || (I->mask & ~3u))) ||
-       /* The coordinate offset rides in the sample's own f43/f51/f141 and is
-        * orthogonal to the LOD shape, the array layer, the gather bit, the
-        * depth comparison and the descriptor operand class -- see
-        * agx3_tex_core.c for the witness table. One exclusion survives here
-        * and it is not the ISA's: an array sample carrying an *immediate*
-        * level or bias already spends f43 on that immediate, and Apple
-        * stages the offset separately and selects f141 = 2, a form with no
-        * slot plan here. 3D and cube offsets have no witness. */
-       (offset &&
-        (enc != AGX_ISA_ENCODING_AGX3B || three_d || cube ||
-         (array && (biased_lod || (explicit_lod && immediate_lod))))) ||
+       /* Offset arrays use the native staged layer. 3D carries the third
+        * signed nibble in the same immediate, while cubes have no offset. */
+       (offset && (enc != AGX_ISA_ENCODING_AGX3B || cube)) ||
        /* A depth comparison is orthogonal to the LOD shape on a plain 2D
         * sample. The array and cube comparisons use their own packed layer /
         * CEM operands, with implicit LOD or the witnessed explicit zero. */
        (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
                    I->mask != (gather ? 15u : 1u) ||
-                   ((array || cube) && !implicit_lod &&
+                   ((cube || (array && !offset)) && !implicit_lod &&
                     !shadow_level_zero))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d || cube ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
@@ -1629,7 +1621,17 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t len = 0;
 
-   if ((explicit_lod && !immediate_lod) || register_bias) {
+   const bool combined_array_lod = array && !cube && offset &&
+      ((explicit_lod && !immediate_lod) || register_bias);
+   if (combined_array_lod) {
+      if (!agx3_tex_stage_array_lod(
+             enc, I->src[0].value + 4, I->src[1].value, stage_slot, wait_mask,
+             I->src[0].cache, I->src[0].discard,
+             I->src[1].cache, I->src[1].discard, bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      wait_mask = 0;
+   } else if ((explicit_lod && !immediate_lod) || register_bias) {
       if (!agx3_tex_stage_lod(enc, I->src[1].value, stage_slot, wait_mask,
                              I->src[1].cache, I->src[1].discard,
                              bytes, &len) ||
@@ -1727,7 +1729,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * to the incompatible APPLE_FRAGMENT profile and is retained only by the
     * standalone texture encoder.
     */
-   if (array && !cube && !query_lod && (shadow || implicit_lod) &&
+   if (array && !cube && !query_lod && !combined_array_lod &&
+       (shadow || implicit_lod || offset) &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||
@@ -1804,7 +1807,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .shadow = shadow,
       .query_lod = query_lod,
       .offset = offset,
-      .offset_xy = offset ? I->offset_xy : 0,
+      .offset_xyz = offset ? I->offset_xyz : 0,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER

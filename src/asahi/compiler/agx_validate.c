@@ -104,7 +104,7 @@ agx_validate_sources(agx_instr *I)
           * standard floats, so we treat them as such in the IR, with an
           * implicit f16->f32 for 32-bit floating point operations.
           */
-         /* G17P texture offsets are an immediate byte in the instruction,
+         /* G17P texture offsets are signed four-bit coordinate components,
           * but the logical compare/offset source is modelled as 32-bit. This
           * is the sole immediate form whose IR width is wider than its field.
           */
@@ -112,7 +112,9 @@ agx_validate_sources(agx_instr *I)
                                I->offset && !I->shadow;
          agx_validate_assert(src.size ==
                              (texture_offset ? AGX_SIZE_32 : AGX_SIZE_16));
-         agx_validate_assert(src.value < (1 << (ldst ? 16 : 8)));
+         const unsigned immediate_bits = ldst ? 16 :
+            (texture_offset && I->dim == AGX_DIM_3D) ? 12 : 8;
+         agx_validate_assert(src.value < (1u << immediate_bits));
       } else if (I->op == AGX_OPCODE_COLLECT && !agx_is_null(src)) {
          agx_validate_assert(src.size == I->src[0].size);
       } else if (I->op == AGX_OPCODE_PHI) {
@@ -396,7 +398,7 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          }
       } else if (s == 5) {
          /* Compare/offset. On G17P the coordinate offset is an immediate
-          * field on the sample instruction (I->offset_xy), not an operand,
+          * field on the sample instruction (I->offset_xyz), not an operand,
           * so agx_emit_tex() leaves this source to the comparator alone
           * rather than collecting the two -- there is no register pair for
           * the hardware to read. Without a comparator the immediate still

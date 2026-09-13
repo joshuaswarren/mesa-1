@@ -63,6 +63,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const bool three_d = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
    const bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
    const bool cube_array = cube && tex->is_array;
+   const bool offset_array = tex->is_array && !cube &&
+      (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0);
    const int level_src = nir_tex_instr_src_index(tex, nir_tex_src_lod);
    /* Native G17P compute depthcube/depth2d_array sample_compare(level(0))
     * keeps the ordinary face/layer staging and selects SMP f139=2. */
@@ -130,7 +133,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
       if (comparator < 0 ||
           nir_src_num_components(tex->src[comparator].src) != 1 ||
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
-          (tex->is_array && tex->op != nir_texop_tex && !shadow_level_zero))
+          (tex->is_array && !offset_array && tex->op != nir_texop_tex &&
+           !shadow_level_zero))
          return false;
    }
 
@@ -140,7 +144,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
-   /* A coordinate offset is an immediate nibble pair in the sample itself
+   /* A coordinate offset is an immediate with one nibble per coordinate
     * (f43/f51/f141), witnessed in every LOD mode and on the gather; only a
     * compile-time offset can reach that field. Without this the whole
     * shader is disowned and falls back to the heap-descriptor form, which
@@ -155,14 +159,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
    if (has_offset &&
        (!nir_src_is_const(tex->src[offset_src].src) ||
         nir_src_num_components(tex->src[offset_src].src) !=
-           (packed_offset ? 1u : 2u) ||
-        (packed_offset && nir_src_as_uint(tex->src[offset_src].src) > 0xff) ||
-        three_d || cube ||
-        /* A comparison sample takes the offset -- agx_emit_tex() hands it to
-         * the packer on the instruction rather than through src[5], which the
-         * comparator needs. An array comparison does not: its layer form is
-         * not settled (see README-agx3-packer-limits.md). */
-        (tex->is_shadow && tex->is_array)))
+           (packed_offset ? 1u : three_d ? 3u : 2u) ||
+        (packed_offset && nir_src_as_uint(tex->src[offset_src].src) >
+                             (three_d ? 0xfffu : 0xffu)) || cube))
       return false;
 
    const unsigned expected_srcs =

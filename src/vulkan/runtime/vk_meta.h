@@ -114,6 +114,11 @@ struct vk_meta_device {
    bool use_layer_output;
    bool use_stencil_export;
    bool use_masked_rgba8_buffer_unpack;
+   /* A driver without layered rendering may split a 3D graphics copy into
+    * one attachment view per destination Z slice.  The fragment Layer value
+    * is then relative to that view, so it must not be rebased by the absolute
+    * destination Z when addressing the source buffer. */
+   bool use_view_relative_3d_layer;
 
    bool use_rect_list_pipeline;
 
@@ -146,6 +151,17 @@ struct vk_meta_device {
                            const struct vk_meta_rect *rect,
                            uint32_t layer_count);
 };
+
+static inline VkOffset3D
+vk_meta_buffer_to_image_gfx_source_offset(const struct vk_meta_device *meta,
+                                          VkImageType image_type,
+                                          VkOffset3D destination_offset)
+{
+   if (meta->use_view_relative_3d_layer && image_type == VK_IMAGE_TYPE_3D)
+      destination_offset.z = 0;
+
+   return destination_offset;
+}
 
 static inline uint32_t
 vk_meta_buffer_access_wg_size(const struct vk_meta_device *meta,

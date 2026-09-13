@@ -402,7 +402,7 @@ typedef struct {
     * register. agx_emit_tex() cannot hand the packer both through src[5],
     * which is one operand, so the offset rides here instead.
     *
-    * Signed nibble pair, (y << 4) | x, exactly as agx_nir_lower_texture()
+    * Signed x/y/z nibbles, exactly as agx_nir_lower_texture()
     * packs nir_tex_src_offset. Only meaningful when `offset` is set.
     *
     * NOTE: agx_opt_cse.c's instrs_equal() is hand-written and enumerates
@@ -410,7 +410,7 @@ typedef struct {
     * beside it must be too, or two samples differing only in their offset
     * will CSE into one.
     */
-   uint8_t offset_xy;
+   uint16_t offset_xyz;
 
    /* TODO: Handle tex ops more efficient */
    enum agx_dim dim       : 4;
