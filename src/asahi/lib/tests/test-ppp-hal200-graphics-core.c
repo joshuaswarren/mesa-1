@@ -30,6 +30,30 @@ check(enum agx_ppp_hal200_graphics_bundle bundle, const uint32_t *words,
 int
 main(void)
 {
+   /* Native depth-only, conservative, late atomic, sample-mask and explicit
+    * early witnesses. Only bits22:23 may change in either face2 word. */
+   for (unsigned layout = 0; layout < 4; ++layout) {
+      for (unsigned early = 0; early < 2; ++early) {
+         for (unsigned memory = 0; memory < 2; ++memory) {
+            uint32_t face;
+            unsigned expected = early ? 3 : memory ? 0 : layout;
+            assert(agx_ppp_hal200_fragment_face_depth_pack(
+               AGX_CHIP_G17P, layout, early, memory, 0xa7ffffff, &face));
+            assert(((face >> 22) & 3) == expected);
+            assert((face & ~UINT32_C(0x00c00000)) ==
+                   (UINT32_C(0xa7ffffff) & ~UINT32_C(0x00c00000)));
+         }
+      }
+   }
+   uint32_t bad_depth_mode = 0x12345678;
+   assert(!agx_ppp_hal200_fragment_face_depth_pack(
+      AGX_CHIP_G17G, 0, false, false, 0, &bad_depth_mode));
+   assert(!agx_ppp_hal200_fragment_face_depth_pack(
+      AGX_CHIP_G17P, 4, false, false, 0, &bad_depth_mode));
+   assert(!agx_ppp_hal200_fragment_face_depth_pack(
+      AGX_CHIP_G17P, 0, false, false, 0, NULL));
+   assert(bad_depth_mode == UINT32_C(0x12345678));
+
    for (unsigned mode = 0; mode < 4; ++mode) {
       uint32_t control = UINT32_C(0xdead3eef);
       uint32_t offset = UINT32_C(0xdeadbeef);

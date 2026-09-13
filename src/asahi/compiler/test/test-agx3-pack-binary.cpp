@@ -6378,6 +6378,34 @@ TEST_F(AGX3PackBinary, VertexStagingProducerMatchesAppleAndPreservesLiveness)
    EXPECT_EQ(memcmp(bytes, apple_y, len), 0);
 }
 
+TEST_F(AGX3PackBinary, DepthStagingPublicationPreservesSourceLiveness)
+{
+   /* Native late_atomic coverage COPY at offset 258. f13 is set on this
+    * destination and on the FSEL that publishes the other DEPTHF dword. */
+   static const uint8_t native[] = {
+      0x0b, 0x01, 0x2f, 0x00, 0x42, 0x00, 0x00, 0x00, 0x10, 0x00,
+   };
+   uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                        true, true, 1, 0, bytes, &len));
+   ASSERT_EQ(len, sizeof(native));
+   EXPECT_EQ(memcmp(bytes, native, len), 0);
+
+   ASSERT_TRUE(agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                        true, false, 1, 0, bytes, &len));
+   ASSERT_EQ(len, sizeof(native));
+   EXPECT_EQ(bytes[2], native[2] & ~8u);
+   bytes[2] |= 8;
+   EXPECT_EQ(memcmp(bytes, native, len), 0);
+
+   /* Other consumers retain their existing compact publication protocol. */
+   ASSERT_TRUE(agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                        false, true, 1, 0, bytes, &len));
+   EXPECT_EQ(len, 4u);
+   EXPECT_FALSE(agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                         true, true, 1, 0, bytes, &len));
+}
+
 TEST_F(AGX3PackBinary, VertexStagingBankAndScoreboardRoundTrip)
 {
    for (unsigned slot = 1; slot <= 6; ++slot) {

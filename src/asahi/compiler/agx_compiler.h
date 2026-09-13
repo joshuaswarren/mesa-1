@@ -1167,7 +1167,7 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
-bool agx_nir_lower_frag_sidefx(nir_shader *s);
+bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
 
 struct agx_cycle_estimate {
    /* ALU throughput */

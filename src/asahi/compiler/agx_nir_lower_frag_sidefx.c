@@ -9,10 +9,11 @@
 
 /* Fragment shaders with side effects require special handling to ensure the
  * side effects execute as intended. By default, they require late depth
- * testing, to ensure the side effects happen even for killed pixels. Trigger
- * an all-live sample test after the side effects instead of synthesizing a
- * FragDepth write. Besides avoiding needless position interpolation, this is
- * the native operation for running tests without changing depth.
+ * testing, to ensure the side effects happen even for killed pixels. G17P's
+ * native late-memory shaders provide pass-through depth feedback after the
+ * side effects. MOVMSK is its explicit early-test path and does not by itself
+ * defer hardware depth rejection. Keep the existing all-live sample test on
+ * other devices.
  *
  * For side effects with force early testing forced, the sample mask is written
  * at the *beginning* of the shader.
@@ -21,8 +22,15 @@
 #define ALL_SAMPLES (0xFF)
 
 static void
-insert_late_test(nir_builder *b)
+insert_late_test(nir_builder *b, bool g17p)
 {
+   if (g17p) {
+      nir_store_output(b, nir_load_frag_coord_z(b), nir_imm_int(b, 0),
+                       .io_semantics.location = FRAG_RESULT_DEPTH,
+                       .src_type = nir_type_float32);
+      b->shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+      return;
+   }
    nir_def *all_samples = nir_imm_intN_t(b, ALL_SAMPLES, 16);
    nir_sample_mask_agx(b, all_samples, all_samples);
 }
@@ -59,6 +67,11 @@ has_sample_mask(nir_shader *s)
    return false;
 }
 
+struct sidefx_state {
+   bool done;
+   bool g17p;
+};
+
 static bool
 pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -66,18 +79,18 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    /* Only lower once */
-   bool *done = data;
-   if (*done)
+   struct sidefx_state *state = data;
+   if (state->done)
       return false;
-   *done = true;
+   state->done = true;
 
    b->cursor = nir_before_instr(&intr->instr);
-   insert_late_test(b);
+   insert_late_test(b, state->g17p);
    return true;
 }
 
 bool
-agx_nir_lower_frag_sidefx(nir_shader *s)
+agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p)
 {
    assert(s->info.stage == MESA_SHADER_FRAGMENT);
 
@@ -114,15 +127,15 @@ agx_nir_lower_frag_sidefx(nir_shader *s)
    if (has_sample_mask(s))
       return false;
 
-   bool done = false;
-   nir_shader_intrinsics_pass(s, pass, nir_metadata_control_flow, &done);
+   struct sidefx_state state = {.g17p = g17p};
+   nir_shader_intrinsics_pass(s, pass, nir_metadata_control_flow, &state);
 
    /* If there's no render targets written, just put the write at the end */
-   if (!done) {
+   if (!state.done) {
       nir_function_impl *impl = nir_shader_get_entrypoint(s);
       nir_builder b = nir_builder_at(nir_after_impl(impl));
 
-      insert_late_test(&b);
+      insert_late_test(&b, g17p);
    }
 
    return true;

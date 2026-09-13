@@ -5753,7 +5753,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3 ||
              scan_I->op == AGX_OPCODE_ZS_EMIT)
             has_coverage_write = true;
-         if (scan_I->op == AGX_OPCODE_ZS_EMIT)
+         if (scan_I->op == AGX_OPCODE_ZS_EMIT ||
+             scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             has_zs_emit = true;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
@@ -7025,16 +7026,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests ||
                 I->nr_srcs != 1 || I->zs != 1 ||
                 !agx3_vary_reg32(I->src[0]) ||
-                agx_channels(I->src[0]) != 1 || !g17p_colour_open)
+                agx_channels(I->src[0]) != 2 || !g17p_deferred_zs_wait)
                AGX3_REFUSE(I);
 
             uint8_t bytes[AGX3_STAGE_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_stage_copy_source(enc, 0, I->src[0].value,
-                                        I->src[0].discard, slot,
+            if (!g17p_colour_open) {
+               if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               ctx->agx3_colour_link.entry_emitted = true;
+               ctx->agx3_colour_link.entry_offset =
+                  emission->size - len - initial_size;
+               g17p_colour_open = true;
+            }
+            /* Native DEPTHF producers publish both staging dwords with f13.
+             * Keep that flag independent of the allocator's GPR last-use. */
+            if (!agx3_stage_copy_liveness(enc, 0, I->src[0].value,
+                                        true, I->src[0].discard, slot,
                                         wait | outstanding_here, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
+            if (!agx3_stage_copy_liveness(enc, 2, I->src[0].value + 2,
+                                        true, I->src[0].discard, slot, 0,
+                                        bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            if (!agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+               AGX3_REFUSE(I);
+            g17p_deferred_zs_wait = NULL;
 
             const struct agx3_zs_desc zs = {
                .value = 0,
@@ -7048,7 +7068,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
 
             outstanding = 0;
-            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 2);
+            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 4);
             continue;
          }
 

@@ -28,6 +28,8 @@
 #include "agx3_funop_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_sr_core.h"
+#include "agx3_stage_core.h"
+#include "agx3_zs_core.h"
 #include "agx3_tex_core.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
@@ -775,6 +777,47 @@ test_frag_sidefx_late_test_once(void)
 }
 
 static bool
+test_g17p_frag_sidefx_late_depth_once(void)
+{
+   for (unsigned early = 0; early < 2; ++early) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P late depth feedback");
+      b.shader->info.internal = true;
+      fs_store_colour(&b, nir_load_preamble(&b, 4, 32, .base = 4));
+      b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      b.shader->info.writes_memory = true;
+      b.shader->info.fs.early_fragment_tests = early;
+      for (unsigned pass = 0; pass < 2; ++pass) {
+         agx_preprocess_nir_g17p(b.shader);
+         unsigned depth_writes = 0;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic == nir_intrinsic_store_output &&
+                      nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_DEPTH) {
+                     depth_writes++;
+                     if (nir_src_bit_size(intr->src[0]) != 32) {
+                        ralloc_free(b.shader);
+                        return false;
+                     }
+                  }
+               }
+            }
+         }
+         if (depth_writes != !early || count_sample_mask(b.shader) != 0) {
+            ralloc_free(b.shader);
+            return false;
+         }
+      }
+      ralloc_free(b.shader);
+   }
+   return true;
+}
+
+static bool
 test_g17p_background_clear(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1484,11 +1527,11 @@ build_fs_depth(void)
 }
 
 static nir_shader *
-build_fs_depth_only(void)
+build_fs_depth_only_value(float depth)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 depth-only FS");
-   nir_store_output(&b, nir_imm_float(&b, 0.5f), nir_imm_int(&b, 0),
+   nir_store_output(&b, nir_imm_float(&b, depth), nir_imm_int(&b, 0),
                     .base = 0, .write_mask = 0x1,
                     .src_type = nir_type_float32,
                     .io_semantics.location = FRAG_RESULT_DEPTH,
@@ -1499,8 +1542,21 @@ build_fs_depth_only(void)
    return b.shader;
 }
 
-/* Same depth path with a genuine run-time f32 source. This keeps the
- * saturating f32-to-f16 narrowing and its register lifetime in the oracle. */
+static nir_shader *
+build_fs_depth_only(void)
+{
+   return build_fs_depth_only_value(0.5f);
+}
+
+static nir_shader *
+build_fs_depth_precision(void)
+{
+   /* This differs from 0.5f in float32 but rounds to it in float16. */
+   return build_fs_depth_only_value(0.50001f);
+}
+
+/* Same depth path with a genuine run-time f32 source. Keep its precision
+ * and register lifetime through the complete staged depth payload. */
 static nir_shader *
 build_fs_depth_dynamic(void)
 {
@@ -6034,35 +6090,45 @@ g17p_front_facing_protocol(const struct agx_shader_part *part)
 static bool
 g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
 {
-   /* Independently fixed records from the production depth=0.5 shader:
-    * half LDIMM 0x3800, class-1 acquire, stage[0] copy, Apple's depthf,
-    * class-1 release, terminator. This pins both halves of depthf's input:
-    * the copy is 32-bit, so the half literal is physically word.high.
-    */
-   static const uint8_t constant_tail[] = {
-      0x04,0x80,0x06,0x00,0x00,0x0c,0x01,0x00,
-      0x87,0x02,0x54,0x01,0x00,0x00,
-      0x0b,0x00,0x29,0x04,
-      0xd7,0x14,0x54,0x00,0x00,0x03,
-      0x07,0x02,0x54,0x01,0x00,0x00,
-      0x0e,0x00,0x00,0x00,
-   };
-   static const uint8_t dynamic_tail[] = {
-      0x11,0x01,0x1c,0x81,0x05,0x02,0x00,0x02,
-      0x87,0x02,0x54,0x01,0x00,0x00,
-      0x0b,0x02,0x29,0x04,
-      0xd7,0x14,0x54,0x00,0x00,0x03,
-      0x07,0x02,0x54,0x01,0x00,0x00,
-      0x0e,0x00,0x00,0x00,
-   };
-   const uint8_t *tail = variant == 1 ? constant_tail : dynamic_tail;
-   const size_t tail_size = sizeof(constant_tail);
-   return part->info.agx3_staging_known &&
-          part->info.agx3_staging_halfs == 2 &&
-          part->info.binary_size >= tail_size &&
-          !memcmp((const uint8_t *)part->binary + part->info.binary_size -
-                     tail_size,
-                  tail, tail_size);
+   (void)variant;
+   if (!part->info.agx3_staging_known || part->info.agx3_staging_halfs != 4)
+      return false;
+   const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0, 0};
+   const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0, 0};
+   /* Two independent f32 staging writes, then one class-1 transaction.
+    * The source run is allocator-owned; do not pin a register allocation. */
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      for (unsigned src = 0; src < 126; src += 2) {
+         for (unsigned discard = 0; discard < 2; ++discard) {
+            uint8_t sequence[64], length;
+            unsigned size = 0;
+            if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, src,
+                                       true, discard, slot, 0, sequence, &length))
+               continue;
+            size += length;
+            if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 2, src + 2,
+                                       true, discard, slot, 0, sequence + size, &length))
+               continue;
+            size += length;
+            memcpy(sequence + size, acquire, sizeof(acquire));
+            size += sizeof(acquire);
+            struct agx3_zs_desc desc = {
+               .value_kill = true, .slot = slot, .wait_mask = 1u << (slot - 1),
+            };
+            if (!agx3_zs_encode_depth_stencil(AGX_ISA_ENCODING_AGX3B, &desc,
+                                             true, false, sequence + size, &length))
+               continue;
+            size += length;
+            memcpy(sequence + size, release, sizeof(release));
+            size += sizeof(release);
+            for (unsigned off = 0; off + size <= part->info.binary_size; ++off) {
+               if (!memcmp((const uint8_t *)part->binary + off, sequence, size))
+                  return true;
+            }
+         }
+      }
+   }
+   return false;
 }
 
 static const struct agx3_graphics_case cases[] = {
@@ -6172,6 +6238,8 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_depth = true},
    {"fs-depth-only", build_fs_depth_only, true, .g17p_only = true,
     .expected_g17p_depth = true},
+   {"fs-depth-precision", build_fs_depth_precision, true, .g17p_only = true,
+    .expected_g17p_depth = 3},
    {"fs-depth-write-dynamic", build_fs_depth_dynamic, true,
     .g17p_only = true, .expected_g17p_depth = 2},
 };
@@ -6818,6 +6886,7 @@ main(int argc, char **argv)
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
+   RUN(test_g17p_frag_sidefx_late_depth_once);
 #undef RUN
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {

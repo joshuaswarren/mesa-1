@@ -3504,6 +3504,19 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 UINT32_C(0x07e00000), UINT32_C(0x0001ffff)},
    };
 
+   /* UNCHANGED permits early depth rejection. DEPTHF shaders must publish
+    * their actual depth contract here, including the forced-ANY contract of
+    * late side effects. This is independent of pass type and triangle merging. */
+   const unsigned conservative_depth =
+      agx_translate_depth_layout(fs->b.info.depth_layout);
+   for (unsigned face = 1; face <= 2; ++face) {
+      if (!agx_ppp_hal200_fragment_face_depth_pack(
+             dev->dev.chip, conservative_depth, fs->b.info.early_fragment_tests,
+             fs->info.fs.writes_memory, secondary_fields.words[face],
+             &secondary_fields.words[face]))
+         return hk_g17p_bind_tail_refused(__LINE__);
+   }
+
    const unsigned line_width = agx_pack_line_width(dyn->rs.line.width);
    const unsigned polygon_mode = dyn->rs.polygon_mode;
    const unsigned object_type = gfx->object_type;
