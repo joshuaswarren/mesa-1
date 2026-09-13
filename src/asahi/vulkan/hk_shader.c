@@ -2270,6 +2270,16 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
           */
          nir_shader *clone = last ? nir : nir_shader_clone(NULL, nir);
 
+         /* Without a declared fragment successor this hardware variant is
+          * only used for VS -> null FS. Geometry/tessellation and transform
+          * feedback consume the separate software variant's outputs.
+          * Remove unconsumed user outputs before assigning a UVS layout;
+          * fixed-function outputs and side effects remain intact. */
+         if (hw && !(next_stage & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+            NIR_PASS(_, clone, nir_remove_outputs, MESA_SHADER_FRAGMENT,
+                     BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32), 0);
+         }
+
          NIR_PASS(_, clone, agx_nir_gather_vs_inputs,
                   shader->info.vs.attrib_components_read);
 
