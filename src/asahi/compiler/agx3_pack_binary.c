@@ -6552,11 +6552,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_IMAGE_LOAD) {
             /* Native TEX reads staging coordinates, independently of GPRs.
              * This also applies to the background reload's pixel coordinates. */
-            /* Apple's dynamic argument-buffer vertex read stages its uint2
-             * coordinates before the same SMP.EP4 used by other stages.
-             * Image operations retain their stage-specific paths. */
+            /* Apple's argument-buffer vertex read publishes uint2 coordinates
+             * before SMP.EP4. G17P indexed imageLoad uses the same read-only
+             * texture heap and coordinate ABI as texelFetch: its GPR pair is
+             * not a staging operand. Keep legacy immediate reads unchanged. */
             const bool staged =
-               (I->op == AGX_OPCODE_TEXTURE_LOAD &&
+               ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
+                 enc == AGX_ISA_ENCODING_AGX3B) &&
                 ctx->stage == MESA_SHADER_VERTEX &&
                 I->src[3].type != AGX_INDEX_IMMEDIATE) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||

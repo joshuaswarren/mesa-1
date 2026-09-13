@@ -12843,6 +12843,58 @@ TEST_F(AGX3PackBinary, BufferFetchStoreKeepsNativeReadCoordinatesSeparate)
    }
 }
 
+TEST_F(AGX3PackBinary, VertexIndexedImageReadPublishesCoordinates)
+{
+   for (bool image : {false, true}) {
+      SCOPED_TRACE(image);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_index data = agx_register(16, AGX_SIZE_32);
+      data.channels_m1 = 3;
+      agx_instr *read = agx_image_load_to(
+         b, data, coord, agx_immediate(0),
+         image ? agx_uniform(0, AGX_SIZE_64) : agx_immediate(0),
+         agx_register(24, AGX_SIZE_64), agx_immediate(0), agx_null(),
+         AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 1, false, false, false);
+      if (!image)
+         read->op = AGX_OPCODE_TEXTURE_LOAD;
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+      EXPECT_TRUE(b->shader->agx3_staging_known);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
+
+      bool found = false;
+      for (size_t i = 0; i < code.size(); ++i) {
+         struct agx3_tex_fetch_desc fetch = {};
+         if (i + 20 > code.size() ||
+             !agx3_tex_decode_fetch(AGX_ISA_ENCODING_AGX3B,
+                                    code.data() + i, 20, &fetch))
+            continue;
+         EXPECT_EQ(fetch.coord, 0);
+         EXPECT_EQ(fetch.wait_mask, 1u << (fetch.slot - 1));
+         /* Native vertex read() writes x/y to staging halves 0/2, then
+          * SMP consumes those coordinates. The Mesa GPR pair is not itself
+          * a staging operand, for either texelFetch or imageLoad. */
+         std::vector<uint8_t> coordinates;
+         for (unsigned c = 0; c < 2; ++c) {
+            uint8_t copy[AGX3_TEX_MAX_LENGTH], length = 0;
+            ASSERT_TRUE(agx3_tex_stage_copy_hints(
+               AGX_ISA_ENCODING_AGX3B, 2 * c, 8 + 2 * c, fetch.slot,
+               0, false, false, copy, &length));
+            append(coordinates, copy, length);
+         }
+         ASSERT_GE(i, coordinates.size());
+         EXPECT_TRUE(std::equal(coordinates.begin(), coordinates.end(),
+                                code.begin() + i - coordinates.size()));
+         found = true;
+      }
+      EXPECT_TRUE(found);
+   }
+}
+
 TEST_F(AGX3PackBinary, BindlessStorageImageWriteMatchesNativeIndexForm)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
