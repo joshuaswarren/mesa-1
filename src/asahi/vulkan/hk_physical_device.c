@@ -809,7 +809,8 @@ hk_get_device_features(
       features->fragmentStoresAndAtomics = true;
       features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
-      features->shaderResourceMinLod = false;
+      features->shaderResourceMinLod =
+         hk_g17p_unverified_feature("shader_resource_min_lod");
       features->advancedBlendCoherentOperations = true;
       features->sparseBinding = false;
       features->sparseResidencyAliased = false;

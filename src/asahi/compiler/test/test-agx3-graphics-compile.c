@@ -25,8 +25,11 @@
 #include "agx_compile.h"
 #include "agx3_alu_core.h"
 #include "agx3_copy_core.h"
+#include "agx3_funop_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_sr_core.h"
+#include "agx3_stage_core.h"
+#include "agx3_zs_core.h"
 #include "agx3_tex_core.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
@@ -774,6 +777,47 @@ test_frag_sidefx_late_test_once(void)
 }
 
 static bool
+test_g17p_frag_sidefx_late_depth_once(void)
+{
+   for (unsigned early = 0; early < 2; ++early) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P late depth feedback");
+      b.shader->info.internal = true;
+      fs_store_colour(&b, nir_load_preamble(&b, 4, 32, .base = 4));
+      b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      b.shader->info.writes_memory = true;
+      b.shader->info.fs.early_fragment_tests = early;
+      for (unsigned pass = 0; pass < 2; ++pass) {
+         agx_preprocess_nir_g17p(b.shader);
+         unsigned depth_writes = 0;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic == nir_intrinsic_store_output &&
+                      nir_intrinsic_io_semantics(intr).location == FRAG_RESULT_DEPTH) {
+                     depth_writes++;
+                     if (nir_src_bit_size(intr->src[0]) != 32) {
+                        ralloc_free(b.shader);
+                        return false;
+                     }
+                  }
+               }
+            }
+         }
+         if (depth_writes != !early || count_sample_mask(b.shader) != 0) {
+            ralloc_free(b.shader);
+            return false;
+         }
+      }
+      ralloc_free(b.shader);
+   }
+   return true;
+}
+
+static bool
 test_g17p_background_clear(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1443,7 +1487,7 @@ test_g17p_pipeline_statistics_fs_prolog(void)
                    !part.info.has_preamble && part.info.push_count == 0 &&
                    part.info.agx3_staging_known &&
                    part.info.agx3_staging_halfs == 0 &&
-                   hash == UINT64_C(0x6414c9cb47e44c7a) &&
+                   hash == UINT64_C(0x6186f8d3eecf28fa) &&
                    g17p_sample_mask_input_protocol(&part);
 
    if (!ok || getenv("AGX3_DUMP_BINARY")) {
@@ -1503,11 +1547,11 @@ build_fs_depth(void)
 }
 
 static nir_shader *
-build_fs_depth_only(void)
+build_fs_depth_only_value(float depth)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 depth-only FS");
-   nir_store_output(&b, nir_imm_float(&b, 0.5f), nir_imm_int(&b, 0),
+   nir_store_output(&b, nir_imm_float(&b, depth), nir_imm_int(&b, 0),
                     .base = 0, .write_mask = 0x1,
                     .src_type = nir_type_float32,
                     .io_semantics.location = FRAG_RESULT_DEPTH,
@@ -1518,8 +1562,21 @@ build_fs_depth_only(void)
    return b.shader;
 }
 
-/* Same depth path with a genuine run-time f32 source. This keeps the
- * saturating f32-to-f16 narrowing and its register lifetime in the oracle. */
+static nir_shader *
+build_fs_depth_only(void)
+{
+   return build_fs_depth_only_value(0.5f);
+}
+
+static nir_shader *
+build_fs_depth_precision(void)
+{
+   /* This differs from 0.5f in float32 but rounds to it in float16. */
+   return build_fs_depth_only_value(0.50001f);
+}
+
+/* Same depth path with a genuine run-time f32 source. Keep its precision
+ * and register lifetime through the complete staged depth payload. */
 static nir_shader *
 build_fs_depth_dynamic(void)
 {
@@ -2437,6 +2494,80 @@ test_g17p_native_cube_sample(void)
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+test_g17p_query_lod_compile(void)
+{
+   static const struct {
+      enum glsl_sampler_dim dim;
+      bool array;
+      unsigned coords;
+   } shapes[] = {
+      {GLSL_SAMPLER_DIM_2D, false, 2},
+      {GLSL_SAMPLER_DIM_3D, false, 3},
+      {GLSL_SAMPLER_DIM_CUBE, false, 3},
+      {GLSL_SAMPLER_DIM_2D, true, 2},
+      {GLSL_SAMPLER_DIM_CUBE, true, 3},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P LOD query");
+      nir_def *bary = nir_load_barycentric_pixel(
+         &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+      nir_def *coord = nir_load_interpolated_input(
+         &b, shapes[i].coords, 32, bary, nir_imm_int(&b, 0),
+         .io_semantics.location = VARYING_SLOT_VAR0,
+         .io_semantics.num_slots = 1);
+      nir_def *image =
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+      nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+      nir_def *heap_index = nir_load_global_constant(
+         &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2,
+         .access = ACCESS_CAN_SPECULATE);
+      nir_def *sampler = nir_bindless_sampler_agx(
+         &b, nir_imm_int(&b, 32), heap_index, .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_lod;
+      tex->sampler_dim = shapes[i].dim;
+      tex->is_array = shapes[i].array;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = shapes[i].coords;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+      nir_def_init(&tex->instr, &tex->def, 2, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      fs_store_colour(&b, nir_vec4(&b, nir_channel(&b, &tex->def, 0),
+                                   nir_channel(&b, &tex->def, 1),
+                                   nir_imm_float(&b, 0), nir_imm_float(&b, 1)));
+      b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+      b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+               AGX_DESCRIPTOR_GENERATION_9);
+      struct agx_g17p_combined_sampler_binding binding;
+      bool ok = tex->coord_components == shapes[i].coords &&
+                agx_nir_lower_g17p_combined_sampler(b.shader, &binding);
+      agx_preprocess_nir(b.shader);
+      fs_lower(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true, .reserved_preamble = 24,
+      };
+      struct agx_shader_part part = {0};
+      ok &= agx_compile_shader_nir(b.shader, &key, &part) &&
+            part.binary && !part.info.scratch_size &&
+            part.info.agx3_staging_known &&
+            part.info.agx3_staging_halfs ==
+               (shapes[i].dim == GLSL_SAMPLER_DIM_2D ? 4 : 8);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok) {
+         fprintf(stderr, "LOD query compile failed for shape %u\n", i);
+         return false;
+      }
+   }
+   return true;
 }
 
 static bool
@@ -3976,9 +4107,8 @@ test_g17p_multisample_eot_block_store(void)
        expected_u8norm_resolved, sizeof(expected_u8norm_resolved)},
       {false, PIPE_FORMAT_R32_UINT, 1, true, false, false,
        expected_i32_resolved, sizeof(expected_i32_resolved)},
-      /* The distinct 84-byte signed four-word I32 builtin has no multisample
-       * witness, so it must fail closed rather than store a resolving 2D
-       * program into a multisample surface. */
+      /* This change qualifies the signed four-word I32 2D store only.
+       * Preserve the existing multisample refusal. */
       {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, NULL, 0},
    };
 
@@ -4393,7 +4523,9 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(i32x4_float.shader);
 
-   /* Fresh signed key0x10020a00 uses an 84-byte program with selector0x35. */
+   /* Fresh format10, components4, texture-type2 is byte-identical to UINT
+    * and FLOAT. The old 84-byte fixture belongs to texture-type3, an array
+    * store that reads a layer register even for a non-layered attachment. */
    nir_builder i32x4_signed = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA32 SINT RT0 EOT");
    coords = nir_trim_vector(
@@ -4408,23 +4540,13 @@ test_g17p_eot_block_store(void)
    key.g17p_rt0_eot_i32_signed_four_words = true;
    const bool i32x4_signed_compiled =
       agx_compile_shader_nir(i32x4_signed.shader, &key, &part);
-   static const uint8_t expected_i32x4_signed[] = {
-      0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
-      0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
-      0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
-      0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
-      0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
-      0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
-      0x00,0x00,0x00,0x80,0x28,0x35,0x00,0x00,0x0e,0x00,0x00,0x00,
-   };
    ok &= i32x4_signed_compiled &&
-         part.info.binary_size == sizeof(expected_i32x4_signed) &&
+         part.info.binary_size == sizeof(expected_i32) &&
          part.info.main_offset == 0 &&
-         part.info.main_size == sizeof(expected_i32x4_signed) &&
+         part.info.main_size == sizeof(expected_i32) &&
          part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
          part.info.agx3_staging_halfs == 8 &&
-         memcmp(part.binary, expected_i32x4_signed,
-                sizeof(expected_i32x4_signed)) == 0;
+         memcmp(part.binary, expected_i32, sizeof(expected_i32)) == 0;
    if (i32x4_signed_compiled)
       free(part.binary);
    ralloc_free(i32x4_signed.shader);
@@ -5096,6 +5218,63 @@ build_fs_meta_rgba_upload(void)
  * friends) plus the fragment-only gradient dfdx.
  */
 static nir_shader *
+build_fs_native_trig_precision(bool half)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P native trig FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *x = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   if (half)
+      x = nir_f2f16(&b, x);
+   nir_def *sine = nir_fsin(&b, x);
+   nir_def *cosine = nir_fcos(&b, x);
+   if (half) {
+      sine = nir_f2f32(&b, sine);
+      cosine = nir_f2f32(&b, cosine);
+   }
+   fs_store_colour(&b, nir_vec4(&b, sine, cosine,
+                               nir_fmul(&b, sine, nir_frcp(&b, cosine)),
+                               nir_imm_float(&b, 1)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   agx_preprocess_nir_g17p(b.shader);
+   unsigned fmas = 0, sincs = 0, selects = 0;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            if (alu->op == nir_op_ffma) {
+               ++fmas;
+               assert(nir_alu_instr_is_exact(alu));
+            }
+            sincs += alu->op == nir_op_fsinc_agx3;
+            selects += alu->op == nir_op_bittest_select_agx3;
+         }
+      }
+   }
+   assert(fmas == 4 && sincs == 2 && selects == 4);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+static nir_shader *
+build_fs_native_trig(void)
+{
+   return build_fs_native_trig_precision(false);
+}
+
+static nir_shader *
+build_fs_native_trig_f16(void)
+{
+   return build_fs_native_trig_precision(true);
+}
+
+static nir_shader *
 build_fs_funops(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -5710,6 +5889,7 @@ struct agx3_graphics_case {
    bool expected_g17p_explicit_sample;
    bool expected_g17p_sample_group;
    bool expected_g17p_balanced_coverage;
+   uint8_t expected_g17p_sincs;
 };
 
 static bool
@@ -5960,35 +6140,45 @@ g17p_front_facing_protocol(const struct agx_shader_part *part)
 static bool
 g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
 {
-   /* Independently fixed records from the production depth=0.5 shader:
-    * half LDIMM 0x3800, class-1 acquire, stage[0] copy, Apple's depthf,
-    * class-1 release, terminator. This pins both halves of depthf's input:
-    * the copy is 32-bit, so the half literal is physically word.high.
-    */
-   static const uint8_t constant_tail[] = {
-      0x04,0x80,0x06,0x00,0x00,0x0c,0x01,0x00,
-      0x87,0x02,0x54,0x01,0x00,0x00,
-      0x0b,0x00,0x29,0x04,
-      0xd7,0x14,0x54,0x00,0x00,0x03,
-      0x07,0x02,0x54,0x01,0x00,0x00,
-      0x0e,0x00,0x00,0x00,
-   };
-   static const uint8_t dynamic_tail[] = {
-      0x11,0x01,0x1c,0x81,0x05,0x02,0x00,0x02,
-      0x87,0x02,0x54,0x01,0x00,0x00,
-      0x0b,0x02,0x29,0x04,
-      0xd7,0x14,0x54,0x00,0x00,0x03,
-      0x07,0x02,0x54,0x01,0x00,0x00,
-      0x0e,0x00,0x00,0x00,
-   };
-   const uint8_t *tail = variant == 1 ? constant_tail : dynamic_tail;
-   const size_t tail_size = sizeof(constant_tail);
-   return part->info.agx3_staging_known &&
-          part->info.agx3_staging_halfs == 2 &&
-          part->info.binary_size >= tail_size &&
-          !memcmp((const uint8_t *)part->binary + part->info.binary_size -
-                     tail_size,
-                  tail, tail_size);
+   (void)variant;
+   if (!part->info.agx3_staging_known || part->info.agx3_staging_halfs != 4)
+      return false;
+   const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0, 0};
+   const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0, 0};
+   /* Two independent f32 staging writes, then one class-1 transaction.
+    * The source run is allocator-owned; do not pin a register allocation. */
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      for (unsigned src = 0; src < 126; src += 2) {
+         for (unsigned discard = 0; discard < 2; ++discard) {
+            uint8_t sequence[64], length;
+            unsigned size = 0;
+            if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, src,
+                                       true, discard, slot, 0, sequence, &length))
+               continue;
+            size += length;
+            if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 2, src + 2,
+                                       true, discard, slot, 0, sequence + size, &length))
+               continue;
+            size += length;
+            memcpy(sequence + size, acquire, sizeof(acquire));
+            size += sizeof(acquire);
+            struct agx3_zs_desc desc = {
+               .value_kill = true, .slot = slot, .wait_mask = 1u << (slot - 1),
+            };
+            if (!agx3_zs_encode_depth_stencil(AGX_ISA_ENCODING_AGX3B, &desc,
+                                             true, false, sequence + size, &length))
+               continue;
+            size += length;
+            memcpy(sequence + size, release, sizeof(release));
+            size += sizeof(release);
+            for (unsigned off = 0; off + size <= part->info.binary_size; ++off) {
+               if (!memcmp((const uint8_t *)part->binary + off, sequence, size))
+                  return true;
+            }
+         }
+      }
+   }
+   return false;
 }
 
 static const struct agx3_graphics_case cases[] = {
@@ -6056,6 +6246,10 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-meta-rgba-upload", build_fs_meta_rgba_upload, true, false,
     AGX_ABI_FUNI_ROOT + 4, .g17p_only = true},
    {"fs-transcendentals", build_fs_funops, true},
+   {"fs-native-trig", build_fs_native_trig, true, .g17p_only = true,
+    .expected_g17p_sincs = 2},
+   {"fs-native-trig-f16", build_fs_native_trig_f16, true, .g17p_only = true,
+    .expected_g17p_sincs = 2},
    {"fs-quickshell-abs-scale", build_fs_quickshell_abs_scale, true,
     .g17p_only = true},
    {"fs-hyprland-cm-mixed-add", build_fs_hyprland_cm_mixed_add, true,
@@ -6096,6 +6290,8 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_depth = true},
    {"fs-depth-only", build_fs_depth_only, true, .g17p_only = true,
     .expected_g17p_depth = true},
+   {"fs-depth-precision", build_fs_depth_precision, true, .g17p_only = true,
+    .expected_g17p_depth = 3},
    {"fs-depth-write-dynamic", build_fs_depth_dynamic, true,
     .g17p_only = true, .expected_g17p_depth = 2},
 };
@@ -6212,6 +6408,28 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             fprintf(stderr, "%s %s: vertex LDDEV policy mismatch\n",
                     enc_name(enc), c->name);
          }
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_sincs != 0) {
+         unsigned found = 0;
+         const uint8_t *text = part.binary;
+         for (unsigned off = 0; off + 10 <= part.info.binary_size; off += 2) {
+            if (text[off] != 0x2f || text[off + 1] != 0x03)
+               continue;
+            bool match = false;
+            for (unsigned dest = 0; dest < 128 && !match; dest += 2) {
+               for (unsigned src = 0; src < 128 && !match; src += 2) {
+                  uint8_t exact[AGX3_FUNOP_MAX_LENGTH], len = 0;
+                  match = agx3_funop_encode(enc, AGX3_FUNOP_SINC, dest, src,
+                                            false, false, false, 0,
+                                            exact, &len) && len == 10 &&
+                          memcmp(text + off, exact, len) == 0;
+               }
+            }
+            found += match;
+         }
+         result = found == c->expected_g17p_sincs;
       }
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B &&
@@ -6703,6 +6921,11 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
+   if (!test_g17p_query_lod_compile()) {
+      fputs("native LOD query compile mismatch\n", stderr);
+      all_ok = false;
+   }
+
    if (!test_g17p_native_cube_array_sample()) {
       fputs("native cube-array sample mismatch\n", stderr);
       all_ok = false;
@@ -6735,6 +6958,7 @@ main(int argc, char **argv)
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
+   RUN(test_g17p_frag_sidefx_late_depth_once);
 #undef RUN
 
    for (unsigned e = 0; e < ARRAY_SIZE(encodings); ++e) {

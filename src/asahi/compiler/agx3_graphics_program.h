@@ -53,6 +53,8 @@ enum agx3_g17p_rt0_bg_op {
 #define AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS 14u
 #define AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS 18u
 #define AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
+#define AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS 28u
+#define AGX3_G17P_QUAD_CLEAR_PUSH_HALFS 36u
 
 bool agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
                                     enum agx3_g17p_rt0_bg_op op,
@@ -94,6 +96,8 @@ struct agx3_g17p_rt0_eot_program_desc {
    uint8_t imageblock_offset_B;
    uint8_t attachment_count;
    uint8_t imageblock_offset1_B;
+   uint8_t imageblock_offset2_B;
+   uint8_t imageblock_offset3_B;
    uint32_t shader_binary_size;
    uint32_t scratch_size;
    uint16_t nr_gprs;
@@ -102,7 +106,7 @@ struct agx3_g17p_rt0_eot_program_desc {
 };
 
 struct agx3_g17p_rt0_eot_program {
-   uint8_t bytes[AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE];
+   uint8_t bytes[AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 

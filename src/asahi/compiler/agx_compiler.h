@@ -402,7 +402,7 @@ typedef struct {
     * register. agx_emit_tex() cannot hand the packer both through src[5],
     * which is one operand, so the offset rides here instead.
     *
-    * Signed nibble pair, (y << 4) | x, exactly as agx_nir_lower_texture()
+    * Signed x/y/z nibbles, exactly as agx_nir_lower_texture()
     * packs nir_tex_src_offset. Only meaningful when `offset` is set.
     *
     * NOTE: agx_opt_cse.c's instrs_equal() is hand-written and enumerates
@@ -410,7 +410,7 @@ typedef struct {
     * beside it must be too, or two samples differing only in their offset
     * will CSE into one.
     */
-   uint8_t offset_xy;
+   uint16_t offset_xyz;
 
    /* TODO: Handle tex ops more efficient */
    enum agx_dim dim       : 4;
@@ -511,8 +511,10 @@ typedef struct agx_block {
     */
    bool loop_header;
 
-   /* Offset of the block in the emitted binary */
-   off_t offset, last_offset;
+   /* Offsets of the block in the emitted binary.  On AGX3, loop_exit_offset
+    * names the first CNDEND after a loop backedge, before any enclosing-scope
+    * CNDENDs that happen to share the block. */
+   off_t offset, last_offset, loop_exit_offset;
 
    /** Available for passes to use for metadata */
    uint8_t pass_flags;
@@ -584,8 +586,8 @@ typedef struct {
    unsigned loop_count;
    unsigned max_reg;
 
-   /* AGX3 staging-file high-water mark, in 16-bit halves. Unlike max_reg,
-    * this describes the separate file consumed by UVSW and texture inputs. */
+   /* Half of the AGX3 compiler staging footprint. Unlike max_reg, this
+    * describes the separate file consumed by UVSW and texture inputs. */
    unsigned agx3_staging_halfs;
    bool agx3_staging_known;
    bool agx3_fltnorm_start;
@@ -1165,7 +1167,7 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
-bool agx_nir_lower_frag_sidefx(nir_shader *s);
+bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
 
 struct agx_cycle_estimate {
    /* ALU throughput */

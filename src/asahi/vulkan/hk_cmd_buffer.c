@@ -1229,9 +1229,10 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
  * by hk_agx3_g17p_vertex_program_info: position plus up to 64 user words.
  * HAL200 updateVaryingTable (0x3efa58) uses the same CF entry encoding for
  * smooth, linear and flat inputs, including their mixture in one shader.
- * Flat inputs are restricted to non-fan triangle primitives; the compiler
- * selects C and therefore must not admit the first-fan layout. Position Z and
- * reciprocal W use the native system coefficient sources.
+ * Flat inputs select C. Native G17P Point and Triangle pipelines have identical
+ * complete fragment text for flat vec2/vec3/vec4 inputs. Admit points with the
+ * ordinary first-vertex selector as well as non-fan triangles, but never the
+ * first-fan layout. Position Z and reciprocal W use native coefficient sources.
  */
 bool
 hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
@@ -1263,12 +1264,16 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
       const struct agx_cf_binding *b = &cf->bindings[i];
       if (b->count == 0 || b->count > 4 || b->cf_base != next_cf)
          return false;
-      if (!b->smooth &&
-          (b->perspective ||
-           (gfx->topology != AGX_PRIMITIVE_TRIANGLES &&
-            gfx->topology != AGX_PRIMITIVE_TRIANGLE_STRIP) ||
-           (gfx->provoking != 0 && gfx->provoking != 2)))
-         return false;
+      if (!b->smooth) {
+         const bool point = gfx->topology == AGX_PRIMITIVE_POINTS &&
+                            gfx->provoking == 0;
+         const bool triangle =
+            (gfx->topology == AGX_PRIMITIVE_TRIANGLES ||
+             gfx->topology == AGX_PRIMITIVE_TRIANGLE_STRIP) &&
+            (gfx->provoking == 0 || gfx->provoking == 2);
+         if (b->perspective || (!point && !triangle))
+            return false;
+      }
       if (b->slot == VARYING_SLOT_POS) {
          /* System coefficients precede user coefficients: optional W,
           * then optional Z. agx_link_varyings assigns native Z source1. */
@@ -1820,7 +1825,9 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          .uniform_ranges = ranges,
          .uniform_range_count = range_count,
          .shader_binary_size = linked->b.size,
-         .scratch_size = linked->b.scratch_size,
+         .scratch_size =
+            MAX2(linked->b.scratch_size,
+                 linked->b.agx3_spectpr_scratch_size),
          .nr_gprs = linked->b.nr_gprs,
          .compiler_d_valid = linked->b.g17p_compiler_d_valid,
          .compiler_d = linked->b.g17p_compiler_d,

@@ -4,6 +4,7 @@
  */
 
 #include "hk_g17p_meta_copy_core.h"
+#include "vulkan/runtime/vk_meta.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -714,6 +715,34 @@ main(void)
    volume_upload.buffer_row_length = 24;
    volume_upload.buffer_image_height = 16;
    CHECK(hk_g17p_buffer_to_image_copy_supported(&volume_upload));
+
+   /* G17P renders each volume slice through a depth-one attachment view.
+    * Layer is therefore zero inside every draw, even when the destination
+    * view selects a nonzero Z. The source buffer already advances by one
+    * image stride per slice and must retain that relative coordinate. */
+   struct vk_meta_device meta = {.use_view_relative_3d_layer = true};
+   for (uint32_t slice = 0; slice < volume_upload.copy_extent.depth; ++slice) {
+      const VkOffset3D destination = {
+         volume_upload.image_offset.x,
+         volume_upload.image_offset.y,
+         volume_upload.image_offset.z + (int32_t)slice,
+      };
+      const VkOffset3D source = vk_meta_buffer_to_image_gfx_source_offset(
+         &meta, VK_IMAGE_TYPE_3D, destination);
+      CHECK(source.x == destination.x && source.y == destination.y &&
+            source.z == 0);
+   }
+
+   /* The correction is opt-in and never changes 1D/2D or another driver's
+    * layered 3D copy coordinates. */
+   VkOffset3D destination = {3, 4, 5};
+   VkOffset3D source = vk_meta_buffer_to_image_gfx_source_offset(
+      &meta, VK_IMAGE_TYPE_2D, destination);
+   CHECK(source.x == 3 && source.y == 4 && source.z == 5);
+   meta.use_view_relative_3d_layer = false;
+   source = vk_meta_buffer_to_image_gfx_source_offset(
+      &meta, VK_IMAGE_TYPE_3D, destination);
+   CHECK(source.x == 3 && source.y == 4 && source.z == 5);
 
    struct hk_g17p_buffer_to_image_copy bad_volume = volume_upload;
    bad_volume.image_offset.z = -1;

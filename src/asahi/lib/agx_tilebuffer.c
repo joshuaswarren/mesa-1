@@ -228,7 +228,11 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     * limit is strictly smaller. Keep the generic allocator's valid 32x16
     * layout; BG/EOT use pixel coordinates and the render UAPI publishes the
     * utile geometry to firmware. */
-   if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16)
+   const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
+   const bool raw32 = mrt == AGX_G17P_MRT_RGBA32 ||
+                     mrt == AGX_G17P_MRT_R32_QUAD;
+   if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16 &&
+       !(mrt == AGX_G17P_MRT_RGBA32 && tib->tile_size == 16 * 16))
       return false;
 
    if (tib->nr_samples > 1 &&
@@ -238,9 +242,7 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
-   const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
-
-   for (unsigned rt = mrt != AGX_G17P_MRT_NONE ? 2 : 1;
+   for (unsigned rt = raw32 ? 4 : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
          return false;
@@ -308,6 +310,8 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
+            tib->logical_format[0] == PIPE_FORMAT_R8_SRGB ||
+            tib->logical_format[0] == PIPE_FORMAT_R8G8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_UINT ||
@@ -339,6 +343,30 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
    if (!tib || tib->nr_samples != 1 || tib->spilled[0] || tib->spilled[1] ||
        tib->_offset_B[0] != 0)
       return AGX_G17P_MRT_NONE;
+
+   /* Native G17P constructors cover two through four identical RGBA32
+    * targets in one imageblock. Keep the existing four-target R32 path. */
+   const enum pipe_format format = tib->logical_format[0];
+   const bool rgba32 = format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
+                       format == PIPE_FORMAT_R32G32B32A32_UINT ||
+                       format == PIPE_FORMAT_R32G32B32A32_SINT;
+   if (rgba32 || format == PIPE_FORMAT_R32_FLOAT) {
+      const unsigned stride = rgba32 ? 16 : 4;
+      unsigned count = 0;
+      while (count < AGX_MAX_RENDER_TARGETS &&
+             tib->logical_format[count] == format)
+         count++;
+      bool supported = !tib->layered && count >= 2 && count <= 4 &&
+                       (rgba32 || count == 4) &&
+                       tib->sample_size_B == count * stride;
+      for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+         supported &= rt < count ? tib->logical_format[rt] == format &&
+                             !tib->spilled[rt] && tib->_offset_B[rt] == rt * stride
+                       : tib->logical_format[rt] == PIPE_FORMAT_NONE;
+      }
+      if (supported)
+         return rgba32 ? AGX_G17P_MRT_RGBA32 : AGX_G17P_MRT_R32_QUAD;
+   }
 
    for (unsigned rt = 2; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)

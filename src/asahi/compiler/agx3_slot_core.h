@@ -40,9 +40,10 @@ extern "C" {
    (AGX3_SLOT_TPS_TOKEN_BASE + AGX3_SLOT_TPS_HALF_TOKENS)
 #define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
 
-/* Up to 16 half-register or storage-token sources/dests per instruction is far
- * more than any AGX3 form uses. */
-#define AGX3_SLOT_MAX_REGS 16u
+/* A 3D gradient+minimum sample reads six coordinate halves, fourteen LOD
+ * halves, and two four-half descriptor operands. Keep the full dependency
+ * list; truncating it can drop a late descriptor load's RAW wait. */
+#define AGX3_SLOT_MAX_REGS 32u
 
 struct agx3_slot_instr {
    bool is_async;   /* produces a scoreboard-tracked result */

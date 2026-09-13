@@ -38,9 +38,11 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
     * The array form uses halves 16/18 and PACK_SMPIR publishes the packed
     * sample/layer word separately. */
    if ((d->sample && !d->multisample) ||
+       (d->staged_sample && (!d->multisample || d->sample)) ||
        (d->multisample &&
         (enc != AGX_ISA_ENCODING_AGX3B || d->sample > 3 ||
-         (d->array && d->sample) || d->coord != (d->array ? 16 : 0))))
+         (d->array && d->sample) ||
+         d->coord != (d->array && !d->staged_sample ? 16 : 0))))
       return false;
 
    /* Own-MSL texture3d::read witnesses use f76=3 with a third integer
@@ -61,7 +63,8 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
          : ((d->sampler_value & 1) || d->sampler_value > 252)) ||
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
-        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0)))
+        (sk != AGX3_TEX_OPERAND_IMMEDIATE ||
+         d->sampler_value != (d->staged_sample ? 1 : 0))))
       return false;
    if (d->three_d &&
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
@@ -129,9 +132,9 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(19, d->coord);
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot);
    ov[n++] = (struct agx3_field_kv)KV(27, d->coord_kill ? 1 : 0);
-   /* MS-array names its packed third coordinate with f29=2. Non-MS fetches
-    * use f29 for immediate LOD and f37 to mark that operand. */
-   if (d->multisample && d->array) {
+   /* Keep the native literal-layer2 witness; staged arrays use f77=2 instead.
+    * Non-MS fetches use f29 for immediate LOD and f37 to mark that operand. */
+   if (d->multisample && d->array && !d->staged_sample) {
       ov[n++] = (struct agx3_field_kv)KV(29, 2);
       ov[n++] = (struct agx3_field_kv)KV(37, 1);
    } else if (!d->register_lod) {
@@ -144,7 +147,7 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       76, d->three_d ? 3 : (d->multisample ? 2 : 1));
    if (d->array)
       ov[n++] = (struct agx3_field_kv)KV(
-         77, d->multisample ? 1 : 2); /* MS array vs register-layer array */
+         77, d->multisample && !d->staged_sample ? 1 : 2);
    ov[n++] = (struct agx3_field_kv)KV(78, 1);  /* texel fetch */
    /* Each operand lands in the field its kind selects: 95/96/97 for the
     * texture, 124/125/126 for the sampler. */
@@ -217,6 +220,27 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->sample_abi > AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT ||
        (d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
         enc != AGX_ISA_ENCODING_AGX3B))
+      return false;
+
+   /* The native clamp corpus covers non-array fragment 2D/3D samples,
+    * including 2D comparison/offset and indexed descriptor operands. */
+   if (d->min_lod &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->array || d->cube ||
+        d->vertex_stage || d->query_lod ||
+        (d->three_d && d->offset) ||
+        d->gather != AGX3_TEX_GATHER_NONE ||
+        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER ||
+        (d->lod != AGX3_TEX_LOD_BIAS_REGISTER &&
+         d->lod != AGX3_TEX_LOD_GRADIENT)))
+      return false;
+
+   /* Fresh native calculate_{clamped,unclamped}_lod witnesses cover the
+    * ordinary derivative path only, returning packed X/Y float32 results. */
+   if (d->query_lod &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->width != AGX3_TEX_W32 ||
+        d->lod != AGX3_TEX_LOD_AUTO || (d->mask & ~3u) || d->array_layer ||
+        d->gather != AGX3_TEX_GATHER_NONE || d->shadow || d->offset ||
+        d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER))
       return false;
 
    if ((d->sample_group_nonterminal || d->sample_group_end) &&
@@ -301,8 +325,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
-         d->lod != AGX3_TEX_LOD_REGISTER) ||
-        d->gather != AGX3_TEX_GATHER_NONE))
+         d->lod != AGX3_TEX_LOD_REGISTER)))
       return false;
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
@@ -381,21 +404,26 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * slot plan here, so the collision is refused rather than silently
     * dropping one of the two values.
     *
-    * 3D and cube offsets are not witnessed and stay closed, and so is a
-    * register descriptor pair: the immediate and uniform pairs above each
-    * take the offset orthogonally, but the register pair has no offset
-    * witness of its own.
+    * Fresh runtime-indexed G17P argument-buffer witnesses use the driver
+    * profile and the same offset fields with register descriptors. The 3D
+    * form extends f43 to twelve bits, one signed nibble per coordinate.
+    * Driver array offsets use the staged f77=2 layer in every LOD mode;
+    * immediate LOD then uses f29/f37, leaving f43 for the offset. The direct
+    * APPLE_FRAGMENT layer still has the immediate-slot collision above.
     */
-   const bool array_immediate_lod =
-      d->array &&
+   const bool direct_array_immediate_lod =
+      d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
       (d->lod == AGX3_TEX_LOD_BIAS || d->lod == AGX3_TEX_LOD_LEVEL);
    if (d->offset &&
-       (enc != AGX_ISA_ENCODING_AGX3B || d->offset_xy == 0 ||
-        d->three_d || d->cube || array_immediate_lod ||
-        tk == AGX3_TEX_OPERAND_REGISTER || sk == AGX3_TEX_OPERAND_REGISTER))
+       (enc != AGX_ISA_ENCODING_AGX3B ||
+        (!d->offset_register && d->offset_xyz == 0) ||
+        d->offset_xyz > (d->three_d ? 0xfffu : 0xffu) ||
+        d->cube || direct_array_immediate_lod))
       return false;
 
-   if (!d->offset && d->offset_xy != 0)
+   if ((!d->offset && (d->offset_xyz != 0 || d->offset_register)) ||
+       (d->offset_register &&
+        (d->offset_xyz || d->gather == AGX3_TEX_GATHER_NONE || d->three_d)))
       return false;
 
    /* Metal's gather takes no LOD argument, so every gather witness is an
@@ -409,11 +437,16 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     *   depth.gather_compare(s, uv, r)        05800ca490002000010000001200  + f143
     *   depth.gather_compare(s, uv, r, off)   05800ca490002102018800001200  + f43/f51/f141
     *
-    * 3D and cube gathers are not witnessed and stay closed.
+    * Fresh runtime-descriptor cube and depthcube witnesses use the ordinary
+    * CEM coordinates with f144=1:
+    *   05800ca414001000010280010100a02800004000
+    *   05800ca414003000010280010100a02800004000
+    * Runtime 2D offsets set f141=2 and read the merged bank-6 operand.
+    * 3D gathers remain unsupported.
     */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
        (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
-        d->lod != AGX3_TEX_LOD_AUTO || d->three_d || d->cube))
+        d->lod != AGX3_TEX_LOD_AUTO || d->three_d))
       return false;
 
    /* Apple's depth sample_compare witnesses stage their reference value into
@@ -441,7 +474,10 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->shadow &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
-        ((d->array || d->cube) && d->lod != AGX3_TEX_LOD_AUTO)))
+        ((d->cube || (d->array && !d->offset && !d->vertex_stage)) &&
+         d->lod != AGX3_TEX_LOD_AUTO &&
+         !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0 &&
+           !(d->array && d->cube)))))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -471,6 +507,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool apple_fragment_abi =
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
    const bool shadow_array = d->shadow && d->array;
+   const bool staged_driver_array =
+      d->array && !d->cube &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->vertex_stage || d->shadow || d->lod == AGX3_TEX_LOD_AUTO ||
+       d->offset);
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
    unsigned nb = 0;
@@ -478,7 +519,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    base[nb++] = (struct agx3_field_kv)KV(23, 5);
    base[nb++] = (struct agx3_field_kv)KV(38, 1);
    base[nb++] = (struct agx3_field_kv)KV(52, 1);
-   if (d->gather == AGX3_TEX_GATHER_NONE && !d->shadow)
+   if (d->gather == AGX3_TEX_GATHER_NONE && !d->shadow && !d->query_lod)
       base[nb++] = (struct agx3_field_kv)KV(74, 1);
    base[nb++] = (struct agx3_field_kv)KV(89, 3);
    base[nb++] = (struct agx3_field_kv)KV(90, 3);
@@ -507,7 +548,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[33];
+   struct agx3_field_kv ov[34];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -518,6 +559,8 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(75, d->mask);
    ov[n++] = (struct agx3_field_kv)KV(76, d->cube ? 4 : d->three_d ? 3 : 1);
    ov[n++] = (struct agx3_field_kv)KV(78, 2);  /* filtered sample */
+   if (d->min_lod)
+      ov[n++] = (struct agx3_field_kv)KV(140, 2);
 
    /* f156 is a group terminator, not a per-instruction implicit-LOD bit.
     * A lone AUTO/BIAS, staged register LOD, array, or cube sample forms a
@@ -526,10 +569,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     * sample_group_end when a multi-op group ends on a shape (including an
     * immediate LEVEL) that would not infer it in isolation. Explicit-gradient
     * samples are outside these groups. */
-   const bool intrinsic_group =
-      d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
-      d->lod == AGX3_TEX_LOD_REGISTER || d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
-      (d->lod != AGX3_TEX_LOD_GRADIENT && (d->array || d->cube));
+   const bool intrinsic_group = !d->vertex_stage &&
+      (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
+       d->lod == AGX3_TEX_LOD_REGISTER ||
+       d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
+       (d->lod != AGX3_TEX_LOD_GRADIENT && (d->array || d->cube)));
    if (d->sample_group_end ||
        (intrinsic_group && !d->sample_group_nonterminal))
       ov[n++] = (struct agx3_field_kv)KV(156, 1);
@@ -539,10 +583,12 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * witnesses use the direct f31/f37 path as part of their complete 4/8
        * ABI; cube arrays retain their independently witnessed direct path.
        */
-      const bool staged_driver_array =
-         !d->cube && d->lod == AGX3_TEX_LOD_AUTO &&
-         d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER;
-      if (shadow_array || staged_driver_array) {
+      if (d->query_lod) {
+         /* No layer coordinate participates in the LOD derivative. */
+         ov[n++] = (struct agx3_field_kv)KV(29, 0);
+         ov[n++] = (struct agx3_field_kv)KV(37, 1);
+         ov[n++] = (struct agx3_field_kv)KV(77, 1);
+      } else if (shadow_array || staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(77, 2);
       } else {
          ov[n++] = (struct agx3_field_kv)KV(31, d->array_layer);
@@ -559,7 +605,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    if (d->lod == AGX3_TEX_LOD_AUTO) {
       /* AUTO has no explicit LOD operand. Its group marker is emitted above. */
    } else if (d->lod == AGX3_TEX_LOD_BIAS) {
-      if (d->array) {
+      if (d->array && !staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
       } else {
@@ -578,7 +624,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        * staged scalars are the derivative. */
       ov[n++] = (struct agx3_field_kv)KV(139, 5);
    } else {
-      if (d->array) {
+      /* A level-zero comparison keeps the packed f77=2 layer operand.
+       * Native array_compare_zero therefore uses f29/f37 for the level,
+       * just like a non-array sample, rather than the direct-layer f43. */
+      if (d->array && !shadow_array && !staged_driver_array) {
          ov[n++] = (struct agx3_field_kv)KV(43, d->lod_x64);
          ov[n++] = (struct agx3_field_kv)KV(51, 1);
       } else {
@@ -595,8 +644,12 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    }
    if (d->shadow)
       ov[n++] = (struct agx3_field_kv)KV(143, 1);
-   if (d->offset) {
-      ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xy);
+   if (d->query_lod)
+      ov[n++] = (struct agx3_field_kv)KV(146, 1);
+   if (d->offset_register) {
+      ov[n++] = (struct agx3_field_kv)KV(141, 2);
+   } else if (d->offset) {
+      ov[n++] = (struct agx3_field_kv)KV(43, d->offset_xyz);
       ov[n++] = (struct agx3_field_kv)KV(51, 1);
       ov[n++] = (struct agx3_field_kv)KV(141, 1);
    }
@@ -953,7 +1006,8 @@ agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
    *len = 0;
    if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || slot < 1 || slot > 6 ||
        (wait_mask & ~0x3f) || (src_cache && src_discard) ||
-       (kind != AGX3_TEX_LEVEL_FLOAT && kind != AGX3_TEX_LEVEL_INTEGER))
+       (kind != AGX3_TEX_LEVEL_MINIMUM && kind != AGX3_TEX_LEVEL_FLOAT &&
+        kind != AGX3_TEX_LEVEL_INTEGER))
       return false;
 
    const struct agx3_field_kv base[] = {
@@ -989,6 +1043,81 @@ agx3_tex_stage_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
    return agx3_tex_stage_typed_lod(enc, src, slot, wait_mask, src_cache,
                                    src_discard, AGX3_TEX_LEVEL_FLOAT, out,
                                    len);
+}
+
+/* Native bias+minimum publishes both halves in one PACK_SMPIR. f16 is the
+ * minimum, f30 the bias, regardless of their order in the source register.
+ * NIR packs bias low and minimum high, so the caller reverses their addresses.
+ * Two scalar publications would overwrite the shared bank-6 operand. */
+bool
+agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                        uint16_t minimum, uint8_t slot, uint16_t wait_mask,
+                        bool src_cache, bool src_discard,
+                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || minimum >= 128 || bias >= 256 ||
+       slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
+      KV(74, 1), KV(76, 2), KV(77, 16),
+   };
+   struct agx3_field_kv ov[13];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, minimum);
+   ov[n++] = (struct agx3_field_kv)KV(30, bias);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   ov[n++] = (struct agx3_field_kv)KV(39, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, src_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
+
+/* Native G17P gather offsets insert signed nibbles from two 16-bit
+ * registers into bits 12 and 28 of bank 6. Array gathers merge the normalized
+ * layer as the third operand, never as a separate bank-6 write.
+ * Runtime descriptor witnesses, slot 6, discarded inputs:
+ *   x=12, y=14:          1705540600183800f0e40100
+ *   x=16, y=17, layer=8: 1705540600204440f0e60300
+ */
+bool
+agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+                             bool array, uint16_t packed_layer,
+                             uint8_t slot, bool cache, bool discard,
+                             uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 126 ||
+       slot < 1 || slot > 6 || (cache && discard) ||
+       (array && ((packed_layer & 1) || packed_layer > 190)))
+      return false;
+
+   const struct agx3_field_kv fields[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(12, slot),
+      KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(30, src + 1), KV(37, 2), KV(38, 1), KV(39, cache), KV(41, discard),
+      KV(44, array ? packed_layer : 0), KV(51, array ? 2 : 1),
+      KV(52, 2), KV(55, array),
+      KV(74, 5), KV(75, 12), KV(76, 5), KV(77, 28),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                            sizeof(fields) / sizeof(fields[0]), NULL, 0,
+                            out, len);
 }
 
 /* The dynamic array-layer witness uses PACK_SMPIR like register LOD, but its
@@ -1030,6 +1159,54 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+/* Runtime-indexed texture2d_array and depth2d_array sample witnesses publish
+ * layer half 12 and LOD half 13 on slot 6 with the same single instruction:
+ *
+ *   level(reg), bias(reg): 1705540600183400f0e42500
+ *   layer alone:          1705540600180000f0e40400
+ *
+ * Exact recomposition isolates f30/f37/f41 as the second register operand,
+ * f76=2 as its float type, and f77=16 as its position in the packed word.
+ * Two independent publications to bank 6 would overwrite the first operand.
+ */
+bool
+agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
+                         uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                         bool layer_cache, bool layer_discard,
+                         bool lod_cache, bool lod_discard,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || layer >= 128 || (layer & 1) ||
+       lod >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       (layer_cache && layer_discard) || (lod_cache && lod_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
+      KV(74, 4), KV(76, 2), KV(77, 16),
+   };
+   struct agx3_field_kv ov[13];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, layer);
+   ov[n++] = (struct agx3_field_kv)KV(30, lod);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, layer_discard);
+   ov[n++] = (struct agx3_field_kv)KV(39, lod_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, lod_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
 /* Apple's G17P cube path first runs one CEM calculation for each axis.  The
@@ -1253,9 +1430,59 @@ agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
                             sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
-/* Own-MSL texture2d_ms reads publish a variable integer sample with this
- * distinct PACK_SMPIR before the otherwise sample-0 MS fetch. The exact
- * discarded-r2h witness is 1705540400000000d0c00800. */
+/* Native runtime MS-array reads normalize the layer to a GPR, then merge
+ * that word with the sample at staging half4. NIR provides sample in low16
+ * and layer in high16, so both half addresses must be consumed separately.
+ * Fresh native runtime witnesses: layer half6 -> packed half2 is
+ * 17055402030c0000f0880400; sample half0 plus packed half2 is
+ * 1705540400000010d0c20a00. */
+bool
+agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
+                            uint16_t dest, bool cache, bool discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 128 || dest > 190 ||
+       (dest & 1) || (cache && discard))
+      return false;
+   const struct agx3_field_kv fields[] = {
+      KV(2, dest), KV(9, 2), KV(10, 2), KV(11, 1),
+      KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                           sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+}
+
+bool
+agx3_tex_stage_ms_array_sample(enum agx_isa_encoding enc, uint16_t sample,
+                              uint16_t packed_layer, bool cache, bool discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || sample >= 128 || (sample & 1) ||
+       packed_layer > 190 || (packed_layer & 1) || (cache && discard))
+      return false;
+   const struct agx3_field_kv fields[] = {
+      KV(5, 4), KV(9, 5), KV(10, 2), KV(12, 1),
+      KV(16, sample), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(37, 1), KV(38, 1), KV(44, packed_layer), KV(51, 2),
+      KV(52, 2), KV(55, 1), KV(74, 9), KV(75, 12), KV(76, 1), KV(77, 16),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+                           sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+}
+
+/* Native texture2d_ms reads publish the sample at fixed staging half4.
+ * Field24=1 reads the low16 of the sample producer. Field16 uses the same
+ * half-register address as the producer, without converting it to words.
+ * The native discarded-half2 witness is 1705540400040000d0c00800. */
 bool
 agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                          uint16_t wait_mask, bool src_cache,
@@ -1266,18 +1493,18 @@ agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || (src & 1) ||
        (wait_mask & ~0x3f) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(9, 5),  KV(10, 2), KV(12, 1), KV(23, 2), KV(24, 1), KV(37, 1),
+      KV(5, 4),  KV(9, 5),  KV(10, 2), KV(12, 1), KV(23, 2), KV(24, 1), KV(37, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 9), KV(75, 12),
       KV(76, 1), KV(77, 16),
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;
-   ov[n++] = (struct agx3_field_kv)KV(5, src);
+   ov[n++] = (struct agx3_field_kv)KV(16, src);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
    for (unsigned i = 0; i < 6; ++i)

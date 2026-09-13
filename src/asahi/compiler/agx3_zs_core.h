@@ -92,7 +92,9 @@ bool agx3_zs_encode_sample_mask(enum agx_isa_encoding enc,
                                 uint8_t out[AGX3_ZS_MAX_LENGTH], uint8_t *len);
 
 /*
- * `depthf`: trigger the depth/stencil writeout for the staged word. At least
+ * `depthf`: trigger depth/stencil writeout at the staged payload base. G17P
+ * depth-only payloads contain coverage32 at value and depth32 at value + 2.
+ * The caller must publish both words before this instruction. At least
  * one of `depth`/`stencil` must be set; all three combinations are witnessed.
  */
 bool agx3_zs_encode_depth_stencil(enum agx_isa_encoding enc,

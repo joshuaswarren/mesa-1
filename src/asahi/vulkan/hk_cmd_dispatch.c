@@ -695,7 +695,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    const bool ok = hk_g17p_build_compute_program_raw(
       cmd, UINT32_MAX, 0,
       linked->b.bo->va->addr + linked->b.entry_offset, linked->b.size,
-      linked->b.scratch_size, linked->b.nr_gprs,
+      MAX2(linked->b.scratch_size, linked->b.agx3_spectpr_scratch_size),
+      linked->b.nr_gprs,
       s->b.info.agx3_staging_known,
       (uint32_t)s->b.info.agx3_staging_halfs * 2,
       s->b.info.local_size ? MAX2(256u, ALIGN_POT(s->b.info.local_size, 64u))

@@ -381,6 +381,24 @@ agx_ppp_hal200_depth_face_pack(enum agx_chip chip, bool test_enable,
    return true;
 }
 
+bool
+agx_ppp_hal200_fragment_face_depth_pack(
+   enum agx_chip chip, unsigned conservative_depth, bool early_tests,
+   bool writes_memory, uint32_t original, uint32_t *out)
+{
+   if (!out || chip != AGX_CHIP_G17P || conservative_depth > 3)
+      return false;
+
+   /* Native __GPU_LD_MD root2.field4 -> FragmentProgramVariant+0xfcd
+    * (216ba0bac..bd8), then updateFragmentShaderISPState (216c71904..950)
+    * inserts this mode into both SECONDARY face words. Isolated native
+    * witnesses give ANY=0, GREATER=1, LESS=2, UNCHANGED=3; adding a late
+    * atomic to either conservative depth shader changes its mode to ANY. */
+   unsigned mode = early_tests ? 3 : writes_memory ? 0 : conservative_depth;
+   *out = (original & ~UINT32_C(0x00c00000)) | (mode << 22);
+   return true;
+}
+
 /* AGXMetalG17P 26aa64..26ab64 constructs the descriptor; 458898..45891c
  * lowers both faces to this layout. The vector shifts/masks at811700/811710
  * route pass/depth-fail/fail/compare to16/19/22/25, respectively. Disabled

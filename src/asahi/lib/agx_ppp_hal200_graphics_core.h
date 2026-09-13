@@ -62,6 +62,13 @@ bool agx_ppp_hal200_fragment_face_object_pack(
    enum agx_chip chip, unsigned object_type, uint32_t original,
    uint32_t *out);
 
+/* SECONDARY front/back face bits22:23 carry conservative depth. Native
+ * late-memory shaders select ANY even with a conservative depth qualifier;
+ * explicit early tests select UNCHANGED and ignore shader depth writes. */
+bool agx_ppp_hal200_fragment_face_depth_pack(
+   enum agx_chip chip, unsigned conservative_depth, bool early_tests,
+   bool writes_memory, uint32_t original, uint32_t *out);
+
 bool agx_ppp_hal200_primitive_msaa_pack(enum agx_chip chip, bool enable,
                                        uint32_t original, uint32_t *out);
 

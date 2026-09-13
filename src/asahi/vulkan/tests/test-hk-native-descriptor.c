@@ -461,7 +461,21 @@ main(void)
 
    excluded = plain;
    excluded.dimension = AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
-   check_gen9_layer_mode_preserved(excluded);
+   excluded.samples = AGX_SAMPLE_COUNT_4;
+   excluded.width = 64;
+   excluded.height = 64;
+   excluded.address = 0x5ffdea0000ull;
+   excluded.page_aligned_layers = true;
+   assert(hk_pack_native_texture(9, &plain_aligned, &excluded));
+   static const uint8_t native_msaa4[32] = {
+      0x24,0x0a,0x88,0xf6,0x03,0xfc,0x00,0x01,
+      0x00,0xa0,0xde,0xff,0x05,0x00,0x00,0x00,
+   };
+   assert(memcmp(&plain_aligned, native_msaa4, sizeof(native_msaa4)) == 0);
+   excluded.page_aligned_layers = false;
+   assert(hk_pack_native_texture(9, &plain_unaligned, &excluded));
+   assert(memcmp(&plain_aligned, &plain_unaligned,
+                 sizeof(plain_aligned)) == 0);
 
    excluded = plain;
    excluded.depth = 2;

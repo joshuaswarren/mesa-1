@@ -1,5 +1,58 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
+## Texture offset qualification and vertex LOD follow-up, 2026-09-13
+
+The first hardware run passed 68 of 71 primary cases. The three failures were
+the RGBA16F 3D variants, and their matching offset-free controls failed with
+the same gray-volume image. G17P uploads this eight-byte format through the
+graphics path. That path splits a volume upload into one depth-one attachment
+view per Z slice and advances the buffer address for each slice. Common meta
+still subtracted the absolute destination Z from the view-relative Layer value,
+so only a narrow band addressed valid source texels. The G17P meta setup now
+selects view-relative 3D source coordinates. Destination view selection, slice
+batching, raw compute uploads, and texture sample instructions are unchanged.
+
+The c13b Vulkan 1.0 `texture_functions.textureoffset.repeat` group contained
+71 pipeline-creation failures. All 71 now compile both graphics stages under
+the G17P DRM shim with no IR validation errors and pass on an Apple A18 Pro
+using the production multi-draw path. Six focused 3D RGBA16F offset and control
+images pass as well.
+
+Own-MSL `metal-nt -arch applegpu_g17p` witnesses cover runtime-indexed texture
+and sampler arguments, 2D and 3D samples, array layers, depth comparisons,
+immediate and register LOD/bias, and gradients. The tests recompose complete
+native SMP bytes. Register descriptors use the same `f43/f51/f141` offset
+fields. In 3D, `f43` holds three signed nibbles, including the negative Z
+boundary. The IR field and validator both preserve all twelve bits.
+
+Driver array offsets select the staged `f77=2` layer. Immediate LOD uses
+`f29/f37`, leaving `f43` for the offset. A register LOD or bias shares the
+layer's bank 6 word and must be published with it in one `PACK_SMPIR`:
+`1705540600183400f0e42500` for layer half 12, LOD half 13, slot 6.
+The direct Apple-fragment array profile retains its existing immediate-slot
+restriction. Offset-free lowering and sample scheduling are unchanged. Across 165 matching
+controls, all 2,112 complete shader binaries are byte-identical to the baseline,
+including register and staging counts. The full Asahi suite reports 207 passes
+and one expected failure.
+
+The next candidate closes the 47 vertex-stage residuals: 23
+`textureLodOffset` and 24 `textureGradOffset` cases now compile both graphics
+stages under the G17P DRM shim, with no packer refusals or validation errors.
+Twenty fresh A18 Pro Metal 27.1 vertex pipelines cover 2D, 2D-array, 3D,
+depth, and depth-array control/offset pairs with register LOD or explicit
+gradients. Their complete SMP packets recompose byte-exactly, and each offset
+pair differs only in `f43/f51/f141`. Vertex register LOD omits fragment sample
+group terminator `f156`; vertex arrays stage their layer with the LOD or as a
+separate sampler-private operand. The first hardware pass renders 43 of the 47
+cases correctly; only the four 3D `textureGradOffset` variants fail, and their
+four offset-free controls fail the same way. Raising the launch value from 32
+to 40 does not change those results. Native ShaderInfo fields 38/42 distinguish
+the resource requirement: explicit level is 32, a 2D gradient is 48, and a 3D
+gradient is 80. The next candidate publishes those exact vertex values; its
+hardware rendering is not qualified yet. Cube offsets, dynamic offsets, and
+AGX3c offsets remain outside this work. The older texture-offset claims below
+predate this measured scope.
+
 **Status (2026-09-10): the coordinate offset and the depth comparison are now
 encoded in every LOD mode, and the whole in-tree probe corpus compiles -- 24 of
 25 compute and 64 of 64 fragment, with no refusal line anywhere.** A second

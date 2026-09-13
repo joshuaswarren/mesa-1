@@ -495,6 +495,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    const bool rgba8_mrt = mrt == AGX_G17P_MRT_RGBA8;
    const bool r11g11b10_mrt = mrt == AGX_G17P_MRT_R11G11B10;
    const bool dual_mrt = wboit_mrt || rgba8_mrt || r11g11b10_mrt;
+   const bool raw32_mrt = mrt == AGX_G17P_MRT_RGBA32 ||
+                         mrt == AGX_G17P_MRT_R32_QUAD;
+   unsigned raw32_count = 0;
+   if (raw32_mrt) {
+      while (raw32_count < HK_MAX_RTS &&
+             key->tib.logical_format[raw32_count] != PIPE_FORMAT_NONE)
+         raw32_count++;
+   }
 
    for (unsigned rt = 0; rt < HK_MAX_RTS; ++rt) {
       const enum agx_bg_eot_op op = key->op[rt];
@@ -506,8 +514,10 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          rt == 1 && dual_mrt &&
          (store ? op == AGX_EOT_STORE
                 : (op == AGX_BG_CLEAR || op == AGX_BG_LOAD));
+      const bool raw32_mrt_rt = rt < raw32_count && raw32_mrt &&
+         (store ? op == AGX_EOT_STORE : (op == AGX_BG_CLEAR || op == AGX_BG_LOAD));
       if ((rt == 0 && !rt0_supported) ||
-          (rt != 0 && op != AGX_BG_EOT_NONE && !dual_mrt_rt1)) {
+          (rt != 0 && op != AGX_BG_EOT_NONE && !dual_mrt_rt1 && !raw32_mrt_rt)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
@@ -515,6 +525,18 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 
    const enum agx_bg_eot_op op = key->op[0];
    const bool dual_mrt_active = dual_mrt && key->op[1] != AGX_BG_EOT_NONE;
+   const bool raw32_mrt_active = raw32_mrt &&
+      (key->op[0] != AGX_BG_EOT_NONE || key->op[1] != AGX_BG_EOT_NONE ||
+       key->op[2] != AGX_BG_EOT_NONE || key->op[3] != AGX_BG_EOT_NONE);
+   const unsigned attachment_count = raw32_mrt_active ? raw32_count : dual_mrt_active ? 2 : 1;
+   if (raw32_mrt_active) {
+      for (unsigned rt = 0; rt < attachment_count; ++rt) {
+         if (info->colorAttachmentCount < attachment_count || key->op[rt] != op || op == AGX_BG_EOT_NONE) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return (struct hk_bg_eot){0};
+         }
+      }
+   }
    if (dual_mrt_active &&
        (key->op[1] != op || info->colorAttachmentCount < 2)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -522,7 +544,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble =
-         rgba8_mrt && dual_mrt_active
+         raw32_mrt_active ? 4 + 8 * attachment_count
+         : rgba8_mrt && dual_mrt_active
             ? AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
          : r11g11b10_mrt && dual_mrt_active
             ? AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
@@ -558,11 +581,13 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       program_capacity = AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
       program_label = "G17P empty tile Ioto program";
    } else if (store) {
-      program_capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
+      program_capacity = raw32_mrt_active ? AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE
+                                        : AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
       program_label = "G17P RT0 EOT Ioto program";
    } else if (op == AGX_BG_CLEAR) {
       program_capacity =
-         rgba8_mrt && dual_mrt_active
+         raw32_mrt_active ? AGX_IOTO_G17P_QUAD_CLEAR_PROGRAM_MAX_SIZE
+         : rgba8_mrt && dual_mrt_active
             ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
          : r11g11b10_mrt && dual_mrt_active
             ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
@@ -665,11 +690,24 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          target1_pbe = key->tib.layered ? iview1->planes[0].layered_eot
                                         : iview1->planes[0].eot;
       }
-      struct hk_native_pbe_descriptor pbe_arguments[2] = {target_pbe};
+      struct hk_native_pbe_descriptor pbe_arguments[4] = {target_pbe};
       if (dual_mrt_active)
          pbe_arguments[1] = target1_pbe;
+      if (raw32_mrt_active) {
+         for (unsigned rt = 1; rt < attachment_count; ++rt) {
+            struct hk_image_view *view = cmd->state.gfx.render.color_att[rt].iview;
+            if (!view || !view->planes[0].eot_pbe_valid ||
+                view->vk.image->samples != 1 ||
+                info->pColorAttachments[rt].imageView == VK_NULL_HANDLE) {
+               vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
+               return (struct hk_bg_eot){0};
+            }
+            pbe_arguments[rt] = view->planes[0].eot;
+         }
+      }
       const size_t pbe_argument_size =
-         dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
+         raw32_mrt_active ? attachment_count * AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE
+         : dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
                          : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
       const uint64_t pbe_argument_va =
          hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
@@ -684,9 +722,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          .shader_va = shader->ptr + shader->info.main_offset,
          .pbe_argument_va = pbe_argument_va,
          .imageblock_offset_B = agx_tilebuffer_offset_B(&key->tib, 0),
-         .attachment_count = dual_mrt_active ? 2 : 1,
+         .attachment_count = attachment_count,
          .imageblock_offset1_B =
-            dual_mrt_active ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
+            attachment_count > 1 ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
+         .imageblock_offset2_B = attachment_count > 2 ? agx_tilebuffer_offset_B(&key->tib, 2) : 0,
+         .imageblock_offset3_B = attachment_count > 3 ? agx_tilebuffer_offset_B(&key->tib, 3) : 0,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
          .nr_gprs = shader->info.nr_gprs,
@@ -714,11 +754,12 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false))
          fprintf(stderr,
                  "G17P EOT composed: program=%" PRIx64 " length=%zu "
-                 "pbe=%" PRIx64 " attachments=%u offsets=%u,%u "
+                 "pbe=%" PRIx64 " attachments=%u offsets=%u,%u,%u,%u "
                  "gprs=%u staging=%u\n",
                  program_va, program_length, pbe_argument_va,
                  desc.attachment_count, desc.imageblock_offset_B,
-                 desc.imageblock_offset1_B, desc.nr_gprs,
+                 desc.imageblock_offset1_B, desc.imageblock_offset2_B,
+                 desc.imageblock_offset3_B, desc.nr_gprs,
                  desc.staging_halfs);
 
       if (direct_resolve)
@@ -766,6 +807,16 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
       }
+      if (raw32_mrt_active) {
+         for (unsigned rt = 1; rt < attachment_count; ++rt) {
+            struct hk_image_view *view = cmd->state.gfx.render.color_att[rt].iview;
+            if (!view || view->vk.image->samples != 1 ||
+                info->pColorAttachments[rt].imageView == VK_NULL_HANDLE) {
+               vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
+               return (struct hk_bg_eot){0};
+            }
+         }
+      }
 
       const unsigned descriptor_generation =
          agx_chip_descriptor_generation(dev->dev.chip);
@@ -795,13 +846,18 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 
       if (op == AGX_BG_CLEAR) {
          static_assert(sizeof(att_info->clearValue.color) == 16, "fixed ABI");
-         VkClearColorValue clear_values[2] = {
+         VkClearColorValue clear_values[4] = {
             att_info->clearValue.color,
          };
          if (dual_mrt_active)
             clear_values[1] = att_info1->clearValue.color;
+         if (raw32_mrt_active) {
+            for (unsigned rt = 1; rt < attachment_count; ++rt)
+               clear_values[rt] = info->pColorAttachments[rt].clearValue.color;
+         }
          const size_t clear_size =
-            rgba8_mrt && dual_mrt_active ? 32
+            raw32_mrt_active ? 16 * attachment_count
+            : rgba8_mrt && dual_mrt_active ? 32
             : r11g11b10_mrt && dual_mrt_active ? 28
             : wboit_mrt && dual_mrt_active ? 20 : 16;
          desc.clear_value_va =
@@ -815,7 +871,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          static_assert(sizeof(struct hk_native_texture_descriptor) ==
                           AGX_TEXTURE_GEN9_LENGTH,
                        "native texture table stride");
-         struct hk_native_texture_descriptor textures[3] = {
+         struct hk_native_texture_descriptor textures[7] = {
             key->tib.layered ? iview->planes[0].layered_background
                              : iview->planes[0].background,
          };
@@ -823,7 +879,12 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             textures[2] = key->tib.layered
                              ? iview1->planes[0].layered_background
                              : iview1->planes[0].background;
-         const size_t texture_size = dual_mrt_active
+         if (raw32_mrt_active) {
+            for (unsigned rt = 1; rt < attachment_count; ++rt)
+               textures[2 * rt] = cmd->state.gfx.render.color_att[rt].iview->planes[0].background;
+         }
+         const size_t texture_size = raw32_mrt_active
+            ? (2 * attachment_count - 1) * AGX_TEXTURE_GEN9_LENGTH : dual_mrt_active
             ? 3 * AGX_TEXTURE_GEN9_LENGTH : AGX_TEXTURE_GEN9_LENGTH;
          const uint64_t texture_va =
             hk_pool_upload(cmd, textures, texture_size,
@@ -3464,6 +3525,19 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       .words = {UINT32_C(0x00000200), UINT32_C(0x07e00000),
                 UINT32_C(0x07e00000), UINT32_C(0x0001ffff)},
    };
+
+   /* UNCHANGED permits early depth rejection. DEPTHF shaders must publish
+    * their actual depth contract here, including the forced-ANY contract of
+    * late side effects. This is independent of pass type and triangle merging. */
+   const unsigned conservative_depth =
+      agx_translate_depth_layout(fs->b.info.depth_layout);
+   for (unsigned face = 1; face <= 2; ++face) {
+      if (!agx_ppp_hal200_fragment_face_depth_pack(
+             dev->dev.chip, conservative_depth, fs->b.info.early_fragment_tests,
+             fs->info.fs.writes_memory, secondary_fields.words[face],
+             &secondary_fields.words[face]))
+         return hk_g17p_bind_tail_refused(__LINE__);
+   }
 
    const unsigned line_width = agx_pack_line_width(dyn->rs.line.width);
    const unsigned polygon_mode = dyn->rs.polygon_mode;

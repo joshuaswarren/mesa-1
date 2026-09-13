@@ -136,6 +136,14 @@ bool agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
                             enum agx3_alu_hint hint, uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native signed/unsigned f32-to-i32 with post-RA source and destination cache
+ * state. */
+bool agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src, bool is_signed,
+                             enum agx3_alu_hint hint, bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native signed/unsigned32 to scalar-half conversion. */
 bool agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest,
                          uint16_t src, bool is_signed,
@@ -176,13 +184,11 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  * The general compare-select.
  *
  * `fcmpsel` is four operands -- two compared, two selected -- and each carries
- * an independent (kind, width, value) triple. **The kind numbering is NOT
- * shared between the compare slots and the select slots**: on a compare slot
- * the register is kind 2 and the immediate kind 1, while on a select slot the
- * register is kind 3. Do not unify these into one operand-type enum; they are
- * different fields on different slots, and this file has now produced that
- * hazard three times (the ALU wait baselines, the texture LOD-vs-offset
- * predicates, and this).
+ * an independent (kind, width, value) triple. Selected values use kind 1 for
+ * an immediate, kind 2 for a GPR, and kind 3 for a uniform. Fresh G17P
+ * select-kind.metal probes change only GPR versus constant-buffer alternatives
+ * in fabs(f32) < f16 ? a : b. Kind 3 was previously mislabeled as a register,
+ * causing the trig small-input guard to read pointer words from uniforms.
  *
  * Field map, recovered from the 84 real Apple `fsel` instructions in
  * test/agx3_compose_corpus_vectors.c:
@@ -191,28 +197,25 @@ bool agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
  *   compare 0     f35   kind  f42   width f43   cache f44  last-use f46  ABS f47
  *   compare 1     f52 (register) or f51 (immediate)
  *                       kind  f59   width f60   cache f61  last-use f63  ABS f64
- *   select true   f70 (register) or f68 (immediate)   kind f76   width f77
- *   select false  f87 (register) or f85 (immediate)   kind f93   width f94
+ *   select true   f69 (GPR), f70 (uniform), f68 (immediate)  kind f76 width f77
+ *   select false  f86 (GPR), f87 (uniform), f85 (immediate)  kind f93 width f94
  *   condition f110, scoreboard f107
  *
  * Absolute sources move the instruction to a longer endpoint exactly as they
  * do elsewhere in the family, so the endpoint range is scanned rather than
  * computed; the endpoints are mutually exclusive on their fixed bits.
  *
- * Kind 2 on a SELECT slot is deliberately refused. It is the majority class in
- * the corpus (56 of 84) and deposits into f86/f69/f97, but nothing here
- * identifies what it names -- plausibly a uniform. A vector that cannot be
- * encoded fails closed; that is a better state than a wrong encoding hidden by
- * a green count.
+ * GPR alternatives carry cache/discard fields f78/f80 and f95/f97. Uniform
+ * alternatives have no GPR lifetime hints.
  */
 enum agx3_fsel_kind {
    /* compare slots */
    AGX3_FSEL_CMP_IMMEDIATE = 1,
    AGX3_FSEL_CMP_REGISTER = 2,
-   /* select slots -- note the register is 3 here, not 2 */
+   /* select slots */
    AGX3_FSEL_SEL_IMMEDIATE = 1,
-   AGX3_FSEL_SEL_UNKNOWN2 = 2, /* corpus majority, unidentified, refused */
-   AGX3_FSEL_SEL_REGISTER = 3,
+   AGX3_FSEL_SEL_REGISTER = 2,
+   AGX3_FSEL_SEL_UNIFORM = 3,
 };
 
 struct agx3_fsel_desc {
@@ -235,6 +238,7 @@ struct agx3_fsel_desc {
 
    uint8_t sel0_kind, sel1_kind; /* agx3_fsel_kind, select-slot numbering */
    uint16_t sel0, sel1;
+   enum agx3_alu_hint sel0_hint, sel1_hint;
    bool sel_16;
 
    unsigned condition;
@@ -849,6 +853,16 @@ bool agx3_alu_hceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                     uint8_t *len);
 
+/* Native scalar half round-to-nearest-even and truncate. */
+bool agx3_alu_hroundeven(enum agx_isa_encoding enc, uint16_t dest,
+                         uint16_t src, enum agx3_alu_hint hint,
+                         bool dest_cache, uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+bool agx3_alu_htrunc(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                     enum agx3_alu_hint hint, bool dest_cache,
+                     uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                     uint8_t *len);
+
 /* Native square-root step, multiplied by the input by common Mesa lowering. */
 bool agx3_alu_sqrt_step(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
@@ -885,6 +899,12 @@ bool agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
                    const uint16_t src[2], const enum agx3_alu_hint hints[2],
                    bool dest_cache, uint16_t wait_mask,
                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+bool agx3_alu_hmul_abs(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2],
+                       const enum agx3_alu_hint hints[2],
+                       const bool src_abs[2], bool dest_cache,
+                       uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native scalar half register multiplied by an 8-bit minifloat. */
 bool agx3_alu_hmul_minifloat(enum agx_isa_encoding enc, uint16_t dest,
@@ -917,6 +937,12 @@ bool agx3_alu_hadd_saturate(enum agx_isa_encoding enc, uint16_t dest,
 
 /* Native scalar-half saturate: sat(src + -0.0h). */
 bool agx3_alu_hadd_saturate_negzero(
+   enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+   enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native -src + -0.0h used by half negate and matrix inverse lowering. */
+bool agx3_alu_hadd_neg_negzero(
    enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);

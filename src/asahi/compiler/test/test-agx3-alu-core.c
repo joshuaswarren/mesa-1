@@ -1288,7 +1288,9 @@ test_fcmp_select_half_comparator(void)
       .condition = 5,
    };
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
-   exact(out, len, "12234da4268112002032");
+   /* Corrected synthetic register-operand assertion. The old 0x20 selected
+    * uniform half 50 rather than the requested GPR half 50. */
+   exact(out, len, "12234da4268112000032");
 
    /* The same instruction with a 32-bit comparator differs only in the width
     * field and in the register number -- the length and every other byte are
@@ -1298,7 +1300,7 @@ test_fcmp_select_half_comparator(void)
    d32.cmp1_16 = false;
    d32.cmp1 = 36;
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d32, wide, &wide_len));
-   exact(wide, wide_len, "12234da5268102002032");
+   exact(wide, wide_len, "12234da5268102000032");
    assert(wide_len == len);
 
    /* Holding the register number and moving only the width isolates the bit:
@@ -1306,7 +1308,7 @@ test_fcmp_select_half_comparator(void)
    struct agx3_fsel_desc even16 = d;
    even16.cmp1 = 36;
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &even16, out, &len));
-   exact(out, len, "12234da4268102002032");
+   exact(out, len, "12234da4268102000032");
    {
       unsigned differing = 0;
       for (unsigned i = 0; i < len; ++i)
@@ -1324,14 +1326,44 @@ test_fcmp_select_half_comparator(void)
    assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &first, out, &len));
    assert(len == wide_len && memcmp(out, wide, len) != 0);
 
-   /* Fail-closed rules that must survive. Both comparators at half width is
-    * not witnessed on either entry point, a 32-bit comparator is a register
-    * pair and still may not start on an odd half, and an immediate compare
-    * slot always declares width 2. */
+   /* Fresh native all-half comparison with a register selected arm. */
    struct agx3_fsel_desc both = d;
    both.cmp0_16 = true;
    both.cmp0 = 34;
-   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &both, out, &len));
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &both, out, &len));
+
+   struct agx3_fsel_desc native = {
+      .dest = 0,
+      .dest_16 = false,
+      .cmp0 = 4,
+      .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp0_16 = true,
+      .cmp1 = 5,
+      .cmp1_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp1_16 = true,
+      .sel0_kind = AGX3_FSEL_SEL_IMMEDIATE,
+      .sel0 = 32,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER,
+      .sel1 = 0,
+      .sel1_hint = AGX3_ALU_HINT_DISCARD,
+      .sel_16 = false,
+      .condition = 1,
+      .wait_mask = 32,
+   };
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &native, out, &len));
+   exact(out, len, "02041f0421a013c0");
+   native.sel0_kind = AGX3_FSEL_SEL_REGISTER;
+   native.sel0 = 0;
+   native.sel0_hint = AGX3_ALU_HINT_DISCARD;
+   native.sel1_kind = AGX3_FSEL_SEL_IMMEDIATE;
+   native.sel1 = 32;
+   native.sel1_hint = AGX3_ALU_HINT_NONE;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &native, out, &len));
+   exact(out, len, "02041f0420a013c0");
+
+   /* Fail-closed rules that must survive. A 32-bit comparator is a register
+    * pair and still may not start on an odd half, and an immediate compare
+    * slot always declares width 2. */
 
    struct agx3_fsel_desc odd32 = d;
    odd32.cmp1_16 = false;
@@ -1358,6 +1390,40 @@ test_fcmp_select_half_comparator(void)
           memcmp(imm_bytes, imm32_bytes, imm_len) == 0);
 
    puts("FSEL half comparator: three.js point-shadow shape encodes PASS");
+}
+
+static void
+test_native_fsel_selected_register_kind(void)
+{
+   /* Fresh G17P select-kind.metal, fabs(f32) < f16 ? a : b.
+    * GPR compute text SHA 0029c35e1a30be4d161f3bb941b56a93e5f63749391afe31bee9d80094a855db.
+    * Uniform text SHA 53ac8904298508f51d69ff53f46687581b5e7b32d9f1ce55981ebffba50d7903.
+    * Both native instructions are at text offset 0x58. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   struct agx3_fsel_desc d = {
+      .dest = 0, .cmp0 = 0, .cmp0_abs = true,
+      .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+      .cmp1 = 2, .cmp1_16 = true, .cmp1_hint = AGX3_ALU_HINT_DISCARD,
+      .sel0_kind = AGX3_FSEL_SEL_REGISTER, .sel0 = 4,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER, .sel1 = 6,
+      .sel0_hint = AGX3_ALU_HINT_DISCARD,
+      .sel1_hint = AGX3_ALU_HINT_DISCARD,
+      .condition = 1,
+   };
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   exact(bytes, len, "02011f0283040300800600000100");
+
+   d.sel0_kind = d.sel1_kind = AGX3_FSEL_SEL_UNIFORM;
+   d.sel0 = 12;
+   d.sel1 = 14;
+   /* Uniforms cannot carry GPR-cache hints. */
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   d.sel0_hint = d.sel1_hint = AGX3_ALU_HINT_NONE;
+   assert(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   exact(bytes, len, "02011f02230c0300200e00000100");
+   d.sel0_kind = 4;
+   assert(!agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   puts("FSEL selected GPR versus uniform native contrast PASS");
 }
 
 static void
@@ -1511,6 +1577,19 @@ static void test_int_to_float_liveness(void)
    assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3B,0,2,true,AGX3_ALU_HINT_NONE,32,out,&len));
    exact(out,len,"a707560002048c60");
    puts("Integer-to-float: four native signed/unsigned live/dead vectors PASS");
+}
+
+static void test_float_to_int32_liveness(void)
+{
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 4, 2, true, AGX3_ALU_HINT_CACHE, true, 0,
+      out, &len));
+   exact(out, len, "27075404030496480300");
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 4, 3, true, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
+   puts("Float-to-int32: native live-source cache vector PASS");
 }
 
 static void test_i32_to_f16(void)
@@ -1774,6 +1853,16 @@ static void test_native_u16_arithmetic(void)
    const bool mixed_width[] = {false, true};
    assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B,2,mixed_src,mixed_width,dead,1,255,0,true,false,32,out,&len));
    exact(out,len,"12031d04a2ff03c02080");
+   const uint16_t half_src[] = {0, 1};
+   const bool half_width[] = {true, true};
+   assert(agx3_alu_fcmp_select_imm_width(
+      AGX_ISA_ENCODING_AGX3B, 0, half_src, half_width, dead, 1, 2, 0,
+      false, false, 32, out, &len));
+   exact(out, len, "02001f00228213c02080");
+   assert(agx3_alu_fcmp_select_imm_width(
+      AGX_ISA_ENCODING_AGX3B, 0, half_src, half_width, dead, 1, 7, 3,
+      false, false, 32, out, &len));
+   exact(out, len, "02001f00228713c02083");
    const uint16_t neg_src[] = {8, 0};
    const bool full_width[] = {false, false};
    assert(agx3_alu_fcmp_select_imm_width_neg_second(
@@ -1977,7 +2066,15 @@ static void test_native_half_multiply(void)
                            false,32,bytes,&len));
       exact(bytes,len,live?"2000050100c0":"10021d0300c0");
    }
-   puts("Native half multiply: two complete Apple live/dead vectors PASS");
+   const uint16_t src[]={3,2};
+   const enum agx3_alu_hint hints[]={
+      AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD};
+   const bool both_abs[]={true,true};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
+   assert(agx3_alu_hmul_abs(AGX_ISA_ENCODING_AGX3B,2,src,hints,both_abs,
+                            false,32,bytes,&len));
+   exact(bytes,len,"10031d02020000800300");
+   puts("Native half multiply: live/dead and absolute Apple vectors PASS");
 }
 
 static void test_wait_code_forms_fail_closed(void)
@@ -2729,7 +2826,11 @@ static void test_native_half_add(void)
                          bytes, &len));
    assert(!agx3_alu_hadd(AGX_ISA_ENCODING_AGX3B, 0, src, hints, false, 0x40,
                          bytes, &len));
-   puts("Native half add: two exact Apple vectors and bounds PASS");
+   assert(agx3_alu_hadd_neg_negzero(
+      AGX_ISA_ENCODING_AGX3B, 2, 2, AGX3_ALU_HINT_DISCARD, false, 32,
+      bytes, &len));
+   exact(bytes, len, "10021c8001020280");
+   puts("Native half add: three exact Apple vectors and bounds PASS");
 }
 
 static void test_native_half_saturate(void)
@@ -2807,7 +2908,7 @@ static void test_native_half_fma(void)
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
    };
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 1, live_src, live_hints,
-                        false, false, true, 0, bytes, &len));
+                        false, false, true, 32, bytes, &len));
    exact(bytes, len, "08822683018400c0");
 
    const uint16_t dead_src[] = {0, 1, 2};
@@ -2816,29 +2917,41 @@ static void test_native_half_fma(void)
       AGX3_ALU_HINT_DISCARD,
    };
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
-                        false, false, false, 0, bytes, &len));
+                        false, false, false, 32, bytes, &len));
    exact(bytes, len, "00001e01810200c0");
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 1, live_src, live_hints,
-                        false, true, true, 0, bytes, &len));
+                        false, true, true, 32, bytes, &len));
    exact(bytes, len, "08822683118400c0");
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
-                        false, true, false, 0, bytes, &len));
+                        false, true, false, 32, bytes, &len));
    exact(bytes, len, "00001e01910200c0");
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 1, live_src, live_hints,
-                        true, false, true, 0, bytes, &len));
+                        true, false, true, 32, bytes, &len));
    exact(bytes, len, "08822683018400c8");
    const uint16_t neg0_src[] = {3, 2, 4};
    assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 1, neg0_src, live_hints,
-                        true, false, true, 0, bytes, &len));
+                        true, false, true, 32, bytes, &len));
    exact(bytes, len, "08832682018400c8");
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3C, 0, dead_src, dead_hints,
                          false, false, false, 0, bytes, &len));
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 256, dead_src, dead_hints,
                          false, false, false, 0, bytes, &len));
    assert(!agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
-                         false, false, false, 0x40, bytes, &len));
-   puts("Native half FMA/FMS: six complete Apple modifier/lifetime vectors "
-        "and refusals PASS");
+                          false, false, false, 0x40, bytes, &len));
+
+   const uint8_t wait_tail[] = {0x00, 0x20, 0x40, 0x60,
+                                 0x80, 0xa0, 0xc0};
+   for (unsigned slot = 0; slot <= 6; ++slot) {
+      const uint16_t wait = slot ? (1u << (slot - 1)) : 0;
+      assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
+                           false, false, false, wait, bytes, &len));
+      assert(len == 8 && bytes[7] == wait_tail[slot]);
+   }
+   assert(agx3_alu_hfma(AGX_ISA_ENCODING_AGX3B, 0, dead_src, dead_hints,
+                        false, false, false, 3, bytes, &len));
+   assert(len == 10 && ((bytes[7] >> 5) | ((bytes[9] >> 5) << 3)) == 3);
+   puts("Native half FMA/FMS: six complete Apple modifier/lifetime vectors, "
+        "six direct wait slots, no-wait, and refusals PASS");
 }
 
 static void test_native_half_fma_minifloat_addend(void)
@@ -2868,8 +2981,17 @@ static void test_native_half_fma_minifloat_addend(void)
    assert(!agx3_alu_hfma_addend_minifloat(
       AGX_ISA_ENCODING_AGX3B, 2, src, 56, dead_hints, false, 64, bytes,
       &len));
-   puts("Native half FMA minifloat addend: two exact Apple vectors and "
-        "bounds PASS");
+   for (unsigned wait = 0; wait < 64; ++wait) {
+      assert(agx3_alu_hfma_addend_minifloat(
+         AGX_ISA_ENCODING_AGX3B, 6, src, 128, dead_hints, false, wait,
+         bytes, &len));
+      if (wait && (wait & (wait - 1))) {
+         assert(len == 10);
+         assert(((bytes[7] >> 5) | ((bytes[9] >> 5) << 3)) == wait);
+      }
+   }
+   puts("Native half FMA minifloat addend: two exact Apple vectors, all 64 "
+        "wait masks, and bounds PASS");
 }
 
 static void test_native_widen_half(void)
@@ -2952,6 +3074,14 @@ static void test_native_half_sqrt(void)
       AGX_ISA_ENCODING_AGX3B, 8, 4, 0, AGX3_ALU_HINT_DISCARD,
       AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
    exact(bytes, len, "41051d000020");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 4, 0, 4, AGX3_ALU_HINT_CACHE,
+      AGX3_ALU_HINT_DISCARD, false, 32, bytes, &len));
+   exact(bytes, len, "2181150400c0");
+   assert(agx3_alu_fmul_mixed_half(
+      AGX_ISA_ENCODING_AGX3B, 2, 4, 3, AGX3_ALU_HINT_DISCARD,
+      AGX3_ALU_HINT_NONE, false, 32, bytes, &len));
+   exact(bytes, len, "11050d0210c0");
 
    memset(bytes, 0xa5, sizeof(bytes));
    assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3C, 2, 4,
@@ -2966,21 +3096,23 @@ static void test_native_half_sqrt(void)
    assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
                                    AGX3_ALU_HINT_CACHE, false, 0,
                                    bytes, &len));
-   assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
-                                   AGX3_ALU_HINT_CACHE, true, 1,
-                                   bytes, &len));
+   assert(agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3B, 2, 4,
+                                  AGX3_ALU_HINT_CACHE, true, 1,
+                                  bytes, &len));
+   exact(bytes, len, "2f11540203088a400000");
+   memset(bytes, 0xa5, sizeof(bytes));
    assert(!agx3_alu_fmul_mixed_half(
       AGX_ISA_ENCODING_AGX3B, 2, 3, 4, AGX3_ALU_HINT_DISCARD,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_fmul_mixed_half(
-      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_CACHE,
+      AGX_ISA_ENCODING_AGX3B, 2, 2, 4, (enum agx3_alu_hint)3,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_fmul_mixed_half(
       AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
-      AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
+      (enum agx3_alu_hint)3, false, 0, bytes, &len));
    assert(!agx3_alu_fmul_mixed_half(
       AGX_ISA_ENCODING_AGX3B, 2, 2, 4, AGX3_ALU_HINT_DISCARD,
-      AGX3_ALU_HINT_NONE, false, 32, bytes, &len));
+      AGX3_ALU_HINT_NONE, false, 64, bytes, &len));
    for (unsigned i = 0; i < sizeof(bytes); ++i)
       assert(bytes[i] == 0xa5);
 
@@ -3421,6 +3553,10 @@ static void test_native_half_min(void)
    assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B,2,dead_src,dead,
                             false,32,bytes,&len));
    exact(bytes,len,"12021c0211c0");
+   const uint16_t wait1_src[]={1,8,1,8};
+   assert(agx3_alu_fmin_half(AGX_ISA_ENCODING_AGX3B,1,wait1_src,dead,
+                            false,1,bytes,&len));
+   exact(bytes,len,"0a001c080920");
    puts("Native half minimum: exact internal-clamp/dead Apple FSEL vectors PASS");
 }
 
@@ -3432,9 +3568,15 @@ static void test_native_half_compare_select(void)
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
       AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD,
    };
-   assert(agx3_alu_fcmp_select_half(AGX_ISA_ENCODING_AGX3B, 0, src,
+   /* The native vector starts with 0x0a because it writes odd half 1 while
+    * caching the result. Field12 carries cache; byte0 bit3 remains the low
+    * destination bit. */
+   assert(agx3_alu_fcmp_select_half(AGX_ISA_ENCODING_AGX3B, 1, src,
                                     cached, 1, true, 0, bytes, &len));
    exact(bytes, len, "0a822582028413c08005");
+   assert(agx3_alu_fcmp_select_half(AGX_ISA_ENCODING_AGX3B, 0, src,
+                                    cached, 1, true, 0, bytes, &len));
+   exact(bytes, len, "02822582028413c08005");
 
    const uint16_t dead_src[] = {0, 1, 2, 3};
    const enum agx3_alu_hint dead[] = {
@@ -3486,6 +3628,10 @@ static void test_native_half_max(void)
    assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,2,src,dead,
                             false,32,bytes,&len));
    exact(bytes,len,"12021c0210c0");
+   const uint16_t wait2_src[]={2,7,2,7};
+   assert(agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,2,wait2_src,dead,
+                            false,2,bytes,&len));
+   exact(bytes,len,"12021c061040");
    assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3C,0,src,cached,
                              true,32,bytes,&len));
    assert(!agx3_alu_fmax_half(AGX_ISA_ENCODING_AGX3B,256,src,cached,
@@ -3905,6 +4051,11 @@ static void test_native_half_rsqrt(void)
       {2,2,AGX3_ALU_HINT_DISCARD, false, 0,"af0154020204ac600000"},
       {3,3,AGX3_ALU_HINT_DISCARD, false, 0,"af0154030206ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, true, 32,"af0156020304ac600000"},
+      {1,1,AGX3_ALU_HINT_DISCARD, false, 1,"af1154010202ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false, 2,"af2154020204ac600000"},
+      {3,3,AGX3_ALU_HINT_DISCARD, false, 4,"af4154030206ac600000"},
+      {6,6,AGX3_ALU_HINT_DISCARD, false, 8,"af815406020cac600000"},
+      {7,7,AGX3_ALU_HINT_DISCARD, false,16,"af015507020eac600000"},
    };
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -3922,8 +4073,8 @@ static void test_native_half_rsqrt(void)
       if (bad == 0) enc = AGX_ISA_ENCODING_AGX3C;
       if (bad == 1) dest = 256;
       if (bad == 2) src = 256;
-      if (bad == 3) hint = AGX3_ALU_HINT_CACHE;
-      if (bad == 4) wait = 1;
+      if (bad == 3) hint = (enum agx3_alu_hint)3;
+      if (bad == 4) wait = 64;
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
       memset(bytes, 0xa5, sizeof(bytes));
       assert(!agx3_alu_hrsqrt(enc, dest, src, hint, false, wait,
@@ -3932,7 +4083,7 @@ static void test_native_half_rsqrt(void)
       for (unsigned j = 0; j < sizeof(bytes); ++j)
          assert(bytes[j] == 0xa5);
    }
-   puts("Native half reciprocal sqrt: five exact Apple vectors and narrow refusal guards PASS");
+   puts("Native half reciprocal sqrt: exact Apple wait-bank vectors and bounds PASS");
 }
 
 static void test_native_half_exp2(void)
@@ -3951,6 +4102,11 @@ static void test_native_half_exp2(void)
       {3,3,AGX3_ALU_HINT_DISCARD, false, 0,"af0254030206ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, true, 32,"af0256020304ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, false,32,"af0256020204ac600100", true},
+      {1,1,AGX3_ALU_HINT_DISCARD, false, 1,"af1254010202ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false, 2,"af2254020204ac600000"},
+      {3,3,AGX3_ALU_HINT_DISCARD, false, 4,"af4254030206ac600000"},
+      {6,6,AGX3_ALU_HINT_DISCARD, false, 8,"af825406020cac600000"},
+      {7,7,AGX3_ALU_HINT_DISCARD, false,16,"af025507020eac600000"},
    };
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -3968,8 +4124,8 @@ static void test_native_half_exp2(void)
       if (bad == 0) enc = AGX_ISA_ENCODING_AGX3C;
       if (bad == 1) dest = 256;
       if (bad == 2) src = 256;
-      if (bad == 3) hint = AGX3_ALU_HINT_CACHE;
-      if (bad == 4) wait = 1;
+      if (bad == 3) hint = (enum agx3_alu_hint)3;
+      if (bad == 4) wait = 64;
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
       memset(bytes, 0xa5, sizeof(bytes));
       assert(!agx3_alu_hexp2(enc, dest, src, hint, false, wait,
@@ -3978,7 +4134,7 @@ static void test_native_half_exp2(void)
       for (unsigned j = 0; j < sizeof(bytes); ++j)
          assert(bytes[j] == 0xa5);
    }
-   puts("Native half exp2: six exact Apple vectors and narrow refusal guards PASS");
+   puts("Native half exp2: exact Apple wait-bank vectors and bounds PASS");
 }
 
 static void test_native_half_log2(void)
@@ -3995,6 +4151,11 @@ static void test_native_half_log2(void)
       {2,2,AGX3_ALU_HINT_DISCARD, false, 0,"2f0254020204ac600000"},
       {3,3,AGX3_ALU_HINT_DISCARD, false, 0,"2f0254030206ac600000"},
       {2,2,AGX3_ALU_HINT_DISCARD, true, 32,"2f0256020304ac600000"},
+      {1,1,AGX3_ALU_HINT_DISCARD, false, 1,"2f1254010202ac600000"},
+      {2,2,AGX3_ALU_HINT_DISCARD, false, 2,"2f2254020204ac600000"},
+      {3,3,AGX3_ALU_HINT_DISCARD, false, 4,"2f4254030206ac600000"},
+      {6,6,AGX3_ALU_HINT_DISCARD, false, 8,"2f825406020cac600000"},
+      {7,7,AGX3_ALU_HINT_DISCARD, false,16,"2f025507020eac600000"},
    };
    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -4013,7 +4174,7 @@ static void test_native_half_log2(void)
       if (bad == 1) dest = 256;
       if (bad == 2) src = 256;
       if (bad == 3) hint = (enum agx3_alu_hint)3;
-      if (bad == 4) wait = 1;
+      if (bad == 4) wait = 64;
       uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0xa5;
       memset(bytes, 0xa5, sizeof(bytes));
       assert(!agx3_alu_hlog2(enc, dest, src, hint, false, wait,
@@ -4022,7 +4183,7 @@ static void test_native_half_log2(void)
       for (unsigned j = 0; j < sizeof(bytes); ++j)
          assert(bytes[j] == 0xa5);
    }
-   puts("Native half log2: five exact Apple vectors and narrow refusal guards PASS");
+   puts("Native half log2: exact Apple wait-bank vectors and bounds PASS");
 }
 
 static void test_native_mixed_width_log2(void)
@@ -4110,7 +4271,6 @@ static void test_native_mixed_width_log2(void)
       {AGX_ISA_ENCODING_AGX3B, 0,   192, false,true, AGX3_ALU_HINT_NONE,0},
       {AGX_ISA_ENCODING_AGX3B, 255, 0,   false,true, AGX3_ALU_HINT_NONE,0},
       {AGX_ISA_ENCODING_AGX3B, 0,   255, false,false,AGX3_ALU_HINT_NONE,0},
-      {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,true, AGX3_ALU_HINT_NONE,1},
       {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,true,
        (enum agx3_alu_hint)3, 0},
       {AGX_ISA_ENCODING_AGX3B, 0,   0,   false,false,AGX3_ALU_HINT_NONE,64},
@@ -4150,13 +4310,25 @@ static void test_native_half_floor(void)
    memset(bytes,0xa5,sizeof(bytes));
    assert(!agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3C,2,2,
                            AGX3_ALU_HINT_DISCARD,false,0,bytes,&len));
+   assert(agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3B,2,2,
+                          AGX3_ALU_HINT_CACHE,false,0,bytes,&len));
+   exact(bytes,len,"2f00540202048e600200");
+   assert(agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3B,2,2,
+                          AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+   exact(bytes,len,"2f1054020204ac600200");
+   assert(agx3_alu_htrunc(AGX_ISA_ENCODING_AGX3B,2,2,
+                          AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+   exact(bytes,len,"2f1054020204ac600600");
+   assert(agx3_alu_hroundeven(AGX_ISA_ENCODING_AGX3B,2,2,
+                              AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+   exact(bytes,len,"2f1054020204ac600000");
+   len=0xa5;
+   memset(bytes,0xa5,sizeof(bytes));
    assert(!agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3B,2,2,
-                           AGX3_ALU_HINT_CACHE,false,0,bytes,&len));
-   assert(!agx3_alu_hfloor(AGX_ISA_ENCODING_AGX3B,2,2,
-                           AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+                           AGX3_ALU_HINT_DISCARD,false,64,bytes,&len));
    assert(len==0xa5);
    for(unsigned i=0;i<sizeof(bytes);++i) assert(bytes[i]==0xa5);
-   puts("Native half floor: five exact Apple vectors and refusal guards PASS");
+   puts("Native half rounding modes: exact Apple cache/wait vectors and bounds PASS");
 }
 
 static void test_native_half_ceil(void)
@@ -4179,13 +4351,19 @@ static void test_native_half_ceil(void)
    memset(bytes,0xa5,sizeof(bytes));
    assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3C,2,2,
                           AGX3_ALU_HINT_DISCARD,false,0,bytes,&len));
+   assert(agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
+                         AGX3_ALU_HINT_CACHE,false,0,bytes,&len));
+   exact(bytes,len,"2f00540202048e600400");
+   assert(agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
+                         AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+   exact(bytes,len,"2f1054020204ac600400");
+   len=0xa5;
+   memset(bytes,0xa5,sizeof(bytes));
    assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
-                          AGX3_ALU_HINT_CACHE,false,0,bytes,&len));
-   assert(!agx3_alu_hceil(AGX_ISA_ENCODING_AGX3B,2,2,
-                          AGX3_ALU_HINT_DISCARD,false,1,bytes,&len));
+                          AGX3_ALU_HINT_DISCARD,false,64,bytes,&len));
    assert(len==0xa5);
    for(unsigned i=0;i<sizeof(bytes);++i) assert(bytes[i]==0xa5);
-   puts("Native half ceil: five exact Apple vectors and refusal guards PASS");
+   puts("Native half ceil: exact Apple cache/wait vectors and bounds PASS");
 }
 
 static void test_native_high_float_registers(void)
@@ -4810,10 +4988,12 @@ int main(void){
    test_native_u16_shift_right_immediate();
    test_native_fma_minifloat();
    test_int_to_float_liveness();
+   test_float_to_int32_liveness();
    test_i32_to_f16();
    test_f16_to_int32();
    test_float_compare_select();
    test_fcmp_select_half_comparator();
+   test_native_fsel_selected_register_kind();
    test_threejs_width_kind_modifier_axes();
    test_float_compare_zero();
    test_integer_lifetimes();

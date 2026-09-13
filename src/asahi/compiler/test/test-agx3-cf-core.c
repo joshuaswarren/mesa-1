@@ -340,6 +340,20 @@ test_half_float_zero_compare(void)
          fprintf(stderr,"FAIL native half float-zero branch odd%u condition%u\n",odd,condition);failures++;
       }
    }
+   {
+      const uint8_t gold[] = {
+         0x0a, 0x08, 0x23, 0x81, 0x06, 0x00, 0x08, 0x02, 0x00, 0x00,
+      };
+      uint8_t bytes[AGX3_CF_MAX_LENGTH], length = 0;
+      const bool ok = agx3_cf_fcmp_zero_imm(
+         AGX_ISA_ENCODING_AGX3B, AGX3_CF_FCOND_EQ, false, 0, 9, true, 0,
+         (struct agx3_cf_source_hints){false, false}, 0, bytes, &length);
+      checks++;
+      if (!ok || length != sizeof(gold) || memcmp(bytes, gold, length)) {
+         fprintf(stderr, "FAIL native retained half float-zero branch\n");
+         failures++;
+      }
+   }
 }
 
 /*

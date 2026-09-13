@@ -64,6 +64,7 @@ hk_device_init_meta(struct hk_device *dev)
 
    dev->meta.use_gs_for_layer = false;
    dev->meta.use_layer_output = dev->dev.chip != AGX_CHIP_G17P;
+   dev->meta.use_view_relative_3d_layer = dev->dev.chip == AGX_CHIP_G17P;
    /* G17P has ordinary fixed-function stencil testing/updates, but its
     * fragment stencil-export operand is not part of the grounded AGX3B ABI.
     * Let common meta lower a stencil blit to eight bit-selective discard
@@ -1474,34 +1475,46 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
    }
 }
 
-/* The uncompressed format a compressed image is copied through: one texel per
- * compressed block, carrying the block's bits unchanged.  Compressed blocks are
- * 8 or 16 bytes on every format hk exposes.
+/* Copy through integer views to preserve every bit, including normalized
+ * channel precision, floating-point NaN payloads and YCbCr padding bits.
+ * Compressed images use one integer texel per 8- or 16-byte block.
  */
 static inline VkFormat
-hk_meta_uncompressed_copy_format(VkFormat compressed)
+hk_meta_bitwise_copy_format(VkFormat format)
 {
-   switch (vk_format_get_blocksize(compressed)) {
+   switch (vk_format_get_blocksize(format)) {
+   case 1:
+      return VK_FORMAT_R8_UINT;
+   case 2:
+      return VK_FORMAT_R16_UINT;
+   case 4:
+      return VK_FORMAT_R32_UINT;
    case 8:
       return VK_FORMAT_R32G32_UINT;
    case 16:
       return VK_FORMAT_R32G32B32A32_UINT;
    default:
-      UNREACHABLE("unexpected compressed block size");
+      return format;
    }
 }
 
 static inline struct vk_meta_copy_image_properties
-hk_meta_copy_get_image_properties(struct hk_image *img)
+hk_meta_copy_get_image_properties(struct hk_image *img, bool g17p)
 {
+   /* Keep the existing multisample render-target formats: G17P's native
+    * multisample tile path does not support these integer aliases yet. */
+   g17p &= img->vk.samples == VK_SAMPLE_COUNT_1_BIT;
    struct vk_meta_copy_image_properties props = {.tile_size = {16, 16, 1}};
    const struct vk_format_ycbcr_info *ycbcr =
       vk_format_get_ycbcr_info(img->vk.format);
 
    if (ycbcr && ycbcr->n_planes > 1) {
       assert(ycbcr->n_planes <= ARRAY_SIZE(props.plane));
-      for (uint32_t plane = 0; plane < ycbcr->n_planes; ++plane)
-         props.plane[plane].view_format = ycbcr->planes[plane].format;
+      for (uint32_t plane = 0; plane < ycbcr->n_planes; ++plane) {
+         const VkFormat format = ycbcr->planes[plane].format;
+         props.plane[plane].view_format =
+            g17p ? hk_meta_bitwise_copy_format(format) : format;
+      }
    } else if (!vk_format_is_depth_or_stencil(img->vk.format)) {
       /* vk_meta_copy_image_properties documents that view_format "must not be
        * compressed": the common copy shaders convert texels with
@@ -1515,10 +1528,13 @@ hk_meta_copy_get_image_properties(struct hk_image *img)
        * Only G17P reached this: hk_CmdCopyImage2 routes every G17P copy
        * through the graphics meta path, while AGX2 uses the compute path for
        * all but a few destinations.
+       * G17P also uses integer aliases for uncompressed copies: a normalized
+       * render target may round the copied values or untouched pixels reloaded
+       * by the background shader, violating the bit-exact copy contract.
        */
       props.color.view_format =
-         vk_format_is_compressed(img->vk.format)
-            ? hk_meta_uncompressed_copy_format(img->vk.format)
+         (g17p || vk_format_is_compressed(img->vk.format))
+            ? hk_meta_bitwise_copy_format(img->vk.format)
             : img->vk.format;
    } else {
       switch (img->vk.format) {
@@ -1971,8 +1987,10 @@ hk_g17p_block_copy_format(struct hk_device *dev, VkFormat format)
 static struct hk_g17p_buffer_to_image_copy
 hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
                            const VkCopyBufferToImageInfo2 *info,
-                           const VkBufferImageCopy2 *region, VkFormat format)
+                           const VkBufferImageCopy2 *region, uint8_t plane,
+                           VkFormat format)
 {
+   const struct ail_layout *layout = &image->planes[plane].layout;
    return (struct hk_g17p_buffer_to_image_copy){
       .chip = dev->dev.chip,
       /* The raw compute path does not need an EOT-capable format, but the
@@ -1986,7 +2004,8 @@ hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
       .plane_count = 1,
       .mip_levels = image->vk.mip_levels,
       .array_layers = image->vk.array_layers,
-      .image_extent = image->vk.extent,
+      .image_extent = {layout->width_px, layout->height_px,
+                       image->vk.extent.depth},
       .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       .mip_level = region->imageSubresource.mipLevel,
       .base_array_layer = region->imageSubresource.baseArrayLayer,
@@ -2011,6 +2030,14 @@ hk_g17p_buffer_upload_plane(const struct hk_image *image,
          return false;
    } else if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
       if (!vk_format_has_stencil(image->vk.format))
+         return false;
+   } else if (aspect == VK_IMAGE_ASPECT_PLANE_0_BIT ||
+              aspect == VK_IMAGE_ASPECT_PLANE_1_BIT ||
+              aspect == VK_IMAGE_ASPECT_PLANE_2_BIT) {
+      const struct vk_format_ycbcr_info *ycbcr =
+         vk_format_get_ycbcr_info(image->vk.format);
+      if (!ycbcr || ycbcr->n_planes <= 1 ||
+          hk_image_aspects_to_plane(image, aspect) >= ycbcr->n_planes)
          return false;
    } else {
       return false;
@@ -2045,7 +2072,7 @@ hk_g17p_copy_uncompressed_buffer_to_image_supported(
          return false;
 
       const struct hk_g17p_buffer_to_image_copy copy =
-         hk_g17p_buffer_upload_desc(dev, image, info, region, format);
+         hk_g17p_buffer_upload_desc(dev, image, info, region, plane, format);
       struct hk_g17p_uncompressed_copy_plan plan;
       if (!hk_g17p_uncompressed_buffer_to_image_copy_plan(
              &copy, region->bufferOffset, buffer->vk.size, &plan))
@@ -2076,7 +2103,7 @@ hk_g17p_copy_uncompressed_buffer_to_image(
       const uint64_t base_dst = hk_image_base_address(image, plane);
       const bool dest_tiled = layout->tiling == AIL_TILING_GPU;
       const struct hk_g17p_buffer_to_image_copy copy =
-         hk_g17p_buffer_upload_desc(dev, image, info, region, format);
+         hk_g17p_buffer_upload_desc(dev, image, info, region, plane, format);
       struct hk_g17p_uncompressed_copy_plan plan;
       if (!hk_g17p_uncompressed_buffer_to_image_copy_plan(
              &copy, region->bufferOffset, buffer->vk.size, &plan)) {
@@ -2361,7 +2388,7 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    if (gfx) {
       struct vk_meta_copy_image_properties dst_props =
-         hk_meta_copy_get_image_properties(dst_image);
+         hk_meta_copy_get_image_properties(dst_image, false);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          /* Native single-slice EOT views already select the mip and array
@@ -2472,9 +2499,11 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
 
    if (gfx) {
       struct vk_meta_copy_image_properties src_props =
-         hk_meta_copy_get_image_properties(src_image);
+         hk_meta_copy_get_image_properties(src_image,
+                                          dev->dev.chip == AGX_CHIP_G17P);
       struct vk_meta_copy_image_properties dst_props =
-         hk_meta_copy_get_image_properties(dst_image);
+         hk_meta_copy_get_image_properties(dst_image,
+                                          dev->dev.chip == AGX_CHIP_G17P);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          /* The qualified HAL200 BG/EOT contract is single-layer.  Preserve
