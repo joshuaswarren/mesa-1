@@ -3016,25 +3016,6 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          }
       }
 
-      /* G17G's proven logarithm endpoint consumes f32. Optimizing a
-       * mediump value followed by log2 may fold away its widening move;
-       * restore that exact conversion before RA instead of inventing a
-       * mixed-width instruction encoding. Every finite half is exactly
-       * representable in f32, so the original input is retained. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-          I->op == AGX_OPCODE_LOG2 && I->nr_srcs == 1 && I->nr_dests == 1 &&
-          I->dest[0].size == AGX_SIZE_32 &&
-          I->src[0].type != AGX_INDEX_IMMEDIATE &&
-          I->src[0].size == AGX_SIZE_16) {
-         agx_index source = I->src[0];
-         source.abs = source.neg = false;
-         agx_index widened = agx_temp(ctx, AGX_SIZE_32);
-         agx_fmov_to(&b, widened, source);
-         widened.abs = I->src[0].abs;
-         widened.neg = I->src[0].neg;
-         I->src[0] = widened;
-      }
-
       /* The G17G full-register select compares f32 operands. Retain a
        * mediump comparator's value by widening it before that comparison;
        * leave the selected values and ordered comparison condition intact. */

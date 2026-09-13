@@ -623,7 +623,7 @@ agx3_try_float_modifier(struct util_dynarray *emission,
  * fsin_agx stays fail-closed until an executed-numerics witness exists.
  */
 static int
-agx3_map_funop(unsigned op)
+agx3_map_funop(enum agx_isa_encoding enc, unsigned op)
 {
    switch (op) {
    case AGX_OPCODE_FLOOR:
@@ -636,6 +636,10 @@ agx3_map_funop(unsigned op)
       return AGX3_FUNOP_LOG2;
    case AGX_OPCODE_EXP2:
       return AGX3_FUNOP_EXP2;
+   case AGX_OPCODE_RSQRT:
+      return enc == AGX_ISA_ENCODING_AGX3C ? AGX3_FUNOP_RSQRT : -1;
+   case AGX_OPCODE_SRSQRT:
+      return enc == AGX_ISA_ENCODING_AGX3C ? AGX3_FUNOP_SQRT_STEP : -1;
    case AGX_OPCODE_DFDX:
       return AGX3_FUNOP_DFDX;
    case AGX_OPCODE_DFDY:
@@ -652,25 +656,33 @@ agx3_emit_funop(struct util_dynarray *emission, enum agx_isa_encoding enc,
    if (I->nr_dests != 1 || I->nr_srcs != 1 ||
        I->dest[0].type == AGX_INDEX_NULL ||
        !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
-       I->dest[0].size != AGX_SIZE_32 || !agx3_src_is_register(I->src[0]) ||
-       I->src[0].memory || I->src[0].size != AGX_SIZE_32)
+       !agx3_src_is_register(I->src[0]) || I->src[0].memory)
       return false;
 
    uint8_t bytes[AGX3_FUNOP_MAX_LENGTH];
    uint8_t len = 0;
-   if (enc == AGX_ISA_ENCODING_AGX3C && op <= AGX3_FUNOP_EXP2) {
-      if (I->src[0].kill)
+   if (enc == AGX_ISA_ENCODING_AGX3C &&
+       (op <= AGX3_FUNOP_EXP2 || op == AGX3_FUNOP_RSQRT ||
+        op == AGX3_FUNOP_SQRT_STEP)) {
+      if (I->src[0].kill || agx_channels(I->dest[0]) != 1 ||
+          agx_channels(I->src[0]) != 1 ||
+          (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32) ||
+          (I->src[0].size != AGX_SIZE_16 && I->src[0].size != AGX_SIZE_32))
          return false;
       const struct agx3_funop_runtime runtime = {
          .dest_cache = I->dest[0].cache,
          .src_cache = I->src[0].cache,
          .src_discard = I->src[0].discard,
+         .dest_16 = I->dest[0].size == AGX_SIZE_16,
+         .src_16 = I->src[0].size == AGX_SIZE_16,
       };
       return agx3_funop_encode_g17g(op, I->dest[0].value, I->src[0].value,
                                     I->src[0].abs, I->src[0].neg, I->saturate,
                                     wait_mask, &runtime, bytes, &len) &&
              agx3_append(emission, bytes, len);
    }
+   if (I->dest[0].size != AGX_SIZE_32 || I->src[0].size != AGX_SIZE_32)
+      return false;
    return agx3_funop_encode(enc, op, I->dest[0].value, I->src[0].value,
                             I->src[0].abs, I->src[0].neg, I->saturate,
                             wait_mask, bytes, &len) &&
@@ -7439,7 +7451,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* Transcendental / rounding / gradient funops. The gradients need
           * the 2x2 quad, and every witness is a fragment shader. */
-         const int fop = agx3_map_funop(I->op);
+         const int fop = agx3_map_funop(enc, I->op);
          if (fop >= 0) {
             uint16_t funop_wait = wait;
             /* Apple gradient witnesses expose no wait-field map. A real
@@ -9337,7 +9349,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * destination width on the ordinary f32mul); let it fall through to
           * the minifloat path below instead of being claimed and refused
           * here. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FMUL &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FMUL &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_16 &&
@@ -9362,7 +9375,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * texture sample and the uniform load are live, retire slot 1
              * with the established native wait NOP before issuing the fused
              * multiply; do not discard either dependency. */
-            if (encoded_wait & ~UINT16_C(1)) {
+            if (enc == AGX_ISA_ENCODING_AGX3B &&
+                (encoded_wait & ~UINT16_C(1))) {
                if (!agx3_retire_slots_noop(emission, enc,
                                             encoded_wait & ~UINT16_C(1)))
                   AGX3_REFUSE(I);
@@ -10208,7 +10222,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          /* Native FMA with a minifloat multiplier. Preserve both async
           * dependencies in the instruction, including the extended two-wait
           * form; do not serialize independent texture operations. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
+         if ((enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+             I->op == AGX_OPCODE_FFMA &&
              !I->saturate && I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1) {
             const bool imm_first = I->src[0].type == AGX_INDEX_IMMEDIATE;

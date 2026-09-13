@@ -1717,6 +1717,33 @@ test_f16_to_int32(void)
 static void
 test_native_fma_minifloat(void)
 {
+   /* Fresh applegpu_g17g fma(x, k, +/-y), including both live operands. */
+   static const struct {
+      uint16_t dest, src, add;
+      uint8_t imm, wait;
+      bool dc, neg;
+      enum agx3_alu_hint sh, ah;
+      const char *hex;
+   } g17g[] = {
+      {0,0,8,32,128,0,0,1,1,"2900070a2020a3023088980008080080"},
+      {2,2,10,32,0,0,0,1,1,"19030ea1a00a"},
+      {12,4,12,32,128,1,0,2,1,"2980071a2820a31a108898000c080080"},
+      {14,6,14,32,0,1,0,2,1,"798726a1a00e"},
+      {12,12,4,32,128,1,0,1,2,"2900073a2820a31a3088980004040080"},
+      {14,14,6,32,0,1,0,1,2,"790f2ea12086"},
+      {0,0,8,32,128,0,1,1,1,"2900070a2020a30230889800080800c0"},
+      {2,2,10,32,0,0,1,1,1,"19030ea1910a0202"},
+      {0,0,8,64,128,0,0,1,1,"2900070a2020a3023090980008080080"},
+      {2,2,10,64,0,0,0,1,1,"19030ec1a00a"},
+   };
+   for (unsigned i = 0; i < sizeof(g17g) / sizeof(g17g[0]); ++i) {
+      uint8_t out[16], len;
+      assert(agx3_alu_fma_minifloat_mod(
+         AGX_ISA_ENCODING_AGX3C, g17g[i].dest, g17g[i].src, g17g[i].imm,
+         g17g[i].add, g17g[i].neg, g17g[i].sh, g17g[i].ah, g17g[i].dc,
+         g17g[i].wait, out, &len));
+      exact(out, len, g17g[i].hex);
+   }
    {
       static const struct {
          uint16_t dest, src, addend;
@@ -3319,6 +3346,17 @@ static void test_native_half_sqrt(void)
       AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
    exact(bytes, len, "41051d000020");
 
+   static const uint16_t half_sqrt_src[] = {14, 8, 10, 6};
+   static const char *half_sqrt_hex[] = {
+      "010f1900", "01091d001400", "110b1902", "11071d021400",
+   };
+   for (unsigned i = 0; i < 4; ++i) {
+      assert(agx3_alu_fmul_mixed_half(
+         AGX_ISA_ENCODING_AGX3C, i, half_sqrt_src[i], i,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+      exact(bytes, len, half_sqrt_hex[i]);
+   }
+
    memset(bytes, 0xa5, sizeof(bytes));
    assert(!agx3_alu_sqrt_step_half(AGX_ISA_ENCODING_AGX3C, 2, 4,
                                    AGX3_ALU_HINT_CACHE, true, 0,
@@ -4840,10 +4878,23 @@ test_native_fmul_minifloat_narrow(void)
       AGX_ISA_ENCODING_AGX3B, 2, 2, 0x20, false, true, false,
       AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
 
-   /* AGX3c has no witness for any of this. */
-   assert(!agx3_alu_fmul_minifloat_narrow(
-      AGX_ISA_ENCODING_AGX3C, 2, 2, 0x20, false, false, true,
-      AGX3_ALU_HINT_DISCARD, 1u << 5, bytes, &len));
+   /* Apple applegpu_g17g: half4(float4_input * 0.5f). The first operation
+    * waits for its load; later channels narrow directly to even/odd halves. */
+   static const struct {
+      uint16_t dest, src, wait;
+      uint8_t size, bytes[14];
+   } gpu1[] = {
+      {0,0,128,14,{0x29,0x00,0x05,0x18,0x22,0x80,0xac,0x02,0x0a,0x00,0x20,0x00,0x02,0x10}},
+      {1,2,0,6,{0x01,0xa1,0x15,0x03,0x84,0x00}},
+      {2,4,0,6,{0x11,0xa1,0x15,0x05,0x80,0x00}},
+      {3,6,0,6,{0x11,0xa1,0x15,0x07,0x84,0x00}},
+   };
+   for (unsigned i = 0; i < sizeof(gpu1) / sizeof(gpu1[0]); ++i) {
+      assert(agx3_alu_fmul_minifloat_narrow(
+         AGX_ISA_ENCODING_AGX3C, gpu1[i].dest, gpu1[i].src, 0x20,
+         false, false, true, AGX3_ALU_HINT_DISCARD, gpu1[i].wait, bytes, &len));
+      assert(len == gpu1[i].size && !memcmp(bytes, gpu1[i].bytes, len));
+   }
 }
 
 

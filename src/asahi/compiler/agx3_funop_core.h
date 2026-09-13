@@ -50,6 +50,8 @@ enum agx3_funop {
                           * for why no Mesa opcode routes here yet. */
    AGX3_FUNOP_DFDX,      /* f32dfdx, fragment-only gradient */
    AGX3_FUNOP_DFDY,      /* f32dfdy, fragment-only gradient */
+   AGX3_FUNOP_RSQRT,     /* G17G native reciprocal square root */
+   AGX3_FUNOP_SQRT_STEP, /* G17G square-root step, followed by multiply */
    AGX3_FUNOP_COUNT,
 };
 
@@ -69,9 +71,14 @@ struct agx3_funop_runtime {
    bool dest_cache;
    bool src_cache;
    bool src_discard;
+   bool dest_16;
+   bool src_16;
 };
 
-/* G17G f32rint/log2/exp2 with actual post-RA lifetimes and scoreboard waits.
+/* G17G unary arithmetic with actual post-RA lifetimes and scoreboard waits.
+ * LOG2/EXP2 support all half/float width combinations. RSQRT supports matching
+ * half/float widths; SQRT_STEP has a float result and half/float input.
+ * Rounding currently admits the qualified float/float form only.
  * The legacy entry point above replays the original fixed corpus shapes. */
 bool agx3_funop_encode_g17g(enum agx3_funop op, uint16_t dest, uint16_t src,
                            bool src_abs, bool src_neg, bool saturate,

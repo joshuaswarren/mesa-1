@@ -183,7 +183,7 @@ agx3_alu_fmul_minifloat_narrow(
 {
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if (!out || !len || (!gpu1 && enc != AGX_ISA_ENCODING_AGX3B) ||
-       (gpu1 && dest_half) || dest >= 256 ||
+        dest >= 256 ||
        src >= 256 || (src & 1) || (!dest_half && (dest & 1)) ||
        immediate > 0xff ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
@@ -198,7 +198,11 @@ agx3_alu_fmul_minifloat_narrow(
     *
     * Witnessed with `metal-nt -arch applegpu_g17p`, a single-field difference
     * from the all-32-bit control, and re-composed byte-exactly through this
-    * encoder:
+    * encoder. G17G also independently witnesses narrowing to even and odd
+    * half destinations, including the slot-eight dependency form:
+    *   half4(input * 0.5f): 290005182280ac020a0020000210,
+    *                       01a115038400, 11a115058000, 11a115078400.
+    * G17P controls:
     *
     *   o[i] = a[i] * 0.5f        (float o)  19 a1 15 03 80 c0   f10 = 2
     *   o[i] = half(a[i] * 0.5f)  (half  o)  11 a1 15 03 80 c0   f10 = 1
@@ -594,27 +598,35 @@ agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if (!out || !len || (!gpu1 && enc != AGX_ISA_ENCODING_AGX3B) ||
        dest >= 256 || src >= 256 || addend >= 256 ||
-       ((dest | src | addend) & 1) || (wait_mask & ~UINT16_C(0x3f)) ||
+       ((dest | src | addend) & 1) ||
+       (wait_mask & ~(gpu1 ? UINT16_C(0xff) : UINT16_C(0x3f))) ||
        (unsigned)src_hint > AGX3_ALU_HINT_CACHE ||
        (unsigned)addend_hint > AGX3_ALU_HINT_CACHE)
       return false;
    const struct agx3_field_kv base[] = {
       {9,2},{10,2},{25,2},{26,2},{42,1},{43,2},{59,2},{60,2},{77,2},{91,2},
-      {102,1},
+      {102,1}, {95,3}, {96,55},
    };
-   struct agx3_field_kv fields[17] = {
+   struct agx3_field_kv fields[18] = {
       {2,dest},{11,dest_cache},{18,src},{34,immediate},{52,addend},
       {27,src_hint==AGX3_ALU_HINT_CACHE},{29,src_hint==AGX3_ALU_HINT_DISCARD},
       {61,addend_hint==AGX3_ALU_HINT_CACHE},{63,addend_hint==AGX3_ALU_HINT_DISCARD},
       {65,negate_addend},
    };
    unsigned n=10;
-   for(unsigned slot=0;slot<6;slot++)
-      if(wait_mask & (1u<<slot))fields[n++]=(struct agx3_field_kv){97+slot,1};
-   for(unsigned ep=2;ep<=4;ep++)
-      if(agx3_bind_compose(enc,"f32fma",ep,base,negate_addend ? 11 : 10,
+   /* Native G17G fma(x, 0.5, y), its two live-input variants and fma(x,
+    * 0.5, -y) preserve these operand fields. The long endpoint needs its
+    * own opcode fields and all eight dependency slots. Override f102 too:
+    * G17P's negative-addend template must not introduce a G17G slot-6 wait. */
+   for (unsigned slot = 0; slot < (gpu1 ? 8 : 6); slot++)
+      if (gpu1 || (wait_mask & (1u << slot)))
+         fields[n++] = (struct agx3_field_kv){97 + slot,
+                                             !!(wait_mask & (1u << slot))};
+   for (unsigned ep = 2; ep <= (gpu1 ? 7 : 4); ep++)
+      if(agx3_bind_compose(enc,"f32fma",ep,base,gpu1 ? 13 : (negate_addend ? 11 : 10),
                            fields,n,out,len))
          return true;
    return false;
@@ -975,25 +987,31 @@ agx3_alu_fmul_mixed_half(enum agx_isa_encoding enc, uint16_t dest,
     * Field10 selects the half destination, including odd half registers.
     * The f32 step is consumed, while the original half may remain live. The
     * sampled-texture form uses the native f32mul long endpoint's slot-1 wait. */
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if (!out || !len || (!gpu1 && enc != AGX_ISA_ENCODING_AGX3B) || dest >= 256 ||
        f32 >= 256 || f16 >= 256 || (f32 & 1) ||
        hint32 != AGX3_ALU_HINT_DISCARD ||
        (hint16 != AGX3_ALU_HINT_NONE && hint16 != AGX3_ALU_HINT_DISCARD) ||
-       wait_mask > 1)
+       (wait_mask & ~(gpu1 ? UINT16_C(0xff) : UINT16_C(1))))
       return false;
 
    const struct agx3_field_kv base[] = {
       {9,2},{10,1},{25,2},{26,2},{42,2},{43,1},{60,2},{74,2},
+      {78,3},{79,62},
    };
-   struct agx3_field_kv fields[7] = {
+   struct agx3_field_kv fields[14] = {
       {2,dest}, {18,f32}, {35,f16}, {11,dest_cache}, {29,1},
       {46,hint16 == AGX3_ALU_HINT_DISCARD},
    };
    unsigned n = 6;
-   if (wait_mask)
-      fields[n++] = (struct agx3_field_kv){80, 1};
-   for (unsigned ep = 0; ep < 2; ++ep)
-      if (agx3_bind_compose(enc, "f32mul", ep, base, 8, fields, n,
+   /* Four fresh G17G half-sqrt witnesses independently reproduce the
+    * compact float-step times original-half operation, including odd halves.
+    * The G17G long form carries all eight waits directly. */
+   for (unsigned slot = 0; slot < (gpu1 ? 8 : 1); slot++)
+      if (wait_mask & (1u << slot))
+         fields[n++] = (struct agx3_field_kv){80 + slot, 1};
+   for (unsigned ep = 0; ep < (gpu1 ? 4 : 2); ++ep)
+      if (agx3_bind_compose(enc, "f32mul", ep, base, gpu1 ? 10 : 8, fields, n,
                             out, len))
          return true;
    return false;

@@ -68,6 +68,59 @@ main(void)
    uint8_t b[AGX3_FUNOP_MAX_LENGTH];
    uint8_t len;
 
+   /* Apple applegpu_g17g half/mixed-width arithmetic witnesses. These retain
+    * the actual native precision and independently qualify odd half registers
+    * and both widths of the square-root-step input. */
+   static const struct {
+      enum agx3_funop op;
+      uint16_t dest, src, wait;
+      bool dest_half, src_half, live, abs;
+      const char *hex;
+   } typed_vectors[] = {
+      {AGX3_FUNOP_LOG2,0,0,128,1,1,0,0,"2f0004082230a4022800"},
+      {AGX3_FUNOP_LOG2,1,1,0,1,1,0,0,"270104092230a4022800"},
+      {AGX3_FUNOP_LOG2,9,0,128,1,1,1,0,"2f8004092a30a4120800"},
+      {AGX3_FUNOP_LOG2,7,2,0,1,1,1,0,"378204092a30a40a0800"},
+      {AGX3_FUNOP_EXP2,0,0,128,1,1,0,0,"2f0004082230a5022800"},
+      {AGX3_FUNOP_EXP2,1,1,0,1,1,0,0,"270104092230a5022800"},
+      {AGX3_FUNOP_EXP2,9,0,128,1,1,1,0,"2f8004092a30a5120800"},
+      {AGX3_FUNOP_EXP2,7,2,0,1,1,1,0,"378204092a30a50a0800"},
+      {AGX3_FUNOP_RSQRT,0,0,128,1,1,0,0,"2f0004122220a3022800"},
+      {AGX3_FUNOP_RSQRT,1,1,0,1,1,0,0,"270104132220a3022800"},
+      {AGX3_FUNOP_RSQRT,9,0,128,1,1,1,0,"2f8004132a20a3120800"},
+      {AGX3_FUNOP_RSQRT,7,2,0,1,1,1,0,"378204132a20a30a0800"},
+      {AGX3_FUNOP_RSQRT,0,0,128,0,0,0,0,"2f0004182220a3023000"},
+      {AGX3_FUNOP_RSQRT,12,4,0,0,0,1,0,"278004382a20a31a1000"},
+      {AGX3_FUNOP_SQRT_STEP,14,0,128,0,1,1,0,"3f8004182a20a21a0800"},
+      {AGX3_FUNOP_SQRT_STEP,10,2,0,0,1,1,0,"378204182a20a2120800"},
+      {AGX3_FUNOP_SQRT_STEP,14,0,128,0,0,1,0,"3f8004182a20a21a1000"},
+      {AGX3_FUNOP_SQRT_STEP,12,4,0,0,0,1,0,"278004382a20a21a1000"},
+      {AGX3_FUNOP_SQRT_STEP,14,0,128,0,0,1,1,"3f8004182a20a21a1040"},
+      {AGX3_FUNOP_SQRT_STEP,10,2,0,0,1,1,1,"378204182a20a2120840"},
+      {AGX3_FUNOP_LOG2,0,4,128,0,1,0,0,"2f00041a2220a4022800"},
+      {AGX3_FUNOP_LOG2,2,5,0,0,1,0,0,"3701041a2220a4022800"},
+      {AGX3_FUNOP_LOG2,0,0,128,1,0,0,0,"2f0004082230a4023000"},
+      {AGX3_FUNOP_LOG2,1,2,0,1,0,0,0,"270204092230a4023000"},
+      {AGX3_FUNOP_EXP2,0,4,128,0,1,0,0,"2f00041a2220a5022800"},
+      {AGX3_FUNOP_EXP2,2,5,0,0,1,0,0,"3701041a2220a5022800"},
+      {AGX3_FUNOP_EXP2,0,0,128,1,0,0,0,"2f0004082230a5023000"},
+      {AGX3_FUNOP_EXP2,1,2,0,1,0,0,0,"270204092230a5023000"},
+   };
+   for (unsigned i = 0; i < sizeof(typed_vectors) / sizeof(typed_vectors[0]); ++i) {
+      const struct agx3_funop_runtime runtime = {
+         .dest_cache = typed_vectors[i].live,
+         .src_cache = typed_vectors[i].live,
+         .src_discard = !typed_vectors[i].live,
+         .dest_16 = typed_vectors[i].dest_half,
+         .src_16 = typed_vectors[i].src_half,
+      };
+      const bool ok = agx3_funop_encode_g17g(
+         typed_vectors[i].op, typed_vectors[i].dest, typed_vectors[i].src,
+         typed_vectors[i].abs, false, false, typed_vectors[i].wait,
+         &runtime, b, &len);
+      expect("G17G typed arithmetic", ok, b, len, typed_vectors[i].hex);
+   }
+
    /* Independent applegpu_g17g Metal 27.1.5194.15 witnesses: the live
     * probes multiply the funop result by its input; the dead probes only
     * store the result. Registers are in half units. The second instruction
@@ -220,6 +273,28 @@ main(void)
    }
 
    /* Fail-closed domain edges. */
+   struct agx3_funop_runtime typed = {.dest_16 = true, .src_16 = true};
+   expect_refused("half rounding has no native witness",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_FLOOR, 0, 0, false,
+                    false, false, 0, &typed, b, &len));
+   expect_refused("sqrt step requires float result",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_SQRT_STEP, 0, 0, false,
+                    false, false, 0, &typed, b, &len));
+   typed.dest_16 = false;
+   expect_refused("mixed-width rsqrt is not qualified",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_RSQRT, 0, 0, false,
+                    false, false, 0, &typed, b, &len));
+   expect_refused("odd float result beside half source",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_LOG2, 1, 3, false,
+                    false, false, 0, &typed, b, &len));
+   expect_refused("sqrt step negation is not qualified",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_SQRT_STEP, 0, 3, false,
+                    true, false, 0, &typed, b, &len));
+   typed.src_16 = false;
+   typed.dest_16 = true;
+   expect_refused("odd float source beside half result",
+                  agx3_funop_encode_g17g(AGX3_FUNOP_LOG2, 1, 3, false,
+                    false, false, 0, &typed, b, &len));
    expect_refused("b saturate (Apple lowers via f32add)",
                   agx3_funop_encode(AGX_ISA_ENCODING_AGX3B, AGX3_FUNOP_FLOOR,
                                     0, 0, false, false, true, 0, b, &len));

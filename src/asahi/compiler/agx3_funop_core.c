@@ -58,6 +58,12 @@ static const struct agx3_field_kv c_exp2[] = {
    KV(9, 2),  KV(10, 2), KV(25, 2), KV(26, 2), KV(29, 1),
    KV(33, 3), KV(34, 52), KV(42, 1),
 };
+static const struct agx3_field_kv c_rsqrt[] = {
+   KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(33, 3), KV(34, 66),
+};
+static const struct agx3_field_kv c_sqrt_step[] = {
+   KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(33, 3), KV(34, 68),
+};
 static const struct agx3_field_kv c_sinc[] = {
    KV(9, 2),  KV(10, 2), KV(11, 1), KV(25, 2), KV(26, 2), KV(27, 1),
    KV(33, 3), KV(34, 67),
@@ -92,6 +98,10 @@ static const struct funop_form forms[AGX3_FUNOP_COUNT] = {
                         c_dfdx, NELEM(c_dfdx)},
    [AGX3_FUNOP_DFDY] = {"f32dfdy", -1, false, b_dfdy, NELEM(b_dfdy),
                         c_dfdy, NELEM(c_dfdy)},
+   [AGX3_FUNOP_RSQRT] = {"f32rsqrt", -1, true, NULL, 0,
+                         c_rsqrt, NELEM(c_rsqrt)},
+   [AGX3_FUNOP_SQRT_STEP] = {"f32sqrtstep", -1, true, NULL, 0,
+                             c_sqrt_step, NELEM(c_sqrt_step)},
 };
 
 static bool
@@ -116,12 +126,25 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
         op >= AGX3_FUNOP_COUNT)
       return false;
 
-   if (runtime && (enc != AGX_ISA_ENCODING_AGX3C || op > AGX3_FUNOP_EXP2 ||
+   const bool root = op == AGX3_FUNOP_RSQRT || op == AGX3_FUNOP_SQRT_STEP;
+   if (root && !runtime)
+      return false;
+   if (runtime && (enc != AGX_ISA_ENCODING_AGX3C ||
+                   (op > AGX3_FUNOP_EXP2 && !root) ||
                    (runtime->src_cache && runtime->src_discard)))
       return false;
 
-   /* Witnessed operand domain: even 32-bit half-register pairs below 128. */
-   if (dest >= 128 || src >= 128 || (dest & 1) || (src & 1))
+   const bool dest_16 = runtime && runtime->dest_16;
+   const bool src_16 = runtime && runtime->src_16;
+   if (runtime &&
+       ((op <= AGX3_FUNOP_RINT && (dest_16 || src_16)) ||
+        (op == AGX3_FUNOP_RSQRT && (dest_16 != src_16)) ||
+        (op == AGX3_FUNOP_SQRT_STEP && (dest_16 || src_neg || saturate))))
+      return false;
+
+   /* Native scalar half registers may be odd; float registers are pairs. */
+   if (dest >= 128 || src >= 128 || (!dest_16 && (dest & 1)) ||
+       (!src_16 && (src & 1)))
       return false;
 
    const struct funop_form *F = &forms[op];
@@ -137,7 +160,7 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
    if (wait_mask && !F->wait_ok)
       return false;
 
-   struct agx3_field_kv ov[20];
+   struct agx3_field_kv ov[22];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
    ov[n++] = (struct agx3_field_kv)KV(18, src);
@@ -155,6 +178,8 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
     * The same fields are independently witnessed for all four rint modes.
     * Copying the canonical last-use template here discards live inputs. */
    if (runtime) {
+      ov[n++] = (struct agx3_field_kv)KV(10, dest_16 ? 1 : 2);
+      ov[n++] = (struct agx3_field_kv)KV(26, src_16 ? 1 : 2);
       ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
       ov[n++] = (struct agx3_field_kv)KV(27, runtime->src_cache);
       ov[n++] = (struct agx3_field_kv)KV(29, runtime->src_discard);
