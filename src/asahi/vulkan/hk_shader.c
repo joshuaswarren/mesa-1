@@ -617,9 +617,9 @@ struct lower_ycbcr_state {
    struct vk_descriptor_set_layout *const *set_layouts;
 };
 
-static const struct vk_ycbcr_conversion_state *
-lookup_ycbcr_conversion(const void *_state, uint32_t set, uint32_t binding,
-                        uint32_t array_index)
+static const struct hk_sampler *
+lookup_ycbcr_sampler(const void *_state, uint32_t set, uint32_t binding,
+                     uint32_t array_index)
 {
    const struct lower_ycbcr_state *state = _state;
    assert(set < state->set_layout_count);
@@ -639,9 +639,138 @@ lookup_ycbcr_conversion(const void *_state, uint32_t set, uint32_t binding,
    const struct hk_sampler *sampler =
       bind_layout->immutable_samplers[array_index];
 
-   return sampler && sampler->vk.ycbcr_conversion
-             ? &sampler->vk.ycbcr_conversion->state
-             : NULL;
+   return sampler && sampler->vk.ycbcr_conversion ? sampler : NULL;
+}
+
+static const struct vk_ycbcr_conversion_state *
+lookup_ycbcr_conversion(const void *state, uint32_t set, uint32_t binding,
+                        uint32_t array_index)
+{
+   const struct hk_sampler *sampler =
+      lookup_ycbcr_sampler(state, set, binding, array_index);
+   return sampler ? &sampler->ycbcr : NULL;
+}
+
+/* Reconstruct at full-resolution luma texel centres, then filter the converted
+ * values. The common YCbCr pass lowers each centre sample into plane accesses
+ * and colour conversion. YCbCr samplers use clamp-to-edge and a single mip. */
+static bool
+lower_ycbcr_explicit(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   switch (tex->op) {
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+      break;
+   default:
+      return false;
+   }
+   const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (handle < 0)
+      return false;
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[handle].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned index = 0;
+   if (deref->deref_type == nir_deref_type_array) {
+      if (!nir_src_is_const(deref->arr.index))
+         return false;
+      index = nir_src_as_uint(deref->arr.index);
+   }
+   const struct hk_sampler *sampler = lookup_ycbcr_sampler(
+      state, var->data.descriptor_set, var->data.binding, index);
+   if (!sampler || !sampler->ycbcr.force_explicit_reconstruction)
+      return false;
+
+   assert(tex->sampler_dim == GLSL_SAMPLER_DIM_2D);
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *size =
+      nir_u2f32(b, nir_channels(b, nir_get_texture_size(b, tex), 3));
+   nir_def *coord =
+      tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa;
+   nir_def *uv = nir_fmul(b, nir_channels(b, coord, 3), size);
+   int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset >= 0)
+      uv = nir_fadd(b, uv, nir_i2f32(b, tex->src[offset].src.ssa));
+
+   nir_def *linear;
+   if (sampler->min_filter == sampler->mag_filter) {
+      linear = nir_imm_bool(b, sampler->min_filter == VK_FILTER_LINEAR);
+   } else {
+      nir_def *lod;
+      if (tex->op == nir_texop_txl) {
+         lod = tex->src[nir_tex_instr_src_index(tex, nir_tex_src_lod)].src.ssa;
+         lod = nir_fadd_imm(b, lod, sampler->mip_lod_bias);
+      } else if (tex->op == nir_texop_txd) {
+         nir_def *dx = nir_fmul(
+            b, size,
+            tex->src[nir_tex_instr_src_index(tex, nir_tex_src_ddx)].src.ssa);
+         nir_def *dy = nir_fmul(
+            b, size,
+            tex->src[nir_tex_instr_src_index(tex, nir_tex_src_ddy)].src.ssa);
+         lod = nir_ffma_imm12(
+            b,
+            nir_flog2(b, nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy))),
+            0.5, sampler->mip_lod_bias);
+      } else {
+         lod = nir_get_texture_lod(b, tex);
+         if (tex->op == nir_texop_txb)
+            lod = nir_fadd(
+               b, lod,
+               tex->src[nir_tex_instr_src_index(tex, nir_tex_src_bias)].src.ssa);
+      }
+      linear =
+         nir_bcsel(b, nir_fle_imm(b, lod, 0.0),
+                   nir_imm_bool(b, sampler->mag_filter == VK_FILTER_LINEAR),
+                   nir_imm_bool(b, sampler->min_filter == VK_FILTER_LINEAR));
+   }
+
+   nir_def *pos = nir_bcsel(b, linear, nir_fadd_imm(b, uv, -0.5), uv);
+   nir_def *base = nir_ffloor(b, pos);
+   nir_def *weight =
+      nir_bcsel(b, linear, nir_ffract(b, pos), nir_imm_vec2(b, 0, 0));
+   nir_def *taps[4];
+   for (unsigned tap = 0; tap < 4; ++tap) {
+      nir_def *xy = nir_fadd(b, base, nir_imm_vec2(b, tap & 1, tap >> 1));
+      xy = nir_fmin(b, nir_fmax(b, xy, nir_imm_float(b, 0)),
+                    nir_fadd_imm(b, size, -1));
+      xy = nir_fdiv(b, nir_fadd_imm(b, xy, 0.5), size);
+      nir_def *center = tex->is_array ? nir_vec3(b, nir_channel(b, xy, 0),
+                                                 nir_channel(b, xy, 1),
+                                                 nir_channel(b, coord, 2))
+                                      : xy;
+      nir_def *lod_zero = nir_imm_float(b, 0);
+      nir_tex_instr *sample =
+         nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+      /* Register cloned source uses before removing or rewriting them. */
+      nir_builder_instr_insert(b, &sample->instr);
+      for (int s = sample->num_srcs - 1; s >= 0; --s) {
+         switch (sample->src[s].src_type) {
+         case nir_tex_src_lod:
+         case nir_tex_src_bias:
+         case nir_tex_src_ddx:
+         case nir_tex_src_ddy:
+         case nir_tex_src_offset:
+            nir_tex_instr_remove_src(sample, s);
+            break;
+         case nir_tex_src_coord:
+            nir_src_rewrite(&sample->src[s].src, center);
+            break;
+         default:
+            break;
+         }
+      }
+      sample->op = nir_texop_txl;
+      nir_tex_instr_add_src(sample, nir_tex_src_lod, lod_zero);
+      taps[tap] = &sample->def;
+   }
+   nir_def *x = nir_channel(b, weight, 0), *y = nir_channel(b, weight, 1);
+   /* Frontend preprocessing may already have lowered the original flrps. */
+   b->shader->info.flrp_lowered = false;
+   nir_def *result = nir_flrp(b, nir_flrp(b, taps[0], taps[1], x),
+                              nir_flrp(b, taps[2], taps[3], x), y);
+   nir_def_replace(&tex->def, result);
+   return true;
 }
 
 static bool
@@ -991,6 +1120,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       .set_layout_count = set_layout_count,
       .set_layouts = set_layouts,
    };
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_explicit,
+            nir_metadata_none, (void *)&ycbcr_state);
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);
    if (dev->dev.chip == AGX_CHIP_G17P) {

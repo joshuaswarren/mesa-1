@@ -75,6 +75,7 @@ vk_common_CreateSamplerYcbcrConversion(VkDevice _device,
    state->chroma_offsets[0] = pCreateInfo->xChromaOffset;
    state->chroma_offsets[1] = pCreateInfo->yChromaOffset;
    state->chroma_filter = pCreateInfo->chromaFilter;
+   state->force_explicit_reconstruction = pCreateInfo->forceExplicitReconstruction;
 
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(state->format);

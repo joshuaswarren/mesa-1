@@ -21,6 +21,11 @@ struct hk_sampler {
    VkClearColorValue custom_border;
    bool has_border;
 
+   /* Shader-visible immutable sampling state for explicit reconstruction. */
+   struct vk_ycbcr_conversion_state ycbcr;
+   VkFilter min_filter, mag_filter;
+   float mip_lod_bias;
+
    uint8_t plane_count;
    uint16_t lod_bias_fp16;
 

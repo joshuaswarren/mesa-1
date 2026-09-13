@@ -225,6 +225,18 @@ hk_CreateSampler(VkDevice device,
    if (!sampler)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   sampler->min_filter = info->minFilter;
+   sampler->mag_filter = info->magFilter;
+   sampler->mip_lod_bias = info->mipLodBias;
+   if (sampler->vk.ycbcr_conversion) {
+      sampler->ycbcr = sampler->vk.ycbcr_conversion->state;
+      /* Explicit nearest chroma maps luma (i,j) to (i/2,j/2), independent
+       * of chroma location. Linear reconstruction retains the offset. */
+      if (sampler->ycbcr.force_explicit_reconstruction &&
+          sampler->ycbcr.chroma_filter == VK_FILTER_NEAREST)
+         sampler->ycbcr.chroma_reconstruction = false;
+   }
+
    bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors;
    bool custom_border =
       uses_border(info) &&

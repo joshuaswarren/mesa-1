@@ -193,6 +193,9 @@ hk_get_image_format_features(struct hk_physical_device *pdev,
          VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
    }
 
+   if (agx_native_graphics(&pdev->dev) && ycbcr_info->n_planes > 1)
+      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE_BIT;
+
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
 
