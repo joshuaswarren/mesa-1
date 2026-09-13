@@ -188,6 +188,9 @@ format_for_plane(struct hk_image_view *view, unsigned view_plane)
    VkFormat plane_format =
       ycbcr_info ? ycbcr_info->planes[view_plane].format : view->vk.format;
 
+   if (view->vk.format == VK_FORMAT_D16_UNORM_S8_UINT)
+      plane_format = hk_depth_stencil_plane_format(view->vk.format,
+         view->vk.aspects == VK_IMAGE_ASPECT_STENCIL_BIT);
    enum pipe_format p_format = hk_format_to_pipe_format(plane_format);
    if (view->vk.aspects == VK_IMAGE_ASPECT_STENCIL_BIT)
       p_format = get_stencil_format(p_format);

@@ -1739,6 +1739,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
       assert(desc->format == PIPE_FORMAT_Z32_FLOAT ||
              desc->format == PIPE_FORMAT_Z16_UNORM ||
+             desc->format == PIPE_FORMAT_Z16_UNORM_S8_UINT ||
              desc->format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT);
 
       render->cr.depth.buffer =

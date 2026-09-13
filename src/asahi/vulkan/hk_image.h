@@ -109,6 +109,22 @@ hk_format_to_pipe_format(VkFormat vkformat)
    }
 }
 
+static inline bool
+hk_split_depth_stencil(VkFormat format)
+{
+   return format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+          format == VK_FORMAT_D16_UNORM_S8_UINT;
+}
+
+static inline VkFormat
+hk_depth_stencil_plane_format(VkFormat format, unsigned plane)
+{
+   if (!hk_split_depth_stencil(format))
+      return format;
+   return plane ? VK_FORMAT_S8_UINT :
+      format == VK_FORMAT_D16_UNORM_S8_UINT ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
+}
+
 static inline uint8_t
 hk_image_aspects_to_plane(const struct hk_image *image,
                           VkImageAspectFlags aspectMask)
@@ -124,7 +140,7 @@ hk_image_aspects_to_plane(const struct hk_image *image,
       return 0;
 
    case VK_IMAGE_ASPECT_STENCIL_BIT:
-      return image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+      return hk_split_depth_stencil(image->vk.format);
 
    case VK_IMAGE_ASPECT_PLANE_1_BIT:
    case VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT:
