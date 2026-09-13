@@ -649,7 +649,8 @@ lower_ycbcr_plane_range(nir_builder *b, nir_tex_instr *tex, void *data)
 {
    const int plane_src = nir_tex_instr_src_index(tex, nir_tex_src_plane);
    const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
-   if (plane_src < 0 || deref_src < 0)
+   if (plane_src < 0 || deref_src < 0 || tex->op == nir_texop_txs ||
+       tex->op == nir_texop_query_levels || tex->op == nir_texop_lod)
       return false;
 
    nir_deref_instr *deref = nir_src_as_deref(tex->src[deref_src].src);
