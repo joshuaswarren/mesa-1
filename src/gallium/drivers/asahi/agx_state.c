@@ -65,6 +65,7 @@
 #include "util/macros.h"
 #include "util/ralloc.h"
 #include "util/u_inlines.h"
+#include "util/u_index_modify.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
@@ -7280,6 +7281,49 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (indirect && indirect->indirect_draw_count) {
       perf_debug_ctx(ctx, "multi-draw indirect");
       util_draw_indirect(pctx, info, drawid_offset, indirect);
+      return;
+   }
+
+   /* HAL300's grounded index-list encodings consume U16 or U32 indices.
+    * Preserve U8 API draws by widening through Gallium's ordinary index
+    * utility before command construction. Vertex values, index bias and
+    * the restart index remain unchanged; only the storage width changes. */
+   if (info->index_size == 1 &&
+       agx_vdm_index_list_direct_is_hal300_inline(agx_device(pctx->screen)->chip)) {
+      if (indirect) {
+         util_draw_indirect(pctx, info, drawid_offset, indirect);
+         return;
+      }
+
+      if (!draws->count || !info->instance_count)
+         return;
+      if (draws->count > UINT32_MAX / sizeof(uint16_t)) {
+         mesa_loge("asahi: U8 index expansion exceeds buffer size limit");
+         return;
+      }
+
+      struct pipe_resource *indices = NULL;
+      unsigned offset = 0;
+      void *map = NULL;
+      u_upload_alloc_ref(pctx->stream_uploader, 0,
+                         draws->count * sizeof(uint16_t), 64,
+                         &offset, &indices, &map);
+      if (!indices || !map) {
+         pipe_resource_reference(&indices, NULL);
+         return;
+      }
+      util_shorten_ubyte_elts_to_userptr(pctx, info, 0, 0,
+                                        draws->start, draws->count, map);
+      u_upload_unmap(pctx->stream_uploader);
+
+      struct pipe_draw_info widened = *info;
+      struct pipe_draw_start_count_bias draw = *draws;
+      widened.index_size = sizeof(uint16_t);
+      widened.has_user_indices = false;
+      widened.index.resource = indices;
+      draw.start = offset / sizeof(uint16_t);
+      agx_draw_vbo(pctx, &widened, drawid_offset, NULL, &draw, 1);
+      pipe_resource_reference(&indices, NULL);
       return;
    }
 
