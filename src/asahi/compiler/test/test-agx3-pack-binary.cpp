@@ -6213,6 +6213,38 @@ TEST_F(AGX3PackBinary, LocalLoadAddStoreCarriesWait)
    }
 }
 
+TEST_F(AGX3PackBinary, LocalVectorUsesScalarElementIndex)
+{
+   for (int e = 0; e < 2; ++e) {
+      const enum agx_isa_encoding enc =
+         e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      agx_index base = agx_uniform(8, AGX_SIZE_16);
+      agx_local_store(b, agx_register(0, AGX_SIZE_32), base,
+                      agx_immediate(4), AGX_FORMAT_I32, 0xf);
+      agx_stop(b);
+
+      struct agx3_local_desc st = {};
+      st.data = 0;
+      st.width = AGX3_MEM_W32;
+      st.mask = 0xf;
+      st.shift = 2;
+      st.base_kind = AGX3_LOCAL_BASE_UNIFORM;
+      st.base = 8;
+      st.index = 4;
+      uint8_t sb[AGX3_LOCAL_TPS_MAX_LENGTH];
+      uint8_t sl = 0;
+      ASSERT_TRUE(agx3_local_encode_store(enc, &st, sb, &sl));
+
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      std::vector<uint8_t> want;
+      append(want, sb, sl);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
 TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
 {
    for (int e = 0; e < 2; ++e) {

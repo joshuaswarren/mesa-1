@@ -2421,17 +2421,6 @@ agx3_translate_mem(const agx_instr *I, bool is_store, uint8_t slot,
    return true;
 }
 
-static uint8_t
-agx3_local_vector_shift(enum agx3_mem_width width, uint8_t mask)
-{
-   const unsigned channels = util_bitcount(mask);
-   unsigned bytes = channels << width;
-   uint8_t shift = 0;
-   while ((1u << shift) < bytes)
-      shift++;
-   return shift;
-}
-
 /* Translate the shared-memory shape Mesa currently emits. AGX3 preprocessing
  * converts byte offsets to scalar-element indices, matching Apple's grounded
  * ldtg/sttg register-index convention. */
@@ -2448,7 +2437,10 @@ agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
       return false;
    d->width = (enum agx3_mem_width)w;
    d->mask = (uint8_t)I->mask;
-   d->shift = agx3_local_vector_shift(d->width, d->mask);
+   /* The index counts scalar elements even for vector accesses. Scaling by
+    * the total vector width makes successive vec4 stores stride four times
+    * too far and breaks explicitly aliased shared-memory views. */
+   d->shift = d->width;
 
    const agx_index data = is_store ? I->src[0] : I->dest[0];
    const enum agx_size expected =
