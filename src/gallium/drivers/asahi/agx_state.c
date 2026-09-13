@@ -29,6 +29,7 @@
 #include "asahi/lib/agx_ppp_w_clamp_cull2_core.h"
 #include "asahi/lib/agx_usc.h"
 #include "asahi/lib/agx_vdm_barrier_core.h"
+#include "asahi/lib/agx_vdm_index_list_core.h"
 #include "asahi/lib/agx_vdm_state_update_core.h"
 #include "asahi/lib/agx_vdm_ppp_state_core.h"
 #include "asahi/lib/agx_vdm_stream_link_core.h"
@@ -7639,8 +7640,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * estimate the maximum bytes of VDM commands that this draw will emit.
     */
    struct agx_device *dev = agx_device(ctx->base.screen);
+   /* HAL300 emits a vertex state update and the viewport, bases and graphics
+    * PPP records before its Index List. The AGX2 estimate is smaller than
+    * that state block alone; overread padding is not command storage.
+    */
    const size_t command_space =
-      dev->chip == AGX_CHIP_G17P
+      dev->chip == AGX_CHIP_G17G
+         ? AGX_VDM_STATE_UPDATE_LENGTH +
+              (2 + AGX_PPP_HAL300_GRAPHICS_RECORDS) * AGX_VDM_PPP_STATE_CORE_LENGTH +
+              AGX_VDM_STATE_LENGTH + AGX_VDM_STATE_RESTART_INDEX_LENGTH +
+              MAX2(AGX_VDM_INDEX_LIST_DIRECT_INDEXED_MAX_LENGTH,
+                   AGX_VDM_INDEX_LIST_INDIRECT_INDEXED_MAX_LENGTH) +
+              AGX_VDM_BARRIER_CORE_LENGTH
+      : dev->chip == AGX_CHIP_G17P
          ? AGX_VDM_STATE_UPDATE_LENGTH + AGX_VDM_HAL200_BIND_TAIL_LENGTH +
               AGX_VDM_HAL200_DRAW_STATE_POINTER_LENGTH +
               AGX_VDM_HAL200_INDEXED_DRAW_BODY_LENGTH + AGX_VDM_BARRIER_LENGTH
@@ -7725,6 +7737,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       out = (void *)agx_vdm_barrier((uint32_t *)out, dev->chip);
    }
 
+   assert(dev->chip != AGX_CHIP_G17G ||
+          (size_t)(out - batch->vdm.current) <= command_space);
    batch->vdm.current = out;
    assert((batch->vdm.current + AGX_VDM_STREAM_LINK_LENGTH) <= batch->vdm.end &&
           "Failed to reserve sufficient space in encoder");
