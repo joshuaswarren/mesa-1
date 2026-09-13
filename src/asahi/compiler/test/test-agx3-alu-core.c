@@ -3170,6 +3170,43 @@ static void test_m5_native_half_immediates(void)
    puts("M5 half immediates: twenty-four original Apple instructions PASS");
 }
 
+static void test_m5_native_half_negation(void)
+{
+   /* Original strict Metal x-y, y-x, -x-y and saturate(x-y), dead/live. */
+   const char *native[8][4] = {
+      {"280024022220a0020608", "08011c050008", "10021c060008", "18031c070008"},
+      {"2800240a2220a0020408", "08051c010008", "10061c020008", "18071c030008"},
+      {"280024022220a0020688", "08011c0501080200", "10021c0601080200", "18031c0701080200"},
+      {"280024022220a0020618", "08011c0501080002", "10021c0601080002", "18031c0701080002"},
+      {"280024022220a0120200", "480104050008", "500204060008", "580304070008"},
+      {"2800240a2220a0120000", "480504010008", "500604020008", "580704030008"},
+      {"280024022220a0120280", "4801040501080200", "5002040601080200", "5803040701080200"},
+      {"280024022220a0120210", "4801040501080002", "5002040601080002", "5803040701080002"},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned form = 0; form < 8; ++form) {
+      const enum agx3_alu_hint hint = form >= 4 ? AGX3_ALU_HINT_NONE : AGX3_ALU_HINT_DISCARD;
+      const enum agx3_alu_hint hints[] = {hint, hint};
+      for (unsigned lane = 0; lane < 4; ++lane) {
+         const bool reverse = form % 4 == 1;
+         const uint16_t src[] = {lane + (reverse ? 4 : 0), lane + (reverse ? 0 : 4)};
+         assert(agx3_alu_hadd_neg(AGX_ISA_ENCODING_AGX3C,
+            lane + (form >= 4 ? 8 : 0), src, hints, form % 4 == 2 ? 3 : 2,
+            form % 4 == 3, false, lane == 0 ? 128 : 0, bytes, &len));
+         exact(bytes, len, native[form][lane]);
+      }
+   }
+   const uint16_t src[] = {1, 5};
+   const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   assert(!agx3_alu_hadd_neg(AGX_ISA_ENCODING_AGX3B, 1, src, hints,
+                              2, false, false, 0, bytes, &len));
+   assert(!agx3_alu_hadd_neg(AGX_ISA_ENCODING_AGX3C, 1, src, hints,
+                              4, false, false, 0, bytes, &len));
+   assert(!agx3_alu_hadd_neg(AGX_ISA_ENCODING_AGX3C, 1, src, hints,
+                              2, false, false, 256, bytes, &len));
+   puts("M5 half negation: thirty-two original Apple instructions PASS");
+}
+
 static void test_native_half_fma_minifloat_addend(void)
 {
    /* applegpu-nt 32023.917, apple-g17p, fma(a, b, half(1.5/2.5)). */
@@ -5220,6 +5257,7 @@ int main(void){
    test_m5_native_half_arithmetic();
    test_m5_native_half_minmax();
    test_m5_native_half_immediates();
+   test_m5_native_half_negation();
    test_native_half_fma_minifloat_addend();
    test_native_narrow_multiply();
    test_native_sqrt_step();

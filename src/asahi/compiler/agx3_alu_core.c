@@ -3704,12 +3704,13 @@ static bool
 agx3_alu_h_binop(enum agx_isa_encoding enc, const char *mnemonic,
                  unsigned max_ep, uint16_t dest, const uint16_t src[2],
                  const enum agx3_alu_hint hints[2], bool dest_cache,
-                 bool saturate, uint16_t wait_mask,
+                 bool saturate, unsigned neg_mask, uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || !src || !hints || !out || !len ||
        dest >= 256 || src[0] >= 256 || src[1] >= 256 ||
+       neg_mask > 3 || (neg_mask && (!m5 || strcmp(mnemonic, "f16add"))) ||
        (wait_mask & ~(m5 ? UINT16_C(0xff) : UINT16_C(0x3f))) ||
        (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
        (unsigned)hints[1] > AGX3_ALU_HINT_CACHE)
@@ -3718,7 +3719,7 @@ agx3_alu_h_binop(enum agx_isa_encoding enc, const char *mnemonic,
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {24, 2}, {25, 1}, {41, 2}, {42, 1},
    };
-   struct agx3_field_kv fields[19] = {
+   struct agx3_field_kv fields[21] = {
       {2, dest},
       {17, src[0]},
       {34, src[1]},
@@ -3728,8 +3729,10 @@ agx3_alu_h_binop(enum agx_isa_encoding enc, const char *mnemonic,
       {28, hints[0] == AGX3_ALU_HINT_DISCARD},
       {43, hints[1] == AGX3_ALU_HINT_CACHE},
       {45, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {30, !!(neg_mask & 1)},
+      {47, !!(neg_mask & 2)},
    };
-   unsigned n = 9;
+   unsigned n = 11;
    if (m5) {
       /* Native G17G half4 arithmetic retains the compact operands and
        * pins these distinct ep3 selectors with a slot-8 dependency. */
@@ -3755,7 +3758,7 @@ agx3_alu_hmul(enum agx_isa_encoding enc, uint16_t dest,
               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_h_binop(enc, "f16mul", 2, dest, src, hints, dest_cache,
-                           false, wait_mask, out, len);
+                           false, 0, wait_mask, out, len);
 }
 
 bool
@@ -3765,7 +3768,7 @@ agx3_alu_hmul_saturate(enum agx_isa_encoding enc, uint16_t dest,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_h_binop(enc, "f16mul", 3, dest, src, hints, dest_cache,
-                           true, wait_mask, out, len);
+                           true, 0, wait_mask, out, len);
 }
 
 bool
@@ -3823,7 +3826,7 @@ agx3_alu_hadd(enum agx_isa_encoding enc, uint16_t dest,
               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_h_binop(enc, "f16add", 4, dest, src, hints, dest_cache,
-                           false, wait_mask, out, len);
+                           false, 0, wait_mask, out, len);
 }
 
 bool
@@ -3833,7 +3836,27 @@ agx3_alu_hadd_saturate(enum agx_isa_encoding enc, uint16_t dest,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    return agx3_alu_h_binop(enc, "f16add", 4, dest, src, hints, dest_cache,
-                           true, wait_mask, out, len);
+                           true, 0, wait_mask, out, len);
+}
+
+bool
+agx3_alu_hadd_neg(enum agx_isa_encoding enc, uint16_t dest,
+                 const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                 unsigned neg_mask, bool saturate, bool dest_cache,
+                 uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3C || !src || !hints || neg_mask > 3)
+      return false;
+
+   /* Native G17G x-y, -x-y and saturate(x-y) vectors pin source negate
+    * fields 47/30, saturation and slot-8 dependencies. Canonicalize a
+    * single negation onto source 1, retaining each operand's lifetime. */
+   const bool swap = neg_mask == 1;
+   const uint16_t ordered_src[] = {src[swap], src[!swap]};
+   const enum agx3_alu_hint ordered_hints[] = {hints[swap], hints[!swap]};
+   return agx3_alu_h_binop(enc, "f16add", 4, dest, ordered_src, ordered_hints,
+                          dest_cache, saturate, swap ? 2 : neg_mask,
+                          wait_mask, out, len);
 }
 
 bool

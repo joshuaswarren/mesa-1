@@ -3331,6 +3331,25 @@ TEST_F(AGX3PackBinary, G17GHalfSaturateMatchesNativeForm)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, G17GHalfSubtractMatchesNativeInEitherOrder)
+{
+   const uint8_t native[] = {0x08, 0x01, 0x1c, 0x05, 0x00, 0x08};
+   std::vector<uint8_t> want(std::begin(native), std::end(native));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3C, &end));
+   append(want, end.bytes, end.length);
+   for (bool swap : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+      agx_index x = agx_register(1, AGX_SIZE_16);
+      agx_index y = agx_register(5, AGX_SIZE_16);
+      x.discard = y.discard = true;
+      y.neg = true;
+      agx_hadd_to(b, agx_register(1, AGX_SIZE_16), swap ? y : x, swap ? x : y);
+      agx_stop(b);
+      EXPECT_EQ(pack(b), want);
+   }
+}
+
 TEST_F(AGX3PackBinary, HalfSaturateRefusesUnwitnessedOperands)
 {
    for (unsigned variant = 0; variant < 14; ++variant) {

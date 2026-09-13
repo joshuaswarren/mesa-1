@@ -9497,6 +9497,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->nr_dests == 1 && I->nr_srcs == 2) {
             uint16_t src[2];
             enum agx3_alu_hint hints[2];
+            unsigned neg_mask = 0;
             agx_index dst = I->dest[0];
             if (!agx3_src_is_register(dst) || dst.memory ||
                 dst.size != AGX_SIZE_16 || agx_channels(dst) != 1)
@@ -9505,14 +9506,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx_index x = I->src[i];
                if (!agx3_src_is_register(x) || x.memory ||
                    x.size != AGX_SIZE_16 || agx_channels(x) != 1 || x.abs ||
-                   x.neg || x.kill || (x.cache && x.discard))
+                   (x.neg && enc != AGX_ISA_ENCODING_AGX3C) ||
+                   x.kill || (x.cache && x.discard))
                   AGX3_REFUSE(I);
                src[i] = x.value;
                hints[i] = agx3_post_ra_hint(x);
+               neg_mask |= x.neg << i;
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             const bool encoded =
-               I->saturate ? agx3_alu_hadd_saturate(enc, dst.value, src, hints,
+               neg_mask ? agx3_alu_hadd_neg(enc, dst.value, src, hints,
+                                          neg_mask, I->saturate, dst.cache,
+                                          wait, bytes, &len)
+               : I->saturate ? agx3_alu_hadd_saturate(enc, dst.value, src, hints,
                                                     dst.cache, wait, bytes, &len)
                            : agx3_alu_hadd(enc, dst.value, src, hints,
                                            dst.cache, wait, bytes, &len);
