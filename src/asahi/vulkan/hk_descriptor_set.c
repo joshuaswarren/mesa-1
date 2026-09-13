@@ -20,6 +20,7 @@
 #include "hk_entrypoints.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "hk_image_view.h"
+#include "hk_image.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
 #include "asahi/compiler/agx_nir.h"
@@ -127,6 +128,11 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
          desc[plane].sw.min_lod_fp16 = _mesa_float_to_half(min_lod);
          desc[plane].sw.min_lod_uint16 = min_lod;
+         const enum pipe_format integer = hk_scaled_texture_format(
+            hk_format_to_pipe_format(view->vk.format));
+         if (generation == 9 && integer != PIPE_FORMAT_NONE)
+            desc[plane].sw.scaled_conversion =
+               util_format_is_pure_sint(integer) ? 1 : 2;
       }
    }
 

@@ -1232,6 +1232,40 @@ agx_nir_lower_custom_border(nir_shader *nir)
    return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
 }
 
+/* Image-view formats are dynamic descriptor state. Recover scaled samples
+ * from the integer descriptor result without changing ordinary float samples. */
+static bool
+lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
+{
+   if (tex->dest_type != nir_type_float32 || tex->is_shadow ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->is_sparse)
+      return false;
+   switch (tex->op) {
+   case nir_texop_tex: case nir_texop_txb: case nir_texop_txl:
+   case nir_texop_txd: case nir_texop_txf: case nir_texop_txf_ms:
+   case nir_texop_tg4:
+      break;
+   default:
+      return false;
+   }
+   const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+   if (handle < 0)
+      return false;
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *desc = nir_load_from_texture_handle_agx(b, tex->src[handle].src.ssa);
+   const unsigned offset = 32 +
+      offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion);
+   nir_def *kind = nir_load_global_constant(b, 1, 16,
+      nir_iadd_imm(b, desc, offset), .align_mul = 2);
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *value = &tex->def;
+   nir_def *converted = nir_bcsel(b, nir_ieq_imm(b, kind, 1),
+      nir_i2f32(b, value), nir_u2f32(b, value));
+   nir_def *result = nir_bcsel(b, nir_ine_imm(b, kind, 0), converted, value);
+   nir_def_rewrite_uses_after(value, result);
+   return true;
+}
+
 static nir_def *
 query_min_lod(nir_builder *b, nir_tex_instr *tex, bool int_coords)
 {
@@ -1734,6 +1768,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_viewport_fs,
                nir_metadata_control_flow, NULL);
    }
+
+   if (agx_chip_descriptor_generation(dev->dev.chip) == 9)
+      NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
+               nir_metadata_control_flow, NULL);
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       /* hk_nir_lower_robust_image_access() leaves formatless loads to this

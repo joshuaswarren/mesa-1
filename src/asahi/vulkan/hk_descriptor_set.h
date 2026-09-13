@@ -40,7 +40,8 @@ struct hk_sampled_image_descriptor_sw {
 
    /* This is only used for txf, it can be separate from the other stuff */
    uint16_t min_lod_uint16;
-   uint16_t pad;
+   /* Native sampled-image conversion: 0 = none, 1 = SINT, 2 = UINT. */
+   uint16_t scaled_conversion;
    /* TODO: This should probably be a heap! */
    uint32_t border[4];
    /* Native G17P global texture index; the descriptor's size is unchanged. */

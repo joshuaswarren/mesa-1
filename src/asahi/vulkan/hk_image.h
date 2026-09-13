@@ -138,6 +138,26 @@ hk_format_to_pipe_format(VkFormat vkformat)
    }
 }
 
+/* Scaled image samples use integer texels plus shader conversion to float.
+ * Byte layout and component swizzles are identical to these integer formats. */
+static inline enum pipe_format
+hk_scaled_texture_format(enum pipe_format format)
+{
+   switch (format) {
+#define SCALED(base) \
+   case PIPE_FORMAT_##base##_SSCALED: return PIPE_FORMAT_##base##_SINT; \
+   case PIPE_FORMAT_##base##_USCALED: return PIPE_FORMAT_##base##_UINT;
+   SCALED(R8)
+   SCALED(R8G8)
+   SCALED(R8G8B8A8)
+   SCALED(R16)
+   SCALED(R16G16)
+   SCALED(R16G16B16A16)
+#undef SCALED
+   default: return PIPE_FORMAT_NONE;
+   }
+}
+
 static inline bool
 hk_split_depth_stencil(VkFormat format)
 {

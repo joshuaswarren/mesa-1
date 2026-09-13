@@ -94,6 +94,14 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (util_format_is_compressed(p_format) && tiling != VK_IMAGE_TILING_OPTIMAL)
       return 0;
 
+   if (agx_chip_descriptor_generation(pdev->dev.chip) == 9 &&
+       hk_scaled_texture_format(p_format) != PIPE_FORMAT_NONE) {
+      /* Integer fetch plus float conversion is exact for 8/16-bit scaled
+       * formats. Linear filtering and attachment conversion are separate. */
+      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+                  VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+   }
+
    if (ail_pixel_format[p_format].texturable) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
       features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
