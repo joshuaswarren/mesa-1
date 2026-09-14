@@ -174,22 +174,38 @@ test_half_immediate_compare(void)
       }
    }
 
-   /* The two unsigned ordered relations have no witness with a non-zero
-    * constant on this encoding point -- Apple emits the compact six-byte form
-    * instead -- and 256 changes the instruction entirely. */
+   /* Fresh witnesses from
+    * .tmp/cts-pipeline/witness/cf-uimm16-20260914/uimm16.metal. The dead and
+    * live `ushort x < 4` kernels produce the same compact compare, while the
+    * immediate and relation fields vary independently. */
    {
       uint8_t bytes[AGX3_CF_MAX_LENGTH], length = 0;
-      const struct agx3_cf_source_hints none = {false, false};
-      REJECT(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
-                                        AGX3_CF_ICOND_ULT, 0, 4, 2, none, 32,
-                                        bytes, &length));
-      REJECT(agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
-                                        AGX3_CF_ICOND_UGT, 0, 4, 2, none, 32,
-                                        bytes, &length));
+      const struct agx3_cf_source_hints hints[] = {
+         {false, true}, {true, false},
+      };
+      const struct {
+         enum agx3_cf_icond cond;
+         uint8_t imm;
+         const char *hex;
+      } compact[] = {
+         {AGX3_CF_ICOND_ULT, 4, "0a04228405c2"},
+         {AGX3_CF_ICOND_ULT, 32, "0a0422a005c2"},
+         {AGX3_CF_ICOND_UGT, 4, "0a04228404c2"},
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(compact); ++i) {
+         for (unsigned h = 0; h < ARRAY_SIZE(hints); ++h) {
+            const bool ok = agx3_cf_icmp_imm16_runtime(
+               AGX_ISA_ENCODING_AGX3B, compact[i].cond, 0, 4,
+               compact[i].imm, hints[h], 32, bytes, &length);
+            checks++;
+            if (!ok || !hex_is(bytes, length, compact[i].hex))
+               failures++;
+         }
+      }
       /* Zero keeps working for every relation: that is the existing form. */
       checks++;
       if (!agx3_cf_icmp_imm16_runtime(AGX_ISA_ENCODING_AGX3B,
-                                      AGX3_CF_ICOND_ULT, 0, 4, 0, none, 32,
+                                      AGX3_CF_ICOND_ULT, 0, 4, 0, hints[0], 32,
                                       bytes, &length))
          failures++;
    }

@@ -144,12 +144,21 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
        !out || !len || (hint.cache && hint.discard) ||
        (wait_mask != 0 && wait_mask != 32))
       return false;
-   /* Apple puts a non-zero constant on this encoding point only for equality
-    * and the two signed relations; `ushort x < 2` becomes the compact
-    * six-byte form instead. Keep the unwitnessed pair fail-closed. */
-   if (imm != 0 && cond != AGX3_CF_ICOND_EQ && cond != AGX3_CF_ICOND_SLT &&
-       cond != AGX3_CF_ICOND_SGT)
-      return false;
+   /* Unsigned ordered comparisons against nonzero constants use the compact
+    * form. Unlike the ten-byte signed/equality form, it has no source
+    * lifetime fields. Fresh dead/live witnesses produce identical bytes. */
+   if (imm != 0 &&
+       (cond == AGX3_CF_ICOND_ULT || cond == AGX3_CF_ICOND_UGT)) {
+      const struct agx3_field_kv base[] = {
+         KV(9, 2), KV(10, 1), KV(24, 1), KV(25, 1),
+      };
+      const struct agx3_field_kv fields[] = {
+         KV(2, src), KV(16, imm), KV(42, cond), KV(31, slot),
+         KV(39, wait_mask == 32),
+      };
+      return agx3_bind_compose(enc, "icmp", 0, base, 4, fields, 5, out,
+                               len);
+   }
    /* Native signed and unsigned zero tests both sign-extend the half.
     * This preserves equality and every relation to zero. Live witnesses
     * retain the source for the taken branch instead of discarding it. */
