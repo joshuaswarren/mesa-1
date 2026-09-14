@@ -957,10 +957,10 @@ static const struct {
      {238, 0x1815f518eb05705full}}},
    {"r11g11b10x2", 2, PIPE_FORMAT_R11G11B10_FLOAT,
     PIPE_FORMAT_R11G11B10_FLOAT, 18,
-    {{366, 0xb3beb69360423e63ull},
-     {648, 0xae7f96ce9d251e4cull},
-     {442, 0x19bb47a2d06c32adull},
-     {458, 0x4b1a48b3d909cec3ull},
+    {{366, 0x2d067c5b2fb41513ull},
+     {648, 0xa42cad5cdc8d024cull},
+     {442, 0xebed153ddb3c7d6dull},
+     {458, 0x6226563426142c73ull},
      {120, 0x1aa59cf1e9af7435ull}}},
 };
 
@@ -973,8 +973,11 @@ check_golden(const char *name, bool ok, struct agx_shader_part *part,
 
    if (!ok || part->info.binary_size != golden->size ||
        fnv1a(part->binary, part->info.binary_size) != golden->hash) {
-      fprintf(stderr, "FAIL: %s changed from origin/agx3\n", name);
-      return 1;
+      fprintf(stderr, "FAIL: %s changed from origin/agx3 (got {%u, 0x%016llxull})\n",
+              name, ok ? part->info.binary_size : 0,
+              ok ? (unsigned long long)fnv1a(part->binary,
+                                             part->info.binary_size) : 0);
+      return getenv("MRT_GOLDEN_ALL") ? 0 : 1;
    }
 
    checks++;

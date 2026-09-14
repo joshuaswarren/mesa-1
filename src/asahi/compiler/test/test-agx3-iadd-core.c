@@ -740,10 +740,137 @@ test_native_imad_narrow_operands(void)
    }
 }
 
+/*
+ * applegpu_g17p register isub with narrow operands, #imm - reg, and 32-bit
+ * addsat/subsat of int and uint, with dead, stored-later and cached operands,
+ * cached results, and waits on slots 1 and 6.
+ */
+static void
+test_native_isub_and_saturate(void)
+{
+   const struct {
+      struct agx3_iadd_desc d;
+      const char *apple;
+   } v[] = {
+      /* a - int(short b), a - uint(ushort b) */
+      {{.src_a_is_register = true, .src_a_kill = true, .src = 4,
+        .src_16 = true, .sign_extend = true, .src_kill = true,
+        .subtract = true, .wait_mask = 1u << 5}, "1f01560002001028170d"},
+      {{.src_a_is_register = true, .src_a_kill = true, .src = 4,
+        .src_16 = true, .src_kill = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f015600020010281705"},
+      /* int(short a) - b, uint(ushort a) - b */
+      {{.src_a_is_register = true, .src_a_reg = 4, .src_a_16 = true,
+        .src_a_sign_extend = true, .src_a_kill = true, .src_kill = true,
+        .subtract = true, .wait_mask = 1u << 5}, "1f015600020800881707"},
+      {{.src_a_is_register = true, .src_a_reg = 4, .src_a_16 = true,
+        .src_a_kill = true, .src_kill = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f015600020800881705"},
+      /* int(short a) - int(short b), uint(ushort a) - uint(ushort b) */
+      {{.src_a_is_register = true, .src_a_reg = 1, .src_a_16 = true,
+        .src_a_sign_extend = true, .src_a_kill = true, .src = 0,
+        .src_16 = true, .sign_extend = true, .src_kill = true,
+        .subtract = true, .wait_mask = 1u << 5}, "1f01560002020008170f"},
+      {{.src_a_is_register = true, .src_a_reg = 1, .src_a_16 = true,
+        .src_a_kill = true, .src = 0, .src_16 = true, .src_kill = true,
+        .subtract = true, .wait_mask = 1u << 5}, "1f015600020200081705"},
+      /* Both operands stored afterwards; both cached with a cached result. */
+      {{.dest = 4, .src_a_is_register = true, .src_a_reg = 2, .src = 10,
+        .src_16 = true, .sign_extend = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f01560402042828110d"},
+      {{.dest = 2, .dest_cache = true, .src_a_is_register = true,
+        .src_a_reg = 6, .src_a_cache = true, .src = 8, .src_16 = true,
+        .sign_extend = true, .src_cache = true, .subtract = true,
+        .wait_mask = 1u << 0}, "1f115402030c222c110d"},
+      {{.dest = 2, .dest_cache = true, .src_a_is_register = true,
+        .src_a_reg = 8, .src_a_16 = true, .src_a_sign_extend = true,
+        .src_a_cache = true, .src = 6, .src_cache = true, .subtract = true,
+        .wait_mask = 1u << 0}, "1f11540203101a8c1107"},
+      /* 16 - int(short b), 16 - b, 16u - uint(ushort b) */
+      {{.immediate = 16, .src = 0, .src_16 = true, .sign_extend = true,
+        .src_kill = true, .subtract = true, .wait_mask = 1u << 5},
+       "1f01560002200008150c"},
+      {{.immediate = 16, .src = 0, .src_kill = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f015600022000881504"},
+      {{.immediate = 16, .src = 0, .src_16 = true, .src_kill = true,
+        .subtract = true, .wait_mask = 1u << 5}, "1f015600022000081504"},
+      /* addsat/subsat of int and uint */
+      {{.src_a_is_register = true, .src_a_kill = true,
+        .src_a_sign_extend = true, .src = 4, .src_kill = true,
+        .sign_extend = true, .saturate = true, .wait_mask = 1u << 5},
+       "9f015600020010e8170f"},
+      {{.src_a_is_register = true, .src_a_kill = true, .src = 4,
+        .src_kill = true, .saturate = true, .wait_mask = 1u << 5},
+       "9f015600020010e81705"},
+      {{.src_a_is_register = true, .src_a_kill = true,
+        .src_a_sign_extend = true, .src = 4, .src_kill = true,
+        .sign_extend = true, .saturate = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f015600020010e8170f"},
+      {{.src_a_is_register = true, .src_a_kill = true, .src = 4,
+        .src_kill = true, .saturate = true, .subtract = true,
+        .wait_mask = 1u << 5}, "1f015600020010e81705"},
+      {{.src_a_is_register = true, .src_a_reg = 4, .src_a_cache = true,
+        .src_a_sign_extend = true, .src = 6, .src_cache = true,
+        .sign_extend = true, .saturate = true, .wait_mask = 1u << 5},
+       "9f01560002081aec110f"},
+      {{.dest = 6, .src_a_is_register = true, .src_a_reg = 4,
+        .src_a_sign_extend = true, .src = 0, .sign_extend = true,
+        .saturate = true, .wait_mask = 1u << 5}, "9f015606020800e8110f"},
+      {{.dest = 2, .dest_cache = true, .src_a_is_register = true,
+        .src_a_kill = true, .src_a_sign_extend = true, .src = 2,
+        .src_kill = true, .sign_extend = true, .saturate = true,
+        .wait_mask = 1u << 5}, "9f015602030008e8170f"},
+      {{.dest = 2, .src_a_is_register = true, .src_a_reg = 2,
+        .src_a_kill = true, .src_a_sign_extend = true, .src = 4,
+        .src_cache = true, .sign_extend = true, .saturate = true,
+        .wait_mask = 1u << 0}, "9f115402020410ec130f"},
+      {{.dest = 4, .src_a_is_register = true, .src_a_reg = 4,
+        .src_a_kill = true, .src_a_sign_extend = true, .src = 6,
+        .src_kill = true, .sign_extend = true, .saturate = true},
+       "9f015404020818e8170f"},
+   };
+   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
+      uint8_t out[AGX3_IADD_MAX_LENGTH], want[AGX3_IADD_MAX_LENGTH];
+      uint8_t len = 0;
+      for (unsigned k = 0; k < 10; ++k) {
+         unsigned b;
+         sscanf(v[i].apple + 2 * k, "%2x", &b);
+         want[k] = b;
+      }
+      CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &v[i].d, out, &len));
+      CHECK(len == 10 && memcmp(out, want, 10) == 0);
+      if (len != 10 || memcmp(out, want, 10)) {
+         fprintf(stderr, "vector %u:", i);
+         for (unsigned k = 0; k < len; ++k)
+            fprintf(stderr, "%02x", out[k]);
+         fprintf(stderr, "\n");
+      }
+   }
+
+   /* Saturation is full width with matching signedness only, and the new
+    * fields do not exist on AGX3c. */
+   uint8_t out[AGX3_IADD_MAX_LENGTH], len = 0;
+   struct agx3_iadd_desc bad = v[12].d;
+   bad.sign_extend = false;
+   CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+   bad = v[12].d;
+   bad.src_16 = true;
+   CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+   bad = v[9].d;
+   bad.saturate = true;
+   CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+   bad = v[0].d;
+   bad.src_kill = true;
+   bad.src_cache = true;
+   CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+   CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &v[0].d, out, &len));
+}
+
 int
 main(void)
 {
    test_native_imad_narrow_operands();
+   test_native_isub_and_saturate();
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
       const struct vec *v = &vectors[i];
       uint8_t out[AGX3_IADD_MAX_LENGTH];

@@ -35,6 +35,20 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * shifted adds witness 1..4; shift 0 is the unshifted form. */
    if (d->shift > 4 || d->wait_mask >= (1u << slots))
       return false;
+   if ((d->subtract || d->saturate || d->src_a_cache || d->src_cache) &&
+       !agx3b)
+      return false;
+   if ((d->saturate || d->src_a_cache) && !d->src_a_is_register)
+      return false;
+   if (d->src_cache && !d->src_a_is_register)
+      return false;
+   if ((d->src_a_cache && d->src_a_kill) || (d->src_cache && d->src_kill))
+      return false;
+   /* Saturation is witnessed at full width with matching signedness only. */
+   if (d->saturate &&
+       (d->src_a_16 || d->src_16 || d->shift ||
+        d->src_a_sign_extend != d->sign_extend))
+      return false;
    if (d->src_a_is_register) {
       if (d->immediate != 0)
          return false;
@@ -84,7 +98,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       : agx3b ? sizeof(baseline_b) / sizeof(baseline_b[0])
               : sizeof(baseline_c) / sizeof(baseline_c[0]);
 
-   struct agx3_field_kv ov[20];
+   struct agx3_field_kv ov[24];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache ? 1 : 0);
@@ -95,6 +109,12 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
       if (d->src_a_sign_extend)
          ov[n++] = (struct agx3_field_kv)KV(28, 1);
+      if (d->src_a_cache)
+         ov[n++] = (struct agx3_field_kv)KV(25, 1);
+      if (d->src_cache)
+         ov[n++] = (struct agx3_field_kv)KV(40, 1);
+      if (d->saturate)
+         ov[n++] = (struct agx3_field_kv)KV(53, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(15, d->immediate);
@@ -115,8 +135,9 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
          ov[n++] = (struct agx3_field_kv)KV((agx3b ? 45 : 46) + i, 1);
    }
 
-   return agx3_bind_compose(encoding, agx3b ? "iadd" : "iadd32", 0, baseline,
-                            nbaseline, ov, n, out, len);
+   return agx3_bind_compose(encoding,
+                            agx3b ? (d->subtract ? "isub" : "iadd") : "iadd32",
+                            0, baseline, nbaseline, ov, n, out, len);
 }
 
 bool

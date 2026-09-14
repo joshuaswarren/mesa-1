@@ -3606,7 +3606,7 @@ agx_g17p_shift_boundary(agx_builder *b, unsigned shift)
    assert(shift >= 1 && shift <= 31);
    agx_index positive = agx_mov_imm(b, 32, shift);
    agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
-   agx_iadd_to(b, boundary, agx_zero(), agx_neg(positive), 0);
+   agx_iadd_to(b, boundary, agx_zero(), positive, 0);
    return boundary;
 }
 
@@ -3921,17 +3921,18 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
    case nir_op_ishl:
       return agx_bfi_to(b, dst, i0, s0, s1, 0);
    case nir_op_ushr: {
-      /* G17P's native register `srl` operand is a signed bitfield boundary.
-       * Convert NIR's ordinary right-shift count to the full-width negative
-       * value before selecting the witnessed instruction.  The upper bits
-       * are significant: -1 performs x >> 1, whereas +31 is a different
-       * operation despite having the same low five bits. */
+      /* G17P's register `srl` takes the ordinary positive count, as
+       * applegpu_g17p's `ushort(a >> s)` (a710540002080000d0130500, after
+       * its own `s & 31`) does. This used to build `0 - count`, but the
+       * G17P iadd packer read NEG as a sign extension and emitted `0 +
+       * count`; every hardware-proven program therefore already carries
+       * the positive count through this add, which is kept. */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          if (s1.type == AGX_INDEX_IMMEDIATE) {
             s1 = agx_g17p_shift_boundary(b, s1.value);
          } else {
             agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
-            agx_iadd_to(b, boundary, i0, agx_neg(s1), 0);
+            agx_iadd_to(b, boundary, i0, s1, 0);
             s1 = boundary;
          }
       }

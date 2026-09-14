@@ -3340,10 +3340,14 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
     * then emits the ordinary no-wait form through the select core -- where
     * the real immediate encodings live.
     */
-   bool all_sources_registers = true;
+   /* The composer takes register numbers only: a saturate, shift or source
+    * modifier would be dropped. Before this check a 32-bit iadd_sat that
+    * waited on a load composed as a plain iadd. */
+   bool all_sources_registers = !S->saturate && !S->shift;
    for (unsigned i = 0; i < S->nr_srcs; ++i)
       all_sources_registers &= S->src[i].is_reg &&
-                               S->src[i].size == AGX3_SEL_SIZE_32;
+                               S->src[i].size == AGX3_SEL_SIZE_32 &&
+                               !S->src[i].abs && !S->src[i].neg;
 
    uint8_t bytes[AGX3_ALU_MAX_LENGTH];
    uint8_t len = 0;
@@ -4352,6 +4356,36 @@ agx3_find_select_wait_operand(const struct agx3_slot_instr *sl,
    }
 
    return false;
+}
+
+/*
+ * applegpu_g17p never gives one instruction more than one scoreboard wait.
+ * Across 36 kernels whose consumers each read two of four or six loads in
+ * crossing orders (short sub/addsat/asr, int*int, int+(short<<2),
+ * int-short), Apple reuses a slot for loads consumed together and otherwise
+ * orders the loads so each consumer names at most one newly pending slot.
+ * A multi-slot ISEL wait was also unreliable on hardware. Retire every slot
+ * but the highest through an identity on the exact operand that slot writes,
+ * leaving the instruction the single wait Apple's forms carry.
+ */
+static bool
+agx3_retire_extra_waits(struct util_dynarray *emission,
+                        enum agx_isa_encoding enc,
+                        const struct agx3_slot_instr *sl,
+                        const struct agx3_slot_result *res,
+                        unsigned consumer, const agx_instr *I,
+                        uint16_t *wait)
+{
+   while (util_bitcount(*wait) > 1) {
+      const uint16_t bit = *wait & (uint16_t)-(int16_t)*wait;
+      agx_index operand;
+      if (!agx3_find_select_wait_operand(sl, res, consumer, I,
+                                         (uint8_t)ffs(bit), &operand) ||
+          !agx3_retire_select_operand_wait(emission, enc, operand, bit))
+         return false;
+      *wait &= (uint16_t)~bit;
+   }
+   return true;
 }
 
 /* The instructions agx3_try_control_flow() claims. */
@@ -9886,17 +9920,71 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index constant = imm_first ? I->src[0] : I->src[1];
             const agx_index reg = imm_first ? I->src[1] : I->src[0];
 
+            /* iadd_sat, uadd_sat, isub_sat and usub_sat over 32-bit
+             * registers: the register iadd/isub point with f53. ABS on both
+             * operands selects unsigned saturation; otherwise both sign
+             * fields are set, exactly as applegpu_g17p's addsat/subsat of
+             * int and uint. The wait-carrying composer used to drop the
+             * saturate bit here. */
+            if (enc == AGX_ISA_ENCODING_AGX3B && I->saturate) {
+               agx_index a = I->src[0], b = I->src[1];
+               if (a.neg && !b.neg) {
+                  const agx_index t = a;
+                  a = b;
+                  b = t;
+               }
+               if (I->shift != 0 || !agx3_src_is_register(a) ||
+                   !agx3_src_is_register(b) || a.memory || b.memory ||
+                   a.size != AGX_SIZE_32 || b.size != AGX_SIZE_32 ||
+                   agx_channels(a) != 1 || agx_channels(b) != 1 ||
+                   a.neg || a.kill || b.kill || a.abs != b.abs ||
+                   (a.cache && a.discard) || (b.cache && b.discard))
+                  AGX3_REFUSE(I);
+
+               uint16_t w = wait;
+               if (!agx3_retire_extra_waits(emission, enc, sl, res,
+                                            instr_index, I, &w))
+                  AGX3_REFUSE(I);
+               const struct agx3_iadd_desc d = {
+                  .dest = I->dest[0].value,
+                  .dest_cache = I->dest[0].cache,
+                  .src_a_is_register = true,
+                  .src_a_reg = a.value,
+                  .src_a_kill = a.discard,
+                  .src_a_cache = a.cache,
+                  .src_a_sign_extend = !a.abs,
+                  .src = b.value,
+                  .src_kill = b.discard,
+                  .src_cache = b.cache,
+                  .sign_extend = !b.abs,
+                  .subtract = b.neg,
+                  .saturate = true,
+                  .wait_mask = w,
+               };
+               uint8_t bytes[AGX3_IADD_MAX_LENGTH];
+               uint8_t len = 0;
+               if (!agx3_iadd_encode(enc, &d, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+
+            /* reg - #imm. A narrow register is sign-extended when bare and
+             * zero-extended under ABS; NEG on it would negate the register
+             * too, which this form does not express. */
             if (!imm_first && I->shift == 0 && !I->saturate &&
                 constant.type == AGX_INDEX_IMMEDIATE && constant.neg &&
                 !constant.abs && !constant.memory && constant.value <= 0xff &&
                 agx3_src_is_register(reg) && !reg.memory && !reg.kill &&
                 agx_channels(reg) == 1 && !(reg.cache && reg.discard) &&
-                ((reg.size == AGX_SIZE_32 && !reg.abs && !reg.neg) ||
-                 (reg.size == AGX_SIZE_16 && (reg.abs != reg.neg)))) {
+                !reg.neg &&
+                ((reg.size == AGX_SIZE_32 && !reg.abs) ||
+                 reg.size == AGX_SIZE_16)) {
                const struct agx3_isub_imm_desc d = {
                   .dest=I->dest[0].value, .src=reg.value,
                   .immediate=constant.value, .src_16=reg.size==AGX_SIZE_16,
-                  .sign_extend=reg.neg, .src_cache=reg.cache,
+                  .sign_extend=reg.size==AGX_SIZE_16 && !reg.abs,
+                  .src_cache=reg.cache,
                   .src_kill=reg.discard, .wait_mask=wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH],len;
@@ -9926,11 +10014,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                constant.type == AGX_INDEX_IMMEDIATE &&
                reg.size == AGX_SIZE_16 && !reg.abs && !reg.neg &&
                (I->shift == 0 || I->shift == 4);
+            /* #imm - reg is AGX IR's iadd(#imm, -reg). NEG is a negation, not
+             * a sign extension (on AGX2 too): it selects Apple's isub with
+             * the immediate in slot A, `16 - int(short b)` being
+             * 1f 01 56 00 02 20 00 08 15 0c. Before, a negated register was
+             * added, and a negated half was added sign-extended. Only the
+             * unshifted subtraction is witnessed. */
+            const bool imm_minus_reg =
+               enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
+               reg.neg && I->shift == 0 &&
+               (reg.size == AGX_SIZE_16 ||
+                (reg.size == AGX_SIZE_32 && !reg.abs));
             if (constant.type == AGX_INDEX_IMMEDIATE && !constant.abs &&
-                !constant.neg && constant.value <= 0xff &&
+                !constant.neg && constant.value <= 0xff && !I->saturate &&
                 agx3_src_is_register(reg) && !reg.memory &&
-                agx_channels(reg) == 1 && !(reg.abs && reg.neg) &&
-                (reg.size == AGX_SIZE_32 ||
+                agx_channels(reg) == 1 && (!reg.neg || imm_minus_reg) &&
+                ((reg.size == AGX_SIZE_32 && !reg.abs) ||
                  (reg.size == AGX_SIZE_16 &&
                   (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
@@ -9940,8 +10039,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src = reg.value,
                   .src_kill = reg.discard,
                   .src_16 = reg.size == AGX_SIZE_16,
-                  .sign_extend = signed_half_widen || reg.neg,
+                  .sign_extend = reg.size == AGX_SIZE_16 && !reg.abs,
                   .shift = I->shift,
+                  .subtract = reg.neg,
                   .wait_mask = wait,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
@@ -9993,6 +10093,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (shifted_half ||
                  (!bsrc.abs && !bsrc.neg && bsrc.size == AGX_SIZE_32)) &&
                 agx_channels(bsrc) == 1) {
+               uint16_t w = wait;
+               if (shifted_half &&
+                   !agx3_retire_extra_waits(emission, enc, sl, res,
+                                            instr_index, I, &w))
+                  AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
                   .src_a_is_register = true,
@@ -10003,7 +10108,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src_16 = shifted_half,
                   .sign_extend = shifted_half && !bsrc.abs,
                   .shift = I->shift,
-                  .wait_mask = wait,
+                  .wait_mask = w,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
                uint8_t len = 0;
@@ -10013,66 +10118,76 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
 
             /*
-             * Register + register where at least one operand is a 16-bit
-             * half, zero-extended (abs) or sign-extended (neg) as on AGX2.
+             * Register +/- register where at least one operand is a 16-bit
+             * half. As on AGX2, a narrow operand is zero-extended under ABS
+             * and sign-extended otherwise, and NEG negates it: iadd(a, -b)
+             * is Apple's isub, the same fields under their own opcode
+             * (`int a - int(short b)` is 1f 01 56 00 02 00 10 28 17 0d).
+             * This used to read NEG as the sign extension and drop the
+             * negation, so `16 - count` over a narrow count added.
              * `gl_LocalInvocationID` arrives as three 16-bit special
-             * registers, so summing it is exactly this shape; the whole
-             * shader was refused before, because the register slot-A form
-             * pinned both operand widths to 32-bit.
-             *
-             * Apple emits the same instruction for `(uint)a + (uint)b` over
-             * two ushorts; see the witnesses quoted in agx3_iadd_core.h.
+             * registers, so summing it is exactly this shape.
              *
              * Gated on a narrow operand so the all-32-bit unshifted add keeps
-             * the select-core encoding it already had: re-routing a shape
-             * that already worked is what cost two hardware probes last time.
+             * the select-core encoding it already had.
              */
-            /* Firefox's signed-index accumulation is the grounded 32+16
-             * width pair with f43 (slot-B sign extension): a bare integer
-             * half is signed in AGX IR, while ABS denotes zero extension.
-             * Keep the admission directional so unrelated bare-half pairs
-             * do not silently enter this bring-up path. */
-            const bool signed_32_half =
-               enc == AGX_ISA_ENCODING_AGX3B &&
-               a.size == AGX_SIZE_32 && !a.abs && !a.neg &&
-               bsrc.size == AGX_SIZE_16 && !bsrc.abs && !bsrc.neg;
-            const bool a_ok =
-               agx3_src_is_register(a) && !a.memory && agx_channels(a) == 1 &&
-               !(a.cache && a.discard) &&
-               (a.size == AGX_SIZE_32 ? (!a.abs && !a.neg)
-                                      : (a.size == AGX_SIZE_16 &&
-                                         (a.abs != a.neg)));
-            const bool b_ok =
-               agx3_src_is_register(bsrc) && !bsrc.memory &&
-               agx_channels(bsrc) == 1 && !(bsrc.cache && bsrc.discard) &&
-               (bsrc.size == AGX_SIZE_32 ? (!bsrc.abs && !bsrc.neg)
-                                         : (bsrc.size == AGX_SIZE_16 &&
-                                            ((bsrc.abs != bsrc.neg) ||
-                                             signed_32_half)));
+            agx_index na = original_a, nb = original_b;
+            /* Addition commutes: keep a negated operand in slot B, and put a
+             * 32-bit operand in slot A of a mixed-width add, the order of
+             * the hardware-proven Firefox accumulator. */
+            if ((na.neg && !nb.neg) ||
+                (!na.neg && !nb.neg && !na.abs && !nb.abs &&
+                 na.size == AGX_SIZE_16 && nb.size == AGX_SIZE_32)) {
+               const agx_index t = na;
+               na = nb;
+               nb = t;
+            }
+            const bool na_ok =
+               agx3_src_is_register(na) && !na.memory &&
+               agx_channels(na) == 1 && !na.neg &&
+               !(na.cache && na.discard) &&
+               (na.size == AGX_SIZE_16 ||
+                (na.size == AGX_SIZE_32 && !na.abs));
+            const bool nb_ok =
+               agx3_src_is_register(nb) && !nb.memory &&
+               agx_channels(nb) == 1 &&
+               !(nb.cache && nb.discard) &&
+               (nb.size == AGX_SIZE_16 ||
+                (nb.size == AGX_SIZE_32 && !nb.abs));
 
-            if (I->shift == 0 && !I->saturate && a_ok && b_ok &&
-                (a.size == AGX_SIZE_16 || bsrc.size == AGX_SIZE_16)) {
+            if (I->shift == 0 && !I->saturate && na_ok && nb_ok &&
+                (na.size == AGX_SIZE_16 || nb.size == AGX_SIZE_16)) {
+               const bool b3 = enc == AGX_ISA_ENCODING_AGX3B;
+               uint16_t w = wait;
+               if (b3 && !agx3_retire_extra_waits(emission, enc, sl, res,
+                                                  instr_index, I, &w))
+                  AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
                   .dest_cache = I->dest[0].cache,
                   .src_a_is_register = true,
-                  .src_a_reg = a.value,
-                  .src_a_kill = a.discard,
-                  .src_a_16 = a.size == AGX_SIZE_16,
-                  .src_a_sign_extend = a.size == AGX_SIZE_16 && a.neg,
-                  .src = bsrc.value,
-                  .src_kill = bsrc.discard,
-                  .src_16 = bsrc.size == AGX_SIZE_16,
-                  .sign_extend =
-                     bsrc.size == AGX_SIZE_16 &&
-                     (bsrc.neg || signed_32_half),
-                  .wait_mask = wait,
+                  .src_a_reg = na.value,
+                  .src_a_kill = na.discard,
+                  /* Apple's operand cache hints, on the subtraction this
+                   * path newly encodes. The additions it already emitted
+                   * keep their hardware-proven bytes without them. */
+                  .src_a_cache = b3 && nb.neg && na.cache,
+                  .src_a_16 = na.size == AGX_SIZE_16,
+                  .src_a_sign_extend = na.size == AGX_SIZE_16 && !na.abs,
+                  .src = nb.value,
+                  .src_kill = nb.discard,
+                  .src_cache = b3 && nb.neg && nb.cache,
+                  .src_16 = nb.size == AGX_SIZE_16,
+                  .sign_extend = nb.size == AGX_SIZE_16 && !nb.abs,
+                  .subtract = nb.neg,
+                  .wait_mask = w,
                };
                uint8_t bytes[AGX3_IADD_MAX_LENGTH];
                uint8_t len = 0;
-               if (agx3_iadd_encode(enc, &d, bytes, &len) &&
-                   agx3_append(emission, bytes, len))
-                  continue;
+               if (!agx3_iadd_encode(enc, &d, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
             }
          }
 
