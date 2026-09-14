@@ -1962,15 +1962,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                    ((cube || (array && !offset && !vertex_stage)) &&
                     !implicit_lod && !shadow_level_zero &&
                     !(array && !cube && min_lod) &&
-                    /* A comparison cube stages a register level or a
-                     * bias and minimum exactly as the colour cube does, and
-                     * the cube array the same way with its layer beside the
-                     * face+level word -- which is what
-                     * KHR-GL30.ext_texture_shadow_lod
-                     * texturelod/bias.samplercubearrayshadow_fragment
-                     * compiles to. */
-                    !(cube && ((explicit_lod && !immediate_lod) ||
-                               register_bias || bias_min))))) ||
+                    /* A comparison stages a register level or bias beside
+                     * the operand its dimension already owns: the noncube
+                     * array with its layer (agx3_tex_stage_array_lod), the
+                     * cube with CEM's face, the cube array with both. All
+                     * three are KHR-GL30.ext_texture_shadow_lod --
+                     * texturelod and bias on sampler2DArrayShadow and on
+                     * samplerCubeArrayShadow. Admitting only the cube
+                     * refuses the array fragments, which then fail to link
+                     * while every offline gate stays green. A bias with a
+                     * minimum is witnessed for the cube only. */
+                    !((explicit_lod && !immediate_lod) || register_bias ||
+                      (cube && bias_min))))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;

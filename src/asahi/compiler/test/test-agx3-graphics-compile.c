@@ -3145,6 +3145,73 @@ test_g17p_cube_array_shadow_level_varyings(bool bias)
    return compiled;
 }
 
+/*
+ * KHR-GL30.ext_texture_shadow_lod's sampler2DArrayShadow fragments:
+ * textureLod() and texture(..., bias) with the level and the bias arriving
+ * in registers. The comparison stages its level or bias beside the layer it
+ * already publishes; admitting only the cube form refuses these and the
+ * programs fail to link, with no offline gate the wiser.
+ */
+static bool
+test_g17p_array_shadow_register_lod(bool bias)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      bias ? "G17P array shadow bias" : "G17P array shadow level");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *coord = nir_load_interpolated_input(
+      &b, 3, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *lod_ref = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 1, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR1,
+      .io_semantics.num_slots = 1);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = bias ? nir_texop_txb : nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->is_array = true;
+   tex->is_shadow = true;
+   tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->texture_index = 0;
+   tex->sampler_index = 1;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                     nir_channel(&b, lod_ref, 1));
+   tex->src[2] = nir_tex_src_for_ssa(bias ? nir_tex_src_bias : nir_tex_src_lod,
+                                     nir_channel(&b, lod_ref, 0));
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, nir_vec4(&b, &tex->def, nir_imm_float(&b, 0.0f),
+                                nir_imm_float(&b, 0.0f),
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VARYING_SLOT_VAR0) | BITFIELD64_BIT(VARYING_SLOT_VAR1);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   const bool ok = agx_compile_shader_nir(b.shader, &key, &part) &&
+                   part.binary != NULL && part.info.binary_size > 0;
+   if (!ok) {
+      fprintf(stderr, "G17P array shadow %s did not compile\n",
+              bias ? "bias" : "level");
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static bool
 test_g17p_cube_array_shadow_dump(void)
 {
@@ -8232,6 +8299,11 @@ main(int argc, char **argv)
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_half_rgb10_epilog);
    RUN(test_g17p_three_shadow_sample_references);
+   if (!test_g17p_array_shadow_register_lod(false) ||
+       !test_g17p_array_shadow_register_lod(true)) {
+      fputs("test_g17p_array_shadow_register_lod failed\n", stderr);
+      all_ok = false;
+   }
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
