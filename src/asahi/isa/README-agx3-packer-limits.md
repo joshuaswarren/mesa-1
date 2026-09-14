@@ -25,14 +25,25 @@ native SMP bytes. Register descriptors use the same `f43/f51/f141` offset
 fields. In 3D, `f43` holds three signed nibbles, including the negative Z
 boundary. The IR field and validator both preserve all twelve bits.
 
-Driver array offsets select the staged `f77=2` layer. Immediate LOD uses
+Static driver array offsets select the staged `f77=2` layer. Immediate LOD uses
 `f29/f37`, leaving `f43` for the offset. A register LOD or bias shares the
-layer's bank 6 word and must be published with it in one `PACK_SMPIR`:
-`1705540600183400f0e42500` for layer half 12, LOD half 13, slot 6.
+layer's bank 6 word and is published with it in one `PACK_SMPIR`:
+`1705540600183400f0e42500` for layer half 12, LOD half 13, slot 6. A runtime
+offset owns that same word: the array layer, register LOD/bias, and X/Y offset
+are converted to one packed word and published by `COPY`. Dynamic 3D offsets
+lower after projection to normalized
+coordinate addition because the inferred Z continuation collides with the
+gradient banks and failed numerical qualification.
+
+Dynamic texel-fetch LOD also occupies bank 6. The shader staging footprint now
+reserves the complete word for 1D/2D fetches; previously their eight-byte
+coordinate footprint left the LOD publication outside the declared range.
+Array fetches publish their layer and full uint LOD together in one typed
+`PACK_SMPIR`, avoiding two writes to the same word.
 The direct Apple-fragment array profile retains its existing immediate-slot
-restriction. Offset-free lowering and sample scheduling are unchanged. Across 165 matching
-controls, all 2,112 complete shader binaries are byte-identical to the baseline,
-including register and staging counts. The full Asahi suite reports 207 passes
+restriction. Offset-free coordinate and LOD staging are unchanged. Across 165
+matching controls, all 2,112 complete shader binaries are byte-identical to the baseline,
+including register and staging counts. The full Asahi suite reports 205 passes
 and one expected failure.
 
 The next candidate closes the 47 vertex-stage residuals: 23

@@ -3020,16 +3020,6 @@ test_indexed_dynamic_fetch_lod(void)
             }
 
             bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader);
-            if (three_d) {
-               /* Do not turn an unimplemented 3D register-LOD form into an
-                * accepted native descriptor path as a side effect. */
-               all_ok &= !ok &&
-                  nir_tex_instr_src_index(
-                     tex, nir_tex_src_texture_handle) >= 0;
-               ralloc_free(b.shader);
-               continue;
-            }
-
             const int li =
                nir_tex_instr_src_index(tex, nir_tex_src_lod);
             const int ti =
@@ -3066,9 +3056,10 @@ test_indexed_dynamic_fetch_lod(void)
 
             if (!ok)
                fprintf(stderr,
-                       "dynamic indexed txf stage=%u array=%u bits=%u "
+                       "dynamic indexed txf stage=%u array=%u three_d=%u "
+                       "bits=%u "
                        "failed\n",
-                       stages[stage], array, bits);
+                       stages[stage], array, three_d, bits);
             all_ok &= ok;
             ralloc_free(b.shader);
          }
@@ -3408,6 +3399,224 @@ test_txf_offset_lowering(void)
                    nir_src_is_const(tex->src[coord].src) &&
                    nir_src_comp_as_int(tex->src[coord].src, 0) == 2 &&
                    nir_src_comp_as_int(tex->src[coord].src, 1) == 0;
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_g17p_3d_runtime_offset_lowering(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 runtime 3D offset FS");
+   nir_def *offset = nir_load_push_constant(
+      &b, 3, 32, nir_imm_int(&b, 0), .base = 0, .range = 12);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_3D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord,
+      nir_imm_vec3(&b, 0.25f, 0.5f, 0.75f));
+   tex->src[1] =
+      nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(&b, 1.0f));
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_offset, offset);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, &tex->def);
+
+   const bool progress =
+      agx_nir_lower_g17p_texture_early(b.shader, false);
+   const int coord =
+      nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   unsigned size_queries = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex &&
+             nir_instr_as_tex(instr)->op == nir_texop_txs)
+            size_queries++;
+      }
+   }
+
+   const bool ok = progress && coord >= 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0 &&
+                   !nir_src_is_const(tex->src[coord].src) &&
+                   size_queries == 1;
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_g17p_projected_3d_runtime_offset_lowering(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options,
+      "AGX3 projected runtime 3D offset VS");
+   nir_def *offset = nir_load_push_constant(
+      &b, 3, 32, nir_imm_int(&b, 0), .base = 0, .range = 12);
+   nir_def *projector = nir_load_push_constant(
+      &b, 1, 32, nir_imm_int(&b, 0), .base = 12, .range = 4);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 5);
+   tex->op = nir_texop_txd;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_3D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord, nir_imm_vec3(&b, 0.9f, 1.05f, -0.08f));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_projector, projector);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_offset, offset);
+   tex->src[3] = nir_tex_src_for_ssa(
+      nir_tex_src_ddx, nir_imm_vec3(&b, 0.2f, 0.0f, 0.0f));
+   tex->src[4] = nir_tex_src_for_ssa(
+      nir_tex_src_ddy, nir_imm_vec3(&b, 0.0f, 0.0f, 0.0f));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   const bool progress =
+      agx_nir_lower_g17p_texture_early(b.shader, false);
+   const int coord = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   unsigned size_queries = 0, reciprocals = 0, fused_adds = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex &&
+             nir_instr_as_tex(instr)->op == nir_texop_txs)
+            size_queries++;
+         else if (instr->type == nir_instr_type_alu) {
+            const nir_op op = nir_instr_as_alu(instr)->op;
+            reciprocals += op == nir_op_frcp;
+            fused_adds += op == nir_op_ffma;
+         }
+      }
+   }
+
+   const bool ok = progress && coord >= 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_offset) < 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
+                   !nir_src_is_const(tex->src[coord].src) &&
+                   size_queries == 1 && reciprocals >= 2 && fused_adds >= 1;
+   ralloc_free(b.shader);
+   return ok;
+}
+
+/* The homogeneous offset composition is specific to the 3D fallback. Keep
+ * projected 2D runtime offsets on the native offset path while the common
+ * early lowering still consumes their projector. */
+static bool
+test_g17p_projected_2d_runtime_offset_scope(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 projected runtime 2D offset FS");
+   nir_def *coord = nir_load_push_constant(
+      &b, 2, 32, nir_imm_int(&b, 0), .base = 0, .range = 8);
+   nir_def *projector = nir_load_push_constant(
+      &b, 1, 32, nir_imm_int(&b, 0), .base = 8, .range = 4);
+   nir_def *offset = nir_load_push_constant(
+      &b, 2, 32, nir_imm_int(&b, 0), .base = 12, .range = 8);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 5);
+   tex->op = nir_texop_txd;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_int32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_projector, projector);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_offset, offset);
+   tex->src[3] = nir_tex_src_for_ssa(
+      nir_tex_src_ddx, nir_imm_vec2(&b, 0.2f, 0.0f));
+   tex->src[4] = nir_tex_src_for_ssa(
+      nir_tex_src_ddy, nir_imm_vec2(&b, 0.0f, 0.0f));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   const bool progress =
+      agx_nir_lower_g17p_texture_early(b.shader, false);
+   const int lowered_coord =
+      nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   unsigned size_queries = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex &&
+             nir_instr_as_tex(instr)->op == nir_texop_txs)
+            size_queries++;
+      }
+   }
+
+   const bool ok = progress && lowered_coord >= 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
+                   nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 &&
+                   !nir_src_is_const(tex->src[lowered_coord].src) &&
+                   size_queries == 0;
+   ralloc_free(b.shader);
+   return ok;
+}
+
+/* A runtime offset loaded as one vector has no allocated_vec entry. Combining
+ * it with a shadow comparator used to call agx_emit_extract() anyway and abort
+ * while compiling the pcOffset sampler2DShadow bias fragment. Keep the same
+ * source shape in a complete G17P fragment compile. */
+static bool
+test_g17p_shadow_runtime_offset_compile(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P shadow bias with runtime offset");
+   nir_def *offset = nir_load_constant_agx(
+      &b, 2, 32, nir_imm_int64(&b, 0), nir_imm_int(&b, 0),
+      .format = PIPE_FORMAT_R32_UINT, .sign_extend = true);
+   nir_def *image =
+      nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+   nir_def *set = nir_load_descriptor_set_agx(&b, 0);
+   nir_def *heap_index = nir_load_global_constant(
+      &b, 1, 16, nir_iadd_imm(&b, set, 40), .align_mul = 2,
+      .access = ACCESS_CAN_SPECULATE);
+   nir_def *sampler = nir_bindless_sampler_agx(
+      &b, nir_imm_int(&b, 32), heap_index, .desc_set = 0);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 6);
+   tex->op = nir_texop_txb;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->is_shadow = true;
+   tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord, nir_imm_vec2(&b, 0.25f, 0.75f));
+   tex->src[1] = nir_tex_src_for_ssa(
+      nir_tex_src_comparator, nir_imm_float(&b, 0.5f));
+   tex->src[2] =
+      nir_tex_src_for_ssa(nir_tex_src_bias, nir_imm_float(&b, 0.25f));
+   tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_offset, offset);
+   tex->src[4] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+   tex->src[5] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, sampler);
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def *value = nir_channel(&b, &tex->def, 0);
+   fs_store_colour(&b, nir_vec4(&b, value, value, value,
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   const int backend2 =
+      nir_tex_instr_src_index(tex, nir_tex_src_backend2);
+   struct agx_g17p_combined_sampler_binding binding;
+   bool ok = backend2 >= 0 &&
+             nir_src_num_components(tex->src[backend2].src) == 2 &&
+             agx_nir_lower_g17p_combined_sampler(b.shader, &binding);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   key.reserved_preamble = 24;
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &key, &part) &&
+         part.binary != NULL && part.info.binary_size > 0;
+   free(part.binary);
    ralloc_free(b.shader);
    return ok;
 }
@@ -6678,8 +6887,11 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--txf-offset-only")) {
-      const bool ok = test_txf_offset_lowering();
-      fprintf(stderr, "WebGL2 texelFetchOffset coordinate lowering: %s\n",
+      const bool ok = test_txf_offset_lowering() &&
+                      test_g17p_3d_runtime_offset_lowering() &&
+                      test_g17p_projected_3d_runtime_offset_lowering() &&
+                      test_g17p_projected_2d_runtime_offset_scope();
+      fprintf(stderr, "G17P texture offset coordinate lowering: %s\n",
               ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -6782,6 +6994,28 @@ main(int argc, char **argv)
 
    if (!test_txf_offset_lowering()) {
       fputs("texelFetchOffset coordinate lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_3d_runtime_offset_lowering()) {
+      fputs("G17P 3D runtime offset was not lowered to coordinates\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_projected_3d_runtime_offset_lowering()) {
+      fputs("G17P projected 3D runtime offset was not composed before divide\n",
+            stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_projected_2d_runtime_offset_scope()) {
+      fputs("G17P projected 2D runtime offset escaped its native path\n",
+            stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_shadow_runtime_offset_compile()) {
+      fputs("G17P shadow runtime offset compile failed\n", stderr);
       all_ok = false;
    }
 

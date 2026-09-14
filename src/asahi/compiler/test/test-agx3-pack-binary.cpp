@@ -5241,27 +5241,169 @@ TEST_F(AGX3PackBinary, TextureSampleOffsetUsesNativeImmediateField)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
-TEST_F(AGX3PackBinary, TextureSampleOffsetRefusesRegisterAndAGX3C)
+TEST_F(AGX3PackBinary, TextureSampleOffsetStagesRuntimePair)
 {
-   for (unsigned shape = 0; shape < 2; ++shape) {
-      const auto enc = shape ? AGX_ISA_ENCODING_AGX3C
-                             : AGX_ISA_ENCODING_AGX3B;
-      agx_builder *b = builder(enc);
-      agx_index dest = agx_register(8, AGX_SIZE_16);
-      agx_index coord = agx_register(4, AGX_SIZE_32);
-      dest.channels_m1 = 3;
-      coord.channels_m1 = 1;
-      agx_index offset = shape ? agx_immediate(0xf1)
-                               : agx_register(0, AGX_SIZE_32);
-      offset.size = AGX_SIZE_32;
-      agx_instr *I = agx_texture_sample_to(
-         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
-         agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
-         true, false, false, AGX_GATHER_NONE, false);
-      I->mask = 15;
-      agx_stop(b);
-      pack(b, /*expect_ok=*/false);
-   }
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(8, AGX_SIZE_16);
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   agx_index offset = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   coord.discard = true;
+   offset.channels_m1 = 1;
+   offset.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_offset_2d(enc, 0, 2, 1, 0, false, true,
+                                        bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .final = true, .offset = true, .offset_staged = true,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
+TEST_F(AGX3PackBinary, TextureArrayRuntimeOffsetPacksLayerInWord)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(16, AGX_SIZE_16);
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   agx_index offset = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   offset.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D_ARRAY, AGX_LOD_MODE_AUTO_LOD, 0,
+      true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 0, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 8, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 10, 1, 0, false, true,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+   append(want, bytes, len);
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 16, .coord = 0, .width = AGX3_TEX_W16, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1, .final = true,
+      .array = true, .array_layer = 12, .offset = true,
+      .offset_staged = true, .offset_staged_array = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
+TEST_F(AGX3PackBinary, TextureArrayRuntimeOffsetAndLodPublishOneWord)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(16, AGX_SIZE_32);
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   agx_index lod = agx_register(6, AGX_SIZE_16);
+   agx_index packed = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   lod.discard = true;
+   packed.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), packed, AGX_DIM_2D_ARRAY, AGX_LOD_MODE_LOD_MIN, 0,
+      true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+
+   const std::vector<uint8_t> stream = pack(b);
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 0, 1, 0, false, true,
+                                         bytes, &len));
+   EXPECT_NE(std::search(stream.begin(), stream.end(), bytes, bytes + len),
+             stream.end());
+
+   ASSERT_TRUE(agx3_tex_stage_lod(enc, 6, 1, 0, false, true, bytes, &len));
+   EXPECT_EQ(std::search(stream.begin(), stream.end(), bytes, bytes + len),
+             stream.end());
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 12, 1, 0, false, true,
+                                          bytes, &len));
+   EXPECT_EQ(std::search(stream.begin(), stream.end(), bytes, bytes + len),
+             stream.end());
+
+   const struct agx3_tex_sample_desc sample = {
+      .dest = 16, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+      .final = true, .array = true, .array_layer = 12,
+      .offset = true, .offset_staged = true, .offset_staged_array = true,
+      .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+   };
+   ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   EXPECT_NE(std::search(stream.begin(), stream.end(), bytes, bytes + len),
+             stream.end());
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+}
+
+TEST_F(AGX3PackBinary, TextureSampleOffsetStillRefusesAGX3C)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   agx_index dest = agx_register(8, AGX_SIZE_16);
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   agx_index offset = agx_immediate(0xf1);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 1;
+   offset.size = AGX_SIZE_32;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), offset, AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+      true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+   pack(b, /*expect_ok=*/false);
 }
 
 TEST_F(AGX3PackBinary, TextureFetch2DMSPackedSample)
@@ -7930,6 +8072,8 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
                                 bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8u);
 
    agx_builder *bad = builder(enc);
    bad->shader->stage = MESA_SHADER_FRAGMENT;
@@ -7946,6 +8090,92 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    bad_I->op = AGX_OPCODE_TEXTURE_LOAD;
    bad_I->mask = 15;
    pack(bad, /*expect_ok=*/false);
+}
+
+TEST_F(AGX3PackBinary, TextureFetchArrayPacksLayerWithRegisterLod)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_register(4, AGX_SIZE_32), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D_ARRAY,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_array_integer_lod(
+      enc, 16, 4, 1, 0, false, false, false, false, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 1, 0, false, false,
+                                         bytes, &len));
+   append(want, bytes, len);
+   const struct agx3_tex_fetch_desc d = {
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1u << 0, .coord_kill = true, .final = true,
+      .array = true, .register_lod = true,
+   };
+   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8u);
+}
+
+TEST_F(AGX3PackBinary, TextureFetch3DRegisterLodIsFullUint)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.no_stop = true;
+
+   agx_index dest = agx_register(8, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_register(4, AGX_SIZE_32), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_3D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_typed_lod(
+      enc, 4, 2, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
+   append(want, bytes, len);
+   for (unsigned component = 0; component < 3; ++component) {
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(
+         enc, 2 * component, 12 + 2 * component, 2, 0, false, false,
+         bytes, &len));
+      append(want, bytes, len);
+   }
+   const struct agx3_tex_fetch_desc fetch = {
+      .dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1u << 1, .coord_kill = true, .final = true,
+      .three_d = true, .register_lod = true,
+   };
+   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &fetch, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
+   append(want, bytes, len);
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, G17PFltnormStartMatchesNativeF32Uniforms)
@@ -9743,9 +9973,24 @@ TEST_F(AGX3PackBinary, NativeIselPairsAdjacentDeviceLoadSlots)
    agx_stop(b);
 
    const auto code = pack(b);
-   /* Three 14-byte loads, one 10-byte ISEL and END. A generic extra wait
-    * carrier would add another instruction here. */
-   ASSERT_EQ(code.size(), 56);
+   /* Both value loads issue before one source-dependent identity retires each
+    * of slots 1 and 2. ISEL itself then carries no scoreboard wait. */
+   ASSERT_EQ(code.size(), 76);
+   const uint16_t carrier1_src[] = {10, 10};
+   const uint16_t carrier2_src[] = {8, 8};
+   const enum agx3_alu_hint carrier_hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   uint8_t carrier1[AGX3_ALU_MAX_LENGTH], carrier2[AGX3_ALU_MAX_LENGTH];
+   uint8_t carrier1_length = 0, carrier2_length = 0;
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 10, carrier1_src,
+      carrier_hints, 1, carrier1, &carrier1_length));
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 8, carrier2_src,
+      carrier_hints, 2, carrier2, &carrier2_length));
+   EXPECT_EQ(memcmp(code.data() + 42, carrier1, carrier1_length), 0);
+   EXPECT_EQ(memcmp(code.data() + 42 + carrier1_length, carrier2,
+                    carrier2_length), 0);
    const struct agx3_isel_desc desc = {
       .dest = 12,
       .cmp0 = 8,
@@ -9757,13 +10002,266 @@ TEST_F(AGX3PackBinary, NativeIselPairsAdjacentDeviceLoadSlots)
       .false_kind = AGX3_ISEL_REGISTER,
       .sel_true = 8,
       .sel_false = 10,
-      .wait_mask = 3,
+      .wait_mask = 0,
    };
    uint8_t expected[AGX3_ISEL_MAX_LENGTH], length = 0;
    ASSERT_TRUE(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &desc, expected,
                                 &length));
    ASSERT_EQ(length, 10);
-   EXPECT_EQ(memcmp(code.data() + 42, expected, length), 0);
+   EXPECT_EQ(memcmp(code.data() + 42 + carrier1_length + carrier2_length,
+                    expected, length), 0);
+}
+
+TEST_F(AGX3PackBinary, NativeIselRetiresTextureAndDeviceLoadPair)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_block *entry = agx_start_block(b->shader);
+   agx_block *body = agx_test_block(b->shader);
+   agx_block *merge = agx_test_block(b->shader);
+
+   agx_index old_sample = agx_register(16, AGX_SIZE_32);
+   old_sample.channels_m1 = 3;
+   agx_index old_coord = agx_register(24, AGX_SIZE_32);
+   old_coord.channels_m1 = 1;
+   agx_instr *old_texture = agx_texture_sample_to(
+      b, old_sample, old_coord, agx_immediate_f(0.0f), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   old_texture->mask = 15;
+   agx_begin_cf(b);
+   agx_if_icmp(b, agx_register(30, AGX_SIZE_32),
+               agx_register(32, AGX_SIZE_32), 1, AGX_ICOND_ULT, false,
+               merge);
+   agx_jmp_exec_none(b, merge);
+   agx_block_add_successor(entry, body);
+   agx_block_add_successor(entry, merge);
+
+   b->cursor = agx_after_block(body);
+
+   agx_index sample = agx_register(8, AGX_SIZE_32);
+   sample.channels_m1 = 3;
+   agx_index coord = agx_register(4, AGX_SIZE_32);
+   coord.channels_m1 = 1;
+   agx_instr *texture = agx_texture_sample_to(
+      b, sample, coord, agx_immediate_f(0.0f), agx_immediate(0),
+      agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+      AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE, false);
+   texture->mask = 15;
+
+   agx_index loaded = agx_register(40, AGX_SIZE_32);
+   agx_device_load_to(b, loaded, agx_register(36, AGX_SIZE_64),
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+
+   agx_index sample_value = agx_register(8, AGX_SIZE_32);
+   agx_index old_value = agx_register(16, AGX_SIZE_32);
+   sample_value.discard = loaded.discard = old_value.discard = true;
+   agx_icmpsel_to(b, agx_register(44, AGX_SIZE_32), sample_value, loaded,
+                  sample_value, old_value, AGX_ICOND_UEQ);
+   agx_block_add_successor(body, merge);
+
+   b->cursor = agx_after_block(merge);
+   agx_pop_exec(b, 1);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   ASSERT_FALSE(code.empty());
+
+   const uint16_t carrier1_src[] = {40, 40};
+   const uint16_t carrier2_src[] = {8, 8};
+   const enum agx3_alu_hint carrier_hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   uint8_t carrier1[AGX3_ALU_MAX_LENGTH], carrier2[AGX3_ALU_MAX_LENGTH];
+   uint8_t carrier1_length = 0, carrier2_length = 0;
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 40, carrier1_src,
+      carrier_hints, 1, carrier1, &carrier1_length));
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 8, carrier2_src,
+      carrier_hints, 2, carrier2, &carrier2_length));
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier1,
+                         carrier1 + carrier1_length),
+             code.end());
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier2,
+                         carrier2 + carrier2_length),
+             code.end());
+
+   /* The sample and load stay overlapped on distinct slots. Their grounded
+    * identity carrier retires both before the consuming ISEL. */
+   const struct agx3_isel_desc desc = {
+      .dest = 44,
+      .cmp0 = 8,
+      .cmp1 = 40,
+      .cond = AGX3_ISEL_ICOND_EQ,
+      .explicit_hints = true,
+      .discard = {true, true, true, true},
+      .true_kind = AGX3_ISEL_REGISTER,
+      .false_kind = AGX3_ISEL_REGISTER,
+      .sel_true = 8,
+      .sel_false = 16,
+      .wait_mask = 0,
+   };
+   uint8_t expected[AGX3_ISEL_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &desc, expected,
+                                &length));
+   EXPECT_NE(std::search(code.begin(), code.end(), expected,
+                         expected + length),
+             code.end());
+}
+
+TEST_F(AGX3PackBinary, NativeIselPairsDereferencedDeviceLoadSlots)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+
+   agx_index first_ptr = agx_register(0, AGX_SIZE_32);
+   first_ptr.channels_m1 = 3;
+   agx_device_load_to(b, first_ptr, agx_uniform(8, AGX_SIZE_64),
+                      agx_immediate(1), AGX_FORMAT_I32, 15, 0, false);
+   agx_index first = agx_register(0, AGX_SIZE_32);
+   agx_index first_base = agx_register(0, AGX_SIZE_64);
+   first_base.discard = true;
+   agx_device_load_to(b, first, first_base,
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+
+   agx_index second_ptr = agx_register(8, AGX_SIZE_32);
+   second_ptr.channels_m1 = 3;
+   agx_device_load_to(b, second_ptr, agx_uniform(8, AGX_SIZE_64),
+                      agx_immediate(2), AGX_FORMAT_I32, 15, 0, false);
+   agx_index second = agx_register(2, AGX_SIZE_32);
+   agx_index second_base = agx_register(8, AGX_SIZE_64);
+   second_base.discard = true;
+   agx_device_load_to(b, second, second_base,
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+
+   first.discard = true;
+   second.discard = true;
+   agx_icmpsel_to(b, agx_register(0, AGX_SIZE_32), second, first, second,
+                  first, AGX_ICOND_UEQ);
+   agx_stop(b);
+
+   const auto code = pack(b);
+   /* Pointer loads reuse slot 3 after each dereference consumes it. The two
+    * value loads overlap on slots 2 and 1, then one grounded carrier retires
+    * each producer before ISEL. */
+   ASSERT_EQ(code.size(), 90);
+   const uint16_t carrier1_src[] = {2, 2};
+   const uint16_t carrier2_src[] = {0, 0};
+   const enum agx3_alu_hint carrier_hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   uint8_t carrier1[AGX3_ALU_MAX_LENGTH], carrier2[AGX3_ALU_MAX_LENGTH];
+   uint8_t carrier1_length = 0, carrier2_length = 0;
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 2, carrier1_src,
+      carrier_hints, 1, carrier1, &carrier1_length));
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 0, carrier2_src,
+      carrier_hints, 2, carrier2, &carrier2_length));
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier1,
+                         carrier1 + carrier1_length),
+             code.end());
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier2,
+                         carrier2 + carrier2_length),
+             code.end());
+
+   const struct agx3_isel_desc desc = {
+      .dest = 0,
+      .cmp0 = 2,
+      .cmp1 = 0,
+      .cond = AGX3_ISEL_ICOND_EQ,
+      .explicit_hints = true,
+      .discard = {true, true, true, true},
+      .true_kind = AGX3_ISEL_REGISTER,
+      .false_kind = AGX3_ISEL_REGISTER,
+      .sel_true = 2,
+      .sel_false = 0,
+      .wait_mask = 0,
+   };
+   uint8_t expected[AGX3_ISEL_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &desc, expected,
+                                &length));
+   EXPECT_NE(std::search(code.begin(), code.end(), expected,
+                         expected + length),
+             code.end());
+}
+
+TEST_F(AGX3PackBinary, NativeIselDropsControlFlowRetiredSlot)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_block *entry = agx_start_block(b->shader);
+   agx_block *body = agx_test_block(b->shader);
+   agx_block *merge = agx_test_block(b->shader);
+
+   agx_index old_value = agx_register(8, AGX_SIZE_32);
+   agx_device_load_to(b, old_value, agx_uniform(8, AGX_SIZE_64),
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+   agx_begin_cf(b);
+   agx_if_icmp(b, agx_register(16, AGX_SIZE_32),
+               agx_register(18, AGX_SIZE_32), 1, AGX_ICOND_ULT, false,
+               merge);
+   agx_jmp_exec_none(b, merge);
+   agx_block_add_successor(entry, body);
+   agx_block_add_successor(entry, merge);
+
+   b->cursor = agx_after_block(body);
+   agx_index first = agx_register(10, AGX_SIZE_32);
+   agx_index second = agx_register(12, AGX_SIZE_32);
+   agx_device_load_to(b, first, agx_uniform(12, AGX_SIZE_64),
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+   agx_device_load_to(b, second, agx_uniform(16, AGX_SIZE_64),
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 2, false);
+   old_value.discard = first.discard = second.discard = true;
+   agx_icmpsel_to(b, agx_register(14, AGX_SIZE_32), second, first, first,
+                  old_value, AGX_ICOND_UEQ);
+   agx_block_add_successor(body, merge);
+
+   b->cursor = agx_after_block(merge);
+   agx_pop_exec(b, 1);
+   agx_stop(b);
+   const auto code = pack(b);
+   ASSERT_FALSE(code.empty());
+
+   /* The old value's slot was retired before IF. Each live body load is
+    * retired through its own grounded carrier before ISEL. */
+   const uint16_t carrier1_src[] = {12, 12};
+   const uint16_t carrier2_src[] = {10, 10};
+   const enum agx3_alu_hint carrier_hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   uint8_t carrier1[AGX3_ALU_MAX_LENGTH], carrier2[AGX3_ALU_MAX_LENGTH];
+   uint8_t carrier1_length = 0, carrier2_length = 0;
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 12, carrier1_src,
+      carrier_hints, 1, carrier1, &carrier1_length));
+   ASSERT_TRUE(agx3_alu_bit_reg(
+      AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 10, carrier2_src,
+      carrier_hints, 2, carrier2, &carrier2_length));
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier1,
+                         carrier1 + carrier1_length),
+             code.end());
+   EXPECT_NE(std::search(code.begin(), code.end(), carrier2,
+                         carrier2 + carrier2_length),
+             code.end());
+
+   const struct agx3_isel_desc desc = {
+      .dest = 14,
+      .cmp0 = 12,
+      .cmp1 = 10,
+      .cond = AGX3_ISEL_ICOND_EQ,
+      .explicit_hints = true,
+      .discard = {true, true, true, true},
+      .true_kind = AGX3_ISEL_REGISTER,
+      .false_kind = AGX3_ISEL_REGISTER,
+      .sel_true = 10,
+      .sel_false = 8,
+      .wait_mask = 0,
+   };
+   uint8_t expected[AGX3_ISEL_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &desc, expected,
+                                &length));
+   EXPECT_NE(std::search(code.begin(), code.end(), expected,
+                         expected + length),
+             code.end());
 }
 
 TEST_F(AGX3PackBinary, AbsFselWaitsOnItsLoadedComparator)

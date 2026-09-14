@@ -312,9 +312,11 @@ struct agx3_tex_sample_desc {
    /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
     * Array queries take no layer and encode immediate layer zero. */
    bool query_lod;
-   bool offset;                 /* signed nibble-packed 2D texel offset */
-   uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
-   bool offset_register;         /* runtime gather offset staged in bank 6 */
+   bool offset;                 /* coordinate offset is present */
+   bool offset_staged;          /* f141=2 reads PACK_SMPIR offset banks */
+   bool offset_staged_array;    /* staged word also contains array layer */
+   uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
+   bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
 };
 
@@ -355,6 +357,18 @@ bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                               uint16_t lod, uint8_t slot, uint16_t wait_mask,
                               bool layer_cache, bool layer_discard,
                               bool lod_cache, bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* The texel-fetch variant packs a full uint LOD beside the array layer. */
+bool agx3_tex_stage_array_integer_lod(
+   enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
+   uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
+   bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish a runtime signed 2D coordinate offset into operand bank 6. */
+bool agx3_tex_stage_offset_2d(enum agx_isa_encoding enc, uint16_t x,
+                              uint16_t y, uint8_t slot, uint16_t wait_mask,
+                              bool source_cache, bool source_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Run one axis of the native cube-coordinate calculation.  Three axes with

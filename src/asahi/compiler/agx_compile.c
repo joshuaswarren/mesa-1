@@ -4329,7 +4329,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
 
    agx_index dst = agx_def_index(&instr->def);
 
-   /* Pack shadow reference value (compare) and packed offset together */
+   /* Pack the shadow reference and offset sources into the one texture IR
+    * operand. G17P constants leave only the comparator here because their
+    * offset rides in SMP. Runtime G17P offsets remain a two-component vector
+    * for PACK_SMPIR; a comparison, when present, is its leading component. */
    agx_index compare_offset = agx_null();
 
    /* G17P constant offsets live in the instruction, leaving src[5] to
@@ -4354,7 +4357,25 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       if (packed_offset.type == AGX_INDEX_IMMEDIATE)
          packed_offset = agx_mov_imm(b, 32, packed_offset.value);
 
-      compare_offset = agx_vec2(b, compare, packed_offset);
+      const unsigned offset_channels = agx_channels(packed_offset);
+      agx_index sources[4] = {compare};
+      assert(offset_channels <= 3);
+      if (offset_channels == 1) {
+         sources[1] = packed_offset;
+      } else {
+         agx_index offset_components[3] = {
+            agx_null(), agx_null(), agx_null()
+         };
+         /* Vector loads are contiguous but do not necessarily have an entry
+          * in allocated_vec. Split this texture operand explicitly instead
+          * of assuming its producer was an agx_emit_collect_to(). The split
+          * remains a pseudo instruction and coalesces with a preceding
+          * collect when one exists. */
+         agx_emit_split(b, offset_components, packed_offset, offset_channels);
+         for (unsigned c = 0; c < offset_channels; ++c)
+            sources[c + 1] = offset_components[c];
+      }
+      compare_offset = agx_emit_collect(b, offset_channels + 1, sources);
    }
    else if (!agx_is_null(packed_offset))
       compare_offset = packed_offset;

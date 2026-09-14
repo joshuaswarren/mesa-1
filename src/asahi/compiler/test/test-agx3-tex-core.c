@@ -1387,6 +1387,9 @@ test_3d_fetch(void)
    d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
    d.sampler_value = 0;
    d.register_lod = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                               &length));
+   d.lod_x64 = 64;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
                                 &length));
    return 0;
@@ -2419,6 +2422,44 @@ test_offset_witnesses(void)
       CHECK(length == 14 && hex_eq(bytes, length, sweep[i].hex));
    }
 
+   /* The staged runtime form is the register-source branch of the native
+    * PACK_SMPIR offset witness. r2/r3 publish signed X/Y at positions 12/28
+    * in operand bank 6, and SMP selects that bank with f141=2. */
+   CHECK(agx3_tex_stage_offset_2d(AGX_ISA_ENCODING_AGX3B, 4, 6, 1, 0,
+                                  false, true, bytes, &length));
+   CHECK(length == 12 &&
+         hex_eq(bytes, length, "170554060008180070c00100"));
+   CHECK(!agx3_tex_stage_offset_2d(AGX_ISA_ENCODING_AGX3C, 4, 6, 1, 0,
+                                   false, true, bytes, &length));
+
+   d = base;
+   d.offset = true;
+   d.offset_staged = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   d.offset_xyz = 1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+   d.offset_xyz = 0;
+   d.three_d = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+
+   /* The driver descriptor ABI cannot use Apple's direct array-layer field.
+    * Its staged offset is valid only when the layer is already present in the
+    * published bank-6 word. */
+   d = base;
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+   d.array = true;
+   d.array_layer = 12;
+   d.offset = true;
+   d.offset_staged = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+   d.offset_staged_array = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+
    /* The same offset (1,1) carried by every other LOD shape. f156 on the
     * immediate-level row is the stream group terminator, which this encoder
     * takes from the packer rather than inferring. */
@@ -3044,6 +3085,13 @@ test_indexed_offset_witnesses(void)
                                     true, true, false, true, bytes, &length));
    CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
                                     false, true, true, true, bytes, &length));
+   CHECK(agx3_tex_stage_array_integer_lod(
+      AGX_ISA_ENCODING_AGX3B, 12, 14, 2, 0, false, true, false, true,
+      bytes, &length));
+   CHECK(length == 12);
+   CHECK(!agx3_tex_stage_array_integer_lod(
+      AGX_ISA_ENCODING_AGX3B, 12, 13, 2, 0, false, true, false, true,
+      bytes, &length));
    return 0;
 }
 
