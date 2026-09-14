@@ -1752,6 +1752,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          shader->info.tess.tcs_nr_patch_outputs =
             util_last_bit(nir->info.patch_outputs_written);
          shader->info.tess.tcs_output_stride = poly_tcs_output_stride(nir);
+      } else if (dev->dev.chip == AGX_CHIP_G17P && hw) {
+         /* G17P tessellates in hardware and runs the evaluation shader as the
+          * post-tessellation vertex program, which reads the patch and the
+          * coordinate from the tessellator. This destroys info so it needs to
+          * happen after the gather. */
+         NIR_PASS(_, nir, poly_nir_lower_tes_native);
       } else {
          /* This destroys info so it needs to happen after the gather */
          NIR_PASS(_, nir, poly_nir_lower_tes, hw);
