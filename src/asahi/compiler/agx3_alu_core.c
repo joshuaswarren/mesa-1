@@ -15,8 +15,7 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 128 || (!half && ((dest | src) & 1)) ||
-       (hint != AGX3_ALU_HINT_DISCARD && hint != AGX3_ALU_HINT_CACHE) ||
-       (wait_mask & ~0x3fu))
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
 
    /* applegpu_g17p `popcount` is the eight-byte cbs point. f10/f24 are the
@@ -26,6 +25,8 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *   2705540202045004  h2 <- popcount(^h2)
     *   2725540402025004  h4 <- popcount(^h1), wait slot 2
     *   2705560002024204  h0 <- popcount($h1), wait slot 6
+    *   2705560302044004  h3 <- popcount(h2), h2 stored later, slot 6
+    *   2705560402004c04  r2 <- popcount(r0), r0 stored later, slot 6
     *   2715540202045c04  r1 <- popcount(^r1), wait slot 1
     *   2705540403004e04  $r2 <- popcount($r0) */
    const struct agx3_field_kv base[] = {
@@ -2529,13 +2530,17 @@ agx3_alu_sll_one_reg32(enum agx_isa_encoding enc, uint16_t dest,
        (wait_mask & ~0x3fu))
       return false;
 
-   /* Two applegpu_g17p controls establish independent fields on the same SLL
-    * endpoint: scalar `1u << uint` selects immediate-one/full shift, while a
-    * ushort2 result selects the scalar-half destination. Compose that exact
-    * cross-product instead of materializing a temporary register for one. */
+   /* applegpu_g17p `ushort(1) << ushort(n)` is one sll with an immediate
+    * one, a half destination and a half count (f39 = 1). The count here is
+    * the low half of a uint register, which is exactly the half Apple reads
+    * after its own `n & 15`:
+    *   270054020302080080120400  $h2 <- 1 << ^h2
+    *   270054040202000080100400  h4 <- 1 << h0 (count still live)
+    *   270054010202040080120400  h1 <- 1 << ^h2
+    * f42 is the count's last use and f11 the destination cache. */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {15, 1}, {23, 1}, {24, 1},
-      {38, 2}, {39, 2}, {52, 1}, {53, 2},
+      {38, 2}, {39, 1}, {52, 1}, {53, 2},
    };
    struct agx3_field_kv fields[12] = {
       {2, dest},
@@ -2571,25 +2576,34 @@ agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !hints || !out || !len ||
        dest >= 256 || source >= 256 || shift >= 256 || (shift & 1) ||
-       (unsigned)hints[0] > AGX3_ALU_HINT_DISCARD ||
-       (unsigned)hints[1] > AGX3_ALU_HINT_DISCARD || (wait_mask & ~0x3fu))
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
 
    /* applegpu_g17p `short(a) >> uint(n)`: the signed value and destination
     * remain scalar halves, while the register shift count retains its full
-    * width. f28 selects signed fill and f45..f50 carry producer waits. */
+    * width. f28 selects signed fill and f45..f50 carry producer waits. The
+    * value's and count's lifetimes are independent pairs, f25/f27 and
+    * f40/f42, each witnessed dead, retained for a store and cached:
+    *   a7115402020808e0e200  h2 <- ^h4 >> ^r1
+    *   a7115402020808a0e200  h2 <- h4 >> ^r1
+    *   a711540402080060e200  h4 <- ^h4 >> r0
+    *   a7115402020a0aa0e200  h2 <- $h5 >> ^r1
+    *   a7115403030a08e0e200  $h3 <- ^h5 >> ^r1 */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 1}, {23, 2}, {24, 1}, {28, 1}, {38, 2}, {39, 2},
    };
-   struct agx3_field_kv fields[14] = {
+   struct agx3_field_kv fields[16] = {
       {2, dest},
       {11, dest_cache},
       {16, source},
+      {25, hints[0] == AGX3_ALU_HINT_CACHE},
       {27, hints[0] == AGX3_ALU_HINT_DISCARD},
       {31, shift},
+      {40, hints[1] == AGX3_ALU_HINT_CACHE},
       {42, hints[1] == AGX3_ALU_HINT_DISCARD},
    };
-   unsigned count = 6;
+   unsigned count = 8;
    for (unsigned slot = 0; slot < 6; ++slot) {
       if (wait_mask & (1u << slot))
          fields[count++] = (struct agx3_field_kv){45 + slot, 1};

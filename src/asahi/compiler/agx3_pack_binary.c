@@ -9783,9 +9783,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const uint16_t src[2] = {a.value, b.value};
             const enum agx3_alu_hint hints[2] = {
                agx3_post_ra_hint(a), agx3_post_ra_hint(b)};
+            uint16_t w = wait;
+            if (!agx3_retire_extra_waits(emission, enc, sl, res, instr_index,
+                                         I, &w))
+               AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             if (!agx3_alu_add_sat16(enc, dest.value, src, hints, !a.abs,
-                                    dest.cache, wait, bytes, &len) ||
+                                    dest.cache, w, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
@@ -9815,18 +9819,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (subtrahend.cache && subtrahend.discard))
                AGX3_REFUSE(I);
 
+            uint16_t w = wait;
+            if (!agx3_retire_extra_waits(emission, enc, sl, res, instr_index,
+                                         I, &w))
+               AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             bool encoded;
             if (negate) {
                encoded = agx3_alu_neg16(enc, dest.value, subtrahend.value,
                                         agx3_post_ra_hint(subtrahend),
-                                        dest.cache, wait, bytes, &len);
+                                        dest.cache, w, bytes, &len);
             } else {
                const uint16_t src[2] = {minuend.value, subtrahend.value};
                const enum agx3_alu_hint hints[2] = {
                   agx3_post_ra_hint(minuend), agx3_post_ra_hint(subtrahend)};
                encoded = agx3_alu_sub16(enc, dest.value, src, hints,
-                                        dest.cache, wait, bytes, &len);
+                                        dest.cache, w, bytes, &len);
             }
             if (!encoded || !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
@@ -11788,20 +11796,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
 
             const enum agx3_alu_hint hints[2] = {
-               value.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(value),
-               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift),
+               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
             };
+            uint16_t w = wait;
+            if (!agx3_retire_extra_waits(emission, enc, sl, res, instr_index,
+                                         I, &w))
+               AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
             if (!agx3_alu_asr_reg16(enc, dest.value, value.value, shift.value,
-                                    hints, dest.cache, wait, bytes, &length) ||
+                                    hints, dest.cache, w, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
          }
 
          /* A scalar-half `1 << count` needs no register holding the one: the
-          * native `sll` takes an immediate value. Keep the half result and
-          * the full-width uint count. */
+          * native `sll` takes an immediate value. Apple reads a half count
+          * here; NIR's uint count register supplies its low half. A cached
+          * count keeps its register through the clear last-use bit. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFI &&
              I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
              agx3_src_is_zero_imm(I->src[0]) &&

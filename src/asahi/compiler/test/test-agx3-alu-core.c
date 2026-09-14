@@ -46,6 +46,13 @@ test_native_popcount(void)
        {0x27, 0x25, 0x54, 0x04, 0x02, 0x08, 0x5c, 0x04}},
       {4, 0, false, AGX3_ALU_HINT_CACHE, true, 0,
        {0x27, 0x05, 0x54, 0x04, 0x03, 0x00, 0x4e, 0x04}},
+      /* The source stored after the count, and a cached count. */
+      {3, 2, true, AGX3_ALU_HINT_NONE, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x03, 0x02, 0x04, 0x40, 0x04}},
+      {4, 0, false, AGX3_ALU_HINT_NONE, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x04, 0x02, 0x00, 0x4c, 0x04}},
+      {3, 2, true, AGX3_ALU_HINT_DISCARD, true, 1u << 5,
+       {0x27, 0x05, 0x56, 0x03, 0x03, 0x04, 0x50, 0x04}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
@@ -58,8 +65,6 @@ test_native_popcount(void)
 
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
-   assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
-                             AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 1u << 6, bytes,
                              &len));
@@ -1872,10 +1877,23 @@ static void test_native_u16_arithmetic(void)
    assert(!agx3_alu_sll_reg(AGX_ISA_ENCODING_AGX3B, 0, true, false,
                             sll_mixed_src, sll_mixed_width, sll_bad_hints,
                             0, out, &len));
+   /* applegpu_g17p `ushort(1) << ushort(n & 15u)` over uint counts. */
+   assert(agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 2, 2,
+                                 AGX3_ALU_HINT_DISCARD, true, 0,
+                                 out, &len));
+   exact(out, len, "270054020302080080120400");
+   assert(agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                 AGX3_ALU_HINT_NONE, false, 0,
+                                 out, &len));
+   exact(out, len, "270054040202000080100400");
+   assert(agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                 AGX3_ALU_HINT_DISCARD, false, 0,
+                                 out, &len));
+   exact(out, len, "270054000202000080120400");
    assert(agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 0, 2,
                                  AGX3_ALU_HINT_DISCARD, false, 1,
                                  out, &len));
-   exact(out, len, "2710540002020800c0120400");
+   exact(out, len, "271054000202080080120400");
    assert(!agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 0, 3,
                                   AGX3_ALU_HINT_DISCARD, false, 1,
                                   out, &len));
@@ -1890,6 +1908,32 @@ static void test_native_u16_arithmetic(void)
    assert(agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3B, 2, asr_src[0],
                              asr_src[1], dead, false, 1, out, &len));
    exact(out, len, "a7115402020808e0e200");
+   /* applegpu_g17p `short(x >> (n & 15u))` with x or n still stored
+    * afterwards, x cached for a later xor, and a cached result. */
+   {
+      const struct {
+         uint16_t dest, value, count;
+         enum agx3_alu_hint hints[2];
+         bool dest_cache;
+         const char *apple;
+      } live[] = {
+         {2, 4, 2, {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD}, false,
+          "a7115402020808a0e200"},
+         {4, 4, 0, {AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE}, false,
+          "a711540402080060e200"},
+         {2, 5, 2, {AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_DISCARD}, false,
+          "a7115402020a0aa0e200"},
+         {3, 5, 2, {AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD}, true,
+          "a7115403030a08e0e200"},
+      };
+      for (unsigned i = 0; i < sizeof(live) / sizeof(live[0]); ++i) {
+         assert(agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3B, live[i].dest,
+                                   live[i].value, live[i].count,
+                                   live[i].hints, live[i].dest_cache, 1,
+                                   out, &len));
+         exact(out, len, live[i].apple);
+      }
+   }
    assert(!agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3B, 2, asr_src[0], 3,
                               dead, false, 1, out, &len));
    assert(!agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3C, 2, asr_src[0],
