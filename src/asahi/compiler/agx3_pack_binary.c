@@ -1335,15 +1335,20 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       I->src[4].size == AGX_SIZE_32 && agx_channels(I->src[4]) == 1 &&
       !(I->src[4].value & 1) && I->src[4].value <= 126 &&
       !(I->src[4].cache && (I->src[4].discard || I->src[4].kill));
+   /* Cube stores reach the packer as 2D arrays with the face folded into the
+    * layer, and 1D stores as 2D. */
+   const bool array = I->dim == AGX_DIM_2D_ARRAY;
+   const bool three_d = I->dim == AGX_DIM_3D;
+   const unsigned coords = (array || three_d) ? 3 : 2;
    if (enc != AGX_ISA_ENCODING_AGX3B || I->nr_dests != 0 ||
        I->nr_srcs != 5 ||
-       I->dim != AGX_DIM_2D ||
+       (I->dim != AGX_DIM_2D && !array && !three_d) ||
        (wait_mask & ~UINT16_C(0x3f)) != 0 ||
        !agx3_tex_plain_reg(I->src[0]) || I->src[0].size != AGX_SIZE_32 ||
        agx_channels(I->src[0]) != 4 || (I->src[0].value & 1) ||
        I->src[0].value > 248 || !agx3_tex_plain_reg(I->src[1]) ||
-       I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 2 ||
-       (I->src[1].value & 1) || I->src[1].value > 252 ||
+       I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != coords ||
+       (I->src[1].value & 1) || I->src[1].value + 2 * (coords - 1) > 254 ||
        !agx3_tex_imm(I->src[2], 0) ||
        (!immediate_state && !heap_state)) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
@@ -1357,7 +1362,14 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    struct util_dynarray staged;
    util_dynarray_init(&staged, NULL);
    uint8_t coord_bytes[AGX3_STAGE_MAX_LENGTH], coord_len = 0;
-   const uint16_t data_dest[4] = {4, 6, 12, 14};
+   uint8_t layer_bytes[AGX3_TEX_MAX_LENGTH], layer_len = 0;
+   /* A 3D write stages z at half 4 and an array write packs its layer at
+    * half 6, moving the data lanes out of the way: metal-nt -arch
+    * applegpu_g17p COPYs texture3d data to halves 8/10/12/14 and
+    * texture2d_array data to halves 4/10/12/14. */
+   const uint16_t data_dest[4] = {
+      three_d ? 8 : 4, array || three_d ? 10 : 6, 12, 14,
+   };
    /* imgwci consumes integer coordinates from staging halves 0 and 2. Native
     * texture/image kernels publish ordinary GPR coordinates with COPY on the
     * same slot the instruction waits for. Keeping the source retained also
@@ -1367,7 +1379,16 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        !agx3_append(&staged, coord_bytes, coord_len) ||
        !agx3_stage_copy_source(enc, 2, I->src[1].value + 2, false, 1, 0,
                                coord_bytes, &coord_len) ||
-       !agx3_append(&staged, coord_bytes, coord_len)) {
+       !agx3_append(&staged, coord_bytes, coord_len) ||
+       (three_d &&
+        (!agx3_stage_copy_source(enc, 4, I->src[1].value + 4, false, 1, 0,
+                                 coord_bytes, &coord_len) ||
+         !agx3_append(&staged, coord_bytes, coord_len))) ||
+       (array &&
+        (!agx3_tex_stage_image_write_layer(enc, I->src[1].value + 4, 1, 0,
+                                           false, false, layer_bytes,
+                                           &layer_len) ||
+         !agx3_append(&staged, layer_bytes, layer_len)))) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
       goto fail;
@@ -1395,6 +1416,9 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       .image_value = I->src[4].value,
       .image_kill = heap_state && (I->src[4].discard || I->src[4].kill),
       .normalized = normalized,
+      .dim = array     ? AGX3_IMAGE_WRITE_2D_ARRAY
+             : three_d ? AGX3_IMAGE_WRITE_3D
+                       : AGX3_IMAGE_WRITE_2D,
    };
    bool encoded;
    if (heap_state) {

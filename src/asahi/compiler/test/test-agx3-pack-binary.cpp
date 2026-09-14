@@ -13691,6 +13691,82 @@ TEST_F(AGX3PackBinary, StorageImageExplicitBaseAndSlotMatchHardware)
          AGX_ISA_ENCODING_AGX3B, &d, 8, slot, bytes, &len));
 }
 
+/* metal-nt -arch applegpu_g17p (AIR-NT 32023.917) texture2d_array and
+ * texture3d writes at register coordinates, int and float data, immediate
+ * and killed-register descriptor selection. */
+TEST_F(AGX3PackBinary, LayeredStorageImageWriteMatchesNative)
+{
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t len = 0;
+
+   static const uint8_t layer_r2[] = {
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x08, 0x10, 0x00,
+      0xf0, 0xc0, 0x00, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3B, 4, 1, 0, false, true, bytes, &len));
+   ASSERT_EQ(len, sizeof(layer_r2));
+   EXPECT_EQ(memcmp(bytes, layer_r2, sizeof(layer_r2)), 0);
+
+   static const uint8_t layer_r0[] = {
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x00, 0x10, 0x00,
+      0xf0, 0xc0, 0x00, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3B, 0, 1, 0, false, true, bytes, &len));
+   ASSERT_EQ(len, sizeof(layer_r0));
+   EXPECT_EQ(memcmp(bytes, layer_r0, sizeof(layer_r0)), 0);
+
+   EXPECT_FALSE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3B, 1, 1, 0, false, true, bytes, &len));
+   EXPECT_FALSE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3C, 4, 1, 0, false, true, bytes, &len));
+
+   const struct {
+      enum agx3_image_write_dim dim;
+      enum agx3_tex_operand_kind kind;
+      uint16_t value, base;
+      bool kill, normalized;
+      uint8_t native[AGX3_IMAGE_WRITE_LENGTH];
+   } writes[] = {
+      {AGX3_IMAGE_WRITE_2D_ARRAY, AGX3_TEX_OPERAND_IMMEDIATE, 0, 4, false,
+       false,
+       {0xd7, 0x10, 0x54, 0x00, 0x20, 0x00, 0x00, 0x00,
+        0x00, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00}},
+      {AGX3_IMAGE_WRITE_3D, AGX3_TEX_OPERAND_IMMEDIATE, 0, 0, false, false,
+       {0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x88, 0x1a, 0x09, 0x00}},
+      {AGX3_IMAGE_WRITE_2D_ARRAY, AGX3_TEX_OPERAND_REGISTER, 12, 4, true,
+       false,
+       {0xd7, 0x10, 0x54, 0x00, 0x20, 0x00, 0x00, 0x0c,
+        0x21, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x89, 0x00}},
+      {AGX3_IMAGE_WRITE_2D_ARRAY, AGX3_TEX_OPERAND_REGISTER, 12, 4, true,
+       true,
+       {0xd7, 0x10, 0x54, 0x00, 0x20, 0x00, 0x00, 0x0c,
+        0x21, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x89, 0x00}},
+      {AGX3_IMAGE_WRITE_3D, AGX3_TEX_OPERAND_REGISTER, 0, 0, true, false,
+       {0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+        0x21, 0x08, 0x00, 0x00, 0x88, 0x1a, 0x89, 0x00}},
+      {AGX3_IMAGE_WRITE_3D, AGX3_TEX_OPERAND_REGISTER, 0, 0, true, true,
+       {0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+        0x21, 0x08, 0x00, 0x00, 0x88, 0x3a, 0x89, 0x00}},
+   };
+   for (const auto &w : writes) {
+      const struct agx3_image_write_desc d = {
+         .image_kind = w.kind,
+         .image_value = w.value,
+         .image_kill = w.kill,
+         .normalized = w.normalized,
+         .dim = w.dim,
+      };
+      uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH];
+      ASSERT_TRUE(agx3_tex_encode_image_write_2d(
+         AGX_ISA_ENCODING_AGX3B, &d, w.base, 1, imgwci, &len));
+      ASSERT_EQ(len, sizeof(w.native));
+      EXPECT_EQ(memcmp(imgwci, w.native, sizeof(w.native)), 0);
+   }
+}
+
 TEST_F(AGX3PackBinary, IntegerIndexedStorageWriteUsesResolvedPbe)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

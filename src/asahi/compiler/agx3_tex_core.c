@@ -809,7 +809,8 @@ agx3_tex_encode_image_write_2d(
         *
         * the state operand moves against the immediate-state controls and f70
         * does not, and int and uint are byte-identical. */
-       (reg && ((d->image_value & 1) || d->image_value > 126)))
+       (reg && ((d->image_value & 1) || d->image_value > 126)) ||
+       d->dim > AGX3_IMAGE_WRITE_3D)
       return false;
 
    /* The native integer direct-state0 packet is the same composed form
@@ -827,14 +828,24 @@ agx3_tex_encode_image_write_2d(
     * f93 with f99=3 instead names a uniform half: ts[i] with i a constant
     * buffer scalar, or an argument-buffer entry, is d71054000040000c20040000881a0901
     * (f93 12). The composer validates the complete selected form. */
+   /* f72 is the texture type and f73=2 marks a PACK_IMGWIR-staged layer.
+    * metal-nt -arch applegpu_g17p, int data at a register coordinate:
+    *
+    *   texture2d        d71054000040000000040000881a0900
+    *   texture2d_array  d71054002000000000040000881a0900  (f79=4, f73=2)
+    *   texture3d        d71054000040000000080000881a0900  (f72=3)
+    */
    struct agx3_field_kv fields[24] = {
       KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
-      KV(51, 1),  KV(52, 1),  KV(58 + staging_slot, 1), KV(71, 2), KV(72, 1),
+      KV(51, 1),  KV(52, 1),  KV(58 + staging_slot, 1), KV(71, 2),
+      KV(72, d->dim == AGX3_IMAGE_WRITE_3D ? 3 : 1),
       KV(74, 1),  KV(85, 3),  KV(86, 3),   KV(113, 1),
       KV(70, d->normalized),
    };
    unsigned n = 15;
    fields[n++] = (struct agx3_field_kv)KV(79, uniform_base);
+   if (d->dim == AGX3_IMAGE_WRITE_2D_ARRAY)
+      fields[n++] = (struct agx3_field_kv)KV(73, 2);
    if (immediate) {
       fields[n++] = (struct agx3_field_kv)KV(91, d->image_value);
       fields[n++] = (struct agx3_field_kv)KV(99, 1);
@@ -1196,6 +1207,44 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+/* metal-nt -arch applegpu_g17p (AIR-NT 32023.917) stages a texture2d_array
+ * write's layer with PACK_IMGWIR, whose operand fields are PACK_SMPIR's:
+ *
+ *   t.write(v, gid.xy, gid.z), discarded r2:  9705540600081000f0c00000
+ *   t.write(v, gid.xy, l), discarded r0:      9705540600001000f0c00000
+ */
+bool
+agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
+                                 uint8_t slot, uint16_t wait_mask,
+                                 bool src_cache, bool src_discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                 uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 126 || slot < 1 ||
+       slot > 6 || (wait_mask & ~0x3f) || (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+   };
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, src);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   return agx3_bind_compose(enc, "pack_imgwir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }
 
 /* Runtime-indexed texture2d_array and depth2d_array sample witnesses publish

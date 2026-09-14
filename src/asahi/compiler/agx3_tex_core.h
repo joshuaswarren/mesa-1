@@ -347,6 +347,14 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
                                    uint8_t slot, bool cache, bool discard,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* PACK_IMGWIR publishes an image write's layer register to staging half 6,
+ * with the same operand fields as PACK_SMPIR's array layer. */
+bool agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
+                                      uint8_t slot, uint16_t wait_mask,
+                                      bool src_cache, bool src_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
@@ -471,12 +479,22 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * The existing native-witness wrapper retains its fixed base/slot choices. */
 #define AGX3_IMAGE_WRITE_LENGTH 16u
 
+/* The texture type an image write addresses. A layered write stages its
+ * layer through agx3_tex_stage_image_write_layer(); a 3D write stages z as a
+ * third coordinate. */
+enum agx3_image_write_dim {
+   AGX3_IMAGE_WRITE_2D = 0,
+   AGX3_IMAGE_WRITE_2D_ARRAY,
+   AGX3_IMAGE_WRITE_3D,
+};
+
 struct agx3_image_write_desc {
    uint16_t wait_mask;
    enum agx3_tex_operand_kind image_kind;
    uint16_t image_value;
    bool image_kill;
    bool normalized;
+   enum agx3_image_write_dim dim;
 };
 
 /* Explicit PBE heap base in uniform halves, native descriptor index in
