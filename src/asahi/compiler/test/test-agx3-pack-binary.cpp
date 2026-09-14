@@ -4756,6 +4756,61 @@ TEST_F(AGX3PackBinary, TextureCoordinateCollectStaysLowUnderPressure)
    EXPECT_LE(tex->src[0].value + 4, 128u);
 }
 
+TEST_F(AGX3PackBinary, UniformMovesAndImageReadsStayLowUnderPressure)
+{
+   for (unsigned image = 0; image < 2; ++image) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      b->shader->nir = rzalloc(mem_ctx, nir_shader);
+      b->shader->nir->info.stage = MESA_SHADER_COMPUTE;
+
+      /* Keep halves 0..127 live, as in the texture pressure tests, so a
+       * result lands below half 128 only if the allocator bounds it. */
+      agx_index live[64];
+      for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+         live[i] = agx_preload(b, agx_register(2 * i, AGX_SIZE_32));
+
+      agx_instr *bounded;
+      agx_index value;
+      if (image) {
+         agx_index xy[2] = {agx_mov_imm(b, 32, 1), agx_mov_imm(b, 32, 2)};
+         agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+         agx_instr *collect = agx_collect_to(b, coord, 2);
+         collect->src[0] = xy[0];
+         collect->src[1] = xy[1];
+         agx_index dest = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+         bounded = agx_image_load_to(
+            b, dest, coord, agx_immediate(0), agx_uniform(6, AGX_SIZE_64),
+            agx_uniform(0, AGX_SIZE_64), agx_immediate(0), agx_null(),
+            AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 15, false, false, false);
+         agx_instr *split = agx_split(b, 4, dest);
+         for (unsigned i = 0; i < 4; ++i)
+            split->dest[i] = agx_temp(b->shader, AGX_SIZE_32);
+         value = split->dest[0];
+      } else {
+         value = agx_temp(b->shader, AGX_SIZE_32);
+         bounded = agx_mov_to(b, value, agx_uniform(26, AGX_SIZE_32));
+      }
+
+      agx_index sum = agx_fadd(b, live[0], value);
+      for (unsigned i = 1; i < ARRAY_SIZE(live); ++i)
+         sum = agx_fadd(b, sum, live[i]);
+      agx_export(b, sum, 8);
+      agx_stop(b);
+
+      agx_pressure_schedule(b->shader);
+      agx_ra(b->shader);
+
+      /* TEX and the uniform COPY both name seven-bit destinations. */
+      ASSERT_EQ(bounded->dest[0].type, AGX_INDEX_REGISTER);
+      EXPECT_LE(bounded->dest[0].value +
+                   agx_size_align_16(bounded->dest[0].size) *
+                      agx_channels(bounded->dest[0]),
+                128u)
+         << "image=" << image;
+   }
+}
+
 TEST_F(AGX3PackBinary, ThreeJSVertexTextureCoordinatesStayLowUnderPressure)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -9169,6 +9224,44 @@ TEST_F(AGX3PackBinary, ImmediateIaddPreservesLiveSource)
                                 (uint8_t)(killed ? 0x14 : 0x10),0x14};
       ASSERT_GE(bytes.size(), sizeof(native));
       EXPECT_EQ(memcmp(bytes.data(), native, sizeof(native)), 0);
+   }
+}
+
+TEST_F(AGX3PackBinary, HighHalfZeroExtendUsesNarrowAdd)
+{
+   for (unsigned dest : {126u, 132u, 190u}) {
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      agx_index half = agx_register(54, AGX_SIZE_16);
+      half.discard = true;
+      agx_bitop_to(b, agx_register(dest, AGX_SIZE_32), half, agx_immediate(0),
+                   AGX3_SEL_TT_MOV);
+      agx_stop(b);
+
+      std::vector<uint8_t> want;
+      if (dest < AGX3_COPY_REG16_DEST_HALVES) {
+         uint8_t copy[AGX3_COPY_MAX_LENGTH], clr[AGX3_STAGE_MAX_LENGTH];
+         uint8_t copy_len = 0, clr_len = 0;
+         ASSERT_TRUE(agx3_copy_encode_reg16(enc, dest, 54, false, false, true,
+                                            0, copy, &copy_len));
+         ASSERT_TRUE(agx3_clr(enc, dest + 1, true, false, clr, &clr_len));
+         append(want, copy, copy_len);
+         append(want, clr, clr_len);
+      } else {
+         /* The seven-bit half COPY cannot name the destination; the narrow
+          * slot-B add of 0 zero-extends into an eight-bit one. */
+         const struct agx3_iadd_desc d = {
+            .src_kill = true, .dest = (uint16_t)dest, .immediate = 0,
+            .src = 54, .src_16 = true,
+         };
+         uint8_t add[AGX3_IADD_MAX_LENGTH], add_len = 0;
+         ASSERT_TRUE(agx3_iadd_encode(enc, &d, add, &add_len));
+         append(want, add, add_len);
+      }
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want) << "dest=" << dest;
    }
 }
 

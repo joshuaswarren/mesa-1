@@ -7151,10 +7151,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  I->op == AGX_OPCODE_TEXTURE_LOAD) ||
                 I->op == AGX_OPCODE_IMAGE_LOAD) &&
                I->dim == AGX_DIM_2D;
-            const bool register_fetch_lod =
-               I->op == AGX_OPCODE_TEXTURE_LOAD &&
-               I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
-               I->src[1].type == AGX_INDEX_REGISTER;
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
@@ -9782,6 +9778,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
              I->dest[0].size == AGX_SIZE_32 && agx_channels(I->dest[0]) == 1 &&
              (I->dest[0].value & 1) == 0) {
+            /* The half COPY names a seven-bit destination. Above it, add the
+             * zero-extended half to an immediate 0: agx3_iadd_encode()'s
+             * narrow slot-B source form, as Apple emits for
+             * `uint(ushort a[i]) + 7`, names an eight-bit destination. */
+            if (I->dest[0].value >= AGX3_COPY_REG16_DEST_HALVES) {
+               const struct agx3_iadd_desc d = {
+                  .dest = I->dest[0].value,
+                  .dest_cache = I->dest[0].cache,
+                  .immediate = 0,
+                  .src = I->src[0].value,
+                  .src_kill = I->src[0].discard,
+                  .src_16 = true,
+                  .wait_mask = wait,
+               };
+               uint8_t bytes[AGX3_IADD_MAX_LENGTH];
+               uint8_t len = 0;
+               if (!agx3_iadd_encode(enc, &d, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
             uint8_t lo[AGX3_COPY_MAX_LENGTH], hi[AGX3_STAGE_MAX_LENGTH];
             uint8_t lo_len = 0, hi_len = 0;
             bool copied = agx3_copy_encode_reg16(
