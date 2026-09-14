@@ -1316,12 +1316,13 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
    if (cf->nr_bindings == 0)
       return cf->nr_cf == 0;
 
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_api_shader *api_vs = gfx->shaders[MESA_SHADER_VERTEX];
+   /* The coefficients describe the hardware vertex program the draw
+    * launches: the API vertex shader, or the post-tessellation vertex
+    * program when tessellation is bound. */
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct hk_shader *vs =
-      api_vs ? &api_vs->variants[HK_VS_VARIANT_HW] : NULL;
+      gfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(gfx) : NULL;
    if (!vs || gfx->shaders[MESA_SHADER_GEOMETRY] ||
-       gfx->shaders[MESA_SHADER_TESS_EVAL] ||
        cf->nr_bindings > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        cf->nr_cf > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        vs->agx3_vdm_state_update.source_layout !=
