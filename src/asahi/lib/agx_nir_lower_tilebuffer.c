@@ -330,7 +330,9 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          assert(ctx->translucent != NULL &&
                 "colour masking requires translucency");
 
-         assert(agx_tilebuffer_supports_mask(tib, rt));
+         /* Writing nothing takes no masked store: the preserve below issues
+          * a full store of the value it has just loaded. */
+         assert(write_mask == 0 || agx_tilebuffer_supports_mask(tib, rt));
          *(ctx->translucent) = true;
       }
 

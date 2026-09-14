@@ -41,6 +41,26 @@
  * presents first so the context blits out of a freshly acquired buffer, and
  * ASAHI_DEPTH_BLIT_FIRST issues the flipped scissored depth blit that the
  * conformance case performs immediately before its colour one.
+ *
+ * The blit was innocent. Read straight out of the driver, the window's own
+ * memory is already zero by the time the blit samples it, while the window's
+ * depth still holds what the case cleared into it. Something earlier wrote
+ * zeros over the colour, and the last two checks below say what.
+ *
+ * The case asks for a depth clear it cannot get: the window's depth is already
+ * loaded, so the driver cannot fast clear it and u_blitter draws a full screen
+ * quad with colour writes masked off instead. That draw loses the colour it
+ * was drawn over -- but only on a ten-bit target. An RGBA8 attachment of the
+ * same shape survives it, and blending the destination back over itself, which
+ * loads the same tile, survives on both. So neither the tilebuffer load nor
+ * the store is at fault: it is a colour mask of exactly zero.
+ *
+ * Formats whose tilebuffer writes cannot be masked -- RGB10A2 among them --
+ * left their colour mask to nir_lower_blend, which deletes the store outright
+ * when the mask is zero. On G17P a covered fragment that stores nothing loses
+ * the tile it was drawn over, which agx_nir_lower_tilebuffer already knew and
+ * handled for every other format. Writing nothing needs no masked store, so
+ * the mask now goes to the tilebuffer lowering whatever the format.
  */
 
 #define GL_GLEXT_PROTOTYPES
@@ -49,6 +69,7 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -251,6 +272,329 @@ check_alpha(void)
    return ok;
 }
 
+/* Read one pixel of the bound read framebuffer's colour. */
+static void
+read_colour(GLenum buffer, float rgba[4])
+{
+   rgba[0] = rgba[1] = rgba[2] = rgba[3] = -1.0f;
+   glReadBuffer(buffer);
+   glReadPixels(SIZE / 4, SIZE / 4, 1, 1, GL_RGBA, GL_FLOAT, rgba);
+}
+
+/* Read one pixel of the default framebuffer's colour. */
+static void
+read_default_colour(float rgba[4])
+{
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+   read_colour(GL_BACK, rgba);
+}
+
+static bool
+same_colour(const float a[4], const float b[4])
+{
+   for (unsigned c = 0; c < 4; ++c) {
+      if (fabsf(a[c] - b[c]) > 1.0f / 255.0f)
+         return false;
+   }
+   return true;
+}
+
+/*
+ * The conformance case sets the window's colour, and then -- before it blits
+ * that colour anywhere -- clears the window's depth and reads it back. Nothing
+ * between the two touches the colour, so the colour must survive both.
+ *
+ * This is the one step the checks above never reproduced, and it is the step
+ * the passing configuration skips: scissor_blit fails on configurations 2, 3
+ * and 4, whose default framebuffer carries depth, and passes on 1, which has
+ * none and so never clears it. Read the colour back after each step, so a
+ * single run says which one loses it.
+ */
+static bool
+check_depth_clear_keeps_colour(bool interleave)
+{
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   glDisable(GL_SCISSOR_TEST);
+   glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+
+   float cleared[4];
+   read_default_colour(cleared);
+
+   /* The conformance case does not go straight from the window's colour to its
+    * depth: it clears a texture of its own in between, so the window's batch is
+    * flushed and rebuilt rather than extended. */
+   if (interleave) {
+      GLuint scratch_texture, scratch_fbo;
+      glGenTextures(1, &scratch_texture);
+      glBindTexture(GL_TEXTURE_2D, scratch_texture);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SIZE, SIZE, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, NULL);
+      glGenFramebuffers(1, &scratch_fbo);
+      glBindFramebuffer(GL_FRAMEBUFFER, scratch_fbo);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, scratch_texture, 0);
+      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+
+      float unused[4] = {0};
+      glReadBuffer(GL_COLOR_ATTACHMENT0);
+      glReadPixels(SIZE / 2, SIZE / 2, 1, 1, GL_RGBA, GL_FLOAT, unused);
+
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glReadBuffer(GL_BACK);
+      glDeleteFramebuffers(1, &scratch_fbo);
+      glDeleteTextures(1, &scratch_texture);
+   }
+
+   /* The conformance case's own depth value, cleared into the window. */
+   glClearDepth(0.25);
+   glClear(GL_DEPTH_BUFFER_BIT);
+
+   float after_depth_clear[4];
+   read_default_colour(after_depth_clear);
+
+   float depth = -1.0f;
+   glReadPixels(SIZE / 4, SIZE / 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT,
+                &depth);
+
+   float after_depth_read[4];
+   read_default_colour(after_depth_read);
+
+   /* And finally through the blit, which is the path that reads zeros. */
+   GLuint texture, fbo;
+   glGenTextures(1, &texture);
+   glBindTexture(GL_TEXTURE_2D, texture);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SIZE, SIZE, 0, GL_RGBA,
+                GL_UNSIGNED_BYTE, NULL);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+   glGenFramebuffers(1, &fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          texture, 0);
+   glClearColor(0.5f, 0.5f, 0.5f, 0.5f);
+   glClear(GL_COLOR_BUFFER_BIT);
+
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+   glReadBuffer(GL_BACK);
+   glEnable(GL_SCISSOR_TEST);
+   glScissor(0, 0, SIZE / 2, SIZE / 2);
+   glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE, GL_COLOR_BUFFER_BIT,
+                     GL_NEAREST);
+   glDisable(GL_SCISSOR_TEST);
+
+   float blitted[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+   glReadBuffer(GL_COLOR_ATTACHMENT0);
+   glReadPixels(SIZE / 4, SIZE / 4, 1, 1, GL_RGBA, GL_FLOAT, blitted);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+   glReadBuffer(GL_BACK);
+
+   if (glGetError() != GL_NO_ERROR) {
+      fprintf(stderr, "default framebuffer: depth clear raised a GL error\n");
+      return false;
+   }
+
+   const struct {
+      const char *what;
+      const float *colour;
+   } steps[] = {
+      {"cleared", cleared},
+      {"after clearing depth", after_depth_clear},
+      {"after reading depth", after_depth_read},
+      {"through a blit", blitted},
+   };
+
+   bool ok = true;
+   for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+      const bool match = same_colour(steps[i].colour, cleared);
+      ok &= match;
+      printf("%-13s colour %-20s [%.3f %.3f %.3f %.3f] %s\n",
+             interleave ? "interleaved" : "direct", steps[i].what,
+             steps[i].colour[0], steps[i].colour[1], steps[i].colour[2],
+             steps[i].colour[3], match ? "" : "LOST");
+   }
+   printf("%-13s depth reads %.6f\n", interleave ? "interleaved" : "direct",
+          depth);
+
+   glDeleteFramebuffers(1, &fbo);
+   glDeleteTextures(1, &texture);
+   return ok;
+}
+
+static GLuint
+compile(GLenum stage, const char *source)
+{
+   GLuint shader = glCreateShader(stage);
+   glShaderSource(shader, 1, &source, NULL);
+   glCompileShader(shader);
+
+   GLint ok = 0;
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+   if (!ok) {
+      char log[1024] = {0};
+      glGetShaderInfoLog(shader, sizeof(log) - 1, NULL, log);
+      fprintf(stderr, "default framebuffer: shader failed to compile: %s\n",
+              log);
+      return 0;
+   }
+   return shader;
+}
+
+static const char *depth_vs_source =
+   "#version 330 core\n"
+   "void main() {\n"
+   "  vec2 p = vec2((gl_VertexID & 1) == 0 ? -1.0 : 1.0,\n"
+   "                (gl_VertexID & 2) == 0 ? -1.0 : 1.0);\n"
+   "  gl_Position = vec4(p, 0.5, 1.0);\n"
+   "}\n";
+
+static const char *depth_fs_source =
+   "#version 330 core\n"
+   "out vec4 frag;\n"
+   "void main() {\n"
+   "  frag = vec4(1.0, 0.0, 0.0, 1.0);\n"
+   "}\n";
+
+/*
+ * A depth-only draw must not disturb the colour it shares a tile with.
+ *
+ * This is what the conformance case really does. It asks for a depth clear,
+ * but the window's depth is already loaded by then, so the driver cannot fast
+ * clear it and u_blitter draws a full screen quad with colour writes masked
+ * off instead. The batch reloads the window's colour, draws depth over it, and
+ * stores the colour back at end of tile -- and the colour comes back zero.
+ *
+ * A fast clear of the same depth leaves the colour alone, so the reload and
+ * the store are both fine on their own: it is the masked draw between them
+ * that loses the colour.
+ */
+/* Two ways to ask a draw to leave the colour it finds alone. Both reach the
+ * same place -- a tilebuffer load of the destination -- on a format whose
+ * tilebuffer writes cannot be masked. */
+enum preserve_mode {
+   /* Colour writes masked off entirely, depth written: the shape u_blitter
+    * reaches when it cannot fast clear the depth. */
+   PRESERVE_MASKED_DEPTH,
+   /* Blend the destination back over itself. */
+   PRESERVE_BLEND_DST,
+};
+
+static bool
+check_draw_keeps_colour(const char *what, GLenum colour_format,
+                        enum preserve_mode mode)
+{
+   GLuint vs = compile(GL_VERTEX_SHADER, depth_vs_source);
+   GLuint fs = compile(GL_FRAGMENT_SHADER, depth_fs_source);
+   if (!vs || !fs)
+      return false;
+
+   GLuint program = glCreateProgram();
+   glAttachShader(program, vs);
+   glAttachShader(program, fs);
+   glLinkProgram(program);
+   GLint linked = 0;
+   glGetProgramiv(program, GL_LINK_STATUS, &linked);
+   if (!linked) {
+      char log[1024] = {0};
+      glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+      fprintf(stderr, "default framebuffer: link failed: %s\n", log);
+      return false;
+   }
+
+   GLuint vao;
+   glGenVertexArrays(1, &vao);
+   glBindVertexArray(vao);
+
+   /* The window is the conformance case's own target; a texture of the same
+    * shape says whether the loss belongs to the window or to the draw. */
+   GLuint texture = 0, depth_texture = 0, fbo = 0;
+   if (colour_format) {
+      glGenTextures(1, &texture);
+      glBindTexture(GL_TEXTURE_2D, texture);
+      glTexImage2D(GL_TEXTURE_2D, 0, colour_format, SIZE, SIZE, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, NULL);
+      glGenTextures(1, &depth_texture);
+      glBindTexture(GL_TEXTURE_2D, depth_texture);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, SIZE, SIZE, 0,
+                   GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+
+      glGenFramebuffers(1, &fbo);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, texture, 0);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                             GL_TEXTURE_2D, depth_texture, 0);
+      if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+         printf("%-28s unsupported\n", what);
+         return true;
+      }
+   } else {
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   }
+
+   glDisable(GL_SCISSOR_TEST);
+   glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+
+   /* Read it back so the clear is submitted on its own. The draw below then
+    * begins a batch that must reload the colour rather than clear it, which is
+    * the shape the conformance case reaches. */
+   float cleared[4];
+   read_colour(colour_format ? GL_COLOR_ATTACHMENT0 : GL_BACK, cleared);
+
+   glUseProgram(program);
+   if (mode == PRESERVE_MASKED_DEPTH) {
+      glEnable(GL_DEPTH_TEST);
+      glDepthFunc(GL_ALWAYS);
+      glDepthMask(GL_TRUE);
+      glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+   } else {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_ZERO, GL_ONE);
+   }
+
+   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+   glDisable(GL_DEPTH_TEST);
+   glDisable(GL_BLEND);
+   glUseProgram(0);
+
+   float after[4];
+   read_colour(colour_format ? GL_COLOR_ATTACHMENT0 : GL_BACK, after);
+
+   float depth = -1.0f;
+   glReadPixels(SIZE / 4, SIZE / 4, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT,
+                &depth);
+
+   if (glGetError() != GL_NO_ERROR) {
+      fprintf(stderr, "default framebuffer: depth draw raised a GL error\n");
+      return false;
+   }
+
+   const bool ok = same_colour(after, cleared);
+   printf("%-28s [%.3f %.3f %.3f %.3f] -> [%.3f %.3f %.3f %.3f] "
+          "depth %.6f %s\n",
+          what, cleared[0], cleared[1], cleared[2], cleared[3], after[0],
+          after[1], after[2], after[3], depth, ok ? "" : "LOST");
+
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   glReadBuffer(GL_BACK);
+   if (fbo)
+      glDeleteFramebuffers(1, &fbo);
+   if (texture)
+      glDeleteTextures(1, &texture);
+   if (depth_texture)
+      glDeleteTextures(1, &depth_texture);
+   glDeleteVertexArrays(1, &vao);
+   glDeleteProgram(program);
+   return ok;
+}
+
 /* The failing conformance blit copies the window -- b10g10r10a2_unorm, as the
  * driver's resource log names it -- into an r8g8b8a8_unorm texture under a
  * scissor. Build that pair directly, so no window is needed. */
@@ -365,13 +709,14 @@ main(void)
        !eglBindAPI(EGL_OPENGL_API))
       return 1;
 
-   /* No alpha is requested, which is the configuration the conformance run
-    * fails on: the default framebuffer must still read alpha as one. */
+   /* No alpha, and depth: that is the shape of every configuration the
+    * conformance run fails on. The default framebuffer must still read alpha
+    * as one, and clearing its depth must not cost it its colour. */
    const EGLint *config_attributes = (const EGLint[]){
       EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
       EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
       EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
-      EGL_ALPHA_SIZE, 0, EGL_NONE,
+      EGL_ALPHA_SIZE, 0, EGL_DEPTH_SIZE, 16, EGL_NONE,
    };
    const EGLint window_config_attributes[] = {
       EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
@@ -458,6 +803,11 @@ main(void)
    if (getenv("ASAHI_GL_NOOP_SHIM") != NULL)
       return 0;
 
+   /* Which driver answered. A GL client that misses the campaign's loader
+    * environment lands on llvmpipe, where every one of these checks passes, so
+    * say so rather than let a control be read as a hardware result. */
+   printf("renderer %s (%s)\n", glGetString(GL_RENDERER), glGetString(GL_VENDOR));
+
    glViewport(0, 0, SIZE, SIZE);
 
    /* A window that has been presented hands the next frame a different buffer,
@@ -475,6 +825,20 @@ main(void)
    walk_read_buffers();
    bool ok = check_alpha();
    ok &= check_rgb10_a2_blit();
+   ok &= check_depth_clear_keeps_colour(false);
+   ok &= check_depth_clear_keeps_colour(true);
+   ok &= check_draw_keeps_colour("masked depth draw: window", 0,
+                                 PRESERVE_MASKED_DEPTH);
+   ok &= check_draw_keeps_colour("masked depth draw: rgba8", GL_RGBA8,
+                                 PRESERVE_MASKED_DEPTH);
+   ok &= check_draw_keeps_colour("masked depth draw: rgb10_a2", GL_RGB10_A2,
+                                 PRESERVE_MASKED_DEPTH);
+   ok &= check_draw_keeps_colour("blend destination: window", 0,
+                                 PRESERVE_BLEND_DST);
+   ok &= check_draw_keeps_colour("blend destination: rgba8", GL_RGBA8,
+                                 PRESERVE_BLEND_DST);
+   ok &= check_draw_keeps_colour("blend destination: rgb10_a2", GL_RGB10_A2,
+                                 PRESERVE_BLEND_DST);
 
    printf("default framebuffer: %s\n", ok ? "match" : "MISMATCH");
    return ok ? 0 : 1;

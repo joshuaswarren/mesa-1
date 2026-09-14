@@ -574,7 +574,16 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       if (key->rt_formats[i] == PIPE_FORMAT_NONE)
          continue;
 
-      if (agx_tilebuffer_supports_mask(&tib, i)) {
+      if (key->blend.rt[i].colormask == 0) {
+         /* Writing nothing needs no masked store, so this costs nothing even
+          * where the tilebuffer cannot mask -- and it must go this way. Left
+          * to nir_lower_blend, a mask of zero deletes the store outright, and
+          * a covered fragment that stores nothing loses the tile it was drawn
+          * over: agx_nir_lower_tilebuffer preserves the destination instead.
+          */
+         colormasks[i] = 0;
+         opts.rt[i].colormask = (uint8_t)BITFIELD_MASK(4);
+      } else if (agx_tilebuffer_supports_mask(&tib, i)) {
          colormasks[i] = key->blend.rt[i].colormask;
          opts.rt[i].colormask = (uint8_t)BITFIELD_MASK(4);
       } else {
