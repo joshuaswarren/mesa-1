@@ -547,12 +547,16 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
        * native PBE. */
       if (atomic_sw_out && generation == 9 && !cfg.extended &&
           (layout->writeable_image || usage == HK_DESC_USAGE_EMRT)) {
+         /* A linear image addresses texels through the native PBE's row
+          * stride and is never layered here, so its sideband carries no tile
+          * geometry or layer stride. */
+         const bool linear = layout->tiling == AIL_TILING_LINEAR;
          if (!hk_pack_g17p_image_atomic_sw(
                 ail_get_level_offset_B(layout, cfg.level),
-                layout->tilesize_el[level].width_el,
-                layout->tilesize_el[level].height_el,
-                layout->layer_stride_B, msaa ? image->vk.samples : 1,
-                atomic_sw_out))
+                linear ? 1 : layout->tilesize_el[level].width_el,
+                linear ? 1 : layout->tilesize_el[level].height_el,
+                linear ? 0 : layout->layer_stride_B,
+                msaa ? image->vk.samples : 1, atomic_sw_out))
             return false;
       }
    }
