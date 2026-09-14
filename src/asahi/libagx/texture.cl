@@ -252,11 +252,15 @@ libagx_image_texel_address_gen9(
     * FILE and are intentionally rejected by the AGX3 backend. */
    const uint64_t native01 =
       (uint64_t)ptr->opaque[0] | ((uint64_t)ptr->opaque[1] << 32);
+   const uint64_t native23 =
+      (uint64_t)ptr->opaque[2] | ((uint64_t)ptr->opaque[3] << 32);
    const uint width_px_lod0 = (uint)((native01 >> 24) & 0x3fffu) + 1;
+   /* A linear PBE shortens the address to 40 bits and stores its row pitch
+    * minus 16 bytes at bit 40, see agx_pbe_agx3_2d_pack(). */
+   const bool linear = ((native01 >> 4) & 0x3u) == AGX_LAYOUT_LINEAR;
    const uint64_t buffer =
-      ((uint64_t)ptr->opaque[2] |
-       ((uint64_t)(ptr->opaque[3] & 0xfffu) << 32))
-      << 4;
+      (native23 & (linear ? 0xffffffffffUL : 0xfffffffffffUL)) << 4;
+   const uint linear_stride_B = (uint)((native23 >> 40) & 0x1fffffu) + 16;
    const uint level = (ptr->opaque[5] >> 12) & 0xfu;
    const uint64_t sw = *sw_ptr;
    const uint level_offset_B = (uint)(sw & 0x7ffffffu) << 7;
@@ -267,6 +271,8 @@ libagx_image_texel_address_gen9(
    uint total_px;
    if (is_1d) {
       total_px = coord.x;
+   } else if (linear) {
+      total_px = coord.y * (linear_stride_B / bytes_per_sample_B) + coord.x;
    } else {
       const uint width_px = max(width_px_lod0 >> level, 1u);
       /* libcl's generic align() asserts dynamically that its alignment is a
@@ -408,6 +414,17 @@ libagx_texture_samples_gen9(constant struct agx_texture_gen9_packed *ptr)
 
    /* We may assume the input is multisampled, so just check the samples */
    return 2u << d.samples;
+}
+
+/* robustImageAccess2 reads outside a view return (0, 0, 0, 1) for a format
+ * without alpha and zero otherwise. A view's descriptor records a missing alpha
+ * as a constant one alpha swizzle; the null texture swizzles every channel to
+ * zero. */
+bool
+libagx_image_oob_alpha_one_gen9(constant struct agx_texture_gen9_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN9, d);
+   return d.swizzle_a == AGX_CHANNEL_1;
 }
 
 uint

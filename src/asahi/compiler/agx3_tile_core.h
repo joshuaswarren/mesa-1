@@ -91,6 +91,15 @@ bool agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
                      uint16_t wait_mask, uint8_t out[AGX3_TILE_MAX_LENGTH],
                      uint8_t *len);
 
+/* agx3_tile_store with AGX3b f13 chosen by the caller; AGX3c always sets it.
+ * Apple's AGX3b fragments set f13 on the leading stores of colour
+ * transactions wider than five targets, see agx3_g17p_mrt_protocol(). */
+bool agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,
+                         enum agx3_tile_width width, uint8_t chan_mask,
+                         uint16_t tile_off, struct agx3_tile_sample sample,
+                         uint16_t wait_mask, bool f13,
+                         uint8_t out[AGX3_TILE_MAX_LENGTH], uint8_t *len);
+
 /* Load from the tile buffer into `dest` on scoreboard slot `slot`.  `first`
  * and `last` are the load-sequence boundary markers witnessed in the corpus;
  * AGX3b encodes only `first`, while AGX3c encodes both. */

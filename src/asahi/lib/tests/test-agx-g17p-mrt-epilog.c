@@ -397,9 +397,6 @@ main(void)
    if (!test_wboit_background_clear())
       return 1;
 
-   if (!test_wide_rgba8_background(4, false, 0xf, 7) ||
-       !test_wide_rgba8_background(8, false, 0xff, 7))
-      return 1;
 
    if (!test_wide_rgba8_epilog(4, 0xf, 7) ||
        !test_wide_rgba8_epilog(8, 0xff, 7))
@@ -408,17 +405,14 @@ main(void)
       if (!test_wide_rgba8_epilog(8, g17p_sparse_mrt_oracles[i].target_mask,
                                  g17p_sparse_mrt_oracles[i].partition_mask))
          return 1;
-      for (unsigned reload = 0; reload < 2; ++reload) {
-         if (!test_wide_rgba8_background(8, reload,
-                        g17p_sparse_mrt_oracles[i].target_mask,
-                        g17p_sparse_mrt_oracles[i].partition_mask))
-            return 1;
-      }
    }
 
-   if (!test_wide_rgba8_background(4, true, 0xf, 7) ||
-       !test_wide_rgba8_background(8, true, 0xff, 7))
-      return 1;
+   /* No background case here. The wide-MRT class protocol is witnessed on
+    * Apple's FRAGMENT programs; its BG constructors keep the ascending,
+    * transaction-free shape, and agx3_g17p_rt0_bg_program_generate()'s loader
+    * descriptor is built for that. Compiling a clear with the transaction
+    * aborts KHR-GL30.draw_buffers.draw_buffers_1 on hardware at "background
+    * Ioto program". */
 
    nir_builder mb = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P MRT main");

@@ -1876,7 +1876,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
                   NULL);
          NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
-         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs, dev->chip);
+         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
 
@@ -2028,7 +2028,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       NIR_PASS(_, gs_copy, agx_nir_lower_cull_distance_vs);
 
       struct agx_unlinked_uvs_layout uvs = {0};
-      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs, dev->chip);
+      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs);
 
       compiled->gs_copy =
          agx_compile_nir(dev, gs_copy, &pctx->debug, MESA_SHADER_GEOMETRY,
@@ -4502,8 +4502,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       if (op == AGX_BG_EOT_NONE)
          capacity = AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE;
       else if (wide_count)
-         capacity = store ? AGX3_G17P_WIDE_MRT_EOT_PROGRAM_MAX_SIZE
-                          : AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE;
+         /* A wide background is not an RT0 reload: eight clear values need
+          * eight load chunks, and the generated program runs past the RT0
+          * bound (344 bytes against 246 for eight RGBA8 targets, which is
+          * what KHR-GL30.draw_buffers clears). */
+         capacity = store ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
+                          : AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE;
       else if (store)
          capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
       else if (op == AGX_BG_CLEAR)
@@ -4571,7 +4575,10 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .imageblock_offset_B =
                agx_tilebuffer_offset_B(&key.tib, first_rt),
             .attachment_count = attachment_count,
-            .attachment_mask = rgba8_mask,
+            /* Several targets stored at once is the mixed-format builtin,
+             * whichever API named the layout: the selectors already come
+             * from each target's own logical format (agx_bg_eot.c). */
+            .mixed_mrt = attachment_count >= 2,
             .imageblock_offset1_B =
                dual_mrt_active ? agx_tilebuffer_offset_B(&key.tib, 1) : 0,
             .shader_binary_size = shader->info.binary_size,
@@ -4586,10 +4593,18 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
                .tile_size_px = key.tib.tile_size,
             },
          };
+         uint8_t *const offsets[] = {
+            &desc.imageblock_offset1_B, &desc.imageblock_offset2_B,
+            &desc.imageblock_offset3_B, &desc.imageblock_offset4_B,
+            &desc.imageblock_offset5_B, &desc.imageblock_offset6_B,
+            &desc.imageblock_offset7_B,
+         };
          unsigned offset_index = 0;
-         u_foreach_bit(rt, attachment_mask)
-            desc.imageblock_offsets_B[offset_index++] =
-               agx_tilebuffer_offset_B(&key.tib, rt);
+         u_foreach_bit(rt, attachment_mask & ~BITFIELD_BIT(first_rt)) {
+            if (offset_index >= ARRAY_SIZE(offsets))
+               break;
+            *offsets[offset_index++] = agx_tilebuffer_offset_B(&key.tib, rt);
+         }
          struct agx3_g17p_rt0_eot_program native;
          if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &native) ||
              native.length > capacity)

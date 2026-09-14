@@ -100,8 +100,10 @@ All three formats produce identical text for each texture type:
 
 The type2 text is the existing selector0x35 program. Type3 reproduces the old
 signed fixture byte for byte. The regression requires the same type2 bytes for
-signed and unsigned four-word I32 stores. Multisample and layered admission
-remain unchanged. This is native compiler evidence, not GPU pixel validation.
+signed and unsigned four-word I32 stores. Texture types 4 (multisample) and 8
+(multisample array) are likewise identical across the three formats, and the
+multisample regression requires the unresolved I32 bytes for the signed key.
+This is native compiler evidence, not GPU pixel validation.
 
 On J700 A18 Pro B1, native DM1, the old per-thread-coordinate program stored
 only the first 32x32 tile of a 512x512 target. The matched native shader and

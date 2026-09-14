@@ -61,6 +61,57 @@ bool agx_vdm_tessellate_direct_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
    struct agx_vdm_tessellate_direct_info *info);
 
+#define AGX_VDM_TESSELLATION_STATE_LENGTH 12u
+
+enum agx_vdm_tessellation_partition {
+   AGX_VDM_TESSELLATION_PARTITION_POW2 = 0,
+   AGX_VDM_TESSELLATION_PARTITION_INTEGER = 1,
+   AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD = 2,
+   AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN = 3,
+};
+
+enum agx_vdm_tessellation_step {
+   AGX_VDM_TESSELLATION_STEP_CONSTANT = 0,
+   AGX_VDM_TESSELLATION_STEP_PER_PATCH = 1,
+   AGX_VDM_TESSELLATION_STEP_PER_INSTANCE = 2,
+   AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE = 3,
+};
+
+struct agx_vdm_tessellation_state_info {
+   enum agx_vdm_tessellation_partition partition;
+   bool counterclockwise;
+   /* The tessellator's maximum factor, 1..64. A fractional-odd record
+    * stores one less, so its largest factor is odd. */
+   uint8_t max_factor;
+   bool quads;
+   bool float_factors;
+   enum agx_vdm_tessellation_step step;
+   /* VertexProgramVariant+0x114d, set from the post-tessellation program's
+    * linker metadata. Zero in every captured record. */
+   bool program_flag;
+   /* The factor scale as an IEEE half; 1.0 is 0x3c00. */
+   uint16_t scale_half;
+};
+
+/*
+ * The VDM state update a hardware tessellator reads before a Tessellate
+ * record: block type 2 with its tessellation and tessellation-scale words
+ * present. Built by HWTessellationContext::drawPatches in the G17P render
+ * plugin (0x216cbe490..0x216cbe578):
+ *
+ *   word0 0x40000090
+ *   word1 partition[31:30] ccw[29] (max - 1 - fractional_odd)[28:23] 1[21]
+ *         quads[20] float_factors[19] step[18:17] program_flag[16]
+ *   word2 scale as a half
+ */
+bool agx_vdm_tessellation_state_pack(
+   enum agx_chip chip, const struct agx_vdm_tessellation_state_info *info,
+   uint8_t out[AGX_VDM_TESSELLATION_STATE_LENGTH]);
+
+bool agx_vdm_tessellation_state_unpack(
+   enum agx_chip chip, const void *bytes, size_t size,
+   struct agx_vdm_tessellation_state_info *info);
+
 #ifdef __cplusplus
 }
 #endif

@@ -417,14 +417,18 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
    if ((d->wait_mask & ~wait_limit(enc)) != 0)
       return false;
 
-   /* f25 = 2 register source, f26 = 1 its 16-bit width, f29 = 1 in every
-    * witness. AGX3c adds this form's sub-opcode pair. */
+   /* f25 = 2 register source and f29 = 1 in every witness. f26 is the source
+    * width: one 16-bit register for packed 8-bit lanes and a single 16-bit
+    * lane, and two for a pair of 16-bit lanes (applegpu_g17p RG16Unorm,
+    * RGBA16Unorm and RGBA16Snorm blending reads `1c` where R16 and RGBA8
+    * read `14`). AGX3c adds this form's sub-opcode pair. */
    struct agx3_field_kv base[7];
    unsigned nbase = 0;
    base[nbase++] = (struct agx3_field_kv)KV(9, 2);
    base[nbase++] = (struct agx3_field_kv)KV(10, 2);
    base[nbase++] = (struct agx3_field_kv)KV(25, 2);
-   base[nbase++] = (struct agx3_field_kv)KV(26, 1);
+   base[nbase++] =
+      (struct agx3_field_kv)KV(26, d->is_16bit && d->two_lanes ? 2 : 1);
    base[nbase++] = (struct agx3_field_kv)KV(29, 1);
    if (enc == AGX_ISA_ENCODING_AGX3C) {
       base[nbase++] = (struct agx3_field_kv)KV(30, 3);

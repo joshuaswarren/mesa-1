@@ -111,8 +111,8 @@ agx3_pixel_wait(enum agx_isa_encoding enc, uint32_t writeout,
 {
    /* Every writeout mask Apple's fragment corpus emitted on pixwait, less the
     * f15-gated shader-entry form (512). */
-   static const uint32_t witnessed[] = {1,  4,  8,  12, 16, 32,
-                                        48, 60, 64, 128, 192};
+   static const uint32_t witnessed[] = {1,  4,  8,   12,  16, 32,
+                                        48, 60, 64, 128, 192, 252};
 
    if (out == NULL || len == NULL)
       return false;
@@ -148,9 +148,9 @@ agx3_pixel_release(enum agx_isa_encoding enc, uint32_t writeout, bool last,
                    uint16_t wait_mask, uint8_t out[AGX3_PIXEL_MAX_LENGTH],
                    uint8_t *len)
 {
-   /* The witnessed pixrel descriptors are exactly {0,1,12,48,60,192} with an
-    * optional 0x200 "final release" bit. */
-   static const uint32_t witnessed[] = {0, 1, 12, 48, 60, 192};
+   /* The witnessed pixrel descriptors are exactly {0,1,12,48,60,192,252}
+    * with an optional 0x200 "final release" bit. */
+   static const uint32_t witnessed[] = {0, 1, 12, 48, 60, 192, 252};
 
    if (out == NULL || len == NULL)
       return false;

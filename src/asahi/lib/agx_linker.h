@@ -133,6 +133,9 @@ struct agx_fs_prolog_key {
    /* If we discard, whether we need to run Z/S tests */
    bool run_zs_tests;
 
+   /* G17P rasterization samples its coverage updates are compiled for */
+   uint8_t nr_samples;
+
    /* If we emulate cull distance, the base offset for our allocated coefficient
     * registers so we don't interfere with the main shader.
     */

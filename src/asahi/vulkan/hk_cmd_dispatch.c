@@ -17,6 +17,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_agx3_ioto_program_core.h"
+#include "asahi/compiler/agx3_compute_program.h"
 #include "hk_physical_device.h"
 #include "hk_shader.h"
 #include "libagx_dgc.h"
@@ -216,6 +217,12 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    case AGX_CS_GENERATION_G15:
    case AGX_CS_GENERATION_HAL200:
    case AGX_CS_GENERATION_HAL300: {
+      /* A strong flush already ends the stream: every launch has one in its
+       * tail, and a second barrier with no launch between them is not a
+       * shape Apple's CDM emitter produces. */
+      if (cs->current == cs->strong_flush_end)
+         return;
+
       /* Apple's CommandEncodingNext emitter uses flags=5 for its strong
        * post-dispatch cache flush on every grounded G15--G17 identity.  Keep
        * Honeykrisp's deliberately conservative flush-after-every-launch
@@ -235,6 +242,7 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 
       memcpy(cs->current, packed, sizeof(packed));
       cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
+      cs->strong_flush_end = cs->current;
       break;
    }
 
@@ -322,11 +330,13 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
     * even though Honeykrisp has always launched that binary through CDM. */
    return s && linked &&
           (s->b.info.stage == MESA_SHADER_COMPUTE ||
-           s->info.stage == MESA_SHADER_GEOMETRY) &&
+           s->info.stage == MESA_SHADER_GEOMETRY ||
+           s->info.stage == MESA_SHADER_TESS_CTRL) &&
           linked->b.bo && linked->b.bo->va && linked->b.size != 0 &&
           linked->b.size <= UINT32_MAX && linked->b.nr_gprs != 0 &&
           !s->b.info.has_preamble && s->b.info.preamble_scratch_size == 0 &&
-          s->b.info.scratch_size == 0 && linked->b.scratch_size == 0 &&
+          s->b.info.scratch_size <= AGX3_G17P_MAX_SPILL_B &&
+          linked->b.scratch_size <= AGX3_G17P_MAX_SPILL_B &&
           s->b.info.agx3_staging_known &&
           s->b.info.local_size <= 32768 &&
           s->b.info.texture_state_count == 0 &&
@@ -719,7 +729,12 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    struct agx_precompiled_shader *prog =
       agx_get_precompiled(&dev->bg_eot, idx);
-   if (dev->dev.chip != AGX_CHIP_G17P || !prog || !prog->bo ||
+   if (!prog) {
+      mesa_loge("no G17P precompiled program %u", (unsigned)idx);
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   if (dev->dev.chip != AGX_CHIP_G17P || !prog->bo ||
        !prog->info.main_size || !prog->info.nr_gprs ||
        prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
        !prog->info.agx3_staging_known ||
@@ -809,6 +824,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+   if (barrier_flags == 0x5)
+      cs->strong_flush_end = cs->current;
    cs->stats.cmds++;
 }
 
@@ -1377,6 +1394,8 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+   if (barrier_flags == 0x5)
+      cs->strong_flush_end = cs->current;
    cs->stats.cmds++;
 }
 

@@ -85,6 +85,8 @@ instrs_equal(const void *_i1, const void *_i2)
     * own line here; test-agx3-pack-binary.cpp asserts it. */
    if (i1->offset_xyz != i2->offset_xyz)
       return false;
+   if (i1->pixel_offset != i2->pixel_offset)
+      return false;
    if (i1->colour_target != i2->colour_target)
       return false;
    if (i1->shadow != i2->shadow)

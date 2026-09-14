@@ -50,7 +50,7 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
    invalid.logical_format[count] = format;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
-   invalid.nr_samples = 2;
+   invalid.nr_samples = 3;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
    invalid.layered = true;

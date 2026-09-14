@@ -342,8 +342,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
       }
 
    case AGX_OPCODE_ZS_EMIT_AGX3:
-      assert(s == 0 && I->zs == 1);
-      return 4;
+      assert(s == 0 && I->zs >= 1 && I->zs <= 3);
+      return (I->zs & 1) ? 4 : 2;
 
    case AGX_OPCODE_IMAGE_WRITE:
       if (s == 0)

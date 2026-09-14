@@ -1167,8 +1167,11 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 {
    void *memctx = ralloc_context(NULL);
 
-   /* We need extra registers for memory-memory swaps */
-   k -= remat_only ? 2 : 8;
+   /* Spilling needs extra registers for memory-memory swaps. Rematerializing
+    * inserts none, but must still leave room for the registers RA reserves at
+    * the bottom of the file, which is four for an AGX3 divergent shuffle.
+    */
+   k -= remat_only ? MAX2(agx_reserved_registers(ctx), 2) : 8;
 
    uint8_t *channels = rzalloc_array(memctx, uint8_t, ctx->alloc);
    dist_t *next_uses = rzalloc_array(memctx, dist_t, ctx->alloc);

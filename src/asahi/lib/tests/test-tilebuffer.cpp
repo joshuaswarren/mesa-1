@@ -243,9 +243,10 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 4u);
 
+   /* Multisample layouts take the mixed-format programs. */
    tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
-   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
-   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
 
    tib = agx_build_tilebuffer_layout(wboit, 2, 1, false);
    tib._offset_B[1] = 4;
@@ -488,8 +489,7 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
        * R16_FLOAT is one of the families the four-sample hardware sweep in
        * test-g17p-gl-msaa-resolve.c covers. R16_UINT is not. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
-      EXPECT_EQ(agx_g17p_rt0_tile_layout_supported(&tib),
-                format.physical == PIPE_FORMAT_R16_FLOAT);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
 
    enum pipe_format packed_float[AGX_MAX_RENDER_TARGETS] = {
@@ -605,6 +605,12 @@ TEST(Tilebuffer, G17PRGB32EOTKey)
       EXPECT_EQ(key.g17p_rt0_eot_i32_signed_four_words,
                 format.signed_format);
 
+      /* The 32-bit tile is the one family the multisample sweep does not
+       * reach: agx3_emit_tile() has no witnessed multisample store above
+       * sixteen halves, and admitting the layout only defers the refusal to
+       * a draw. capture-g17p-r32-multisample-store.py holds Apple's own
+       * single-target store for it; the remaining field is not yet
+       * identified, so this stays refused rather than guessed. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
       tib = agx_build_tilebuffer_layout(rt, 1, 1, true);

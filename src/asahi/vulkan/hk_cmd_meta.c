@@ -63,7 +63,7 @@ hk_device_init_meta(struct hk_device *dev)
       return result;
 
    dev->meta.use_gs_for_layer = false;
-   dev->meta.use_layer_output = dev->dev.chip != AGX_CHIP_G17P;
+   dev->meta.use_layer_output = true;
    dev->meta.use_view_relative_3d_layer = dev->dev.chip == AGX_CHIP_G17P;
    /* G17P has ordinary fixed-function stencil testing/updates, but its
     * fragment stencil-export operand is not part of the grounded AGX3B ABI.
@@ -1771,7 +1771,9 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       src_image->vk.image_type == VK_IMAGE_TYPE_2D &&
+       dst_image->vk.image_type == VK_IMAGE_TYPE_2D) {
       for (uint32_t r = 0; r < pBlitImageInfo->regionCount; ++r) {
          const VkImageBlit2 *region = &pBlitImageInfo->pRegions[r];
          const uint32_t src_layers = vk_image_subresource_layer_count(

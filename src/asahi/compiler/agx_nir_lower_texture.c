@@ -22,6 +22,8 @@
 struct agx_texture_lower_options {
    bool gen9;
    bool buffer_metadata;
+   /* Formatless image loads still need view-bounds robustness. */
+   bool robust_formatless_images;
 };
 
 static nir_def *
@@ -81,6 +83,28 @@ has_nonzero_lod(nir_tex_instr *tex)
 
    nir_src src = tex->src[idx].src;
    return !(nir_src_is_const(src) && nir_src_as_uint(src) == 0);
+}
+
+/*
+ * The robustImageAccess2 value of an invalid read on G17P: zero, with a one
+ * alpha when the bound view's format has none, which its Gen9 texture
+ * descriptor records as a constant-one alpha swizzle.
+ */
+static nir_def *
+g17p_robust_oob_value(nir_builder *b, nir_def *texture_descriptor,
+                      nir_alu_type dest_type, unsigned num_components,
+                      unsigned bit_size)
+{
+   nir_def *zero = nir_imm_zero(b, num_components, bit_size);
+   if (num_components != 4)
+      return zero;
+
+   nir_def *one = nir_alu_type_get_base_type(dest_type) == nir_type_float
+                     ? nir_imm_floatN_t(b, 1.0, bit_size)
+                     : nir_imm_intN_t(b, 1, bit_size);
+   nir_def *alpha_one = libagx_image_oob_alpha_one_gen9(b, texture_descriptor);
+   return nir_vector_insert_imm(
+      b, zero, nir_bcsel(b, alpha_one, one, nir_channel(b, zero, 3)), 3);
 }
 
 static bool
@@ -246,6 +270,31 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex, bool buffer_metadata)
    return true;
 }
 
+/* A texel offset counts as immediate when every component resolves to a
+ * constant, including the per-component vector nir_lower_load_const_to_scalar
+ * leaves behind. */
+static bool
+g17p_offset_is_constant(nir_def *offset)
+{
+   for (unsigned c = 0; c < offset->num_components; ++c) {
+      if (!nir_scalar_is_const(nir_scalar_resolved(offset, c)))
+         return false;
+   }
+   return true;
+}
+
+/* A signed x64 LOD in the 12-bit field of a G17P sampler bank-6 word, the
+ * same bounds and truncation the immediate SMP LOD field uses. */
+static nir_def *
+pack_g17p_lod_field(nir_builder *b, nir_def *lod, float minimum, unsigned shift)
+{
+   nir_def *lod32 = nir_f2f32(b, lod);
+   lod32 = nir_fmax(b, lod32, nir_imm_float(b, minimum));
+   lod32 = nir_fmin(b, lod32, nir_imm_float(b, 2047.0f / 64.0f));
+   nir_def *x64 = nir_f2i32(b, nir_fmul_imm(b, lod32, 64.0f));
+   return nir_ishl_imm(b, nir_iand_imm(b, x64, 0xfff), shift);
+}
+
 /*
  * NIR indexes into array textures with unclamped floats (integer for txf). AGX
  * requires the index to be a clamped integer. Lower tex_src_coord into
@@ -286,8 +335,8 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
     * out-of-range coordinate and keeps the level itself, which the G17P
     * indexed fetch cannot even take as an immediate. Predicate the whole
     * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
-    * hardware access itself stays inside the view, and select the required
-    * zero result after the fetch. */
+    * hardware access itself stays inside the view, and select the
+    * robustImageAccess2 value after the fetch. */
    if (gen9 && tex->op == nir_texop_txf &&
        (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
         tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
@@ -426,7 +475,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_def *offset = nir_steal_tex_src(tex, nir_tex_src_offset);
 
    if (offset != NULL) {
-      if (gen9 && !nir_def_is_const(offset)) {
+      if (gen9 && !g17p_offset_is_constant(offset)) {
          /* Array layer, register LOD/bias, and a runtime 2D offset occupy
           * complementary fields of sampler bank 6. Multiple PACK_SMPIR
           * instructions replace that word instead of composing it, so publish
@@ -436,37 +485,68 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
           *
           * Explicit levels are nonnegative; biases retain the full signed
           * 12-bit range.  These are the same bounds and truncation used by
-          * the immediate SMP field. */
+          * the immediate SMP field.
+          *
+          * A sample with a minimum LOD keeps the same word, as Apple's
+          * register packs do. A gradient's minimum takes bits 16..27. A bias
+          * keeps them, and its minimum takes bits 0..11 unless an array
+          * layer owns them; the 2D-array minimum is staged separately. */
          const int level_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_lod);
          const int bias_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_bias);
-         const bool has_min_lod =
-            nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0;
-         const int packed_level_idx = level_idx >= 0 ? level_idx : bias_idx;
-         const bool pack_level = packed_level_idx >= 0 && !has_min_lod &&
-            !nir_src_is_const(tex->src[packed_level_idx].src) &&
+         const int min_lod_idx =
+            nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+         const bool has_min_lod = min_lod_idx >= 0 &&
+            nir_src_bit_size(tex->src[min_lod_idx].src) == 16;
+         const int packed_level_idx =
+            has_min_lod && tex->op == nir_texop_txd ? min_lod_idx
+            : level_idx >= 0                        ? level_idx
+                                                    : bias_idx;
+         const bool pack_level = packed_level_idx >= 0 &&
+            (has_min_lod ||
+             !nir_src_is_const(tex->src[packed_level_idx].src)) &&
             nir_src_bit_size(tex->src[packed_level_idx].src) == 16;
          const bool pack_array_layer = tex->is_array && layer != NULL;
+         const bool bias_minimum = has_min_lod && !tex->is_array &&
+            tex->op == nir_texop_txb;
+
+         /* A 3D bias with a minimum publishes the Z nibble in bits 0..3 of
+          * the same word; its minimum goes to a packed register SMP names.
+          * Apple's texture3d bias + min_lod_clamp + runtime offset packs the
+          * X/Y nibbles and bias into one word (17055402030c1c10f08a0300),
+          * then adds Z at bank-6 bit 0 (1705540600020010f0c20200). */
+         if (offset->num_components == 3 && bias_minimum &&
+             tex->sampler_dim == GLSL_SAMPLER_DIM_3D && pack_level) {
+            nir_def *z = nir_iand_imm(b, nir_channel(b, offset, 2), 0xf);
+            nir_def *x = nir_ishl_imm(
+               b, nir_iand_imm(b, nir_channel(b, offset, 0), 0xf), 12);
+            nir_def *y = nir_ishl_imm(
+               b, nir_iand_imm(b, nir_channel(b, offset, 1), 0xf), 28);
+            nir_def *packed = nir_ior(
+               b, pack_g17p_lod_field(b, tex->src[bias_idx].src.ssa, -32.0f, 16),
+               nir_ior(b, z, nir_ior(b, x, y)));
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+            goto offset_lowered;
+         }
 
          if (offset->num_components == 2 &&
              (pack_level || pack_array_layer)) {
-            nir_def *packed = pack_array_layer
-               ? nir_iand_imm(b, nir_u2u32(b, layer), 0xfff)
-               : nir_imm_int(b, 0);
+            nir_def *packed =
+               pack_array_layer
+                  ? nir_iand_imm(b, nir_u2u32(b, layer), 0xfff)
+               : bias_minimum
+                  ? pack_g17p_lod_field(b, tex->src[min_lod_idx].src.ssa,
+                                        0.0f, 0)
+                  : nir_imm_int(b, 0);
 
             if (pack_level) {
-               nir_def *level = tex->src[packed_level_idx].src.ssa;
-               nir_def *level32 = nir_f2f32(b, level);
-               const float minimum = bias_idx >= 0 ? -32.0f : 0.0f;
-               level32 = nir_fmax(b, level32, nir_imm_float(b, minimum));
-               level32 = nir_fmin(b, level32,
-                                  nir_imm_float(b, 2047.0f / 64.0f));
-               nir_def *level_x64 =
-                  nir_f2i32(b, nir_fmul_imm(b, level32, 64.0f));
-               nir_def *level_bits =
-                  nir_ishl_imm(b, nir_iand_imm(b, level_x64, 0xfff), 16);
-               packed = nir_ior(b, packed, level_bits);
+               const bool signed_bias =
+                  bias_idx >= 0 && packed_level_idx == bias_idx;
+               packed = nir_ior(
+                  b, packed,
+                  pack_g17p_lod_field(b, tex->src[packed_level_idx].src.ssa,
+                                      signed_bias ? -32.0f : 0.0f, 16));
             }
 
             nir_def *x =
@@ -542,11 +622,12 @@ offset_lowered:
    }
 
    if (g17p_txf_oob) {
+      b->cursor = nir_before_instr(instr);
+      nir_def *oob_value = g17p_robust_oob_value(
+         b, texture_descriptor_ptr(b, tex), tex->dest_type,
+         tex->def.num_components, tex->def.bit_size);
       b->cursor = nir_after_instr(instr);
-      nir_def *robust = nir_bcsel(
-         b, g17p_txf_oob,
-         nir_imm_zero(b, tex->def.num_components, tex->def.bit_size),
-         &tex->def);
+      nir_def *robust = nir_bcsel(b, g17p_txf_oob, oob_value, &tex->def);
       nir_def_rewrite_uses_after(&tex->def, robust);
    }
 
@@ -749,6 +830,52 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr, bool gen9
    return true;
 }
 
+/*
+ * A formatless load's robustImageAccess2 value depends on the bound view: zero,
+ * with a one alpha when its format has none. The common robust-access lowering
+ * can only fold that from the intrinsic's format, so the driver leaves G17P
+ * formatless loads to this pass. Predicate the load against the image size,
+ * read texel 0 for an invalid coordinate so the native fetch stays inside the
+ * image, and select the view's out-of-bounds value after the fetch.
+ */
+static void
+lower_g17p_formatless_image_load(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   const bool is_array = nir_intrinsic_image_array(intr);
+   const unsigned num_coords = nir_image_intrinsic_coord_components(intr);
+   const bool cube = dim == GLSL_SAMPLER_DIM_CUBE;
+
+   /* The size of a cube is that of one face, and a cube array counts cubes. */
+   nir_def *size =
+      nir_build_tex(b, nir_texop_txs, .texture_handle = intr->src[0].ssa,
+                    .lod = nir_imm_int(b, 0), .dim = dim, .is_array = is_array,
+                    .can_speculate = nir_instr_can_speculate(&intr->instr));
+   if (cube) {
+      nir_def *layers = is_array ? nir_channel(b, size, 2) : nir_imm_int(b, 6);
+      size = nir_vec3(b, nir_channel(b, size, 0), nir_channel(b, size, 1),
+                      layers);
+   }
+
+   nir_def *coord = intr->src[1].ssa;
+   nir_def *oob = nir_bany(b, nir_uge(b, nir_trim_vector(b, coord, num_coords),
+                                      nir_trim_vector(b, size, num_coords)));
+   nir_src_rewrite(&intr->src[1],
+                   nir_bcsel(b, oob,
+                             nir_imm_zero(b, coord->num_components,
+                                          coord->bit_size),
+                             coord));
+
+   nir_def *oob_value = g17p_robust_oob_value(
+      b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa),
+      nir_intrinsic_dest_type(intr), intr->def.num_components,
+      intr->def.bit_size);
+
+   b->cursor = nir_after_instr(&intr->instr);
+   nir_def_rewrite_uses_after(&intr->def,
+                              nir_bcsel(b, oob, oob_value, &intr->def));
+}
+
 static bool
 lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -765,9 +892,18 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       /* Legalize MSAA index */
       nir_src_rewrite(&intr->src[2], nir_u2u16(b, intr->src[2].ssa));
 
-      if (intr->intrinsic == nir_intrinsic_image_load ||
-          intr->intrinsic == nir_intrinsic_bindless_image_load ||
-          intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+      if (gen9 && options->robust_formatless_images &&
+          intr->intrinsic == nir_intrinsic_bindless_image_load &&
+          nir_intrinsic_format(intr) == PIPE_FORMAT_NONE &&
+          !(nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS) &&
+          nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS &&
+          nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_BUF &&
+          intr->def.num_components == 4) {
+         lower_g17p_formatless_image_load(b, intr);
+         b->cursor = nir_before_instr(&intr->instr);
+      } else if (intr->intrinsic == nir_intrinsic_image_load ||
+                 intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                 intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
          lower_image_load_robustness(b, intr, gen9);
       }
 
@@ -937,8 +1073,15 @@ lower_g17p_3d_runtime_offset(const nir_instr *instr, UNUSED const void *data)
    const nir_tex_instr *tex = nir_instr_as_tex(instr);
    const int offset =
       nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   /* Coordinate addition scales the offset by the base level, which is only
+    * right when the base level is sampled. A bias with a minimum LOD, which
+    * selects other levels, keeps its native staged offset; an immediate
+    * offset keeps SMP's. */
    return tex->sampler_dim == GLSL_SAMPLER_DIM_3D && offset >= 0 &&
-          !nir_src_is_const(tex->src[offset].src);
+          !g17p_offset_is_constant(tex->src[offset].src.ssa) &&
+          !(tex->op == nir_texop_txb &&
+            nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0 &&
+            nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0);
 }
 
 enum g17p_3d_runtime_offset_mode {
@@ -992,7 +1135,7 @@ lower_g17p_projected_3d_runtime_offset(nir_builder *b, nir_instr *instr,
    const int offset_idx = nir_tex_instr_src_index(tex, nir_tex_src_offset);
    if (tex->sampler_dim != GLSL_SAMPLER_DIM_3D || coord_idx < 0 ||
        projector_idx < 0 || offset_idx < 0 ||
-       nir_src_is_const(tex->src[offset_idx].src))
+       g17p_offset_is_constant(tex->src[offset_idx].src.ssa))
       return false;
 
    b->cursor = nir_before_instr(instr);
@@ -1087,11 +1230,14 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 }
 
 static bool
-lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata)
+lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
+              bool robust_formatless_images)
 {
    bool progress = false;
    const bool gen9 = generation == 9;
-   const struct agx_texture_lower_options options = {gen9, buffer_metadata};
+   const struct agx_texture_lower_options options = {
+      gen9, buffer_metadata, robust_formatless_images,
+   };
 
    nir_tex_src_type_constraints tex_constraints = {
       [nir_tex_src_lod] = {true, 16},
@@ -1163,13 +1309,14 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata)
 bool
 agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
 {
-   return lower_texture(s, generation, false);
+   return lower_texture(s, generation, false, false);
 }
 
 bool
-agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation)
+agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation,
+                                           bool robust_formatless_images)
 {
-   return lower_texture(s, generation, true);
+   return lower_texture(s, generation, true, robust_formatless_images);
 }
 
 bool

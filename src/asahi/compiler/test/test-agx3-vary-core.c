@@ -38,6 +38,22 @@ int main(void){
       if(agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B,0,0,1,false,0x40,out,&len)) fail++; else pass++;
    }
    {
+      /* An unlinked vertex shader's index register: the same write of staging
+       * half 4 on slot 1 with f23 = 2 and the index in f16 rather than an
+       * immediate in f15. */
+      static const uint8_t immediate[] = {0x57,0x16,0x54,0x04,0x00,0x41,0x48,0x00};
+      static const uint8_t reg[] = {0x57,0x16,0x54,0x04,0x00,0x01,0x58,0x00};
+      uint8_t out[AGX3_VARY_MAX_LENGTH]; uint8_t len=0;
+      if(!agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B,4,8,1,true,1,out,&len) ||
+         len!=sizeof(immediate) || memcmp(out,immediate,sizeof(immediate))) fail++;
+      else pass++;
+      if(!agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3B,4,8,1,true,1,out,&len) ||
+         len!=sizeof(reg) || memcmp(out,reg,sizeof(reg))) fail++;
+      else pass++;
+      if(agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3C,4,8,1,true,1,out,&len)) fail++; else pass++;
+      if(agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3B,4,8,7,true,1,out,&len)) fail++; else pass++;
+   }
+   {
       const uint8_t native[] = {0x2f,0x0d,0x54,0,3,0,4,2,0x10,0};
       uint8_t out[AGX3_VARY_MAX_LENGTH]; uint8_t len=0;
       if (!agx3_vary_projective_rhw(AGX_ISA_ENCODING_AGX3B,0,0,true,out,&len) ||

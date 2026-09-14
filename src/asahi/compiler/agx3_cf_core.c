@@ -242,9 +242,60 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
       KV(9, 2), KV(10, 2), KV(26, 2), KV(27, 2), KV(38, 1)};
    const struct agx3_field_kv ov[] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
-      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
       KV(32, 1), KV(35, slot), KV(46, cond)};
    return agx3_bind_compose(enc, "fcmp", 0, base, 5, ov, 9, out, len);
+}
+
+/*
+ * Two half-float registers, compared natively rather than widened: Apple's
+ * G17P compiler branches on `if (h0 < h1)` with the f32 form's fields and both
+ * source widths set to half (f10 = f27 = 1). As on every float compare, each
+ * source's cache and discard sit one and three fields after its width. Pinned
+ * by 24 metal-nt -arch applegpu_g17p kernels over lt, gt, eq, ge, le and ne
+ * with every combination of the two operands read again after the branch.
+ */
+bool
+agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                   bool or_nan, unsigned slot, const uint16_t src[2],
+                   const struct agx3_cf_source_hints hints[2],
+                   uint16_t wait_mask, uint8_t out[AGX3_CF_MAX_LENGTH],
+                   uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       !slot_ok(slot) || !fcond_ok(cond) || src[0] >= 256 || src[1] >= 256 ||
+       (hints[0].cache && hints[0].discard) ||
+       (hints[1].cache && hints[1].discard) ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   /* Same condition folding as the f32 form: lt/gt or unordered are codes
+    * 5/6 with f34, and a greater-or-equal is its inverse. */
+   uint64_t fcond = cond;
+   if (or_nan && cond == AGX3_CF_FCOND_LT)
+      fcond = 5;
+   else if (or_nan && cond == AGX3_CF_FCOND_GT)
+      fcond = 6;
+   else if (or_nan)
+      return false;
+
+   const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 1), KV(26, 2),
+                                        KV(27, 1)};
+   struct agx3_field_kv ov[16] = {
+      KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
+      KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
+      KV(34, or_nan), KV(35, slot), KV(46, fcond),
+   };
+   unsigned n = 9;
+   for (unsigned wait_slot = 0; wait_slot < 6; ++wait_slot)
+      ov[n++] = (struct agx3_field_kv){38 + wait_slot,
+                                       !!(wait_mask & (1u << wait_slot))};
+
+   for (unsigned ep = 0; ep < 4; ++ep) {
+      if (agx3_bind_compose(enc, "fcmp", ep, base, 4, ov, n, out, len))
+         return true;
+   }
+   return false;
 }
 
 /*
@@ -297,7 +348,7 @@ agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
    struct agx3_field_kv ov[16] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
       KV(14, abs[0]),
-      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
       KV(31, abs[1]),
       KV(35, slot), KV(46, cond),
    };

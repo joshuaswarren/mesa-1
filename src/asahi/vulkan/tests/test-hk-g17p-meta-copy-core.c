@@ -305,6 +305,16 @@ main(void)
    CHECK(plan.buffer_row_stride_B == 24 &&
          plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
 
+   /* A partial block short of the level edge still copies the whole block,
+    * matching the AGX2 compute copy. */
+   struct hk_g17p_buffer_to_image_copy partial = volume;
+   partial.image_offset.x = 0;
+   partial.copy_extent.width = 3;
+   partial.copy_extent.height = 5;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &partial, 64, 144, &plan));
+   CHECK(plan.base_x_el == 0 && plan.blocks_x == 1 && plan.blocks_y == 2);
+
    struct hk_g17p_buffer_to_image_copy readback = volume;
    readback.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
@@ -445,7 +455,7 @@ main(void)
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
-   malformed.copy_extent.width = 3;
+   malformed.copy_extent.width = 5;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
@@ -994,9 +1004,28 @@ main(void)
    CHECK(!hk_g17p_image_copy_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 2, 2,
       &one_d_two_d, 0, &one_d_out));
+
+   /* A 1D array copies to or from 3D slices exactly as a 2D array does: its
+    * layers map to the volume's depth. */
+   const VkImageCopy2 one_d_volume = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 4},
+      .srcOffset = {3, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffset = {5, 0, 2},
+      .extent = {17, 1, 4},
+   };
+   for (uint32_t slice = 0; slice < 4; ++slice) {
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 4, 4,
+         &one_d_volume, slice, &one_d_out));
+      CHECK(one_d_out.srcSubresource.baseArrayLayer == 1 + slice);
+      CHECK(one_d_out.dstOffset.z == 2 + (int32_t)slice);
+      CHECK(one_d_out.extent.depth == 1);
+   }
    CHECK(!hk_g17p_image_copy_slice(
-      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 1, 1,
-      &one_d_two_d, 0, &one_d_out));
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 3, 3,
+      &one_d_volume, 0, &one_d_out));
 
    VkImageCopy2 volume_array = volume_copy;
    volume_array.dstSubresource.baseArrayLayer = 7;

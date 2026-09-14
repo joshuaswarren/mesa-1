@@ -220,3 +220,31 @@ agx3_vary_uvsw(enum agx_isa_encoding enc, uint16_t value, uint16_t uvs_index,
    return agx3_bind_compose(enc, "uvsw", 0, is_b(enc) ? base_b : base_c,
                             is_b(enc) ? 3 : 6, ov, n, out, len);
 }
+
+bool
+agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
+                              uint16_t index, uint8_t slot, bool value_kill,
+                              uint16_t wait_mask,
+                              uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   /* uvsw's index operand has three kinds in Apple's AGX3b encoder table:
+    * f23 = 1 immediate (f15), 2 register (f16) and 3 uniform (f17), each a
+    * half wide. Metal never computes a vertex output's index, so only the
+    * immediate kind is witnessed in compiled programs; the register kind is
+    * the table's own form for the same field. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || (value & 1) != 0 || value >= 256 ||
+       index >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3fu) != 0)
+      return false;
+   const struct agx3_field_kv base[] = {KV(9, 5), KV(23, 2), KV(24, 1)};
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(5, value);
+   ov[n++] = (struct agx3_field_kv)KV(16, index);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(13, value_kill ? 1 : 0);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
+
+   return agx3_bind_compose(enc, "uvsw", 0, base, 3, ov, n, out, len);
+}

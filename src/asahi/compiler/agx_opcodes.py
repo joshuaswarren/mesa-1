@@ -154,6 +154,9 @@ SR = enum("sr", {
    # AGX3 hardware-vertex inputs. Apple emits these as explicit 32-bit rld
    # instructions instead of the AGX2 preloaded-input ABI.
    216: 'instance_id',
+   217: 'tess_patch_id',
+   218: 'tess_coord_u',
+   219: 'tess_coord_v',
    221: 'vertex_id',
 })
 
@@ -579,12 +582,14 @@ for (name, is_float) in [("break_if_icmp", False), ("break_if_fcmp", True)]:
 # Native normalized RGB10A2 conversion, four floats to/from one packed word.
 op("pack_rgb10a2_agx3", _, dests=1, srcs=4, is_float=True, agx3_mnemonic="pack")
 op("unpack_rgb10a2_agx3", _, dests=1, srcs=1, agx3_mnemonic="unpack")
-# G17P's native single-sample coverage word is prepared before RA. Keep the
-# general sample-mask target explicit while selecting its native zero no-op.
+# G17P's native coverage word is prepared before RA, from SR2 at one sample.
+# Keep the general sample-mask target explicit while selecting its native zero
+# no-op.
 op("get_coverage_1x_agx3", _, dests = 1, schedule_class = "coverage")
-op("sample_mask_1x_agx3", _, dests = 0, srcs = 2, imms = [IMM],
+op("sample_mask_agx3", _, dests = 0, srcs = 2, imms = [IMM],
    can_eliminate = False, schedule_class = "coverage")
-# G17P depthf consumes two dwords: coverage and full-width float32 depth.
-# The tuple is assembled before RA and published at staging halves 0 and 2.
+# G17P depthf consumes the coverage dword, carrying any stencil reference in
+# its upper half, and full-width float32 depth when written. The tuple is
+# assembled before RA and published at staging halves 0 and 2.
 op("zs_emit_agx3", _, dests = 0, srcs = 1, imms = [ZS],
    can_eliminate = False, schedule_class = "coverage")

@@ -319,18 +319,30 @@ test_g17p_vertex_program_info(void)
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
 
    /* Chromium 151's ANGLE Vulkan backend reserves one additional float4 for
-    * transform-feedback capture of gl_Position.  The opt-in public cap is
-    * therefore position plus seventeen float4 user locations: 72 UVS words.
-    * This host-side test proves exact validator/template admission; the
-    * offscreen image oracle is the separate hardware qualification. */
+    * transform-feedback capture of gl_Position: position plus seventeen
+    * float4 user locations, 72 UVS words. */
    struct hk_agx3_g17p_vertex_compile_info angle72 = vkcube_info;
-   angle72.user_size = HK_AGX3_G17P_MAX_USER_WORDS;
+   angle72.user_size = 68;
    angle72.psiz_off = angle72.layer_viewport_off = angle72.clip_off = 72;
    angle72.uvs_size = 72;
    angle72.uvs_written = BITFIELD64_MASK(17) << VARYING_SLOT_VAR0;
    CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &angle72,
                                           &program));
    CHECK(program.template_info.raw_vs_output_count_0 == 72);
+   CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
+   /* Apple's widest G17P vertex program: position plus thirty-one float4
+    * user locations, UVSW indices 0..127, __GPU_LD_MD root.field1.field3
+    * 128. */
+   struct hk_agx3_g17p_vertex_compile_info native128 = vkcube_info;
+   native128.user_size = HK_AGX3_G17P_MAX_USER_WORDS;
+   native128.psiz_off = native128.layer_viewport_off = native128.clip_off =
+      HK_AGX3_G17P_MAX_UVS_WORDS;
+   native128.uvs_size = HK_AGX3_G17P_MAX_UVS_WORDS;
+   native128.uvs_written = BITFIELD64_MASK(31) << VARYING_SLOT_VAR0;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &native128,
+                                          &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 128);
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
 
    struct hk_agx3_g17p_vertex_compile_info invalid_info = vkcube_info;

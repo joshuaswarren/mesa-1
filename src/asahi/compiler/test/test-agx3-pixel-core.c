@@ -100,6 +100,9 @@ main(void)
       {12, "8702540c0800"},  {16, "870254100800"},  {32, "870254200800"},
       {48, "870254300800"},  {60, "8702543c0800"},  {64, "870254400800"},
       {128, "870254800800"}, {192, "870254c00800"},
+      /* Every class of partitions 0..2 at once: 2x/4x store-only fragments
+       * of three to eight targets. */
+      {252, "870254fc0800"},
    };
 
    for (unsigned i = 0; i < sizeof(b_wait) / sizeof(b_wait[0]); ++i) {
@@ -123,7 +126,7 @@ main(void)
       {192, false, "070254c00000"}, {0, true, "070254000200"},
       {1, true, "070254010200"},   {12, true, "0702540c0200"},
       {48, true, "070254300200"},  {60, true, "0702543c0200"},
-      {192, true, "070254c00200"},
+      {192, true, "070254c00200"}, {252, true, "070254fc0200"},
    };
 
    for (unsigned i = 0; i < sizeof(b_rel) / sizeof(b_rel[0]); ++i) {
