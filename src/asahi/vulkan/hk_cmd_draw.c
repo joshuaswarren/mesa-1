@@ -5810,9 +5810,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                    hk_stat_enabled(stat_vs_inv) ||
                    hk_stat_enabled(stat_c_inv) || hk_stat_enabled(stat_c_prims);
    /* Validate the native index domain before robustness or geometry lowering
-    * can introduce a pre-render compute dispatch.  Indirect robust draws keep
-    * their application range for the ordered GPU-side bounds pass; direct
-    * draws still prove their complete span here. */
+    * can introduce a pre-render compute dispatch.  Robust draws keep their
+    * application range for the ordered GPU-side bounds pass, which shadows the
+    * in-range indices and pads the overread with zero indices; only draws
+    * that reach the native Index List unmodified prove their complete span
+    * here. */
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
       uint64_t address;
       uint32_t size_word;
@@ -5820,8 +5822,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          draw_.index_size == AGX_INDEX_SIZE_U8 ||
          draw_.index_size == AGX_INDEX_SIZE_U16 ||
          draw_.index_size == AGX_INDEX_SIZE_U32;
+      struct agx_draw robust_draw = draw_;
+      const bool robust_index = hk_needs_index_robustness(
+         cmd, &robust_draw, conditional_direct_indexed ? &api_draw : NULL);
       const bool conditional_direct_in_bounds =
-         !conditional_direct_indexed ||
+         !conditional_direct_indexed || robust_index ||
          (valid_index_size &&
           agx_vdm_hal200_index_range(
              api_draw.index_buffer, api_draw.index_buffer_range_B,
@@ -5834,10 +5839,12 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
               ? (!draw_.b.ptr || !draw_.index_buffer ||
                  draw_.index_buffer_range_B == 0 ||
                  !conditional_direct_in_bounds)
-              : !agx_vdm_hal200_index_range(
-                   draw_.index_buffer, draw_.index_buffer_range_B, draw_.start,
-                   draw_.b.count[0], agx_index_size_to_B(draw_.index_size),
-                   &address, &size_word))) {
+              : !robust_index &&
+                   !agx_vdm_hal200_index_range(
+                      draw_.index_buffer, draw_.index_buffer_range_B,
+                      draw_.start, draw_.b.count[0],
+                      agx_index_size_to_B(draw_.index_size), &address,
+                      &size_word))) {
          mesa_loge("native G17P indexed draw requires a valid "
                    "uint8/uint16/uint32 range without geometry");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
