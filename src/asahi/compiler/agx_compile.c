@@ -899,10 +899,34 @@ agx_pack_integer_8_agx3(agx_builder *b, const agx_index *channels,
    return n;
 }
 
-/* A multi-component W8 memory payload is byte-packed in the register file:
- * two adjacent components occupy the low/high bytes of one 16-bit register.
- * NIR keeps each 8-bit component in its own 16-bit lane, so unpack the raw
- * device-load payload before exposing it to the rest of the backend. */
+/* A multi-component W8 payload is byte-packed in the register file: two
+ * adjacent components occupy the low/high bytes of one 16-bit register. NIR
+ * keeps each 8-bit component in its own 16-bit or zero-extended 32-bit lane,
+ * so unpack the raw halves before exposing them to the rest of the backend. */
+static void
+agx_unpack_integer_8_agx3(agx_builder *b, agx_index dest,
+                          const agx_index *halfs, unsigned nr_channels)
+{
+   agx_index channels[4] = {agx_null()};
+   agx_index shift = agx_mov_imm(b, 32, 8);
+   for (unsigned i = 0; i < nr_channels; ++i) {
+      agx_index wide = agx_pad_to_32(b, halfs[i / 2]);
+      if (i & 1)
+         wide = agx_ushr(b, wide, shift);
+
+      agx_index narrow = agx_temp(b->shader, AGX_SIZE_16);
+      agx_subdivide_to(b, narrow, wide, 0);
+      channels[i] = agx_and(b, narrow, agx_immediate(0xff));
+      if (dest.size == AGX_SIZE_32) {
+         agx_index zext = agx_temp(b->shader, AGX_SIZE_32);
+         agx_mov_to(b, zext, channels[i]);
+         channels[i] = zext;
+      }
+   }
+
+   agx_emit_collect_to(b, dest, nr_channels, channels);
+}
+
 static void
 agx_unpack_integer_8_memory_agx3(agx_builder *b, agx_index dest,
                                  agx_index packed, unsigned nr_channels)
@@ -914,19 +938,7 @@ agx_unpack_integer_8_memory_agx3(agx_builder *b, agx_index dest,
       agx_subdivide_to(b, halfs[i], packed, i);
    }
 
-   agx_index channels[4] = {agx_null()};
-   agx_index shift = agx_mov_imm(b, 32, 8);
-   for (unsigned i = 0; i < nr_channels; ++i) {
-      agx_index wide = agx_pad_to_32(b, halfs[i / 2]);
-      if (i & 1)
-         wide = agx_ushr(b, wide, shift);
-
-      agx_index narrow = agx_temp(b->shader, AGX_SIZE_16);
-      agx_subdivide_to(b, narrow, wide, 0);
-      channels[i] = agx_and(b, narrow, agx_immediate(0xff));
-   }
-
-   agx_emit_collect_to(b, dest, nr_channels, channels);
+   agx_unpack_integer_8_agx3(b, dest, halfs, nr_channels);
 }
 
 static agx_instr *
@@ -1204,6 +1216,25 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
 
    if (agx_unpack_normalized_agx3(b, dest, instr, format, nr_comps))
       return;
+
+   /* Apple's reads of 8-bit integer attachments load the bytes packed, two
+    * per 16-bit register, and then shift and mask the channels out
+    * (blend/native/tilemask.py uread_*). */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       format == AGX_FORMAT_I8) {
+      const unsigned nr_halfs = DIV_ROUND_UP(nr_comps, 2);
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
+      packed.channels_m1 = nr_halfs - 1;
+      agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
+                     format, BITFIELD_MASK(nr_comps),
+                     nir_intrinsic_base(instr), false);
+
+      agx_index halfs[2] = {agx_null()};
+      agx_emit_split(b, halfs, packed, nr_halfs);
+      agx_unpack_integer_8_agx3(b, dest, halfs, nr_comps);
+      agx_emit_cached_split(b, dest, nr_comps);
+      return;
+   }
 
    agx_ld_tile_to(b, dest, agx_src_index(&instr->src[0]), agx_null(), format,
                   BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
