@@ -6525,6 +6525,42 @@ TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
    }
 }
 
+TEST_F(AGX3PackBinary, UnlinkedVertexOutputsWriteRuntimeIndices)
+{
+   /* A pipeline library's vertex shader cannot know the fragment shader's
+    * interpolation classes, so its user outputs carry run-time indices while
+    * the point size keeps its fixed one. Neither joins a batched bundle:
+    * each is staged and written where it is stored. */
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_VERTEX;
+
+   agx_st_vary(b, agx_register(9, AGX_SIZE_16), agx_register(4, AGX_SIZE_32));
+   agx_st_vary(b, agx_immediate(12), agx_register(6, AGX_SIZE_32));
+   agx_stop(b);
+
+   uint8_t bytes[MAX2(AGX3_STAGE_MAX_LENGTH, AGX3_VARY_MAX_LENGTH)];
+   uint8_t len = 0;
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_stage_copy_source(enc, 0, 4, false, 1, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_vary_uvsw_register_index(enc, 0, 9, 1, true, 1, bytes,
+                                             &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_stage_copy_source(enc, 2, 6, false, 2, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_vary_uvsw(enc, 2, 12, 2, true, 2, bytes, &len));
+   append(want, bytes, len);
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 4u);
+}
+
 TEST_F(AGX3PackBinary, ExplicitSampleInterpolationMatchesApple)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

@@ -1029,8 +1029,15 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint16_t staging_half, uint8_t slot,
                uint16_t wait_mask, bool defer_writeout)
 {
+   /* An unlinked vertex shader computes its user outputs' indices from the
+    * linked varying layout, so the index is then a 16-bit register. */
+   const agx_index index = I->src[0];
+   const bool register_index = agx3_src_is_register(index) &&
+      !index.memory && !index.abs && !index.neg &&
+      index.size == AGX_SIZE_16 && agx_channels(index) == 1;
    if (I->nr_dests != 0 || I->nr_srcs != 2 ||
-       I->src[0].type != AGX_INDEX_IMMEDIATE ||
+       (index.type != AGX_INDEX_IMMEDIATE && !register_index) ||
+       (register_index && defer_writeout) ||
        !agx3_vary_reg32(I->src[1]))
       return false;
 
@@ -1043,10 +1050,15 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
                                 I->src[1].kill, slot, wait_mask, bytes, &len) ||
        !agx3_append(emission, bytes, len))
       return false;
-   return defer_writeout ||
-          (agx3_vary_uvsw(enc, staging_half, I->src[0].value, slot, true,
-                          (uint16_t)(1u << (slot - 1)), bytes, &len) &&
-           agx3_append(emission, bytes, len));
+   if (defer_writeout)
+      return true;
+   const uint16_t staged = (uint16_t)(1u << (slot - 1));
+   return (register_index
+              ? agx3_vary_uvsw_register_index(enc, staging_half, index.value,
+                                              slot, true, staged, bytes, &len)
+              : agx3_vary_uvsw(enc, staging_half, index.value, slot, true,
+                               staged, bytes, &len)) &&
+          agx3_append(emission, bytes, len);
 }
 
 static bool
@@ -6398,13 +6410,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_firefox_dense_outputs;
    unsigned g17p_outputs_staged = 0;
    /* User-output graphs outside the qualified scalar shapes must not
-    * silently fall back to immediate, potentially out-of-order writeout. */
+    * silently fall back to immediate, potentially out-of-order writeout.
+    * An unlinked layout indexes its user outputs at run time instead: no
+    * output can then join a batched bundle, so every output, including the
+    * fixed point size and clip distances behind them, is staged and written
+    * where it is stored. */
    if (enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_VERTEX) {
+      bool runtime_output_index = false;
+      agx_foreach_instr_global(ctx, I) {
+         runtime_output_index |= I->op == AGX_OPCODE_ST_VARY &&
+                                 I->nr_srcs >= 1 &&
+                                 I->src[0].type != AGX_INDEX_IMMEDIATE;
+      }
       agx_foreach_block(ctx, block) {
          agx_foreach_instr_in_block(block, I) {
             if (I->op == AGX_OPCODE_ST_VARY && I->nr_srcs >= 1 &&
                 I->src[0].type == AGX_INDEX_IMMEDIATE &&
-                I->src[0].value >= 4 && !g17p_user_output_protocol)
+                I->src[0].value >= 4 && !g17p_user_output_protocol &&
+                !runtime_output_index)
                AGX3_REFUSE(I);
          }
       }
