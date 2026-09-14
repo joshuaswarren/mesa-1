@@ -20,6 +20,14 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
    uint8_t reg_slot[AGX3_SLOT_NUM_TOKENS];
    memset(reg_slot, 0, sizeof(reg_slot));
 
+   /* reader_slots[r] = the slots of the in-flight stores that latch
+    * half-register r as payload. A store has no destination, so the result
+    * bookkeeping above never covers its payload: the transform feedback copy
+    * program reuses one payload quad for all sixteen captured varyings, and
+    * the next varying's setup raced the outstanding store. */
+   uint16_t reader_slots[AGX3_SLOT_NUM_TOKENS];
+   memset(reader_slots, 0, sizeof(reader_slots));
+
    /* slot_waited[s] = the slot has been synchronised since it was last
     * allocated, so later consumers need not wait it again. */
    bool slot_waited[9] = {false};
@@ -71,6 +79,19 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
             wait_mask |= (uint16_t)(1u << (slot - 1));
             slot_waited[slot] = true;
          }
+
+         /* Write-after-read: retire every async op still reading this
+          * register before redefining it. */
+         uint16_t readers = reader_slots[r];
+         while (readers) {
+            const unsigned bit = (unsigned)(readers & (~readers + 1u));
+            const uint8_t reader = (uint8_t)(__builtin_ctz(bit) + 1);
+            readers &= (uint16_t)~bit;
+            if (!slot_waited[reader]) {
+               wait_mask |= (uint16_t)bit;
+               slot_waited[reader] = true;
+            }
+         }
       }
 
       /* A compound instruction may use a scoreboard slot internally, for
@@ -98,6 +119,13 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
 
       out[i].wait_mask = wait_mask;
 
+      /* Every slot this instruction waited is now retired, so the registers
+       * its async ops were reading are free again. */
+      if (wait_mask) {
+         for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r)
+            reader_slots[r] &= (uint16_t)~wait_mask;
+      }
+
       if (I->is_async) {
          const uint8_t slot =
             I->preferred_slot ? I->preferred_slot : (uint8_t)(next + 1);
@@ -116,10 +144,16 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
             }
          }
          slot_waited[slot] = false; /* freshly outstanding */
+         for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r)
+            reader_slots[r] &= (uint16_t)~(1u << (slot - 1));
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;
             reg_slot[I->dst[d]] = slot;
+         }
+         if (I->latches_srcs) {
+            for (unsigned s = 0; s < I->nr_srcs; ++s)
+               reader_slots[I->src[s]] |= (uint16_t)(1u << (slot - 1));
          }
       } else {
          out[i].slot = 0;

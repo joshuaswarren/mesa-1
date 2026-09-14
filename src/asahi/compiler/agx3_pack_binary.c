@@ -6588,6 +6588,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         /* A device store transfers its payload when it retires, so the
+          * payload registers stay live until then even though the store
+          * declares no destination. */
+         e->latches_srcs = I->op == AGX_OPCODE_DEVICE_STORE;
          if (I->agx3_tex_coord_start)
             e->preferred_slot = native_coord_preferred_slot;
          /* Plain 2D and 3D register-LOD fetches have two independent

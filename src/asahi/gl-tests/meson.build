@@ -283,6 +283,27 @@ gl_rgb32_fbo = executable(
   build_by_default : false,
 )
 
+gl_xfb_interleaved = executable(
+  'asahi-g17p-gl-xfb-interleaved',
+  files('test-g17p-gl-xfb-interleaved.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-interleaved-software-control',
+  gl_xfb_interleaved,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_xfb_streams = executable(
   'asahi-g17p-gl-xfb-streams',
   files('test-g17p-gl-xfb-streams.c'),
