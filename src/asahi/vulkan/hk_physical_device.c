@@ -1567,12 +1567,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        * operation and advertised overlap/premultiplication mode, including
        * coherent sequencing, across the bounded one-attachment profile. */
 
-      /* The common implementation GPU-patches every affected draw, dispatch,
-       * and clear-attachments record and has strict host recording/result
-       * oracles. Keep G17P's public promise opt-in until the bounded direct,
-       * indirect, inverted and inherited execution fixture passes on Neo. */
-      if (!hk_g17p_unverified_feature("conditional_rendering"))
-         supported_extensions.EXT_conditional_rendering = false;
       /* This extension controls divergent quad derivatives, not the standard
        * subgroup quad shuffle operations exposed above. */
       if (!hk_g17p_unverified_feature("shader_quad_control"))
