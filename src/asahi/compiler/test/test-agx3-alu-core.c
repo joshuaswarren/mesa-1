@@ -16,35 +16,53 @@
 static void
 test_native_popcount(void)
 {
+   /* applegpu_g17p popcount of ushort and uint loads and of computed values,
+    * including a still-live SIMD ballot mask and wait slots 1, 2 and 6. */
+   static const struct {
+      uint16_t dest, src;
+      bool half;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      uint8_t apple[8];
+   } vectors[] = {
+      {2, 2, true, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x02, 0x02, 0x04, 0x50, 0x04}},
+      {2, 2, true, AGX3_ALU_HINT_DISCARD, false, 0,
+       {0x27, 0x05, 0x54, 0x02, 0x02, 0x04, 0x50, 0x04}},
+      {0, 0, true, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x00, 0x02, 0x00, 0x50, 0x04}},
+      {2, 2, true, AGX3_ALU_HINT_DISCARD, false, 1u << 0,
+       {0x27, 0x15, 0x54, 0x02, 0x02, 0x04, 0x50, 0x04}},
+      {4, 1, true, AGX3_ALU_HINT_DISCARD, false, 1u << 1,
+       {0x27, 0x25, 0x54, 0x04, 0x02, 0x02, 0x50, 0x04}},
+      {0, 1, true, AGX3_ALU_HINT_CACHE, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x00, 0x02, 0x02, 0x42, 0x04}},
+      {0, 0, false, AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+       {0x27, 0x05, 0x56, 0x00, 0x02, 0x00, 0x5c, 0x04}},
+      {2, 2, false, AGX3_ALU_HINT_DISCARD, false, 1u << 0,
+       {0x27, 0x15, 0x54, 0x02, 0x02, 0x04, 0x5c, 0x04}},
+      {4, 4, false, AGX3_ALU_HINT_DISCARD, false, 1u << 1,
+       {0x27, 0x25, 0x54, 0x04, 0x02, 0x08, 0x5c, 0x04}},
+      {4, 0, false, AGX3_ALU_HINT_CACHE, true, 0,
+       {0x27, 0x05, 0x54, 0x04, 0x03, 0x00, 0x4e, 0x04}},
+   };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-   static const uint8_t u16[] = {0x27, 0x05, 0x56, 0x02,
-                                 0x02, 0x04, 0x50, 0x04};
-   static const uint8_t u32[] = {0x27, 0x05, 0x56, 0x00,
-                                 0x02, 0x00, 0x5c, 0x04};
-   static const uint8_t u16_cached[] = {0x27, 0x05, 0x56, 0x02,
-                                        0x03, 0x04, 0x50, 0x04};
-   /* applegpu-nt 32023.917: popcount of a still-live SIMD ballot mask. */
-   static const uint8_t u32_live[] = {0x27, 0x05, 0x54, 0x04,
-                                      0x03, 0x00, 0x4e, 0x04};
-   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
-                            AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
-   assert(len == sizeof(u16) && !memcmp(bytes, u16, len));
-   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
-                            AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
-   assert(len == sizeof(u32) && !memcmp(bytes, u32, len));
-   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 2, 2, true,
-                            AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
-   assert(len == sizeof(u16_cached) && !memcmp(bytes, u16_cached, len));
-   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 4, 0, false,
-                            AGX3_ALU_HINT_CACHE, true, 0, bytes, &len));
-   assert(len == sizeof(u32_live) && !memcmp(bytes, u32_live, len));
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, vectors[i].dest,
+                               vectors[i].src, vectors[i].half,
+                               vectors[i].hint, vectors[i].dest_cache,
+                               vectors[i].wait, bytes, &len));
+      assert(len == 8 && !memcmp(bytes, vectors[i].apple, len));
+   }
 
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
                              AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
                              AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3B, 0, 0, false,
-                             AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+                             AGX3_ALU_HINT_DISCARD, false, 1u << 6, bytes,
+                             &len));
 }
 
 static void

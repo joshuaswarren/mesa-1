@@ -13,29 +13,35 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                   uint8_t *len)
 {
-   /* Exact Apple G17P witnesses:
-    *   ushort: 27 05 56 02 02 04 50 04
-    *   uint:   27 05 56 00 02 00 5c 04
-    * byte3 is the destination half, byte5 is twice the source half, and the
-    * source descriptor distinguishes 16 from 32 bits. A fresh subgroup-count
-    * witness adds the live uint source form (descriptor 0x4e). Refuse every
-    * other unwitnessed cache/wait/lifetime combination. */
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
        src >= 128 || (!half && ((dest | src) & 1)) ||
-       (hint != AGX3_ALU_HINT_DISCARD &&
-        !(hint == AGX3_ALU_HINT_CACHE && !half)) || wait_mask)
+       (hint != AGX3_ALU_HINT_DISCARD && hint != AGX3_ALU_HINT_CACHE) ||
+       (wait_mask & ~0x3fu))
       return false;
 
-   const uint8_t bytes[8] = {
-      0x27, 0x05,
-      hint == AGX3_ALU_HINT_CACHE ? 0x54 : 0x56,
-      (uint8_t)dest, dest_cache ? 0x03 : 0x02,
-      (uint8_t)(src << 1),
-      half ? 0x50 : (hint == AGX3_ALU_HINT_CACHE ? 0x4e : 0x5c), 0x04,
+   /* applegpu_g17p `popcount` is the eight-byte cbs point. f10/f24 are the
+    * result/source widths, f11 destination cache, f25/f27 source
+    * cache/discard, and f31..f36 the six scoreboard slots:
+    *   2705560202045004  h2 <- popcount(^h2), wait slot 6
+    *   2705540202045004  h2 <- popcount(^h2)
+    *   2725540402025004  h4 <- popcount(^h1), wait slot 2
+    *   2705560002024204  h0 <- popcount($h1), wait slot 6
+    *   2715540202045c04  r1 <- popcount(^r1), wait slot 1
+    *   2705540403004e04  $r2 <- popcount($r0) */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, half ? 1 : 2}, {23, 2}, {24, half ? 1 : 2},
    };
-   memcpy(out, bytes, sizeof(bytes));
-   *len = sizeof(bytes);
-   return true;
+   struct agx3_field_kv fields[11] = {
+      {2, dest}, {11, dest_cache}, {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 5;
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (wait_mask & (1u << slot))
+         fields[n++] = (struct agx3_field_kv){31 + slot, 1};
+   }
+   return agx3_bind_compose(enc, "cbs", 0, base, 4, fields, n, out, len);
 }
 
 bool

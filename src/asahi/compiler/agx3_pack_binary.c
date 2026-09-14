@@ -11949,15 +11949,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                               src.size == AGX_SIZE_16;
             const bool word = dest.size == AGX_SIZE_32 &&
                               src.size == AGX_SIZE_32;
-            if ((!half && !word) || !agx3_src_is_register(dest) ||
-                dest.memory || agx_channels(dest) != 1 ||
+            /* NIR's bit_count of a 16-bit value returns 32 bits. Apple counts
+             * into the low half and clears the high half, as for
+             * `uint(popcount(ushort))`. */
+            const bool widened = dest.size == AGX_SIZE_32 &&
+                                 src.size == AGX_SIZE_16 &&
+                                 !(dest.value & 1);
+            if ((!half && !word && !widened) ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 ||
                 !agx3_src_is_register(src) || src.memory ||
                 agx_channels(src) != 1 || src.abs || src.neg)
                AGX3_REFUSE(I);
 
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            if (wait && !agx3_retire_slots_noop(emission, enc, wait))
-               AGX3_REFUSE(I);
             enum agx3_alu_hint hint = agx3_post_ra_hint(src);
             /* An in-place popcount consumes the old register value and then
              * overwrites it. Post-RA has no separate lifetime hint on this
@@ -11965,9 +11970,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * (including Apple's U32 dest=src=0 program). */
             if (hint == AGX3_ALU_HINT_NONE && dest.value == src.value)
                hint = AGX3_ALU_HINT_DISCARD;
-            if (!agx3_alu_popcount(enc, dest.value, src.value, half,
-                                   hint, dest.cache, 0, bytes, &length) ||
+            if (!agx3_alu_popcount(enc, dest.value, src.value, !word, hint,
+                                   dest.cache, wait, bytes, &length) ||
                 !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            if (widened &&
+                (!agx3_clr(enc, dest.value + 1, true, false, bytes,
+                           &length) ||
+                 !agx3_append(emission, bytes, length)))
                AGX3_REFUSE(I);
             continue;
          }
