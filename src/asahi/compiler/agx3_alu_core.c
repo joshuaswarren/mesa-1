@@ -1286,12 +1286,15 @@ agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                             len);
 }
 
-bool
-agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
-                  const uint16_t src[2],
-                  const enum agx3_alu_hint hints[2], bool dest_cache,
-                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
-                  uint8_t *len)
+/* The two-register bitwise instructions beyond AND/OR/XOR share the
+ * ordinary bitops' operand, hint and wait topology; only the mnemonic
+ * carries the truth table. */
+static bool
+agx3_alu_bit_named(enum agx_isa_encoding enc, const char *mnemonic,
+                   uint16_t dest, const uint16_t src[2],
+                   const enum agx3_alu_hint hints[2], bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
        dest >= 256 || src[0] >= 256 || src[1] >= 256 ||
@@ -1300,12 +1303,6 @@ agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
        (unsigned)hints[1] > AGX3_ALU_HINT_CACHE)
       return false;
 
-   /* Apple `v.x & ~v.y`:
-    *   0b010e03020000800000  bit_andc r0, ^r0, ^r1
-    * Keeping the first input independently gives:
-    *   0b031605020000800000  bit_andc r0, r1, ^r2
-    * The operand/hint/wait topology is identical to the grounded ordinary
-    * bitops; only the noncommutative mnemonic changes. */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {23, 2}, {24, 2},
       {37, 2}, {38, 2},
@@ -1321,7 +1318,36 @@ agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
    for (unsigned slot = 0; slot < 6; ++slot)
       fields[n++] = (struct agx3_field_kv){44 + slot,
                                           !!(wait_mask & (1u << slot))};
-   return agx3_bind_compose(enc, "bit_andc", 0, base, 6, fields, n, out, len);
+   return agx3_bind_compose(enc, mnemonic, 0, base, 6, fields, n, out, len);
+}
+
+bool
+agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[2],
+                  const enum agx3_alu_hint hints[2], bool dest_cache,
+                  uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                  uint8_t *len)
+{
+   /* Apple `v.x & ~v.y`:
+    *   0b010e03020000800000  bit_andc r0, ^r0, ^r1
+    * Keeping the first input independently gives:
+    *   0b031605020000800000  bit_andc r0, r1, ^r2 */
+   return agx3_alu_bit_named(enc, "bit_andc", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_nor(enum agx_isa_encoding enc, uint16_t dest,
+                 const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                 bool dest_cache, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   /* Apple `~(x | y)` of two buffer-loaded uints, slot-6 wait:
+    *   2b830681010000800000  bit_nor r2, $r1, $r0
+    *   2b030e01010000800000  bit_nor r2, ^r1, r0
+    *   2b011603010000800000  bit_nor r2, r0, ^r1 */
+   return agx3_alu_bit_named(enc, "bit_nor", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
 }
 
 /* Native iadd_live/isub_live retain both inputs, while their dead variants

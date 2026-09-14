@@ -424,6 +424,33 @@ test_native_f32_floor_ceil(void)
 }
 
 static void
+test_native_bit_nor(void)
+{
+   /* metal-nt -arch applegpu_g17p, ~(x | y) of two buffer loads. */
+   const struct {
+      uint16_t src[2];
+      enum agx3_alu_hint hints[2];
+      uint8_t bytes[10];
+   } cases[] = {
+      {{2, 0}, {AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE},
+       {0x2b, 0x83, 0x06, 0x81, 0x01, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {{2, 0}, {AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE},
+       {0x2b, 0x03, 0x0e, 0x01, 0x01, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {{0, 2}, {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD},
+       {0x2b, 0x01, 0x16, 0x03, 0x01, 0x00, 0x00, 0x80, 0x00, 0x00}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      assert(agx3_alu_bit_nor(AGX_ISA_ENCODING_AGX3B, 4, cases[i].src,
+                              cases[i].hints, false, 32, bytes, &len));
+      assert(len == 10 && !memcmp(bytes, cases[i].bytes, 10));
+   }
+   assert(!agx3_alu_bit_nor(AGX_ISA_ENCODING_AGX3C, 4, cases[0].src,
+                            cases[0].hints, false, 32, bytes, &len));
+   puts("Native bit_nor: three exact live/dead witnesses PASS");
+}
+
+static void
 test_native_bit_andc(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -5255,6 +5282,7 @@ int main(void){
    test_native_minifloat_half_select();
    test_native_bit_not16();
    test_native_bit_andc();
+   test_native_bit_nor();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
    test_native_f32_rsqrt_modifiers();

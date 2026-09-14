@@ -12372,8 +12372,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* a & ~b (truth table 0x2) and ~(a | b) (0x1) are their own
+          * two-register instructions. */
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
-             (I->truth_table & 0xfu) == 0x2u && I->nr_dests == 1 &&
+             ((I->truth_table & 0xfu) == 0x2u ||
+              (I->truth_table & 0xfu) == 0x1u) && I->nr_dests == 1 &&
              I->nr_srcs == 2) {
             const agx_index dest = I->dest[0];
             if (!agx3_vary_reg32(dest) || agx_channels(dest) != 1)
@@ -12389,8 +12392,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                hints[i] = agx3_post_ra_hint(I->src[i]);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            if (!agx3_alu_bit_andc(enc, dest.value, src, hints, dest.cache,
-                                   wait, bytes, &length) ||
+            const bool nor = (I->truth_table & 0xfu) == 0x1u;
+            if (!(nor ? agx3_alu_bit_nor(enc, dest.value, src, hints,
+                                         dest.cache, wait, bytes, &length)
+                      : agx3_alu_bit_andc(enc, dest.value, src, hints,
+                                          dest.cache, wait, bytes, &length)) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
