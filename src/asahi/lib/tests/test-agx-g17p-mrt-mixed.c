@@ -463,14 +463,15 @@ test_background_programs(void)
 }
 
 static bool
-compile_epilog(unsigned count, const enum pipe_format *formats, bool additive,
-               bool write_z, struct agx_shader_part *part)
+compile_epilog_written(unsigned count, const enum pipe_format *formats,
+                       unsigned written, uint64_t partitions, bool additive,
+                       bool write_z, struct agx_shader_part *part)
 {
    const enum pipe_blendfactor dst =
       additive ? PIPE_BLENDFACTOR_ONE : PIPE_BLENDFACTOR_ZERO;
    struct agx_fs_epilog_key epilog = {
-      .link.loc_written = BITFIELD_MASK(count),
-      .link.size_32 = BITFIELD_MASK(count),
+      .link.loc_written = written,
+      .link.size_32 = written,
       .link.write_z = write_z,
       .nr_samples = 1,
    };
@@ -492,10 +493,19 @@ compile_epilog(unsigned count, const enum pipe_format *formats, bool additive,
    agx_nir_lower_g17p_tile_samples(b.shader, 1);
    agx_preprocess_nir(b.shader);
    struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                                .g17p_tile_partitions = partitions,
                                 .secondary = true};
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+compile_epilog(unsigned count, const enum pipe_format *formats, bool additive,
+               bool write_z, struct agx_shader_part *part)
+{
+   return compile_epilog_written(count, formats, BITFIELD_MASK(count), 0,
+                                 additive, write_z, part);
 }
 
 /* Find each pixel instruction of a native witness, in order. */
@@ -529,7 +539,10 @@ static const uint8_t release_192[6] = {0x07, 0x02, 0x54, 0xc0, 0x00, 0x00};
 static const uint8_t wait_48[6] = {0x87, 0x02, 0x54, 0x30, 0x08, 0x00};
 static const uint8_t release_48[6] = {0x07, 0x02, 0x54, 0x30, 0x00, 0x00};
 static const uint8_t wait_12[6] = {0x87, 0x02, 0x54, 0x0c, 0x08, 0x00};
+static const uint8_t release_12[6] = {0x07, 0x02, 0x54, 0x0c, 0x00, 0x00};
 static const uint8_t release_524[6] = {0x07, 0x02, 0x54, 0x0c, 0x02, 0x00};
+static const uint8_t release_560[6] = {0x07, 0x02, 0x54, 0x30, 0x02, 0x00};
+static const uint8_t release_704[6] = {0x07, 0x02, 0x54, 0xc0, 0x02, 0x00};
 
 static int
 test_epilogs(void)
@@ -539,7 +552,7 @@ test_epilogs(void)
       for (unsigned write_z = 0; write_z < 2; ++write_z) {
          struct agx_shader_part part = {0};
          CHECK(compile_epilog(l->count, l->formats, false, write_z, &part));
-         CHECK(part.info.agx3_colour_link.colour_partitions == 3);
+         CHECK(part.info.agx3_colour_link.colour_classes == 7);
          CHECK(part.info.agx3_colour_link.entry_emitted);
 
          unsigned n = 0;
@@ -566,6 +579,88 @@ test_epilogs(void)
             memcpy(sequence[n++], release_524, 6);
          }
          CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
+         free(part.binary);
+      }
+   }
+   return 0;
+}
+
+/* The pixel transactions of Apple's store-only fragments writing some of the
+ * colour targets, from metal-nt -arch applegpu_g17p render pipelines of two to
+ * four targets for every written subset, indexed by the written partitions.
+ * Each written partition keeps the classes of its position among all targets,
+ * partitions store in descending order, the last store also releases class
+ * 512, and class 12 stays held from partition 3 to partition 0 only when both
+ * are written. A lone store to partition 0 is the one-target protocol.
+ */
+enum pixel_op { END, W12, W48, W192, R12, R48, R192, R524, R560, R704 };
+
+static const struct {
+   unsigned count, written;
+   enum pixel_op ops[8];
+} subset_witnesses[] = {
+   {3, 0x1, {W12, R524}},
+   {3, 0x2, {W48, R560}},
+   {3, 0x4, {W192, R704}},
+   {3, 0x3, {W48, R48, W12, R524}},
+   {3, 0x5, {W192, R192, W12, R524}},
+   {3, 0x6, {W192, R192, W48, R560}},
+   {4, 0x1, {W12, R524}},
+   {4, 0x2, {W48, R560}},
+   {4, 0x4, {W192, R704}},
+   {4, 0x8, {W12, R524}},
+   {4, 0x3, {W48, R48, W12, R524}},
+   {4, 0x5, {W192, R192, W12, R524}},
+   {4, 0x9, {W12, R524}},
+   {4, 0x6, {W192, R192, W48, R560}},
+   {4, 0xa, {W12, R12, W48, R560}},
+   {4, 0xc, {W12, R12, W192, R704}},
+   {4, 0x7, {W192, R192, W48, R48, W12, R524}},
+   {4, 0xb, {W12, W48, R48, R524}},
+   {4, 0xd, {W12, W192, R192, R524}},
+   {4, 0xe, {W12, R12, W192, R192, W48, R560}},
+};
+
+static int
+test_subset_epilogs(void)
+{
+   static const uint8_t *const bytes[] = {
+      [W12] = wait_12,     [W48] = wait_48,     [W192] = wait_192,
+      [R12] = release_12,  [R48] = release_48,  [R192] = release_192,
+      [R524] = release_524, [R560] = release_560, [R704] = release_704,
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
+      const struct layout *l = &layouts[i];
+      uint64_t partitions = 0;
+      for (unsigned rt = 0; rt < l->count; ++rt)
+         partitions |= BITFIELD64_BIT(l->offsets[rt]);
+
+      for (unsigned written = 1; written < BITFIELD_MASK(l->count);
+           ++written) {
+         unsigned ranks = 0;
+         u_foreach_bit(rt, written) {
+            ranks |= BITFIELD_BIT(
+               util_bitcount64(partitions & BITFIELD64_MASK(l->offsets[rt])));
+         }
+
+         unsigned w = 0;
+         while (subset_witnesses[w].count != l->count ||
+                subset_witnesses[w].written != ranks)
+            w++;
+
+         unsigned classes = 0, n = 0;
+         u_foreach_bit(rank, ranks)
+            classes |= BITFIELD_BIT(rank % 3);
+         uint8_t sequence[8][6];
+         for (; n < 8 && subset_witnesses[w].ops[n] != END; ++n)
+            memcpy(sequence[n], bytes[subset_witnesses[w].ops[n]], 6);
+
+         struct agx_shader_part part = {0};
+         CHECK(compile_epilog_written(l->count, l->formats, written,
+                                      partitions, false, false, &part));
+         CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
+         CHECK(part.info.agx3_colour_link.colour_classes == classes);
          free(part.binary);
       }
    }
@@ -731,6 +826,7 @@ main(void)
    if (test_selectors_match_single_target_programs() ||
        test_layout_classification() || test_eot_programs() ||
        test_background_programs() || test_epilogs() ||
+       test_subset_epilogs() ||
        test_homogeneous_programs_unchanged())
       return 1;
 

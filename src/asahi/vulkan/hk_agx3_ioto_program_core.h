@@ -68,7 +68,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint32_t compiler_d;
    bool fragment;
    bool writes_sample_mask;
-   uint8_t colour_partitions;
+   uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
 };
 

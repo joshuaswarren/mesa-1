@@ -5825,7 +5825,20 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       }
    }
 
-   if (!stop || store_count < 2 ||
+   /* An epilog writing only some of the framebuffer's targets keeps each
+    * store's partition. A lone store to partition zero is the ordinary
+    * single-target protocol. */
+   const uint64_t partitions = ctx->key->g17p_tile_partitions;
+   uint64_t written = 0;
+   for (unsigned i = 0; i < store_count; ++i) {
+      if (stores[i]->pixel_offset >= 64)
+         return false;
+      written |= BITFIELD64_BIT(stores[i]->pixel_offset);
+   }
+   const bool subset = partitions && written != partitions;
+   if (!stop || (partitions && (written & ~partitions)) ||
+       store_count < (subset && written != BITFIELD64_BIT(0) ? 1 : 2) ||
+       (subset && load_count) ||
        (depth_ops && (depth_ops != 3 || load_count)))
       return false;
 
@@ -5878,7 +5891,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          }
       }
    }
-   if (stores[store_count - 1]->pixel_offset != 0)
+   if (stores[store_count - 1]->pixel_offset != 0 && !subset)
       return false;
 
    for (unsigned i = 0; i < store_count; ++i) {

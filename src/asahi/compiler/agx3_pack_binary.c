@@ -5115,13 +5115,22 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * a format or workload name.  Every partition must have one terminal store;
  * loads are optional, and the pre-RA sink guarantees stores descend to the
  * zero-offset final release. The third class pair uses 128/64/192. Four
- * identical R32/RGBA32 targets reuse class 12 across targets 3 and 0, with
- * one shared lifetime. Wider layouts and four-target blending stay refused.
+ * targets reuse class 12 across targets 3 and 0, with one shared lifetime.
+ * Wider layouts and four-target blending stay refused.
+ *
+ * An epilog writing only some of the framebuffer's targets takes the
+ * partitions from the key instead. Apple's store-only fragments for such
+ * pipelines keep every written target's classes from its position among all
+ * targets, store in descending partition order, and share class 12 only when
+ * targets 3 and 0 are both written.
  */
 struct agx3_g17p_mrt_protocol {
    bool valid;
    bool raw32_store;
+   bool shared_class;
    uint8_t count;
+   /* Colour classes of the stored partitions, bit n for partitions n % 3. */
+   uint8_t classes;
    /* Four targets share three colour classes. Target 3 reuses class 0. */
    uint16_t offsets[4];
    uint8_t loads[4];
@@ -5259,27 +5268,35 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return p;
 
-   bool depth_written = false;
+   const uint64_t partitions = ctx->key->fs.ignore_tib_dependencies
+                                  ? 0 : ctx->key->g17p_tile_partitions;
+   if (util_bitcount64(partitions) > ARRAY_SIZE(p.offsets))
+      return p;
+   u_foreach_bit64(offset, partitions)
+      p.offsets[p.count++] = offset;
+
+   bool depth_written = false, tile_ops = false;
    agx_foreach_instr_global(ctx, I) {
       /* A depth export may finish its own class-1 transaction first. */
-      if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !p.count)
+      if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
          depth_written = true;
       if (agx3_is_cf_op(I) ||
           (I->op == AGX_OPCODE_SIGNAL_PIX &&
-           (!depth_written || I->writeout != 1 || p.count)))
+           (!depth_written || I->writeout != 1 || tile_ops)))
          return (struct agx3_g17p_mrt_protocol){0};
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
          continue;
       if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
          return (struct agx3_g17p_mrt_protocol){0};
 
+      tile_ops = true;
       unsigned i;
       for (i = 0; i < p.count; ++i) {
          if (p.offsets[i] == I->pixel_offset)
             break;
       }
       if (i == p.count) {
-         if (p.count == ARRAY_SIZE(p.offsets))
+         if (partitions || p.count == ARRAY_SIZE(p.offsets))
             return (struct agx3_g17p_mrt_protocol){0};
          p.offsets[p.count++] = I->pixel_offset;
       }
@@ -5336,26 +5353,30 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          return (struct agx3_g17p_mrt_protocol){0};
 
       if (I->op == AGX_OPCODE_LD_TILE) {
-         if (++p.loads[partition] > 1 || next_store != p.count ||
+         if (++p.loads[partition] > 1 || stores_started ||
              (unsigned)partition >= previous_load)
             return (struct agx3_g17p_mrt_protocol){0};
          previous_load = partition;
       } else {
          stores_started = true;
-         if (++p.stores[partition] > 1 || next_store == 0 ||
-             partition != (int)--next_store)
+         if (++p.stores[partition] > 1 || (unsigned)partition >= next_store)
             return (struct agx3_g17p_mrt_protocol){0};
+         next_store = partition;
       }
    }
 
    for (unsigned i = 0; i < p.count; ++i) {
       uint32_t read_class, write_class, combined_class;
       /* Four-target blending is not inferred from the store-only witness. */
-      if (p.stores[i] != 1 || (p.count == 4 && p.loads[i]) ||
+      if ((p.stores[i] != 1 && !(partitions && !p.stores[i] && !p.loads[i])) ||
+          (p.count == 4 && p.loads[i]) ||
           !agx3_pixel_colour_partition_classes(
              i % 3, &read_class, &write_class, &combined_class))
          return (struct agx3_g17p_mrt_protocol){0};
+      if (p.stores[i])
+         p.classes |= BITFIELD_BIT(i % 3);
    }
+   p.shared_class = p.count == 4 && p.stores[0] && p.stores[3];
 
    p.raw32_store = true;
    agx_foreach_instr_global(ctx, I) {
@@ -5367,7 +5388,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
                           partition >= 0 && I->pixel_offset == 16u * partition;
       }
    }
-   p.valid = stopped && next_store == 0;
+   p.valid = stopped && stores_started;
    return p;
 }
 
@@ -6206,8 +6227,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          : NULL;
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);
-   ctx->agx3_colour_link.colour_partitions =
-      g17p_mrt.valid ? MIN2(g17p_mrt.count, 3)
+   ctx->agx3_colour_link.colour_classes =
+      g17p_mrt.valid ? g17p_mrt.classes
                      : (g17p_colour_protocol || g17p_blend_protocol ? 1 : 0);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
@@ -7328,7 +7349,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                                   : combined_class;
                /* Target3 opens class12 and leaves it held until target0.
                 * Do not reacquire it or release it between those stores. */
-               const bool shared_class = g17p_mrt.count == 4;
+               const bool shared_class = g17p_mrt.shared_class;
                const bool acquire_class = !shared_class || partition != 0;
                const bool release_class = !shared_class || partition != 3;
                if ((acquire_class &&

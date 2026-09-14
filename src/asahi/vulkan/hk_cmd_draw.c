@@ -2822,7 +2822,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
-                            bool stop, unsigned cf_base)
+                            bool stop, unsigned cf_base,
+                            uint64_t g17p_tile_partitions)
 {
    /* Try to get the cached shader */
    struct hash_entry *ent = _mesa_hash_table_search(dev->prolog_epilog.ht, key);
@@ -2837,6 +2838,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
+      .g17p_tile_partitions = g17p_tile_partitions,
       .secondary = true,
       .no_stop = !stop,
    };
@@ -2885,7 +2887,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 static struct agx_shader_part *
 hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                      hk_internal_builder_t builder, bool preprocess_nir,
-                     bool stop, unsigned cf_base)
+                     bool stop, unsigned cf_base, uint64_t g17p_tile_partitions)
 {
    /* Build the meta shader key */
    size_t total_key_size = sizeof(struct hk_internal_key) + data_size;
@@ -2900,7 +2902,7 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
    simple_mtx_lock(&dev->prolog_epilog.lock);
 
    struct agx_shader_part *part = hk_get_prolog_epilog_locked(
-      dev, key, builder, preprocess_nir, stop, cf_base);
+      dev, key, builder, preprocess_nir, stop, cf_base, g17p_tile_partitions);
 
    simple_mtx_unlock(&dev->prolog_epilog.lock);
    return part;
@@ -2914,7 +2916,7 @@ hk_get_fast_linked_locked_vs(struct hk_device *dev, struct hk_shader *shader,
       hk_get_prolog_epilog(dev, &key->prolog, sizeof(key->prolog),
                            dev->dev.chip == AGX_CHIP_G17P
                               ? agx_nir_vs_prolog_raw : agx_nir_vs_prolog,
-                           false, false, 0);
+                           false, false, 0, 0);
    if (!prolog)
       return NULL;
 
@@ -2983,7 +2985,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    if (needs_prolog) {
       prolog = hk_get_prolog_epilog(dev, &key->prolog, sizeof(key->prolog),
                                     build_fs_prolog, false, false,
-                                    key->prolog.cf_base);
+                                    key->prolog.cf_base, 0);
       if (!prolog) {
          mesa_loge("fragment prolog compilation failed: stats=%u cull=%u "
                    "api-mask=%#x run-zs=%u cf-base=%u",
@@ -2999,12 +3001,27 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
     */
    bool epilog_stop = (key->nr_samples_shaded == 0);
 
+   /* A G17P epilog selects each written target's pixel classes from its
+    * position among all of the framebuffer's colour targets. */
+   uint64_t g17p_tile_partitions = 0;
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
+         key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
+         key->epilog.nr_samples, true);
+      for (unsigned rt = 0; rt < ARRAY_SIZE(tib.logical_format); ++rt) {
+         if (tib.logical_format[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
+            g17p_tile_partitions |= BITFIELD64_BIT(tib._offset_B[rt]);
+      }
+      if (util_bitcount64(g17p_tile_partitions) < 2)
+         g17p_tile_partitions = 0;
+   }
+
    struct agx_shader_part *epilog =
       hk_get_prolog_epilog(dev, &key->epilog, sizeof(key->epilog),
                            dev->dev.chip == AGX_CHIP_G17P
                               ? build_g17p_fs_epilog
                               : agx_nir_fs_epilog,
-                           true, epilog_stop, 0);
+                           true, epilog_stop, 0, g17p_tile_partitions);
    if (!epilog) {
       uint32_t link = 0;
       memcpy(&link, &key->epilog.link, sizeof(link));
