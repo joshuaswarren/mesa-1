@@ -80,6 +80,8 @@ hk_files = files(
   'hk_nir_passthrough_gs.c',
   'hk_nir_ray_tracing.c',
   'hk_nir_ray_tracing.h',
+  'hk_nir_widen_16bit_varyings.c',
+  'hk_nir_widen_16bit_varyings.h',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
   'hk_native_descriptor_pack.h',
@@ -149,6 +151,20 @@ if with_tests
       'hk_nir_forward_image_stores_test',
       files('tests/test-hk-nir-forward-image-stores.c',
             'hk_nir_forward_image_stores.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_widen_16bit_varyings',
+    executable(
+      'hk_nir_widen_16bit_varyings_test',
+      files('tests/test-hk-nir-widen-16bit-varyings.c',
+            'hk_nir_widen_16bit_varyings.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil],
       c_args : [c_msvc_compat_args],
