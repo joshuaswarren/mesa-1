@@ -2178,13 +2178,22 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
                  "fragment attachment capture capacity");
    unsigned view_count = 0;
 
+   /* Each retained span is a G17P fragment write range, and the kernel
+    * encodes at most sixteen of them next to its own. Only a direct colour
+    * resolve writes a resolve attachment during the pass; every other resolve
+    * is a later meta pass that retains its own attachments. Eight multisample
+    * targets and their resolve targets would otherwise overflow the table and
+    * fail the submit. */
+   const bool g17p = dev->dev.chip == AGX_CHIP_G17P;
+   const bool resolves_written = !g17p || render->g17p_direct_color_resolve;
+
    for (unsigned i = 0; i < render->color_att_count; ++i) {
       views[view_count++] = (struct hk_attachment_view_ref){
          .view = render->color_att[i].iview,
          .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       };
       views[view_count++] = (struct hk_attachment_view_ref){
-         .view = render->color_att[i].resolve_iview,
+         .view = resolves_written ? render->color_att[i].resolve_iview : NULL,
          .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       };
    }
@@ -2194,7 +2203,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
-      .view = render->depth_att.resolve_iview,
+      .view = g17p ? NULL : render->depth_att.resolve_iview,
       .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
@@ -2202,7 +2211,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       .aspect = VK_IMAGE_ASPECT_STENCIL_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
-      .view = render->stencil_att.resolve_iview,
+      .view = g17p ? NULL : render->stencil_att.resolve_iview,
       .aspect = VK_IMAGE_ASPECT_STENCIL_BIT,
    };
 
