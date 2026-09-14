@@ -944,6 +944,15 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
       if (cs->imm_writes.size) {
          hk_dispatch_imm_writes(cmd, cs);
       }
+
+      /* A transformed draw may reserve a pre-graphics stream and then prove
+       * that it has no vertices to process. Do not leave an empty CDM job in
+       * the submission list. */
+      if (cs->stats.cmds == 0 && cs->stats.flushes == 0 &&
+          !cs->timestamp.end.handle) {
+         list_del(&cs->node);
+         hk_cs_destroy(cs);
+      }
    }
 
    *ptr = NULL;
