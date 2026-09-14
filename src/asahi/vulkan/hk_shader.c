@@ -2404,6 +2404,73 @@ nir_opts(nir_shader *nir, void *data)
    } while (progress);
 }
 
+/* Native varyings use 32-bit components. Widen narrow integer interfaces
+ * before interstage optimization: nir_opt_varyings may retype flat IO as
+ * float, after which a numeric half-float conversion loses integer NaN bits.
+ * Keep narrowing inside the consumer, where it is ordinary integer ALU.
+ */
+static bool
+hk_widen_integer_io(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   bool store;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_per_vertex_output:
+      if (b->shader->info.stage == MESA_SHADER_FRAGMENT)
+         return false;
+      store = true;
+      break;
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_per_vertex_input:
+      if (b->shader->info.stage == MESA_SHADER_VERTEX)
+         return false;
+      store = false;
+      break;
+   case nir_intrinsic_load_output:
+   case nir_intrinsic_load_per_vertex_output:
+      store = false;
+      break;
+   default:
+      return false;
+   }
+
+   nir_alu_type type = store ? nir_intrinsic_src_type(intr)
+                            : nir_intrinsic_dest_type(intr);
+   nir_alu_type base = nir_alu_type_get_base_type(type);
+   unsigned bits = store ? intr->src[0].ssa->bit_size : intr->def.bit_size;
+   if (bits != 16 || (base != nir_type_int && base != nir_type_uint))
+      return false;
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (store && sem.no_varying)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   if (store) {
+      /* XFB observes the original component width independently of the
+       * internal varying representation. Retain a separate XFB-only store. */
+      if (nir_instr_xfb_write_mask(intr)) {
+         nir_intrinsic_instr *xfb = nir_instr_as_intrinsic(
+            nir_instr_clone(b->shader, &intr->instr));
+         nir_io_semantics xfb_sem = sem;
+         xfb_sem.no_varying = true;
+         nir_intrinsic_set_io_semantics(xfb, xfb_sem);
+         nir_builder_instr_insert(b, &xfb->instr);
+         nir_intrinsic_set_io_xfb(intr, (nir_io_xfb){0});
+      }
+      nir_def *value = nir_convert_to_bit_size(b, intr->src[0].ssa, base, 32);
+      nir_src_rewrite(&intr->src[0], value);
+      nir_intrinsic_set_src_type(intr, base | 32);
+   } else {
+      intr->def.bit_size = 32;
+      nir_intrinsic_set_dest_type(intr, base | 32);
+      b->cursor = nir_after_instr(&intr->instr);
+      nir_def *value = nir_u2u16(b, &intr->def);
+      nir_def_rewrite_uses_after(&intr->def, value);
+   }
+   return true;
+}
+
 static VkResult
 hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
@@ -2458,6 +2525,10 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
          nir_io_add_intrinsic_xfb_info(nir);
       }
+
+      if (dev->dev.chip == AGX_CHIP_G17P)
+         NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_widen_integer_io,
+                  nir_metadata_control_flow, NULL);
 
       shaders[i] = nir;
    }
