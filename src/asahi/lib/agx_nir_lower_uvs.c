@@ -194,6 +194,23 @@ gather_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
+agx_nir_lower_default_layer(nir_shader *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   if (s->info.outputs_written & VARYING_BIT_LAYER)
+      return nir_no_progress(impl);
+
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_store_output(&b, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                    .src_type = nir_type_uint32,
+                    .io_semantics = {.location = VARYING_SLOT_LAYER,
+                                     .num_slots = 1},
+                    .write_mask = 1);
+   s->info.outputs_written |= VARYING_BIT_LAYER;
+   return nir_progress(true, impl, nir_metadata_control_flow);
+}
+
+bool
 agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout,
                   bool layer_as_varying)
 {

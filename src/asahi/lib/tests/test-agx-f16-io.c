@@ -212,11 +212,17 @@ lowered_layer_viewport_value(bool write_layer,
 }
 
 static bool
-lowered_g17p_layer_varying(void)
+lowered_g17p_layer_varying(bool explicit_layer)
 {
-   nir_shader *nir = build_layer_viewport_output(true, 7, false, 0, false);
+   nir_shader *nir = build_layer_viewport_output(explicit_layer, 7, false, 0, false);
+   bool added = false, repeated = false;
+   NIR_PASS(added, nir, agx_nir_lower_default_layer);
+   NIR_PASS(repeated, nir, agx_nir_lower_default_layer);
+   bool valid = added == !explicit_layer && !repeated;
+   valid &= (nir->info.outputs_written & VARYING_BIT_LAYER) != 0;
+   const unsigned expected_layer = explicit_layer ? 7 : 0;
    struct agx_unlinked_uvs_layout layout = {0};
-   bool valid = agx_nir_lower_uvs(nir, &layout, true);
+   valid &= agx_nir_lower_uvs(nir, &layout, true);
 
    bool progress;
    do {
@@ -240,9 +246,9 @@ lowered_g17p_layer_varying(void)
 
             const unsigned index = nir_src_as_uint(intr->src[1]);
             const unsigned value = nir_src_as_uint(intr->src[0]);
-            if (index == layout.group_offs[UVS_VARYINGS] && value == 7)
+            if (index == layout.group_offs[UVS_VARYINGS] && value == expected_layer)
                layer_stores++;
-            if (index == layout.group_offs[UVS_LAYER_VIEWPORT] && value == 7)
+            if (index == layout.group_offs[UVS_LAYER_VIEWPORT] && value == expected_layer)
                packed_stores++;
          }
       }
@@ -578,7 +584,7 @@ main(void)
    /* The generation-neutral path keeps layer in the packed fixed-function
     * word. G17P additionally duplicates a fragment-consumed layer into one
     * ordinary flat UVS word, matching the six-UVSW Apple vertex witness. */
-   if (!lowered_g17p_layer_varying())
+   if (!lowered_g17p_layer_varying(false) || !lowered_g17p_layer_varying(true))
       return 1;
 
    /* Fresh applegpu_g17p witnesses are exact on both sides of no_varying:

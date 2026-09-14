@@ -1528,6 +1528,11 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
    NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
    NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
+   /* Native fragment Layer reads use a flat coefficient, including for
+    * independently compiled stages whose VS does not explicitly write Layer. */
+   if (layer_as_varying)
+      NIR_PASS(_, nir, agx_nir_lower_default_layer);
+
    NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs,
             layer_as_varying);
 }
@@ -1802,6 +1807,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          }
          hk_lower_hw_vs(nir, shader, kill_psiz,
                         dev->dev.chip == AGX_CHIP_G17P);
+         outputs = nir->info.outputs_written;
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
          nir->info.stage = MESA_SHADER_COMPUTE;
