@@ -1069,6 +1069,8 @@ void agx_print_instr(const agx_instr *I, FILE *fp);
 void agx_print_block(const agx_block *block, FILE *fp);
 void agx_print_shader(const agx_context *ctx, FILE *fp);
 void agx_optimizer_forward(agx_context *ctx);
+bool agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond,
+                              agx_index x, agx_index y, bool *result);
 void agx_optimizer_backward(agx_context *ctx);
 void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);

@@ -581,8 +581,8 @@ agx_optimizer_if_not(agx_instr **defs, agx_instr *I)
  * select as a value, and fusing a compare of two constants into a select
  * produces one; robust cube image coordinates do all of these.
  */
-static bool
-agx_optimizer_eval_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
+bool
+agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
                          agx_index y, bool *result)
 {
    if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
@@ -621,7 +621,7 @@ static agx_instr *
 agx_optimizer_fold_icmp(agx_context *ctx, agx_instr *I)
 {
    bool cond;
-   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
       return NULL;
 
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
@@ -635,7 +635,7 @@ static agx_instr *
 agx_optimizer_fold_icmpsel(agx_context *ctx, agx_instr *I)
 {
    bool cond;
-   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
       return NULL;
 
    const agx_index chosen = cond ? I->src[2] : I->src[3];
