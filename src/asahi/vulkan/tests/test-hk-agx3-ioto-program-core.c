@@ -2363,6 +2363,21 @@ test_g17p_single_layer_rt0_layout(void)
    tib = agx_build_tilebuffer_layout(rgb10a2_uint, 1, 2, false);
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
+   /* A2R10G10B10_UINT_PACK32 swaps channels in the PBE, not in the tile. */
+   enum pipe_format bgr10a2_uint[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B10G10R10A2_UINT,
+   };
+   tib = agx_build_tilebuffer_layout(bgr10a2_uint, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
+   enum pipe_format bgr10a2_uint_mrt[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B10G10R10A2_UINT, PIPE_FORMAT_A4R4G4B4_UNORM,
+      PIPE_FORMAT_B5G5R5A1_UNORM, PIPE_FORMAT_B8G8R8A8_SNORM,
+      PIPE_FORMAT_A4B4G4R4_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(bgr10a2_uint_mrt, 5, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+
    enum pipe_format r32_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32_UINT,
    };

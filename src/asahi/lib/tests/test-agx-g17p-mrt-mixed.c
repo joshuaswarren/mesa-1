@@ -185,6 +185,15 @@ test_selectors_match_single_target_programs(void)
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R16G16B16A16_UNORM) == 0x95);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R16G16B16A16_SINT) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B5G6R5_UNORM) == 0x15);
+   /* ABGR4Unorm, A1BGR5Unorm and BGR5A1Unorm fragments store the same W16
+    * float LSTCOL as RGBA16Float, RGB10A2Uint the same W16 integer LSTCOL as
+    * RGBA16Uint, and RGBA8Snorm the same W8 LSTCOL as RGBA8Unorm. Channel
+    * order is the PBE's, as for the BGRA forms already listed. */
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A4B4G4R4_UNORM) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A4R4G4B4_UNORM) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B5G5R5A1_UNORM) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B10G10R10A2_UINT) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B8G8R8A8_SNORM) == 0x75);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0);
    CHECK(admitted > 40);

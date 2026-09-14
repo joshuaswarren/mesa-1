@@ -324,7 +324,8 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
    const bool rgb10a2u = tib->sample_size_B == 8 &&
-      tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
+      (tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT ||
+       tib->logical_format[0] == PIPE_FORMAT_B10G10R10A2_UINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
    /* The packed float word is stored raw, so its samples cannot be
     * resolved by averaging the lane. */
