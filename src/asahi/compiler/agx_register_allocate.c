@@ -1868,6 +1868,18 @@ agx_ra(agx_context *ctx)
             BITSET_SET(texture_gpr, I->src[5].value);
       }
 
+      /* imgwci stages its data and coordinates through the same seven-bit
+       * COPY sources and names its PBE index register in a seven-bit field.
+       */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IMAGE_WRITE) {
+         for (unsigned s = 0; s < I->nr_srcs; ++s) {
+            if ((s == 0 || s == 1 || s == 4) &&
+                I->src[s].type == AGX_INDEX_NORMAL)
+               BITSET_SET(texture_gpr, I->src[s].value);
+         }
+      }
+
       /* Both the result and source operands of G17P f32log2 are bounded to
        * halves 0..191 by the recovered native form. dest_limit handles the
        * instruction result directly; mark the defining SSA of its source so

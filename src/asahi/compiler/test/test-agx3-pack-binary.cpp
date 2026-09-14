@@ -4811,6 +4811,55 @@ TEST_F(AGX3PackBinary, UniformMovesAndImageReadsStayLowUnderPressure)
    }
 }
 
+TEST_F(AGX3PackBinary, ImageWriteOperandsStayLowUnderPressure)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_COMPUTE;
+
+   /* Keep halves 0..127 live until after the store. */
+   agx_index live[64];
+   for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+      live[i] = agx_preload(b, agx_register(2 * i, AGX_SIZE_32));
+
+   agx_index channels[4], xy[2];
+   for (unsigned i = 0; i < 4; ++i)
+      channels[i] = agx_mov_imm(b, 32, i + 1);
+   for (unsigned i = 0; i < 2; ++i)
+      xy[i] = agx_mov_imm(b, 32, i);
+   agx_index record = agx_mov_imm(b, 32, 5);
+   agx_index data = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+   agx_instr *data_collect = agx_collect_to(b, data, 4);
+   for (unsigned i = 0; i < 4; ++i)
+      data_collect->src[i] = channels[i];
+   agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+   agx_instr *coord_collect = agx_collect_to(b, coord, 2);
+   coord_collect->src[0] = xy[0];
+   coord_collect->src[1] = xy[1];
+   agx_instr *write = agx_image_write(b, data, coord, agx_immediate(0),
+                                      agx_uniform(20, AGX_SIZE_64), record,
+                                      AGX_DIM_2D, false);
+
+   agx_index sum = live[0];
+   for (unsigned i = 1; i < ARRAY_SIZE(live); ++i)
+      sum = agx_fadd(b, sum, live[i]);
+   agx_export(b, sum, 8);
+   agx_stop(b);
+
+   agx_ra(b->shader);
+
+   /* imgwci stages data and coordinates through seven-bit COPY sources and
+    * names its record index in a seven-bit field. */
+   for (unsigned s : {0u, 1u, 4u}) {
+      ASSERT_EQ(write->src[s].type, AGX_INDEX_REGISTER) << "src " << s;
+      EXPECT_LE(write->src[s].value + agx_size_align_16(write->src[s].size) *
+                                         agx_channels(write->src[s]),
+                128u)
+         << "src " << s;
+   }
+}
+
 TEST_F(AGX3PackBinary, ThreeJSVertexTextureCoordinatesStayLowUnderPressure)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
