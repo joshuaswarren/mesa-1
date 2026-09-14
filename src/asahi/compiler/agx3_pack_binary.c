@@ -7085,13 +7085,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 I->src[3].type != AGX_INDEX_IMMEDIATE) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
                ctx->stage == MESA_SHADER_COMPUTE;
-            /* Apple's texture_buffer<uint>::read followed by a 2D write
-             * uses read-coordinate halves 16/18, separate from imgwci's
-             * halves 0/2, and returns the read on slot 1. This is the same
-             * one-read/one-write contract as a read_write image. */
+            /* imgwci takes its coordinates from staging halves 0/2, so a
+             * read in a shader that also writes images must not stage its
+             * coordinates there: an unwaited write COPY can replace them
+             * before the asynchronous read consumes them. Apple moves the
+             * read to halves 16/18. texture_buffer<uint>::read followed by a
+             * 2D write does, as does an indexed read-only image read followed
+             * by a write, metal-nt -arch applegpu_g17p:
+             *
+             *   read only    copy 5:0, copy 5:2, smp ep4
+             *   read, write  copy 5:16, copy 5:18, smp ep4 f19 16
+             */
             const bool separate_write_coords =
-               g17p_storage_image_protocol &&
-               I->op == AGX_OPCODE_TEXTURE_LOAD && I->dim == AGX_DIM_2D;
+               enc == AGX_ISA_ENCODING_AGX3B && image_writes_left != 0 &&
+               ((g17p_storage_image_protocol &&
+                 I->op == AGX_OPCODE_TEXTURE_LOAD) ||
+                I->op == AGX_OPCODE_IMAGE_LOAD) &&
+               I->dim == AGX_DIM_2D;
             const bool register_fetch_lod =
                I->op == AGX_OPCODE_TEXTURE_LOAD &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
