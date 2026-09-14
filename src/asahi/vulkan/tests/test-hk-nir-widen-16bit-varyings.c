@@ -110,6 +110,37 @@ test_load_input(mesa_shader_stage stage, nir_alu_type type, bool widened,
    ralloc_free(nir);
 }
 
+/* A 16-bit output read back, as a tessellation control shader reads the
+ * outputs it wrote and a fragment shader reads its render target. */
+static void
+test_load_output(mesa_shader_stage stage, nir_alu_type type, bool widened,
+                 nir_op conversion)
+{
+   nir_shader *nir = shader(stage);
+   nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_io_semantics sem = var0;
+   if (stage == MESA_SHADER_FRAGMENT)
+      sem.location = FRAG_RESULT_DATA0;
+   nir_def *load =
+      stage == MESA_SHADER_TESS_CTRL
+         ? nir_load_per_vertex_output(&b, 2, 16, zero, zero,
+                                      .io_semantics = sem,
+                                      .dest_type = type | 16)
+         : nir_load_output(&b, 2, 16, zero, .io_semantics = sem,
+                           .dest_type = type | 16);
+   nir_fneg(&b, nir_u2f32(&b, load));
+
+   CHECK(hk_nir_widen_16bit_varyings(nir) == widened);
+   CHECK(load->bit_size == (widened ? 32 : 16));
+   if (widened) {
+      nir_alu_instr *narrow = alu_user(load);
+      CHECK(narrow && narrow->op == conversion &&
+            narrow->def.bit_size == 16);
+   }
+   ralloc_free(nir);
+}
+
 int
 main(void)
 {
@@ -123,6 +154,11 @@ main(void)
    test_load_input(MESA_SHADER_TESS_EVAL, nir_type_float, true, nir_op_f2f16);
    test_load_input(MESA_SHADER_FRAGMENT, nir_type_int, true, nir_op_i2i16);
    test_load_input(MESA_SHADER_VERTEX, nir_type_float, false, nir_op_f2f16);
+
+   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_float, true, nir_op_f2f16);
+   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_int, true, nir_op_i2i16);
+   test_load_output(MESA_SHADER_FRAGMENT, nir_type_float, false,
+                    nir_op_f2f16);
 
    glsl_type_singleton_decref();
 

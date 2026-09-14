@@ -13,6 +13,11 @@
  * it relocates as float, after which a 16-bit integer would be widened with
  * f2f32 and narrowed with f2f16. G17P's float conversions canonicalize NaNs,
  * so an int16 whose bits spell one arrived changed.
+ *
+ * A tessellation control shader also reads back the outputs it wrote. Those
+ * reads widen with the stores, or they read a float16 from half of a float32
+ * and the second component of a 16-bit vector from the upper half of the
+ * first.
  */
 static bool
 widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
@@ -38,8 +43,14 @@ widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
 
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_per_vertex_input:
-   case nir_intrinsic_load_interpolated_input: {
-      if (stage == MESA_SHADER_VERTEX || intr->def.bit_size != 16)
+   case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_output:
+   case nir_intrinsic_load_per_vertex_output: {
+      const bool output =
+         intr->intrinsic == nir_intrinsic_load_output ||
+         intr->intrinsic == nir_intrinsic_load_per_vertex_output;
+      if (stage == (output ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
+          intr->def.bit_size != 16)
          return false;
 
       const nir_alu_type type =
