@@ -362,6 +362,20 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
       case PIPE_FORMAT_R8G8B8A8_SRGB:
       case PIPE_FORMAT_R11G11B10_FLOAT:
          break;
+      /* One 32-bit target, which GL 3.3 renders to and GL 3.0 never did
+       * (KHR-GL33.texture_size_promotion takes R32F and R32UI multisample).
+       * Apple stores it with the same lstcol the single-sample target uses:
+       * metal-nt -arch applegpu_g17p, one R32Float attachment fed by a
+       * multisample read, emits e71654000000012200000000 at one sample and
+       * e71654000000022208000008 at both two and four -- the same word for
+       * either count, because the fragment is unrolled per sample. The wider
+       * four-lane tile is witnessed the same way: one RGBA32Float attachment
+       * emits e71654000000012e00000000 at one sample and
+       * e71654000000082e08000008 at four. */
+      case PIPE_FORMAT_R32_UINT:
+         if (tib->sample_size_B != 8 && tib->sample_size_B != 16)
+            return false;
+         break;
       default:
          return false;
       }

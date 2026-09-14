@@ -14,10 +14,42 @@ keeps its native code so the tile store can be read rather than inferred.
 
 What it has established so far:
 
-  r32uint, one sample   e70654000000012200000000
-  r32float, one sample  e71654000000012200000000
-  r32uint, four samples e71654000000022208000008
+  r32uint, one sample    e70654000000012200000000
+  r32float, one sample   e71654000000012200000000
+  r32uint, four samples  e71654000000022208000008
   r32float, four samples (identical to the uint one)
+
+Extended 2026-09-14, one colour attachment fed by a multisample read:
+
+  r32float   1x  e71654000000012200000000
+  r32float   2x  e71654000000022208000008
+  r32float   4x  e71654000000022208000008   (identical to 2x)
+  rgba32f    1x  e71654000000012e00000000
+  rgba32f    4x  e71654000000082e08000008
+  rgba8      1x  e70654000000014e00000000
+  rgba8      4x  e72654000000084e08000008
+
+Two samples and four samples emit the SAME word, so the two bits below are a
+multisample selector and not a sample count -- the fragment is unrolled per
+sample (see g17p-per-sample-fragment-unrolls). rgba8, a format this driver
+already stores multisampled, carries the same two bits, so they belong to
+multisample stores generally rather than to the 32-bit tile.
+
+  bit 67 (byte 8 bit 3) and bit 91 (byte 11 bit 3)
+
+Neither is expressible in the composer: `lstcol` has exactly one form in both
+AGX3b.xml and agx3b_tables.c, its declared immediates are f10, f14 (68:78),
+f15 (79:89), f18..f23, f70..f72 and f78, and a sweep of every field over every
+value (test/probes field-bits) moves neither bit. They are fixed at zero in the
+one modelled alternative.
+
+This does not block the tilebuffer: the driver's own multisample stores use the
+register sample form rather than the immediate one witnessed here, and RGBA8
+multisample already passes GL 3.0 hardware without those bits. What the
+captures establish is that Apple stores a 32-bit tile at two and four samples
+at all, which is what agx_g17p_rt0_tile_layout_supported() needed in order to
+admit R32F/R32UI and RGBA32F multisample for
+KHR-GL33.texture_size_promotion.
 
 agx3_tile_store() reproduces the one-sample uint word exactly, at
 data=half0 width=W32 mask=1 offset=0 sample=immediate1, so the scalar 32-bit
