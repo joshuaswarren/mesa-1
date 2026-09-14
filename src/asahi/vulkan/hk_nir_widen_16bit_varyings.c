@@ -21,14 +21,17 @@
  */
 static bool
 widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
-                    UNUSED void *data)
+                    void *data)
 {
    const mesa_shader_stage stage = b->shader->info.stage;
+   const enum hk_nir_widen_16bit_varyings_mode mode =
+      *(const enum hk_nir_widen_16bit_varyings_mode *)data;
 
    switch (intr->intrinsic) {
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_per_vertex_output: {
-      if (stage == MESA_SHADER_FRAGMENT || intr->src[0].ssa->bit_size != 16)
+      if (!(mode & HK_NIR_WIDEN_16BIT_OUTPUTS) ||
+          stage == MESA_SHADER_FRAGMENT || intr->src[0].ssa->bit_size != 16)
          return false;
 
       const nir_alu_type type =
@@ -49,7 +52,10 @@ widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
       const bool output =
          intr->intrinsic == nir_intrinsic_load_output ||
          intr->intrinsic == nir_intrinsic_load_per_vertex_output;
-      if (stage == (output ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
+      const unsigned required_mode = output ? HK_NIR_WIDEN_16BIT_OUTPUTS
+                                            : HK_NIR_WIDEN_16BIT_INPUTS;
+      if (!(mode & required_mode) ||
+          stage == (output ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
           intr->def.bit_size != 16)
          return false;
 
@@ -71,8 +77,9 @@ widen_16bit_varying(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 bool
-hk_nir_widen_16bit_varyings(nir_shader *nir)
+hk_nir_widen_16bit_varyings(nir_shader *nir,
+                            enum hk_nir_widen_16bit_varyings_mode mode)
 {
    return nir_shader_intrinsics_pass(nir, widen_16bit_varying,
-                                     nir_metadata_control_flow, NULL);
+                                     nir_metadata_control_flow, &mode);
 }

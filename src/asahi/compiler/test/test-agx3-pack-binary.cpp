@@ -9549,6 +9549,71 @@ TEST_F(AGX3PackBinary, FloatSelectWaitPreservesUnrelatedPendingLoads)
    }
 }
 
+TEST_F(AGX3PackBinary, HalfSelectRetiresPendingDestination)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_device_load_to(b, agx_register(40, AGX_SIZE_32),
+                      agx_uniform(0, AGX_SIZE_64), agx_immediate(0),
+                      AGX_FORMAT_I32, 1, 0, false);
+   agx_device_load_to(b, agx_register(60, AGX_SIZE_16),
+                      agx_uniform(0, AGX_SIZE_64), agx_immediate(4),
+                      AGX_FORMAT_I16, 1, 0, false);
+   agx_mov_imm_to(b, agx_register(58, AGX_SIZE_16), 500);
+   agx_icmpsel_to(b, agx_register(41, AGX_SIZE_16),
+                  agx_register(60, AGX_SIZE_16), agx_register(58, AGX_SIZE_16),
+                  agx_immediate(0), agx_immediate(1), AGX_ICOND_SLT);
+   agx_stop(b);
+   const auto code = pack(b);
+   ASSERT_FALSE(code.empty());
+
+   /* Slot 1 still writes the destination's upper half. It is not a source
+    * of the select, but must be retired before that half is overwritten. */
+   const uint16_t operands[] = {41, 41};
+   const enum agx3_alu_hint hints[] = {
+      AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_alu_bit_reg16(enc, AGX3_ALU_BAND, 41, operands, hints,
+                                  1, bytes, &length));
+   EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + length),
+             code.end());
+}
+
+TEST_F(AGX3PackBinary, FloatUnaryPreservesLiveCoordinate)
+{
+   /* Apple applegpu_g17p kernels store both OP(x) and x. The original
+    * coordinate remains live after the rounding used by f2i64 lowering. */
+   static const uint8_t native[][10] = {
+      {0x2f,0x00,0x56,0x00,0x02,0x04,0x90,0x40,0x06,0x00},
+      {0x2f,0x00,0x56,0x00,0x02,0x04,0x90,0x40,0x02,0x00},
+      {0x2f,0x00,0x56,0x00,0x02,0x04,0x90,0x40,0x04,0x00},
+      {0x2f,0x02,0x56,0x00,0x02,0x04,0x90,0x40,0x00,0x00},
+      {0xaf,0x02,0x56,0x00,0x02,0x04,0x90,0x40,0x00,0x00},
+   };
+   for (unsigned op = 0; op < ARRAY_SIZE(native); ++op) {
+      SCOPED_TRACE(op);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      const agx_index dst = agx_register(0, AGX_SIZE_32);
+      const agx_index src = agx_register(2, AGX_SIZE_32);
+      agx_device_load_to(b, src, agx_uniform(0, AGX_SIZE_64),
+                         agx_immediate(0), AGX_FORMAT_I32, 1, 0, false);
+      switch (op) {
+      case 0: agx_trunc_to(b, dst, src); break;
+      case 1: agx_floor_to(b, dst, src); break;
+      case 2: agx_ceil_to(b, dst, src); break;
+      case 3: agx_log2_to(b, dst, src); break;
+      case 4: agx_exp2_to(b, dst, src); break;
+      }
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_GE(code.size(), sizeof(native[op]) + 4);
+      EXPECT_EQ(std::vector<uint8_t>(code.end() - 14, code.end() - 4),
+                std::vector<uint8_t>(native[op], native[op] + 10));
+   }
+}
+
 TEST_F(AGX3PackBinary, InterpolationWaitDoesNotReadPendingRegisters)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

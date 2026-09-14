@@ -651,9 +651,10 @@ agx3_emit_funop(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
    uint8_t bytes[AGX3_FUNOP_MAX_LENGTH];
    uint8_t len = 0;
-   return agx3_funop_encode(enc, op, I->dest[0].value, I->src[0].value,
-                            I->src[0].abs, I->src[0].neg, I->saturate,
-                            wait_mask, bytes, &len) &&
+   return agx3_funop_encode_source_lifetime(
+             enc, op, I->dest[0].value, I->src[0].value, I->src[0].abs,
+             I->src[0].neg, I->saturate, wait_mask, !I->src[0].discard,
+             bytes, &len) &&
           agx3_append(emission, bytes, len);
 }
 
@@ -4647,7 +4648,8 @@ agx3_retire_select_waits(struct util_dynarray *emission,
    return false;
 }
 
-/* Find the exact scalar ISEL operand carrying a live scoreboard slot. Search
+/* Find the exact scalar operand carrying a live scoreboard slot, including
+ * the previous destination value for a write-after-write dependency. Search
  * backward to its latest physical-register writer; a synchronous overwrite
  * terminates the search for that operand. */
 static bool
@@ -4656,8 +4658,9 @@ agx3_find_select_wait_operand(const struct agx3_slot_instr *sl,
                               unsigned consumer, const agx_instr *I,
                               uint8_t slot, agx_index *out)
 {
-   for (unsigned s = 0; s < I->nr_srcs; ++s) {
-      const agx_index operand = I->src[s];
+   for (unsigned s = 0; s < I->nr_srcs + I->nr_dests; ++s) {
+      const agx_index operand = s < I->nr_srcs ? I->src[s]
+                                              : I->dest[s - I->nr_srcs];
       if (!agx3_src_is_register(operand) || operand.memory ||
           agx_channels(operand) != 1 ||
           (operand.size != AGX_SIZE_16 && operand.size != AGX_SIZE_32))

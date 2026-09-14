@@ -61,7 +61,7 @@ static const nir_io_semantics var0 = {.location = VARYING_SLOT_VAR0,
  * base type asks for. */
 static void
 test_store(mesa_shader_stage stage, nir_alu_type type, bool widened,
-           nir_op conversion)
+           nir_op conversion, enum hk_nir_widen_16bit_varyings_mode mode)
 {
    nir_shader *nir = shader(stage);
    nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
@@ -71,7 +71,7 @@ test_store(mesa_shader_stage stage, nir_alu_type type, bool widened,
    nir_store_output(&b, value, nir_imm_int(&b, 0), .io_semantics = var0,
                     .src_type = type | 16);
 
-   CHECK(hk_nir_widen_16bit_varyings(nir) == widened);
+   CHECK(hk_nir_widen_16bit_varyings(nir, mode) == widened);
    nir_intrinsic_instr *store = find(nir, nir_intrinsic_store_output);
    CHECK(store && store->src[0].ssa->bit_size == (widened ? 32 : 16));
    CHECK(store && nir_intrinsic_src_type(store) == (type | (widened ? 32 : 16)));
@@ -86,7 +86,8 @@ test_store(mesa_shader_stage stage, nir_alu_type type, bool widened,
 /* A 16-bit input a consumer reads 32 bits of and narrows. */
 static void
 test_load_input(mesa_shader_stage stage, nir_alu_type type, bool widened,
-                nir_op conversion)
+                nir_op conversion,
+                enum hk_nir_widen_16bit_varyings_mode mode)
 {
    nir_shader *nir = shader(stage);
    nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
@@ -100,7 +101,7 @@ test_load_input(mesa_shader_stage stage, nir_alu_type type, bool widened,
                           .dest_type = type | 16);
    nir_fneg(&b, nir_u2f32(&b, load));
 
-   CHECK(hk_nir_widen_16bit_varyings(nir) == widened);
+   CHECK(hk_nir_widen_16bit_varyings(nir, mode) == widened);
    CHECK(load->bit_size == (widened ? 32 : 16));
    if (widened) {
       nir_alu_instr *narrow = alu_user(load);
@@ -114,7 +115,8 @@ test_load_input(mesa_shader_stage stage, nir_alu_type type, bool widened,
  * outputs it wrote and a fragment shader reads its render target. */
 static void
 test_load_output(mesa_shader_stage stage, nir_alu_type type, bool widened,
-                 nir_op conversion)
+                 nir_op conversion,
+                 enum hk_nir_widen_16bit_varyings_mode mode)
 {
    nir_shader *nir = shader(stage);
    nir_builder b = nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
@@ -131,7 +133,7 @@ test_load_output(mesa_shader_stage stage, nir_alu_type type, bool widened,
                            .dest_type = type | 16);
    nir_fneg(&b, nir_u2f32(&b, load));
 
-   CHECK(hk_nir_widen_16bit_varyings(nir) == widened);
+   CHECK(hk_nir_widen_16bit_varyings(nir, mode) == widened);
    CHECK(load->bit_size == (widened ? 32 : 16));
    if (widened) {
       nir_alu_instr *narrow = alu_user(load);
@@ -146,19 +148,28 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
 
-   test_store(MESA_SHADER_VERTEX, nir_type_float, true, nir_op_f2f32);
-   test_store(MESA_SHADER_TESS_CTRL, nir_type_int, true, nir_op_i2i32);
-   test_store(MESA_SHADER_TESS_EVAL, nir_type_uint, true, nir_op_u2u32);
-   test_store(MESA_SHADER_FRAGMENT, nir_type_float, false, nir_op_f2f32);
+   test_store(MESA_SHADER_VERTEX, nir_type_float, true, nir_op_f2f32,
+              HK_NIR_WIDEN_16BIT_OUTPUTS);
+   test_store(MESA_SHADER_TESS_CTRL, nir_type_int, false, nir_op_i2i32,
+              HK_NIR_WIDEN_16BIT_INPUTS);
+   test_store(MESA_SHADER_TESS_EVAL, nir_type_uint, true, nir_op_u2u32,
+              HK_NIR_WIDEN_16BIT_OUTPUTS);
+   test_store(MESA_SHADER_FRAGMENT, nir_type_float, false, nir_op_f2f32,
+              HK_NIR_WIDEN_16BIT_OUTPUTS);
 
-   test_load_input(MESA_SHADER_TESS_EVAL, nir_type_float, true, nir_op_f2f16);
-   test_load_input(MESA_SHADER_FRAGMENT, nir_type_int, true, nir_op_i2i16);
-   test_load_input(MESA_SHADER_VERTEX, nir_type_float, false, nir_op_f2f16);
+   test_load_input(MESA_SHADER_TESS_EVAL, nir_type_float, false, nir_op_f2f16,
+                   HK_NIR_WIDEN_16BIT_OUTPUTS);
+   test_load_input(MESA_SHADER_FRAGMENT, nir_type_int, true, nir_op_i2i16,
+                   HK_NIR_WIDEN_16BIT_INPUTS);
+   test_load_input(MESA_SHADER_VERTEX, nir_type_float, false, nir_op_f2f16,
+                   HK_NIR_WIDEN_16BIT_INPUTS);
 
-   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_float, true, nir_op_f2f16);
-   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_int, true, nir_op_i2i16);
+   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_float, true, nir_op_f2f16,
+                    HK_NIR_WIDEN_16BIT_OUTPUTS);
+   test_load_output(MESA_SHADER_TESS_CTRL, nir_type_int, false, nir_op_i2i16,
+                    HK_NIR_WIDEN_16BIT_INPUTS);
    test_load_output(MESA_SHADER_FRAGMENT, nir_type_float, false,
-                    nir_op_f2f16);
+                    nir_op_f2f16, HK_NIR_WIDEN_16BIT_OUTPUTS);
 
    glsl_type_singleton_decref();
 

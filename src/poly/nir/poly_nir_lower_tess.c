@@ -75,8 +75,11 @@ lower_tes_load(nir_builder *b, nir_intrinsic_instr *intr)
    if (nir_intrinsic_has_component(intr))
       addr = nir_iadd_imm(b, addr, nir_intrinsic_component(intr) * 4);
 
-   return nir_load_global_constant(b, intr->def.num_components,
-                                   intr->def.bit_size, addr, .align_mul = 4);
+   /* Tessellation buffers have one raw word per component, including narrow
+    * interfaces. */
+   nir_def *value = nir_load_global_constant(b, intr->def.num_components, 32,
+                                             addr, .align_mul = 4);
+   return nir_u2uN(b, value, intr->def.bit_size);
 }
 
 static nir_def *
@@ -133,14 +136,16 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_output: {
       nir_def *addr = tcs_out_addr(b, intr, nir_undef(b, 1, 32));
-      return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
-                             addr, .align_mul = 4);
+      nir_def *value = nir_load_global(b, intr->def.num_components, 32, addr,
+                                       .align_mul = 4);
+      return nir_u2uN(b, value, intr->def.bit_size);
    }
 
    case nir_intrinsic_load_per_vertex_output: {
       nir_def *addr = tcs_out_addr(b, intr, intr->src[0].ssa);
-      return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
-                             addr, .align_mul = 4);
+      nir_def *value = nir_load_global(b, intr->def.num_components, 32, addr,
+                                       .align_mul = 4);
+      return nir_u2uN(b, value, intr->def.bit_size);
    }
 
    case nir_intrinsic_store_output: {
@@ -149,14 +154,14 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
              nir_intrinsic_io_semantics(intr).location !=
                 VARYING_SLOT_TESS_LEVEL_INNER);
 
-      nir_store_global(b, intr->src[0].ssa,
+      nir_store_global(b, nir_u2u32(b, intr->src[0].ssa),
                        tcs_out_addr(b, intr, nir_undef(b, 1, 32)),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
 
    case nir_intrinsic_store_per_vertex_output: {
-      nir_store_global(b, intr->src[0].ssa,
+      nir_store_global(b, nir_u2u32(b, intr->src[0].ssa),
                        tcs_out_addr(b, intr, intr->src[1].ssa),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;

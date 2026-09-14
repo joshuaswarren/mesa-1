@@ -1146,10 +1146,6 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_lower_io_lower_64bit_to_32 |
                nir_lower_io_use_interpolated_input_intrinsics);
 
-   if (dev->dev.chip == AGX_CHIP_G17P) {
-      NIR_PASS(_, nir, hk_nir_widen_16bit_varyings);
-   }
-
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_viewport_fs,
                nir_metadata_control_flow, NULL);
@@ -2362,6 +2358,30 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
       hk_lower_nir(dev, nir, info->robustness, is_multiview,
                    info->set_layout_count, info->set_layouts, hk_features);
+
+      if (dev->dev.chip == AGX_CHIP_G17P) {
+         enum hk_nir_widen_16bit_varyings_mode mode = 0;
+
+         if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+            mode = HK_NIR_WIDEN_16BIT_INPUTS;
+         } else if (nir->info.stage == MESA_SHADER_VERTEX ||
+                    nir->info.stage == MESA_SHADER_TESS_EVAL ||
+                    nir->info.stage == MESA_SHADER_GEOMETRY) {
+            const VkShaderStageFlags poly_stages =
+               VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+               VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+               VK_SHADER_STAGE_GEOMETRY_BIT;
+
+            /* Poly interfaces are raw words in memory. Only the final
+             * pre-raster interface needs numeric widening for G17P's 32-bit
+             * UVS/interpolation path. */
+            if (!(info->next_stage_mask & poly_stages))
+               mode = HK_NIR_WIDEN_16BIT_OUTPUTS;
+         }
+
+         if (mode)
+            NIR_PASS(_, nir, hk_nir_widen_16bit_varyings, mode);
+      }
 
       if (nir->xfb_info) {
          /* Fold constant offset srcs for IO. */
