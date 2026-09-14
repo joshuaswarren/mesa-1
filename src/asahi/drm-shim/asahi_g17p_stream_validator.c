@@ -1305,6 +1305,25 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          break;
       }
 
+      case AGX_VDM_RECORD_TESSELLATE_INDIRECT: {
+         const struct agx_vdm_tessellate_indirect_info *draw =
+            &record.data.tessellate_indirect;
+         const uint64_t factor_bytes =
+            ((uint64_t)draw->factor_buffer_size_minus_one + 1) * 4;
+         if (!have_state || restart_seen || !tessellation_state_seen ||
+             factor_bytes > SIZE_MAX ||
+             !memory->owned(memory->data, draw->factor_buffer,
+                            (size_t)factor_bytes) ||
+             !memory->owned(memory->data, draw->indirect_buffer, 16))
+            return fail_at(cursor, "indirect tessellate draw has no state or "
+                                   "unowned factors or arguments");
+         local.draws++;
+         local.tessellated_draws++;
+         barrier_since_last_draw = false;
+         cursor += record.length;
+         break;
+      }
+
       case AGX_VDM_RECORD_UNKNOWN:
       default:
          return fail_indeterminate_at(cursor, "unrecognised VDM record");
