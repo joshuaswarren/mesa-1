@@ -4567,9 +4567,10 @@ test_g17p_multisample_eot_block_store(void)
        expected_u8norm_resolved, sizeof(expected_u8norm_resolved)},
       {false, PIPE_FORMAT_R32_UINT, 1, true, false, false,
        expected_i32_resolved, sizeof(expected_i32_resolved)},
-      /* This change qualifies the signed four-word I32 2D store only.
-       * Preserve the existing multisample refusal. */
-      {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, NULL, 0},
+      /* Internal formats 10, 11 and 17 (signed, unsigned, float) give the
+       * same texture-type-4 builtin with four components, as with type 2. */
+      {true, PIPE_FORMAT_R32_UINT, 4, true, false, true, expected_i32,
+       sizeof(expected_i32)},
    };
 
    bool ok = true;

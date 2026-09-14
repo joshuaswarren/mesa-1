@@ -5070,12 +5070,6 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        offset_imm_reg != offset_reg)
       return AGX3_G17P_RT0_EOT_NONE;
 
-   /* Keep the existing signed-format multisample admission unchanged. The
-    * RGBA32 signed correction below is qualified for texture-type2 only. */
-   if (ctx->key->g17p_rt0_eot_multisample &&
-       ctx->key->g17p_rt0_eot_i32_signed_four_words)
-      return AGX3_G17P_RT0_EOT_NONE;
-
    if (ctx->key->g17p_rt0_eot_i32_signed_four_words &&
        (store_format != AGX_FORMAT_I32 ||
         ctx->key->g17p_rt0_eot_words != 4))
@@ -5175,9 +5169,7 @@ agx3_g17p_layered_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
       }
    }
 
-   if (instruction != 8 ||
-       (ctx->key->g17p_rt0_eot_multisample &&
-        ctx->key->g17p_rt0_eot_i32_signed_four_words))
+   if (instruction != 8)
       return AGX3_G17P_RT0_EOT_NONE;
 
    return agx3_g17p_rt0_eot_store_kind(ctx->key, store_format);
