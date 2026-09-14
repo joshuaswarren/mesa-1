@@ -908,11 +908,12 @@ out:
    return valid;
 }
 
-/* Explicit sample coordinates are an opaque 32-bit token. Require the most
- * recent overlapping write in this block to be ITRCOORDS, so a legacy ITER
- * sample-index register or an unrelated arithmetic value cannot accidentally
- * select the native f32interp coordinate leaf. A tied final interpolation is
- * valid because sources are read before its destination overwrites the token. */
+/* Explicit sample and G17P centroid coordinates are an opaque 32-bit token.
+ * Require the most recent overlapping write in this block to be ITRCOORDS of
+ * the same interpolation, so a legacy ITER sample-index register or an
+ * unrelated arithmetic value cannot accidentally select the native f32interp
+ * coordinate leaf. A tied final interpolation is valid because sources are
+ * read before its destination overwrites the token. */
 static bool
 agx3_sample_coords_use(const agx_block *block, const agx_instr *consumer)
 {
@@ -934,13 +935,22 @@ agx3_sample_coords_use(const agx_block *block, const agx_instr *consumer)
             continue;
 
          producer = I->op == AGX_OPCODE_ITRCOORDS_AGX3 && dst.value == base &&
-                          dst.size == AGX_SIZE_32 && agx_channels(dst) == 1
+                          dst.size == AGX_SIZE_32 && agx_channels(dst) == 1 &&
+                          I->interpolation == consumer->interpolation
                        ? I
                        : NULL;
       }
    }
 
    return false;
+}
+
+static bool
+agx3_interp_uses_coords(enum agx_isa_encoding enc, const agx_instr *I)
+{
+   return I->interpolation == AGX_INTERPOLATION_SAMPLE ||
+          (I->interpolation == AGX_INTERPOLATION_CENTROID &&
+           enc == AGX_ISA_ENCODING_AGX3B);
 }
 
 static bool
@@ -952,9 +962,11 @@ agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
        !agx3_vary_reg32(I->dest[0]) || I->src[0].type != AGX_INDEX_IMMEDIATE)
       return false;
 
-   const bool sample = I->interpolation == AGX_INTERPOLATION_SAMPLE;
+   /* Sample and G17P centroid interpolation consume an ITRCOORDS token
+    * through the same f32interp leaves. */
+   const bool token = agx3_interp_uses_coords(enc, I);
    enum agx3_vary_location location;
-   if (sample) {
+   if (token) {
       if (enc != AGX_ISA_ENCODING_AGX3B || first ||
           !agx3_vary_reg32(I->src[1]) || I->src[1].kill ||
           (I->src[1].cache && I->src[1].discard))
@@ -967,7 +979,7 @@ agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
    uint8_t bytes[AGX3_VARY_MAX_LENGTH];
    uint8_t len = 0;
-   if (sample && I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
+   if (token && I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
       if (I->saturate)
          return false;
       return agx3_vary_projective_rhw_sample(enc, I->dest[0].value,
@@ -975,7 +987,7 @@ agx3_emit_interp(struct util_dynarray *emission, enum agx_isa_encoding enc,
                                              I->src[1].discard, bytes, &len) &&
              agx3_append(emission, bytes, len);
    }
-   if (sample) {
+   if (token) {
       return agx3_vary_interp_sample(enc, I->dest[0].value, I->src[0].value,
                                      I->perspective, I->src[1].value,
                                      I->src[1].discard, bytes, &len) &&
@@ -1017,9 +1029,22 @@ agx3_emit_itrcoords(struct util_dynarray *emission, enum agx_isa_encoding enc,
    /* Cache is an optional post-RA hint. The fresh ITRCOORDS witnesses cover
     * the unmarked and terminal source forms, so preserve the terminal bit and
     * deliberately leave a merely cached source unmarked. */
-   return agx3_vary_sample_coords(enc, I->dest[0].value, I->src[0].value,
-                                  I->src[0].discard, wait_mask, bytes, &len) &&
-          agx3_append(emission, bytes, len);
+   bool encoded;
+   switch (I->interpolation) {
+   case AGX_INTERPOLATION_SAMPLE:
+      encoded = agx3_vary_sample_coords(enc, I->dest[0].value,
+                                        I->src[0].value, I->src[0].discard,
+                                        wait_mask, bytes, &len);
+      break;
+   case AGX_INTERPOLATION_CENTROID:
+      encoded = agx3_vary_centroid_coords(enc, I->dest[0].value,
+                                          I->src[0].value, I->src[0].discard,
+                                          wait_mask, bytes, &len);
+      break;
+   default:
+      return false;
+   }
+   return encoded && agx3_append(emission, bytes, len);
 }
 
 static bool
@@ -7225,7 +7250,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * LOD samples.  This conservatively preserves helper-capable lanes;
           * plain varying-only fragments retain the marker below. */
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
-             scan_I->op == AGX_OPCODE_ITRCOORDS_AGX3 ||
+             (scan_I->op == AGX_OPCODE_ITRCOORDS_AGX3 &&
+              scan_I->interpolation == AGX_INTERPOLATION_SAMPLE) ||
              scan_I->op == AGX_OPCODE_DFDX ||
              scan_I->op == AGX_OPCODE_DFDY)
             g17p_fragment_helper_protocol = true;
@@ -7972,7 +7998,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_INTERP_AGX3 ||
              I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
-            if (I->interpolation == AGX_INTERPOLATION_SAMPLE &&
+            if (agx3_interp_uses_coords(enc, I) &&
                 !agx3_sample_coords_use(block, I))
                AGX3_REFUSE(I);
             if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 &&
@@ -9050,10 +9076,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_sr_desc d;
             uint8_t bytes[AGX3_SR_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_sr(enc, I, slot, wait, &d) ||
-                !agx3_sr_encode(enc, &d, bytes, &len))
+            if (!agx3_translate_sr(enc, I, slot, wait, &d))
+               AGX3_REFUSE(I);
+            /* The coverage word is a fragment input. Apple's programs that
+             * open with it put the entry marker on that read. */
+            const bool coverage_input = enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               I->sr == AGX_SR_INPUT_SAMPLE_MASK;
+            d.first = coverage_input && emission->size == initial_size &&
+                      !fragment_input_started &&
+                      !g17p_fragment_helper_protocol;
+            if (!agx3_sr_encode(enc, &d, bytes, &len))
                AGX3_REFUSE(I);
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
+            fragment_input_started |= coverage_input;
             continue;
          }
 

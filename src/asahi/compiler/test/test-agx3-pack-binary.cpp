@@ -7159,13 +7159,17 @@ TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
    for (int e = 0; e < 2; ++e) {
       const enum agx_isa_encoding enc =
          e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+      /* Only AGX3C has an implicit centroid location; G17P centroid
+       * interpolation is an explicit token chain, covered below. */
+      const enum agx_interpolation second =
+         e ? AGX_INTERPOLATION_CENTROID : AGX_INTERPOLATION_CENTER;
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_COMPUTE; /* Synthetic opcode mixture. */
 
       agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(3),
                          agx_zero(), AGX_INTERPOLATION_CENTER, false);
       agx_interp_agx3_to(b, agx_register(2, AGX_SIZE_32), agx_immediate(4),
-                         agx_zero(), AGX_INTERPOLATION_CENTROID, true);
+                         agx_zero(), second, true);
       agx_ldcf_to(b, agx_register(4, AGX_SIZE_32), agx_immediate(5), 1);
       agx_instr *store =
          agx_st_vary(b, agx_immediate(7), agx_register(4, AGX_SIZE_32));
@@ -7178,7 +7182,8 @@ TEST_F(AGX3PackBinary, VaryingInterpolationCoefficientAndUvs)
       ASSERT_TRUE(agx3_vary_interp_at(enc, 0, 3, false, AGX3_VARY_CENTER,
                                       bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_vary_interp_at(enc, 2, 4, true, AGX3_VARY_CENTROID,
+      ASSERT_TRUE(agx3_vary_interp_at(enc, 2, 4, true,
+                                      e ? AGX3_VARY_CENTROID : AGX3_VARY_CENTER,
                                       bytes, &len));
       append(want, bytes, len);
       ASSERT_TRUE(agx3_vary_ldcf(enc, 4, 5, 1, bytes, &len));
@@ -7239,7 +7244,8 @@ TEST_F(AGX3PackBinary, ExplicitSampleInterpolationMatchesApple)
 
    agx_index sample = agx_register(4, AGX_SIZE_16);
    sample.discard = true;
-   agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32), sample);
+   agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32), sample,
+                         AGX_INTERPOLATION_SAMPLE);
 
    agx_index coords = agx_register(4, AGX_SIZE_32);
    coords.discard = true;
@@ -7256,13 +7262,77 @@ TEST_F(AGX3PackBinary, ExplicitSampleInterpolationMatchesApple)
    EXPECT_EQ(pack(b), native);
 }
 
+TEST_F(AGX3PackBinary, CentroidInterpolationMatchesApple)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+
+   agx_get_sr_to(b, agx_register(0, AGX_SIZE_16), AGX_SR_INPUT_SAMPLE_MASK);
+   agx_index coverage = agx_register(0, AGX_SIZE_16);
+   coverage.discard = true;
+   agx_itrcoords_agx3_to(b, agx_register(6, AGX_SIZE_32), coverage,
+                         AGX_INTERPOLATION_CENTROID);
+
+   agx_index coords = agx_register(6, AGX_SIZE_32);
+   static const unsigned dests[] = {0, 8, 2, 6};
+   for (unsigned c = 0; c < 4; ++c) {
+      coords.discard = c == 3;
+      agx_interp_agx3_to(b, agx_register(dests[c], AGX_SIZE_32),
+                         agx_immediate(1 + c), coords,
+                         AGX_INTERPOLATION_CENTROID, true);
+   }
+   agx_stop(b);
+
+   /* Fresh applegpu_g17p `[[centroid_perspective]]` float4 fragment at
+    * raster_sample_count 1 and 4 (identical here): the entry-marked SR39
+    * read, ITRCOORDS f38=1 waiting on it, and the channel f32interps that
+    * consume the token, the last one tied to it on its final use. */
+   const std::vector<uint8_t> native = {
+      0x04, 0xc2, 0x11, 0x06, 0x01, 0x00, 0x00, 0x00,
+      0xaf, 0x14, 0x54, 0x06, 0x03, 0x00, 0x0a, 0x01,
+      0x2f, 0x05, 0x54, 0x00, 0x03, 0x02, 0x03, 0x02, 0x08, 0x00,
+      0x2f, 0x05, 0x54, 0x08, 0x03, 0x04, 0x03, 0x02, 0x08, 0x00,
+      0x2f, 0x05, 0x54, 0x02, 0x03, 0x06, 0x03, 0x02, 0x08, 0x00,
+      0x2f, 0x05, 0x54, 0x06, 0x03, 0x08, 0x03, 0x02, 0x20, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+}
+
+TEST_F(AGX3PackBinary, CentroidInterpolationStaysFailClosed)
+{
+   {
+      /* G17P has no implicit centroid coordinate register. */
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(3),
+                         agx_zero(), AGX_INTERPOLATION_CENTROID, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+   }
+   {
+      /* A sample token does not name a centroid. */
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32),
+                            agx_register(2, AGX_SIZE_16),
+                            AGX_INTERPOLATION_SAMPLE);
+      agx_interp_agx3_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(3),
+                         agx_register(4, AGX_SIZE_32),
+                         AGX_INTERPOLATION_CENTROID, false);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, ExplicitSampleInterpolationStaysFailClosed)
 {
    {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       agx_itrcoords_agx3_to(b, agx_register(4, AGX_SIZE_32),
-                            agx_register(2, AGX_SIZE_16));
+                            agx_register(2, AGX_SIZE_16),
+                            AGX_INTERPOLATION_SAMPLE);
       agx_stop(b);
       EXPECT_TRUE(pack(b, /*expect_ok=*/false).empty());
    }

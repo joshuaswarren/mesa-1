@@ -95,6 +95,13 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    if (d->slot < 1 || d->slot > nslots || (d->wait_mask >> nslots) != 0)
       return false;
 
+   /* The entry marker is witnessed only on G17P's W16 SR39 coverage read:
+    * `[[sample_mask]]` and centroid inputs, and a multisample fragment with no
+    * other input, each open with `rld ep1 ... f48=1`. */
+   if (d->first && (enc != AGX_ISA_ENCODING_AGX3B || d->sr != 39 ||
+                    d->width != AGX3_SR_W16))
+      return false;
+
    struct agx3_field_kv base[5];
    unsigned nbase = 0;
    base[nbase++] = (struct agx3_field_kv)KV(9, 2);
@@ -105,7 +112,7 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
       base[nbase++] = (struct agx3_field_kv)KV(29, 144);
    }
 
-   struct agx3_field_kv ov[13];
+   struct agx3_field_kv ov[14];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -124,10 +131,14 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
          ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
    }
 
-   /* The compact form's selector requires every wait bit zero and a narrow
-    * destination field; the composer refuses it otherwise and the long form
-    * carries the same operands. */
-   if (agx3_bind_compose(enc, "rld", 0, base, nbase, ov, n, out, len))
+   if (d->first)
+      ov[n++] = (struct agx3_field_kv)KV(48, 1);
+
+   /* The compact form's selector requires every wait bit zero, a narrow
+    * destination field and no entry marker; the composer refuses it otherwise
+    * and the long form carries the same operands. */
+   if (!d->first &&
+       agx3_bind_compose(enc, "rld", 0, base, nbase, ov, n, out, len))
       return true;
    return agx3_bind_compose(enc, "rld", 1, base, nbase, ov, n, out, len);
 }

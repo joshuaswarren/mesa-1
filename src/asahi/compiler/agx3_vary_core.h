@@ -10,6 +10,8 @@
  *               linear iterator.
  *   at-sample -> itrcoords + f32interp : compute an explicit sample's
  *               coordinate token once, then consume it for each coefficient.
+ *   centroid -> itrcoords + f32interp : the same token chain on G17P, with
+ *               ITRCOORDS deriving the centroid from the coverage word.
  *   ldcf     -> ldcfr     : raw <A,B,C> coefficient load.
  *   st_vary  -> uvsw      : unified-vertex-store write of one 32-bit component.
  *
@@ -67,6 +69,15 @@ bool agx3_vary_sample_coords(enum agx_isa_encoding enc, uint16_t dest,
                              uint16_t sample_index, bool sample_index_kill,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len);
+
+/* Centroid interpolation on G17P computes the centroid of the covered samples
+ * with ITRCOORDS from the native 16-bit SR39 coverage word, then consumes the
+ * token through the same leaves as explicit sample interpolation. */
+bool agx3_vary_centroid_coords(enum agx_isa_encoding enc, uint16_t dest,
+                               uint16_t coverage, bool coverage_kill,
+                               uint16_t wait_mask,
+                               uint8_t out[AGX3_VARY_MAX_LENGTH],
+                               uint8_t *len);
 
 /* Consume an ITRCOORDS token in the sample-coordinate f32interp leaf.
  * `coords_kill` must be false while later scalar interpolations still need

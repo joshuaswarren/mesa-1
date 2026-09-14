@@ -30,6 +30,7 @@
 #include "agx3_funop_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_sr_core.h"
+#include "agx3_vary_core.h"
 #include "agx3_stage_core.h"
 #include "agx3_zs_core.h"
 #include "agx3_tex_core.h"
@@ -1324,6 +1325,25 @@ build_fs_interpolated_at_sample(void)
    nir_def *sample = nir_iand_imm(&b, nir_channel(&b, pixel, 0), 3);
    nir_def *bary = nir_load_barycentric_at_sample(
       &b, 32, sample, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+
+   fs_store_colour(&b, colour);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* Vulkan `centroid in vec4`, the CTS multiple_interpolation shape. */
+static nir_shader *
+build_fs_interpolated_centroid(void)
+{
+   nir_builder b =
+      nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
+                                     "G17P centroid interpolated FS");
+
+   nir_def *bary = nir_load_barycentric_centroid(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
    nir_def *colour = nir_load_interpolated_input(
       &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
       .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
@@ -7287,6 +7307,7 @@ struct agx3_graphics_case {
    bool expected_g17p_sample_mask_input;
    bool expected_g17p_front_facing;
    bool expected_g17p_explicit_sample;
+   bool expected_g17p_centroid;
    bool expected_g17p_sample_group;
    bool expected_g17p_balanced_coverage;
    uint8_t expected_g17p_sincs;
@@ -7422,6 +7443,60 @@ g17p_explicit_sample_protocol(const struct agx_shader_part *part)
 }
 
 static bool
+g17p_centroid_protocol(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   const unsigned size = part->info.binary_size;
+
+   /* Apple's G17P centroid fragments open with the entry-marked W16 SR39
+    * read in slot 1; ITRCOORDS f38=1 consumes it as its terminal source,
+    * waiting on that slot, and the RHW and every channel read the token. */
+   for (unsigned sr_dest = 0; sr_dest < 256; ++sr_dest) {
+      const struct agx3_sr_desc d = {
+         .dest = sr_dest,
+         .width = AGX3_SR_W16,
+         .sr = 39,
+         .slot = 1,
+         .first = true,
+      };
+      uint8_t sr[AGX3_SR_MAX_LENGTH];
+      uint8_t sr_length = 0;
+      if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, sr, &sr_length) ||
+          sr_length + 8 > size || memcmp(code, sr, sr_length))
+         continue;
+
+      const unsigned coords = code[sr_length + 3];
+      uint8_t itrcoords[AGX3_VARY_MAX_LENGTH];
+      uint8_t itrcoords_length = 0;
+      if (!agx3_vary_centroid_coords(AGX_ISA_ENCODING_AGX3B, coords, sr_dest,
+                                     true, 1, itrcoords, &itrcoords_length) ||
+          memcmp(code + sr_length, itrcoords, itrcoords_length))
+         return false;
+
+      unsigned interps = 0;
+      bool projective_rhw = false;
+      bool terminal = false;
+      for (unsigned j = sr_length + itrcoords_length; j + 10 <= size; ++j) {
+         if (code[j] != 0x2f || code[j + 2] != 0x54 ||
+             ((code[j + 6] & 0x7f) << 1) != coords)
+            continue;
+
+         const unsigned coordinate_liveness = code[j + 8] & 0x28;
+         if (coordinate_liveness != 0x08 && coordinate_liveness != 0x20)
+            continue;
+
+         interps++;
+         projective_rhw |= (code[j + 8] & 1) != 0;
+         terminal |= coordinate_liveness == 0x20;
+      }
+
+      return interps == 5 && projective_rhw && terminal;
+   }
+
+   return false;
+}
+
+static bool
 g17p_sample_mask_input_protocol(const struct agx_shader_part *part)
 {
    const uint8_t *binary = part->binary;
@@ -7429,45 +7504,49 @@ g17p_sample_mask_input_protocol(const struct agx_shader_part *part)
    uint8_t sr_length = 0;
 
    /* Apple's [[sample_mask]] input is the 16-bit SR39 RLD followed by an
-    * immediate ushort SRL extracting bits 4..7. Search across allocation and
+    * immediate ushort SRL extracting bits 4..7. The RLD carries the entry
+    * marker when it opens the program. Search across allocation and
     * liveness choices, but require the SRL to consume the RLD register and
     * wait on its exact async slot. */
-   for (unsigned slot = 1; slot <= 6; ++slot) {
-      for (unsigned sr_dest = 0; sr_dest < 256; ++sr_dest) {
-         const struct agx3_sr_desc d = {
-            .dest = sr_dest,
-            .width = AGX3_SR_W16,
-            .sr = 39,
-            .slot = slot,
-         };
-         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, sr_bytes,
-                             &sr_length))
-            continue;
-
-         for (unsigned sr_off = 0;
-              sr_off + sr_length <= part->info.binary_size; ++sr_off) {
-            if (memcmp(binary + sr_off, sr_bytes, sr_length))
+   for (unsigned first = 0; first <= 1; ++first) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         for (unsigned sr_dest = 0; sr_dest < 256; ++sr_dest) {
+            const struct agx3_sr_desc d = {
+               .dest = sr_dest,
+               .width = AGX3_SR_W16,
+               .sr = 39,
+               .slot = slot,
+               .first = first,
+            };
+            if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, sr_bytes,
+                                &sr_length))
                continue;
 
-            for (unsigned shift_dest = 0; shift_dest < 256; ++shift_dest) {
-               for (unsigned hint = AGX3_ALU_HINT_NONE;
-                    hint <= AGX3_ALU_HINT_CACHE; ++hint) {
-                  for (unsigned dest_cache = 0; dest_cache <= 1;
-                       ++dest_cache) {
-                     uint8_t shift_bytes[AGX3_ALU_MAX_LENGTH];
-                     uint8_t shift_length = 0;
-                     if (!agx3_alu_srl_imm16(
-                            AGX_ISA_ENCODING_AGX3B, shift_dest, sr_dest, 4,
-                            hint, dest_cache, 1u << (slot - 1), shift_bytes,
-                            &shift_length))
-                        continue;
+            for (unsigned sr_off = 0;
+                 sr_off + sr_length <= part->info.binary_size; ++sr_off) {
+               if (memcmp(binary + sr_off, sr_bytes, sr_length))
+                  continue;
 
-                     for (unsigned shift_off = sr_off + sr_length;
-                          shift_off + shift_length <= part->info.binary_size;
-                          ++shift_off) {
-                        if (!memcmp(binary + shift_off, shift_bytes,
-                                    shift_length))
-                           return true;
+               for (unsigned shift_dest = 0; shift_dest < 256; ++shift_dest) {
+                  for (unsigned hint = AGX3_ALU_HINT_NONE;
+                       hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+                     for (unsigned dest_cache = 0; dest_cache <= 1;
+                          ++dest_cache) {
+                        uint8_t shift_bytes[AGX3_ALU_MAX_LENGTH];
+                        uint8_t shift_length = 0;
+                        if (!agx3_alu_srl_imm16(
+                               AGX_ISA_ENCODING_AGX3B, shift_dest, sr_dest, 4,
+                               hint, dest_cache, 1u << (slot - 1), shift_bytes,
+                               &shift_length))
+                           continue;
+
+                        for (unsigned shift_off = sr_off + sr_length;
+                             shift_off + shift_length <= part->info.binary_size;
+                             ++shift_off) {
+                           if (!memcmp(binary + shift_off, shift_bytes,
+                                       shift_length))
+                              return true;
+                        }
                      }
                   }
                }
@@ -7768,6 +7847,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-interpolated-varying", build_fs_interpolated, true},
    {"fs-interpolated-at-sample", build_fs_interpolated_at_sample, true,
     .g17p_only = true, .expected_g17p_explicit_sample = true},
+   {"fs-interpolated-centroid", build_fs_interpolated_centroid, true,
+    .g17p_only = true, .expected_g17p_centroid = true},
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
    {"fs-textured-triangle", build_fs_texture_imm, true,
     .expected_g17p_sampled_fragment = true},
@@ -8076,6 +8157,16 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             fprintf(stderr,
                     "%s %s: missing native ITRCOORDS/f32interp "
                     "sample token chain\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_centroid) {
+         result = g17p_centroid_protocol(&part);
+         if (!result)
+            fprintf(stderr,
+                    "%s %s: missing native SR39/ITRCOORDS/f32interp "
+                    "centroid token chain\n",
                     enc_name(enc), c->name);
       }
 

@@ -621,8 +621,9 @@ agx_interp_for_bary(nir_intrinsic_instr *bary, agx_index *sample_index)
  * allocation can place the temporary RHW, reciprocal, and channels safely.
  * G17P explicit at-sample interpolation first computes one ITRCOORDS token
  * from the low half of the sample index, then shares it across RHW and every
- * scalar channel. Dynamic coefficient indices remain on the legacy IR path
- * so the AGX3 packer rejects them instead of guessing. */
+ * scalar channel. G17P centroid interpolation computes the token from the
+ * coverage word instead. Dynamic coefficient indices remain on the legacy IR
+ * path so the AGX3 packer rejects them instead of guessing. */
 static bool
 agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
                         agx_index sample_index, unsigned components,
@@ -653,7 +654,17 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
          sample_half = agx_mov(b, sample_half);
 
       interp_coords = agx_temp(b->shader, AGX_SIZE_32);
-      agx_itrcoords_agx3_to(b, interp_coords, sample_half);
+      agx_itrcoords_agx3_to(b, interp_coords, sample_half, interp);
+   } else if (interp == AGX_INTERPOLATION_CENTROID &&
+              b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      /* Apple's G17P centroid inputs, single-sample and multisample alike,
+       * pass native W16 SR39 -- the covered samples -- straight to
+       * ITRCOORDS. With one sample that is the pixel centre. */
+      agx_index coverage = agx_temp(b->shader, AGX_SIZE_16);
+      agx_get_sr_to(b, coverage, AGX_SR_INPUT_SAMPLE_MASK);
+
+      interp_coords = agx_temp(b->shader, AGX_SIZE_32);
+      agx_itrcoords_agx3_to(b, interp_coords, coverage, interp);
    } else if ((interp != AGX_INTERPOLATION_CENTER &&
                interp != AGX_INTERPOLATION_CENTROID) ||
               sample_index.type != AGX_INDEX_IMMEDIATE ||
@@ -668,9 +679,7 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
          return false;
 
       agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          (interp == AGX_INTERPOLATION_CENTER ||
-           interp == AGX_INTERPOLATION_SAMPLE))
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
       else
          agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);

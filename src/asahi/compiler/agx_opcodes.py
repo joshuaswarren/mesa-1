@@ -416,10 +416,11 @@ op("iter", (0x21, 8, _), srcs = 2, imms = [CHANNELS, INTERPOLATION])
 op("interp_agx3", None, srcs = 2,
    imms = [INTERPOLATION, PERSPECTIVE])
 
-# G17P computes explicit per-sample interpolation coordinates in a 32-bit
-# token consumed by one or more scalar f32interp instructions. The input is
-# the low 16 bits of the API sample index.
-op("itrcoords_agx3", None, srcs = 1)
+# G17P computes explicit interpolation coordinates in a 32-bit token consumed
+# by one or more scalar f32interp instructions. For sample interpolation the
+# input is the low 16 bits of the API sample index; for centroid interpolation
+# it is the native 16-bit coverage word.
+op("itrcoords_agx3", None, srcs = 1, imms = [INTERPOLATION])
 
 # Native projective-only RHW producer. A distinct opcode prevents CSE from
 # merging it with ordinary position.w, whose f32interp f54 must remain clear.

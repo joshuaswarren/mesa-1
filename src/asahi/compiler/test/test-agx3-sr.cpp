@@ -70,6 +70,48 @@ TEST(AGX3SrCore, WitnessSpotChecks)
    }
 }
 
+TEST(AGX3SrCore, CoverageEntryMarker)
+{
+   /* Fresh applegpu_g17p fragments whose first input is the SR39 coverage
+    * word: centroid inputs read it into h0, a [[sample_mask]] input and a
+    * 4x constant-colour fragment into h2, each in the 8-byte form with the
+    * f48 entry marker. */
+   static const uint8_t h0[] = {0x04, 0xc2, 0x11, 0x06, 0x01, 0x00, 0x00, 0x00};
+   static const uint8_t h2[] = {0x14, 0xc2, 0x11, 0x06, 0x01, 0x00, 0x00, 0x00};
+
+   struct agx3_sr_desc d = {};
+   d.width = AGX3_SR_W16;
+   d.sr = 39;
+   d.slot = 1;
+   d.first = true;
+
+   uint8_t out[AGX3_SR_MAX_LENGTH];
+   uint8_t len = 0;
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(h0));
+   EXPECT_EQ(0, memcmp(out, h0, len));
+
+   d.dest = 2;
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(h2));
+   EXPECT_EQ(0, memcmp(out, h2, len));
+
+   /* The same read later in Apple's 4x centroid fragment is unmarked and
+    * compact. */
+   static const uint8_t later[] = {0x54, 0xc2, 0x10, 0x06};
+   d.dest = 10;
+   d.first = false;
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(later));
+   EXPECT_EQ(0, memcmp(out, later, len));
+
+   /* The marker is witnessed on nothing else. */
+   d.first = true;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3C, &d, out, &len));
+   d.sr = 41;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+}
+
 TEST(AGX3SrCore, HardwareVertexInvocationInputs)
 {
    /* Apple's isolated hardware-vertex shaders begin with these byte-exact
