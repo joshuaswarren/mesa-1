@@ -454,18 +454,25 @@ test_ballot_vectors(void)
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
                                      &length));
    CHECK(bytes_equal(out, length, half_eq0_b, sizeof(half_eq0_b)));
-   /* The 16-bit quad ballot against zero, sources arriving on slot 6. */
+   /* The 16-bit quad ballot against zero of a ushort or uint, sources
+    * arriving on slot 6. */
    static const struct {
       uint16_t dest, src;
-      bool live, invert;
+      bool src_half, live, invert;
       uint8_t bytes[10];
    } quad_half[] = {
-      {0, 0, false, true,
+      {0, 0, true, false, true,
        {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x40, 0x22, 0x12}},
-      {1, 1, false, false,
+      {1, 1, true, false, false,
        {0x17, 0x02, 0x56, 0x01, 0x03, 0x02, 0x00, 0x40, 0x22, 0x02}},
-      {0, 1, true, true,
+      {0, 1, true, true, true,
        {0x17, 0x02, 0x56, 0x00, 0x03, 0x02, 0x02, 0x00, 0x22, 0x12}},
+      {0, 0, false, false, false,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x50, 0x22, 0x02}},
+      {0, 0, false, false, true,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x50, 0x22, 0x12}},
+      {2, 0, false, true, true,
+       {0x17, 0x02, 0x56, 0x02, 0x03, 0x00, 0x02, 0x10, 0x22, 0x12}},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(quad_half); ++i) {
       const struct agx3_subgroup_ballot_desc q = {
@@ -473,7 +480,7 @@ test_ballot_vectors(void)
          .type = AGX3_SUBGROUP_BALLOT_INTEGER,
          .dest = quad_half[i].dest,
          .src = quad_half[i].src,
-         .src_half = true,
+         .src_half = quad_half[i].src_half,
          .dest_half = true,
          .dest_cache = true,
          .src_live = quad_half[i].live,

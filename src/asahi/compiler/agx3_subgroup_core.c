@@ -277,18 +277,21 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
     */
    if (d->quad && d->dest_half) {
       const unsigned slots = 6;
-      if (enc != AGX_ISA_ENCODING_AGX3B || !d->src_half ||
+      if (enc != AGX_ISA_ENCODING_AGX3B ||
           d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->compare_immediate ||
-          d->condition != 4 || d->dest >= 192 || d->src >= 192 ||
+          d->condition != 4 || d->dest >= 192 ||
+          (d->src_half ? d->src >= 192 : !valid_reg(enc, d->src)) ||
           (d->wait_mask >> slots) != 0)
          return false;
 
+      /* A uint source only widens f24: quad_any(x != 0) of a uint is
+       * 17025600030000502212. */
       struct agx3_field_kv qbase[16];
       unsigned qnb = 0;
       qbase[qnb++] = (struct agx3_field_kv){9, 2};
       qbase[qnb++] = (struct agx3_field_kv){10, 1};
       qbase[qnb++] = (struct agx3_field_kv){23, 2};
-      qbase[qnb++] = (struct agx3_field_kv){24, 1};
+      qbase[qnb++] = (struct agx3_field_kv){24, d->src_half ? 1u : 2u};
       qbase[qnb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
       qbase[qnb++] = (struct agx3_field_kv){38, 1};
       qbase[qnb++] = (struct agx3_field_kv){39, 1};

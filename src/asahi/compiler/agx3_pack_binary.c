@@ -3749,8 +3749,9 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       return false;
 
    /* The 16-bit quad ballot against zero carries its own wait. */
-   if (quad && !is_float && src_half && I->dest[0].size == AGX_SIZE_16) {
+   if (quad && !is_float && I->dest[0].size == AGX_SIZE_16) {
       if (!agx3_subgroup_plain_half(I->dest[0]) || I->src[1].value != 0 ||
+          !(src_half || agx3_subgroup_plain(src, AGX_INDEX_REGISTER)) ||
           (I->icond != AGX_ICOND_UEQ && I->icond != AGX_ICOND_SEQ))
          return false;
 
@@ -3759,7 +3760,7 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
          .type = AGX3_SUBGROUP_BALLOT_INTEGER,
          .dest = I->dest[0].value,
          .src = src.value,
-         .src_half = true,
+         .src_half = src_half,
          .dest_half = true,
          .dest_cache = I->dest[0].cache,
          .src_live = !src.discard,
