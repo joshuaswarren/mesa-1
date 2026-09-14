@@ -423,6 +423,9 @@ typedef struct {
    /* TODO: Handle tilebuffer ops more efficient */
    bool explicit_coords : 1;
 
+   /* Logical attachment identity, independent of the physical pixel_offset. */
+   uint8_t colour_target;
+
    /* TODO: Handle iter ops more efficient */
    enum agx_interpolation interpolation : 2;
    bool perspective                    : 1;
@@ -1086,8 +1089,13 @@ void agx_pressure_schedule(agx_context *ctx);
  * output/staging scalars. The Vulkan property remains 64 user components by
  * default until that exact image oracle passes on hardware. */
 #define AGX3_MAX_VERTEX_OUTPUTS 72u
+
+/* Register halves the AGX3B operand fields can name (ALU sources and
+ * destinations, LDDEV/STDEV payloads): 0..191. */
+#define AGX3_REGISTER_HALVES 192u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
+bool agx3_pad_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so
  * the compare uses the already grounded register/register form. */
 void agx_materialize_agx3_cf_constants(agx_context *ctx);

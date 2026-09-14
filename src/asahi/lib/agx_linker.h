@@ -42,8 +42,8 @@ struct agx_linked_shader {
    bool g17p_compiler_d_valid;
    uint32_t g17p_compiler_d;
 
-   /* Compiler-proven number of active G17P colour-tile partitions. */
-   uint8_t g17p_colour_partitions;
+   /* Compiler-proven mask of active G17P colour-tile partitions. */
+   uint8_t g17p_colour_partition_mask;
 
    /* Set if the linked SW vertex shader reads base vertex/instance. The VS
     * prolog can read base instance even when the API VS does not, which is why

@@ -77,6 +77,40 @@ if with_tests and with_tools.contains('drm-shim')
 
   # The shim has to be preloaded before libc's open(), so the test runs the
   # binary through a wrapper that sets LD_PRELOAD and the chip selector.
+  foreach chip : ['g13g', 'g17p']
+    test(
+      'asahi-' + chip + '-gallium-xfb-program',
+      prog_python,
+      args : [
+        files('tests/run-shim.py'),
+        libasahi_noop_drm_shim,
+        asahi_g17p_blit_test,
+      ],
+      env : [
+        'ASAHI_SHIM_CHIP=' + chip,
+        'AGX_TEST_XFB_COPY_PROGRAM=1',
+      ],
+      suite : ['asahi'],
+    )
+
+    # Linked-program vertex output shapes: clip distances and multiple user
+    # varyings must reach the AGX3 vertex writeout with inlined UVS indices.
+    test(
+      'asahi-' + chip + '-gallium-vertex-output-shapes',
+      prog_python,
+      args : [
+        files('tests/run-shim.py'),
+        libasahi_noop_drm_shim,
+        asahi_g17p_blit_test,
+      ],
+      env : [
+        'ASAHI_SHIM_CHIP=' + chip,
+        'AGX_TEST_VERTEX_OUTPUT_SHAPES=1',
+      ],
+      suite : ['asahi'],
+    )
+  endforeach
+
   test(
     'asahi-g17p-gallium-blit',
     prog_python,

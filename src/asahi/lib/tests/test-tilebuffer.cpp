@@ -183,6 +183,35 @@ TEST(Tilebuffer, Layouts)
    }
 }
 
+TEST(Tilebuffer, G17PUnorm8MultisampleLayouts)
+{
+   /* The allocator keeps a minimal MSAA slot even without colour output. */
+   const enum pipe_format none = PIPE_FORMAT_NONE;
+   for (unsigned samples : {2u, 4u}) {
+      auto tib = agx_build_tilebuffer_layout(&none, 0, samples, false);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(tib.sample_size_B, 8u);
+      tib.sample_size_B = 16;
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   }
+
+   const enum pipe_format formats[] = {
+      PIPE_FORMAT_R8_UNORM,
+      PIPE_FORMAT_R8G8_UNORM,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   for (enum pipe_format format : formats) {
+      for (unsigned samples : {2u, 4u}) {
+         auto tib = agx_build_tilebuffer_layout(&format, 1, samples, false);
+         EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+         EXPECT_EQ(agx_tilebuffer_physical_format(&tib, 0), PIPE_FORMAT_R8_UNORM);
+         EXPECT_EQ(tib.sample_size_B, 8u);
+         EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 0), 0u);
+         EXPECT_LT(agx_tilebuffer_total_size(&tib), 32768u);
+      }
+   }
+}
+
 TEST(Tilebuffer, G17PDualRenderTargets)
 {
    enum pipe_format wboit[AGX_MAX_RENDER_TARGETS] = {
@@ -269,6 +298,66 @@ TEST(Tilebuffer, G17PNarrowSRGB)
       tib = agx_build_tilebuffer_layout(formats, 2, 1, false);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
+}
+
+TEST(Tilebuffer, G17PAllRGBA8AttachmentMasksUseCompactStorage)
+{
+   for (unsigned mask = 1; mask < 256; ++mask) {
+      SCOPED_TRACE(mask);
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {};
+      for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+         if (mask & (1u << rt))
+            formats[rt] = PIPE_FORMAT_R8G8B8A8_UNORM;
+      }
+      auto tib = agx_build_tilebuffer_layout(formats, 8, 1, false);
+      EXPECT_EQ(agx_g17p_rgba8_mrt_mask(&tib), mask);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      unsigned active = 0, last = 0;
+      for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+         if (!(mask & (1u << rt)))
+            continue;
+         EXPECT_EQ(agx_tilebuffer_offset_B(&tib, rt), 4 * active++);
+         EXPECT_LT(agx_tilebuffer_offset_B(&tib, rt), tib.sample_size_B);
+         last = rt;
+      }
+      tib._offset_B[last] += 4;
+      EXPECT_EQ(agx_g17p_rgba8_mrt_mask(&tib), 0u);
+   }
+   EXPECT_EQ(agx_g17p_rgba8_mrt_mask(nullptr), 0u);
+}
+
+TEST(Tilebuffer, G17PDenseWideRGBA8RenderTargets)
+{
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS];
+   for (auto &format : formats)
+      format = PIPE_FORMAT_R8G8B8A8_UNORM;
+
+   for (unsigned count = 3; count <= AGX_MAX_RENDER_TARGETS; ++count) {
+      auto tib = agx_build_tilebuffer_layout(formats, count, 1, false);
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&tib), count);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(tib.sample_size_B, ((4 * count + 7) & ~7u));
+      EXPECT_EQ(tib.tile_size, count >= 7 ? 32 * 16 : 32 * 32);
+      for (unsigned rt = 0; rt < count; ++rt)
+         EXPECT_EQ(agx_tilebuffer_offset_B(&tib, rt), 4 * rt);
+
+      auto invalid = tib;
+      invalid.logical_format[1] = PIPE_FORMAT_NONE;
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&invalid), 0u);
+      invalid = tib;
+      invalid._offset_B[count - 1] += 4;
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&invalid), 0u);
+      invalid = tib;
+      invalid.spilled[count - 1] = true;
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&invalid), 0u);
+      invalid = tib;
+      invalid.layered = true;
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&invalid), 0u);
+      invalid = tib;
+      invalid.nr_samples = 2;
+      EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(&invalid), 0u);
+   }
+   EXPECT_EQ(agx_g17p_wide_rgba8_mrt_count(nullptr), 0u);
 }
 
 TEST(Tilebuffer, G17PRGB565EOTKey)

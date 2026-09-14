@@ -17,3 +17,17 @@ libpoly_nir = static_library(
   dependencies: [idep_nir, idep_mesautil, idep_libpoly],
   build_by_default : false,
 )
+
+if with_tests
+  test(
+    'poly-tcs-barriers',
+    executable(
+      'poly-tcs-barriers',
+      '../tests/poly_tcs_barrier_tests.c',
+      include_directories : [inc_poly],
+      link_with : [libpoly_nir],
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+    ),
+    suite : 'poly',
+  )
+endif

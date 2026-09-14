@@ -2604,7 +2604,7 @@ test_coverage_initial_pixel_dependencies(void)
       desc.uniform_range_count = resources;
       for (unsigned partitions = 1; partitions <= 3; ++partitions) {
          struct hk_agx3_g17p_graphics_program opaque, coverage;
-         desc.colour_partitions = partitions;
+         desc.colour_partition_mask = (1u << partitions) - 1;
          desc.writes_sample_mask = false;
          CHECK(hk_agx3_g17p_basic_graphics_program_generate(
             AGX_CHIP_G17P, &desc, &opaque));
@@ -2626,15 +2626,15 @@ test_coverage_initial_pixel_dependencies(void)
    }
 
    struct hk_agx3_g17p_graphics_program invalid;
-   desc.colour_partitions = 4;
+   desc.colour_partition_mask = 8;
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
       AGX_CHIP_G17P, &desc, &invalid));
-   desc.colour_partitions = 0;
+   desc.colour_partition_mask = 0;
    desc.fragment = false;
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
       AGX_CHIP_G17P, &desc, &invalid));
    desc.writes_sample_mask = false;
-   desc.colour_partitions = 1;
+   desc.colour_partition_mask = 1;
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(
       AGX_CHIP_G17P, &desc, &invalid));
    return 0;

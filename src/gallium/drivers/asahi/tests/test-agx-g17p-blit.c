@@ -49,6 +49,8 @@
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/genxml/agx_pack.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_xfb_info.h"
+#include "compiler/glsl_types.h"
 
 #include "agx_public.h"
 #include "agx_state.h"
@@ -652,6 +654,284 @@ check_staged_resolve_shapes(void)
    return true;
 }
 
+/* The official clip-distance coverage test captures gl_MaxClipDistances through
+ * transform feedback. This follows the same software-VS/GS-copy path without a
+ * GPU. Check command construction, not the buffer contents: the shim does not
+ * execute shaders. */
+static bool
+check_xfb_copy_program(struct pipe_context *pctx, bool clip_distances,
+                       unsigned interleaved)
+{
+   struct pipe_screen *screen = pctx->screen;
+   nir_builder vs = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "transform feedback constant eight");
+   if (interleaved) {
+      /* nir_create_passthrough_gs copies the vertex shader's output
+       * variables, so a shape meant to exercise the copy program keeps its
+       * variables; nir_lower_io runs in the driver. */
+      nir_variable *pos = nir_variable_create(vs.shader, nir_var_shader_out,
+                                              glsl_vec4_type(), "gl_Position");
+      pos->data.location = VARYING_SLOT_POS;
+      nir_store_var(&vs, pos, nir_imm_vec4(&vs, 0, 0, 0, 1), 0xf);
+      for (unsigned i = 0; i < interleaved; ++i) {
+         nir_variable *var = nir_variable_create(
+            vs.shader, nir_var_shader_out, glsl_vec4_type(),
+            ralloc_asprintf(vs.shader, "result_%u", i));
+         var->data.location = VARYING_SLOT_VAR0 + i;
+         var->data.driver_location = 1 + i;
+         nir_store_var(&vs, var,
+                       nir_imm_vec4(&vs, i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3),
+                       0xf);
+      }
+      nir_xfb_info *xfb = rzalloc_size(vs.shader, nir_xfb_info_size(interleaved));
+      xfb->buffers_written = 1;
+      xfb->streams_written = 1;
+      xfb->buffers[0].stride = 16 * (interleaved + 1);
+      xfb->buffers[0].varying_count = interleaved + 1;
+      xfb->output_count = interleaved;
+      for (unsigned i = 0; i < interleaved; ++i) {
+         xfb->outputs[i].buffer = 0;
+         xfb->outputs[i].offset = 16 * i;
+         xfb->outputs[i].location = VARYING_SLOT_VAR0 + i;
+         xfb->outputs[i].component_mask = 0xf;
+      }
+      vs.shader->xfb_info = xfb;
+      vs.shader->info.xfb_stride[0] = 4 * (interleaved + 1);
+      vs.shader->info.known_interpolation_qualifiers = true;
+      nir_shader_gather_info(vs.shader, nir_shader_get_entrypoint(vs.shader));
+      goto vs_built;
+   }
+   nir_store_output(&vs, nir_imm_vec4(&vs, 0, 0, 0, 1),
+                    nir_imm_int(&vs, 0), .base = 0, .write_mask = 0xf,
+                    .io_semantics.location = VARYING_SLOT_POS);
+   nir_store_output(&vs, nir_imm_int(&vs, 8), nir_imm_int(&vs, 0),
+                    .base = 1, .write_mask = 1,
+                    .io_semantics.location = VARYING_SLOT_VAR0,
+                    .io_xfb.out[0].num_components = 1);
+   vs.shader->info.xfb_stride[0] = 1;
+
+   /* The functional clip-distance case also writes gl_ClipDistance and
+    * captures it, so the copy program carries the clip distance group too.
+    */
+   if (clip_distances) {
+      nir_store_output(&vs, nir_imm_vec2(&vs, 1.0f, -1.0f),
+                       nir_imm_int(&vs, 0), .base = 2, .write_mask = 0x3,
+                       .io_semantics.location = VARYING_SLOT_CLIP_DIST0,
+                       .io_xfb.out[0].num_components = 2,
+                       .io_xfb.out[0].buffer = 0, .io_xfb.out[0].offset = 1);
+      vs.shader->info.xfb_stride[0] = 3;
+      vs.shader->info.clip_distance_array_size = 2;
+   }
+
+   vs.shader->info.known_interpolation_qualifiers = true;
+   nir_gather_xfb_info_from_intrinsics(vs.shader);
+   nir_shader_gather_info(vs.shader, nir_shader_get_entrypoint(vs.shader));
+vs_built:;
+   struct pipe_shader_state vs_state = {
+      .type = PIPE_SHADER_IR_NIR,
+      .ir.nir = vs.shader,
+   };
+   void *vs_cso = pctx->create_vs_state(pctx, &vs_state);
+
+   nir_builder fs = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "transform feedback fragment");
+   nir_store_output(&fs, nir_imm_vec4(&fs, 1, 0, 0, 1),
+                    nir_imm_int(&fs, 0), .base = 0, .write_mask = 0xf,
+                    .io_semantics.location = FRAG_RESULT_DATA0);
+   nir_shader_gather_info(fs.shader, nir_shader_get_entrypoint(fs.shader));
+   struct pipe_shader_state fs_state = {
+      .type = PIPE_SHADER_IR_NIR,
+      .ir.nir = fs.shader,
+   };
+   void *fs_cso = pctx->create_fs_state(pctx, &fs_state);
+   struct pipe_rasterizer_state rast = {
+      .rasterizer_discard = true,
+      .depth_clip_near = true,
+      .depth_clip_far = true,
+      .clip_plane_enable = clip_distances ? 0x3 : 0,
+      .point_size = 1,
+      .line_width = 1,
+   };
+   struct pipe_blend_state blend = {.rt[0].colormask = 0xf};
+   struct pipe_depth_stencil_alpha_state depth = {0};
+   void *rast_cso = pctx->create_rasterizer_state(pctx, &rast);
+   void *blend_cso = pctx->create_blend_state(pctx, &blend);
+   void *depth_cso = pctx->create_depth_stencil_alpha_state(pctx, &depth);
+   void *ve_cso = pctx->create_vertex_elements_state(pctx, 0, NULL);
+   if (!vs_cso || !fs_cso || !rast_cso || !blend_cso || !depth_cso || !ve_cso)
+      return false;
+
+   struct pipe_framebuffer_state fb = {.width = 16, .height = 16, .layers = 1};
+   struct pipe_viewport_state viewport = {
+      .scale = {8, 8, 0.5}, .translate = {8, 8, 0.5},
+   };
+   pctx->set_framebuffer_state(pctx, &fb);
+   pctx->set_viewport_states(pctx, 0, 1, &viewport);
+   pctx->set_sample_mask(pctx, ~0u);
+   pctx->bind_vs_state(pctx, vs_cso);
+   pctx->bind_fs_state(pctx, fs_cso);
+   pctx->bind_rasterizer_state(pctx, rast_cso);
+   pctx->bind_blend_state(pctx, blend_cso);
+   pctx->bind_depth_stencil_alpha_state(pctx, depth_cso);
+   pctx->bind_vertex_elements_state(pctx, ve_cso);
+
+   struct pipe_resource *buffer = make_buffer(screen, 256);
+   if (!buffer)
+      return false;
+   struct pipe_stream_output_target *target =
+      pctx->create_stream_output_target(pctx, buffer, 0, 256);
+   if (!target)
+      return false;
+   unsigned offset = 0;
+   pctx->set_stream_output_targets(pctx, 1, &target, &offset, MESA_PRIM_POINTS);
+   const struct pipe_draw_info info = {
+      .mode = MESA_PRIM_POINTS, .instance_count = 1,
+   };
+   const struct pipe_draw_start_count_bias draw = {.count = 1};
+   struct agx_context *ctx = agx_context(pctx);
+   bool ok = true;
+   for (unsigned i = 0; i < 2; ++i) {
+      pctx->draw_vbo(pctx, &info, 0, NULL, &draw, 1);
+      ok &= ctx->gs && ctx->gs->gs_copy && !ctx->gs->gs_copy->failed &&
+            ctx->skipped_no_program == 0 && ctx->batch && ctx->batch->draws;
+   }
+   if (!ok)
+      fprintf(stderr, "XFB copy program%s%s: skipped=%u draws=%u\n",
+              clip_distances ? " with clip distances" : "",
+              interleaved ? " with interleaved varyings" : "",
+              ctx->skipped_no_program, ctx->batch ? ctx->batch->draws : 0);
+   else
+      printf("two transform-feedback draws%s%s built without a missing program\n",
+             clip_distances ? " with clip distances" : "",
+             interleaved ? " with interleaved varyings" : "");
+
+   pctx->set_stream_output_targets(pctx, 0, NULL, NULL, MESA_PRIM_POINTS);
+   pipe_so_target_reference(&target, NULL);
+   pipe_resource_reference(&buffer, NULL);
+   pctx->bind_vs_state(pctx, NULL);
+   pctx->bind_fs_state(pctx, NULL);
+   pctx->bind_rasterizer_state(pctx, NULL);
+   pctx->bind_blend_state(pctx, NULL);
+   pctx->bind_depth_stencil_alpha_state(pctx, NULL);
+   pctx->bind_vertex_elements_state(pctx, NULL);
+   pctx->delete_vs_state(pctx, vs_cso);
+   pctx->delete_fs_state(pctx, fs_cso);
+   pctx->delete_rasterizer_state(pctx, rast_cso);
+   pctx->delete_blend_state(pctx, blend_cso);
+   pctx->delete_depth_stencil_alpha_state(pctx, depth_cso);
+   pctx->delete_vertex_elements_state(pctx, ve_cso);
+   return ok;
+}
+
+
+/* Whether every variant the driver has compiled for a bound vertex shader
+ * state encoded. create_vs_state() precompiles the default hardware variant,
+ * so a refusal is visible without a draw. */
+static bool
+vertex_state_encoded(void *cso)
+{
+   struct agx_uncompiled_shader *so = cso;
+   bool ok = true;
+   hash_table_foreach(so->variants, ent) {
+      struct agx_compiled_shader *cs = ent->data;
+      ok &= !cs->failed;
+   }
+   return ok;
+}
+
+/* The hardware vertex program shapes behind KHR-GL30.clip_distance.* and any
+ * program with more than one user varying slot: position plus N clip
+ * distances (the functional test, N = 1..8, written from gl_VertexID), the
+ * coverage test's eight clip distances that the fragment shader reads back,
+ * and two plain user varyings. Each is created as a vertex shader state and
+ * the compiled variant checked for a refusal. */
+static bool
+check_vertex_output_shapes(struct pipe_context *pctx)
+{
+   bool ok = true;
+   for (unsigned shape = 0; shape < 11; ++shape) {
+      const unsigned clip_count = shape < 8 ? shape + 1 : shape == 8 ? 8 : 0;
+      const bool two_varyings = shape == 9;
+      /* KHR-GL30.transform_feedback.capture_vertex_interleaved_test (and the
+       * query and discard variants that reuse its program) write
+       * min(MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS, MAX_VARYING_COMPONENTS)
+       * / 4 - 1 constant vec4 varyings and select gl_Position by gl_VertexID.
+       */
+      const unsigned interleaved = shape == 10 ? 64 / 4 - 1 : 0;
+      nir_builder vs = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "vertex output shape");
+      nir_def *vid = nir_i2f32(&vs, nir_load_vertex_id(&vs));
+      nir_def *pos = nir_vec4(&vs, nir_fmul_imm(&vs, vid, 0.5f),
+                              nir_imm_float(&vs, 0), nir_imm_float(&vs, 0),
+                              nir_imm_float(&vs, 1));
+      if (interleaved) {
+         nir_def *id = nir_load_vertex_id(&vs);
+         const float e = 0.0625f;
+         const float corners[4][2] = {
+            {-1 + e, 1 - e}, {1 - e, 1 - e}, {-1 + e, -1 + e}, {1 - e, -1 + e}};
+         pos = nir_imm_vec4(&vs, 0, 0, 0, 0);
+         for (unsigned c = 0; c < 4; ++c) {
+            pos = nir_bcsel(&vs, nir_ieq_imm(&vs, id, c),
+                            nir_imm_vec4(&vs, corners[c][0], corners[c][1], 0, 1),
+                            pos);
+         }
+         for (unsigned i = 0; i < interleaved; ++i) {
+            nir_store_output(&vs,
+                             nir_imm_vec4(&vs, i * 4, i * 4 + 1, i * 4 + 2,
+                                          i * 4 + 3),
+                             nir_imm_int(&vs, 0), .base = 1 + i, .write_mask = 0xf,
+                             .io_semantics.location = VARYING_SLOT_VAR0 + i,
+                             .io_semantics.num_slots = 1,
+                             .src_type = nir_type_float32);
+         }
+      }
+      nir_store_output(&vs, pos, nir_imm_int(&vs, 0), .base = 0,
+                       .write_mask = 0xf, .io_semantics.location = VARYING_SLOT_POS);
+      for (unsigned i = 0; i < clip_count; ++i) {
+         nir_def *v = nir_fadd_imm(
+            &vs,
+            nir_fmul_imm(&vs, nir_fadd_imm(&vs, vid, 1.0f),
+                         0.75f * (i + 1) / (clip_count * 3.0f)),
+            0.25f);
+         nir_store_output(&vs, v, nir_imm_int(&vs, 0), .base = 1 + i / 4,
+                          .component = i % 4, .write_mask = 1,
+                          .io_semantics.location = VARYING_SLOT_CLIP_DIST0 + i / 4,
+                          .io_semantics.num_slots = 1,
+                          .src_type = nir_type_float32);
+      }
+      if (two_varyings) {
+         nir_store_output(&vs, nir_vec4(&vs, vid, vid, vid, vid),
+                          nir_imm_int(&vs, 0), .base = 1, .write_mask = 0xf,
+                          .io_semantics.location = VARYING_SLOT_VAR0);
+         nir_store_output(&vs, nir_vec4(&vs, vid, vid, vid, vid),
+                          nir_imm_int(&vs, 0), .base = 2, .write_mask = 0xf,
+                          .io_semantics.location = VARYING_SLOT_VAR1);
+      }
+      vs.shader->info.clip_distance_array_size = clip_count;
+      nir_shader_gather_info(vs.shader, nir_shader_get_entrypoint(vs.shader));
+
+      /* A linked GL program arrives with its interpolation qualifiers known
+       * (nir_opt_varyings), which lets the UVS lowering inline the varying
+       * indices. A separable program does not, and keeps uniform indices.
+       */
+      const bool linked = getenv("AGX_TEST_SEPARABLE_VERTEX") == NULL;
+      vs.shader->info.known_interpolation_qualifiers = linked;
+      struct pipe_shader_state vs_state = {
+         .type = PIPE_SHADER_IR_NIR,
+         .ir.nir = vs.shader,
+      };
+      void *vs_cso = pctx->create_vs_state(pctx, &vs_state);
+      const bool encoded = vs_cso && vertex_state_encoded(vs_cso);
+      fprintf(stderr, "vertex output shape %u (clip=%u varyings=%u %s): %s\n",
+              shape, clip_count, two_varyings ? 2 : interleaved,
+              linked ? "linked" : "separable",
+              encoded ? "encoded" : "REFUSED");
+      ok &= encoded;
+      if (vs_cso)
+         pctx->delete_vs_state(pctx, vs_cso);
+   }
+   return ok;
+}
 int
 main(void)
 {
@@ -685,6 +965,26 @@ main(void)
    if (!pctx) {
       fprintf(stderr, "context_create failed\n");
       return 1;
+   }
+
+   if (getenv("AGX_TEST_VERTEX_OUTPUT_SHAPES")) {
+      const bool ok = check_vertex_output_shapes(pctx);
+      pctx->destroy(pctx);
+      screen->destroy(screen);
+      close(fd);
+      return ok ? 0 : 1;
+   }
+
+   if (getenv("AGX_TEST_XFB_COPY_PROGRAM")) {
+      glsl_type_singleton_init_or_ref();
+      const bool ok = check_xfb_copy_program(pctx, false, 0) &&
+                      check_xfb_copy_program(pctx, true, 0) &&
+                      check_xfb_copy_program(pctx, false, 15);
+      glsl_type_singleton_decref();
+      pctx->destroy(pctx);
+      screen->destroy(screen);
+      close(fd);
+      return ok ? 0 : 1;
    }
 
    if (!check_g17p_sampler_bias_record())

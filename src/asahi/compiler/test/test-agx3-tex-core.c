@@ -2294,6 +2294,13 @@ test_multisample_sample_stage(void)
    CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 12, 0,
                                   false, true, other, &other_len));
    CHECK(hex_eq(other, other_len, "1705540400180000d0c00800"));
+   static const uint8_t native_r4[] = {
+      0x17,0x05,0x54,0x04,0x00,0x10,
+      0x00,0x00,0xd0,0xc0,0x08,0x00,
+   };
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 8, 0,
+                                  false, true, bytes, &len));
+   CHECK(len == sizeof(native_r4) && !memcmp(bytes, native_r4, len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                    false, false, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,

@@ -126,8 +126,8 @@ struct ra_ctx {
    /* SSA values read by G17P's 192-half f32log2 operand domain. */
    BITSET_WORD *log2_gpr;
 
-   /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
-    * register bank. */
+   /* SSA coordinates that must stay above CEM's fixed scratch register bank
+    * or a fully occupied MRT store bank. */
    BITSET_WORD *high_gpr;
 };
 
@@ -1672,6 +1672,16 @@ agx_ra(agx_context *ctx)
          agx_max_registers_for_occupancy(threads_per_workgroup);
    }
 
+   /* The AGX3B register operand fields name halves 0..191: an add, a device
+    * load and a device store all pack at half 190 and refuse half 192 (LOG2
+    * carries the same bound in dest_limit). Keep the allocator inside that
+    * file so a wide program spills instead of reaching registers the packer
+    * cannot name; a 65-output transform feedback copy program used to land
+    * its loads at r96 and its addresses at r98.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      max_possible_regs = MIN2(max_possible_regs, AGX3_REGISTER_HALVES);
+
    if (force_spilling) {
       /* Even when testing spilling, we need enough room for preloaded/exported
        * regs.
@@ -1829,6 +1839,7 @@ agx_ra(agx_context *ctx)
           I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(low_gpr, I->src[0].value);
 
+
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source
        * domain. Keep every SSA vector that reaches either path below half
@@ -1890,6 +1901,26 @@ agx_ra(agx_context *ctx)
       }
    }
 
+   /* The ordered eight-target RGBA8 reload keeps sixteen packed halves live
+    * until its terminal tile stores. Its shared texture coordinates are also
+    * bank-constrained, so the shuffler cannot evict them from that low bank.
+    * Place those coordinates above it from the outset, within their existing
+    * seven-bit COPY domain. This does not relax the tile or texture encodings. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->agx3_mrt_tile_ops_ordered) {
+      unsigned tile_halfs = 0;
+      for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+         if (BITSET_TEST(low_gpr, ssa))
+            tile_halfs += ncomps[ssa];
+      }
+      if (tile_halfs >= 16) {
+         for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+            if (BITSET_TEST(texture_gpr, ssa) && !BITSET_TEST(low_gpr, ssa))
+               BITSET_SET(high_gpr, ssa);
+         }
+      }
+   }
+
    /* For live range splitting to work properly, ensure the register file is
     * aligned to the larger vector size. Most of the time, this is a no-op since
     * the largest vector size is usually 128-bit and the register file is
@@ -1911,6 +1942,8 @@ agx_ra(agx_context *ctx)
    if (ctx->key->is_helper || force_spilling)
       max_regs = max_possible_regs;
 
+   /* The occupancy bucket may sit above the encodable file (AGX3B: 192). */
+   max_regs = MIN2(max_regs, max_possible_regs);
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
 
    /* Or, we can bound tightly for debugging */

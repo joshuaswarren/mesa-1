@@ -34,7 +34,7 @@ struct agx3_g17p_graphics_program_desc {
    uint32_t compiler_d;
    bool fragment;
    bool writes_sample_mask;
-   uint8_t colour_partitions;
+   uint8_t colour_partition_mask;
    struct agx_ioto_g17p_imageblock imageblock;
 };
 
@@ -55,6 +55,8 @@ enum agx3_g17p_rt0_bg_op {
 #define AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 #define AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS 28u
 #define AGX3_G17P_QUAD_CLEAR_PUSH_HALFS 36u
+#define AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE 768u
+#define AGX3_G17P_WIDE_MRT_EOT_PROGRAM_MAX_SIZE 512u
 
 bool agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
                                     enum agx3_g17p_rt0_bg_op op,
@@ -81,7 +83,7 @@ struct agx3_g17p_rt0_bg_program_desc {
 };
 
 struct agx3_g17p_rt0_bg_program {
-   uint8_t bytes[AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE];
+   uint8_t bytes[AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 
@@ -98,6 +100,8 @@ struct agx3_g17p_rt0_eot_program_desc {
    uint8_t imageblock_offset1_B;
    uint8_t imageblock_offset2_B;
    uint8_t imageblock_offset3_B;
+   uint8_t imageblock_offsets_B[8];
+   uint8_t attachment_mask;
    uint32_t shader_binary_size;
    uint32_t scratch_size;
    uint16_t nr_gprs;
@@ -106,7 +110,7 @@ struct agx3_g17p_rt0_eot_program_desc {
 };
 
 struct agx3_g17p_rt0_eot_program {
-   uint8_t bytes[AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE];
+   uint8_t bytes[AGX3_G17P_WIDE_MRT_EOT_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 

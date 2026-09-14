@@ -20,7 +20,7 @@ dump(const char *name, enum pipe_format format,
       return;
    printf("quad-%s format=%u gprs=%u staging=%u partitions=%u bytes=", name,
           format, part->info.nr_gprs, part->info.agx3_staging_halfs,
-          part->info.agx3_colour_link.colour_partitions);
+          util_bitcount(part->info.agx3_colour_link.colour_partition_mask));
    for (unsigned i = 0; i < part->info.main_size; ++i)
       printf("%02x", ((uint8_t *)part->binary)[part->info.main_offset + i]);
    puts("");
@@ -78,7 +78,8 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
                                 .secondary = true};
    struct agx_shader_part part = {0};
    assert(agx_compile_shader_nir(b.shader, &key, &part));
-   assert(part.info.agx3_colour_link.colour_partitions == MIN2(count, 3));
+   assert(part.info.agx3_colour_link.colour_partition_mask ==
+          BITFIELD_MASK(MIN2(count, 3)));
    assert(part.info.agx3_colour_link.entry_emitted);
    assert(!part.info.scratch_size);
    dump("epilog", format, &part);

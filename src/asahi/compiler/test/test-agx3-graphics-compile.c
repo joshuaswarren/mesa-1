@@ -23,6 +23,8 @@
  */
 
 #include "agx_compile.h"
+#include "poly/nir/poly_nir.h"
+#include "nir_xfb_info.h"
 #include "agx3_alu_core.h"
 #include "agx3_copy_core.h"
 #include "agx3_funop_core.h"
@@ -2570,6 +2572,340 @@ test_g17p_query_lod_compile(void)
    return true;
 }
 
+/* Dump the driver's cube-array depth-comparison sequence (varying direction,
+ * layer and reference, immediate descriptors) so it can be diffed against
+ * Apple's `depthcube_array.sample_compare(s, dir, layer, ref)` fragment.
+ * KHR-GL30.ext_texture_shadow_lod.texture.samplercubearrayshadow_fragment
+ * compiles but renders a mismatch; this is the byte-level evidence. */
+/* The transform feedback path compiles the vertex shader in its compute
+ * form: poly_nir_lower_vs_before_gs() turns each output store into a global
+ * store at the vertex parameter buffer, the stage becomes COMPUTE and the
+ * ordinary vertex prolog exports the zero-based vertex ID. Mirror that
+ * pipeline (the driver's sysval lowering maps the parameter buffer to a
+ * root uniform, done here as a preamble load) and report what the AGX3
+ * packer refuses: KHR-GL30.transform_feedback.capture_vertex_* fail to link
+ * with "cannot encode the default vertex shader variant". */
+static bool
+lower_vertex_param_buffer(nir_builder *b, nir_intrinsic_instr *intr,
+                          void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_vertex_param_buffer_poly)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_load_preamble(b, 1, 64, .base = 24));
+   return true;
+}
+
+static bool
+test_g17p_compute_form_vertex_shader(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17P compute-form VS");
+   nir_def *id = nir_u2f32(&b, nir_load_vertex_id(&b));
+   nir_def *iid = nir_u2f32(&b, nir_load_instance_id(&b));
+   nir_def *pos = nir_vec4(&b, id, iid, nir_imm_float(&b, 0.0f),
+                           nir_imm_float(&b, 1.0f));
+   nir_def *var = nir_vec4(&b, nir_fmul_imm(&b, id, 0.5f), iid,
+                           nir_imm_float(&b, 0.25f), nir_imm_float(&b, 0.75f));
+   nir_store_output(&b, pos, nir_imm_int(&b, 0), .base = 0, .write_mask = 15,
+                    .io_semantics.location = VARYING_SLOT_POS,
+                    .io_semantics.num_slots = 1);
+   nir_store_output(&b, var, nir_imm_int(&b, 0), .base = 1, .write_mask = 15,
+                    .io_semantics.location = VARYING_SLOT_VAR0,
+                    .io_semantics.num_slots = 1);
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.io_lowered = true;
+
+   NIR_PASS(_, b.shader, poly_nir_lower_vs_before_gs);
+   b.shader->info.stage = MESA_SHADER_COMPUTE;
+   memset(&b.shader->info.cs, 0, sizeof(b.shader->info.cs));
+   b.shader->info.workgroup_size[0] = 64;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass, lower_vertex_param_buffer,
+            nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part) &&
+                         part.binary != NULL;
+   if (getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "G17P compute-form VS: compiled=%u size=%u bytes:",
+              compiled, part.info.binary_size);
+      for (unsigned i = 0; compiled && i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return compiled;
+}
+
+/* The driver's transform feedback pipeline: the vertex program becomes a
+ * passthrough geometry shader (nir_create_passthrough_gs), which poly lowers
+ * into a count program, a pre-GS program, the main geometry program and the
+ * rasterization copy program. The first three run as compute kernels on
+ * G17P; every KHR-GL30.transform_feedback case reported "cannot encode this
+ * GS shader". Reproduce the compute kernels here with the driver's sysval
+ * mapping (root uniforms, done as preamble loads) so the refused instruction
+ * shapes are visible without hardware. */
+static bool
+lower_poly_sysvals(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   unsigned base;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_vertex_param_buffer_poly:
+      base = 24;
+      break;
+   case nir_intrinsic_load_geometry_param_buffer_poly:
+      base = 28;
+      break;
+   case nir_intrinsic_load_vs_outputs_poly:
+      base = 32;
+      break;
+   case nir_intrinsic_load_stat_query_address_poly:
+      base = 36 + 4 * nir_intrinsic_base(intr);
+      break;
+   default:
+      return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_load_preamble(b, 1, 64, .base = base));
+   return true;
+}
+
+static int
+xfb_test_type_size(const struct glsl_type *type, bool bindless)
+{
+   return glsl_count_attribute_slots(type, false);
+}
+
+static bool
+compile_xfb_compute_program(nir_shader *nir, const char *what)
+{
+   if (!nir)
+      return true;
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_poly_sysvals,
+            nir_metadata_control_flow, NULL);
+   agx_preprocess_nir(nir);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(nir, &key, &part) &&
+                         part.binary != NULL;
+   if (getenv("AGX3_DUMP_BINARY") || !compiled)
+      fprintf(stderr, "G17P xfb %s program: compiled=%u size=%u\n", what,
+              compiled, part.info.binary_size);
+   free(part.binary);
+   return compiled;
+}
+
+static bool
+test_g17p_xfb_geometry_programs(void)
+{
+   /* The passthrough builder and nir_lower_io consult GLSL types. */
+   glsl_type_singleton_init_or_ref();
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "xfb source VS");
+   nir_variable *pos = nir_variable_create(b.shader, nir_var_shader_out,
+                                           glsl_vec4_type(), "gl_Position");
+   pos->data.location = VARYING_SLOT_POS;
+   nir_variable *var = nir_variable_create(b.shader, nir_var_shader_out,
+                                           glsl_vec4_type(), "xfb_var");
+   var->data.location = VARYING_SLOT_VAR0;
+   var->data.driver_location = 1;
+   nir_def *id = nir_u2f32(&b, nir_load_vertex_id(&b));
+   nir_store_var(&b, pos,
+                 nir_vec4(&b, id, nir_imm_float(&b, 0.0f),
+                          nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f)),
+                 0xf);
+   nir_store_var(&b, var,
+                 nir_vec4(&b, nir_fmul_imm(&b, id, 0.5f),
+                          nir_imm_float(&b, 0.25f), nir_imm_float(&b, 0.5f),
+                          nir_imm_float(&b, 0.75f)),
+                 0xf);
+   b.shader->info.outputs_written =
+      VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+
+   nir_xfb_info *xfb = rzalloc_size(b.shader, nir_xfb_info_size(1));
+   xfb->buffers_written = 1;
+   xfb->streams_written = 1;
+   xfb->buffers[0].stride = 16;
+   xfb->buffers[0].varying_count = 1;
+   xfb->output_count = 1;
+   xfb->outputs[0].buffer = 0;
+   xfb->outputs[0].offset = 0;
+   xfb->outputs[0].location = VARYING_SLOT_VAR0;
+   xfb->outputs[0].component_mask = 0xf;
+   b.shader->xfb_info = xfb;
+   b.shader->info.xfb_stride[0] = 4;
+
+   nir_shader *gs = nir_create_passthrough_gs(
+      &agx_nir_options, b.shader, MESA_PRIM_TRIANGLES, MESA_PRIM_TRIANGLES,
+      false, false, false);
+   NIR_PASS(_, gs, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+            xfb_test_type_size, nir_lower_io_lower_64bit_to_32);
+   nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
+
+   nir_shader *gs_count = NULL, *gs_copy = NULL, *pre_gs = NULL;
+   struct poly_gs_info info = {0};
+   NIR_PASS(_, gs, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs, &info);
+   if (getenv("AGX3_DUMP_BINARY"))
+      fprintf(stderr,
+              "G17P xfb lowering: xfb=%u prefix_sum=%u count_words=%u "
+              "count=%p pre=%p copy=%p\n",
+              info.xfb, info.prefix_sum, info.count_words, (void *)gs_count,
+              (void *)pre_gs, (void *)gs_copy);
+
+   bool ok = compile_xfb_compute_program(gs_count, "count");
+   ok &= compile_xfb_compute_program(pre_gs, "pre");
+   ok &= compile_xfb_compute_program(gs, "main");
+   ralloc_free(b.shader);
+   ralloc_free(gs);
+   ralloc_free(gs_count);
+   ralloc_free(pre_gs);
+   ralloc_free(gs_copy);
+   glsl_type_singleton_decref();
+   return ok;
+}
+
+/* KHR-GL30.ext_texture_shadow_lod.texturelod.samplercubearrayshadow_fragment
+ * as the CTS writes it: `textureLod(u_sampler, v_texCoord, v_lodShadowRef.y,
+ * v_lodShadowRef.x)` with the coordinate, the reference and the level all
+ * interpolated, and the sampler at API slot 1. */
+static bool
+test_g17p_cube_array_shadow_level_varyings(bool bias)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      bias ? "G17P cube-array shadow bias varyings"
+           : "G17P cube-array shadow level varyings");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *coord = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *lod_ref = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 1, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR1,
+      .io_semantics.num_slots = 1);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = bias ? nir_texop_txb : nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->is_array = true;
+   tex->is_shadow = true;
+   tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 4;
+   tex->texture_index = 0;
+   tex->sampler_index = 1;
+   if (!getenv("AGX3_CUBE_ARRAY_CLAMP"))
+      tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                     nir_channel(&b, lod_ref, 1));
+   tex->src[2] = nir_tex_src_for_ssa(bias ? nir_tex_src_bias : nir_tex_src_lod,
+                                     nir_channel(&b, lod_ref, 0));
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, nir_vec4(&b, &tex->def, nir_imm_float(&b, 0.0f),
+                                nir_imm_float(&b, 0.0f),
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VARYING_SLOT_VAR0) | BITFIELD64_BIT(VARYING_SLOT_VAR1);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part) &&
+                         part.binary != NULL;
+   if (getenv("AGX3_DUMP_BINARY") || !compiled) {
+      fprintf(stderr, "G17P cube-array shadow %s varyings: compiled=%u size=%u bytes:",
+              bias ? "bias" : "level", compiled, part.info.binary_size);
+      for (unsigned i = 0; compiled && i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return compiled;
+}
+
+static bool
+test_g17p_cube_array_shadow_dump(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P cube-array shadow dump");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *coord = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *ref = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 1, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR1,
+      .io_semantics.num_slots = 1);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->is_array = true;
+   tex->is_shadow = true;
+   tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 4;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   /* The staging sequence under test is independent of the robustness
+    * prologue, which needs a bindless descriptor pointer. */
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator, ref);
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   fs_store_colour(&b, nir_replicate(&b, &tex->def, 4));
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VARYING_SLOT_VAR0) | BITFIELD64_BIT(VARYING_SLOT_VAR1);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part) &&
+                         part.binary != NULL;
+   if (getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "G17P cube-array shadow: compiled=%u size=%u staging=%u/%u bytes:",
+              compiled, part.info.binary_size, part.info.agx3_staging_known,
+              part.info.agx3_staging_halfs);
+      for (unsigned i = 0; compiled && i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return compiled;
+}
+
 static bool
 test_g17p_native_cube_array_sample(void)
 {
@@ -4269,10 +4605,10 @@ test_g17p_eot_block_store(void)
    key.g17p_rt0_eot_words = 0;
    key.g17p_rt0_eot_rgb565 = false;
 
-   /* Exact Quake WBOIT tile layout: native builtin EOT mask3 stores an
-    * RGBA16F block at byte0 and scalar R8 in a distinct tile partition at
-    * byte8. The nonzero second-partition key is what selects the 238-byte
-    * native program rather than the 120-byte same-partition specialization. */
+   /* Native mixed RGBA16F/R8 EOT at offsets0/8 and sample stride16.
+    * Both physical partition quotients are zero. This independent native
+    * oracle is reproduced by test/probes/capture-g17p-mrt-eot.py;
+    * SHA256 b3191cbbd673db5fb00d3e744f60ed59befad9bc19a2bf30aa9420effa63df12. */
    nir_builder mrt = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P WBOIT MRT EOT");
    coords = nir_trim_vector(&mrt, nir_load_global_invocation_id(&mrt, 32), 2);
@@ -4293,21 +4629,11 @@ test_g17p_eot_block_store(void)
       0x50,0x26,0x0a,0x00,0x9f,0x20,0x54,0x00,0x03,0x00,0x10,0x00,
       0x50,0x26,0x0a,0x00,0x97,0x05,0x54,0x04,0x00,0x08,0x00,0x00,
       0xd0,0x40,0x10,0x00,0x0b,0x82,0x21,0x04,0x1b,0x80,0x21,0x04,
-      0x23,0x00,0x20,0x00,0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,
-      0xa8,0x15,0x00,0x00,0x06,0x04,0x24,0x99,0x15,0x06,0x00,0x01,
-      0x00,0x00,0x0a,0x84,0x33,0x04,0x06,0x00,0x17,0x28,0x02,0x00,
-      0x8f,0x04,0x54,0x22,0x0f,0x01,0x54,0x60,0x00,0x00,0x00,0x00,
-      0x00,0x00,0x23,0x00,0x20,0x01,0x0f,0x05,0x54,0x1a,0x34,0x98,
-      0x11,0x06,0x00,0x01,0x00,0x00,0x9f,0x01,0x54,0x05,0x03,0x02,
-      0x14,0x00,0x15,0x04,0x0a,0x84,0x23,0x86,0x06,0x00,0x0f,0x28,
-      0x02,0x00,0x32,0x04,0x35,0x06,0x26,0x81,0x0f,0x08,0x22,0x80,
-      0x9f,0x01,0x54,0x04,0x02,0x08,0x18,0x00,0x17,0x05,0x8f,0x04,
-      0x54,0x22,0x0f,0x00,0x54,0xcc,0xff,0xff,0xff,0xff,0xff,0x00,
-      0x0f,0x06,0x04,0x02,0x00,0x00,0x0f,0x00,0x54,0x94,0xff,0xff,
-      0xff,0xff,0xff,0x00,0x0f,0x06,0x04,0x02,0x00,0x00,0x97,0x05,
-      0x54,0x0c,0x00,0x10,0x00,0x00,0xd0,0x40,0x10,0x00,0x4b,0x02,
-      0x29,0x04,0x5b,0x00,0x29,0x04,0x57,0x10,0x54,0x08,0x00,0x10,
-      0x00,0x80,0xa8,0x75,0x00,0x00,0x0e,0x00,0x00,0x00,
+      0x97,0x05,0x54,0x0c,0x00,0x10,0x00,0x00,0xd0,0x44,0x10,0x00,
+      0x4b,0x03,0x2f,0x00,0x42,0x00,0x00,0x04,0x00,0x00,0x5b,0x01,
+      0x2f,0x00,0x42,0x00,0x00,0x04,0x00,0x00,0x57,0x10,0x54,0x00,
+      0x00,0x00,0x00,0x80,0xa8,0x15,0x00,0x00,0x57,0x20,0x54,0x08,
+      0x00,0x10,0x00,0x90,0xa8,0x75,0x00,0x00,0x0e,0x00,0x00,0x00,
    };
    ok &= mrt_compiled && part.info.binary_size == sizeof(expected_mrt) &&
          part.info.main_offset == 0 && part.info.main_size == sizeof(expected_mrt) &&
@@ -4830,6 +5156,52 @@ build_fs_texture_index_abi(bool compact_native, bool gen9_bound)
    return b.shader;
 }
 
+/* u_blitter's same-size depth blit is a fragment texel fetch whose level is
+ * the interpolated texcoord.w, a per-lane register. Keep that shape in the
+ * compiler oracle so its native staging sequence can be compared byte for
+ * byte against Apple's `t.read(uint2(uv), uint(lod))` fragments. */
+static nir_shader *
+build_fs_texel_fetch_register_lod(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 texel fetch register LOD FS");
+
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *in = nir_load_interpolated_input(
+      &b, 3, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_txf;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   /* The staging sequence under test is independent of the robustness
+    * prologue, which needs a bindless descriptor pointer. */
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(
+      nir_tex_src_coord, nir_f2i32(&b, nir_trim_vector(&b, in, 2)));
+   tex->src[1] = nir_tex_src_for_ssa(
+      nir_tex_src_lod, nir_f2i32(&b, nir_channel(&b, in, 2)));
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   fs_store_colour(&b, &tex->def);
+
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_fs_texture_imm(void)
 {
@@ -4888,7 +5260,7 @@ build_fs_two_texture_samples(void)
  * Keep a real vertex-stage compile in the corpus so txl(0) cannot regress to
  * the fragment-only implicit-derivative selector. */
 static nir_shader *
-build_vs_texture_level_zero(void)
+build_vs_texture_level(bool register_lod)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_VERTEX, &agx_nir_options, "AGX3 vertex texture level-zero VS");
@@ -4902,8 +5274,11 @@ build_vs_texture_level_zero(void)
    tex->sampler_index = 0;
    tex->src[0] = nir_tex_src_for_ssa(
       nir_tex_src_coord, nir_imm_vec2(&b, 0.5f, 0.5f));
-   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod,
-                                     nir_imm_float(&b, 0.0f));
+   nir_def *lod = register_lod
+                    ? nir_u2f32(&b, nir_iand_imm(
+                         &b, nir_load_vertex_id(&b), 3))
+                    : nir_imm_float(&b, 0.0f);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
    nir_def_init(&tex->instr, &tex->def, 4, 32);
    nir_builder_instr_insert(&b, &tex->instr);
 
@@ -4922,6 +5297,21 @@ build_vs_texture_level_zero(void)
             AGX_DESCRIPTOR_GENERATION_9);
    agx_preprocess_nir(b.shader);
    return b.shader;
+}
+
+static nir_shader *
+build_vs_texture_level_zero(void)
+{
+   return build_vs_texture_level(false);
+}
+
+/* Apple's G17P vertex level(float(vertex_id & 3)) witness stages the
+ * per-vertex LOD with PACK_SMPIR before SMP. Keep the LOD out of the constant
+ * preamble so this exercises the register operand accepted by the encoder. */
+static nir_shader *
+build_vs_texture_register_lod(void)
+{
+   return build_vs_texture_level(true);
 }
 
 /* Firefox WebRender uses texelFetch from a dynamically indexed descriptor in
@@ -5937,8 +6327,13 @@ g17p_sample_group_protocol(const struct agx_shader_part *part)
                incorrectly_terminated_first |=
                   binary_contains(part, candidate, length);
 
+               /* The second in-flight sample stages into sampler-private
+                * group 8, as Apple's own consecutive samples do (see the
+                * staging-group note in agx3_pack_binary.c); it must not
+                * restage bank 0 while the first SMP still reads it. */
                d.texture = 1;
                d.sampler = 1;
+               d.coord = 8;
                d.final = true;
                d.sample_group_end = true;
                if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d,
@@ -6213,6 +6608,8 @@ static const struct agx3_graphics_case cases[] = {
     AGX_ABI_VUNI_COUNT_VK(2) + 8, 257},
    {"vs-texture-level-zero", build_vs_texture_level_zero, true,
     .g17p_only = true},
+   {"vs-texture-register-lod", build_vs_texture_register_lod, true,
+    .g17p_only = true},
    {"vs-indexed-texture-fetch", build_vs_indexed_texture_fetch, true,
     .g17p_only = true, .reserved_preamble = 64},
    {"vs-indexed-texture-sample", build_vs_indexed_texture_sample, true,
@@ -6226,6 +6623,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-tilebuffer-load", build_fs_tilebuffer_load, true},
    {"fs-textured-triangle", build_fs_texture_imm, true,
     .expected_g17p_sampled_fragment = true},
+   {"fs-texel-fetch-register-lod", build_fs_texel_fetch_register_lod, true,
+    .g17p_only = true},
    {"fs-two-texture-sample-group", build_fs_two_texture_samples, true,
     .g17p_only = true, .expected_g17p_sampled_fragment = true,
     .expected_g17p_sample_group = true},
@@ -6592,6 +6991,16 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--vertex-texture-lod-only")) {
+      const struct agx3_graphics_case c = {
+         "vs-texture-register-lod", build_vs_texture_register_lod, true,
+         .g17p_only = true,
+      };
+      const bool ok = run_case(&c, AGX_ISA_ENCODING_AGX3B);
+      fprintf(stderr, "G17P vertex register texture LOD: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--zink-minifloat-abs-fma-only")) {
       const struct agx3_graphics_case c = {
          "fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
@@ -6926,6 +7335,24 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
+   if (!test_g17p_cube_array_shadow_dump()) {
+      fputs("cube-array shadow dump compile failed\n", stderr);
+      return 1;
+   }
+   if (!test_g17p_compute_form_vertex_shader()) {
+      fputs("compute-form vertex shader compile failed\n", stderr);
+      return 1;
+   }
+   if (!test_g17p_cube_array_shadow_level_varyings(false) ||
+       !test_g17p_cube_array_shadow_level_varyings(true)) {
+      fprintf(stderr, "agx3_graphics: cube-array shadow level/bias from varyings refused\n");
+      return 1;
+   }
+
+   if (!test_g17p_xfb_geometry_programs()) {
+      fputs("transform feedback geometry programs compile failed\n", stderr);
+      return 1;
+   }
    if (!test_g17p_native_cube_array_sample()) {
       fputs("native cube-array sample mismatch\n", stderr);
       all_ok = false;

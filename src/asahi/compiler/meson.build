@@ -715,6 +715,19 @@ if with_tests
   )
 
   test(
+    'agx3_vertex_formats',
+    executable(
+      'agx3_vertex_formats_test',
+      files('test/test-agx3-vertex-formats.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_int8_memory',
     executable(
       'agx3_int8_memory_test',
@@ -804,8 +817,8 @@ if with_tests
       files('test/test-agx3-graphics-compile.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_compiler],
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+      link_with : [libasahi_compiler, libpoly_nir],
     ),
     suite : ['asahi'],
   )

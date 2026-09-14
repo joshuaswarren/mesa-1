@@ -257,7 +257,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    size_t size = 0;
    unsigned nr_gprs = 0, scratch_size = 0, agx3_spectpr_scratch_size = 0;
    unsigned staging_halfs = 0;
-   unsigned colour_partitions = 0;
+   unsigned colour_partition_mask = 0;
    bool staging_known = true;
    bool reads_tib = false, writes_sample_mask = false,
         disable_tri_merging = false, tag_write_disable = true;
@@ -295,12 +295,10 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       linked->uses_txf |= part->info.uses_txf;
       sampled_fragment |= part->info.g17p_sampled_fragment;
       tag_write_disable &= part->info.tag_write_disable;
-      if (part->info.agx3_colour_link.colour_partitions >
-          AGX3_G17P_MAX_COLOUR_PARTITIONS)
+      if (part->info.agx3_colour_link.colour_partition_mask >=
+          (1u << AGX3_G17P_MAX_COLOUR_PARTITIONS))
          return false;
-      colour_partitions = MAX2(
-         colour_partitions,
-         part->info.agx3_colour_link.colour_partitions);
+      colour_partition_mask |= part->info.agx3_colour_link.colour_partition_mask;
    }
 
    if (colour_fused)
@@ -310,9 +308,13 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    assert(size > 0 && "must stop");
 
+   /* The staging accounting is per instruction, so a linked software vertex
+    * shader (a compute-stage main behind the vertex prolog) is described the
+    * same way as a hardware vertex or fragment program. */
    if (dev->chip == AGX_CHIP_G17P &&
        (main->info.stage == MESA_SHADER_VERTEX ||
-        main->info.stage == MESA_SHADER_FRAGMENT) &&
+        main->info.stage == MESA_SHADER_FRAGMENT ||
+        main->info.stage == MESA_SHADER_COMPUTE) &&
        staging_known && !linked->g17p_compiler_d_valid) {
       linked->g17p_compiler_d_valid = true;
       linked->g17p_compiler_d = staging_halfs * 2;
@@ -431,7 +433,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    linked->scratch_size = scratch_size;
    linked->agx3_spectpr_scratch_size = agx3_spectpr_scratch_size;
    linked->nr_gprs = nr_gprs;
-   linked->g17p_colour_partitions = colour_partitions;
+   linked->g17p_colour_partition_mask = colour_partition_mask;
 
    if (agx_bo_sync_for_device(linked->bo, 0, alloc_size)) {
       agx_bo_unreference(dev, linked->bo);

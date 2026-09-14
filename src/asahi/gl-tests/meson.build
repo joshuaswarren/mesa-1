@@ -226,38 +226,42 @@ gl_hypr_mixed_draw = executable(
   build_by_default : false,
 )
 
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-software-control',
-  gl_hypr_mixed_draw,
-  args : [
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'EGL_PLATFORM=surfaceless',
-    'LIBGL_ALWAYS_SOFTWARE=true',
-  ],
-  suite : ['asahi'],
-)
-
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-shim-submit',
-  prog_python,
-  args : [
-    files('run-gl-shim.py'),
-    libasahi_noop_drm_shim,
-    libegl,
-    libgallium_dri,
+foreach mode : ['tight', 'api-barrier']
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-software-control-' + mode,
     gl_hypr_mixed_draw,
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
-    'MESA_SHADER_CACHE_DISABLE=true',
-  ],
-  suite : ['asahi'],
-)
+    args : [
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'EGL_PLATFORM=surfaceless',
+      'LIBGL_ALWAYS_SOFTWARE=true',
+    ],
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-shim-submit-' + mode,
+    prog_python,
+    args : [
+      files('run-gl-shim.py'),
+      libasahi_noop_drm_shim,
+      libegl,
+      libgallium_dri,
+      gl_hypr_mixed_draw,
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+      'MESA_SHADER_CACHE_DISABLE=true',
+    ],
+    suite : ['asahi'],
+  )
+endforeach
 
 gl_multi_viewport = executable(
   'asahi-g17p-gl-multi-viewport',

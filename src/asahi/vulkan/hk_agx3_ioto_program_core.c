@@ -241,7 +241,7 @@ hk_agx3_g17p_basic_graphics_program_generate(
       .compiler_d = desc->compiler_d,
       .fragment = desc->fragment,
       .writes_sample_mask = desc->writes_sample_mask,
-      .colour_partitions = desc->colour_partitions,
+      .colour_partition_mask = desc->colour_partition_mask,
       .imageblock = desc->imageblock,
    };
    struct agx3_g17p_graphics_program shared;

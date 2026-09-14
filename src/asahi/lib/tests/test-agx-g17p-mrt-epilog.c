@@ -7,9 +7,11 @@
 #include "agx3_pixel_core.h"
 #include "agx_linker.h"
 #include "agx_nir.h"
+#include "agx_nir_texture.h"
 #include "agx_tilebuffer.h"
 #include "nir_builder.h"
 #include "util/format/u_formats.h"
+#include "../../compiler/test/probes/g17p-sparse-mrt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -253,6 +255,139 @@ test_wboit_background_clear(void)
    return ok;
 }
 
+static bool
+test_lower_reload_handle(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_texture_handle_agx)
+      return false;
+   b->cursor = nir_instr_remove(&intr->instr);
+   nir_def_rewrite_uses(&intr->def, nir_bindless_image_agx(
+      b, nir_imul_imm(b, intr->src[0].ssa, 32), .desc_set = 0));
+   return true;
+}
+
+static bool
+test_wide_rgba8_background(unsigned count, bool reload,
+                           unsigned target_mask, unsigned partition_mask)
+{
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P wide RGBA8 background");
+   b.shader->info.fs.untyped_color_outputs = true;
+   for (unsigned rt = 0; rt < count; ++rt) {
+      if (!(target_mask & BITFIELD_BIT(rt)))
+         continue;
+      formats[rt] = PIPE_FORMAT_R8G8B8A8_UNORM;
+      nir_def *color = reload
+         ? nir_txf(&b, nir_u2u32(&b, nir_load_pixel_coord(&b)),
+                   .texture_index = rt * 2, .dim = GLSL_SAMPLER_DIM_2D,
+                   .dest_type = nir_type_uint32,
+                   .backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP)
+         : nir_load_preamble(&b, 4, 32, .base = 4 + 8 * rt);
+      nir_store_output(&b, color,
+                       nir_imm_int(&b, 0), .write_mask = 0xf,
+                       .src_type = nir_type_uint32,
+                       .io_semantics.location = FRAG_RESULT_DATA0 + rt,
+                       .io_semantics.num_slots = 1);
+      b.shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DATA0 + rt);
+   }
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(formats, count, 1, false);
+   agx_nir_lower_texture(b.shader);
+   agx_preprocess_nir(b.shader);
+   unsigned bindless_base = 0;
+   NIR_PASS(_, b.shader, agx_nir_lower_tilebuffer, &tib, NULL,
+            &bindless_base, NULL, NULL, false, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_monolithic_msaa, 1);
+   NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   NIR_PASS(_, b.shader, nir_shader_intrinsics_pass, test_lower_reload_handle,
+            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, 1);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .fs.ignore_tib_dependencies = true,
+      .reserved_preamble = reload ? 0 : 4 + 8 * util_last_bit(target_mask),
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   bool ok = compiled && part.binary &&
+             part.info.agx3_colour_link.colour_partition_mask == partition_mask &&
+             part.info.agx3_colour_link.entry_emitted &&
+             part.info.push_count ==
+                (reload ? 0 : 4 + 8 * util_last_bit(target_mask));
+   const unsigned active = util_bitcount(target_mask);
+   /* This traverses real NIR lowering and pre-RA store ordering. Inspect the
+    * terminal transaction rather than accepting a successful compile alone:
+    * all targets must survive RA at descending physical byte offsets. */
+   if (ok) {
+      const uint8_t *code = (uint8_t *)part.binary + part.info.main_offset;
+      unsigned stores = 0;
+      for (unsigned i = 0; i + 12 <= part.info.main_size; ++i) {
+         if (code[i] == 0xe7 && code[i+1] == 0x06 && code[i+2] == 0x54) {
+            ok &= stores < active && code[i+5] == 2 * (active - stores - 1);
+            ++stores;
+            i += 11;
+         }
+      }
+      ok &= stores == active;
+   }
+   if (!ok)
+      fprintf(stderr, "G17P %u-target background failed lowering/RA/transaction\n", count);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+test_wide_rgba8_epilog(unsigned count, unsigned target_mask,
+                       unsigned partition_mask)
+{
+   struct agx_fs_epilog_key key = {
+      .link = {.size_32 = target_mask, .loc_written = target_mask},
+      .nr_samples = 1,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   for (unsigned rt = 0; rt < count; ++rt) {
+      if (!(target_mask & BITFIELD_BIT(rt)))
+         continue;
+      key.remap[rt] = rt;
+      key.rt_formats[rt] = PIPE_FORMAT_R8G8B8A8_UNORM;
+      key.blend.rt[rt].colormask = 0xf;
+      key.blend.rt[rt].mode = blend_mode(false);
+   }
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P wide RGBA8 epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_1x_tile_samples(b.shader);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+   };
+   struct agx_shader_part part = {0};
+   fprintf(stderr, "Compiling RGBA8 epilog target mask 0x%x\n", target_mask);
+   bool ok = agx_compile_shader_nir(b.shader, &backend, &part) && part.binary &&
+             part.info.agx3_colour_link.colour_partition_mask == partition_mask;
+   const unsigned active = util_bitcount(target_mask);
+   if (ok) {
+      const uint8_t *code = (uint8_t *)part.binary + part.info.main_offset;
+      unsigned stores = 0;
+      for (unsigned i = 0; i + 12 <= part.info.main_size; ++i) {
+         if (code[i] == 0xe7 && code[i + 1] == 0x06 && code[i + 2] == 0x54) {
+            ok &= stores < active && code[i + 5] == 2 * (active - stores - 1);
+            ++stores;
+            i += 11;
+         }
+      }
+      ok &= stores == active;
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -260,6 +395,29 @@ main(void)
       return 1;
 
    if (!test_wboit_background_clear())
+      return 1;
+
+   if (!test_wide_rgba8_background(4, false, 0xf, 7) ||
+       !test_wide_rgba8_background(8, false, 0xff, 7))
+      return 1;
+
+   if (!test_wide_rgba8_epilog(4, 0xf, 7) ||
+       !test_wide_rgba8_epilog(8, 0xff, 7))
+      return 1;
+   for (unsigned i = 0; i < ARRAY_SIZE(g17p_sparse_mrt_oracles); ++i) {
+      if (!test_wide_rgba8_epilog(8, g17p_sparse_mrt_oracles[i].target_mask,
+                                 g17p_sparse_mrt_oracles[i].partition_mask))
+         return 1;
+      for (unsigned reload = 0; reload < 2; ++reload) {
+         if (!test_wide_rgba8_background(8, reload,
+                        g17p_sparse_mrt_oracles[i].target_mask,
+                        g17p_sparse_mrt_oracles[i].partition_mask))
+            return 1;
+      }
+   }
+
+   if (!test_wide_rgba8_background(4, true, 0xf, 7) ||
+       !test_wide_rgba8_background(8, true, 0xff, 7))
       return 1;
 
    nir_builder mb = nir_builder_init_simple_shader(
@@ -302,7 +460,7 @@ main(void)
       vkquake_part.info.main_size == vkquake_part.info.binary_size &&
       vkquake_part.info.agx3_colour_link.entry_emitted &&
       vkquake_part.info.agx3_colour_link.straight_line &&
-      vkquake_part.info.agx3_colour_link.colour_partitions == 2 &&
+      vkquake_part.info.agx3_colour_link.colour_partition_mask == 3 &&
       vkquake_part.info.agx3_colour_link.entry_offset == 0;
    if (!vkquake_ok) {
       fprintf(stderr,
@@ -361,7 +519,7 @@ main(void)
                                   true, &part) &&
                    part.info.agx3_colour_link.entry_emitted &&
                    part.info.agx3_colour_link.straight_line &&
-                   part.info.agx3_colour_link.colour_partitions == 2 &&
+                   part.info.agx3_colour_link.colour_partition_mask == 3 &&
                    part.info.agx3_colour_link.entry_offset == 0 &&
                    part.info.main_offset == 0 &&
                    part.info.main_size == part.info.binary_size;
@@ -447,7 +605,7 @@ main(void)
               sizeof(expected_rgba8_mrt)) ||
        !part.info.agx3_colour_link.entry_emitted ||
        !part.info.agx3_colour_link.straight_line ||
-       part.info.agx3_colour_link.colour_partitions != 2 ||
+       part.info.agx3_colour_link.colour_partition_mask != 3 ||
        part.info.agx3_colour_link.entry_offset != 40 ||
        memcmp(rgba8_code + 40, apple_transaction,
               sizeof(apple_transaction))) {

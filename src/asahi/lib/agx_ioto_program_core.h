@@ -141,10 +141,12 @@ bool agx_ioto_g17p_no_resource_program_compose(
 /* Compose the ordinary no-resource G17P fragment-stage program captured in
  * every valid EXP-G1a vary0-class run.  Unlike compute and vertex programs,
  * the fragment loader terminates its default profile prefix with the exact
- * six-byte PIXREL record before stop; it has no SETPROFILECTL suffix. */
+ * six-byte PIXREL record before stop; it has no SETPROFILECTL suffix.
+ * colour_partition_mask names consumed synchronization partitions (bits 0..2),
+ * independent of the number or physical placement of colour attachments. */
 bool agx_ioto_g17p_fragment_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partitions, void *output, size_t capacity, size_t *written);
+   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written);
 
 /* Compose a G17P resource program around a body emitted by the HAL200 ESL
  * scheduler. Resource loads and their drain padding precede the packed shader
@@ -164,7 +166,7 @@ bool agx_ioto_g17p_fragment_resource_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partitions, void *output, size_t capacity, size_t *written);
+   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written);
 
 /* Native coverage fragment metadata keeps the loader's pixel class0 held:
  * __GPU_METADATA_2.field1=0x2f2, versus opaque0x2f3. This composer accepts
@@ -173,7 +175,7 @@ bool agx_ioto_g17p_coverage_fragment_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partitions, void *output, size_t capacity, size_t *written);
+   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written);
 
 /* Internal background clear/reload programs with no shader pixel-dependency
  * operations use the native BG PIXREL descriptor 0x200, not ordinary FS

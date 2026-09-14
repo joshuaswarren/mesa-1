@@ -4,6 +4,7 @@
  */
 
 #include "agx_bg_eot.h"
+#include "agx_g17p_wide_mrt_eot.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 #include "agx_compile.h"
@@ -336,6 +337,40 @@ static struct agx_bg_eot_shader *
 agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
+   const unsigned rgba8_mask = agx_g17p_rgba8_mrt_mask(&key->tib);
+   const unsigned active_count = util_bitcount(rgba8_mask);
+   if (cache->dev->chip == AGX_CHIP_G17P && rgba8_mask) {
+      /* EOT partitions are physical offset/sample-stride quotients, not
+       * fragment synchronization classes. All these compact offsets stay
+       * in partition zero; native PBEs and offset arguments use active order. */
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] != ((rgba8_mask & BITFIELD_BIT(rt))
+                              ? AGX_EOT_STORE : AGX_BG_EOT_NONE))
+            return NULL;
+      }
+      struct agx_g17p_wide_mrt_eot native;
+      if (!agx_g17p_wide_mrt_eot_get(active_count, &native))
+         return NULL;
+      struct agx_shader_part bin = {
+         .binary = (void *)native.code,
+         .info = {
+            .stage = MESA_SHADER_COMPUTE,
+            .binary_size = native.size,
+            .main_size = native.size,
+            .nr_gprs = 8,
+            .agx3_staging_known = true,
+            .agx3_staging_halfs = native.staging_halfs,
+         },
+      };
+      struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
+      if (!res || !agx_g17p_upload_bg_eot(cache, &bin, res)) {
+         ralloc_free(res);
+         return NULL;
+      }
+      res->info = bin.info;
+      return res;
+   }
+
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
                                                   &agx_nir_options, "agx_eot");
 

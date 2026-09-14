@@ -78,6 +78,7 @@ MASK = immediate("mask")
 BFI_MASK = immediate("bfi_mask")
 LOD_MODE = immediate("lod_mode", "enum agx_lod_mode")
 PIXEL_OFFSET = immediate("pixel_offset")
+COLOUR_TARGET = immediate("colour_target", "uint8_t")
 STACK_SIZE = immediate("stack_size", 'int16_t')
 EXPLICIT_COORDS = immediate("explicit_coords", "bool")
 PERSPECTIVE = immediate("perspective", "bool")
@@ -368,12 +369,12 @@ op("normflt_agx3", _, dests = 1, srcs = 1, imms = [FORMAT], is_float = True,
 
 # Sources: sample mask, explicit coords (if present)
 op("ld_tile", (0x49, 8, _), dests = 1, srcs = 2,
-        imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS], can_reorder = False,
+        imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS, COLOUR_TARGET], can_reorder = False,
         schedule_class = "coverage")
 
 # Sources: value, sample mask, explicit coords (if present)
 op("st_tile", (0x09, 8, _), dests = 0, srcs = 3,
-      can_eliminate = False, imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS],
+      can_eliminate = False, imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS, COLOUR_TARGET],
       schedule_class = "coverage")
 
 for (name, exact) in [("any", 0xC000), ("none", 0xC020), ("none_after", 0xC020)]:

@@ -638,6 +638,11 @@ struct agx_context {
    struct agx_compiled_shader *vs, *fs, *gs, *tcs;
    struct {
       struct agx_linked_shader *vs, *fs;
+
+      /* G17P: the geometry copy program linked as the hardware vertex
+       * shader of a geometry-assisted draw. NULL on other chips, which run
+       * the copy program's main part directly. */
+      struct agx_linked_shader *gs_copy;
    } linked;
    uint32_t dirty;
 

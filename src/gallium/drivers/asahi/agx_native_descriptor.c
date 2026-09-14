@@ -181,12 +181,10 @@ agx_gallium_pack_native_texture(
           !semantic->acceleration_buffer)
          return false;
 
-      /* The recovered cube form requires an uncompressed face-range end VA.
-       * Compression metadata aliases that word, so there is no grounded
-       * representation for the combination yet. */
+      /* The captured cube form is extended and includes a secondary address.
+       * Preserve those requirements for a complete payload. */
       if (semantic->dimension == AGX_TEXTURE_DIMENSION_CUBE &&
-          (semantic->compressed || !extended ||
-           !semantic->acceleration_buffer))
+          (!extended || !semantic->acceleration_buffer))
          return false;
 
       /* HAL200 encodeImageReadState clears word1[62] for an ordinary
@@ -214,6 +212,7 @@ agx_gallium_pack_native_texture(
          .height = semantic->height,
          .samples = semantic->samples,
          .has_levels = has_levels,
+         .compressed = semantic->compressed,
          .state_control = semantic->mode | (semantic->compression << 2),
          .address = semantic->address,
          .srgb = semantic->srgb,
@@ -239,12 +238,6 @@ agx_gallium_pack_native_texture(
       };
 
       AGX_TEXTURE_GEN9_pack(out->opaque, &cfg);
-
-      /* A18's array, 3D, mipmapped-2D, and cube descriptors all carry word1
-       * bit 27 exactly when word3's extended bit and word4's range/metadata
-       * payload are live.  A base one-level 2D descriptor clears both. */
-      if (extended)
-         out->opaque[1] |= BITFIELD_BIT(27);
 
       return true;
    }
@@ -365,7 +358,7 @@ agx_gallium_pack_native_pbe(
     * same gate hk_pack_native_pbe() applies field for field -- the one that
     * already runs on this hardware through Honeykrisp. Gen9's exact tiled
     * 2D-array packet is the one bounded layered exception. Every other axis
-    * (multisample, compression, sRGB-on-store, image mode, the
+    * (compression, sRGB-on-store, image mode, the
     * extended word, and the software addressing sideband Gallium uses for
     * image atomics, EMRT and spilled render targets) has no proven Gen9/Gen10
     * placement, so refuse rather than drop the bits.
@@ -374,7 +367,11 @@ agx_gallium_pack_native_pbe(
       agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
       legacy->layers > 1;
-   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
+   const bool multisample =
+      agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
+   if ((!array && !multisample &&
+        legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (agx3_generation != AGX_PBE_AGX3_GENERATION_9 || legacy->level != 0 ||
          legacy->levels != 1 || legacy->unk_mipmapped)) ||
@@ -382,9 +379,15 @@ agx_gallium_pack_native_pbe(
         legacy->layout != AGX_LAYOUT_TWIDDLED &&
         legacy->layout != AGX_LAYOUT_GPU) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
-       legacy->samples != AGX_SAMPLE_COUNT_2 || legacy->compressed ||
+       (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
+                       legacy->samples != AGX_SAMPLE_COUNT_4)
+                    : legacy->samples != AGX_SAMPLE_COUNT_2) ||
+       legacy->compressed ||
        legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        (!array && legacy->layers != 1) ||
+       (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
+                        legacy->level != 0 || legacy->levels != 1 ||
+                        legacy->unk_mipmapped)) ||
        (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
         (legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
@@ -416,7 +419,11 @@ agx_gallium_pack_native_pbe(
    };
 
    struct agx_pbe_agx3_descriptor packed;
-   const bool valid = array
+   const bool valid = multisample
+      ? agx_pbe_agx3_2d_multisample_pack(
+           agx3_generation, &fields,
+           legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
+      : array
       ? (legacy->level == 0 && legacy->levels == 1 &&
          !legacy->unk_mipmapped &&
          agx_pbe_agx3_2d_array_pack(agx3_generation, &fields,

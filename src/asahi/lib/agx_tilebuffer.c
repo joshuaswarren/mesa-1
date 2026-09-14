@@ -215,6 +215,39 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
    }
 }
 
+unsigned
+agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   if (!tib || tib->layered || tib->nr_samples != 1 ||
+       (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16))
+      return 0;
+
+   unsigned count = 0, mask = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      const enum pipe_format format = tib->logical_format[rt];
+      if (format == PIPE_FORMAT_NONE)
+         continue;
+      if ((format != PIPE_FORMAT_R8G8B8A8_UNORM &&
+           format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+           format != PIPE_FORMAT_R8G8B8X8_UNORM &&
+           format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
+          tib->spilled[rt] || tib->_offset_B[rt] != 4 * count)
+         return 0;
+      mask |= BITFIELD_BIT(rt);
+      ++count;
+   }
+   return count && tib->sample_size_B == ALIGN_POT(4 * count, 8) &&
+          tib->sample_size_B * tib->tile_size < 32768 ? mask : 0;
+}
+
+unsigned
+agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib)
+{
+   const unsigned mask = agx_g17p_rgba8_mrt_mask(tib);
+   const unsigned count = util_bitcount(mask);
+   return count >= 3 && mask == BITFIELD_MASK(count) ? count : 0;
+}
+
 bool
 agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
 {
@@ -236,11 +269,17 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
       return false;
 
    if (tib->nr_samples > 1 &&
+       tib->logical_format[0] != PIPE_FORMAT_NONE &&
+       tib->logical_format[0] != PIPE_FORMAT_R8_UNORM &&
+       tib->logical_format[0] != PIPE_FORMAT_R8G8_UNORM &&
        tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM &&
        tib->logical_format[0] != PIPE_FORMAT_R8G8B8X8_UNORM &&
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
+
+   if (agx_g17p_rgba8_mrt_mask(tib))
+      return true;
 
    for (unsigned rt = raw32 ? 4 : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
@@ -249,7 +288,9 @@ agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
    }
 
    if (tib->logical_format[0] == PIPE_FORMAT_NONE)
-      return tib->sample_size_B == 0;
+      /* The allocator reserves a minimal sample slot for MSAA even without
+       * colour attachments. No colour BG/EOT operation uses that slot. */
+      return tib->sample_size_B == (tib->nr_samples > 1 ? 8 : 0);
 
    const bool scalar_r32f = tib->nr_samples == 1 &&
                             tib->logical_format[0] == PIPE_FORMAT_R32_FLOAT;
