@@ -1784,6 +1784,7 @@ agx_ra(agx_context *ctx)
     * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
     * only the admitted two-to-four RGBA32 or four R32 payload bank. */
    unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
+   bool tile_loads = false;
    bool quad_tile =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -1806,12 +1807,21 @@ agx_ra(agx_context *ctx)
          quad_stores++;
       } else if (I->op == AGX_OPCODE_LD_TILE) {
          quad_tile = false;
+         tile_loads = true;
       }
    }
    const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
       (quad_width == 16 || quad_stores == 4) &&
       quad_mask == BITFIELD_MASK(quad_stores);
-   const unsigned tile_gpr_limit = raw32_bank ? 32 : 16;
+   /* Apple's store-only three- and four-target fragments and multi-target
+    * BG builtins of other formats store every width from the same bank, again
+    * with f13=0. */
+   const bool mrt_bank =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT && !tile_loads &&
+      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) && quad_stores <= 4 &&
+      (ctx->key->secondary || ctx->key->g17p_mrt_bg);
+   const unsigned tile_gpr_limit = raw32_bank || mrt_bank ? 32 : 16;
 
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded

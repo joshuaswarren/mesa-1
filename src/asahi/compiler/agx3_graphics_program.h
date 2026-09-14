@@ -47,6 +47,8 @@ enum agx3_g17p_rt0_bg_op {
    AGX3_G17P_RT0_BG_CLEAR,
    AGX3_G17P_RT0_BG_RELOAD,
    AGX3_G17P_RT0_BG_NONE,
+   /* Reload the leading targets and clear the rest. */
+   AGX3_G17P_RT0_BG_CLEAR_RELOAD,
 };
 
 #define AGX3_G17P_RT0_CLEAR_PUSH_HALFS 12u
@@ -75,13 +77,16 @@ struct agx3_g17p_rt0_bg_program_desc {
    uint16_t nr_gprs;
    uint16_t staging_halfs;
    uint16_t clear_push_halfs;
+   /* CLEAR_RELOAD: uniform half of the first cleared target's value, which
+    * clear_value_va addresses. The reloaded targets precede it. */
+   uint16_t clear_start_halfs;
    bool staging_known;
    enum agx3_g17p_rt0_bg_op op;
    struct agx_ioto_g17p_imageblock imageblock;
 };
 
 struct agx3_g17p_rt0_bg_program {
-   uint8_t bytes[AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE];
+   uint8_t bytes[AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 
@@ -98,6 +103,8 @@ struct agx3_g17p_rt0_eot_program_desc {
    uint8_t imageblock_offset1_B;
    uint8_t imageblock_offset2_B;
    uint8_t imageblock_offset3_B;
+   /* Two to four targets of arbitrary formats, each at its own offset. */
+   bool mixed_mrt;
    uint32_t shader_binary_size;
    uint32_t scratch_size;
    uint16_t nr_gprs;

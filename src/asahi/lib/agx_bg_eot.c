@@ -304,6 +304,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .fs.ignore_tib_dependencies = true,
+      .g17p_mrt_bg = key->mixed_mrt,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
@@ -435,6 +436,24 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
       compiler_key.g17p_rt0_eot_multisample = store_multisample;
+
+      /* A mixed layout storing several targets uses the multi-target
+       * builtin, selecting each target's IMGWBLK tail by its format. A
+       * single stored target keeps its format's own program. */
+      unsigned stores = 0;
+      for (unsigned rt = 0; key->mixed_mrt && rt < ARRAY_SIZE(key->op); ++rt)
+         stores += key->op[rt] == AGX_EOT_STORE;
+
+      if (stores > 1 &&
+          stores <= ARRAY_SIZE(compiler_key.g17p_mrt_eot_selectors)) {
+         for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+            if (key->op[rt] == AGX_EOT_STORE) {
+               compiler_key.g17p_mrt_eot_selectors
+                  [compiler_key.g17p_mrt_eot_count++] =
+                  agx_g17p_mrt_eot_selector(key->tib.logical_format[rt]);
+            }
+         }
+      }
    }
 
    compiler_key.g17p_r11g11b10_mrt_eot =

@@ -7,6 +7,7 @@
 #include <assert.h>
 #include "util/format/u_format.h"
 #include "util/u_debug.h"
+#include "agx_bg_eot_key.h"
 #include "layout.h"
 
 /* Maximum number of bytes per tile on G13G. This may change in future versions
@@ -78,6 +79,18 @@ format_align_B(enum pipe_format format)
    return (format != PIPE_FORMAT_NONE) ? util_format_get_blocksize(phys) : 0;
 }
 
+static unsigned
+format_size_B(enum pipe_format format)
+{
+   unsigned size_B = format_align_B(format);
+   enum pipe_format phys = ail_pixel_format[format].renderable;
+   if (util_format_get_nr_components(phys) == 1) {
+      size_B *= util_format_get_nr_components(format);
+   }
+
+   return size_B;
+}
+
 struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
                             uint8_t nr_samples, bool layered)
@@ -110,11 +123,7 @@ agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
       assert(util_is_aligned(offset_B, MAX2(format_align_B(formats[rt]), 1)) &&
              "loop invariant ensured by the sort");
 
-      unsigned size_B = format_align_B(format);
-      enum pipe_format phys = ail_pixel_format[format].renderable;
-      if (util_format_get_nr_components(phys) == 1) {
-         size_B *= util_format_get_nr_components(format);
-      }
+      unsigned size_B = format_size_B(format);
 
       /* If allocating this render target would exceed any tilebuffer limits, we
        * need to spill it to memory. Otherwise, allocate it to the tilebuffer.
@@ -269,7 +278,8 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
    const bool raw32 = mrt == AGX_G17P_MRT_RGBA32 ||
                      mrt == AGX_G17P_MRT_R32_QUAD;
    if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16 &&
-       !(mrt == AGX_G17P_MRT_RGBA32 && tib->tile_size == 16 * 16))
+       !((mrt == AGX_G17P_MRT_RGBA32 || mrt == AGX_G17P_MRT_MIXED) &&
+         tib->tile_size == 16 * 16))
       return false;
 
    if (tib->nr_samples > 1 &&
@@ -279,7 +289,8 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
-   for (unsigned rt = raw32 || mrt == AGX_G17P_MRT_RGBA8 ? 4
+   for (unsigned rt = raw32 || mrt == AGX_G17P_MRT_RGBA8 ||
+                              mrt == AGX_G17P_MRT_MIXED ? 4
                            : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
@@ -375,6 +386,30 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             rgba16i_or_x));
 }
 
+/* Other two- to four-target layouts share Apple's multi-target EOT builtin,
+ * whose targets differ only in a per-format IMGWBLK selector, and a background
+ * program without pixel transactions. Each target keeps its own tile offset,
+ * so admit any unspilled layout whose formats all have a grounded selector. */
+static enum agx_g17p_mrt_layout
+agx_g17p_classify_mixed_mrt(const struct agx_tilebuffer_layout *tib,
+                            unsigned active_count)
+{
+   bool mixed = !tib->layered && active_count >= 2 && active_count <= 4;
+   uint64_t occupied_B = 0;
+   for (unsigned rt = 0; rt < active_count; ++rt) {
+      const unsigned offset_B = tib->_offset_B[rt];
+      const unsigned size_B = format_size_B(tib->logical_format[rt]);
+      const uint64_t bytes = BITFIELD64_MASK(size_B) << MIN2(offset_B, 63);
+      mixed &= !tib->spilled[rt] &&
+               agx_g17p_mrt_eot_selector(tib->logical_format[rt]) != 0 &&
+               offset_B + size_B <= tib->sample_size_B &&
+               !(occupied_B & bytes);
+      occupied_B |= bytes;
+   }
+
+   return mixed ? AGX_G17P_MRT_MIXED : AGX_G17P_MRT_NONE;
+}
+
 enum agx_g17p_mrt_layout
 agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
 {
@@ -384,9 +419,11 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
    const unsigned active_count = agx_tilebuffer_compact(tib, &compact, NULL);
    tib = &compact;
 
-   if (tib->nr_samples != 1 || tib->spilled[0] || tib->spilled[1] ||
-       tib->_offset_B[0] != 0)
+   if (tib->nr_samples != 1)
       return AGX_G17P_MRT_NONE;
+
+   if (tib->spilled[0] || tib->spilled[1] || tib->_offset_B[0] != 0)
+      return agx_g17p_classify_mixed_mrt(tib, active_count);
 
    /* Native G17P constructors cover two through four identical RGBA32
     * targets in one imageblock. Keep the existing four-target R32 path. */
@@ -425,10 +462,8 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
    if (rgba8)
       return AGX_G17P_MRT_RGBA8;
 
-   for (unsigned rt = 2; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
-      if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
-         return AGX_G17P_MRT_NONE;
-   }
+   if (active_count > 2)
+      return agx_g17p_classify_mixed_mrt(tib, active_count);
 
    if (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT &&
        tib->logical_format[1] == PIPE_FORMAT_R8_UNORM &&
@@ -459,5 +494,5 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
        tib->_offset_B[1] == 4 && tib->sample_size_B == 8)
       return AGX_G17P_MRT_R11G11B10;
 
-   return AGX_G17P_MRT_NONE;
+   return agx_g17p_classify_mixed_mrt(tib, active_count);
 }

@@ -227,14 +227,15 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 
+   /* A third target of another format uses the mixed-format layout. */
    enum pipe_format three_targets[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_FLOAT,
       PIPE_FORMAT_R8_UNORM,
       PIPE_FORMAT_R8_UNORM,
    };
    tib = agx_build_tilebuffer_layout(three_targets, 3, 1, false);
-   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
-   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
 
    EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
 }
@@ -309,7 +310,8 @@ TEST(Tilebuffer, G17PNarrowSRGB)
 
       formats[1] = format;
       tib = agx_build_tilebuffer_layout(formats, 2, 1, false);
-      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
 }
 

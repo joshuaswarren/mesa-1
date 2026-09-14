@@ -408,6 +408,17 @@ struct agx_shader_key {
     * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */
    bool g17p_r11g11b10_mrt_eot;
 
+   /* Background program for a G17P AGX_G17P_MRT_MIXED layout. Apple's
+    * builtin for such layouts stores each target without pixel transactions,
+    * at f13=0 even from high registers, and in no required partition order. */
+   bool g17p_mrt_bg;
+
+   /* Number of targets, two to four, stored by a G17P multi-target EOT for
+    * arbitrary target formats, and the IMGWBLK selector of each target in
+    * store order. Zero selects the format-specific EOT recognizers. */
+   uint8_t g17p_mrt_eot_count;
+   uint8_t g17p_mrt_eot_selectors[4];
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.

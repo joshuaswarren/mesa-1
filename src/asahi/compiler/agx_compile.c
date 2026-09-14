@@ -5734,8 +5734,9 @@ agx3_sink_vertex_outputs(agx_context *ctx)
  *
  * This is partition-driven, not format- or workload-driven.  It is restricted
  * to straight-line fragment epilogs and internal background programs, and it
- * refuses any non-colour side effect.  The packer independently proves the
- * partition graph before selecting the corresponding pixel classes.
+ * refuses any non-colour side effect other than a leading depth export.  The
+ * packer independently proves the partition graph before selecting the
+ * corresponding pixel classes.
  */
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
@@ -5749,18 +5750,39 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    agx_instr *loads[4] = {0}, *stores[4] = {0}, *stop = NULL;
    agx_instr *first_wait = NULL;
    unsigned load_count = 0, store_count = 0;
+   /* Apple's store-only MRT fragments that export depth complete the class-1
+    * depth transaction before the first colour transaction, which follows
+    * unchanged. Admit exactly that leading wait, depth write and signal. */
+   unsigned depth_ops = 0;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
+         const bool colour_started = first_wait || load_count || store_count;
          switch (I->op) {
          case AGX_OPCODE_PRELOAD:
          case AGX_OPCODE_COLLECT:
          case AGX_OPCODE_SPLIT:
             break;
          case AGX_OPCODE_WAIT_PIX:
-            if (I->writeout == 1)
+            if (I->writeout == 1) {
+               if (depth_ops != 0 || colour_started)
+                  return false;
+               depth_ops = 1;
+               break;
+            }
+            if (depth_ops == 1 || depth_ops == 2)
                return false;
             if (!first_wait)
                first_wait = I;
+            break;
+         case AGX_OPCODE_ZS_EMIT_AGX3:
+            if (depth_ops != 1)
+               return false;
+            depth_ops = 2;
+            break;
+         case AGX_OPCODE_SIGNAL_PIX:
+            if (depth_ops != 2 || I->writeout != 1)
+               return false;
+            depth_ops = 3;
             break;
          case AGX_OPCODE_FLTNORM_AGX3:
             break;
@@ -5803,11 +5825,14 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       }
    }
 
-   if (!stop || store_count < 2)
+   if (!stop || store_count < 2 ||
+       (depth_ops && (depth_ops != 3 || load_count)))
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
-    * ordinary colour transactions, including two/three RGBA32 targets. */
+    * ordinary colour transactions, including two/three RGBA32 targets. Other
+    * multi-target BG programs have no transactions either and store in no
+    * required partition order. */
    if (ctx->key->fs.ignore_tib_dependencies) {
       bool rgba32 = !load_count;
       for (unsigned i = 0; i < store_count; ++i)
@@ -5817,7 +5842,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       for (unsigned i = 0; i < store_count; ++i)
          rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
                   stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
-      if (store_count == 4 || rgba32 || rgba8)
+      if (ctx->key->g17p_mrt_bg || store_count == 4 || rgba32 || rgba8)
          return false;
    }
 

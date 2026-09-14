@@ -139,6 +139,7 @@ enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_R11G11B10,
    AGX_G17P_MRT_RGBA32,
    AGX_G17P_MRT_R32_QUAD,
+   AGX_G17P_MRT_MIXED,
 };
 
 /* Classify the byte-grounded G17P multiple-render-target layouts. The

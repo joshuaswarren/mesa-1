@@ -207,6 +207,7 @@ agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
    switch (op) {
    case AGX3_G17P_RT0_BG_CLEAR:
    case AGX3_G17P_RT0_BG_RELOAD:
+   case AGX3_G17P_RT0_BG_CLEAR_RELOAD:
       pass_mask = (UINT64_C(1) << 17) - 1;
       break;
    case AGX3_G17P_RT0_BG_NONE:
@@ -237,6 +238,11 @@ agx3_g17p_rt0_bg_shader_resources_match(enum agx3_g17p_rt0_bg_op op,
              !uses_txf;
    case AGX3_G17P_RT0_BG_RELOAD:
       return push_count == 0 && uses_txf;
+   case AGX3_G17P_RT0_BG_CLEAR_RELOAD:
+      return (push_count == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS ||
+              push_count == AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS ||
+              push_count == AGX3_G17P_QUAD_CLEAR_PUSH_HALFS) &&
+             uses_txf;
    default:
       return false;
    }
@@ -250,7 +256,7 @@ agx3_g17p_rt0_bg_program_generate(
    if (!program || chip != AGX_CHIP_G17P || !desc)
       return false;
 
-   struct agx3_ioto_uniform_range ranges[2];
+   struct agx3_ioto_uniform_range ranges[3];
    size_t range_count;
    switch (desc->op) {
    case AGX3_G17P_RT0_BG_CLEAR: {
@@ -289,6 +295,35 @@ agx3_g17p_rt0_bg_program_generate(
          .address = desc->sampler_pointer_va,
       };
       range_count = 2;
+      break;
+   case AGX3_G17P_RT0_BG_CLEAR_RELOAD:
+      /* Texture and sampler pointers occupy halves 0..7 and each target's
+       * clear value its own eight halves from 4 + 8 * target, so a cleared
+       * target must follow at least one reloaded target. */
+      if (!desc->clear_value_va || !desc->texture_pointer_va ||
+          !desc->sampler_pointer_va ||
+          !agx3_g17p_rt0_bg_shader_resources_match(
+             desc->op, desc->clear_push_halfs, true) ||
+          desc->clear_start_halfs < 12 ||
+          desc->clear_start_halfs > desc->clear_push_halfs - 8 ||
+          (desc->clear_start_halfs - 4) % 8)
+         return false;
+      ranges[0] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0,
+         .size_halfs = 4,
+         .address = desc->texture_pointer_va,
+      };
+      ranges[1] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 4,
+         .size_halfs = 4,
+         .address = desc->sampler_pointer_va,
+      };
+      ranges[2] = (struct agx3_ioto_uniform_range){
+         .start_halfs = desc->clear_start_halfs,
+         .size_halfs = desc->clear_push_halfs - desc->clear_start_halfs,
+         .address = desc->clear_value_va,
+      };
+      range_count = 3;
       break;
    default:
       return false;
@@ -396,11 +431,25 @@ agx3_g17p_rt0_eot_program_generate(
       desc->imageblock.sample_size_B ==
          ALIGN_POT(count * desc->imageblock_offset1_B, 8) &&
       desc->imageblock.nr_samples == 1;
+   /* The same program reads every target's offset from its own uniform, so
+    * targets of other formats may sit at any offset inside the sample. */
+   const bool mixed_mrt =
+      desc && desc->mixed_mrt && count >= 2 && count <= 4 &&
+      desc->shader_binary_size == 32 + 44 * count && desc->nr_gprs == 8 &&
+      desc->staging_halfs == 8 * count &&
+      desc->imageblock_offset_B < desc->imageblock.sample_size_B &&
+      desc->imageblock_offset1_B < desc->imageblock.sample_size_B &&
+      (count > 2 ? desc->imageblock_offset2_B < desc->imageblock.sample_size_B
+                 : desc->imageblock_offset2_B == 0) &&
+      (count > 3 ? desc->imageblock_offset3_B < desc->imageblock.sample_size_B
+                 : desc->imageblock_offset3_B == 0) &&
+      desc->imageblock.nr_samples == 1;
+   const bool multi_mrt = raw32_mrt || mixed_mrt;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
-       (!rt0 && !dual_mrt && !raw32_mrt) ||
+       (!rt0 && !dual_mrt && !multi_mrt) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
-          (raw32_mrt ? 32 * count - 1 : dual_mrt ? 63 : 31) ||
+          (multi_mrt ? 32 * count - 1 : dual_mrt ? 63 : 31) ||
        (desc->pbe_argument_va & 31))
       return false;
 
@@ -436,14 +485,14 @@ agx3_g17p_rt0_eot_program_generate(
                                  body + body_size, &offset_length))
       return false;
    body_size += offset_length;
-   if (dual_mrt || raw32_mrt) {
+   if (dual_mrt || multi_mrt) {
       if (!agx_ioto_load_pack_ldimm(chip, 10, desc->imageblock_offset1_B,
                                     body + body_size, &offset_length))
          return false;
       body_size += offset_length;
    }
 
-   if (raw32_mrt && count > 2) {
+   if (multi_mrt && count > 2) {
       const unsigned offsets[] = {
          desc->imageblock_offset2_B, desc->imageblock_offset3_B};
       for (unsigned i = 0; i < count - 2; ++i) {
@@ -458,7 +507,7 @@ agx3_g17p_rt0_eot_program_generate(
    const struct agx3_field_kv baseline[] = {{9, 3}, {10, 2}, {23, 2}, {24, 2}};
    /* Native offset uniforms are u4/u8/u12/u16, not contiguous dwords.
     * Padding positions are unused but initialized deterministically. */
-   const unsigned copy_count = raw32_mrt ? 2 * count + 1 : dual_mrt ? 5 : 3;
+   const unsigned copy_count = multi_mrt ? 2 * count + 1 : dual_mrt ? 5 : 3;
    const unsigned copy_sources[] = {4, 6, 8, 8, 10, 8, 12, 8, 14};
    for (unsigned i = 0; i < copy_count; ++i) {
       const struct agx3_field_kv operands[] = {
