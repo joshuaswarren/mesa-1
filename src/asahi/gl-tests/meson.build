@@ -303,6 +303,26 @@ test(
   suite : ['asahi'],
 )
 
+gl_default_framebuffer = executable(
+  'asahi-g17p-gl-default-framebuffer',
+  files('test-g17p-gl-default-framebuffer.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-default-framebuffer-software-control',
+  gl_default_framebuffer,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_array_shadow = executable(
   'asahi-g17p-gl-array-shadow',
   files('test-g17p-gl-array-shadow.c'),
