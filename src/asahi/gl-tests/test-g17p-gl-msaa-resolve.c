@@ -25,7 +25,10 @@
 #define SAMPLES 4
 
 /* The conformance case walks every renderable colour format. A tile layout is
- * admitted per physical format, so check each one the GL 3.0 case uses. */
+ * admitted per physical format, so check each one the conformance cases use.
+ * GL 3.3 reaches further than GL 3.0 did: KHR-GL33.texture_size_promotion
+ * renders to the signed normalized families as well, which is what added the
+ * snorm rows below. */
 static const struct {
    const char *name;
    GLenum internal_format;
@@ -41,6 +44,9 @@ static const struct {
    {"r16", GL_R16},         {"rg16", GL_RG16},
    {"rgba16", GL_RGBA16},   {"r8i", GL_R8I},
    {"rgba8i", GL_RGBA8I},   {"r32ui", GL_R32UI},
+   {"r8_snorm", GL_R8_SNORM},     {"rg8_snorm", GL_RG8_SNORM},
+   {"rgba8_snorm", GL_RGBA8_SNORM}, {"r16_snorm", GL_R16_SNORM},
+   {"rg16_snorm", GL_RG16_SNORM}, {"rgba16_snorm", GL_RGBA16_SNORM},
 };
 
 static GLuint
@@ -236,20 +242,28 @@ main(void)
    glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE, GL_COLOR_BUFFER_BIT,
                      GL_NEAREST);
    glFinish();
-   if (glGetError() != GL_NO_ERROR) {
-      fprintf(stderr, "msaa resolve: the resolve blit raised an error\n");
-      return 1;
-   }
 
-   glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);
-   GLubyte resolved[4] = {0};
-   glReadPixels(SIZE / 2, SIZE / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, resolved);
-   const bool resolved_red = resolved[0] > 200 && resolved[1] < 60;
-   if (!resolved_red)
-      fprintf(stderr,
-              "msaa resolve: %-9s resolved pixel is (%u, %u, %u, %u), the "
-              "resolve lost it\n", formats[f].name, resolved[0], resolved[1],
-              resolved[2], resolved[3]);
+   /* A format the driver will not resolve is a result, not a reason to stop:
+    * the sweep exists to say which families reach every sample and resolve,
+    * so record it and carry on to the next one. */
+   const bool blit_ok = glGetError() == GL_NO_ERROR;
+   if (!blit_ok)
+      fprintf(stderr, "msaa resolve: %-9s the resolve blit raised an error\n",
+              formats[f].name);
+
+   bool resolved_red = false;
+   if (blit_ok) {
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);
+      GLubyte resolved[4] = {0};
+      glReadPixels(SIZE / 2, SIZE / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                   resolved);
+      resolved_red = resolved[0] > 200 && resolved[1] < 60;
+      if (!resolved_red)
+         fprintf(stderr,
+                 "msaa resolve: %-9s resolved pixel is (%u, %u, %u, %u), the "
+                 "resolve lost it\n", formats[f].name, resolved[0],
+                 resolved[1], resolved[2], resolved[3]);
+   }
    ok &= resolved_red;
 
    fprintf(stderr, "msaa resolve: %-9s %s\n", formats[f].name,

@@ -325,6 +325,43 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
          tib->tile_size == 16 * 16))
       return false;
 
+   /* Multisample tiles repeat one sample's allocation, so what matters is the
+    * physical tilebuffer format rather than the API format in front of it.
+    * A hardware sweep at four samples
+    * (src/asahi/gl-tests/test-g17p-gl-msaa-resolve.c, which reads every sample
+    * back individually before resolving) covers each physical family below:
+    * rgba8, rgb565, rgba4, rgb5_a1, rgb10_a2, r8, rg8, r16f and rgba16f all
+    * reach every sample and resolve to the drawn colour. Naming the physical
+    * format also admits the BGRA and RGBX spellings of the same tiles, which
+    * the previous logical-format list had to enumerate one at a time.
+    */
+   if (tib->nr_samples > 1 && tib->logical_format[0] != PIPE_FORMAT_NONE) {
+      switch (agx_tilebuffer_physical_format(tib, 0)) {
+      case PIPE_FORMAT_R8_UNORM:
+      case PIPE_FORMAT_R8G8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_R16_UNORM:
+      case PIPE_FORMAT_R16_FLOAT:
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      /* The signed normalized families, which GL 3.3 reaches where GL 3.0 did
+       * not: KHR-GL33.texture_size_promotion renders to them. The same sweep
+       * covers them -- r8_snorm, rg8_snorm, rgba8_snorm, r16_snorm, rg16_snorm
+       * and rgba16_snorm all reach every sample and resolve. */
+      case PIPE_FORMAT_R8_SNORM:
+      case PIPE_FORMAT_R16_SNORM:
+      /* The remaining two colour formats the conformance blit walks. Their
+       * tiles are the same eight bytes per sample as the families above. */
+      case PIPE_FORMAT_R8G8B8A8_SRGB:
+      case PIPE_FORMAT_R11G11B10_FLOAT:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   if (agx_g17p_rgba8_mrt_mask(tib))
+      return true;
+
    for (unsigned rt = mrt == AGX_G17P_MRT_MIXED ? AGX_MAX_RENDER_TARGETS
                       : raw32 || mrt == AGX_G17P_MRT_RGBA8 ? 4
                       : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
@@ -386,16 +423,17 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_FLOAT ||
             agx_tilebuffer_physical_format(tib, 0) ==
                PIPE_FORMAT_R10G10B10A2_UNORM ||
+            /* Every spelling of the signed normalized tiles at once. Naming
+             * the physical format admits the BGRA and RGBX forms the logical
+             * list had to enumerate and still missed: GL 3.3's
+             * texture_size_promotion renders to r8g8b8x8_snorm. */
+            agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_SNORM ||
+            agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R32_UINT ||
-            tib->logical_format[0] == PIPE_FORMAT_R8_SNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UINT ||
-            tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SRGB ||
@@ -408,13 +446,11 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_FLOAT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_FLOAT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT ||
-            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||
