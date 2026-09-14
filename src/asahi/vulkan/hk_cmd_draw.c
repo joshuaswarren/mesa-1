@@ -4159,7 +4159,10 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct agx_ppp_w_clamp_cull2_core w_cull2_record;
    const struct agx_ppp_w_clamp_cull2_fields w_cull2_fields = {
       .w_clamp_raw = 0,
-      .cull2_raw = UINT32_C(0x80),
+      /* The generated primitive-ID coefficient needs its rasterizer input
+       * enabled as well as the matching VDM producer and output slot. */
+      .cull2_raw = UINT32_C(0x80) |
+                   (gfx->generate_primitive_id ? UINT32_C(0x1000) : 0),
    };
 
    struct agx_ppp_viewport_payload_fields viewport_fields = {
@@ -5680,6 +5683,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             .template_info = program->template_info,
          };
          info.template_info.pipeline = pipeline_program;
+         info.template_info.raw_vs_output_flag_6 = gfx->generate_primitive_id;
+         info.template_info.raw_vs_output_count_1_extra =
+            gfx->generate_primitive_id;
          if (hk_g17p_cycle_vdm_context_enabled(dev) &&
              cs->agx3_raw_active_context_selector == UINT32_MAX)
             cs->agx3_raw_active_context_selector = 1;
