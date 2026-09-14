@@ -49,6 +49,7 @@ struct vk_meta_copy_buffer_key {
 
 struct vk_meta_copy_image_view {
    VkImageViewType type;
+   bool depth_stencil_aspect_views;
 
    union {
       struct {
@@ -460,7 +461,8 @@ copy_create_src_image_view(struct vk_command_buffer *cmd,
     * set of aspects for the full image.
     */
    VkImageAspectFlags view_aspects =
-      aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ?
+      !view_info->depth_stencil_aspect_views &&
+      (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) ?
       vk_format_aspects(format) : aspect;
 
    VkImageViewCreateInfo info = {
@@ -515,7 +517,8 @@ copy_create_dst_image_view(struct vk_command_buffer *cmd,
     * set of aspects for the full image.
     */
    VkImageAspectFlags view_aspects =
-      aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) ?
+      !view_info->depth_stencil_aspect_views &&
+      (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) ?
       vk_format_aspects(format) : aspect;
    const VkImageViewUsageCreateInfo usage = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
@@ -1345,6 +1348,7 @@ img_copy_view_info(VkImageViewType view_type, VkImageAspectFlags aspects,
 {
    struct vk_meta_copy_image_view view = {
       .type = view_type,
+      .depth_stencil_aspect_views = img_props->depth_stencil_aspect_views,
    };
 
    assert(aspects &

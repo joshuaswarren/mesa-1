@@ -1728,7 +1728,10 @@ hk_meta_copy_get_image_properties(struct hk_image *img, bool g17p)
    /* Keep the existing multisample render-target formats: G17P's native
     * multisample tile path does not support these integer aliases yet. */
    g17p &= img->vk.samples == VK_SAMPLE_COUNT_1_BIT;
-   struct vk_meta_copy_image_properties props = {.tile_size = {16, 16, 1}};
+   struct vk_meta_copy_image_properties props = {
+      .tile_size = {16, 16, 1},
+      .depth_stencil_aspect_views = g17p && hk_split_depth_stencil(img->vk.format),
+   };
    const struct vk_format_ycbcr_info *ycbcr =
       vk_format_get_ycbcr_info(img->vk.format);
 

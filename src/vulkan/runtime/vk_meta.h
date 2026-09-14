@@ -89,6 +89,10 @@ struct vk_meta_copy_image_properties {
       };
    };
 
+   /* Keep depth/stencil aspects on internal color-format views when the
+    * driver uses the aspect to select separate backing planes. */
+   bool depth_stencil_aspect_views;
+
    /* Size of the image tile. Used to select the optimal workgroup size. */
    VkExtent3D tile_size;
 };
