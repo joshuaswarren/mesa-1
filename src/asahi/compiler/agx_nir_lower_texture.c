@@ -648,8 +648,15 @@ lower_buffer_image(nir_builder *b, nir_intrinsic_instr *intr,
               b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, 32))
          : libagx_buffer_texture_offset(b, desc, coord);
    } else if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
+      /* A store's handle addresses the PBE, which follows the native texture
+       * at the start of the texel-buffer descriptor.
+       */
       nir_def *desc = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
-      coord = libagx_buffer_image_offset(b, desc, coord);
+      coord = buffer_metadata
+         ? nir_iadd(b, coord, load_buffer_metadata(
+              b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET -
+                          AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET, 32))
+         : libagx_buffer_image_offset(b, desc, coord);
    }
 
    /* Lower the buffer load/store to a 2D image load/store, matching the 2D

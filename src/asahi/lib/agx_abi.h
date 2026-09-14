@@ -68,6 +68,7 @@
 /* Honeykrisp G17P texel-buffer metadata follows the native texture/PBE and
  * heap-index records. These are software ABI fields, not Gen9 hardware bits.
  */
+#define AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET 32
 #define AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET 72
 #define AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET 72
 #define AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET 76

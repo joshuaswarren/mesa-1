@@ -2191,6 +2191,8 @@ fold_buffer_descriptor(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          value = nir_imm_int(b, f->elements);
          break;
       case 0x1000 + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET:
+      case 0x1000 + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET -
+              AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET:
          value = nir_imm_int(b, f->tail);
          break;
       case 0x1000 + AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET:
@@ -2322,6 +2324,17 @@ test_g17p_buffer_image_metadata(void)
          &b, 1, 32, handle, zero, .image_dim = GLSL_SAMPLER_DIM_BUF);
       nir_export_agx(&b, value, .base = 0);
       nir_export_agx(&b, size, .base = 8);
+      /* A store's handle is the PBE, AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET into
+       * the descriptor; the fixture folds either handle to the same address,
+       * so the tail must come from the PBE-relative metadata offset. */
+      nir_def *pbe = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET),
+         .desc_set = 0);
+      nir_intrinsic_instr *store = nir_bindless_image_store(
+         &b, pbe, coord, zero, value, zero,
+         .image_dim = GLSL_SAMPLER_DIM_BUF,
+         .format = PIPE_FORMAT_R8G8B8A8_UINT, .src_type = nir_type_uint32,
+         .access = ACCESS_NON_READABLE);
       agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
       struct buffer_metadata_fixture f = {.elements = 16384, .tail = tail};
       bool progress;
@@ -2345,11 +2358,17 @@ test_g17p_buffer_image_metadata(void)
       }
       nir_scalar x = nir_scalar_resolved(load->src[1].ssa, 0);
       nir_scalar y = nir_scalar_resolved(load->src[1].ssa, 1);
-      bool ok = size_ok && f.loads == 2 &&
+      nir_scalar store_x = nir_scalar_resolved(store->src[1].ssa, 0);
+      nir_scalar store_y = nir_scalar_resolved(store->src[1].ssa, 1);
+      bool ok = size_ok && f.loads == 3 &&
          nir_intrinsic_image_dim(load) == GLSL_SAMPLER_DIM_2D &&
+         nir_intrinsic_image_dim(store) == GLSL_SAMPLER_DIM_2D &&
          nir_scalar_is_const(x) && nir_scalar_is_const(y) &&
          nir_scalar_as_uint(x) == ((16383 + tail) & 16383) &&
-         nir_scalar_as_uint(y) == ((16383 + tail) >> 14);
+         nir_scalar_as_uint(y) == ((16383 + tail) >> 14) &&
+         nir_scalar_is_const(store_x) && nir_scalar_is_const(store_y) &&
+         nir_scalar_as_uint(store_x) == nir_scalar_as_uint(x) &&
+         nir_scalar_as_uint(store_y) == nir_scalar_as_uint(y);
       if (!ok)
          fprintf(stderr, "imageBuffer tail %u: size=%u loads=%u\n",
                  tail, size_ok, f.loads);

@@ -339,17 +339,15 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       hk_storage_image_descriptor_layout(generation);
    uint32_t heap_index = 0;
 
-   /* G17P imageBuffer reads use the native texture heap even though buffer
-    * writes cannot use the legacy PBE software descriptor. */
+   /* G17P buffer views carry a Gen9 linear PBE; imageBuffer reads still use
+    * the native texture heap. */
    if ((!storage || generation == 9 || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
 
       desc.tex = view->tex;
-      if (storage && hk_native_pbe_supported(generation))
+      if (storage)
          desc.pbe = view->pbe;
-      else if (storage)
-         hk_set_null_native_pbe(generation, &desc.pbe);
       heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);

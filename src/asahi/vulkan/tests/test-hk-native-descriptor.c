@@ -5,6 +5,7 @@
 
 #include "hk_native_descriptor_pack.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_pbe_agx3_core.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -392,6 +393,37 @@ check_buffer_metadata(void)
    memcpy(&address, descriptor + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, sizeof(address));
    assert(count == 64 && tail == 3 && address == semantic.address);
    assert(memcmp(descriptor, &native, sizeof(native)) == 0);
+
+   /* A storage texel buffer is written through the Gen9 linear PBE: width
+    * 16384, a row pitch of one row of texels and no software tail. The store
+    * handle addresses that PBE, so its tail metadata sits PBE_OFFSET bytes
+    * before the texture-relative offset.
+    */
+   const struct AGX_PBE pbe_semantic = {
+      AGX_PBE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D,
+      .layout = AGX_LAYOUT_LINEAR,
+      .channels = AGX_CHANNELS_R32,
+      .type = AGX_TEXTURE_TYPE_UINT,
+      .width = 16384, .height = 1,
+      .stride = 16384 * 4 - 4,
+      .buffer = UINT64_C(0x4000012340),
+   };
+   struct hk_native_pbe_descriptor pbe;
+   assert(hk_pack_native_pbe(9, &pbe, &pbe_semantic));
+   struct agx_pbe_agx3_2d_fields pbe_fields;
+   assert(agx_pbe_agx3_2d_unpack(9, pbe.opaque, sizeof(pbe.opaque),
+                                 &pbe_fields));
+   assert(pbe_fields.layout == AGX_LAYOUT_LINEAR &&
+          pbe_fields.width == 16384 && pbe_fields.height == 1 &&
+          pbe_fields.stride_B == 16384 * 4 &&
+          pbe_fields.buffer == pbe_semantic.buffer);
+   assert(hk_storage_image_descriptor_layout(9).pbe ==
+          AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+
+   struct AGX_PBE pbe_with_tail = pbe_semantic;
+   pbe_with_tail.buffer_offset_sw = 3;
+   assert(!hk_pack_native_pbe(9, &pbe, &pbe_with_tail));
 }
 
 int
