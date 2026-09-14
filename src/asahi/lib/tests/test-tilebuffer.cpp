@@ -332,9 +332,12 @@ TEST(Tilebuffer, G17PNarrowSRGB)
       tib = agx_build_tilebuffer_layout(formats, 1, 1, true);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 
+      /* These narrow sRGB targets share the R8G8B8A8_SRGB physical tile, and
+       * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_color_config
+       * exercises that tile at four samples through GL_SRGB8_ALPHA8. */
       for (unsigned samples : {2u, 4u}) {
          tib = agx_build_tilebuffer_layout(formats, 1, samples, false);
-         EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+         EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
       }
 
       formats[1] = format;
@@ -481,8 +484,12 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
       EXPECT_EQ(agx_g17p_mrt_eot_selector(format.logical), 0x15);
 
+      /* Multisample admission follows the physical tilebuffer format, and
+       * R16_FLOAT is one of the families the four-sample hardware sweep in
+       * test-g17p-gl-msaa-resolve.c covers. R16_UINT is not. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
-      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(agx_g17p_rt0_tile_layout_supported(&tib),
+                format.physical == PIPE_FORMAT_R16_FLOAT);
    }
 
    enum pipe_format packed_float[AGX_MAX_RENDER_TARGETS] = {
@@ -506,8 +513,12 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
    EXPECT_EQ(agx_g17p_rt0_pbe_format(PIPE_FORMAT_R10G10B10A2_UNORM),
              PIPE_FORMAT_R10G10B10A2_UNORM);
 
+   /* The packed float tile is eight bytes per sample at any sample count, and
+    * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_color_config
+    * exercises it at four samples through GL_R11F_G11F_B10F. Layering is a
+    * separate contract and stays refused. */
    tib = agx_build_tilebuffer_layout(packed_float, 1, 2, false);
-   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    tib = agx_build_tilebuffer_layout(packed_float, 1, 1, true);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 

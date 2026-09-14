@@ -2590,6 +2590,20 @@ build_fs_prolog(nir_builder *b, const void *key)
             nir_metadata_control_flow, NULL);
 }
 
+/* G17P addresses each tilebuffer sample explicitly, so a multisample epilog
+ * writes one sample and leaves the rest untouched unless its tile stores are
+ * expanded. Without this a four-sample draw reaches only sample zero, and
+ * resolving it yields a quarter of the drawn colour.
+ */
+static void
+build_g17p_fs_epilog(nir_builder *b, const void *key_)
+{
+   const struct agx_fs_epilog_key *key = key_;
+   agx_nir_fs_epilog(b, key);
+
+   NIR_PASS(_, b->shader, agx_nir_lower_g17p_tile_samples, key->nr_samples);
+}
+
 static struct agx_linked_shader *
 asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
                 struct agx_fast_link_key *key)
@@ -2616,8 +2630,11 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
          false, key->prolog.fs.cf_base, false);
 
       epilog = agx_build_meta_shader_internal(
-         ctx, agx_nir_fs_epilog, &key->epilog.fs, sizeof(key->epilog.fs), false,
-         true, 0, false);
+         ctx,
+         agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P
+            ? build_g17p_fs_epilog
+            : agx_nir_fs_epilog,
+         &key->epilog.fs, sizeof(key->epilog.fs), false, true, 0, false);
 
    } else if (so->type == MESA_SHADER_TESS_EVAL) {
       /* No prolog/epilog needed */
@@ -4311,8 +4328,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       /* Match each admitted tile layout to its complete background/EOT
        * program and argument layout. */
       if (!agx_gallium_g17p_tile_layout_supported(
-             &batch->tilebuffer_layout))
+             &batch->tilebuffer_layout)) {
+         const struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
+         mesa_loge("asahi: G17P tile layout is unproven: %u samples, "
+                   "%u B/sample, %u px tile, layered=%u",
+                   tib->nr_samples, tib->sample_size_B, tib->tile_size,
+                   tib->layered);
+         for (unsigned rt = 0; rt < ARRAY_SIZE(tib->logical_format); ++rt) {
+            if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
+               mesa_loge("asahi:   target %u is %s at byte %u%s", rt,
+                         util_format_short_name(tib->logical_format[rt]),
+                         tib->_offset_B[rt],
+                         tib->spilled[rt] ? " (spilled)" : "");
+         }
          agx_native_descriptor_rejected(dev, "background tile layout");
+      }
 
       const enum agx_g17p_mrt_layout mrt =
          agx_g17p_classify_mrt(&key.tib);
@@ -4367,7 +4397,13 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       const bool shader_supported =
          shader && shader->bo && shader->bo->va && shader->ptr &&
          shader->info.binary_size &&
-         shader->info.binary_size <= (wide_count ? 4096 : 512) &&
+         /* The G17P per-sample lowering repeats the body once per sample, so
+          * this size guard scales with the sample count: a four-sample reload
+          * is 990 bytes where the single-sample one is well under 512. */
+         shader->info.binary_size <=
+            (wide_count
+                ? 4096u
+                : 512u * MAX2(batch->tilebuffer_layout.nr_samples, 1u)) &&
          shader->info.main_offset < shader->info.binary_size &&
          shader->info.main_size <=
             shader->info.binary_size - shader->info.main_offset &&
@@ -4382,8 +4418,24 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
                    op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR
                                       : AGX3_G17P_RT0_BG_RELOAD,
                    shader->info.push_count, shader->info.uses_txf)));
-      if (!shader_supported || !resources_match)
+      if (!shader_supported || !resources_match) {
+         mesa_loge("asahi: G17P background shader is unproven: op %u, "
+                   "%u pushed halves, txf=%u, preamble=%u, rodata=%u, "
+                   "gprs=%u, %u samples, binary %u B (bound %u), main %u@%u",
+                   op, shader ? shader->info.push_count : 0,
+                   shader ? shader->info.uses_txf : 0,
+                   shader ? shader->info.has_preamble : 0,
+                   shader ? shader->info.rodata.size_16 : 0,
+                   shader ? shader->info.nr_gprs : 0,
+                   batch->tilebuffer_layout.nr_samples,
+                   shader ? shader->info.binary_size : 0,
+                   wide_count ? 4096u
+                              : 512u * MAX2(batch->tilebuffer_layout.nr_samples,
+                                            1u),
+                   shader ? shader->info.main_size : 0,
+                   shader ? shader->info.main_offset : 0);
          agx_native_descriptor_rejected(dev, "background shader");
+      }
       agx_batch_add_bo(batch, shader->bo);
 
       size_t capacity;

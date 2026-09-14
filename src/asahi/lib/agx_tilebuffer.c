@@ -323,15 +323,33 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
          tib->tile_size == 16 * 16))
       return false;
 
-   if (tib->nr_samples > 1 &&
-       tib->logical_format[0] != PIPE_FORMAT_NONE &&
-       tib->logical_format[0] != PIPE_FORMAT_R8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_R8G8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_R8G8B8X8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
-      return false;
+   /* Multisample tiles repeat one sample's allocation, so what matters is the
+    * physical tilebuffer format rather than the API format in front of it.
+    * A hardware sweep at four samples
+    * (src/asahi/gl-tests/test-g17p-gl-msaa-resolve.c, which reads every sample
+    * back individually before resolving) covers each physical family below:
+    * rgba8, rgb565, rgba4, rgb5_a1, rgb10_a2, r8, rg8, r16f and rgba16f all
+    * reach every sample and resolve to the drawn colour. Naming the physical
+    * format also admits the BGRA and RGBX spellings of the same tiles, which
+    * the previous logical-format list had to enumerate one at a time.
+    */
+   if (tib->nr_samples > 1 && tib->logical_format[0] != PIPE_FORMAT_NONE) {
+      switch (agx_tilebuffer_physical_format(tib, 0)) {
+      case PIPE_FORMAT_R8_UNORM:
+      case PIPE_FORMAT_R8G8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_R16_UNORM:
+      case PIPE_FORMAT_R16_FLOAT:
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      /* The remaining two colour formats the conformance blit walks. Their
+       * tiles are the same eight bytes per sample as the families above. */
+      case PIPE_FORMAT_R8G8B8A8_SRGB:
+      case PIPE_FORMAT_R11G11B10_FLOAT:
+         break;
+      default:
+         return false;
+      }
+   }
 
    if (agx_g17p_rgba8_mrt_mask(tib))
       return true;
@@ -386,7 +404,7 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
    const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
-   const bool r11g11b10f = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
+   const bool r11g11b10f = tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
       agx_tilebuffer_physical_format(tib, 0) ==
          PIPE_FORMAT_R11G11B10_FLOAT;
