@@ -575,8 +575,8 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
       ((src_type == VK_IMAGE_TYPE_1D && dst_type == VK_IMAGE_TYPE_2D) ||
        (dst_type == VK_IMAGE_TYPE_1D && src_type == VK_IMAGE_TYPE_2D)) &&
       src_layers == 1 && dst_layers == 1;
-   const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
-                              (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   const bool two_d_three_d = (src_1d_or_2d && dst_3d) ||
+                              (dst_1d_or_2d && src_3d);
    const bool valid_pair = same_type || one_d_two_d || two_d_three_d;
    if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
        !valid_pair || src_layers == 0 ||

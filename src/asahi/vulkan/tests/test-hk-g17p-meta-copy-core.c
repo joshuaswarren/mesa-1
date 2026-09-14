@@ -994,9 +994,28 @@ main(void)
    CHECK(!hk_g17p_image_copy_slice(
       AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 2, 2,
       &one_d_two_d, 0, &one_d_out));
+
+   /* A 1D array copies to or from 3D slices exactly as a 2D array does: its
+    * layers map to the volume's depth. */
+   const VkImageCopy2 one_d_volume = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 4},
+      .srcOffset = {3, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffset = {5, 0, 2},
+      .extent = {17, 1, 4},
+   };
+   for (uint32_t slice = 0; slice < 4; ++slice) {
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 4, 4,
+         &one_d_volume, slice, &one_d_out));
+      CHECK(one_d_out.srcSubresource.baseArrayLayer == 1 + slice);
+      CHECK(one_d_out.dstOffset.z == 2 + (int32_t)slice);
+      CHECK(one_d_out.extent.depth == 1);
+   }
    CHECK(!hk_g17p_image_copy_slice(
-      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 1, 1,
-      &one_d_two_d, 0, &one_d_out));
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 3, 3,
+      &one_d_volume, 0, &one_d_out));
 
    VkImageCopy2 volume_array = volume_copy;
    volume_array.dstSubresource.baseArrayLayer = 7;
