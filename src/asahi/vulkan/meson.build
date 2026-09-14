@@ -278,6 +278,34 @@ if with_tests
   )
 
   test(
+    'hk_cdm_inline_merge',
+    executable(
+      'hk_cdm_inline_merge_test',
+      files('tests/test-hk-cdm-inline-merge.c'),
+      include_directories : [
+        inc_gallium,
+        inc_gallium_aux,
+        inc_include,
+        inc_src,
+        inc_asahi,
+        inc_virtio_gpu,
+        inc_virtio_vdrm,
+      ],
+      dependencies : [
+        idep_nir,
+        idep_mesautil,
+        idep_libagx,
+        idep_libagx_shaders_h,
+        idep_vulkan_runtime_headers,
+        idep_vulkan_util_headers,
+      ],
+      c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_g17p_full_frame_scissor',
     executable(
       'hk_g17p_full_frame_scissor_test',

@@ -527,13 +527,39 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    assert(a->cmd == b->cmd);
    assert(!a->timestamp.end.handle);
 
-   void *link_end =
-      hk_cmd_buffer_emit_cs_jump(a->cmd, a->current, b->addr, false);
-   const bool linked = link_end != a->current;
-   a->current = b->current;
-   a->stream_linked |= linked || b->stream_linked;
-   a->strong_flush_end = b->strong_flush_end;
-   a->weak_barrier_end = b->weak_barrier_end;
+   const size_t b_size = (uint8_t *)b->current - (uint8_t *)b->start;
+   const size_t remaining = (uint8_t *)a->end - (uint8_t *)a->current;
+   const bool inline_b = !a->stream_linked && !b->stream_linked &&
+                         hk_cs_space_fits(remaining, b_size,
+                                          AGX_CDM_STREAM_LINK_LENGTH);
+
+   if (inline_b) {
+      uint8_t *dst = a->current;
+      memcpy(dst, b->start, b_size);
+      a->current = dst + b_size;
+
+      /* These markers point just past an emitted barrier. Preserve them in
+       * the destination root so another adjacent merge still has an exact
+       * view of the stream tail. */
+      a->strong_flush_end =
+         b->strong_flush_end
+            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start)
+            : NULL;
+      a->weak_barrier_end =
+         b->weak_barrier_end
+            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start)
+            : NULL;
+   } else {
+      void *link_end =
+         hk_cmd_buffer_emit_cs_jump(a->cmd, a->current, b->addr, false);
+      const bool linked = link_end != a->current;
+      a->current = b->current;
+      a->end = b->end;
+      a->chunk = b->chunk;
+      a->stream_linked |= linked || b->stream_linked;
+      a->strong_flush_end = b->strong_flush_end;
+      a->weak_barrier_end = b->weak_barrier_end;
+   }
 
    a->uses_sampler_heap |= b->uses_sampler_heap;
    a->scratch.cs.main |= b->scratch.cs.main;
