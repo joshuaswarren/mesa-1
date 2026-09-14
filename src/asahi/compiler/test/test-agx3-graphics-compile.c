@@ -1763,6 +1763,37 @@ g17p_count_bytes(const struct agx_shader_part *part, const uint8_t *needle,
 }
 
 static bool
+test_g17p_clustered_minmax_width(void)
+{
+   for (unsigned bits = 16; bits <= 64; bits *= 2) {
+      for (unsigned max = 0; max < 2; ++max) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "clustered minmax width");
+         nir_reduce(&b, nir_undef(&b, 1, bits), .cluster_size = 4,
+                    .reduction_op = max ? nir_op_fmax : nir_op_fmin);
+         agx_nir_lower_subgroups_g17p(b.shader);
+         unsigned remaining = 0;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  remaining += instr->type == nir_instr_type_intrinsic &&
+                     nir_instr_as_intrinsic(instr)->intrinsic ==
+                        nir_intrinsic_reduce;
+               }
+            }
+         }
+         ralloc_free(b.shader);
+         if (remaining != (bits == 32)) {
+            fprintf(stderr, "clustered f%s %u-bit lowering mismatch\n",
+                    max ? "max" : "min", bits);
+            return false;
+         }
+      }
+   }
+   return true;
+}
+
+static bool
 test_g17p_pbe_to_texture_fence(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -8808,6 +8839,7 @@ main(int argc, char **argv)
    RUN(test_g17p_blended_payloads_beyond_bank);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_g17p_pbe_to_texture_fence);
+   RUN(test_g17p_clustered_minmax_width);
    RUN(test_frag_sidefx_late_test_once);
    RUN(test_g17p_frag_sidefx_late_depth_once);
 #undef RUN
