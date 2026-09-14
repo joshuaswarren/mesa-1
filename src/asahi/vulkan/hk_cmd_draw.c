@@ -1623,12 +1623,18 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
+      char names[256] = "";
+      for (unsigned i = 0, len = 0; i < render->color_att_count; ++i) {
+         len += snprintf(names + len, sizeof(names) - MIN2(len, sizeof(names)),
+                         "%s%s", i ? "," : "",
+                         util_format_short_name(formats[i]));
+         len = MIN2(len, sizeof(names));
+      }
       mesa_loge_once("G17P tilebuffer layout refused: attachments=%u "
-                     "samples=%u sample_size=%u tile_size=%u format0=%s",
+                     "samples=%u sample_size=%u tile_size=%u formats=%s",
                      render->color_att_count, render->tilebuffer.nr_samples,
                      render->tilebuffer.sample_size_B,
-                     render->tilebuffer.tile_size,
-                     util_format_short_name(formats[0]));
+                     render->tilebuffer.tile_size, names);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
