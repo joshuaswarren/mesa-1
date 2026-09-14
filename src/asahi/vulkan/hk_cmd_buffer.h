@@ -571,7 +571,7 @@ struct hk_cmd_buffer {
    } state;
 
    struct {
-      struct hk_uploader main, usc, vdm;
+      struct hk_uploader main, usc, root, vdm;
    } uploader;
 
    /* Command-pool slab spans leased by this command buffer's VDM uploader. */

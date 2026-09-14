@@ -27,6 +27,7 @@
 #include "hk_shader.h"
 #include "libagx_shaders.h"
 
+#include "util/cache_ops.h"
 #include "util/log.h"
 #include "util/hash_table.h"
 #include "util/u_debug.h"
@@ -151,10 +152,14 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
        * backing storage remain live until device destruction. */
       hk_g17p_quarantine_command_uploads(
          dev, &cmd->uploader.main.bos, &cmd->uploader.usc.bos,
-         &cmd->vdm_allocations);
+         &cmd->uploader.root.bos, &cmd->vdm_allocations);
    } else {
-      hk_cmd_pool_free_bo_list(pool, &cmd->uploader.main.bos);
-      hk_cmd_pool_free_usc_bo_list(pool, &cmd->uploader.usc.bos);
+      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_MAIN,
+                               &cmd->uploader.main.bos);
+      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_USC,
+                               &cmd->uploader.usc.bos);
+      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_ROOT,
+                               &cmd->uploader.root.bos);
       list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
                                &cmd->vdm_allocations, link) {
          list_del(&allocation->link);
@@ -219,6 +224,7 @@ hk_create_cmd_buffer(struct vk_command_pool *vk_pool,
 
    list_inithead(&cmd->uploader.main.bos);
    list_inithead(&cmd->uploader.usc.bos);
+   list_inithead(&cmd->uploader.root.bos);
    list_inithead(&cmd->vdm_allocations);
    list_inithead(&cmd->control_streams);
 
@@ -243,6 +249,10 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->uploader.usc.map = NULL;
    cmd->uploader.usc.base = 0;
    cmd->uploader.usc.offset = 0;
+   cmd->uploader.root.map = NULL;
+   cmd->uploader.root.base = 0;
+   cmd->uploader.root.offset = 0;
+   cmd->uploader.root.capacity = 0;
    cmd->uploader.vdm.map = NULL;
    cmd->uploader.vdm.base = 0;
    cmd->uploader.vdm.offset = 0;
@@ -307,15 +317,18 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 }
 
 static VkResult
-hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,
+hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, enum hk_cmd_bo_type type,
                        struct hk_cmd_bo **bo_out)
 {
-   VkResult result = hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), usc, bo_out);
+   VkResult result =
+      hk_cmd_pool_alloc_bo(hk_cmd_buffer_pool(cmd), type, bo_out);
    if (result != VK_SUCCESS)
       return result;
 
-   if (usc)
+   if (type == HK_CMD_BO_USC)
       list_addtail(&(*bo_out)->link, &cmd->uploader.usc.bos);
+   else if (type == HK_CMD_BO_ROOT)
+      list_addtail(&(*bo_out)->link, &cmd->uploader.root.bos);
    else
       list_addtail(&(*bo_out)->link, &cmd->uploader.main.bos);
 
@@ -324,7 +337,8 @@ hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, bool usc,
 
 static struct agx_ptr
 hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
-                   uint32_t size, uint32_t alignment, bool usc)
+                   uint32_t size, uint32_t alignment,
+                   enum hk_cmd_bo_type type)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
@@ -332,7 +346,10 @@ hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
     * for statically allocated vertex output buffers with geometry shaders.
     */
    if (size > HK_CMD_BO_SIZE) {
-      uint32_t flags = usc ? AGX_BO_LOW_VA : 0;
+      enum agx_bo_flags flags =
+         type == HK_CMD_BO_USC    ? AGX_BO_LOW_VA
+         : type == HK_CMD_BO_ROOT ? AGX_BO_WRITEBACK
+                                  : 0;
       struct agx_bo *bo =
          agx_bo_create(&dev->dev, size, 0, flags, "Large pool allocation");
 
@@ -364,12 +381,11 @@ hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
    }
 
    struct hk_cmd_bo *bo;
-   VkResult result = hk_cmd_buffer_alloc_bo(cmd, usc, &bo);
+   VkResult result = hk_cmd_buffer_alloc_bo(cmd, type, &bo);
    if (unlikely(result != VK_SUCCESS)) {
       vk_command_buffer_set_error(&cmd->vk, result);
       return (struct agx_ptr){0};
    }
-
    /* Pick whichever of the current upload BO and the new BO will have more
     * room left to be the BO for the next upload.  If our upload size is
     * bigger than the old offset, we're better off burning the whole new
@@ -394,7 +410,20 @@ hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
 {
    struct hk_uploader *uploader =
       usc ? &cmd->uploader.usc : &cmd->uploader.main;
-   return hk_pool_alloc_from(cmd, uploader, size, alignment, usc);
+   return hk_pool_alloc_from(cmd, uploader, size, alignment,
+                             usc ? HK_CMD_BO_USC : HK_CMD_BO_MAIN);
+}
+
+static struct agx_ptr
+hk_pool_root_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
+                   uint32_t alignment)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return hk_pool_alloc(cmd, size, alignment);
+
+   return hk_pool_alloc_from(cmd, &cmd->uploader.root, size, alignment,
+                             HK_CMD_BO_ROOT);
 }
 
 struct agx_ptr
@@ -765,6 +794,31 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
    }
 }
 
+static void
+hk_cmd_buffer_publish_root_uploads(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (dev->dev.chip != AGX_CHIP_G17P ||
+       list_is_empty(&cmd->uploader.root.bos))
+      return;
+
+   if (util_has_cache_ops()) {
+      /* Every root range was cleaned when written. Complete those cache
+       * operations once, after recording has made all roots immutable. */
+      util_post_flush_fence();
+      return;
+   }
+
+   /* Platforms without userspace cache maintenance publish each root slab
+    * through their winsys. Root slabs contain no unrelated command uploads. */
+   list_for_each_entry(struct hk_cmd_bo, bo, &cmd->uploader.root.bos, link) {
+      if (agx_bo_sync_for_device(bo->bo, 0, bo->bo->size)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
+         return;
+      }
+   }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
@@ -791,6 +845,11 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
          cs->current = hk_cmd_buffer_emit_cdm_terminate(cmd, cs->current);
       }
    }
+
+   /* G17P roots use cached mappings. Publish the completed recording once,
+    * after every root table is immutable and before submission can consume
+    * any address embedded in the command streams. */
+   hk_cmd_buffer_publish_root_uploads(cmd);
 
    return vk_command_buffer_end(&cmd->vk);
 }
@@ -1119,7 +1178,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    struct hk_root_descriptor_table *root = &desc->root;
 
-   struct agx_ptr root_ptr = hk_pool_alloc(cmd, sizeof(*root), 8);
+   struct agx_ptr root_ptr = hk_pool_root_alloc(cmd, sizeof(*root), 8);
    if (!root_ptr.gpu)
       return 0;
 
@@ -1127,6 +1186,13 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    root->printf_buffer_address = dev->dev.printf_buffer_address;
 
    memcpy(root_ptr.cpu, root, sizeof(*root));
+
+   /* Cached G17P roots need explicit CPU-to-GPU publication. Clean just this
+    * table now; vkEndCommandBuffer completes all recorded root cleans with a
+    * single fence before submission can consume them. */
+   if (dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops())
+      util_flush_range_no_fence(root_ptr.cpu, sizeof(*root));
+
    return root_ptr.gpu;
 }
 
