@@ -583,6 +583,86 @@ check_msaa_depth_blit(struct pipe_context *pctx, unsigned samples)
    return ok;
 }
 
+/* KHR-GL30.framebuffer_blit.scissor_blit blits into a framebuffer holding a
+ * colour texture and a depth texture, under a scissor that covers exactly one
+ * tile, and the tile comes back zeroed. Build that shape through the shim --
+ * which constructs the same background, draw and end-of-tile programs without
+ * a GPU -- and hold it to producing every one of them.
+ *
+ * Every program is built, so the failure is in what they compute or in the
+ * tile handling at execution, not in a missing or refused one. Keeping the
+ * check means a future regression that does drop a program here is caught
+ * without a GPU.
+ */
+static bool
+check_scissored_blit(struct pipe_context *pctx)
+{
+   struct pipe_screen *screen = pctx->screen;
+   struct agx_context *ctx = agx_context(pctx);
+
+   struct pipe_resource *colour =
+      make_2d(screen, PIPE_FORMAT_R8G8B8A8_UNORM, 64, 64,
+              PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW);
+   struct pipe_resource *source =
+      make_2d(screen, PIPE_FORMAT_B10G10R10A2_UNORM, 64, 64,
+              PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW |
+                 PIPE_BIND_DISPLAY_TARGET);
+   struct pipe_resource *depth =
+      make_2d(screen, PIPE_FORMAT_Z16_UNORM, 64, 64,
+              PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW);
+   if (!colour || !source || !depth) {
+      fprintf(stderr, "scissored blit: resources unsupported\n");
+      pipe_resource_reference(&colour, NULL);
+      pipe_resource_reference(&source, NULL);
+      pipe_resource_reference(&depth, NULL);
+      return true;
+   }
+
+   const unsigned skipped_before = ctx->skipped_no_program;
+
+   /* Seed the destination the way the conformance case does, so the scissored
+    * blit has existing contents to preserve outside its rectangle. */
+   struct pipe_surface colour_surface = {
+      .texture = colour, .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+      .first_layer = 0, .last_layer = 0, .level = 0,
+   };
+   struct pipe_framebuffer_state fb = {
+      .width = 64, .height = 64, .layers = 1, .samples = 1, .nr_cbufs = 1,
+   };
+   fb.cbufs[0] = colour_surface;
+   pctx->set_framebuffer_state(pctx, &fb);
+   const union pipe_color_union clear = {.f = {0.0f, 0.0f, 0.0f, 1.0f}};
+   pctx->clear(pctx, PIPE_CLEAR_COLOR0, 0xf, 0, NULL, &clear, 0.0, 0);
+   pctx->flush(pctx, NULL, 0);
+
+   /* One tile's worth of scissor, exactly as the conformance case sets. */
+   const struct pipe_blit_info info = {
+      .src = {.resource = source,
+              .format = PIPE_FORMAT_B10G10R10A2_UNORM,
+              .level = 0,
+              .box = {.width = 64, .height = 64, .depth = 1}},
+      .dst = {.resource = colour,
+              .format = PIPE_FORMAT_R8G8B8A8_UNORM,
+              .level = 0,
+              .box = {.width = 64, .height = 64, .depth = 1}},
+      .mask = PIPE_MASK_RGBA,
+      .filter = PIPE_TEX_FILTER_NEAREST,
+      .scissor_enable = 1,
+      .scissor = {.minx = 0, .miny = 0, .maxx = 32, .maxy = 32},
+   };
+   pctx->blit(pctx, &info);
+   pctx->flush(pctx, NULL, 0);
+
+   const bool ok = ctx->skipped_no_program == skipped_before;
+   printf("scissored blit into a colour+depth target: %s\n",
+          ok ? "built every program" : "DROPPED, a program was missing");
+
+   pipe_resource_reference(&colour, NULL);
+   pipe_resource_reference(&source, NULL);
+   pipe_resource_reference(&depth, NULL);
+   return ok;
+}
+
 static bool
 check_stencil_blit_shapes(void)
 {
@@ -1105,6 +1185,9 @@ main(void)
       return 1;
 
    if (!check_msaa_depth_blit(pctx, 2) || !check_msaa_depth_blit(pctx, 4))
+      return 1;
+
+   if (!check_scissored_blit(pctx))
       return 1;
 
    if (!check_staged_resolve_shapes())
