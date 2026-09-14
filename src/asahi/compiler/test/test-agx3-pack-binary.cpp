@@ -10467,7 +10467,7 @@ TEST_F(AGX3PackBinary, HalfSelectOfByteConstantsIsNotRefusedByTheHalfForms)
    EXPECT_GT(code.size(), 4u);
 }
 
-TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
+TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNative)
 {
    for (bool live : {false, true}) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -10496,15 +10496,24 @@ TEST_F(AGX3PackBinary, HalfCompareSelectMatchesNativeAndRefusesModifier)
       EXPECT_EQ(memcmp(code.data(), native, 10), 0);
    }
 
+   /* An absolute half comparator takes the fourteen-byte endpoint. Apple's
+    * applegpu_g17p `(abs(a) > b) ? a : b` over half operands, with its slot 6
+    * wait (f107) cleared: 12021d0283021200800300800100. */
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
-   agx_index modified = agx_register(0, AGX_SIZE_16);
+   agx_index a = agx_register(2, AGX_SIZE_16);
+   agx_index c = agx_register(3, AGX_SIZE_16);
+   a.discard = c.discard = true;
+   agx_index modified = a;
    modified.abs = true;
-   agx_fcmpsel_to(b, agx_register(0, AGX_SIZE_16), modified,
-                  agx_register(1, AGX_SIZE_16),
-                  agx_register(2, AGX_SIZE_16),
-                  agx_register(3, AGX_SIZE_16), AGX_FCOND_LT);
+   agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), modified, c, a, c,
+                  AGX_FCOND_GT);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   const auto code = pack(b);
+   const uint8_t native[] = {
+      0x12,0x02,0x1d,0x02,0x83,0x02,0x12,0x00,0x80,0x03,0x00,0x00,0x01,0x00,
+   };
+   ASSERT_EQ(code.size(), sizeof(native) + 4);
+   EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
 }
 
 TEST_F(AGX3PackBinary, HalfSqrtMatchesNativeSequenceAndRefusesModifier)
@@ -10912,8 +10921,10 @@ TEST_F(AGX3PackBinary, HalfCeilMatchesNativeAndRefusesModifier)
    EXPECT_TRUE(pack(b,false).empty());
 }
 
-TEST_F(AGX3PackBinary, HalfMaximumRoutesUntiedAndRefusesModifiers)
+TEST_F(AGX3PackBinary, HalfMaximumRoutesUntiedAndRefusesSaturate)
 {
+   /* An absolute comparator is Apple's own half maximum form (see
+    * HalfCompareSelectMatchesNative); only the saturated select refuses. */
    for (unsigned mode = 0; mode < 3; ++mode) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       agx_index a = agx_register(2, AGX_SIZE_16);
@@ -10928,8 +10939,8 @@ TEST_F(AGX3PackBinary, HalfMaximumRoutesUntiedAndRefusesModifiers)
       if (mode == 2)
          I->saturate = true;
       agx_stop(b);
-      const auto code = pack(b, mode == 0);
-      EXPECT_EQ(code.empty(), mode != 0) << "mode=" << mode;
+      const auto code = pack(b, mode != 2);
+      EXPECT_EQ(code.empty(), mode == 2) << "mode=" << mode;
    }
 }
 

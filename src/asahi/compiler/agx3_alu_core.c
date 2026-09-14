@@ -1371,7 +1371,7 @@ agx3_alu_fcmp_select_imm_width_internal(enum agx_isa_encoding enc,
                         const enum agx3_alu_hint hints[2],
                         unsigned condition, uint8_t if_true, uint8_t if_false,
                         bool dest_16, bool dest_cache, uint16_t wait_mask,
-                        bool src1_neg,
+                        bool src1_neg, const bool src_abs[2],
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !src_16 || !hints ||
@@ -1434,10 +1434,13 @@ agx3_alu_fcmp_select_imm_width_internal(enum agx_isa_encoding enc,
       {46, hints[0] == AGX3_ALU_HINT_DISCARD},
       {61, hints[1] == AGX3_ALU_HINT_CACHE},
       {63, hints[1] == AGX3_ALU_HINT_DISCARD}, {65, src1_neg},
+      {47, src_abs[0]}, {64, src_abs[1]},
       {68, if_true}, {85, if_false}, {110, condition}, {107, wait_mask == 32},
    };
-   for (unsigned ep = 20; ep < 28; ++ep)
-      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 13, out, len))
+   /* An absolute source moves to the fourteen-byte ep28..35 endpoints; the
+    * composer's predicates reject f47/f64 on the ten-byte ones. */
+   for (unsigned ep = 20; ep < 36; ++ep)
+      if (agx3_bind_compose(enc, "fsel", ep, base, 10, fields, 15, out, len))
          return true;
    return false;
 }
@@ -1452,7 +1455,7 @@ agx3_alu_fcmp_select_imm_width(enum agx_isa_encoding enc, uint16_t dest,
 {
    return agx3_alu_fcmp_select_imm_width_internal(
       enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
-      dest_cache, wait_mask, false, out, len);
+      dest_cache, wait_mask, false, (const bool[2]){false, false}, out, len);
 }
 
 /* Reverse a comparison so its two operands can exchange places. */
@@ -1471,35 +1474,39 @@ agx3_fcond_reversed(unsigned condition)
 /*
  * The same compare-select with an ABSOLUTE VALUE on either comparison source.
  *
- * This is NOT a modifier bit on the form above, and assuming it was -- the way
- * f30 works for the rsqrt family -- would produce bytes that compose cleanly
- * and encode a different instruction. Apple moves to a longer endpoint: the
- * ten-byte ep20..27 family becomes a fourteen-byte ep28..35 one, and the whole
- * destination field block shifts by +14 (dest f3 -> f17, its width f11 -> f25,
- * its cache hint f12 -> f26). The source, immediate, condition and wait fields
- * keep their numbers. NEG stays on the ten-byte endpoint; ABS never does.
+ * This is NOT a modifier bit on the ten-byte form: Apple moves to the
+ * fourteen-byte ep28..35 endpoints, which carry f47 and f64, the two sources'
+ * absolute-value bits. NEG stays on the ten-byte endpoint; ABS never does.
  *
- * f47 and f64 are the two sources' absolute-value bits, separable because
- * `fabs(a) < fabs(b)` sets both. Witnessed with metal-nt -arch applegpu_g17p,
- * one kernel per field, every vector recovered by re-composing through this
- * encoder:
+ * Those endpoints place the destination block in one of two ways, and the
+ * placement decides how an immediate select is read. With dest f3, width f11
+ * and cache f12 the selects are integers; with f0 set and dest f17, width f25
+ * and cache f26 they are minifloats. metal-nt -arch applegpu_g17p kernels
+ * with the same float32 comparison, destination and hints:
  *
- *   (fabs(a) <  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 01 00
- *   ( a < fabs(b)) ? 1.0h : 0.0h   12 03 19 05 23 b0 03 00 20 80 00 80 02 00
- *   (fabs(a) < fabs(b)) ? ...      12 03 19 05 23 b0 03 00 20 80 00 80 03 00
- *   (fabs(a) >  b) ? 1.0h : 0.0h   12 03 19 05 23 b0 02 00 20 80 00 80 01 00
- *   (fabs(a) == b) ? 1.0h : 0.0h   12 03 19 05 27 b0 00 00 20 80 00 80 01 00
- *   (fabs(a) >= b) ? 1.0h : 0.0h   12 03 19 05 27 b0 02 00 20 80 00 80 01 00
- *   (fabs(a) <  b) ? 2.0h : 0.0h   12 03 19 05 23 c0 03 00 20 80 00 80 01 00
- *   (fabs(a) <  b) ? 0.0h : 1.0h   12 03 19 05 23 80 03 00 20 b0 00 80 01 00
- *   (fabs(a) <  b) ? 1.0f : 0.0f   02 01 1b 05 23 b0 03 00 20 80 00 80 01 00
+ *   x + ((fabs(a) < b) ? 3u : 1u)       22 05 3f 07 23 83 03 00 20 81 00 80 01 00
+ *   x + ((fabs(a) < b) ? 1.0f : 0.0f)   22 05 39 07 23 b0 03 00 20 80 00 80 01 00
  *
- * so f110 is the condition, f68 and f85 the two minifloat selects, f17 the
- * destination register (swept 2/3/6/8 across kernels holding several selects
- * live at once), and f44/f46 and f61/f63 the per-source cache and last-use
- * hints. The half-destination and 32-bit-destination endpoints are mutually
- * exclusive -- each refuses the other's width vector -- so scanning the range
- * cannot silently pick the wrong one.
+ * (f68 = 3 against the minifloat 48 of 1.0.) FCMPSEL's selected immediates
+ * are integer bit patterns, so they take the integer placement. The rest of
+ * the integer-select ladder, one kernel per field, dest r2 with cache,
+ * comparisons r2 and r3 with last use, wait slot 6:
+ *
+ *   ( a < fabs(b)) ? 3u : 1u        22 05 3f 07 23 83 03 00 20 81 00 80 02 00
+ *   (fabs(a) < fabs(b)) ? 3u : 1u   22 05 3f 07 23 83 03 00 20 81 00 80 03 00
+ *   (fabs(a) >  b) ? 3u : 1u        22 05 3f 07 23 83 02 00 20 81 00 80 01 00
+ *   (fabs(a) == b) ? 3u : 1u        22 05 3f 07 27 83 00 00 20 81 00 80 01 00
+ *   (fabs(a) >= b) ? 3u : 1u        22 05 3f 07 27 83 02 00 20 81 00 80 01 00
+ *   (fabs(a) <= b) ? 3u : 1u        22 05 3f 07 27 83 03 00 20 81 00 80 01 00
+ *   (fabs(a) <  b) ? 0u : 7u        22 05 3f 07 23 80 03 00 20 87 00 80 01 00
+ *   16-bit result, 3 and 1          12 03 3d 05 23 83 03 00 20 81 00 80 01 00
+ *   half/half, 16-bit result        1a 02 3d 04 23 83 0b 00 20 81 00 80 01 00
+ *   half/half, fabs(b), 32-bit      22 04 3f 04 23 83 13 00 20 81 00 80 02 00
+ *   float/half, 32-bit result       22 05 3f 06 23 83 03 00 20 81 00 80 01 00
+ *
+ * so f110 is the condition, f68 and f85 the two integer selects, f43 and f60
+ * the comparators' widths and f44/f46 and f61/f63 their cache and last-use
+ * hints, exactly as on the ten-byte endpoint.
  */
 bool
 agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
@@ -1600,12 +1607,6 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
    const bool cmp0_16 = d.cmp0_16;
    const bool cmp1_16 = d.cmp1_is_immediate ? false : d.cmp1_16;
 
-   /* The recovered all-half endpoints do not yet have an absolute-comparison
-    * witness. Keep those modifier forms closed instead of accepting a field
-    * composition whose half-width meaning is unverified. */
-   if (cmp0_16 && cmp1_16 && (d.cmp0_abs || d.cmp1_abs))
-      return false;
-
    /* Both comparator widths remain independent when a selected value is a
     * register. Fresh applegpu_g17p kernels selecting between a 32-bit GPR and
     * immediate 32 use the same field map and set f43=f60=1:
@@ -1690,19 +1691,19 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
    f[n++] = (struct agx3_field_kv){107, d.wait_mask == 32};
 
    /*
-    * The destination block has TWO placements on this endpoint family, and
-    * they are alternative encodings of one instruction rather than two
-    * instructions: dest f3 -> f17, its width f11 -> f25, its cache hint
-    * f12 -> f26, with f0 and f24 fixed. Apple emits both --
+    * The destination block has TWO placements on this endpoint family: dest
+    * f3 -> f17, its width f11 -> f25, its cache hint f12 -> f26, with f0 and
+    * f24 fixed. Apple emits both --
     *
     *   (fabs(a) < 0.5f) ? 1.0h : 0.0h   120309a123b00302208000800100   ep28
     *   corpus vector 224                42d725d923810300208000000300   ep33
     *
-    * decompose to the same operand fields, differing only in that block, and
-    * the second is one of the 84 real `fsel` instructions in
-    * test/agx3_compose_corpus_vectors.c. So the placement is a free choice;
-    * pick f3/f11 first, which is what every shape that already composed here
-    * used, and fall back to the shifted block for the shapes it cannot reach.
+    * -- but they are not interchangeable for a non-zero immediate select: the
+    * f0 placement reads f68/f85 as minifloats and the f3 placement as
+    * integers (see agx3_alu_fcmp_select_imm_width_abs() for the witnessed
+    * pair). FCMPSEL selects integer bit patterns, so pick f3/f11 first and
+    * fall back to the shifted block only when every immediate select is zero,
+    * which is the same bits in either.
     *
     * What the first row does settle is that an IMMEDIATE comparator is not a
     * separate form: against (fabs(a) < c) ? 1.0h : 0.0h, which is
@@ -1711,6 +1712,9 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
     * non-zero immediate comparator recorded what had been measured, not what
     * the field can hold.
     */
+   const bool integer_select =
+      (d.sel0_kind == AGX3_FSEL_SEL_IMMEDIATE && d.sel0 != 0) ||
+      (d.sel1_kind == AGX3_FSEL_SEL_IMMEDIATE && d.sel1 != 0);
    struct agx3_field_kv alt_base[9];
    unsigned nab = 0;
    alt_base[nab++] = (struct agx3_field_kv){0, 1};
@@ -1722,7 +1726,7 @@ agx3_alu_fcmp_select(enum agx_isa_encoding enc, const struct agx3_fsel_desc *in,
    alt_base[nab++] = (struct agx3_field_kv){77, d.sel_16 ? 1 : 2};
    alt_base[nab++] = (struct agx3_field_kv){94, d.sel_16 ? 1 : 2};
 
-   for (unsigned pass = 0; pass < 2; ++pass) {
+   for (unsigned pass = 0; pass < (integer_select ? 1 : 2); ++pass) {
       const bool shifted = pass == 1;
       f[0] = (struct agx3_field_kv){shifted ? 17 : 3, d.dest};
       f[1] = (struct agx3_field_kv){shifted ? 26 : 12, d.dest_cache};
@@ -1746,42 +1750,14 @@ agx3_alu_fcmp_select_imm_width_abs(enum agx_isa_encoding enc, uint16_t dest,
                         const bool src_abs[2],
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || !src || !src_16 ||
-       !hints || !src_abs || (src_16[0] && src_16[1]) ||
-       dest >= 256 || (!dest_16 && (dest & 1)) ||
-       (condition != 0 && condition != 1 && condition != 2 &&
-        condition != 5 && condition != 6) ||
-       (wait_mask != 0 && wait_mask != 32))
-      return false;
    /* At least one absolute source: without one this is the shorter endpoint,
-    * and emitting the long form for it would change bytes that already work. */
-   if (!src_abs[0] && !src_abs[1])
+    * which agx3_alu_fcmp_select_imm_width() owns. */
+   if (!src_abs || (!src_abs[0] && !src_abs[1]))
       return false;
-   for (unsigned i = 0; i < 2; ++i)
-      if (src[i] >= 256 || (!src_16[i] && (src[i] & 1)) ||
-          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
-         return false;
 
-   const struct agx3_field_kv base[] = {
-      {0, 1}, {24, 2}, {25, dest_16 ? 1 : 2},
-      {42, 2}, {43, src_16[0] ? 1 : 2},
-      {59, 2}, {60, src_16[1] ? 1 : 2},
-      {76, 1}, {77, dest_16 ? 1 : 2}, {93, 1}, {94, dest_16 ? 1 : 2},
-   };
-   const struct agx3_field_kv fields[] = {
-      {17, dest}, {26, dest_cache}, {35, src[0]}, {52, src[1]},
-      {44, hints[0] == AGX3_ALU_HINT_CACHE},
-      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
-      {61, hints[1] == AGX3_ALU_HINT_CACHE},
-      {63, hints[1] == AGX3_ALU_HINT_DISCARD},
-      {47, src_abs[0]}, {64, src_abs[1]},
-      {68, if_true}, {85, if_false}, {110, condition},
-      {107, wait_mask == 32},
-   };
-   for (unsigned ep = 28; ep < 36; ++ep)
-      if (agx3_bind_compose(enc, "fsel", ep, base, 11, fields, 14, out, len))
-         return true;
-   return false;
+   return agx3_alu_fcmp_select_imm_width_internal(
+      enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
+      dest_cache, wait_mask, false, src_abs, out, len);
 }
 
 bool
@@ -1794,7 +1770,7 @@ agx3_alu_fcmp_select_imm_width_neg_second(
 {
    return agx3_alu_fcmp_select_imm_width_internal(
       enc, dest, src, src_16, hints, condition, if_true, if_false, dest_16,
-      dest_cache, wait_mask, true, out, len);
+      dest_cache, wait_mask, true, (const bool[2]){false, false}, out, len);
 }
 
 /* The same select with the negate on either comparator. A negate on the first
@@ -1842,7 +1818,7 @@ agx3_alu_fcmp_select_imm_width_neg(
 
    return agx3_alu_fcmp_select_imm_width_internal(
       enc, dest, s, w, h, condition, if_true, if_false, dest_16, dest_cache,
-      wait_mask, negate_second, out, len);
+      wait_mask, negate_second, (const bool[2]){false, false}, out, len);
 }
 
 bool
@@ -1865,14 +1841,22 @@ agx3_alu_fcmp_minifloat_select_half(
     *   020119b1860a00c22080
     *   0a0319b1860b00022080
     * field51 is the minifloat compare operand, field69 the selected half
-    * register and field85 the false immediate. */
-   const struct agx3_field_kv base[] = {
+    * register and field85 the false immediate. Those take the f0
+    * destination placement, which reads field85 as a minifloat; a non-zero
+    * integer needs the f3 placement Apple's ushort kernel uses,
+    * `x + ((a == -1.0f) ? h : 5)`: 12033db1860500222085. */
+   const bool integer = if_false != 0;
+   const struct agx3_field_kv float_base[] = {
       {0, 1}, {24, 2}, {25, 1}, {42, 2}, {43, 2}, {59, 1},
       {60, 2}, {76, 2}, {77, 1}, {93, 1}, {94, 1},
    };
+   const struct agx3_field_kv integer_base[] = {
+      {10, 2}, {11, 1}, {42, 2}, {43, 2}, {59, 1},
+      {60, 2}, {76, 2}, {77, 1}, {93, 1}, {94, 1},
+   };
    const struct agx3_field_kv fields[] = {
-      {17, dest}, {26, dest_cache}, {35, compare}, {51, minifloat},
-      {69, if_true}, {85, if_false},
+      {integer ? 3 : 17, dest}, {integer ? 12 : 26, dest_cache},
+      {35, compare}, {51, minifloat}, {69, if_true}, {85, if_false},
       {44, compare_hint == AGX3_ALU_HINT_CACHE},
       {46, compare_hint == AGX3_ALU_HINT_DISCARD},
       {78, true_hint == AGX3_ALU_HINT_CACHE},
@@ -1880,8 +1864,9 @@ agx3_alu_fcmp_minifloat_select_half(
       {107, wait_mask == 32}, {110, condition},
    };
    for (unsigned ep = 20; ep < 28; ++ep)
-      if (agx3_bind_compose(enc, "fsel", ep, base, 11, fields, 12, out,
-                            len))
+      if (agx3_bind_compose(enc, "fsel", ep,
+                            integer ? integer_base : float_base,
+                            integer ? 10 : 11, fields, 12, out, len))
          return true;
    return false;
 }
@@ -2021,9 +2006,15 @@ agx3_alu_fcmp_half_minifloat_select_f32(
     * registers. Register/zero alternatives use ep22 and f68/f85 for the
     * immediate instead. In both, f35 is the scalar-half comparator and f51
     * the ordinary minifloat. These endpoints have only the slot-6 wait bit;
-    * callers retire another producer slot before composing them. */
+    * callers retire another producer slot before composing them.
+    *
+    * ep22's f0 destination placement reads the immediate as a minifloat. A
+    * non-zero integer keeps the f3 placement, as Apple's
+    * `x + ((a < 0.5h) ? v : 5u)` does in its tied-result form
+    * 22062fa120850322, so it stays on ep27 with the immediate in f68/f85. */
    const bool mixed_selected =
-      selected_immediate[0] || selected_immediate[1];
+      (selected_immediate[0] && selected[0] == 0) ||
+      (selected_immediate[1] && selected[1] == 0);
    struct agx3_field_kv base[13];
    unsigned nbase = 0;
    if (mixed_selected) {
@@ -2538,8 +2529,14 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
          return false;
    }
    const bool abs_compare = compare_abs[0] || compare_abs[1];
+   /* Apple's absolute comparisons selecting a zero for a float result take
+    * the f0 destination placement, which reads f68/f85 as minifloats. A
+    * non-zero selected immediate is an integer bit pattern and needs the f3
+    * placement: `(fabs(a) < b) ? v : 5u` is 02011f0583080320208500000100.
+    * Zero is the same bits in either. */
    const bool abs_immediate_select =
-      abs_compare && (immediate[0] || immediate[1]);
+      abs_compare && (immediate[0] || immediate[1]) &&
+      (!immediate[0] || src[2] == 0) && (!immediate[1] || src[3] == 0);
    /* A 16-bit result used to be refused alongside a comparison against an
     * immediate zero. Only the second belongs here. The destination width is
     * an independent field on the long endpoint, exactly as it is on the short

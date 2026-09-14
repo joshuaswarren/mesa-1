@@ -251,9 +251,9 @@ bool agx3_alu_fcmp_select(enum agx_isa_encoding enc,
 
 /* The same select with an absolute value on either comparison source. ABS is
  * not a bit on the form above: it moves to a longer endpoint (ten bytes ->
- * fourteen) with the destination field block shifted by +14. f47 and f64 are
- * the two sources' bits and are separable. See agx3_alu_core.c for the
- * witnessed byte ladder. */
+ * fourteen) whose integer-select destination block is the same f3/f11/f12.
+ * f47 and f64 are the two sources' bits and are separable. See
+ * agx3_alu_core.c for the witnessed byte ladder. */
 bool agx3_alu_fcmp_select_imm_width_abs(
    enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
    const bool src_16[2], const enum agx3_alu_hint hints[2],
