@@ -55,6 +55,20 @@ fragment DepthOutput fragment_main(float4 position [[position]],
     return {src.read(uint2(position.xy), s)};
 }
 '''
+# The same shapes with the depth computed from the sample identity alone, so
+# the texture read is out of the way and what is left between the stores is the
+# per-sample machinery itself.
+CONST_PIXEL = '''
+fragment DepthOutput fragment_main() { return {0.5}; }
+'''
+CONST_SAMPLE = '''
+fragment DepthOutput fragment_main(uint s [[sample_id]]) {
+    return {(float)s * 0.25};
+}
+'''
+
 for samples in (1, 2, 4):
     build(f'depth-pixel-{samples}x', DEPTH_PIXEL, samples, False)
     build(f'depth-sample-{samples}x', DEPTH_SAMPLE, samples, False)
+    build(f'const-pixel-{samples}x', CONST_PIXEL, samples, False)
+    build(f'const-sample-{samples}x', CONST_SAMPLE, samples, False)

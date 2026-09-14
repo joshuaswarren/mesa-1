@@ -122,3 +122,33 @@ cover enough of these encodings to disassemble the block automatically -- the
 generated decoder mis-decodes the program's prologue -- so identifying each
 instruction means the same targeted probe ladder used elsewhere in this
 directory: vary one thing, diff the bytes.
+
+## Isolating the block: depth from the sample identity alone
+
+Dropping the texture read leaves only the per-sample machinery, and the
+baseline becomes exact:
+
+```
+const-pixel-1x   176 B  one store
+const-pixel-2x   272 B  one store       byte-identical to const-pixel-4x
+const-pixel-4x   272 B  one store
+const-sample-1x  180 B  one store       the 1x collapse
+const-sample-2x  288 B  two stores      86-byte stride
+const-sample-4x  460 B  four stores     86-byte stride
+```
+
+The per-pixel program does not change with the sample count at all. Each extra
+sample costs one store plus one 80-byte block, and the block is the same at two
+and four samples but for a handful of bytes:
+
+```
+2x: 24c21026a720540503081200c010010023042f830002000000009f015406030a10
+    001605229123010200830020909f015400031e1800140432053f03830242008004
+    000410002b012f00420000041000
+4x: 24c21026a720540503081200c010010023042f830002000000009f015404030a10
+    001605329123010200830020909f015404031e1000140432072f03030242008006
+    000410002b052f00420000041000
+```
+
+which is what more scoreboard slots in flight looks like, not a different
+sequence. This is the cleanest starting point for naming each instruction.
