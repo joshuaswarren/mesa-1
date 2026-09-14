@@ -320,10 +320,19 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       /* G17P multisample backgrounds store through the coverage register. */
       .fs.nr_samples =
          cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
-      .g17p_mrt_bg = key->mixed_mrt,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
+
+   /* The multi-target background protocol is keyed, not inferred: without
+    * this the packer sees a bare run of tile stores, refuses the shader and
+    * the draw is dropped. Vulkan says so through mixed_mrt; GL reaches the
+    * same shapes through an ordinary draw-buffer mask, and
+    * KHR-GL30.draw_buffers clears eight RGBA8 targets at once. */
+   unsigned background_targets = 0;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      background_targets += key->op[rt] != AGX_BG_EOT_NONE;
+   compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -490,8 +499,11 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       /* A mixed layout storing several targets uses the multi-target
        * builtin, selecting each target's IMGWBLK tail by its format. A
        * single stored target keeps its format's own program. */
+      /* Counted whatever named the layout. A GL draw-buffer mask reaches the
+       * same several-target store as a Vulkan mixed layout; the selectors
+       * come from each target's own logical format either way. */
       unsigned stores = 0;
-      for (unsigned rt = 0; key->mixed_mrt && rt < ARRAY_SIZE(key->op); ++rt)
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
          stores += key->op[rt] == AGX_EOT_STORE;
 
       if (stores > 1 &&

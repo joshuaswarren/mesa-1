@@ -4502,8 +4502,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       if (op == AGX_BG_EOT_NONE)
          capacity = AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE;
       else if (wide_count)
+         /* A wide background is not an RT0 reload: eight clear values need
+          * eight load chunks, and the generated program runs past the RT0
+          * bound (344 bytes against 246 for eight RGBA8 targets, which is
+          * what KHR-GL30.draw_buffers clears). */
          capacity = store ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
-                          : AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
+                          : AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE;
       else if (store)
          capacity = AGX_IOTO_G17P_RT0_EOT_PROGRAM_SIZE;
       else if (op == AGX_BG_CLEAR)
@@ -4571,6 +4575,10 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             .imageblock_offset_B =
                agx_tilebuffer_offset_B(&key.tib, first_rt),
             .attachment_count = attachment_count,
+            /* Several targets stored at once is the mixed-format builtin,
+             * whichever API named the layout: the selectors already come
+             * from each target's own logical format (agx_bg_eot.c). */
+            .mixed_mrt = attachment_count >= 2,
             .imageblock_offset1_B =
                dual_mrt_active ? agx_tilebuffer_offset_B(&key.tib, 1) : 0,
             .shader_binary_size = shader->info.binary_size,

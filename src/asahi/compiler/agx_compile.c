@@ -6090,25 +6090,26 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
-    * ordinary colour transactions, including two/three RGBA32 targets, and
-    * a mixed Vulkan BG names its targets through the key instead.
+    * ordinary colour transactions, including two/three RGBA32 targets. Other
+    * multi-target BG programs have no transactions either and store in no
+    * required partition order.
     *
-    * Wide RGBA8 is not in that set. The four- and eight-output native
-    * fragments in test/probes/g17p-wide-mrt/ acquire class12 before the
-    * highest target, retain it across the lower targets' own transactions
-    * and release it with the last store, so their stores descend; a clear
-    * writes the same tile words through the same protocol, which
-    * asahi-g17p-mrt-epilog traverses through real NIR lowering and RA. */
+    * The wide-MRT class protocol is a FRAGMENT witness
+    * (test/probes/g17p-wide-mrt/), and extending it to clears is not
+    * supported by anything: a background compiled with the transaction no
+    * longer matches agx3_g17p_rt0_bg_program_generate()'s loader
+    * descriptor, and KHR-GL30.draw_buffers.draw_buffers_1 aborts the
+    * process at "background Ioto program" on real hardware. */
    if (ctx->key->fs.ignore_tib_dependencies) {
       bool rgba32 = !load_count;
-      bool r32_quad = !load_count && store_count == 4;
-      for (unsigned i = 0; i < store_count; ++i) {
+      for (unsigned i = 0; i < store_count; ++i)
          rgba32 &= stores[i]->format == AGX_FORMAT_I32 &&
                    stores[i]->mask == 15 && stores[i]->pixel_offset == 16 * i;
-         r32_quad &= stores[i]->format == AGX_FORMAT_I32 &&
-                     stores[i]->mask == 1 && stores[i]->pixel_offset == 4 * i;
-      }
-      if (ctx->key->g17p_mrt_bg || rgba32 || r32_quad)
+      bool rgba8 = !load_count && store_count >= 3;
+      for (unsigned i = 0; i < store_count; ++i)
+         rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
+                  stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
+      if (ctx->key->g17p_mrt_bg || store_count >= 4 || rgba32 || rgba8)
          return false;
    }
 

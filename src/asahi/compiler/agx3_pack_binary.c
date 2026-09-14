@@ -6193,6 +6193,11 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (!p.count || (p.count == 1 && p.targets[0] == 0))
       return (struct agx3_g17p_mrt_protocol){0};
 
+   /* A background of four or more targets keeps the constructors' ascending,
+    * transaction-free shape; see the note in agx_compile.c. */
+   if (p.count >= 4 && ctx->key->fs.ignore_tib_dependencies)
+      return (struct agx3_g17p_mrt_protocol){0};
+
    for (unsigned i = 0; i < p.count; ++i) {
       for (unsigned j = i + 1; j < p.count; ++j) {
          if (p.offsets[j] < p.offsets[i]) {
