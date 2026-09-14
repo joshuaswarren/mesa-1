@@ -6217,16 +6217,19 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    }
    if (!stop)
       return false;
-   unsigned count = 0;
-   while (count < ARRAY_SIZE(stores) && stores[count])
-      ++count;
-   if (count < 5)
+   /* Constant position components need no UVS store. A layer or point-size
+    * export can therefore follow holes in the position vector. Sort the live
+    * SSA exports just as for dense outputs, without manufacturing values for
+    * those holes. The packer's sparse protocol retains their actual indices.
+    */
+   bool user_output = false;
+   for (unsigned i = 4; i < ARRAY_SIZE(stores); ++i)
+      user_output |= stores[i] != NULL;
+   if (!user_output)
       return false;
-   for (unsigned i = count; i < ARRAY_SIZE(stores); ++i) {
-      if (stores[i])
-         return false;
-   }
-   for (unsigned i = 0; i < count; ++i) {
+   for (unsigned i = 0; i < ARRAY_SIZE(stores); ++i) {
+      if (!stores[i])
+         continue;
       list_del(&stores[i]->link);
       list_addtail(&stores[i]->link, &stop->link);
    }
