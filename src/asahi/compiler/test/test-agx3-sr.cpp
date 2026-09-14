@@ -155,6 +155,35 @@ TEST(AGX3SrCore, G17PBackFacingInput)
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &wide, out, &len));
 }
 
+TEST(AGX3SrCore, G17PActiveThreadIndexInSubgroup)
+{
+   /* metal-nt -arch applegpu_g17p: simd_is_first() reads SR34 into h0 on slot
+    * 1 with these bytes in compute and vertex shaders, and with f48 set in the
+    * long form in fragment shaders. */
+   static const uint8_t compute[] = {0x04, 0x95, 0x10, 0x06};
+   static const uint8_t fragment[] = {0x04, 0x95, 0x11, 0x06,
+                                      0x01, 0x00, 0x00, 0x00};
+   struct agx3_sr_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_SR_W16;
+   d.sr = 34;
+   d.slot = 1;
+   uint8_t out[AGX3_SR_MAX_LENGTH];
+   uint8_t len = 0;
+
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(compute));
+   EXPECT_EQ(0, memcmp(out, compute, len));
+
+   d.fragment_active_index = true;
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(fragment));
+   EXPECT_EQ(0, memcmp(out, fragment, len));
+
+   d.sr = 7;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+}
+
 TEST(AGX3SrCore, WaitEscalatesToLongForm)
 {
    /* A wait bit cannot ride the compact form; Apple's own at_dev_nr witness

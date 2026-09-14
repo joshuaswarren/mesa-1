@@ -584,7 +584,11 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
    nir_pop_if(&b, NULL);
    agx_preprocess_nir(b.shader);
 
+   /* Both must key off the active thread index. A subgroup reduction also
+    * sees lanes masked off by the enclosing control flow, so reducing the
+    * invocation IDs elects the wrong lane there. */
    bool lowered = true;
+   bool active_index = false;
    nir_foreach_function_impl(impl, b.shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -594,11 +598,14 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
                nir_instr_as_intrinsic(instr)->intrinsic;
             if (op == nir_intrinsic_elect ||
                 op == nir_intrinsic_read_first_invocation ||
-                op == nir_intrinsic_load_active_subgroup_invocation_agx)
+                op == nir_intrinsic_reduce)
                lowered = false;
+            if (op == nir_intrinsic_load_active_subgroup_invocation_agx)
+               active_index = true;
          }
       }
    }
+   lowered &= active_index;
 
    struct agx_shader_key key = {0};
    key.dev.encoding = encoding;

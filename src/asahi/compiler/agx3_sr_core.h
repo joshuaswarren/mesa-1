@@ -41,6 +41,10 @@ struct agx3_sr_desc {
    uint8_t sr;         /* Apple's normalized special-register field f21 */
    uint8_t slot;       /* scoreboard slot this read signals: 1..6 (b) / 1..8 (c) */
    uint16_t wait_mask; /* bit i sets wait on slot i+1 */
+
+   /* f48. Apple sets it on every fragment-stage read of SR 34, the active
+    * thread index in the subgroup, and on no other read. */
+   bool fragment_active_index;
 };
 
 /* True if (sr, width) has a byte-exact corpus witness. Unwitnessed pairs must
