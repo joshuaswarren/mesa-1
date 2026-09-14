@@ -2397,8 +2397,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
             /* The AGX2 cache-operation train collapses on AGX3 into one
              * exact barrier per semantic memory scope. Keep Apple's observed
-             * device -> texture -> threadgroup ordering. */
-            if (modes & (nir_var_mem_global | nir_var_image)) {
+             * device -> texture -> threadgroup ordering. A tessellation
+             * control shader runs as a compute kernel whose outputs poly
+             * lowered to the global output buffer, so its output barrier is
+             * a device-memory barrier. */
+            const bool tcs_outputs =
+               b->shader->nir->info.stage == MESA_SHADER_TESS_CTRL &&
+               (modes & nir_var_shader_out);
+            if ((modes & (nir_var_mem_global | nir_var_image)) ||
+                tcs_outputs) {
                agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_DEVICE);
                emitted = true;
             }
