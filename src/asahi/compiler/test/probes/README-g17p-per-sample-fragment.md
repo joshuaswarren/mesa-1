@@ -59,18 +59,29 @@ d7 44 54 08 40 03 34
 d7 84 54 0c 60 03 07
 ```
 
-Byte 1 walks `0x14, 0x24, 0x44, 0x84` -- a **one-hot** sample mask in the high
-nibble, `(1 << sample) << 4`. The two operand bytes walk `sample * 4` and
-`sample * 0x20`. The per-pixel program has a single store whose mask byte is
-`0x14` followed by a whole-pixel `8f 14 54 22 0f 00 54 9a ff ff ff ff ff`.
+Read against the field roles `agx3_zs_core.h` already documents, these are
+**four ordinary `depthf` instructions**, not a new form. The two operand bytes
+walk `sample * 4` and `sample * 0x20` -- the f5 operand naming each copy's own
+staged word -- and byte 1 walks `0x10, 0x20, 0x40, 0x80`, which is the
+f17..f22 per-slot wait mask: one scoreboard slot per copy. No field carries a
+sample number.
 
-This is what `ZS_EMIT_AGX3` still has to learn: `agx3_pack_binary.c` accepts
-only the whole-pixel form the fast-linked epilog emits, so an unrolled
-per-sample body is refused with
+The sample selection lives where that header says the contract lives: in what
+the staged register holds, and in the coverage the `movmsk` before each store
+sets. `lower_g17p_tile_sample()` already describes the same shape for
+tilebuffer stores -- coverage "ANDed with a one-hot bit for each iteration of
+an unrolled per-sample shader".
+
+So the encoders exist. What `agx3_pack_binary.c` still has to learn is the
+**sequencing**: its `g17p_deferred_zs_wait` is a one-shot, so a body that emits
+one `wait_pix` and N `zs_emit_agx3` is refused at the second with
 
 ```
 no grounded AGX3 encoding for zs_emit_agx3
 ```
+
+Each store needs its own pixel transaction on its own slot, with coverage set
+per iteration.
 
 Reproduce with `ASAHI_MSAA_DEPTH_BLIT=1` under the drm-shim
 (`asahi-g17p-blit`), which builds the blit's programs without a GPU.
