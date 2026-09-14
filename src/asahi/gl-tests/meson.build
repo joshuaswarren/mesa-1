@@ -283,6 +283,26 @@ gl_rgb32_fbo = executable(
   build_by_default : false,
 )
 
+gl_stencil_blit = executable(
+  'asahi-g17p-gl-stencil-blit',
+  files('test-g17p-gl-stencil-blit.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-stencil-blit-software-control',
+  gl_stencil_blit,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_msaa_resolve = executable(
   'asahi-g17p-gl-msaa-resolve',
   files('test-g17p-gl-msaa-resolve.c'),
