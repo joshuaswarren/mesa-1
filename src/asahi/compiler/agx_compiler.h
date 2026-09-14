@@ -1089,12 +1089,11 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* The promoted Apple witness exports position plus sixteen float4 user
- * locations (68 scalars). Keep room for the opt-in ANGLE qualification shape:
- * position plus seventeen float4 user locations, or 72 contiguous
- * output/staging scalars. The Vulkan property remains 64 user components by
- * default until that exact image oracle passes on hardware. */
-#define AGX3_MAX_VERTEX_OUTPUTS 72u
+/* Apple's G17P compiler emits position plus thirty-one float4 user locations
+ * as 128 UVSWs for UVS indices 0..127, and __GPU_LD_MD root.field1.field3 is
+ * 128; a thirty-second float4 exceeds the fragment's 127 coefficients. Each
+ * output stages at half 2k, which UVSW's eight-bit staging operand covers. */
+#define AGX3_MAX_VERTEX_OUTPUTS 128u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so

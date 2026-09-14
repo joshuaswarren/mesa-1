@@ -893,20 +893,11 @@ hk_get_device_properties(const struct agx_device *dev,
     * giving a theoretical limit of 119. We round down to 116 to give a sensible
     * limit in vec4s.
     */
-   /* The legacy pipeline can address 119 components. HAL200 is promoted
-    * through Apple's position + sixteen-float4 (68 total UVS word) program,
-    * giving Vulkan's required 64 user interface components.  ANGLE 151 needs
-    * one additional float4 for its transform-feedback copy of gl_Position;
-    * expose that 68-user/72-total candidate only for its hardware oracle. */
-   /* ANGLE needs one float4 beyond the sixteen-float4 witness for its internal
-    * transform-feedback copy of gl_Position.  Without it eglCreateContext for
-    * ES 3.0 fails with EGL_BAD_ATTRIBUTE, Chromium's GPU process exits during
-    * initialisation, and WebGL/WebGPU are unavailable entirely -- measured on
-    * G17P, where the 64-word limit reports gl=disabled/angle=none and the
-    * 68-word limit brings WebGL, WebGL2 and WebGPU all up.  It is the default
-    * so no browser needs a bespoke environment to get hardware acceleration. */
-   unsigned max_vgt_output_components =
-      dev->chip == AGX_CHIP_G17P ? HK_AGX3_G17P_MAX_USER_WORDS : 116;
+   /* G17P has the same 128-word UVS budget: Apple's compiler writes position
+    * plus thirty-one float4 user locations, and its fragment linker admits 127
+    * coefficients. The same reserve for clip/cull and layer/viewport words
+    * applies. */
+   unsigned max_vgt_output_components = 116;
 
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),

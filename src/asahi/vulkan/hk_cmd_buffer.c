@@ -1322,8 +1322,8 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
       api_vs ? &api_vs->variants[HK_VS_VARIANT_HW] : NULL;
    if (!vs || gfx->shaders[MESA_SHADER_GEOMETRY] ||
        gfx->shaders[MESA_SHADER_TESS_EVAL] ||
-       cf->nr_bindings > HK_AGX3_G17P_MAX_USER_WORDS + 2 ||
-       cf->nr_cf > HK_AGX3_G17P_MAX_USER_WORDS + 2 ||
+       cf->nr_bindings > HK_AGX3_G17P_MAX_COEFFICIENTS ||
+       cf->nr_cf > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        vs->agx3_vdm_state_update.source_layout !=
           AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT ||
        vs->info.uvs.user_size > HK_AGX3_G17P_MAX_USER_WORDS)
