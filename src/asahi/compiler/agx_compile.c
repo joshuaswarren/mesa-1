@@ -2307,6 +2307,13 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_mov_to(b, dst, agx_abs(agx_vertex_id(b)));
 
    case nir_intrinsic_load_primitive_id:
+      /* AGX3's tessellator hands the patch index to the post-tessellation
+       * vertex program in SR 0xd9, Apple's [[patch_id]]. */
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
+         assert(stage == MESA_SHADER_VERTEX && "post-tessellation vertex");
+         return agx_get_sr_to(b, dst, AGX_SR_TESS_PATCH_ID);
+      }
+
       assert(stage == MESA_SHADER_TESS_EVAL);
       return agx_mov_to(b, dst, agx_abs(agx_vertex_id(b)));
 
@@ -2320,6 +2327,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_mov_to(b, dst, agx_abs(agx_instance_id(b)));
 
    case nir_intrinsic_load_tess_coord_xy: {
+      /* On AGX3 the tessellator's position in the patch arrives as two
+       * 32-bit float special registers, Apple's [[position_in_patch]]. */
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
+         assert(stage == MESA_SHADER_VERTEX && "post-tessellation vertex");
+         agx_index coords[] = {agx_get_sr(b, 32, AGX_SR_TESS_COORD_U),
+                               agx_get_sr(b, 32, AGX_SR_TESS_COORD_V)};
+         return agx_emit_collect_to(b, dst, 2, coords);
+      }
+
       assert(stage == MESA_SHADER_TESS_EVAL);
 
       agx_index coords[] = {agx_tess_coord_x(b), agx_tess_coord_y(b)};

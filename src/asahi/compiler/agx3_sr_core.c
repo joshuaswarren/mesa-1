@@ -26,6 +26,13 @@
  * G17P vertex shaders and compile to `0cdd1006` / `0cd81006` for destination
  * r0.
  *
+ * Three more feed the post-tessellation vertex program of a Metal
+ * tessellation pipeline, between those two: 47 (byte 0xd9) is [[patch_id]],
+ * and 48 and 49 (0xda, 0xdb) are the two [[position_in_patch]] coordinates as
+ * 32-bit floats, for triangle and quad patches alike (a triangle's third
+ * barycentric is computed as 1 - u - v). metal-nt -arch applegpu_g17p reads
+ * them as `0cd91006`, `2cda1046` and `1cdb1066`.
+ *
  * Three more 16-bit numbers are fragment-only and were added from the G17P
  * writeout session (offline `applegpu-nt -arch applegpu_g17p`, 2026-08-31):
  *
@@ -66,7 +73,7 @@ agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
       }
    }
    if (width == AGX3_SR_W32)
-      return (sr >= 23 && sr <= 28) || sr == 46 || sr == 51;
+      return (sr >= 23 && sr <= 28) || (sr >= 46 && sr <= 49) || sr == 51;
    return false;
 }
 

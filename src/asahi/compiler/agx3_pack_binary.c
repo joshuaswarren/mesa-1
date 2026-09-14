@@ -745,6 +745,9 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       /* The semantic enum carries the hardware SR byte (0xd8/0xdd), while
        * agx3_sr_core consumes Apple's anonymous normalized f21 value. */
       SR(AGX_SR_INSTANCE_ID, 46, AGX3_SR_W32);
+      SR(AGX_SR_TESS_PATCH_ID, 47, AGX3_SR_W32);
+      SR(AGX_SR_TESS_COORD_U, 48, AGX3_SR_W32);
+      SR(AGX_SR_TESS_COORD_V, 49, AGX3_SR_W32);
       SR(AGX_SR_VERTEX_ID, 51, AGX3_SR_W32);
    default:
       return false;

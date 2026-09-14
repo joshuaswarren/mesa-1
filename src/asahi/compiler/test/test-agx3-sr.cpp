@@ -207,6 +207,32 @@ TEST(AGX3SrCore, G17PTotalActiveThreadsInSubgroup)
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
 }
 
+TEST(AGX3SrCore, G17PPostTessellationInputs)
+{
+   /* metal-nt -arch applegpu_g17p, the post-tessellation vertex program of a
+    * triangle patch pipeline reading [[patch_id]] and [[position_in_patch]]. */
+   static const struct {
+      uint8_t sr, dest, slot;
+      uint8_t bytes[4];
+   } reads[] = {
+      {47, 0, 1, {0x0c, 0xd9, 0x10, 0x06}},
+      {48, 4, 3, {0x2c, 0xda, 0x10, 0x46}},
+      {49, 2, 4, {0x1c, 0xdb, 0x10, 0x66}},
+   };
+   for (unsigned i = 0; i < sizeof(reads) / sizeof(reads[0]); ++i) {
+      struct agx3_sr_desc d = {};
+      d.dest = reads[i].dest;
+      d.width = AGX3_SR_W32;
+      d.sr = reads[i].sr;
+      d.slot = reads[i].slot;
+      uint8_t out[AGX3_SR_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      ASSERT_EQ(len, sizeof(reads[i].bytes));
+      EXPECT_EQ(0, memcmp(out, reads[i].bytes, len));
+   }
+}
+
 TEST(AGX3SrCore, WaitEscalatesToLongForm)
 {
    /* A wait bit cannot ride the compact form; Apple's own at_dev_nr witness

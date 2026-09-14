@@ -153,6 +153,9 @@ SR = enum("sr", {
    # AGX3 hardware-vertex inputs. Apple emits these as explicit 32-bit rld
    # instructions instead of the AGX2 preloaded-input ABI.
    216: 'instance_id',
+   217: 'tess_patch_id',
+   218: 'tess_coord_u',
+   219: 'tess_coord_v',
    221: 'vertex_id',
 })
 
