@@ -794,12 +794,21 @@ hk_get_device_features(
        * falls back to SwiftShader. */
       features->fragmentStoresAndAtomics = true;
       features->shaderTessellationAndGeometryPointSize = false;
-      features->shaderResourceResidency = false;
       features->advancedBlendCoherentOperations = true;
-      features->sparseBinding = false;
-      features->sparseResidencyAliased = false;
-      features->sparseResidencyImage2D = false;
-      features->sparseResidencyBuffer = false;
+      /* Sparse binding and residency reuse the AGX2 architecture wholesale:
+       * per-page VM_BIND with unbound pages mapped to the scratch/zero page,
+       * a read-only shadow at +sparse_ro_offset, and a userspace sparse map
+       * that the G17P texture descriptor points at in Sparse mode. The kernel
+       * already accepts DRM_ASAHI_BIND_SINGLE_PAGE binds, and the G17P user VA
+       * window is split for the RO alias exactly as AGX2 is. Keep it behind
+       * the unverified-feature opt-in until the residency-query descriptor
+       * path is qualified on hardware; every piece below is chip-agnostic. */
+      const bool sparse = hk_g17p_unverified_feature("sparse");
+      features->shaderResourceResidency = sparse;
+      features->sparseBinding = sparse;
+      features->sparseResidencyAliased = sparse;
+      features->sparseResidencyImage2D = sparse;
+      features->sparseResidencyBuffer = sparse;
       /* The common Honeykrisp lowering duplicates a draw per view, writes
        * ViewIndex through the draw root and routes it through the packed
        * layer/viewport UVS output.  G17P now also has exact array BG/EOT
@@ -1603,9 +1612,13 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       VK_QUEUE_SPARSE_BINDING_BIT;
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* Graphics, compute and transfers use the native HAL200 queue path.
-       * Sparse binding still requires separate kernel support. */
+       * Sparse binding rides the shared per-page VM_BIND path; advertise it
+       * only when the same opt-in that turns on the sparse features above is
+       * set, so the queue family and the device features stay consistent. */
       queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
                     VK_QUEUE_TRANSFER_BIT;
+      if (pdev->vk.supported_features.sparseBinding)
+         queue_flags |= VK_QUEUE_SPARSE_BINDING_BIT;
    }
 
    uint32_t queue_count = 1;
