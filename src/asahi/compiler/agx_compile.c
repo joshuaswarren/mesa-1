@@ -4222,8 +4222,12 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          /* Compatibility for callers which already performed the AGX2 NIR
           * quadrant reduction. Fold [0,4] exactly to [-1,1], then use the
-          * same native sinc operation as the G17P radians lowering. */
-         agx_index middle = agx_fadd(b, agx_immediate_f(2.0f), agx_neg(s0));
+          * same native sinc operation as the G17P radians lowering. The
+          * folds stay in the operand's own precision: the builder would size
+          * the temporary from the leading immediate and make a 16-bit add of
+          * a 32-bit quadrant, which neither keeps the precision nor packs. */
+         agx_index middle = agx_temp(b->shader, s0.size);
+         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(s0));
          agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
          agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
                                    middle, AGX_FCOND_LE);
@@ -6075,19 +6079,25 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
-    * ordinary colour transactions, including two/three RGBA32 targets. Other
-    * multi-target BG programs have no transactions either and store in no
-    * required partition order. */
+    * ordinary colour transactions, including two/three RGBA32 targets, and
+    * a mixed Vulkan BG names its targets through the key instead.
+    *
+    * Wide RGBA8 is not in that set. The four- and eight-output native
+    * fragments in test/probes/g17p-wide-mrt/ acquire class12 before the
+    * highest target, retain it across the lower targets' own transactions
+    * and release it with the last store, so their stores descend; a clear
+    * writes the same tile words through the same protocol, which
+    * asahi-g17p-mrt-epilog traverses through real NIR lowering and RA. */
    if (ctx->key->fs.ignore_tib_dependencies) {
       bool rgba32 = !load_count;
-      for (unsigned i = 0; i < store_count; ++i)
+      bool r32_quad = !load_count && store_count == 4;
+      for (unsigned i = 0; i < store_count; ++i) {
          rgba32 &= stores[i]->format == AGX_FORMAT_I32 &&
                    stores[i]->mask == 15 && stores[i]->pixel_offset == 16 * i;
-      bool rgba8 = !load_count && store_count >= 3;
-      for (unsigned i = 0; i < store_count; ++i)
-         rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
-                  stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
-      if (ctx->key->g17p_mrt_bg || store_count >= 4 || rgba32 || rgba8)
+         r32_quad &= stores[i]->format == AGX_FORMAT_I32 &&
+                     stores[i]->mask == 1 && stores[i]->pixel_offset == 4 * i;
+      }
+      if (ctx->key->g17p_mrt_bg || rgba32 || r32_quad)
          return false;
    }
 

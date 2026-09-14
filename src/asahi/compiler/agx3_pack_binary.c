@@ -6181,9 +6181,6 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.count < 2)
       return (struct agx3_g17p_mrt_protocol){0};
 
-   if (p.count >= 4 && ctx->key->fs.ignore_tib_dependencies)
-      return (struct agx3_g17p_mrt_protocol){0};
-
    for (unsigned i = 0; i < p.count; ++i) {
       for (unsigned j = i + 1; j < p.count; ++j) {
          if (p.offsets[j] < p.offsets[i]) {
