@@ -1873,6 +1873,21 @@ agx_emit_local_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
    unsigned nr = instr->def.num_components;
    unsigned mask = BITFIELD_MASK(nr);
 
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       format == AGX_FORMAT_I8 && nr > 1) {
+      /* LDTG returns packed bytes, not one byte in each half register.
+       * Keep the vector memory transaction and unpack its physical payload. */
+      const unsigned nr_halves = DIV_ROUND_UP(nr, 2);
+      agx_index packed = agx_vec_temp(b->shader, AGX_SIZE_16, nr_halves);
+      agx_local_load_to(b, packed, base, index, format, mask)->memory_is_packed =
+         true;
+      agx_index halves[2] = {agx_null()};
+      agx_emit_split(b, halves, packed, nr_halves);
+      agx_unpack_integer_8_agx3(b, dst, halves, nr);
+      agx_emit_cached_split(b, dst, nr);
+      return;
+   }
+
    agx_local_load_to(b, dst, base, index, format, mask);
    agx_emit_cached_split(b, dst, nr);
 }
@@ -1893,7 +1908,22 @@ agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
    unsigned mask = BITFIELD_MASK(
       nir_src_num_components(instr->src[0])); /* XXX: there's a write mask */
 
-   agx_local_store(b, value, base, index, format, mask);
+   const bool packed_bytes =
+      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      format == AGX_FORMAT_I8 && nir_src_num_components(instr->src[0]) > 1;
+   if (packed_bytes) {
+      const unsigned nr = nir_src_num_components(instr->src[0]);
+      agx_index channels[4] = {agx_null()};
+      for (unsigned i = 0; i < nr; ++i)
+         channels[i] = agx_extract_nir_src(b, instr->src[0], i);
+      agx_index packed[2] = {agx_null()};
+      const unsigned nr_packed =
+         agx_pack_integer_8_agx3(b, channels, nr, format, packed);
+      assert(nr_packed == DIV_ROUND_UP(nr, 2));
+      value = agx_emit_collect(b, nr_packed, packed);
+   }
+   agx_local_store(b, value, base, index, format, mask)->memory_is_packed =
+      packed_bytes;
 }
 
 static void

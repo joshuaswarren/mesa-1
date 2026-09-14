@@ -437,7 +437,8 @@ typedef struct {
    bool coherent : 1;
    /* AGX3 memory index scale excludes the access-format size. */
    bool memory_index_is_bytes : 1;
-   /* Raw subword memory elements occupy packed 32-bit SSA words. */
+   /* Raw subword memory elements use packed payloads (device loads use
+    * 32-bit SSA words; byte stores and shared loads use 16-bit halves). */
    bool memory_is_packed : 1;
 
    /* Explicit AGX3 SCS load semantics.  These stay on the internal SCS pseudo

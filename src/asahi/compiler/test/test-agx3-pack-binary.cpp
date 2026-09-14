@@ -7093,6 +7093,28 @@ TEST_F(AGX3PackBinary, G17PFrontFacingUsesNativeBackFacingSr)
    pack(b, /*expect_ok=*/false);
 }
 
+TEST_F(AGX3PackBinary, PackedSharedByteVectorsUsePhysicalHalves)
+{
+   for (unsigned channels = 2; channels <= 4; ++channels) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      const unsigned halves = DIV_ROUND_UP(channels, 2);
+      agx_index value = agx_register(4, AGX_SIZE_16);
+      value.channels_m1 = halves - 1;
+      agx_instr *load = agx_local_load_to(
+         b, value, agx_immediate(0), agx_immediate(1), AGX_FORMAT_I8,
+         BITFIELD_MASK(channels));
+      load->memory_is_packed = true;
+      agx_instr *store = agx_local_store(
+         b, value, agx_immediate(0), agx_immediate(5), AGX_FORMAT_I8,
+         BITFIELD_MASK(channels));
+      store->memory_is_packed = true;
+      /* Keep the logical byte mask while tracking only its physical halves
+       * through the asynchronous producer and consumer. */
+      agx_stop(b);
+      EXPECT_FALSE(pack(b).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, LoadAddStoreCarriesWait)
 {
    /* A load, an add that consumes the load result, and a store. The add must

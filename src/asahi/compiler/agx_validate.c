@@ -185,6 +185,11 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
    case AGX_OPCODE_LOCAL_LOAD:
    case AGX_OPCODE_STACK_LOAD:
    case AGX_OPCODE_LD_TILE:
+      if (I->op == AGX_OPCODE_LOCAL_LOAD && I->memory_is_packed) {
+         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+         assert(I->format == AGX_FORMAT_I8 && I->dest[d].size == AGX_SIZE_16);
+         return DIV_ROUND_UP(util_bitcount(I->mask), 2);
+      }
       if (I->op == AGX_OPCODE_DEVICE_LOAD && I->memory_is_packed) {
          assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
          assert(I->dest[d].size == AGX_SIZE_32);
@@ -306,7 +311,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
    case AGX_OPCODE_ST_TILE:
       /* See agx_write_registers */
       if (s == 0) {
-         if (I->op == AGX_OPCODE_DEVICE_STORE && I->memory_is_packed) {
+         if ((I->op == AGX_OPCODE_DEVICE_STORE ||
+              I->op == AGX_OPCODE_LOCAL_STORE) && I->memory_is_packed) {
             assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
             assert(I->format == AGX_FORMAT_I8);
             return DIV_ROUND_UP(util_bitcount(I->mask), 2);

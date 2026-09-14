@@ -3153,7 +3153,10 @@ agx3_translate_local(enum agx_isa_encoding enc, const agx_instr *I,
    const agx_index data = is_store ? I->src[0] : I->dest[0];
    const enum agx_size expected =
       d->width == AGX3_MEM_W32 ? AGX_SIZE_32 : AGX_SIZE_16;
-   const unsigned halves = agx_size_align_16(expected) * util_bitcount(I->mask);
+   const bool packed_bytes = enc == AGX_ISA_ENCODING_AGX3B &&
+      d->width == AGX3_MEM_W8 && I->memory_is_packed;
+   const unsigned halves = packed_bytes ? DIV_ROUND_UP(util_bitcount(I->mask), 2)
+      : agx_size_align_16(expected) * util_bitcount(I->mask);
    if (!agx3_src_is_register(data) || data.memory || data.size != expected ||
        (data.value & (agx_size_align_16(expected) - 1)) ||
        data.value + halves > 256)

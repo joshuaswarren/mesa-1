@@ -96,6 +96,45 @@ check_shared_store_compute(enum agx_isa_encoding encoding)
 }
 
 static bool
+check_g17p_shared_byte_vectors(void)
+{
+   for (unsigned channels = 2; channels <= 4; ++channels) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "packed shared bytes");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.shared_size = 16;
+      nir_def *values[4];
+      for (unsigned c = 0; c < channels; ++c)
+         values[c] = nir_imm_intN_t(&b, 0x35 + c * 0x31, 8);
+      nir_store_shared(&b, nir_vec(&b, values, channels), nir_imm_int(&b, 1),
+                       .align_mul = 1, .write_mask = BITFIELD_MASK(channels),
+                       .access = ACCESS_VOLATILE);
+      nir_def *loaded = nir_load_shared(
+         &b, channels, 8, nir_imm_int(&b, 1), .align_mul = 1,
+         .access = ACCESS_VOLATILE);
+      nir_store_global(&b, nir_u2u32(&b, loaded),
+                       nir_imm_int64(&b, UINT64_C(0x2000000000)),
+                       .align_mul = 4);
+      agx_preprocess_nir_g17p(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+      };
+      struct agx_shader_part part = {0};
+      const bool ok = agx_compile_shader_nir(b.shader, &key, &part);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok) {
+         fprintf(stderr, "shared byte vector rejected: %u channels\n", channels);
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool
 check_unlowered_printf_address_rejected(enum agx_isa_encoding encoding)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -2324,6 +2363,9 @@ main(int argc, char **argv)
       return 1;
    if (!check_g17p_subgroup_quad_compute(true) ||
        !check_g17p_subgroup_quad_compute(false))
+      return 1;
+
+   if (!check_g17p_shared_byte_vectors())
       return 1;
 
    for (unsigned i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {
