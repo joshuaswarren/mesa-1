@@ -120,7 +120,8 @@ needs_lower(const nir_instr *instr, UNUSED const void *_)
 }
 
 static nir_def *
-interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
+interpolate_channel(nir_builder *b, nir_intrinsic_instr *load,
+                    unsigned channel, bool layer_as_varying)
 {
    nir_def *coefficients = nir_load_coefficients_agx(
       b, nir_get_io_offset_src(load)->ssa,
@@ -131,7 +132,8 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
    if (load->intrinsic == nir_intrinsic_load_input) {
       nir_def *flat;
 
-      if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER)
+      if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER &&
+          !layer_as_varying)
          flat = nir_load_layer_id(b);
       else
          flat = interpolate_flat(b, coefficients);
@@ -166,20 +168,22 @@ static nir_def *
 lower(nir_builder *b, nir_instr *instr, void *data)
 {
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   const bool layer_as_varying = *(const bool *)data;
 
    /* Each component is loaded separated */
    nir_def *values[NIR_MAX_VEC_COMPONENTS] = {NULL};
    for (unsigned i = 0; i < intr->def.num_components; ++i) {
-      values[i] = interpolate_channel(b, intr, i);
+      values[i] = interpolate_channel(b, intr, i, layer_as_varying);
    }
 
    return nir_vec(b, values, intr->def.num_components);
 }
 
 bool
-agx_nir_lower_interpolation(nir_shader *s)
+agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying)
 {
    assert(s->info.stage == MESA_SHADER_FRAGMENT);
 
-   return nir_shader_lower_instructions(s, needs_lower, lower, NULL);
+   return nir_shader_lower_instructions(s, needs_lower, lower,
+                                        &layer_as_varying);
 }

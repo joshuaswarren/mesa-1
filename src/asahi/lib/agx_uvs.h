@@ -61,7 +61,8 @@ struct agx_unlinked_uvs_layout {
 static_assert(sizeof(struct agx_unlinked_uvs_layout) == 88, "packed");
 
 bool agx_nir_lower_uvs(struct nir_shader *s,
-                       struct agx_unlinked_uvs_layout *layout);
+                       struct agx_unlinked_uvs_layout *layout,
+                       bool layer_as_varying);
 
 /**
  * Represents a linked UVS layout.

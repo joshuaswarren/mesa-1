@@ -1364,10 +1364,12 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             return false;
          }
       } else {
-         /* A fragment gl_ViewportIndex read is an ordinary flat varying
-          * that the vertex shader also writes out as a user word. */
+         /* G17P reads both fragment layer and gl_ViewportIndex through flat
+          * coefficients. Each is emitted as an ordinary user word when the
+          * fragment shader consumes it. */
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
+                                b->slot == VARYING_SLOT_LAYER ||
                                 b->slot == VARYING_SLOT_VIEWPORT;
          if (!user_slot || (b->perspective && !has_rhw) ||
              b->offset + b->count > vs->info.uvs.components[b->slot])
