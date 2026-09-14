@@ -2682,58 +2682,109 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  * kernel turns each patch's levels into the factor record the tessellator
  * reads. The draw itself is then a native Tessellate command that runs the
  * evaluation shader as the post-tessellation vertex program.
+ *
+ * The tessellator draws every instance's patches as one run, in the order the
+ * TCS dispatch unrolled them, so that the evaluation shader addresses the TCS
+ * output directly by the tessellator's patch index. An indirect draw only
+ * learns its patch count on the GPU: a setup kernel places its buffers in the
+ * heap and writes the launch grids and the patch draw the native indirect
+ * Tessellate command reads.
  */
 static void
 hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                     struct agx_draw draw)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_shader *vs = hk_bound_sw_vs(gfx);
    struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-   const struct poly_tess_params *p = gfx->tess.params;
+   const uint64_t params = gfx->descriptors.root.draw.tess_params;
+   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
+   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
+   struct agx_grid grid_vs, grid_tcs, grid_factors;
 
-   if (agx_is_indirect(draw.b) || !p ||
-       gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
+   if (!gfx->tess.params || gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
        gfx->tess.info.points) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
 
-   const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
-   const uint32_t unrolled = patches * draw.b.count[1];
-
    uint64_t tcs_stat = hk_pipeline_stat_addr(
       cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT);
-   if (hk_stat_enabled(tcs_stat)) {
-      libagx_increment_statistic(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
-                                 tcs_stat, patches);
+
+   if (agx_is_indirect(draw.b)) {
+      struct agx_ptr patch_draw = hk_pool_alloc(cmd, 4 * sizeof(uint32_t), 4);
+      if (!patch_draw.gpu) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+
+      struct libagx_tess_setup_indirect_hw_args args = {
+         .p = params,
+         .grids = gfx->tess.grids,
+         .vp = gfx->descriptors.root.draw.vertex_params,
+         .indirect = draw.b.ptr,
+         .patch_draw = patch_draw.gpu,
+         .vertex_outputs = vs->b.info.outputs,
+         .factor_record_B = record_B,
+         .tcs_statistic = tcs_stat,
+      };
+
+      if (draw.indexed) {
+         args.in_index_buffer = draw.index_buffer;
+         args.in_index_size_B = agx_index_size_to_B(draw.index_size);
+         args.in_index_buffer_range_el = agx_draw_index_range_el(draw);
+      }
+
+      libagx_tess_setup_indirect_hw_struct(cmd, agx_1d(1),
+                                           AGX_BARRIER_ALL | AGX_PREGFX, args);
+
+      const uint32_t grid_stride = 6 * sizeof(uint32_t);
+      grid_vs = agx_grid_indirect_local(gfx->tess.grids);
+      grid_tcs = agx_grid_indirect_local(gfx->tess.grids + grid_stride);
+      grid_factors =
+         agx_grid_indirect_local(gfx->tess.grids + 2 * grid_stride);
+
+      /* The records are somewhere in the heap, which the tessellator reads
+       * as the factor buffer from the draw's patch start. */
+      gfx->tess.factor_buffer = dev->heap->va->addr;
+      gfx->tess.factor_buffer_size_B = dev->heap->size;
+      gfx->tess.patch_draw = patch_draw.gpu;
+      gfx->tess.patches = 0;
+   } else {
+      const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
+      const uint32_t unrolled = patches * draw.b.count[1];
+
+      if (hk_stat_enabled(tcs_stat)) {
+         libagx_increment_statistic(cmd, agx_1d(1),
+                                    AGX_BARRIER_ALL | AGX_PREGFX, tcs_stat,
+                                    patches);
+      }
+
+      grid_vs = grid_tcs = draw.b;
+      grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
+      grid_factors = agx_1d(unrolled);
+
+      struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
+      if (!factors.cpu) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+
+      gfx->tess.factor_buffer = factors.gpu;
+      gfx->tess.factor_buffer_size_B = unrolled * record_B;
+      gfx->tess.patch_draw = 0;
+      gfx->tess.patches = unrolled;
    }
 
-   struct agx_grid grid_tcs = draw.b;
-   grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
-
-   hk_dispatch_with_local_size(cmd, cs, vs, draw.b, agx_workgroup(64, 1, 1));
+   hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, agx_workgroup(64, 1, 1));
    hk_dispatch_with_local_size(
       cmd, cs, tcs, grid_tcs,
       agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
 
-   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
-   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
-   struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
-   if (!factors.cpu) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      return;
-   }
-
-   libagx_tess_factors_half(cmd, agx_1d(unrolled),
-                            AGX_BARRIER_ALL | AGX_PREGFX, p->tcs_buffer,
-                            factors.gpu, p->tcs_stride_el, quads);
-
-   gfx->tess.factor_buffer = factors.gpu;
-   gfx->tess.factor_buffer_size_B = unrolled * record_B;
-   gfx->tess.patches = patches;
-   gfx->tess.instances = draw.b.count[1];
+   libagx_tess_factors_half(cmd, grid_factors, AGX_BARRIER_ALL | AGX_PREGFX,
+                            params, gfx->tess.factor_buffer, quads);
 }
 
 /*
@@ -2750,8 +2801,6 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_tess_info info = gfx->tess.info;
-   const bool quads = info.mode == TESS_PRIMITIVE_QUADS;
-   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
 
    /* The tessellator orders its output in a lower-left domain: a clockwise
     * triangle there is counter-clockwise in Vulkan's default upper-left
@@ -2767,32 +2816,49 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                       : AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN,
       .counterclockwise = ccw,
       .max_factor = 64,
-      .quads = quads,
+      .quads = info.mode == TESS_PRIMITIVE_QUADS,
       .float_factors = false,
-      /* The factor records are unrolled per instance, instance by instance. */
-      .step = gfx->tess.instances > 1
-                 ? AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE
-                 : AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+      .step = AGX_VDM_TESSELLATION_STEP_PER_PATCH,
       .scale_half = 0x3c00,
    };
-   const struct agx_vdm_tessellate_direct_info direct = {
-      .factor_buffer = gfx->tess.factor_buffer,
-      .patch_count = gfx->tess.patches,
-      .instance_count = gfx->tess.instances,
-      .instance_stride_word =
-         gfx->tess.instances > 1 ? (gfx->tess.patches * record_B) >> 2 : 0,
-      .factor_buffer_size_minus_one =
-         DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1,
-   };
+   const uint32_t factor_words_minus_one =
+      DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1;
 
    uint8_t state_bytes[AGX_VDM_TESSELLATION_STATE_LENGTH];
-   struct agx_vdm_tessellate_direct encoded;
+   uint8_t draw_bytes[MAX2(AGX_VDM_TESSELLATE_DIRECT_LENGTH,
+                           AGX_VDM_TESSELLATE_INDIRECT_LENGTH)];
+   size_t draw_B;
+   bool packed;
+   if (gfx->tess.patch_draw) {
+      const struct agx_vdm_tessellate_indirect_info indirect = {
+         .factor_buffer = gfx->tess.factor_buffer,
+         .indirect_buffer = gfx->tess.patch_draw,
+         .factor_buffer_size_minus_one = factor_words_minus_one,
+      };
+      struct agx_vdm_tessellate_indirect encoded;
+      packed = agx_vdm_tessellate_indirect_pack(dev->dev.chip, &indirect,
+                                                &encoded);
+      memcpy(draw_bytes, encoded.bytes, encoded.length);
+      draw_B = encoded.length;
+   } else {
+      const struct agx_vdm_tessellate_direct_info direct = {
+         .factor_buffer = gfx->tess.factor_buffer,
+         .patch_count = gfx->tess.patches,
+         .instance_count = 1,
+         .factor_buffer_size_minus_one = factor_words_minus_one,
+      };
+      struct agx_vdm_tessellate_direct encoded;
+      packed = agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct,
+                                              &encoded) &&
+               gfx->tess.patches;
+      memcpy(draw_bytes, encoded.bytes, encoded.length);
+      draw_B = encoded.length;
+   }
+
    const size_t selector_B = render_state_emitted ? sizeof(uint32_t) : 0;
-   const size_t total_B =
-      selector_B + sizeof(state_bytes) + AGX_VDM_TESSELLATE_DIRECT_LENGTH;
-   if (!gfx->tess.factor_buffer || !gfx->tess.patches ||
+   const size_t total_B = selector_B + sizeof(state_bytes) + draw_B;
+   if (!gfx->tess.factor_buffer || !packed ||
        !agx_vdm_tessellation_state_pack(dev->dev.chip, &state, state_bytes) ||
-       !agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct, &encoded) ||
        (size_t)((uint8_t *)cs->end - out) < total_B) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
@@ -2805,8 +2871,8 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
    memcpy(cursor, state_bytes, sizeof(state_bytes));
    cursor += sizeof(state_bytes);
-   memcpy(cursor, encoded.bytes, encoded.length);
-   cursor += encoded.length;
+   memcpy(cursor, draw_bytes, draw_B);
+   cursor += draw_B;
    cs->current = cursor;
    return true;
 }
