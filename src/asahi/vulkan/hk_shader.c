@@ -1493,6 +1493,34 @@ hk_g17p_shift_vertex_preamble(UNUSED nir_builder *b,
    return true;
 }
 
+/* The layer and viewport index each occupy a 16-bit half of the shared UVS
+ * scalar. Apple's G17P compiler saturates a wider index into its half rather
+ * than truncating it: every vertex program writing render_target_array_index
+ * or viewport_array_index from a value that may exceed 16 bits carries one
+ * isel, identical to the one it emits for an explicit min(value, 0xffff),
+ * which it drops once the value is known to fit (value & 0xffff). metal-nt
+ * -arch applegpu_g17p, layer = vid: 02012e030502; layer = min(vid, 0xffff):
+ * the same single 02012e030502; layer = vid & 0xffff: no isel. */
+static bool
+hk_g17p_saturate_layer_viewport(nir_builder *b, nir_intrinsic_instr *intr,
+                                UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const unsigned location = nir_intrinsic_io_semantics(intr).location;
+   nir_def *value = intr->src[0].ssa;
+   if ((location != VARYING_SLOT_LAYER && location != VARYING_SLOT_VIEWPORT) ||
+       value->bit_size <= 16)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[0],
+                   nir_umin(b, value, nir_imm_intN_t(b, 0xffff,
+                                                     value->bit_size)));
+   return true;
+}
+
 static void
 hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
 {
@@ -1741,6 +1769,11 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    uint64_t outputs = nir->info.outputs_written;
    if (sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL) {
       if (hw) {
+         if (dev->dev.chip == AGX_CHIP_G17P) {
+            NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+                     hk_g17p_saturate_layer_viewport,
+                     nir_metadata_control_flow, NULL);
+         }
          hk_lower_hw_vs(nir, shader, kill_psiz);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
@@ -2123,6 +2156,11 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       agx_preprocess_nir(pre_gs);
 
       struct hk_shader *shader = &obj->variants[HK_GS_VARIANT_RAST];
+      if (dev->dev.chip == AGX_CHIP_G17P) {
+         NIR_PASS(_, rast, nir_shader_intrinsics_pass,
+                  hk_g17p_saturate_layer_viewport, nir_metadata_control_flow,
+                  NULL);
+      }
       hk_lower_hw_vs(rast, shader, false);
       shader->info.gs = count_variant->info.gs;
       main_variant->info.gs = count_variant->info.gs;
