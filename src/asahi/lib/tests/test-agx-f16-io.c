@@ -134,7 +134,7 @@ build_layer_viewport_output(bool write_layer, uint32_t layer,
 }
 
 static bool
-lowered_layer_viewport_value(bool write_layer,
+lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
                              uint32_t layer, bool write_viewport,
                              uint32_t viewport, bool viewport_varying,
                              uint32_t expected, unsigned expected_size,
@@ -143,7 +143,7 @@ lowered_layer_viewport_value(bool write_layer,
    nir_shader *nir = build_layer_viewport_output(
       write_layer, layer, write_viewport, viewport, viewport_varying);
    struct agx_unlinked_uvs_layout layout = {0};
-   bool valid = agx_nir_lower_uvs(nir, &layout);
+   bool valid = agx_nir_lower_uvs(nir, &layout, chip);
 
    bool progress;
    do {
@@ -199,10 +199,10 @@ lowered_layer_viewport_value(bool write_layer,
             actual == expected;
    if (!valid) {
       fprintf(stderr,
-              "layer/viewport packing mismatch: layer=%#x/%u "
+              "layer/viewport packing mismatch: chip=%u layer=%#x/%u "
               "viewport=%#x/%u/%u actual=%#x expected=%#x stores=%u/%u "
               "size=%u user=%u written=%#" PRIx64 "\n",
-              layer, write_layer, viewport, write_viewport,
+              chip, layer, write_layer, viewport, write_viewport,
               viewport_varying, actual, expected, stores, matching_stores,
               layout.size, layout.user_size, layout.written);
    }
@@ -504,24 +504,27 @@ main(void)
    /* Fresh applegpu_g17p witnesses are exact on both sides of no_varying:
     * viewport-only with an unread FS output has five UVSWs and a five-word
     * layout, while a fragment read adds exactly one ordinary UVSW/word. Layer
-    * and viewport share one packed scalar in both cases: the layer is its low
-    * half and the viewport its high half, as on AGX2. */
-   if (!lowered_layer_viewport_value(true, 1, false, 0, false,
-                                     UINT32_C(0x00000001), 5, 1) ||
-       !lowered_layer_viewport_value(false, 0, true, 2, false,
-                                     UINT32_C(0x00020000), 5, 1) ||
-       !lowered_layer_viewport_value(false, 0, true, 2, true,
-                                     UINT32_C(0x00020000), 6, 2) ||
-       !lowered_layer_viewport_value(true, 1, true, 2, false,
-                                     UINT32_C(0x00020001), 5, 1) ||
-       !lowered_layer_viewport_value(true, 1, true, 2, true,
-                                     UINT32_C(0x00020001), 6, 2))
+    * and viewport still share one packed scalar in both cases. */
+   if (!lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, false, 0,
+                                     false, UINT32_C(0x00010000), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
+                                     false, UINT32_C(0x00000002), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
+                                     true, UINT32_C(0x00000002), 6, 2) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
+                                     false, UINT32_C(0x00010002), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
+                                     true, UINT32_C(0x00010002), 6, 2) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
+                                     false, UINT32_C(0x00020001), 5, 1) ||
+       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
+                                     true, UINT32_C(0x00020001), 6, 2))
       return 1;
 
    nir_shader *nir = build_f16_output();
    struct agx_unlinked_uvs_layout layout = {0};
 
-   if (!agx_nir_lower_uvs(nir, &layout) || layout.size != 5 ||
+   if (!agx_nir_lower_uvs(nir, &layout, AGX_CHIP_G17P) || layout.size != 5 ||
        layout.user_size != 1 || !has_type_correct_varying_store(nir)) {
       fprintf(stderr, "f16 output was not widened to f32 before ST_VARY\n");
       ralloc_free(nir);

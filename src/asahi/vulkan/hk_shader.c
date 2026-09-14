@@ -1494,7 +1494,8 @@ hk_g17p_shift_vertex_preamble(UNUSED nir_builder *b,
 }
 
 static void
-hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
+hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
+               enum agx_chip chip)
 {
    /* Point size must be clamped, excessively large points don't render
     * properly on G13.
@@ -1511,7 +1512,7 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
    NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
    NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
-   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
+   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs, chip);
 }
 
 /* G17P unrolls per-sample fragment execution for a pipeline that fixes two or
@@ -1745,7 +1746,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    uint64_t outputs = nir->info.outputs_written;
    if (sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL) {
       if (hw) {
-         hk_lower_hw_vs(nir, shader, kill_psiz);
+         hk_lower_hw_vs(nir, shader, kill_psiz, dev->dev.chip);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
          nir->info.stage = MESA_SHADER_COMPUTE;
@@ -2127,7 +2128,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       agx_preprocess_nir(pre_gs);
 
       struct hk_shader *shader = &obj->variants[HK_GS_VARIANT_RAST];
-      hk_lower_hw_vs(rast, shader, false);
+      hk_lower_hw_vs(rast, shader, false, dev->dev.chip);
       shader->info.gs = count_variant->info.gs;
       main_variant->info.gs = count_variant->info.gs;
 

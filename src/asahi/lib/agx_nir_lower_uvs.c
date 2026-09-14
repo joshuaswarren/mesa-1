@@ -34,6 +34,7 @@ struct ctx {
    nir_def *layer, *viewport;
    nir_cursor after_layer_viewport;
    struct agx_unlinked_uvs_layout *layout;
+   enum agx_chip chip;
 };
 
 static enum uvs_group
@@ -155,9 +156,12 @@ write_layer_viewport_sysval(struct ctx *ctx)
    nir_def *layer = ctx->layer ? nir_u2u16(&b, ctx->layer) : zero;
    nir_def *viewport = ctx->viewport ? nir_u2u16(&b, ctx->viewport) : zero;
 
-   /* render_target_array_index is the low half and viewport_array_index the
-    * high half on every generation, G17P included. */
-   nir_def *packed = nir_pack_32_2x16_split(&b, layer, viewport);
+   /* Apple's G17P compiler places render_target_array_index in the high
+    * half and viewport_array_index in the low half of the shared scalar.
+    * The established AGX2 ABI uses the opposite order. */
+   nir_def *packed = ctx->chip == AGX_CHIP_G17P
+                        ? nir_pack_32_2x16_split(&b, viewport, layer)
+                        : nir_pack_32_2x16_split(&b, layer, viewport);
 
    nir_store_uvs_agx(
       &b, packed,
@@ -193,7 +197,8 @@ gather_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout)
+agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout,
+                  enum agx_chip chip)
 {
    bool progress = false;
 
@@ -232,7 +237,7 @@ agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout)
    layout->user_size = sizes[UVS_VARYINGS];
 
    /* Now lower in terms of the unlinked layout */
-   struct ctx ctx = {.layout = layout};
+   struct ctx ctx = {.layout = layout, .chip = chip};
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower,
             nir_metadata_control_flow, &ctx);
 
