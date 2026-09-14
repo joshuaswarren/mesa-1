@@ -29,9 +29,19 @@
  * GL 3.3 reaches further than GL 3.0 did: KHR-GL33.texture_size_promotion
  * renders to the signed normalized families as well, which is what added the
  * snorm rows below. */
+/* An integer target needs an integer fragment output and an integer sampler:
+ * a float draw writes nothing to one, which the sweep used to report as the
+ * draw failing to reach any sample. */
+enum channel_kind {
+   CHANNEL_FLOAT,
+   CHANNEL_UINT,
+   CHANNEL_SINT,
+};
+
 static const struct {
    const char *name;
    GLenum internal_format;
+   enum channel_kind kind;
 } formats[] = {
    {"rgba8", GL_RGBA8},     {"rgb565", GL_RGB565},
    {"rgba4", GL_RGBA4},     {"rgb5_a1", GL_RGB5_A1},
@@ -40,10 +50,10 @@ static const struct {
    {"rgba16f", GL_RGBA16F}, {"r32f", GL_R32F},
    {"rgba32f", GL_RGBA32F}, {"srgb8a8", GL_SRGB8_ALPHA8},
    {"r11f", GL_R11F_G11F_B10F}, {"rgb9e5", GL_RGB9_E5},
-   {"rg16f", GL_RG16F},     {"rgb10a2ui", GL_RGB10_A2UI},
+   {"rg16f", GL_RG16F},     {"rgb10a2ui", GL_RGB10_A2UI, CHANNEL_UINT},
    {"r16", GL_R16},         {"rg16", GL_RG16},
-   {"rgba16", GL_RGBA16},   {"r8i", GL_R8I},
-   {"rgba8i", GL_RGBA8I},   {"r32ui", GL_R32UI},
+   {"rgba16", GL_RGBA16},   {"r8i", GL_R8I, CHANNEL_SINT},
+   {"rgba8i", GL_RGBA8I, CHANNEL_SINT},   {"r32ui", GL_R32UI, CHANNEL_UINT},
    {"r8_snorm", GL_R8_SNORM},     {"rg8_snorm", GL_RG8_SNORM},
    {"rgba8_snorm", GL_RGBA8_SNORM}, {"r16_snorm", GL_R16_SNORM},
    {"rg16_snorm", GL_RG16_SNORM}, {"rgba16_snorm", GL_RGBA16_SNORM},
@@ -155,16 +165,35 @@ main(void)
       continue;
    }
 
-   GLuint fill = link_program(vs_quad,
-                              "#version 330 core\n"
-                              "out vec4 color;\n"
-                              "void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }\n");
+   const enum channel_kind kind = formats[f].kind;
+   static const char *const fill_sources[] = {
+      [CHANNEL_FLOAT] = "#version 330 core\n"
+                        "out vec4 color;\n"
+                        "void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }\n",
+      [CHANNEL_UINT] = "#version 330 core\n"
+                       "out uvec4 color;\n"
+                       "void main() { color = uvec4(255u, 0u, 0u, 255u); }\n",
+      [CHANNEL_SINT] = "#version 330 core\n"
+                       "out ivec4 color;\n"
+                       "void main() { color = ivec4(127, 0, 0, 127); }\n",
+   };
+   GLuint fill = link_program(vs_quad, fill_sources[kind]);
    if (!fill)
       return 1;
 
    glViewport(0, 0, SIZE, SIZE);
-   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-   glClear(GL_COLOR_BUFFER_BIT);
+   /* glClearColor is float state; an integer target takes its clear through
+    * the typed entry point instead. */
+   if (kind == CHANNEL_UINT) {
+      const GLuint zero[4] = {0, 0, 0, 1};
+      glClearBufferuiv(GL_COLOR, 0, zero);
+   } else if (kind == CHANNEL_SINT) {
+      const GLint zero[4] = {0, 0, 0, 1};
+      glClearBufferiv(GL_COLOR, 0, zero);
+   } else {
+      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+   }
    glUseProgram(fill);
    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
    glFinish();
@@ -182,23 +211,48 @@ main(void)
    GLuint single_texture, single_fbo;
    glGenTextures(1, &single_texture);
    glBindTexture(GL_TEXTURE_2D, single_texture);
-   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SIZE, SIZE, 0, GL_RGBA,
-                GL_UNSIGNED_BYTE, NULL);
+   glTexImage2D(GL_TEXTURE_2D, 0,
+                kind == CHANNEL_UINT   ? GL_RGBA8UI
+                : kind == CHANNEL_SINT ? GL_RGBA8I
+                                       : GL_RGBA8,
+                SIZE, SIZE, 0,
+                kind == CHANNEL_FLOAT ? GL_RGBA : GL_RGBA_INTEGER,
+                kind == CHANNEL_SINT ? GL_BYTE : GL_UNSIGNED_BYTE, NULL);
    glGenFramebuffers(1, &single_fbo);
    glBindFramebuffer(GL_FRAMEBUFFER, single_fbo);
    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                           single_texture, 0);
 
-   GLuint read_sample = link_program(
-      vs_quad,
-      "#version 330 core\n"
-      "uniform sampler2DMS source;\n"
-      "uniform int sample_index;\n"
-      "out vec4 color;\n"
-      "void main()\n"
-      "{\n"
-      "    color = texelFetch(source, ivec2(gl_FragCoord.xy), sample_index);\n"
-      "}\n");
+   static const char *const read_sources[] = {
+      [CHANNEL_FLOAT] =
+         "#version 330 core\n"
+         "uniform sampler2DMS source;\n"
+         "uniform int sample_index;\n"
+         "out vec4 color;\n"
+         "void main()\n"
+         "{\n"
+         "    color = texelFetch(source, ivec2(gl_FragCoord.xy), sample_index);\n"
+         "}\n",
+      [CHANNEL_UINT] =
+         "#version 330 core\n"
+         "uniform usampler2DMS source;\n"
+         "uniform int sample_index;\n"
+         "out uvec4 color;\n"
+         "void main()\n"
+         "{\n"
+         "    color = texelFetch(source, ivec2(gl_FragCoord.xy), sample_index);\n"
+         "}\n",
+      [CHANNEL_SINT] =
+         "#version 330 core\n"
+         "uniform isampler2DMS source;\n"
+         "uniform int sample_index;\n"
+         "out ivec4 color;\n"
+         "void main()\n"
+         "{\n"
+         "    color = texelFetch(source, ivec2(gl_FragCoord.xy), sample_index);\n"
+         "}\n",
+   };
+   GLuint read_sample = link_program(vs_quad, read_sources[kind]);
    if (!read_sample)
       return 1;
    glUseProgram(read_sample);
@@ -208,24 +262,60 @@ main(void)
 
    for (unsigned s = 0; s < SAMPLES; ++s) {
       glBindFramebuffer(GL_FRAMEBUFFER, single_fbo);
-      glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
-      glClear(GL_COLOR_BUFFER_BIT);
+      if (kind == CHANNEL_UINT) {
+         const GLuint green[4] = {0, 255, 0, 255};
+         glClearBufferuiv(GL_COLOR, 0, green);
+      } else if (kind == CHANNEL_SINT) {
+         const GLint green[4] = {0, 127, 0, 127};
+         glClearBufferiv(GL_COLOR, 0, green);
+      } else {
+         glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+         glClear(GL_COLOR_BUFFER_BIT);
+      }
       glUniform1i(glGetUniformLocation(read_sample, "sample_index"), (GLint)s);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
       glFinish();
 
-      GLubyte pixel[4] = {0};
-      glReadPixels(SIZE / 2, SIZE / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-      const bool red = pixel[0] > 200 && pixel[1] < 60;
+      /* Read every kind back as signed 32-bit: it holds an unsigned byte and
+       * a signed byte alike, so one comparison covers all three. */
+      GLint pixel[4] = {0};
+      glReadPixels(SIZE / 2, SIZE / 2, 1, 1,
+                   kind == CHANNEL_FLOAT ? GL_RGBA : GL_RGBA_INTEGER,
+                   kind == CHANNEL_FLOAT ? GL_UNSIGNED_BYTE : GL_INT, pixel);
+      if (kind == CHANNEL_FLOAT) {
+         const GLubyte *bytes = (const GLubyte *)pixel;
+         pixel[3] = bytes[3]; pixel[2] = bytes[2];
+         pixel[1] = bytes[1]; pixel[0] = bytes[0];
+      }
+      /* The drawn red is 255 unsigned, 127 signed; either way the red channel
+       * is large and the green channel is not. */
+      const GLint high = kind == CHANNEL_SINT ? 100 : 200;
+      const bool red = pixel[0] >= high && pixel[1] < 60;
       if (!red)
          fprintf(stderr,
-                 "msaa resolve: %-9s sample %u reads (%u, %u, %u, %u), the "
+                 "msaa resolve: %-9s sample %u reads (%d, %d, %d, %d), the "
                  "draw did not reach it\n", formats[f].name, s, pixel[0],
                  pixel[1], pixel[2], pixel[3]);
       ok &= red;
    }
 
-   /* Half two: does the resolve reproduce the drawn colour? */
+   /* Half two: does the resolve reproduce the drawn colour? Only the float
+    * and normalized families have one to check -- GL defines no averaging
+    * resolve for an integer target, and the conformance cases copy those with
+    * a nearest blit between matching formats instead. Reaching every sample is
+    * the whole question for them, and half one has answered it. */
+   if (kind != CHANNEL_FLOAT) {
+      fprintf(stderr, "msaa resolve: %-9s %s (samples only; an integer target "
+                      "has no averaging resolve)\n",
+              formats[f].name, ok ? "match" : "MISMATCH");
+      all_ok &= ok;
+      glDeleteFramebuffers(1, &single_fbo);
+      glDeleteTextures(1, &single_texture);
+      glDeleteFramebuffers(1, &ms_fbo);
+      glDeleteTextures(1, &ms_texture);
+      continue;
+   }
+
    GLuint resolve_rb, resolve_fbo;
    glGenRenderbuffers(1, &resolve_rb);
    glBindRenderbuffer(GL_RENDERBUFFER, resolve_rb);
