@@ -50,6 +50,7 @@ int main(void)
       assert(agx_vdm_hal200_bind_tail_unpack(AGX_CHIP_G17P,
              uploads[draw].tail.bytes, uploads[draw].tail.length, decoded));
       assert(decoded[0].context_offset == bases[draw] + HK_G17P_VARYING_RECORD_OFFSET);
+      assert(decoded[4].control == 0xa00);
       const uint32_t expected[5] = {0x10040000, counts[draw], 0, 0, 0};
       assert(!memcmp(retained[draw] + HK_G17P_VARYING_RECORD_OFFSET,
                      expected, sizeof(expected)));
@@ -121,6 +122,11 @@ int main(void)
       0x12, 0x34, &uploads[0]));
    assert(uploads[0].pairs[0].context_offset == bases[0] + 128 + 72);
    assert(uploads[0].pairs[5].context_offset == bases[0] + 128);
+   /* The viewport slot's PPP size follows the payload: 18 words, not 10. */
+   assert(uploads[0].pairs[4].control == 0x1200);
+   uint32_t multi_tail_control;
+   memcpy(&multi_tail_control, uploads[0].tail.bytes + 4 + 8 * 4 + 4, 4);
+   assert(multi_tail_control == 0x1200);
    const uint32_t multi_varyings[5] = {0x10040000, 0x12, 0x34, 0, 0};
    assert(!memcmp(multi + 128 + 72, multi_varyings,
                   sizeof(multi_varyings)));

@@ -927,8 +927,8 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
                    uint64_t address,
                    struct asahi_g17p_stream_stats *stats)
 {
-   static const uint32_t controls[8] = {
-      0x700, 0x500, 0x700, 0x500, 0xa00, 0x300, 0x200, 0x200,
+   uint32_t controls[8] = {
+      0x700, 0x500, 0x700, 0x500, 0, 0x300, 0x200, 0x200,
    };
    size_t lengths[8] = {20, 28, 28, 28, 20, 0, 12, 8};
    uint8_t bytes[AGX_VDM_HAL200_BIND_TAIL_LENGTH];
@@ -950,6 +950,12 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
        lengths[5] > AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH)
       return fail_at(address, "viewport slot length is out of range");
    const unsigned viewport_count = (lengths[5] - 8) / 32;
+
+   /* Pair 4 sizes the viewport payload in words. A stale one-viewport size
+    * on a longer payload leaves the tiler parsing a truncated PPP record. */
+   controls[AGX_VDM_HAL200_BIND_VIEWPORT_CONTROL_PAIR] =
+      agx_vdm_hal200_bind_viewport_control(lengths[5]);
+
    uint8_t output_record[AGX_PPP_HAL200_OUTPUT_LENGTH];
    uint8_t primary_record[AGX_PPP_HAL200_PRIMARY_FACE_LENGTH];
    uint8_t secondary_record[AGX_PPP_HAL200_SECONDARY_FACE_LENGTH];

@@ -19,6 +19,7 @@
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_pack.h"
+#include "agx_vdm_hal200_bind_tail_core.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
@@ -216,20 +217,17 @@ asahi_g17p_vdm_bisect(struct hk_device *dev, struct hk_cs *cs, size_t len)
       }
    }
 
-   static const uint32_t controls[] = {
-      UINT32_C(0x700), UINT32_C(0x500), UINT32_C(0x700), UINT32_C(0x500),
-      UINT32_C(0xa00), UINT32_C(0x300), UINT32_C(0x200), UINT32_C(0x200),
-   };
    const unsigned pair_count = stage >= 4 ? MIN2((unsigned)(stage - 3), 8) : 0;
    for (unsigned i = 0; i < pair_count; ++i) {
       uint32_t address, control;
       const size_t offset = 44 + (8 * i);
       memcpy(&address, (uint8_t *)cs->start + offset, 4);
       memcpy(&control, (uint8_t *)cs->start + offset + 4, 4);
-      if (address == 0 || (address & 3) != 0 || control != controls[i]) {
+      if (address == 0 || (address & 3) != 0 ||
+          !agx_vdm_hal200_bind_control_valid(i, control)) {
          mesa_loge("HK_G17P_VDM_BISECT=%d bind[%u] mismatch: addr=%#x "
-                   "control=%#x expected=%#x",
-                   stage, i, address, control, controls[i]);
+                   "control=%#x",
+                   stage, i, address, control);
          return len;
       }
    }
