@@ -204,6 +204,9 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
    if (!sink)
       return fail_at(address, "could not open disassembly sink");
 
+   /* The container's own span bounds the walk. A fixed 16 KiB bound used to
+    * reject complete fragment shaders past it -- 16bit_storage
+    * struct_mixed_types links a 27986-byte fragment -- as having no end. */
    size_t offset = 0;
    bool valid = false;
    while (offset < available) {
