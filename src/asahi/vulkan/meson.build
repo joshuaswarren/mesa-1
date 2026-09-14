@@ -71,6 +71,8 @@ hk_files = files(
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',
+  'hk_nir_forward_image_stores.c',
+  'hk_nir_forward_image_stores.h',
   'hk_nir_lower_descriptors.c',
   'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
@@ -135,6 +137,20 @@ if with_tests
             'hk_nir_ray_tracing.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_forward_image_stores',
+    executable(
+      'hk_nir_forward_image_stores_test',
+      files('tests/test-hk-nir-forward-image-stores.c',
+            'hk_nir_forward_image_stores.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),

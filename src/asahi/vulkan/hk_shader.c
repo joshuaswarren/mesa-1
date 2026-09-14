@@ -9,6 +9,7 @@
 #include "hk_shader.h"
 
 #include "hk_nir_ray_tracing.h"
+#include "hk_nir_forward_image_stores.h"
 #include "hk_nir_lower_robust_image.h"
 #include "hk_entrypoints.h"
 
@@ -1009,6 +1010,12 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool lower_g17p_robust_images =
       dev->dev.chip == AGX_CHIP_G17P &&
       rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
+
+   /* A G17P image load does not see a store made earlier in the same
+    * invocation; forward the stored value. Run it before the robust lowering
+    * so the loads and stores it tracks are still unconditional. */
+   if (dev->dev.chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, hk_nir_forward_image_stores, lower_g17p_robust_images);
    NIR_PASS(_, nir, hk_nir_lower_robust_image_access,
             lower_g17p_robust_images);
 
