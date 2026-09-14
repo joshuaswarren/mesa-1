@@ -1900,8 +1900,38 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
-      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
-               dev->chip, &epilog_key);
+
+      /* AGX3 has no equivalent of the AGX2 machine code agx_fast_link()
+       * splices around a linked fragment program to run it once per sample.
+       * Apple's own compiler unrolls the body instead, once per sample, in one
+       * program (probes/README-g17p-per-sample-fragment.md).
+       *
+       * An unrolled main cannot carry a separate epilog: the stores the split
+       * moves out -- colour, and depth/stencil, which it defers past discards
+       * -- would run once for a body that ran per sample. So keep the whole
+       * fragment in one program. Only the shape with nothing but depth and
+       * stencil to keep is taken here, which is what a multisample depth blit
+       * needs; a per-sample colour shader would also need its tilebuffer and
+       * blending built into the main, and keeps its existing named refusal.
+       */
+      const uint64_t zs_outputs = BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                                  BITFIELD64_BIT(FRAG_RESULT_STENCIL);
+      const bool unrolled_samples =
+         dev->chip == AGX_CHIP_G17P && key->nr_samples > 1 &&
+         nir->info.fs.uses_sample_shading &&
+         !(nir->info.outputs_written & ~zs_outputs);
+
+      if (!unrolled_samples) {
+         NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
+                  dev->chip, &epilog_key);
+      } else {
+         /* The stores stay here, but the draw-time state still has to know
+          * the fragment writes them. */
+         epilog_key.write_z =
+            !!(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH));
+         epilog_key.write_s =
+            !!(nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL));
+      }
 
       if (nir->info.fs.uses_fbfetch_output) {
          struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
@@ -1919,7 +1949,13 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                   &translucent, false, dev->chip == AGX_CHIP_G17P);
       }
 
-      if (nir->info.fs.uses_sample_shading) {
+      if (unrolled_samples) {
+         NIR_PASS(_, nir, agx_nir_lower_monolithic_msaa, key->nr_samples);
+
+         /* Nothing is left for the linker to wrap. */
+         nir->info.fs.uses_sample_shading = false;
+         epilog_key.sample_shading = false;
+      } else if (nir->info.fs.uses_sample_shading) {
          /* Ensure the sample ID is preserved in register */
          nir_builder b =
             nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
@@ -2177,6 +2213,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       so->info.uses_fbfetch = nir->info.fs.uses_fbfetch_output;
+      so->info.uses_sample_shading = nir->info.fs.uses_sample_shading;
       so->info.writes_memory = nir->info.writes_memory;
       so->info.inputs_linear_shaded = nir->info.linear_varyings;
       so->info.inputs_flat_shaded = nir->info.inputs_read &
@@ -2892,9 +2929,15 @@ agx_update_fs(struct agx_batch *batch)
    struct asahi_fs_shader_key key = {0};
    key.custom_borders = ctx->stage[MESA_SHADER_FRAGMENT].custom_borders;
 
-   if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch) {
+   /* A fragment shader that runs per sample is unrolled over the sample count
+    * when it is compiled -- G17P has no loop to wrap it in -- so the count
+    * belongs in its variant key, exactly as a tilebuffer fetch's does. */
+   if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch ||
+       ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_sample_shading) {
       key.nr_samples = nr_samples;
+   }
 
+   if (ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch) {
       for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
          key.rt_formats[i] = batch->key.cbufs[i].format;
       }

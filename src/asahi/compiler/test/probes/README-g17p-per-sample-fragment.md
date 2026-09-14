@@ -38,3 +38,39 @@ Wrapping the body is an AGX2 shape with no AGX3 equivalent.
 
 Requires Apple's `metal`, `metallib` and `metal-nt` through `xcrun`; captured
 against AIR-NT 32023.917, `-arch applegpu_g17p`.
+
+## The depth store carries the sample as a one-hot field
+
+`capture-g17p-per-sample-depth.py` does the same for a fragment that writes
+depth, which is the shape a multisample depth blit takes.
+
+```
+depth-pixel-4x   316 bytes
+depth-sample-4x  724 bytes
+```
+
+Unrolled again, and the four depth stores differ in exactly the fields that
+name the sample:
+
+```
+d7 14 54 00 00 03 34
+d7 24 54 04 20 03 34
+d7 44 54 08 40 03 34
+d7 84 54 0c 60 03 07
+```
+
+Byte 1 walks `0x14, 0x24, 0x44, 0x84` -- a **one-hot** sample mask in the high
+nibble, `(1 << sample) << 4`. The two operand bytes walk `sample * 4` and
+`sample * 0x20`. The per-pixel program has a single store whose mask byte is
+`0x14` followed by a whole-pixel `8f 14 54 22 0f 00 54 9a ff ff ff ff ff`.
+
+This is what `ZS_EMIT_AGX3` still has to learn: `agx3_pack_binary.c` accepts
+only the whole-pixel form the fast-linked epilog emits, so an unrolled
+per-sample body is refused with
+
+```
+no grounded AGX3 encoding for zs_emit_agx3
+```
+
+Reproduce with `ASAHI_MSAA_DEPTH_BLIT=1` under the drm-shim
+(`asahi-g17p-blit`), which builds the blit's programs without a GPU.

@@ -515,6 +515,71 @@ check_direct_resolve_shapes(void)
    return true;
 }
 
+/* A depth blit whose source and destination carry the same sample count is
+ * the shape u_blitter shades once per sample: it turns on sample shading for
+ * `src_samples > 1 && src_samples == dst_samples`. G17P has no per-sample
+ * fragment execution -- agx_fast_link() refuses the AGX2 machine-code sample
+ * loop -- so the fragment program fails to link and the draw is dropped, which
+ * is what fails
+ * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_depth_config_test.
+ *
+ * Run the blit through the shim, which builds the same programs without a GPU,
+ * and hold it to producing one.
+ */
+static bool
+check_msaa_depth_blit(struct pipe_context *pctx, unsigned samples)
+{
+   struct pipe_screen *screen = pctx->screen;
+   struct agx_context *ctx = agx_context(pctx);
+
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_Z32_FLOAT,
+      .width0 = 32,
+      .height0 = 32,
+      .depth0 = 1,
+      .array_size = 1,
+      .last_level = 0,
+      .nr_samples = samples,
+      .nr_storage_samples = samples,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW,
+   };
+   struct pipe_resource *src = screen->resource_create(screen, &templ);
+   struct pipe_resource *dst = screen->resource_create(screen, &templ);
+   if (!src || !dst) {
+      fprintf(stderr, "msaa depth blit: %ux depth target unsupported\n",
+              samples);
+      pipe_resource_reference(&src, NULL);
+      pipe_resource_reference(&dst, NULL);
+      return true;
+   }
+
+   const struct pipe_blit_info info = {
+      .src = {.resource = src,
+              .format = PIPE_FORMAT_Z32_FLOAT,
+              .level = 0,
+              .box = {.width = 32, .height = 32, .depth = 1}},
+      .dst = {.resource = dst,
+              .format = PIPE_FORMAT_Z32_FLOAT,
+              .level = 0,
+              .box = {.width = 32, .height = 32, .depth = 1}},
+      .mask = PIPE_MASK_Z,
+      .filter = PIPE_TEX_FILTER_NEAREST,
+   };
+
+   const unsigned skipped_before = ctx->skipped_no_program;
+   pctx->blit(pctx, &info);
+   const bool ok = ctx->skipped_no_program == skipped_before;
+
+   printf("msaa depth blit: %ux to %ux %s\n", samples, samples,
+          ok ? "built a program" : "DROPPED, no fragment program");
+
+   pipe_resource_reference(&src, NULL);
+   pipe_resource_reference(&dst, NULL);
+   return ok;
+}
+
 static bool
 check_stencil_blit_shapes(void)
 {
@@ -1034,6 +1099,15 @@ main(void)
       return 1;
 
    if (!check_stencil_blit_shapes())
+      return 1;
+
+   /* The reproduction for the remaining per-sample gap: the sample loop and
+    * the variant key are solved, but the depth store the unrolled body emits
+    * has no grounded AGX3 encoding yet
+    * (probes/README-g17p-per-sample-fragment.md). Opt in while that lands, so
+    * this does not sit in the suite as a standing red. */
+   if (getenv("ASAHI_MSAA_DEPTH_BLIT") != NULL &&
+       (!check_msaa_depth_blit(pctx, 2) || !check_msaa_depth_blit(pctx, 4)))
       return 1;
 
    if (!check_staged_resolve_shapes())
