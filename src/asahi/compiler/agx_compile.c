@@ -999,34 +999,40 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
    assert(!write_z || z.size == AGX_SIZE_32);
    assert(!write_s || s.size == AGX_SIZE_16);
 
-   /* G17P depthf reads two staged dwords: coverage at half 0 and float32
-    * depth at half 2. Native FSEL.ep35 publishes the clamped depth directly
-    * to staging[2], followed by a separate coverage COPY to staging[0].
-    * Do not narrow depth into the coverage word's high half. Build both
-    * full-width values before RA so the allocator owns the payload.
+   /* G17P depthf reads staged dwords: coverage at half 0 and float32 depth
+    * at half 2. Native FSEL.ep35 publishes the clamped depth directly to
+    * staging[2], followed by a separate coverage COPY to staging[0].
+    * Do not narrow depth into the coverage word's high half. Build every
+    * full-width value before RA so the allocator owns the payload.
     *
-    * Stencil remains on the legacy path and is refused by the AGX3 packer:
-    * Metal has no fragment stencil-output expression from which to ground its
-    * staged operand contract.
+    * A stencil reference occupies that high half instead. Apple's G17P
+    * [[stencil]] fragments copy the 16-bit reference into the upper half of
+    * the register holding the coverage, then stage the whole dword; with
+    * [[depth(any)]] as well, depth still follows at half 2.
     */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && write_z &&
-       !write_s) {
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
       agx_get_coverage_1x_agx3_to(b, sr2);
       agx_index mid = agx_iadd(b, sr2, sr2, 4);
       agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
 
-      agx_index coverage32 = agx_temp(b->shader, AGX_SIZE_32);
-      agx_mov_to(b, coverage32, coverage);
-      agx_index depth;
-      if (nir_src_is_const(instr->src[1])) {
-         const float value = nir_src_as_float(instr->src[1]);
-         depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
-      } else {
-         depth = agx_temp(b->shader, AGX_SIZE_32);
-         agx_fmov_to(b, depth, z)->saturate = true;
+      agx_index word = agx_temp(b->shader, AGX_SIZE_32);
+      if (write_s)
+         agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, s});
+      else
+         agx_mov_to(b, word, coverage);
+
+      if (write_z) {
+         agx_index depth;
+         if (nir_src_is_const(instr->src[1])) {
+            const float value = nir_src_as_float(instr->src[1]);
+            depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
+         } else {
+            depth = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, depth, z)->saturate = true;
+         }
+         word = agx_vec2(b, word, depth);
       }
-      agx_index word = agx_vec2(b, coverage32, depth);
 
       b->shader->out->writes_sample_mask = true;
       agx_wait_pixel_mask(b, 0x1);

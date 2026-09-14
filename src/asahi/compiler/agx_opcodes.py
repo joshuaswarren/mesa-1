@@ -583,7 +583,8 @@ op("unpack_rgb10a2_agx3", _, dests=1, srcs=1, agx3_mnemonic="unpack")
 op("get_coverage_1x_agx3", _, dests = 1, schedule_class = "coverage")
 op("sample_mask_1x_agx3", _, dests = 0, srcs = 2, imms = [IMM],
    can_eliminate = False, schedule_class = "coverage")
-# G17P depthf consumes two dwords: coverage and full-width float32 depth.
-# The tuple is assembled before RA and published at staging halves 0 and 2.
+# G17P depthf consumes the coverage dword, carrying any stencil reference in
+# its upper half, and full-width float32 depth when written. The tuple is
+# assembled before RA and published at staging halves 0 and 2.
 op("zs_emit_agx3", _, dests = 0, srcs = 1, imms = [ZS],
    can_eliminate = False, schedule_class = "coverage")

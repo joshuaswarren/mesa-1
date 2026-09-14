@@ -1583,6 +1583,53 @@ build_fs_depth_dynamic(void)
    return b.shader;
 }
 
+/* gl_FragStencilRefARB from a run-time value, optionally with gl_FragDepth,
+ * as the attachment feedback loop tests write it. */
+static nir_shader *
+build_fs_stencil_value(bool depth)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 stencil-write FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *value = nir_load_interpolated_input(
+      &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   fs_store_colour(&b, nir_vec4(&b, nir_imm_float(&b, 0.25f),
+                                nir_imm_float(&b, 0.5f),
+                                nir_imm_float(&b, 0.75f),
+                                nir_imm_float(&b, 1.0f)));
+   nir_store_output(&b, nir_f2i32(&b, value), nir_imm_int(&b, 0), .base = 0,
+                    .write_mask = 0x1, .src_type = nir_type_int32,
+                    .io_semantics.location = FRAG_RESULT_STENCIL,
+                    .io_semantics.num_slots = 1);
+   if (depth) {
+      nir_store_output(&b, value, nir_imm_int(&b, 0), .base = 0,
+                       .write_mask = 0x1, .src_type = nir_type_float32,
+                       .io_semantics.location = FRAG_RESULT_DEPTH,
+                       .io_semantics.num_slots = 1);
+   }
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written =
+      BITFIELD64_BIT(FRAG_RESULT_DATA0) | BITFIELD64_BIT(FRAG_RESULT_STENCIL) |
+      (depth ? BITFIELD64_BIT(FRAG_RESULT_DEPTH) : 0);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
+static nir_shader *
+build_fs_stencil(void)
+{
+   return build_fs_stencil_value(false);
+}
+
+static nir_shader *
+build_fs_depth_stencil(void)
+{
+   return build_fs_stencil_value(true);
+}
+
 /*
  * Fragment shader that reads the tilebuffer before writing it -- the shape a
  * blend or a framebuffer fetch takes, and the shape Apple's own `w_pass8`
@@ -6043,6 +6090,7 @@ struct agx3_graphics_case {
    uint8_t expected_g17p_loads;
    bool g17p_only;
    uint8_t expected_g17p_depth;
+   uint8_t expected_g17p_stencil;
    bool expected_g17p_implicit_coord_group;
    bool expected_g17p_sampled_fragment;
    bool expected_g17p_sample_mask_input;
@@ -6342,6 +6390,78 @@ g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
    return false;
 }
 
+/*
+ * Apple's G17P [[stencil]] fragments (metal-nt applegpu_g17p, render
+ * pipelines with stencil8 and depth32float_stencil8 attachments) copy the
+ * 16-bit reference into the upper half of the coverage register, stage that
+ * dword, and write it out in the class-1 transaction:
+ *
+ *   stencil only   (__text SHA-256 7a34f819...b3b18117)
+ *     13042109 copy r1h <- u4     0b022904 copy s0 <- r1 (f27)
+ *     870254010000 pixwait 1      d71454000001 depthf (f26)
+ *   depth+stencil  (__text SHA-256 e09ec09c...8035a44e)
+ *     03142109 copy r0h <- u20    0b012f00420000001000 copy s0 <- r0 (f13)
+ *     870254010000 pixwait 1      d71454000007 depthf (f25, f26)
+ *
+ * Mesa's reference comes from a register rather than a uniform, and depth is
+ * staged from a register as in the depth-only protocol above.
+ */
+static bool
+g17p_stencil_protocol(const struct agx_shader_part *part, bool depth)
+{
+   if (!part->info.agx3_staging_known ||
+       part->info.agx3_staging_halfs != (depth ? 4 : 2))
+      return false;
+   const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0, 0};
+   const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0, 0};
+   bool upper_half = false, writeout = false;
+   for (unsigned word = 0; word < 126; word += 2) {
+      for (unsigned src = 0; src < 128; ++src) {
+         for (unsigned cache = 0; cache < 2; ++cache) {
+            for (unsigned discard = 0; discard < 2 - cache; ++discard) {
+               uint8_t copy[AGX3_COPY_MAX_LENGTH], length;
+               if (agx3_copy_encode_reg16(AGX_ISA_ENCODING_AGX3B, word + 1,
+                                          src, false, cache, discard, 0,
+                                          copy, &length))
+                  upper_half |= binary_contains(part, copy, length);
+            }
+         }
+      }
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         for (unsigned discard = 0; discard < 2; ++discard) {
+            uint8_t sequence[64], length;
+            unsigned size = 0;
+            if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 0, word,
+                                          depth, discard, slot, 0, sequence,
+                                          &length))
+               continue;
+            size += length;
+            if (depth) {
+               if (!agx3_stage_copy_liveness(AGX_ISA_ENCODING_AGX3B, 2,
+                                             word + 2, true, discard, slot, 0,
+                                             sequence + size, &length))
+                  continue;
+               size += length;
+            }
+            memcpy(sequence + size, acquire, sizeof(acquire));
+            size += sizeof(acquire);
+            struct agx3_zs_desc desc = {
+               .value_kill = true, .slot = slot, .wait_mask = 1u << (slot - 1),
+            };
+            if (!agx3_zs_encode_depth_stencil(AGX_ISA_ENCODING_AGX3B, &desc,
+                                             depth, true, sequence + size,
+                                             &length))
+               continue;
+            size += length;
+            memcpy(sequence + size, release, sizeof(release));
+            size += sizeof(release);
+            writeout |= binary_contains(part, sequence, size);
+         }
+      }
+   }
+   return upper_half && writeout;
+}
+
 static const struct agx3_graphics_case cases[] = {
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
    {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
@@ -6453,6 +6573,10 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_depth = 3},
    {"fs-depth-write-dynamic", build_fs_depth_dynamic, true,
     .g17p_only = true, .expected_g17p_depth = 2},
+   {"fs-stencil-write", build_fs_stencil, true, .g17p_only = true,
+    .expected_g17p_stencil = 1},
+   {"fs-depth-stencil-write", build_fs_depth_stencil, true,
+    .g17p_only = true, .expected_g17p_stencil = 2},
 };
 
 static bool
@@ -6596,6 +6720,14 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
          result = g17p_depth_protocol(&part, c->expected_g17p_depth);
          if (!result)
             fprintf(stderr, "%s %s: depth staging protocol mismatch\n",
+                    enc_name(enc), c->name);
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B &&
+          c->expected_g17p_stencil) {
+         result = g17p_stencil_protocol(&part, c->expected_g17p_stencil == 2);
+         if (!result)
+            fprintf(stderr, "%s %s: stencil staging protocol mismatch\n",
                     enc_name(enc), c->name);
       }
 
