@@ -1770,6 +1770,17 @@ hk_meta_copy_get_image_properties(struct hk_image *img, bool g17p)
          props.stencil.component_mask = BITFIELD_MASK(1);
          break;
       case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      case VK_FORMAT_D16_UNORM_S8_UINT:
+         if (props.depth_stencil_aspect_views) {
+            /* Internal views preserve the selected backing plane and use
+             * its raw element width, not the interleaved API format. */
+            props.depth.view_format = img->vk.format == VK_FORMAT_D16_UNORM_S8_UINT
+                                         ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
+            props.depth.component_mask = BITFIELD_BIT(0);
+            props.stencil.view_format = VK_FORMAT_R8_UINT;
+            props.stencil.component_mask = BITFIELD_BIT(0);
+            break;
+         }
          props.depth.view_format = VK_FORMAT_R32G32_UINT;
          props.depth.component_mask = BITFIELD_BIT(0);
          props.stencil.view_format = VK_FORMAT_R32G32_UINT;
