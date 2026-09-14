@@ -410,6 +410,17 @@ libagx_texture_samples_gen9(constant struct agx_texture_gen9_packed *ptr)
    return 2u << d.samples;
 }
 
+/* robustImageAccess2 reads outside a view return (0, 0, 0, 1) for a format
+ * without alpha and zero otherwise. A view's descriptor records a missing alpha
+ * as a constant one alpha swizzle; the null texture swizzles every channel to
+ * zero. */
+bool
+libagx_image_oob_alpha_one_gen9(constant struct agx_texture_gen9_packed *ptr)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN9, d);
+   return d.swizzle_a == AGX_CHANNEL_1;
+}
+
 uint
 libagx_texture_levels_gen9(constant struct agx_texture_gen9_packed *ptr)
 {

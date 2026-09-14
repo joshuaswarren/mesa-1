@@ -22,6 +22,8 @@
 struct agx_texture_lower_options {
    bool gen9;
    bool buffer_metadata;
+   /* Formatless image loads still need view-bounds robustness. */
+   bool robust_formatless_images;
 };
 
 static nir_def *
@@ -749,6 +751,59 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr, bool gen9
    return true;
 }
 
+/*
+ * A formatless load's robustImageAccess2 value depends on the bound view: zero,
+ * with a one alpha when its format has none. The common robust-access lowering
+ * can only fold that from the intrinsic's format, so the driver leaves G17P
+ * formatless loads to this pass. Predicate the load against the image size,
+ * read texel 0 for an invalid coordinate so the native fetch stays inside the
+ * image, and select the view's out-of-bounds value after the fetch.
+ */
+static void
+lower_g17p_formatless_image_load(nir_builder *b, nir_intrinsic_instr *intr)
+{
+   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
+   const bool is_array = nir_intrinsic_image_array(intr);
+   const unsigned num_coords = nir_image_intrinsic_coord_components(intr);
+   const bool cube = dim == GLSL_SAMPLER_DIM_CUBE;
+
+   /* The size of a cube is that of one face, and a cube array counts cubes. */
+   nir_def *size =
+      nir_build_tex(b, nir_texop_txs, .texture_handle = intr->src[0].ssa,
+                    .lod = nir_imm_int(b, 0), .dim = dim, .is_array = is_array,
+                    .can_speculate = nir_instr_can_speculate(&intr->instr));
+   if (cube) {
+      nir_def *layers = is_array ? nir_channel(b, size, 2) : nir_imm_int(b, 6);
+      size = nir_vec3(b, nir_channel(b, size, 0), nir_channel(b, size, 1),
+                      layers);
+   }
+
+   nir_def *coord = intr->src[1].ssa;
+   nir_def *oob = nir_bany(b, nir_uge(b, nir_trim_vector(b, coord, num_coords),
+                                      nir_trim_vector(b, size, num_coords)));
+   nir_src_rewrite(&intr->src[1],
+                   nir_bcsel(b, oob,
+                             nir_imm_zero(b, coord->num_components,
+                                          coord->bit_size),
+                             coord));
+
+   nir_def *alpha_one = libagx_image_oob_alpha_one_gen9(
+      b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa));
+
+   b->cursor = nir_after_instr(&intr->instr);
+   const unsigned bit_size = intr->def.bit_size;
+   nir_def *zero = nir_imm_zero(b, 1, bit_size);
+   nir_def *one =
+      nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr)) ==
+            nir_type_float
+         ? nir_imm_floatN_t(b, 1.0, bit_size)
+         : nir_imm_intN_t(b, 1, bit_size);
+   nir_def *oob_value =
+      nir_vec4(b, zero, zero, zero, nir_bcsel(b, alpha_one, one, zero));
+   nir_def_rewrite_uses_after(&intr->def,
+                              nir_bcsel(b, oob, oob_value, &intr->def));
+}
+
 static bool
 lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -765,9 +820,18 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       /* Legalize MSAA index */
       nir_src_rewrite(&intr->src[2], nir_u2u16(b, intr->src[2].ssa));
 
-      if (intr->intrinsic == nir_intrinsic_image_load ||
-          intr->intrinsic == nir_intrinsic_bindless_image_load ||
-          intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+      if (gen9 && options->robust_formatless_images &&
+          intr->intrinsic == nir_intrinsic_bindless_image_load &&
+          nir_intrinsic_format(intr) == PIPE_FORMAT_NONE &&
+          !(nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS) &&
+          nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS &&
+          nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_BUF &&
+          intr->def.num_components == 4) {
+         lower_g17p_formatless_image_load(b, intr);
+         b->cursor = nir_before_instr(&intr->instr);
+      } else if (intr->intrinsic == nir_intrinsic_image_load ||
+                 intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                 intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
          lower_image_load_robustness(b, intr, gen9);
       }
 
@@ -1071,11 +1135,14 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 }
 
 static bool
-lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata)
+lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
+              bool robust_formatless_images)
 {
    bool progress = false;
    const bool gen9 = generation == 9;
-   const struct agx_texture_lower_options options = {gen9, buffer_metadata};
+   const struct agx_texture_lower_options options = {
+      gen9, buffer_metadata, robust_formatless_images,
+   };
 
    nir_tex_src_type_constraints tex_constraints = {
       [nir_tex_src_lod] = {true, 16},
@@ -1147,13 +1214,14 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata)
 bool
 agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
 {
-   return lower_texture(s, generation, false);
+   return lower_texture(s, generation, false, false);
 }
 
 bool
-agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation)
+agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation,
+                                           bool robust_formatless_images)
 {
-   return lower_texture(s, generation, true);
+   return lower_texture(s, generation, true, robust_formatless_images);
 }
 
 bool

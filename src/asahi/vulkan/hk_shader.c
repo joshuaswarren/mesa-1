@@ -1124,8 +1124,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
+      /* hk_nir_lower_robust_image_access() leaves formatless loads to this
+       * pass. */
       NIR_PASS(_, nir, agx_nir_lower_texture_with_buffer_metadata,
-               agx_chip_descriptor_generation(dev->dev.chip));
+               agx_chip_descriptor_generation(dev->dev.chip),
+               lower_g17p_robust_images);
    } else {
       NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
                agx_chip_descriptor_generation(dev->dev.chip));

@@ -2216,6 +2216,133 @@ test_g17p_storage_read_zero_lod_compile(void)
    return true;
 }
 
+struct formatless_load_fixture {
+   uint8_t texture[32];
+};
+
+static bool
+fold_formatless_descriptor(nir_builder *b, nir_intrinsic_instr *intr,
+                           void *data)
+{
+   const struct formatless_load_fixture *f = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = NULL;
+   if (intr->intrinsic == nir_intrinsic_load_from_texture_handle_agx) {
+      value = nir_imm_int64(b, 0x1000);
+   } else if (intr->intrinsic == nir_intrinsic_load_global_constant &&
+              nir_src_is_const(intr->src[0]) &&
+              intr->def.num_components == 1 && intr->def.bit_size == 32) {
+      const uint64_t offset = nir_src_as_uint(intr->src[0]) - 0x1000;
+      if (offset > sizeof(f->texture) - 4)
+         return false;
+      uint32_t word;
+      memcpy(&word, f->texture + offset, sizeof(word));
+      value = nir_imm_int(b, word);
+   }
+   if (!value)
+      return false;
+   nir_def_rewrite_uses(&intr->def, value);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/* A formatless load has no format to fold its robustImageAccess2 value from.
+ * With view-bounds robustness, G17P reads texel 0 for an out-of-bounds
+ * coordinate and selects zero with the view's missing-alpha one afterwards:
+ * (0, 0, 0, 1) for an R32F view, (0, 0, 0, 0) for an RGBA32F view. A formatted
+ * load, or one without robustness, is left alone. */
+static bool
+test_g17p_formatless_robust_image_load(void)
+{
+   for (unsigned robust = 0; robust < 2; ++robust) {
+      for (unsigned formatted = 0; formatted < 2; ++formatted) {
+         for (unsigned alpha_one = 0; alpha_one < 2; ++alpha_one) {
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options,
+               "G17P formatless robust image load");
+            nir_def *handle =
+               nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+            /* x = 7 is outside the 4x4 image below. */
+            nir_def *load = nir_bindless_image_load(
+               &b, 4, 32, handle, nir_imm_ivec4(&b, 7, 3, 0, 0),
+               nir_imm_int(&b, 0), nir_imm_intN_t(&b, 0, 16),
+               .image_dim = GLSL_SAMPLER_DIM_2D,
+               .format = formatted ? PIPE_FORMAT_R32_FLOAT : PIPE_FORMAT_NONE,
+               .dest_type = nir_type_float32);
+            nir_store_ssbo(&b, load, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                           .write_mask = 15, .align_mul = 16);
+            b.shader->info.num_ssbos = 1;
+            agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, robust);
+
+            /* The surviving read is clamped by a select on the predicate. */
+            bool clamped = false;
+            nir_foreach_function_impl(impl, b.shader) {
+               nir_foreach_block(block, impl) {
+                  nir_foreach_instr(instr, block) {
+                     if (instr->type != nir_instr_type_intrinsic ||
+                         nir_instr_as_intrinsic(instr)->intrinsic !=
+                            nir_intrinsic_bindless_image_load)
+                        continue;
+                     nir_instr *coord =
+                        nir_def_instr(nir_instr_as_intrinsic(instr)->src[1].ssa);
+                     clamped = coord->type == nir_instr_type_alu &&
+                               nir_instr_as_alu(coord)->op == nir_op_bcsel;
+                  }
+               }
+            }
+
+            /* Gen9 texture: 2D, 4x4, swizzle A = 1 (Channel 1) or A. */
+            struct formatless_load_fixture f = {0};
+            const uint64_t word0 = 2 | (2 << 4) |
+                                   ((alpha_one ? 4ull : 3ull) << 25) |
+                                   (3ull << 28) | (3ull << 42);
+            const uint64_t word1 = UINT64_C(0x123456780) >> 4;
+            memcpy(f.texture, &word0, 8);
+            memcpy(f.texture + 8, &word1, 8);
+            bool progress;
+            do {
+               progress = nir_shader_intrinsics_pass(
+                  b.shader, fold_formatless_descriptor,
+                  nir_metadata_control_flow, &f);
+               progress |= nir_opt_constant_folding(b.shader);
+               progress |= nir_opt_algebraic(b.shader);
+               progress |= nir_opt_dead_cf(b.shader);
+               progress |= nir_opt_remove_phis(b.shader);
+               progress |= nir_opt_dce(b.shader);
+               progress |= nir_opt_copy_prop(b.shader);
+            } while (progress);
+
+            bool constant = false;
+            float stored[4] = {0};
+            nir_foreach_function_impl(impl, b.shader) {
+               nir_foreach_block(block, impl) {
+                  nir_foreach_instr(instr, block) {
+                     if (instr->type != nir_instr_type_intrinsic)
+                        continue;
+                     nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                     if (intr->intrinsic != nir_intrinsic_store_ssbo)
+                        continue;
+                     constant = nir_src_is_const(intr->src[0]);
+                     for (unsigned c = 0; constant && c < 4; ++c)
+                        stored[c] = nir_src_comp_as_float(intr->src[0], c);
+                  }
+               }
+            }
+            ralloc_free(b.shader);
+
+            const bool lowered = robust && !formatted;
+            if (lowered != constant || lowered != clamped)
+               return false;
+            if (lowered &&
+                (stored[0] != 0.0f || stored[1] != 0.0f || stored[2] != 0.0f ||
+                 stored[3] != (alpha_one ? 1.0f : 0.0f)))
+               return false;
+         }
+      }
+   }
+   return true;
+}
+
 struct buffer_metadata_fixture {
    uint32_t elements, tail, coord;
    bool rgb32, saw_data;
@@ -2299,7 +2426,7 @@ test_g17p_buffer_metadata(void)
       nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 15, .align_mul = 16);
       b.shader->info.num_ssbos = 1;
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
 
       struct buffer_metadata_fixture f = {
          .elements = cases[c].elements, .tail = cases[c].tail,
@@ -2382,7 +2509,7 @@ test_g17p_buffer_image_metadata(void)
          .image_dim = GLSL_SAMPLER_DIM_BUF,
          .format = PIPE_FORMAT_R8G8B8A8_UINT, .src_type = nir_type_uint32,
          .access = ACCESS_NON_READABLE);
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
       struct buffer_metadata_fixture f = {.elements = 16384, .tail = tail};
       bool progress;
       do {
@@ -4217,7 +4344,7 @@ test_buffer_fetch_r32_store(void)
       nir_channel(&b, value, 0), zero, .image_dim = GLSL_SAMPLER_DIM_2D,
       .format = PIPE_FORMAT_R32_UINT, .src_type = nir_type_uint32,
       .access = ACCESS_NON_READABLE);
-   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
    struct buffer_metadata_fixture fixture = {.elements = 64};
    bool progress;
    do {
@@ -7210,6 +7337,11 @@ main(int argc, char **argv)
    if (!test_g17p_buffer_metadata() ||
        !test_g17p_buffer_image_metadata() || !test_buffer_fetch_r32_store()) {
       fputs("buffer metadata lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_formatless_robust_image_load()) {
+      fputs("formatless robust image load lowering mismatch\n", stderr);
       all_ok = false;
    }
 
