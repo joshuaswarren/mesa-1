@@ -65,6 +65,7 @@ main(void)
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
           i == LIBAGX_COPY_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
+          i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
           i == LIBAGX_CONDITIONAL_RENDER)
@@ -492,6 +493,43 @@ main(void)
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);
+
+   /* A timestamp written inside a render pass after another timestamp copies
+    * the graphics control stream's completion time. Fresh metal-nt
+    * applegpu_g17p ground truth for the equivalent MSL kernel, dest[0] =
+    * src[0] over two ulong device buffers, performs one 64-bit lddev and one
+    * 64-bit stdev (native __compute text SHA-256
+    * 682dde00553bdaf5abe66ee9c2d7bb9f1ce9e3cb50db1dbd79f0289094885441).
+    * The Mesa ABI form addresses both pointers from its uniforms, leaving
+    * exactly that load, store and end. */
+   static const uint8_t timestamp_expected[] = {
+      0x67, 0x00, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
+   CHECK(timestamp_blob != NULL);
+   if (!timestamp_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *timestamp_info =
+      (const void *)timestamp_blob;
+   CHECK(timestamp_info->preamble_offset == 0);
+   CHECK(timestamp_info->main_offset == 0);
+   CHECK(timestamp_info->main_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->binary_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->nr_gprs == 4);
+   CHECK(timestamp_info->nr_preamble_gprs == 0);
+   CHECK(timestamp_info->push_count == 8);
+   CHECK(timestamp_info->workgroup_size[0] == 1);
+   CHECK(timestamp_info->workgroup_size[1] == 1);
+   CHECK(timestamp_info->workgroup_size[2] == 1);
+   CHECK(timestamp_info->local_size == 0);
+   CHECK(timestamp_info->imageblock_stride == 0);
+   CHECK(!timestamp_info->uses_txf);
+   CHECK(timestamp_info->agx3_staging_known);
+   CHECK(timestamp_info->agx3_staging_halfs == 0);
+   CHECK(memcmp((const uint8_t *)timestamp_blob + sizeof(*timestamp_info),
+                timestamp_expected, sizeof(timestamp_expected)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",
