@@ -265,6 +265,7 @@ agx3_set_dest_and_value(const agx_instr *I, agx_index value,
    S->src[0].reg = value.value;
    S->src[0].size = value.size;
    S->src[0].is_reg = agx3_src_is_register(value);
+   S->src[0].live = !value.kill && !value.discard;
 }
 
 static bool
@@ -327,9 +328,11 @@ agx3_translate_instr(const agx_instr *I, struct agx3_sel_instr *S)
       S->src[0].reg = I->src[0].value;
       S->src[0].size = I->src[0].size;
       S->src[0].is_reg = true;
+      S->src[0].live = !I->src[0].kill && !I->src[0].discard;
       S->src[1].reg = I->src[1].value;
       S->src[1].size = I->src[1].size;
       S->src[1].is_reg = true;
+      S->src[1].live = !I->src[1].kill && !I->src[1].discard;
       return true;
    }
 
@@ -358,6 +361,7 @@ agx3_translate_instr(const agx_instr *I, struct agx3_sel_instr *S)
       S->src[i].abs = I->src[i].abs;
       S->src[i].neg = I->src[i].neg;
       S->src[i].is_reg = agx3_src_is_register(I->src[i]);
+      S->src[i].live = !I->src[i].kill && !I->src[i].discard;
    }
 
    /* NIR ishl/ushr arrive as a bitfield insert/extract with a zero base and a
@@ -3542,6 +3546,14 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
                                S->src[i].size == AGX3_SEL_SIZE_32 &&
                                !S->src[i].abs && !S->src[i].neg;
 
+   /* The composer's baseline is one Apple specimen, lifetime bits included.
+    * Never let it end the lifetime of a source the shader still reads. */
+   bool baseline_ends_live_source = false;
+   for (unsigned i = 0; op != AGX3_ALU_NUM && i < S->nr_srcs; ++i)
+      baseline_ends_live_source |=
+         S->src[i].is_reg && S->src[i].live &&
+         agx3_alu_form_ends_source(enc, op, i);
+
    uint8_t bytes[AGX3_ALU_MAX_LENGTH];
    uint8_t len = 0;
    const uint16_t s0 = S->nr_srcs > 0 ? S->src[0].reg : 0;
@@ -3549,6 +3561,7 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const uint16_t s2 = S->nr_srcs > 2 ? S->src[2].reg : 0;
 
    if (op != AGX3_ALU_NUM && all_sources_registers &&
+       !baseline_ends_live_source &&
        S->has_dest && S->dest_size == AGX3_SEL_SIZE_32 &&
        agx3_alu_compose(enc, op, S->dest, s0, s1, s2, S->imm, wait_mask,
                         bytes, &len)) {

@@ -1198,6 +1198,46 @@ agx3_alu_bit_width(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
    return agx3_bind_compose(enc,f->mnemonic,f->ep,base,nb,ov,n,out,len);
 }
 
+/*
+ * Each source's last-use field in the AGX3b composer forms, as the explicit-hint
+ * encoders place it: integer f27/f42 (agx3_alu_integer_reg_shift), bitwise
+ * f27/f41 (agx3_alu_bit_width), float f46/f29/f63 for operands f35/f18/f52
+ * (agx3_alu_float_reg), and the single source of the float conversions and
+ * unary float forms. A zero names no grounded field.
+ */
+static const uint8_t agx3_alu_source_last_use[AGX3_ALU_NUM][3] = {
+   [AGX3_ALU_IADD] = {27, 42},
+   [AGX3_ALU_ISUB] = {27, 42},
+   [AGX3_ALU_FADD] = {46, 29},
+   [AGX3_ALU_FMUL] = {46, 29},
+   [AGX3_ALU_FMA] = {46, 29, 63},
+   [AGX3_ALU_BAND] = {27, 41},
+   [AGX3_ALU_BOR] = {27, 41},
+   [AGX3_ALU_BXOR] = {27, 41},
+   [AGX3_ALU_RCP] = {29},
+   [AGX3_ALU_RSQRT] = {29},
+   [AGX3_ALU_RINT] = {29},
+   [AGX3_ALU_I2F] = {29},
+   [AGX3_ALU_U2F] = {29},
+   [AGX3_ALU_F2I] = {27},
+};
+
+bool
+agx3_alu_form_ends_source(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                          unsigned i)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || op >= AGX3_ALU_NUM || i >= 3)
+      return false;
+
+   const uint8_t field = agx3_alu_source_last_use[op][i];
+   const struct agx3_alu_form *F = &agx3_alu_forms[op][0];
+   for (unsigned b = 0; field != 0 && b < F->nbase; ++b) {
+      if (F->base[b].f == field && F->base[b].v != 0)
+         return true;
+   }
+   return false;
+}
+
 bool
 agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  uint16_t dest, const uint16_t src[2],

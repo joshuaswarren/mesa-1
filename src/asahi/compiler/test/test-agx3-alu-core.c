@@ -480,6 +480,28 @@ test_band_identity_wait(void)
 }
 
 static void
+test_form_lifetime_baselines(void)
+{
+   const enum agx_isa_encoding b = AGX_ISA_ENCODING_AGX3B;
+   /* Specimens whose baseline ends a source's lifetime. */
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_IADD, 0));
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_IADD, 1));
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_BAND, 0));
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_FMUL, 0));
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_FMUL, 1));
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_FMA, 2));
+   assert(agx3_alu_form_ends_source(b, AGX3_ALU_F2I, 0));
+   /* ... and ones that keep their sources. */
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_ISUB, 0));
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_FADD, 0));
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_SLL, 0));
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_LSR, 1));
+   assert(!agx3_alu_form_ends_source(b, AGX3_ALU_LDIMM, 0));
+   assert(!agx3_alu_form_ends_source(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_IADD, 0));
+   puts("ALU form lifetime baselines PASS");
+}
+
+static void
 test_native_bit_andc(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -5312,6 +5334,7 @@ int main(void){
    test_native_bit_not16();
    test_native_bit_andc();
    test_band_identity_wait();
+   test_form_lifetime_baselines();
    test_native_bit_nor();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
