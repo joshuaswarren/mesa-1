@@ -477,6 +477,7 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
           (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD ||
            I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL ||
            I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL ||
+           (I->op == AGX_OPCODE_EXTR && s < 2) ||
            I->op == AGX_OPCODE_BITOP || I->op == AGX_OPCODE_BALLOT ||
            I->op == AGX_OPCODE_QUAD_BALLOT ||
            I->op == AGX_OPCODE_ICMP_BALLOT ||
