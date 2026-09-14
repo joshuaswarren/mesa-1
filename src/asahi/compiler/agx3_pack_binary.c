@@ -4460,6 +4460,28 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
+   /* Two half-float registers compare natively, as Apple's G17P compiler
+    * does for `if (h0 < h1)`, with both sources' actual lifetimes. */
+   if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+       agx3_src_is_register(I->src[0]) && agx3_src_is_register(I->src[1]) &&
+       I->src[0].size == AGX_SIZE_16 && I->src[1].size == AGX_SIZE_16 &&
+       agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
+       !I->src[0].memory && !I->src[1].memory &&
+       !I->src[0].abs && !I->src[1].abs && !I->src[0].neg &&
+       !I->src[1].neg && !I->src[0].kill && !I->src[1].kill) {
+      enum agx3_cf_fcond cond;
+      bool or_nan;
+      const uint16_t src[] = {I->src[0].value, I->src[1].value};
+      const struct agx3_cf_source_hints hints[] = {
+         {I->src[0].cache, I->src[0].discard},
+         {I->src[1].cache, I->src[1].discard}};
+      if (!agx3_cf_map_fcond(I->fcond, &cond, &or_nan, invert) ||
+          !agx3_cf_fcmp_reg16(enc, cond, or_nan, flag_slot, src, hints, 0,
+                              bytes, &len))
+         return false;
+      return agx3_append(emission, bytes, len);
+   }
+
    bool ok;
    if (is_float) {
       if (!agx3_cf_reg32(I->src[0]))

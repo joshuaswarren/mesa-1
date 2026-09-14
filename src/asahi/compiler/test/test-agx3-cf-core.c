@@ -221,12 +221,52 @@ test_float_zero_compare(void)
    }
 }
 
-/* metal-nt -arch applegpu_g17p: `if (x < y)` over two loaded floats. */
+/* metal-nt -arch applegpu_g17p: `if (x < y)` and friends over two loaded
+ * halves, each operand either read again after the branch or not. */
 static void
-test_float_second_source_lifetime(void)
+test_half_register_compare(void)
 {
-   /* The second source's cache is f28 and its discard f30: y live, then y
-    * dead. */
+   static const struct {
+      enum agx3_cf_fcond cond;
+      bool or_nan;
+      uint16_t src[2];
+      bool live[2];
+      const char *bytes;
+   } rows[] = {
+      {AGX3_CF_FCOND_LT, false, {4, 2}, {false, false}, "0a043a0203c0"},
+      {AGX3_CF_FCOND_LT, false, {4, 2}, {true, false},  "0a84320203c0"},
+      {AGX3_CF_FCOND_LT, false, {5, 4}, {false, true},  "0a042a840bc0"},
+      {AGX3_CF_FCOND_LT, false, {5, 4}, {true, true},   "0a8422840bc0"},
+      {AGX3_CF_FCOND_GT, false, {4, 2}, {false, false}, "0a043a0202c0"},
+      {AGX3_CF_FCOND_GT, false, {5, 4}, {true, true},   "0a8422840ac0"},
+      {AGX3_CF_FCOND_EQ, false, {4, 2}, {false, false}, "0a043b02060000c00000"},
+      {AGX3_CF_FCOND_EQ, false, {5, 4}, {true, true},   "0a842384060008c00000"},
+      /* x >= y: lt or unordered, inverted by the branch */
+      {AGX3_CF_FCOND_LT, true,  {4, 2}, {false, false}, "1a043b02060002c00000"},
+      {AGX3_CF_FCOND_LT, true,  {5, 4}, {false, true},  "1a042b8406000ac00000"},
+      /* x <= y */
+      {AGX3_CF_FCOND_GT, true,  {4, 2}, {true, false},  "1a843302060003c00000"},
+      {AGX3_CF_FCOND_GT, true,  {5, 4}, {true, true},   "1a84238406000bc00000"},
+   };
+
+   for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+      const struct agx3_cf_source_hints hints[] = {
+         {rows[i].live[0], !rows[i].live[0]},
+         {rows[i].live[1], !rows[i].live[1]}};
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      /* Each operand came from a load on scoreboard slot 6. */
+      const bool ok = agx3_cf_fcmp_reg16(AGX_ISA_ENCODING_AGX3B, rows[i].cond,
+                                         rows[i].or_nan, 0, rows[i].src, hints,
+                                         1u << 5, out, &len);
+      checks++;
+      if (!ok || !hex_is(out, len, rows[i].bytes)) {
+         fprintf(stderr, "FAIL native half register branch %u\n", i);
+         failures++;
+      }
+   }
+
+   /* The same f28/f30 layout on the f32 form: y live, then y dead. */
    static const struct {
       bool live1;
       uint16_t src[2];
@@ -527,7 +567,7 @@ main(void)
 {
    test_float_minifloat_compare();
    test_float_zero_compare();
-   test_float_second_source_lifetime();
+   test_half_register_compare();
    test_float_negated_register_compare();
    test_float_absolute_register_compare();
    test_half_float_zero_compare();
