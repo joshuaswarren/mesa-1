@@ -305,7 +305,7 @@ TEST(Tilebuffer, G17PNarrowSRGB)
 
       for (unsigned samples : {2u, 4u}) {
          tib = agx_build_tilebuffer_layout(formats, 1, samples, false);
-         EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+         EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
       }
 
       formats[1] = format;
@@ -393,7 +393,7 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
       EXPECT_EQ(agx_g17p_mrt_eot_selector(format.logical), 0x15);
 
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
-      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
 
    enum pipe_format packed_float[AGX_MAX_RENDER_TARGETS] = {
@@ -506,7 +506,7 @@ TEST(Tilebuffer, G17PRGB32EOTKey)
                 format.signed_format);
 
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
-      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
       tib = agx_build_tilebuffer_layout(rt, 1, 1, true);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
    }

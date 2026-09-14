@@ -277,16 +277,11 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(tib);
    const bool raw32 = mrt == AGX_G17P_MRT_RGBA32 ||
                      mrt == AGX_G17P_MRT_R32_QUAD;
+   /* A multisample tile of a 16-byte sample fits only 16x16. */
    if (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16 &&
-       !((mrt == AGX_G17P_MRT_RGBA32 || mrt == AGX_G17P_MRT_MIXED) &&
+       !((mrt == AGX_G17P_MRT_RGBA32 || mrt == AGX_G17P_MRT_MIXED ||
+          tib->nr_samples > 1) &&
          tib->tile_size == 16 * 16))
-      return false;
-
-   if (tib->nr_samples > 1 &&
-       tib->logical_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_R8G8B8X8_UNORM &&
-       tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
    for (unsigned rt = mrt == AGX_G17P_MRT_MIXED ? AGX_MAX_RENDER_TARGETS
@@ -297,46 +292,42 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
          return false;
    }
 
+   /* A multisample layout reserves one empty byte-aligned sample even with no
+    * colour attachment. */
    if (tib->logical_format[0] == PIPE_FORMAT_NONE)
-      return tib->sample_size_B == 0;
+      return tib->sample_size_B == (tib->nr_samples > 1 ? 8 : 0);
 
-   const bool scalar_r32f = tib->nr_samples == 1 &&
-                            tib->logical_format[0] == PIPE_FORMAT_R32_FLOAT;
-   const bool scalar_r32i = tib->nr_samples == 1 &&
-                            tib->logical_format[0] == PIPE_FORMAT_R32_SINT;
-   const bool pair_r32f = tib->nr_samples == 1 &&
-                          tib->logical_format[0] == PIPE_FORMAT_R32G32_FLOAT;
-   const bool pair_r32i = tib->nr_samples == 1 &&
-                          tib->logical_format[0] == PIPE_FORMAT_R32G32_SINT;
-   const bool pair_r32u = tib->nr_samples == 1 &&
-                          tib->logical_format[0] == PIPE_FORMAT_R32G32_UINT;
-   const bool scalar_r8u = tib->nr_samples == 1 &&
-                           tib->logical_format[0] == PIPE_FORMAT_R8_UINT;
-   const bool scalar_r8i = tib->nr_samples == 1 &&
-                           tib->logical_format[0] == PIPE_FORMAT_R8_SINT;
-   const bool rgba16u_or_x = tib->nr_samples == 1 &&
-      (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UINT ||
-       tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_UINT);
-   const bool rgba16i_or_x = tib->nr_samples == 1 &&
-      (tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SINT ||
-       tib->logical_format[0] == PIPE_FORMAT_R16G16B16X16_SINT);
+   const enum pipe_format format = tib->logical_format[0];
+   const bool scalar_r32f = format == PIPE_FORMAT_R32_FLOAT;
+   const bool scalar_r32i = format == PIPE_FORMAT_R32_SINT;
+   const bool pair_r32f = format == PIPE_FORMAT_R32G32_FLOAT;
+   const bool pair_r32i = format == PIPE_FORMAT_R32G32_SINT;
+   const bool pair_r32u = format == PIPE_FORMAT_R32G32_UINT;
+   const bool scalar_r8u = format == PIPE_FORMAT_R8_UINT;
+   const bool scalar_r8i = format == PIPE_FORMAT_R8_SINT;
+   const bool rgba16u_or_x = format == PIPE_FORMAT_R16G16B16A16_UINT ||
+                             format == PIPE_FORMAT_R16G16B16X16_UINT;
+   const bool rgba16i_or_x = format == PIPE_FORMAT_R16G16B16A16_SINT ||
+                             format == PIPE_FORMAT_R16G16B16X16_SINT;
    /* API RGB32 surfaces use the four-lane RGBX physical family. The unused
     * lane has the same tile footprint and EOT protocol as RGBA32. */
-   const bool rgbx32u = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+   const bool rgbx32u = tib->sample_size_B == 16 &&
       (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_UINT ||
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_UINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgbx32i = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+   const bool rgbx32i = tib->sample_size_B == 16 &&
       (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_SINT ||
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_SINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgbx32f = tib->nr_samples == 1 && tib->sample_size_B == 16 &&
+   const bool rgbx32f = tib->sample_size_B == 16 &&
       (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
-   const bool rgb10a2u = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
+   const bool rgb10a2u = tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
+   /* The packed float word is stored raw, so its samples cannot be
+    * resolved by averaging the lane. */
    const bool r11g11b10f = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
       agx_tilebuffer_physical_format(tib, 0) ==
