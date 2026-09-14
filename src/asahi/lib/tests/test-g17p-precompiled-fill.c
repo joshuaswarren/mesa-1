@@ -65,9 +65,11 @@ main(void)
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
           i == LIBAGX_COPY_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
+          i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
-          i == LIBAGX_CONDITIONAL_RENDER)
+          i == LIBAGX_CONDITIONAL_RENDER ||
+          i == LIBAGX_TESS_FACTORS_HALF)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -106,7 +108,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x93a824ae6ebc0afa));
+         UINT64_C(0xbc86c399457f3a6a));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -144,7 +146,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0x1761df231cb8080c));
+         UINT64_C(0xd412eb7d64cc5c54));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -179,7 +181,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0x96fff30496176f5b));
+         UINT64_C(0x1256365ce6cd378b));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -225,11 +227,11 @@ main(void)
       uint64_t hash;
    } robust_index[] = {
       {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
-       UINT64_C(0x9495c21420219b7c)},
+       UINT64_C(0x0b9b4afcfff889cc)},
       {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
-       UINT64_C(0x32fd5fedbd7e68f3)},
+       UINT64_C(0xbfe2ca3f22a5575b)},
       {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
-       UINT64_C(0x014acefc06e693bd)},
+       UINT64_C(0xc64c99e36e9c9b95)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -348,7 +350,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0xfd5dc1120f8ca104));
+         UINT64_C(0xccb20ed438e45f04));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -371,9 +373,9 @@ main(void)
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
       {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xc1fe4bfe34d9b10e)},
+       {1024, 1, 1}, 4, UINT64_C(0x7798f979bfc20f26)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0xd16bb0ba90732f74)},
+       UINT64_C(0x28b92f478b1714d4)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
@@ -424,8 +426,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0xc148746179c7c9c7)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xeb154f009be4021a)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0xd312d6837034a3df)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xa7af1ba09fd87252)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -488,9 +490,77 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x3000109950dfd0cb));
+         UINT64_C(0x89f7e9a45c600e83));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
+                end, sizeof(end)) == 0);
+
+   /* A timestamp written inside a render pass after another timestamp copies
+    * the graphics control stream's completion time. Fresh metal-nt
+    * applegpu_g17p ground truth for the equivalent MSL kernel, dest[0] =
+    * src[0] over two ulong device buffers, performs one 64-bit lddev and one
+    * 64-bit stdev (native __compute text SHA-256
+    * 682dde00553bdaf5abe66ee9c2d7bb9f1ce9e3cb50db1dbd79f0289094885441).
+    * The Mesa ABI form addresses both pointers from its uniforms, leaving
+    * exactly that load, store and end. */
+   static const uint8_t timestamp_expected[] = {
+      0x67, 0x00, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
+   CHECK(timestamp_blob != NULL);
+   if (!timestamp_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *timestamp_info =
+      (const void *)timestamp_blob;
+   CHECK(timestamp_info->preamble_offset == 0);
+   CHECK(timestamp_info->main_offset == 0);
+   CHECK(timestamp_info->main_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->binary_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->nr_gprs == 4);
+   CHECK(timestamp_info->nr_preamble_gprs == 0);
+   CHECK(timestamp_info->push_count == 8);
+   CHECK(timestamp_info->workgroup_size[0] == 1);
+   CHECK(timestamp_info->workgroup_size[1] == 1);
+   CHECK(timestamp_info->workgroup_size[2] == 1);
+   CHECK(timestamp_info->local_size == 0);
+   CHECK(timestamp_info->imageblock_stride == 0);
+   CHECK(!timestamp_info->uses_txf);
+   CHECK(timestamp_info->agx3_staging_known);
+   CHECK(timestamp_info->agx3_staging_halfs == 0);
+   CHECK(memcmp((const uint8_t *)timestamp_blob + sizeof(*timestamp_info),
+                timestamp_expected, sizeof(timestamp_expected)) == 0);
+
+   /* Hardware tessellation factor records: one KERNEL(32) invocation per
+    * patch reading the TCS levels as floats and as bits, and writing IEEE
+    * halves. Pin the whole generated program and its launch ABI. */
+   const uint32_t *factors_blob = libagx_g17p[LIBAGX_TESS_FACTORS_HALF];
+   CHECK(factors_blob != NULL);
+   if (!factors_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *factors_info =
+      (const void *)factors_blob;
+   const uint8_t *factors_binary =
+      (const uint8_t *)factors_blob + sizeof(*factors_info);
+   CHECK(factors_info->preamble_offset == 0);
+   CHECK(factors_info->main_offset == 0);
+   CHECK(factors_info->main_size == 1496);
+   CHECK(factors_info->binary_size == 1496);
+   CHECK(factors_info->nr_gprs == 24);
+   CHECK(factors_info->nr_preamble_gprs == 0);
+   CHECK(factors_info->push_count == 12);
+   CHECK(factors_info->workgroup_size[0] == 32);
+   CHECK(factors_info->workgroup_size[1] == 1);
+   CHECK(factors_info->workgroup_size[2] == 1);
+   CHECK(factors_info->local_size == 0);
+   CHECK(factors_info->imageblock_stride == 0);
+   CHECK(!factors_info->uses_txf);
+   CHECK(factors_info->agx3_staging_known);
+   CHECK(factors_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
+         UINT64_C(0x0d3d3701f282d673));
+   CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
    if (failures) {

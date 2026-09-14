@@ -84,7 +84,10 @@ struct hk_shader_info {
          bool early_fragment_tests;
          bool writes_memory;
 
-         uint8_t _pad[7];
+         /* Rasterization samples the G17P coverage updates are compiled for */
+         uint8_t g17p_samples;
+
+         uint8_t _pad[6];
       } fs;
 
       struct {

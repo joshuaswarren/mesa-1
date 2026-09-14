@@ -13,6 +13,7 @@
 #include "agx_tilebuffer.h"
 #include "agx_usc.h"
 #include "hk_agx3_ioto_program_core.h"
+#include "asahi/compiler/agx3_compute_program.h"
 #include "hk_agx3_vdm_decode.h"
 #include "hk_buffer.h"
 #include "hk_cmd_pool.h"
@@ -1257,7 +1258,12 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Not scratch but this is the most convenient place for this... */
    cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
 
-   if (max_scratch_size == 0)
+   /* G17P publishes a shader's spill frame as thread-private storage in its
+    * SPECTPR. There is no helper-program stack, and the kernel rejects a
+    * command that names one. */
+   if (max_scratch_size == 0 ||
+       agx_chip_command_stream_generation(dev->dev.chip) ==
+          AGX_CS_GENERATION_HAL200)
       return;
 
    unsigned preamble_size = (s->b.info.preamble_scratch_size > 0) ? 1 : 0;
@@ -1310,14 +1316,15 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
    if (cf->nr_bindings == 0)
       return cf->nr_cf == 0;
 
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct hk_api_shader *api_vs = gfx->shaders[MESA_SHADER_VERTEX];
+   /* The coefficients describe the hardware vertex program the draw
+    * launches: the API vertex shader, or the post-tessellation vertex
+    * program when tessellation is bound. */
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct hk_shader *vs =
-      api_vs ? &api_vs->variants[HK_VS_VARIANT_HW] : NULL;
+      gfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(gfx) : NULL;
    if (!vs || gfx->shaders[MESA_SHADER_GEOMETRY] ||
-       gfx->shaders[MESA_SHADER_TESS_EVAL] ||
-       cf->nr_bindings > HK_AGX3_G17P_MAX_USER_WORDS + 2 ||
-       cf->nr_cf > HK_AGX3_G17P_MAX_USER_WORDS + 2 ||
+       cf->nr_bindings > HK_AGX3_G17P_MAX_COEFFICIENTS ||
+       cf->nr_cf > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        vs->agx3_vdm_state_update.source_layout !=
           AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT ||
        vs->info.uvs.user_size > HK_AGX3_G17P_MAX_USER_WORDS)
@@ -1357,8 +1364,12 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             return false;
          }
       } else {
-         if (b->slot < VARYING_SLOT_VAR0 || b->slot > VARYING_SLOT_VAR31 ||
-             (b->perspective && !has_rhw) ||
+         /* A fragment gl_ViewportIndex read is an ordinary flat varying
+          * that the vertex shader also writes out as a user word. */
+         const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
+                                 b->slot <= VARYING_SLOT_VAR31) ||
+                                b->slot == VARYING_SLOT_VIEWPORT;
+         if (!user_slot || (b->perspective && !has_rhw) ||
              b->offset + b->count > vs->info.uvs.components[b->slot])
             return false;
          ++user_bindings;
@@ -1379,8 +1390,9 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 {
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || s->b.info.has_preamble ||
-       s->b.info.scratch_size != 0 ||
-       s->b.info.preamble_scratch_size != 0 || linked->b.scratch_size != 0 ||
+       s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||
+       s->b.info.preamble_scratch_size != 0 ||
+       linked->b.scratch_size > AGX3_G17P_MAX_SPILL_B ||
        s->b.info.texture_state_count != 0 ||
        (s->b.info.sampler_state_count != 0 &&
         !(s->info.agx3_indexed_sampler_valid &&
@@ -1427,8 +1439,11 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    /* The raster variant produced by poly_nir_lower_gs is a hardware vertex
     * program while retaining the API geometry stage in hk_shader_info.  It
     * pulls generated vertices through the root ABI rather than vertex
-    * attributes, then performs the XFB stores before rasterization. */
-   if (s->info.stage == MESA_SHADER_GEOMETRY &&
+    * attributes, then performs the XFB stores before rasterization.  The
+    * post-tessellation vertex program likewise keeps the evaluation stage and
+    * reads the control shader's outputs through the root ABI. */
+   if ((s->info.stage == MESA_SHADER_GEOMETRY ||
+        s->info.stage == MESA_SHADER_TESS_EVAL) &&
        s->b.info.stage == MESA_SHADER_VERTEX) {
       const bool ok =
          !linked->sw_indexing &&
@@ -1576,10 +1591,12 @@ hk_g17p_graphics_uniform_ranges(
       }
 
       root_uniform = uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_attribs);
-   } else if (s->info.stage == MESA_SHADER_GEOMETRY &&
+   } else if ((s->info.stage == MESA_SHADER_GEOMETRY ||
+               s->info.stage == MESA_SHADER_TESS_EVAL) &&
               s->b.info.stage == MESA_SHADER_VERTEX) {
-      /* poly's raster variant lowers its geometry parameter loads against the
-       * compute-style root at uniform zero. */
+      /* poly's raster variant lowers its geometry parameter loads, and the
+       * post-tessellation vertex program its control-shader output loads,
+       * against the compute-style root at uniform zero. */
       root_uniform = 0;
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (cmd->state.gfx.uses_blend_constant) {
@@ -2178,13 +2195,22 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
                  "fragment attachment capture capacity");
    unsigned view_count = 0;
 
+   /* Each retained span is a G17P fragment write range, and the kernel
+    * encodes at most sixteen of them next to its own. Only a direct colour
+    * resolve writes a resolve attachment during the pass; every other resolve
+    * is a later meta pass that retains its own attachments. Eight multisample
+    * targets and their resolve targets would otherwise overflow the table and
+    * fail the submit. */
+   const bool g17p = dev->dev.chip == AGX_CHIP_G17P;
+   const bool resolves_written = !g17p || render->g17p_direct_color_resolve;
+
    for (unsigned i = 0; i < render->color_att_count; ++i) {
       views[view_count++] = (struct hk_attachment_view_ref){
          .view = render->color_att[i].iview,
          .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       };
       views[view_count++] = (struct hk_attachment_view_ref){
-         .view = render->color_att[i].resolve_iview,
+         .view = resolves_written ? render->color_att[i].resolve_iview : NULL,
          .aspect = VK_IMAGE_ASPECT_COLOR_BIT,
       };
    }
@@ -2194,7 +2220,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
-      .view = render->depth_att.resolve_iview,
+      .view = g17p ? NULL : render->depth_att.resolve_iview,
       .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
@@ -2202,7 +2228,7 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
       .aspect = VK_IMAGE_ASPECT_STENCIL_BIT,
    };
    views[view_count++] = (struct hk_attachment_view_ref){
-      .view = render->stencil_att.resolve_iview,
+      .view = g17p ? NULL : render->stencil_att.resolve_iview,
       .aspect = VK_IMAGE_ASPECT_STENCIL_BIT,
    };
 

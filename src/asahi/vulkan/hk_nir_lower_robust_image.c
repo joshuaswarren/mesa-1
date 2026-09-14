@@ -22,6 +22,11 @@ should_lower_robust_image(const nir_intrinsic_instr *intr, const void *data)
     * driver. */
    switch (intr->intrinsic) {
    case nir_intrinsic_image_deref_load:
+      /* A formatless load's out-of-bounds value depends on the bound view's
+       * format, which the common lowering cannot see. The texture lowering
+       * predicates it with the view's descriptor instead. */
+      return options->lower_loads_and_stores &&
+             nir_intrinsic_format(intr) != PIPE_FORMAT_NONE;
    case nir_intrinsic_image_deref_store:
       return options->lower_loads_and_stores;
    case nir_intrinsic_image_deref_atomic:

@@ -274,10 +274,13 @@ hk_g17p_compressed_copy_plan(
       return false;
    }
 
+   /* A copy covers whole blocks. As on AGX2, whose compute copy converts
+    * the region with util_format_get_nblocks{x,y}, an extent that is not a
+    * multiple of the block and does not reach the level edge still copies
+    * every block it touches. The offset is block-aligned and the extent stays
+    * inside the level, so the rounded-up blocks stay inside it too. */
    if (x >= mip_w || y >= mip_h || width > mip_w - x ||
        height > mip_h - y || (x % block_w) || (y % block_h) ||
-       ((width % block_w) && x + width != mip_w) ||
-       ((height % block_h) && y + height != mip_h) ||
        (copy->buffer_row_length &&
         (copy->buffer_row_length < width ||
          copy->buffer_row_length % block_w)) ||
@@ -575,8 +578,8 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
       ((src_type == VK_IMAGE_TYPE_1D && dst_type == VK_IMAGE_TYPE_2D) ||
        (dst_type == VK_IMAGE_TYPE_1D && src_type == VK_IMAGE_TYPE_2D)) &&
       src_layers == 1 && dst_layers == 1;
-   const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
-                              (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   const bool two_d_three_d = (src_1d_or_2d && dst_3d) ||
+                              (dst_1d_or_2d && src_3d);
    const bool valid_pair = same_type || one_d_two_d || two_d_three_d;
    if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
        !valid_pair || src_layers == 0 ||

@@ -290,6 +290,13 @@ struct agx_fs_shader_key {
 
    /* Base coefficient register. 0 for API shaders but nonzero for FS prolog */
    uint8_t cf_base;
+
+   /* G17P rasterization sample count that coverage updates (sample mask
+    * writes and discards) are compiled for. Apple's fragments build the
+    * coverage word from different system values, and with a different
+    * all-samples constant, at one and at several samples. 0 is one sample.
+    */
+   uint8_t nr_samples;
 };
 
 struct agx_device_key {
@@ -399,11 +406,11 @@ struct agx_shader_key {
     * the partitions from the tile operations. */
    uint64_t g17p_tile_partitions;
 
-   /* Number of targets, two to four, stored by a G17P multi-target EOT for
+   /* Number of targets, two to eight, stored by a G17P multi-target EOT for
     * arbitrary target formats, and the IMGWBLK selector of each target in
     * store order. Zero selects the format-specific EOT recognizers. */
    uint8_t g17p_mrt_eot_count;
-   uint8_t g17p_mrt_eot_selectors[4];
+   uint8_t g17p_mrt_eot_selectors[AGX_MAX_RTS];
 
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns

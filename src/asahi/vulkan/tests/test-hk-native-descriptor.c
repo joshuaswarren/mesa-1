@@ -1343,6 +1343,31 @@ main(void)
    assert(memcmp(&native_pbe, expected_layered,
                  sizeof(expected_layered)) == 0);
    assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   /* A level of a mipmapped 3D or array texture keeps the whole chain's
+    * geometry and adds the native mip extension: word0 bit58, word1 bit63,
+    * level at word2[47:44] and levels-1 at word2[51:48]. */
+   pbe.level = 1;
+   pbe.levels = 3;
+   pbe.unk_mipmapped = true;
+   uint8_t expected_mip[32];
+   memcpy(expected_mip, expected_layered, sizeof(expected_mip));
+   expected_mip[7] |= 0x04;
+   expected_mip[15] |= 0x80;
+   expected_mip[21] = 0x10;
+   expected_mip[22] = 0x02;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_mip, sizeof(expected_mip)) == 0);
+   pbe.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   pbe.layers = 1;
+   expected_mip[0] = 0x23;
+   expected_mip[13] = 0x00;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_mip, sizeof(expected_mip)) == 0);
+   CHECK_PBE_REJECT(pbe.level = 3);
+   pbe.dimension = AGX_TEXTURE_DIMENSION_3D;
+   pbe.layers = 4;
+   pbe.levels = 1;
+   pbe.unk_mipmapped = false;
    CHECK_PBE_REJECT(pbe.level = 1);
    pbe.level = 0;
    CHECK_PBE_REJECT(pbe.layout = AGX_LAYOUT_LINEAR);
@@ -1357,7 +1382,12 @@ main(void)
    pbe.level = 0;
    CHECK_PBE_REJECT(pbe.levels = 17);
    pbe.levels = 1;
-   CHECK_PBE_REJECT(pbe.srgb = true);
+   /* Gen9 converts stores to sRGB with word1 bit 61; Gen10's field is not
+    * recovered. */
+   pbe.srgb = true;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(((const uint8_t *)&native_pbe)[15] & 0x20);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
    pbe.srgb = false;
    CHECK_PBE_REJECT(pbe.mode = AGX_IMAGE_MODE_SPARSE);
    pbe.mode = AGX_IMAGE_MODE_NORMAL;

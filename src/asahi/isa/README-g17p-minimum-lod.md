@@ -1,9 +1,8 @@
 # G17P fragment minimum-LOD sampling
 
 The common Honeykrisp feature path advertises `shaderResourceMinLod` on
-M1/M2. G17P keeps it disabled by default. The diagnostic token
-`HK_G17P_UNVERIFIED_FEATURES=shader_resource_min_lod` exposes it for a bounded
-hardware gate, not as a claim that the entire Vulkan feature is supported.
+M1/M2, and G17P advertises it the same way. On the A18 Pro the minimum-LOD
+CTS targets pass 535 of 535 and the regress list has no new failures.
 
 The G17P native compiler emits SMP `f140=2` for a register minimum. With a
 bias, SMP retains `f139=3`; with explicit gradients it retains `f139=5`.
@@ -18,19 +17,18 @@ A gradient tuple appends the minimum as the low half of a padded final
 is involved. Implicit samples retain the pixel-entry and sample-group
 protocol; explicit gradients remain outside sample groups.
 
-The bounded implementation covers non-array fragment 2D and 3D samples,
+The first implementation covered non-array fragment 2D and 3D samples,
 including indexed descriptors, 2D fixed offsets, and 2D depth comparisons.
-Shared lowering maps 1D cases to the 2D path. Arrays, cubes, sparse results,
-3D offsets, dynamic offsets, and non-fragment clamp forms are not qualified
-by this change. The packed bias/minimum source must fit below half 128,
-as must the gradient tuple, matching the current staging operand bounds.
+Shared lowering maps 1D cases to the 2D path. Arrays, cubes, 3D offsets and
+dynamic offsets followed with their own native staging forms. Sparse results
+and non-fragment clamp forms are still refused. The packed bias/minimum source
+must fit below half 128, as must the gradient tuple, matching the current
+staging operand bounds.
 
 Native instruction fixtures cover the minimum operand and its composition
 with bias, gradients, offsets, comparisons, dimensions, and descriptor
 indexing. Stream tests verify the NIR half order, gradient append position,
-resource footprint, and pixel-entry distinction. The opt-in CTS gate still
-requires correct pixels on G17P before any claim of hardware qualification.
-Passing that bounded gate alone does not justify enabling the global feature.
+resource footprint, and pixel-entry distinction.
 
 ## Scoreboard operand coverage
 

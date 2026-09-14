@@ -234,6 +234,13 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
           ((s == 0 && I->src[1].neg) || (s == 1 && I->src[0].neg)))
          continue;
 
+      /* G17P has no iadd of two immediates. The ushr count copy
+       * `iadd #0, count` must keep its register count. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 &&
+          I->src[1 - s].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
       agx_instr *def = defs[src.value];
       if (!def || def->op != AGX_OPCODE_MOV_IMM)
          continue;
@@ -584,8 +591,8 @@ agx_optimizer_if_not(agx_instr **defs, agx_instr *I)
  * select as a value, and fusing a compare of two constants into a select
  * produces one; robust cube image coordinates do all of these.
  */
-static bool
-agx_optimizer_eval_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
+bool
+agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
                          agx_index y, bool *result)
 {
    if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
@@ -624,7 +631,7 @@ static agx_instr *
 agx_optimizer_fold_icmp(agx_context *ctx, agx_instr *I)
 {
    bool cond;
-   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
       return NULL;
 
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
@@ -638,7 +645,7 @@ static agx_instr *
 agx_optimizer_fold_icmpsel(agx_context *ctx, agx_instr *I)
 {
    bool cond;
-   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
       return NULL;
 
    const agx_index chosen = cond ? I->src[2] : I->src[3];
@@ -728,10 +735,39 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
       return;
    }
 
+   /* Likewise for a quad ballot, whose witnessed register form takes a 16-bit
+    * predicate. */
+   if (I->op == AGX_OPCODE_QUAD_BALLOT && ctx->key &&
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      I->src[0].type == AGX_INDEX_IMMEDIATE) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index predicate = agx_temp(ctx, AGX_SIZE_16);
+      agx_mov_imm_to(&b, predicate, I->src[0].value);
+      I->src[0] = predicate;
+      return;
+   }
+
    if (I->src[0].type != AGX_INDEX_NORMAL)
       return;
 
    agx_instr *def = defs[I->src[0].value];
+
+   /* The same register-against-zero ballot is witnessed on G17P for a 16-bit
+    * source only in its equal-to-zero form, while an unfused ballot counts
+    * the lanes where its predicate is nonzero. Widen a half predicate so it
+    * reaches the 32-bit form instead.
+    */
+   if (I->op == AGX_OPCODE_BALLOT && ctx->key &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->src[0].size == AGX_SIZE_16 &&
+       !(def && (def->op == AGX_OPCODE_ICMP || def->op == AGX_OPCODE_FCMP))) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+      agx_mov_to(&b, wide, I->src[0]);
+      I->src[0] = wide;
+      return;
+   }
+
    if (!def || (def->op != AGX_OPCODE_ICMP && def->op != AGX_OPCODE_FCMP))
       return;
 
@@ -740,6 +776,30 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
 
    /* Replace with a fused instruction since the # of sources changes */
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+   /* Every G17P SIMD ballot Apple's compiler emits compares one register
+    * against a constant, so a ballot of two registers has no witnessed
+    * encoding. Keep the comparison, with the opposite sense, as a boolean and
+    * ballot the lanes where it is zero: the witnessed simd_broadcast_first()
+    * form.
+    */
+   if (!quad && ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       def->src[1].type != AGX_INDEX_IMMEDIATE) {
+      agx_index opposite = agx_temp(ctx, AGX_SIZE_16);
+
+      if (def->op == AGX_OPCODE_ICMP) {
+         agx_icmp_to(&b, opposite, def->src[0], def->src[1], def->icond,
+                     !def->invert_cond);
+      } else {
+         agx_fcmp_to(&b, opposite, def->src[0], def->src[1], def->fcond,
+                     !def->invert_cond);
+      }
+
+      agx_icmp_ballot_to(&b, I->dest[0], opposite, agx_zero(), AGX_ICOND_UEQ,
+                         false);
+      agx_remove_instruction(I);
+      return;
+   }
 
    agx_instr *fused = agx_icmp_ballot_to(
       &b, I->dest[0], def->src[0], def->src[1], def->icond, def->invert_cond);

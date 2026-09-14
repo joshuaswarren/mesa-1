@@ -25,12 +25,12 @@ extern "C" {
  * layouts are rejected before any fields are consumed. */
 #define HK_AGX3_SHADER_BINARY_VERSION 14u
 
-/* The default public limit is the largest hardware witness promoted for normal
- * applications.  The candidate limit adds one float4 for ANGLE's internal
- * transform-feedback copy of gl_Position; it remains opt-in until the
- * position-plus-seventeen-float4 image oracle passes on G17P. */
-#define HK_AGX3_G17P_DEFAULT_USER_WORDS 64u
-#define HK_AGX3_G17P_MAX_USER_WORDS 68u
+/* A G17P vertex program writes at most 128 UVS words: Apple's compiler emits
+ * position plus thirty-one float4 user locations. Its fragment linker refuses
+ * a 128th coefficient. */
+#define HK_AGX3_G17P_MAX_UVS_WORDS 128u
+#define HK_AGX3_G17P_MAX_USER_WORDS (HK_AGX3_G17P_MAX_UVS_WORDS - 4u)
+#define HK_AGX3_G17P_MAX_COEFFICIENTS 127u
 
 bool hk_agx3_shader_binary_version_supported(uint32_t version);
 

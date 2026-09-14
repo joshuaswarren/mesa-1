@@ -126,8 +126,8 @@ struct ra_ctx {
    /* SSA values read by G17P's 192-half f32log2 operand domain. */
    BITSET_WORD *log2_gpr;
 
-   /* SSA coordinates that must stay above CEM's fixed scratch register bank
-    * or a fully occupied MRT store bank. */
+   /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
+    * register bank. */
    BITSET_WORD *high_gpr;
 };
 
@@ -140,14 +140,7 @@ struct ra_ctx {
 static unsigned
 reserved_size(agx_context *ctx)
 {
-   if (ctx->has_spill_pcopy_reserved)
-      return 8;
-   else if (ctx->any_quad_divergent_shuffle)
-      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
-   else if (ctx->any_cf)
-      return 1;
-   else
-      return 0;
+   return agx_reserved_registers(ctx);
 }
 
 UNUSED static void
@@ -364,11 +357,18 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
 {
    enum ra_class cls = ra_class_for_index(I->dest[d]);
    unsigned limit = rctx->bound[cls];
-   /* G17P TEX encodes a seven-bit half-register destination. Coordinate and
-    * other staged sources are bounded separately through texture_gpr below. */
+   /* G17P TEX encodes a seven-bit half-register destination, for image
+    * reads as for texture reads. Coordinate and other staged sources are
+    * bounded separately through texture_gpr below. */
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_TEXTURE_LOAD))
+       (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+        I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD))
       limit = MIN2(limit, 128);
+   /* A move from the uniform file packs to a G17P COPY, which names a
+    * seven-bit destination like the half COPY. */
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_UNIFORM)
+      limit = MIN2(limit, AGX3_COPY_REG16_DEST_HALVES);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        BITSET_TEST(rctx->low_gpr, I->dest[d].value))
       limit = MIN2(limit, rctx->tile_gpr_limit);
@@ -1672,15 +1672,15 @@ agx_ra(agx_context *ctx)
          agx_max_registers_for_occupancy(threads_per_workgroup);
    }
 
-   /* The AGX3B register operand fields name halves 0..191: an add, a device
-    * load and a device store all pack at half 190 and refuse half 192 (LOG2
-    * carries the same bound in dest_limit). Keep the allocator inside that
-    * file so a wide program spills instead of reaching registers the packer
-    * cannot name; a 65-output transform feedback copy program used to land
-    * its loads at r96 and its addresses at r98.
+   /* G17P's register file is 192 halves. Halves 192..255 still fit its
+    * 8-bit register fields but are not general registers: a copy into half
+    * 204 crashed the GPU co-processor. applegpu_g17p holding 60 live float4
+    * or uint4 temporaries never names a register above half 191 and spills
+    * the rest to thread-private storage, so bound the file there and spill
+    * the same way.
     */
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
-      max_possible_regs = MIN2(max_possible_regs, AGX3_REGISTER_HALVES);
+      max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
 
    if (force_spilling) {
       /* Even when testing spilling, we need enough room for preloaded/exported
@@ -1742,7 +1742,7 @@ agx_ra(agx_context *ctx)
          /* Only rematerialize if it actually lets us save a wave */
          if (l < agx_round_registers(effective_demand)) {
             remat = true;
-            max_possible_regs = l;
+            max_possible_regs = MIN2(l, max_possible_regs);
          }
       }
    }
@@ -1785,6 +1785,7 @@ agx_ra(agx_context *ctx)
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
+   unsigned *split_source = calloc(ctx->alloc, sizeof(unsigned));
    BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *log2_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
@@ -1823,15 +1824,20 @@ agx_ra(agx_context *ctx)
    const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
       (quad_width == 16 || quad_stores == 4) &&
       quad_mask == BITFIELD_MASK(quad_stores);
-   /* Apple's store-only three- and four-target fragments and multi-target
-    * BG builtins of other formats store every width from the same bank, again
-    * with f13=0. */
+   /* Apple's store-only fragments of three or more targets and multi-target
+    * BG builtins of other formats store every width from the same bank:
+    * halves 0..31 for up to four targets and 0..63 for more. Its blending
+    * fragments of four or more targets do too: eight RGBA16Float targets
+    * store from halves 0..31, five from 0..19. */
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-      ctx->stage == MESA_SHADER_FRAGMENT && !tile_loads &&
-      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) && quad_stores <= 4 &&
+      ctx->stage == MESA_SHADER_FRAGMENT &&
+      (!tile_loads || quad_stores >= 4) &&
+      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      quad_stores <= AGX_MAX_RTS &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   const unsigned tile_gpr_limit = raw32_bank || mrt_bank ? 32 : 16;
+   const unsigned tile_gpr_limit =
+      mrt_bank && quad_stores > 4 ? 64 : raw32_bank || mrt_bank ? 32 : 16;
 
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded
@@ -1845,10 +1851,20 @@ agx_ra(agx_context *ctx)
             BITSET_SET(texture_gpr, I->dest[d].value);
       }
 
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
-         BITSET_SET(low_gpr, I->src[0].value);
+      /* A split channel takes its vector's register, so a tile store of one
+       * channel constrains the whole vector: a per-sample reload of a scalar
+       * target stores channel 0 of each texel fetch. */
+      if (I->op == AGX_OPCODE_SPLIT && I->src[0].type == AGX_INDEX_NORMAL) {
+         agx_foreach_ssa_dest(I, d)
+            split_source[I->dest[d].value] = I->src[0].value + 1;
+      }
 
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL) {
+         BITSET_SET(low_gpr, I->src[0].value);
+         if (split_source[I->src[0].value])
+            BITSET_SET(low_gpr, split_source[I->src[0].value] - 1);
+      }
 
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source
@@ -1870,6 +1886,18 @@ agx_ra(agx_context *ctx)
          if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->shadow &&
              I->src[5].type == AGX_INDEX_NORMAL)
             BITSET_SET(texture_gpr, I->src[5].value);
+      }
+
+      /* imgwci stages its data and coordinates through the same seven-bit
+       * COPY sources and names its PBE index register in a seven-bit field.
+       */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IMAGE_WRITE) {
+         for (unsigned s = 0; s < I->nr_srcs; ++s) {
+            if ((s == 0 || s == 1 || s == 4) &&
+                I->src[s].type == AGX_INDEX_NORMAL)
+               BITSET_SET(texture_gpr, I->src[s].value);
+         }
       }
 
       /* Both the result and source operands of G17P f32log2 are bounded to
@@ -1911,26 +1939,6 @@ agx_ra(agx_context *ctx)
       }
    }
 
-   /* The ordered eight-target RGBA8 reload keeps sixteen packed halves live
-    * until its terminal tile stores. Its shared texture coordinates are also
-    * bank-constrained, so the shuffler cannot evict them from that low bank.
-    * Place those coordinates above it from the outset, within their existing
-    * seven-bit COPY domain. This does not relax the tile or texture encodings. */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       ctx->agx3_mrt_tile_ops_ordered) {
-      unsigned tile_halfs = 0;
-      for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
-         if (BITSET_TEST(low_gpr, ssa))
-            tile_halfs += ncomps[ssa];
-      }
-      if (tile_halfs >= 16) {
-         for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
-            if (BITSET_TEST(texture_gpr, ssa) && !BITSET_TEST(low_gpr, ssa))
-               BITSET_SET(high_gpr, ssa);
-         }
-      }
-   }
-
    /* For live range splitting to work properly, ensure the register file is
     * aligned to the larger vector size. Most of the time, this is a no-op since
     * the largest vector size is usually 128-bit and the register file is
@@ -1952,8 +1960,9 @@ agx_ra(agx_context *ctx)
    if (ctx->key->is_helper || force_spilling)
       max_regs = max_possible_regs;
 
-   /* The occupancy bucket may sit above the encodable file (AGX3B: 192). */
+   /* Occupancy rounding must not reach past a smaller register file. */
    max_regs = MIN2(max_regs, max_possible_regs);
+
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
 
    /* Or, we can bound tightly for debugging */
@@ -2145,6 +2154,7 @@ agx_ra(agx_context *ctx)
 
    free(phi_web);
    free(low_gpr);
+   free(split_source);
    free(texture_gpr);
    free(log2_gpr);
    free(high_gpr);

@@ -35,8 +35,8 @@
  * every pixel fully -- with a per-pixel or resolved depth buffer every pixel
  * would be entirely A or entirely B and no intermediate value could exist.
  *
- * Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_depth. The test
- * says so and exits non-zero rather than silently skipping.
+ * A device without multisample colour and depth attachments fails the test
+ * rather than silently skipping it.
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -317,8 +317,7 @@ main(void)
    const VkSampleCountFlags want = (VkSampleCountFlags)G17P_MSAA_SAMPLES;
    if ((properties.limits.framebufferColorSampleCounts & want) == 0) {
       fprintf(stderr,
-              TEST_NAME ": framebufferColorSampleCounts lacks %ux "
-                        "(set HK_G17P_MSAA=1)\n",
+              TEST_NAME ": framebufferColorSampleCounts lacks %ux\n",
               G17P_MSAA_SAMPLES);
       return EXIT_FAILURE;
    }

@@ -4,12 +4,10 @@
  */
 
 #include "agx3_graphics_program.h"
-#include "asahi/lib/agx_g17p_wide_mrt_eot.h"
 
 #include "agx3_binder.h"
 #include "agx3_pixel_core.h"
 #include "asahi/lib/agx_ioto_state_core.h"
-#include "util/bitscan.h"
 #include "util/macros.h"
 
 #include <string.h>
@@ -226,10 +224,14 @@ agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
    return true;
 }
 
+/* Clear values of five to eight mixed-format targets, eight halves each after
+ * the four reserved halves. */
 static bool
-wide_mrt_clear_push(unsigned halfs)
+agx3_g17p_wide_mrt_clear_push_halfs(unsigned push_count)
 {
-   return halfs >= 4 + 8 * 3 && halfs <= 4 + 8 * 8 && (halfs - 4) % 8 == 0;
+   return push_count > AGX3_G17P_QUAD_CLEAR_PUSH_HALFS &&
+          push_count <= AGX3_G17P_OCTA_CLEAR_PUSH_HALFS &&
+          (push_count - 4) % 8 == 0;
 }
 
 bool
@@ -242,14 +244,17 @@ agx3_g17p_rt0_bg_shader_resources_match(enum agx3_g17p_rt0_bg_op op,
               push_count == AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS ||
               push_count == AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS ||
               push_count == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS ||
-              wide_mrt_clear_push(push_count)) &&
+              push_count == AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS ||
+              push_count == AGX3_G17P_QUAD_CLEAR_PUSH_HALFS ||
+              agx3_g17p_wide_mrt_clear_push_halfs(push_count)) &&
              !uses_txf;
    case AGX3_G17P_RT0_BG_RELOAD:
       return push_count == 0 && uses_txf;
    case AGX3_G17P_RT0_BG_CLEAR_RELOAD:
       return (push_count == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS ||
               push_count == AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS ||
-              push_count == AGX3_G17P_QUAD_CLEAR_PUSH_HALFS) &&
+              push_count == AGX3_G17P_QUAD_CLEAR_PUSH_HALFS ||
+              agx3_g17p_wide_mrt_clear_push_halfs(push_count)) &&
              uses_txf;
    default:
       return false;
@@ -277,7 +282,9 @@ agx3_g17p_rt0_bg_program_generate(
            clear_push_halfs != AGX3_G17P_WBOIT_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS &&
            clear_push_halfs != AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS &&
-           !wide_mrt_clear_push(clear_push_halfs)))
+           clear_push_halfs != AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS &&
+           clear_push_halfs != AGX3_G17P_QUAD_CLEAR_PUSH_HALFS &&
+           !agx3_g17p_wide_mrt_clear_push_halfs(clear_push_halfs)))
          return false;
       ranges[0] = (struct agx3_ioto_uniform_range){
          .start_halfs = 4,
@@ -351,9 +358,7 @@ agx3_g17p_rt0_bg_program_generate(
    if (!graphics_state_tail(&shader, &tail))
       return false;
 
-   /* Eight clear colors need eight load chunks. Their conservative GPU0
-    * body bound is 624 bytes even when the emitted body is smaller. */
-   uint8_t body[AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE];
+   uint8_t body[768];
    struct agx_ioto_inflight_load loads[64];
    struct agx_ioto_inflight_load sort[64];
    struct agx_ioto_load_cache_entry cache[64];
@@ -388,8 +393,10 @@ agx3_g17p_rt0_bg_program_generate(
        written > UINT16_MAX ||
        (desc->op == AGX3_G17P_RT0_BG_CLEAR &&
         written >
-           (wide_mrt_clear_push(desc->clear_push_halfs)
-               ? AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE
+           (desc->clear_push_halfs > AGX3_G17P_QUAD_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE
+            : desc->clear_push_halfs >= AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS
+               ? AGX_IOTO_G17P_QUAD_CLEAR_PROGRAM_MAX_SIZE
             : desc->clear_push_halfs == AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS
                ? AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE
             : desc->clear_push_halfs == AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS
@@ -417,22 +424,30 @@ agx3_g17p_rt0_eot_program_generate(
                      desc->attachment_count == 1);
    const bool rgba8_mrt = desc && desc->shader_binary_size == 120 &&
                           desc->nr_gprs == 8 &&
-                           desc->staging_halfs == 16 &&
-                           desc->attachment_count == 2 &&
-                           desc->imageblock.nr_samples == 1 &&
-                           desc->imageblock.sample_size_B == 8 &&
-                           desc->imageblock_offset_B == 0 &&
-                           desc->imageblock_offset1_B == 4;
-   const bool wboit_mrt = desc && desc->shader_binary_size == 120 &&
-                           desc->nr_gprs == 8 &&
-                           desc->staging_halfs == 16 &&
-                           desc->attachment_count == 2 &&
-                           desc->imageblock.nr_samples == 1 &&
-                           desc->imageblock.sample_size_B == 16 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
+                          desc->imageblock_offset_B == 0 &&
+                          desc->imageblock_offset1_B == 4;
+   const bool wboit_mrt = desc && desc->shader_binary_size == 238 &&
+                          desc->nr_gprs == 8 &&
+                          desc->staging_halfs == 16 &&
+                          desc->attachment_count == 2 &&
                           desc->imageblock_offset_B == 0 &&
                           desc->imageblock_offset1_B == 8;
    const bool dual_mrt = rgba8_mrt || wboit_mrt;
    const unsigned count = desc ? desc->attachment_count : 0;
+   const uint8_t offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+      desc ? desc->imageblock_offset_B : 0,
+      desc ? desc->imageblock_offset1_B : 0,
+      desc ? desc->imageblock_offset2_B : 0,
+      desc ? desc->imageblock_offset3_B : 0,
+      desc ? desc->imageblock_offset4_B : 0,
+      desc ? desc->imageblock_offset5_B : 0,
+      desc ? desc->imageblock_offset6_B : 0,
+      desc ? desc->imageblock_offset7_B : 0,
+   };
+   const bool high_offsets = offsets[4] || offsets[5] || offsets[6] ||
+                             offsets[7];
    const bool raw32_mrt =
       desc && count >= 2 && count <= 4 &&
       desc->shader_binary_size == 32 + 44 * count && desc->nr_gprs == 8 &&
@@ -443,52 +458,30 @@ agx3_g17p_rt0_eot_program_generate(
       desc->imageblock_offset3_B == (count > 3 ? 3 * desc->imageblock_offset1_B : 0) &&
       desc->imageblock.sample_size_B ==
          ALIGN_POT(count * desc->imageblock_offset1_B, 8) &&
-      desc->imageblock.nr_samples == 1;
+      !high_offsets && desc->imageblock.nr_samples == 1;
    /* The same program reads every target's offset from its own uniform, so
-    * targets of other formats may sit at any offset inside the sample. */
-   const bool mixed_mrt =
-      desc && desc->mixed_mrt && count >= 2 && count <= 4 &&
+    * targets of other formats may sit at any offset inside the sample. Its
+    * multisample form has the same length and registers (texture type 4
+    * changes three bytes per target); the imageblock carries the count. */
+   bool mixed_mrt =
+      desc && desc->mixed_mrt && count >= 2 &&
+      count <= AGX3_G17P_MRT_MAX_TARGETS &&
       desc->shader_binary_size == 32 + 44 * count && desc->nr_gprs == 8 &&
       desc->staging_halfs == 8 * count &&
-      desc->imageblock_offset_B < desc->imageblock.sample_size_B &&
-      desc->imageblock_offset1_B < desc->imageblock.sample_size_B &&
-      (count > 2 ? desc->imageblock_offset2_B < desc->imageblock.sample_size_B
-                 : desc->imageblock_offset2_B == 0) &&
-      (count > 3 ? desc->imageblock_offset3_B < desc->imageblock.sample_size_B
-                 : desc->imageblock_offset3_B == 0) &&
-      desc->imageblock.nr_samples == 1;
-   /* Dense RGBA8 layouts of three to eight targets use the native wide
-    * end-of-tile programs, whose attachment offsets are the compact 4 * rt. */
-   struct agx_g17p_wide_mrt_eot wide_native;
-   const bool wide_mrt = desc &&
-      (desc->attachment_mask || (!raw32_mrt && !mixed_mrt)) &&
-      (desc->attachment_mask || count >= 3) &&
-      agx_g17p_wide_mrt_eot_get(count, &wide_native) &&
-      desc->shader_binary_size == wide_native.size && desc->nr_gprs == 8 &&
-      desc->staging_halfs == wide_native.staging_halfs &&
-      desc->imageblock.nr_samples == 1 &&
-      desc->imageblock.sample_size_B == ALIGN_POT(4 * count, 8) &&
-      desc->imageblock_offset_B == 0;
-   /* An explicit mask selects the compact attachment ABI. Malformed metadata
-    * cannot fall back to a legacy RT0 or dual-target descriptor. */
-   if (desc && desc->attachment_mask && !wide_mrt)
-      return false;
-   if (wide_mrt) {
-      if (desc->attachment_mask &&
-          util_bitcount(desc->attachment_mask) != count)
-         return false;
-      for (unsigned rt = 0; rt < count; ++rt) {
-         if (desc->imageblock_offsets_B[rt] != 4 * rt)
-            return false;
-      }
+      (desc->imageblock.nr_samples == 1 ||
+       desc->imageblock.nr_samples == 2 ||
+       desc->imageblock.nr_samples == 4);
+   for (unsigned rt = 0; mixed_mrt && rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt) {
+      mixed_mrt = rt < count ? offsets[rt] < desc->imageblock.sample_size_B
+                             : offsets[rt] == 0;
    }
-   const bool multi_mrt = raw32_mrt || mixed_mrt || wide_mrt;
-   const unsigned attachment_count = multi_mrt ? count : dual_mrt ? 2 : 1;
+   const bool multi_mrt = raw32_mrt || mixed_mrt;
    if (!program || chip != AGX_CHIP_G17P || !desc ||
        (!rt0 && !dual_mrt && !multi_mrt) ||
+       (!mixed_mrt && high_offsets) ||
        !desc->pbe_argument_va ||
        desc->pbe_argument_va > UINT64_C(0xffffffffffff) -
-          (32 * attachment_count - 1) ||
+          (multi_mrt ? 32 * count - 1 : dual_mrt ? 63 : 31) ||
        (desc->pbe_argument_va & 31))
       return false;
 
@@ -507,7 +500,7 @@ agx3_g17p_rt0_eot_program_generate(
    if (!graphics_state_tail(&shader, &tail))
       return false;
 
-   uint8_t body[10 * AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+   uint8_t body[(2 + AGX3_G17P_MRT_MAX_TARGETS) * AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
    size_t body_size = 0;
    for (unsigned i = 0; i < 2; ++i) {
       uint8_t bytes[AGX_IOTO_LOAD_LDIMM_MAX_SIZE], length;
@@ -519,35 +512,25 @@ agx3_g17p_rt0_eot_program_generate(
       body_size += length;
    }
 
-   /* Native offset uniforms are u8/u10/u12/u14..., one per attachment. */
-   for (unsigned rt = 0; rt < attachment_count; ++rt) {
-      const unsigned offset = wide_mrt ? desc->imageblock_offsets_B[rt]
-                              : rt == 3 ? desc->imageblock_offset3_B
-                              : rt == 2 ? desc->imageblock_offset2_B
-                              : rt == 1 ? desc->imageblock_offset1_B
-                                        : desc->imageblock_offset_B;
+   const unsigned targets = multi_mrt ? count : dual_mrt ? 2 : 1;
+   for (unsigned rt = 0; rt < targets; ++rt) {
       uint8_t offset_length;
-      if (!agx_ioto_load_pack_ldimm(chip, 8 + 2 * rt, offset,
+      if (!agx_ioto_load_pack_ldimm(chip, 8 + 2 * rt, offsets[rt],
                                     body + body_size, &offset_length))
          return false;
       body_size += offset_length;
    }
 
-   uint8_t copies[4 * 17];
+   uint8_t copies[4 * (2 * AGX3_G17P_MRT_MAX_TARGETS + 1)];
    const struct agx3_field_kv baseline[] = {{9, 3}, {10, 2}, {23, 2}, {24, 2}};
-   /* Native ESL: pointer at u0, then 2*N-1 argument dwords at u4. Kind5
-    * attachment offsets occupy even argument dwords; the odd padding dwords
-    * are unused but initialized deterministically. The witnessed two- to
-    * four-target programs copy u8 into every padding dword, while the wide
-    * RGBA8 programs repeat each attachment's own offset. */
-   const unsigned copy_count = multi_mrt ? 2 * attachment_count + 1
-                               : dual_mrt ? 5 : 3;
-   const unsigned copy_sources[] = {4, 6, 8, 8, 10, 8, 12, 8, 14};
+   /* Native offset uniforms are u4/u8/.../u32, not contiguous dwords: target
+    * n's offset is copied from GPR 8 + 2n to uniform 4 + 4n. Padding
+    * positions are unused but initialized deterministically from GPR 8. */
+   const unsigned copy_count = 2 * targets + 1;
    for (unsigned i = 0; i < copy_count; ++i) {
       const struct agx3_field_kv operands[] = {
          {3, 2u * i},
-         {16, wide_mrt ? (i < 2 ? 4 + 2 * i : 8 + 2 * ((i - 2) / 2))
-                       : copy_sources[i]},
+         {16, i < 2 ? 4 + 2 * i : i % 2 ? 8 : 8 + i - 2},
       };
       uint8_t bytes[AGX3_MAX_WORDS * 2], length = 0;
       if (!agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "copy", 0, baseline,

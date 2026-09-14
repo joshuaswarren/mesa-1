@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include "hk_agx3_ioto_program_core.h"
+#include "asahi/compiler/agx3_compute_program.h"
 
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "asahi/lib/agx_ioto_core.h"
@@ -656,8 +657,24 @@ test_g17p_dynamic_compute_program(void)
    CHECK(scratch_differences > 0);
    CHECK(scratch_differences <= AGX_IOTO_SPECTPR_SIZE);
 
+   /* A register spill frame publishes its bytes the same way. */
+   struct hk_agx3_g17p_compute_program_desc spill = desc;
+   spill.scratch_size = 56;
+   struct hk_agx3_g17p_compute_program spill_program;
+   CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &spill,
+                                               &spill_program));
+   struct agx_ioto_state spill_spectpr;
+   CHECK(agx_ioto_g17p_compiler_spectpr_build(56, desc.compiler_d,
+                                              &spill_spectpr));
+   CHECK(spill_spectpr.f[20] == 14 && spill_spectpr.f[21] == 14);
+
+   /* A frame must be whole quads and within the published bound. */
    struct hk_agx3_g17p_compute_program_desc invalid = desc;
-   invalid.scratch_size = 32;
+   invalid.scratch_size = 18;
+   CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
+                                                &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
+   invalid.scratch_size = AGX3_G17P_MAX_SPILL_B + 4;
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
@@ -2297,7 +2314,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R8_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(r8_uint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format r8_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R8_SINT,
@@ -2308,7 +2325,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R8_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(r8_sint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rg16_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16_SINT,
@@ -2327,7 +2344,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgba16_uint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rgba16_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_SINT,
@@ -2338,7 +2355,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgba16_sint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rgba32_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32B32A32_UINT,
@@ -2349,7 +2366,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgba32_uint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rgba32_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32B32A32_SINT,
@@ -2360,7 +2377,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgba32_sint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rgba32_float[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32B32A32_FLOAT,
@@ -2371,7 +2388,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgba32_float, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rgb10a2_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R10G10B10A2_UINT,
@@ -2382,7 +2399,22 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rgb10a2_uint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+
+   /* A2R10G10B10_UINT_PACK32 swaps channels in the PBE, not in the tile. */
+   enum pipe_format bgr10a2_uint[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B10G10R10A2_UINT,
+   };
+   tib = agx_build_tilebuffer_layout(bgr10a2_uint, 1, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R16_UINT);
+   enum pipe_format bgr10a2_uint_mrt[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_B10G10R10A2_UINT, PIPE_FORMAT_A4R4G4B4_UNORM,
+      PIPE_FORMAT_B5G5R5A1_UNORM, PIPE_FORMAT_B8G8R8A8_SNORM,
+      PIPE_FORMAT_A4B4G4R4_UNORM,
+   };
+   tib = agx_build_tilebuffer_layout(bgr10a2_uint_mrt, 5, 1, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format r32_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32_UINT,
@@ -2402,7 +2434,7 @@ test_g17p_single_layer_rt0_layout(void)
 
    /* The exact scalar float evidence is single-sample. */
    tib = agx_build_tilebuffer_layout(r32_float, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rg32_float[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32_FLOAT,
@@ -2415,7 +2447,7 @@ test_g17p_single_layer_rt0_layout(void)
 
    /* The exact two-word float evidence is single-sample and format-exact. */
    tib = agx_build_tilebuffer_layout(rg32_float, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    enum pipe_format r32_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32_SINT,
    };
@@ -2424,7 +2456,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(tib.nr_samples == 1 && tib.sample_size_B == 8);
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    tib = agx_build_tilebuffer_layout(r32_sint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    enum pipe_format rg32_sint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32_SINT,
    };
@@ -2434,7 +2466,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rg32_sint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format rg32_uint[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R32G32_UINT,
@@ -2445,7 +2477,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_physical_format(&tib, 0) == PIPE_FORMAT_R32_UINT);
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    tib = agx_build_tilebuffer_layout(rg32_uint, 1, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    enum pipe_format rg16_snorm[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16_SNORM,
    };
@@ -2478,7 +2510,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 4);
    tib = agx_build_tilebuffer_layout(mrt, 2, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format wboit[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_FLOAT,
@@ -2490,7 +2522,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 8);
    tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    tib = agx_build_tilebuffer_layout(rgba, 1, 2, false);
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));

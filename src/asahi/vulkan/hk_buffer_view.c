@@ -187,9 +187,9 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    } else if (device->dev.chip == AGX_CHIP_G17P) {
       /* Gen9's linear PBE is architectural and has no software tail field,
        * exactly like the texture above: the store lowering adds the tail from
-       * the buffer metadata. A format the Gen9 packer cannot represent (sRGB,
-       * or the emulated RGB32 layout) has no storage usage, so its view keeps
-       * the null PBE.
+       * the buffer metadata. A format the Gen9 packer cannot represent (the
+       * emulated RGB32 layout) has no storage usage, so its view keeps the
+       * null PBE.
        */
       pbe.buffer_offset_sw = 0;
       pbe.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el, pbe.width);

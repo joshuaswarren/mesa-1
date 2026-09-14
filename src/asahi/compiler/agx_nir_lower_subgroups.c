@@ -19,17 +19,10 @@ nir_udiv_round_up(nir_builder *b, nir_def *n, nir_def *d)
    return nir_udiv(b, nir_iadd(b, n, nir_iadd_imm(b, d, -1)), d);
 }
 
-static nir_def *
-first_active_invocation(nir_builder *b)
-{
-   /* A subgroup minimum operates over physically active lanes, so the minimum
-    * invocation ID is exactly the first active invocation, including inside
-    * divergent control flow.  In particular, do not lower through
-    * ACTIVE_THREAD_INDEX_IN_SUBGROUP.  Its AGX3 special-register number is not
-    * grounded, while the native unsigned subgroup-minimum instruction is. */
-   return nir_reduce(b, nir_load_subgroup_invocation(b),
-                     .reduction_op = nir_op_umin);
-}
+struct agx_subgroup_lower_options {
+   bool g17p;
+   bool g17p_clustered_float;
+};
 
 static bool
 lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
@@ -51,29 +44,16 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    case nir_intrinsic_elect: {
-      nir_def *lane = nir_load_subgroup_invocation(b);
-      nir_def_rewrite_uses(&intr->def,
-                           nir_ieq(b, lane, first_active_invocation(b)));
+      nir_def *active_id = nir_load_active_subgroup_invocation_agx(b, 16);
+      nir_def_rewrite_uses(&intr->def, nir_ieq_imm(b, active_id, 0));
       return true;
    }
 
    case nir_intrinsic_first_invocation: {
-      nir_def_rewrite_uses(&intr->def, first_active_invocation(b));
-      return true;
-   }
-
-   case nir_intrinsic_read_first_invocation: {
-      /* Select the elected lane's bits and OR-reduce.  Exactly one active lane
-       * contributes, so this broadcasts every integer or floating-point bit
-       * pattern without needing the first lane's numeric index. */
-      nir_def *data = intr->src[0].ssa;
-      nir_def *lane = nir_load_subgroup_invocation(b);
-      nir_def *elected = nir_ieq(b, lane, first_active_invocation(b));
-      nir_def *selected =
-         nir_bcsel(b, elected, data,
-                   nir_imm_zero(b, data->num_components, data->bit_size));
-      nir_def *first = nir_reduce(b, selected, .reduction_op = nir_op_ior);
-      nir_def_rewrite_uses(&intr->def, first);
+      nir_def *active_id = nir_load_active_subgroup_invocation_agx(b, 16);
+      nir_def *is_first = nir_ieq_imm(b, active_id, 0);
+      nir_def *first_bit = nir_ballot(b, 1, 32, is_first);
+      nir_def_rewrite_uses(&intr->def, nir_ufind_msb(b, first_bit));
       return true;
    }
 
@@ -168,8 +148,16 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    case nir_intrinsic_ballot: {
-      /* Optimize popcount(ballot(true)) to load_active_subgroup_count_agx() */
-      if (!nir_src_is_const(intr->src[0]) || !nir_src_as_bool(intr->src[0]) ||
+      /* Optimize popcount(ballot(true)) to load_active_subgroup_count_agx().
+       *
+       * Not on G17P: Apple's compiler reads its active-count register (SR36)
+       * only inside the helper-guarded region of a uniform atomic, and
+       * compiles simd_sum(1u) to a reduction instead, so keep the ballot whose
+       * lane membership every other subgroup operation shares.
+       */
+      const struct agx_subgroup_lower_options *agx_options = data;
+      if (agx_options->g17p || !nir_src_is_const(intr->src[0]) ||
+          !nir_src_as_bool(intr->src[0]) ||
           !list_is_singular(&intr->def.uses))
          return false;
 
@@ -192,9 +180,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 }
 
-struct agx_subgroup_lower_options {
-   bool g17p_clustered_float;
-};
+
 
 static bool
 lower_subgroup_filter(const nir_intrinsic_instr *intr, const void *data)
@@ -250,6 +236,7 @@ static bool
 agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
 {
    const struct agx_subgroup_lower_options agx_options = {
+      .g17p = g17p_clustered_float,
       .g17p_clustered_float = g17p_clustered_float,
    };
 
@@ -257,6 +244,7 @@ agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
    nir_lower_subgroups_options opts = {
       .filter = lower_subgroup_filter,
       .filter_data = &agx_options,
+      .lower_read_first_invocation = true,
       .lower_inverse_ballot = true,
       .lower_to_scalar = true,
       .lower_relative_shuffle = true,
@@ -272,8 +260,8 @@ agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
    bool progress = nir_lower_subgroups(s, &opts);
 
    /* Then do AGX-only lowerings on top */
-   progress |=
-      nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow, NULL);
+   progress |= nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow,
+                                          (void *)&agx_options);
 
    return progress;
 }

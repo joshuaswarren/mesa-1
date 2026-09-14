@@ -91,6 +91,29 @@ struct agx3_iadd_desc {
     * the second. */
    bool dest_cache;
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
+
+   /*
+    * AGX3b only. `isub` is the same field layout under its own opcode, for
+    * either slot-A kind; slot B is the subtrahend and keeps its width and
+    * sign-extension fields:
+    *
+    *   a - int(short b)       1f 01 56 00 02 00 10 28 17 0d  f39=1 f43=1
+    *   int(short a) - b       1f 01 56 00 02 08 00 88 17 07  f24=1 f28=1
+    *   16 - int(short b)      1f 01 56 00 02 20 00 08 15 0c  f15=16
+    */
+   bool subtract;
+   /*
+    * AGX3b register slot A only: saturate (f53). With 32-bit operands the
+    * slot sign fields select signed saturation, set together:
+    *
+    *   addsat(int, int)       9f 01 56 00 02 00 10 e8 17 0f  f28 f43 f53
+    *   addsat(uint, uint)     9f 01 56 00 02 00 10 e8 17 05  f53
+    *   subsat(int, int)       1f 01 56 00 02 00 10 e8 17 0f
+    */
+   bool saturate;
+   /* AGX3b register slot A only: operand-cache hints f25 (A) and f40 (B). */
+   bool src_a_cache;
+   bool src_cache;
 };
 
 bool agx3_iadd_encode(enum agx_isa_encoding encoding,

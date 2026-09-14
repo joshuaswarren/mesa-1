@@ -317,6 +317,14 @@ struct hk_graphics_state {
       uint64_t grids;
       struct hk_tess_info info;
       enum mesa_prim prim;
+
+      /* G17P hardware tessellation: the factor records the tessellator reads
+       * and the patch/instance counts of the draw that filled them. */
+      const struct poly_tess_params *params;
+      uint64_t factor_buffer;
+      uint32_t factor_buffer_size_B;
+      uint32_t patches;
+      uint32_t instances;
    } tess;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
@@ -386,6 +394,10 @@ struct hk_cs {
 
    /* End pointer of the current chunk of the control stream */
    void *end;
+
+   /* AGX3 CDM: the value of current just after a strong cache flush, so a
+    * flush requested with nothing recorded since it can be elided. */
+   void *strong_flush_end;
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;

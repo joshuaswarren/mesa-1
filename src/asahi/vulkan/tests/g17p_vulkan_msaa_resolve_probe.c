@@ -31,9 +31,7 @@
  *   case 2  N samples, quad           -> must be exactly the draw colour.
  *
  * Each case prints its observed value next to what each named hypothesis
- * predicts, so the answer is read off rather than argued. Pair it with
- * AGX_SPECLM_SAMPLE_CODE: case 1 is the cheapest thing to sweep, because it
- * has no geometry, no shader and one correct answer.
+ * predicts, so the answer is read off rather than argued.
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -341,8 +339,7 @@ main(void)
    if ((properties.limits.framebufferColorSampleCounts &
         (VkSampleCountFlags)G17P_MSAA_SAMPLES) == 0) {
       fprintf(stderr,
-              TEST_NAME ": framebufferColorSampleCounts lacks %ux "
-                        "(set HK_G17P_MSAA=1)\n",
+              TEST_NAME ": framebufferColorSampleCounts lacks %ux\n",
               G17P_MSAA_SAMPLES);
       return EXIT_FAILURE;
    }

@@ -23,6 +23,9 @@ extern "C" {
 /* r0-r127 inclusive, as pairs of 16-bits, gives 256 registers */
 #define AGX_NUM_REGS (256)
 
+/* G17P's register file: halves 0..191. */
+#define AGX3B_NUM_REGS (192)
+
 /* u0-u255 inclusive, as pairs of 16-bits */
 #define AGX_NUM_UNIFORMS (512)
 
@@ -423,9 +426,6 @@ typedef struct {
    /* TODO: Handle tilebuffer ops more efficient */
    bool explicit_coords : 1;
 
-   /* Logical attachment identity, independent of the physical pixel_offset. */
-   uint8_t colour_target;
-
    /* TODO: Handle iter ops more efficient */
    enum agx_interpolation interpolation : 2;
    bool perspective                    : 1;
@@ -544,6 +544,10 @@ typedef struct {
 
    /* Mask of pixel fences we've definitely already waited for. */
    uint16_t already_pixel_waited;
+
+   /* G17P depth/stencil writes not yet emitted. Every sample's write shares
+    * one class-1 transaction, released after the last. */
+   unsigned zs_writes_left;
 
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
@@ -1072,6 +1076,8 @@ void agx_print_instr(const agx_instr *I, FILE *fp);
 void agx_print_block(const agx_block *block, FILE *fp);
 void agx_print_shader(const agx_context *ctx, FILE *fp);
 void agx_optimizer_forward(agx_context *ctx);
+bool agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond,
+                              agx_index x, agx_index y, bool *result);
 void agx_optimizer_backward(agx_context *ctx);
 void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);
@@ -1083,22 +1089,32 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* The promoted Apple witness exports position plus sixteen float4 user
- * locations (68 scalars). Keep room for the opt-in ANGLE qualification shape:
- * position plus seventeen float4 user locations, or 72 contiguous
- * output/staging scalars. The Vulkan property remains 64 user components by
- * default until that exact image oracle passes on hardware. */
-#define AGX3_MAX_VERTEX_OUTPUTS 72u
-
-/* Register halves the AGX3B operand fields can name (ALU sources and
- * destinations, LDDEV/STDEV payloads): 0..191. */
-#define AGX3_REGISTER_HALVES 192u
+/* Apple's G17P compiler emits position plus thirty-one float4 user locations
+ * as 128 UVSWs for UVS indices 0..127, and __GPU_LD_MD root.field1.field3 is
+ * 128; a thirty-second float4 exceeds the fragment's 127 coefficients. Each
+ * output stages at half 2k, which UVSW's eight-bit staging operand covers. */
+#define AGX3_MAX_VERTEX_OUTPUTS 128u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
-bool agx3_pad_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so
  * the compare uses the already grounded register/register form. */
 void agx_materialize_agx3_cf_constants(agx_context *ctx);
+/* Number of 16-bit registers RA keeps reserved at the bottom of the register
+ * file for the whole shader.
+ */
+static inline unsigned
+agx_reserved_registers(const agx_context *ctx)
+{
+   if (ctx->has_spill_pcopy_reserved)
+      return 8;
+   else if (ctx->any_quad_divergent_shuffle)
+      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
+   else if (ctx->any_cf)
+      return 1;
+   else
+      return 0;
+}
+
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);

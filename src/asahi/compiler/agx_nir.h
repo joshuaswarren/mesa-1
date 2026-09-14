@@ -39,8 +39,11 @@ bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
                                                     bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
+/* robust_formatless_images: formatless image loads have not been lowered for
+ * view-bounds robustness and require it. */
 bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
-                                               unsigned generation);
+                                               unsigned generation,
+                                               bool robust_formatless_images);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 

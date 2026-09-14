@@ -112,6 +112,15 @@ bool agx3_vary_uvsw(enum agx_isa_encoding enc, uint16_t value,
                     uint16_t wait_mask, uint8_t out[AGX3_VARY_MAX_LENGTH],
                     uint8_t *len);
 
+/* The same write with the unified-vertex-store index read from the 16-bit
+ * register half `index`, as an unlinked vertex shader computes it. AGX3b
+ * only. */
+bool agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
+                                   uint16_t index, uint8_t slot,
+                                   bool value_kill, uint16_t wait_mask,
+                                   uint8_t out[AGX3_VARY_MAX_LENGTH],
+                                   uint8_t *len);
+
 #ifdef __cplusplus
 }
 #endif

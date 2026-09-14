@@ -174,11 +174,41 @@ lower(agx_builder *b, agx_instr *I)
    }
 }
 
+/*
+ * AGX3 has no control-flow compare with an immediate on both sides. A constant
+ * condition can still reach one: SPIR-V such as dEQP-VK.reconvergence's keeps
+ * `if (true) { break; }` inside loops, and immediate inlining turns the
+ * condition into an immediate. The construct itself must stay, since it owns
+ * an exec-mask level, so keep the instruction and branch on the integer
+ * identity r0l == r0l, as an AGX3 unconditional break already does, inverted
+ * to preserve the constant outcome.
+ */
+static void
+agx3_lower_constant_cf_compare(agx_context *ctx, agx_instr *I)
+{
+   if (I->op != AGX_OPCODE_IF_ICMP && I->op != AGX_OPCODE_ELSE_ICMP &&
+       I->op != AGX_OPCODE_WHILE_ICMP && I->op != AGX_OPCODE_BREAK_IF_ICMP)
+      return;
+
+   bool cond;
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+      return;
+
+   agx_index r0l = agx_register(0, AGX_SIZE_16);
+   I->src[0] = r0l;
+   I->src[1] = r0l;
+   I->icond = AGX_ICOND_UEQ;
+   I->invert_cond = cond == I->invert_cond;
+}
+
 void
 agx_lower_pseudo(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         agx3_lower_constant_cf_compare(ctx, I);
 
       if (lower(&b, I))
          agx_remove_instruction(I);

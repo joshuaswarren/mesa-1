@@ -97,6 +97,7 @@ fields_valid(uint32_t generation,
       fields->buffer && !(fields->buffer & 0xf) &&
       !(fields->buffer >> (linear ? 44 : 48));
    return (!linear || generation == AGX_PBE_AGX3_GENERATION_9) &&
+          (!fields->srgb || generation == AGX_PBE_AGX3_GENERATION_9) &&
           (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
            fields->layout == AGX_PBE_LAYOUT_GPU) &&
           channel_is_uncompressed(fields->channels) && fields->type <= 5 &&
@@ -145,10 +146,43 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
       word1 |= (uint64_t)(fields->stride_B - 16) << 40;
    else
       word1 |= (uint64_t)layer_flag << 60;
+
+   /* PBEStateEncoderGen9<kAGXRevHAL200>::StateFields sets word1 bit 61 in
+    * every layout whenever the texture format's gamma encoding (format
+    * descriptor +0x54) is nonzero, except for a few extended pixel formats
+    * that select bit 62 as well (+0x22c..+0x2dc). TextureGen4's
+    * encodeImageReadState turns the same field into the texture descriptor's
+    * sRGB bits, and AGX2's PBE keeps its sRGB store conversion at this bit. */
+   word1 |= (uint64_t)fields->srgb << 61;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
    out->length = AGX_PBE_AGX3_DESCRIPTOR_LENGTH;
    return true;
+}
+
+/* PBEStateEncoderGen9::StateFields 0x34ef68 and 0x34f00c..0x34f028:
+ * level | (levels - 1) selects the extended descriptor. The level is
+ * word2[47:44], levels-1 is word2[51:48], with word0 bit58 and word1 bit63
+ * marking the extension. Using the native chain fields preserves the
+ * allocation's mip tail addressing rather than pretending each level is a
+ * standalone image.
+ *
+ * In the macOS 27 AGXMetalG17P the deposit is StateFields+0x1ec..+0x21c. It
+ * reads only the level arguments, and nothing later on the tiled 2D-array or
+ * 3D path rewrites word2 (their layer count lands in word1 at +0x374), so
+ * layered targets take the same extension.
+ */
+static void
+mark_mip_chain(struct agx_pbe_agx3_descriptor *out, uint32_t level,
+               uint32_t levels)
+{
+   if (!level && levels == 1)
+      return;
+
+   store_le64(&out->bytes[0], load_le64(&out->bytes[0]) | (UINT64_C(1) << 58));
+   store_le64(&out->bytes[8], load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
+   store_le64(&out->bytes[16],
+              ((uint64_t)level << 44) | ((uint64_t)(levels - 1) << 48));
 }
 
 /* PBEStateEncoderGen9<kAGXRevHAL200>::StateFields (AGXMetalG17P, macOS 27)
@@ -161,18 +195,19 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
  */
 static bool
 pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
-             unsigned dimension, uint32_t layers,
-             struct agx_pbe_agx3_descriptor *out)
+             unsigned dimension, uint32_t layers, uint32_t level,
+             uint32_t levels, struct agx_pbe_agx3_descriptor *out)
 {
    if (out)
       memset(out, 0, sizeof(*out));
 
-   /* The exact HAL200 producer keeps layered targets tiled and non-mipmapped
-    * in this packet. Linear stride and Gen10's shifted mode fields remain
-    * independently gated. */
+   /* The exact HAL200 producer keeps layered targets tiled in this packet.
+    * Linear stride and Gen10's shifted mode fields remain independently
+    * gated. */
    if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
        fields->layout == AGX_PBE_LAYOUT_LINEAR || layers < 1 ||
-       layers > UINT16_MAX + 1u ||
+       layers > UINT16_MAX + 1u || !levels || levels > 16 ||
+       level >= levels ||
        !agx_pbe_agx3_2d_pack(generation, fields, out))
       return false;
 
@@ -183,6 +218,7 @@ pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    word1 |= (uint64_t)fields->page_aligned_layers << 60;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
+   mark_mip_chain(out, level, levels);
    return true;
 }
 
@@ -192,7 +228,7 @@ agx_pbe_agx3_2d_array_pack(
    uint32_t layers, struct agx_pbe_agx3_descriptor *out)
 {
    return pack_layered(generation, fields, AGX_PBE_DIMENSION_2D_ARRAY, layers,
-                       out);
+                       0, 1, out);
 }
 
 bool
@@ -200,7 +236,28 @@ agx_pbe_agx3_3d_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t depth, struct agx_pbe_agx3_descriptor *out)
 {
-   return pack_layered(generation, fields, AGX_PBE_DIMENSION_3D, depth, out);
+   return pack_layered(generation, fields, AGX_PBE_DIMENSION_3D, depth, 0, 1,
+                       out);
+}
+
+bool
+agx_pbe_agx3_2d_array_mip_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, uint32_t level, uint32_t levels,
+   struct agx_pbe_agx3_descriptor *out)
+{
+   return pack_layered(generation, fields, AGX_PBE_DIMENSION_2D_ARRAY, layers,
+                       level, levels, out);
+}
+
+bool
+agx_pbe_agx3_3d_mip_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t depth, uint32_t level, uint32_t levels,
+   struct agx_pbe_agx3_descriptor *out)
+{
+   return pack_layered(generation, fields, AGX_PBE_DIMENSION_3D, depth, level,
+                       levels, out);
 }
 
 bool
@@ -248,19 +305,7 @@ agx_pbe_agx3_2d_mip_pack(
        level >= levels || !agx_pbe_agx3_2d_pack(generation, fields, out))
       return false;
 
-   /* PBEStateEncoderGen9::StateFields 0x34ef68 and 0x34f00c..0x34f028:
-    * level | (levels - 1) selects the extended descriptor. The level is
-    * word2[47:44], levels-1 is word2[51:48], with word0 bit58 and word1
-    * bit63 marking the extension. All other word2/word3 bits remain zero.
-    * Using the native chain fields preserves the allocation's mip tail
-    * addressing rather than pretending each level is a standalone image.
-    */
-   if (level || levels > 1) {
-      store_le64(&out->bytes[0], load_le64(&out->bytes[0]) | (UINT64_C(1) << 58));
-      store_le64(&out->bytes[8], load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
-      store_le64(&out->bytes[16], ((uint64_t)level << 44) |
-                                     ((uint64_t)(levels - 1) << 48));
-   }
+   mark_mip_chain(out, level, levels);
    return true;
 }
 
@@ -287,9 +332,11 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
          : (UINT64_C(1) << 54) - 1;
 
    const uint8_t layout = (word0 >> 4) & 0x3;
+   const uint64_t srgb_bit = generation == AGX_PBE_AGX3_GENERATION_9
+      ? UINT64_C(1) << 61 : 0;
    const uint64_t word1_mask = layout == AGX_PBE_LAYOUT_LINEAR
-      ? (UINT64_C(1) << 61) - 1
-      : ((UINT64_C(1) << 44) - 1) |
+      ? ((UINT64_C(1) << 61) - 1) | srgb_bit
+      : ((UINT64_C(1) << 44) - 1) | srgb_bit |
            (generation == AGX_PBE_AGX3_GENERATION_10 ? UINT64_C(1) << 60 : 0);
    if ((word0 & 0xf) != AGX_PBE_DIMENSION_2D ||
        (word0 & ~word0_mask) || (word1 & ~word1_mask) || word2 || word3)
@@ -305,6 +352,7 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
    fields->width = ((word0 >> 24) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
    fields->height =
       ((word0 >> height_shift) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
+   fields->srgb = (word1 & srgb_bit) != 0;
    if (layout == AGX_PBE_LAYOUT_LINEAR) {
       fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
       fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;

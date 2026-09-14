@@ -560,6 +560,48 @@ check_device_shuffle_compute(enum agx_isa_encoding encoding)
    return valid;
 }
 
+/* popcount(ballot(true)) reads the active thread count on AGX2 and stays a
+ * ballot on G17P, where that register is only witnessed inside Apple's
+ * helper-guarded uniform atomics. */
+static bool
+check_active_count_lowering(bool g17p)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "active subgroup count");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *mask = nir_ballot(&b, 1, 32, nir_imm_true(&b));
+   nir_store_global(&b, nir_bit_count(&b, mask), nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   if (g17p)
+      agx_preprocess_nir_g17p(b.shader);
+   else
+      agx_preprocess_nir(b.shader);
+
+   bool count = false, ballot = false;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            const nir_intrinsic_op op =
+               nir_instr_as_intrinsic(instr)->intrinsic;
+            count |= op == nir_intrinsic_load_active_subgroup_count_agx;
+            ballot |= op == nir_intrinsic_ballot;
+         }
+      }
+   }
+
+   const bool valid = g17p ? (ballot && !count) : (count && !ballot);
+   if (!valid)
+      fprintf(stderr, "active subgroup count lowering wrong for %s\n",
+              g17p ? "G17P" : "AGX2");
+   ralloc_free(b.shader);
+   return valid;
+}
+
 static bool
 check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
 {
@@ -584,7 +626,11 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
    nir_pop_if(&b, NULL);
    agx_preprocess_nir(b.shader);
 
+   /* Both must key off the active thread index. A subgroup reduction also
+    * sees lanes masked off by the enclosing control flow, so reducing the
+    * invocation IDs elects the wrong lane there. */
    bool lowered = true;
+   bool active_index = false;
    nir_foreach_function_impl(impl, b.shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -594,11 +640,14 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
                nir_instr_as_intrinsic(instr)->intrinsic;
             if (op == nir_intrinsic_elect ||
                 op == nir_intrinsic_read_first_invocation ||
-                op == nir_intrinsic_load_active_subgroup_invocation_agx)
+                op == nir_intrinsic_reduce)
                lowered = false;
+            if (op == nir_intrinsic_load_active_subgroup_invocation_agx)
+               active_index = true;
          }
       }
    }
+   lowered &= active_index;
 
    struct agx_shader_key key = {0};
    key.dev.encoding = encoding;
@@ -2220,6 +2269,9 @@ main(int argc, char **argv)
    if (!check_half_ceil_compute())
       return 1;
    if (!check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2))
+      return 1;
+   if (!check_active_count_lowering(false) ||
+       !check_active_count_lowering(true))
       return 1;
    if (!check_g17p_subgroup_vote_compute() ||
        !check_g17p_signed_immediate_ballot_rejected())

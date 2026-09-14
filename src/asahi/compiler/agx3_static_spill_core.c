@@ -170,7 +170,7 @@ encode_load_form(enum agx_isa_encoding enc,
    ov[n++] = (struct agx3_field_kv)KV(18, d->tps_half);
    ov[n++] = (struct agx3_field_kv)KV(24, d->width);
    ov[n++] = (struct agx3_field_kv)KV(26, d->slot_mirror);
-   ov[n++] = (struct agx3_field_kv)KV(27, 1);
+   ov[n++] = (struct agx3_field_kv)KV(27, !d->tps_live);
    ov[n++] = (struct agx3_field_kv)KV(enc == AGX_ISA_ENCODING_AGX3C ? 44 : 41,
                                       d->structural_flag);
    for (unsigned i = 0; i < 8; ++i) {
@@ -443,14 +443,17 @@ agx3_static_spill_decode_load(enum agx_isa_encoding enc, const uint8_t *bytes,
             d.narrow_extend = narrow;
             for (unsigned structural = 0; structural < 2; ++structural) {
                d.structural_flag = structural;
-               uint8_t canonical[AGX3_STATIC_SPILL_MAX_LENGTH];
-               uint8_t canonical_length = 0;
-               if (agx3_static_spill_encode_load_form(enc, &d, ep, canonical,
-                                                      &canonical_length) &&
-                   canonical_length == length &&
-                   memcmp(canonical, bytes, length) == 0) {
-                  *out = d;
-                  return true;
+               for (unsigned live = 0; live < 2; ++live) {
+                  d.tps_live = live;
+                  uint8_t canonical[AGX3_STATIC_SPILL_MAX_LENGTH];
+                  uint8_t canonical_length = 0;
+                  if (agx3_static_spill_encode_load_form(
+                         enc, &d, ep, canonical, &canonical_length) &&
+                      canonical_length == length &&
+                      memcmp(canonical, bytes, length) == 0) {
+                     *out = d;
+                     return true;
+                  }
                }
             }
          }
