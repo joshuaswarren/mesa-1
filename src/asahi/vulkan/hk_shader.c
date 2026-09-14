@@ -353,6 +353,25 @@ hk_make_feature_key(const struct vk_features *feats)
           (feats->pipelineRobustness ? HK_FEAT_PIPELINE_ROBUSTNESS : 0);
 }
 
+/*
+ * Whether no fragment shader can ever consume the user varyings of this
+ * pipeline's pre-rasterization stages. Fragment shader state is part of every
+ * complete pipeline that may rasterize, so a missing fragment stage is final
+ * there. A pre-rasterization library has no fragment shader state and may be
+ * linked with a fragment shader library later.
+ *
+ * The runtime does not keep VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR in
+ * vk_graphics_pipeline_state::pipeline_flags, so look for the state group
+ * instead: fragment shader state always includes the input attachment map.
+ */
+static bool
+hk_pipeline_has_no_fragment_shader(const struct vk_graphics_pipeline_state *state)
+{
+   return state && !(state->shader_stages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
+          (state->ial != NULL ||
+           BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP));
+}
+
 static void
 hk_hash_graphics_state(struct vk_physical_device *device,
                        const struct vk_graphics_pipeline_state *state,
@@ -375,6 +394,15 @@ hk_hash_graphics_state(struct vk_physical_device *device,
        (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))) {
       const bool is_multiview = state->mv->view_mask != 0;
       _mesa_blake3_update(&blake3_ctx, &is_multiview, sizeof(is_multiview));
+   }
+
+   /* G17P removes user varyings from fragmentless pipelines, so the same
+    * pre-rasterization shader compiles differently for a library. */
+   if (((struct hk_physical_device *)device)->dev.chip == AGX_CHIP_G17P &&
+       !(stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+      const bool no_fragment_shader = hk_pipeline_has_no_fragment_shader(state);
+      _mesa_blake3_update(&blake3_ctx, &no_fragment_shader,
+                          sizeof(no_fragment_shader));
    }
 
    enum hk_feature_key feature_key = hk_make_feature_key(features);
@@ -2218,9 +2246,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
     *
     * Do not apply this to pipeline libraries: their pre-raster shader can be
     * linked with a fragment library later. */
-   if (dev->dev.chip == AGX_CHIP_G17P && state && shader_count > 0 &&
-       !(state->pipeline_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) &&
-       !(state->shader_stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+   if (dev->dev.chip == AGX_CHIP_G17P && shader_count > 0 &&
+       hk_pipeline_has_no_fragment_shader(state)) {
       nir_shader *last = shaders[shader_count - 1];
       if (last->info.stage <= MESA_SHADER_GEOMETRY)
          NIR_PASS(_, last, nir_remove_outputs, MESA_SHADER_FRAGMENT,
