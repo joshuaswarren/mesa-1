@@ -656,8 +656,8 @@ agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                         bool dest_cache, uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 128 ||
-       src >= 128 || (dest & 1) || (src & 1) ||
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || (dest & 1) || (src & 1) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
       return false;
@@ -668,7 +668,14 @@ agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *
     * Against the previously used fixed baseline, f11 is destination cache,
     * f25 is source cache and f27 is source discard. They are lifetime fields,
-    * so derive them from post-RA state rather than baking in discard. */
+    * so derive them from post-RA state rather than baking in discard.
+    *
+    * metal-nt 32023.917 applegpu_g17p, 96 live uint(float) results:
+    *   270754be037cb5080200  $r95 <- uint(^r95)
+    * Both register fields address eight-bit half indices. Restricting them
+    * to halves below 128 rejected high-pressure tessellation evaluation
+    * shaders whose float-to-integer result landed at half 128.
+    */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {23, 2}, {24, 2},
       {41, is_signed ? 5 : 4}, {42, 1},

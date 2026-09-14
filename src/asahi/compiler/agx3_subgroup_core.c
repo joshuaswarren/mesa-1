@@ -353,7 +353,18 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       ADD_FIELD(11, 1);
    ADD_FIELD(23, 2);
    ADD_FIELD(24, d->src_half ? 1 : 2);
-   if (!d->compare_immediate || !d->src_live)
+   /* G17P simd_ballot(x != 0), metal-nt 32023.917:
+    *   dead x: 17075600020000582212
+    *   live x: 17075600020400182212
+    * The live witness reads half 2 instead of half 0 and clears f27.
+    * This source discard bit also applies to our register-zero comparison.
+    * In restart unrolling, its input is a shared ballot mask that is still
+    * needed by the broadcast selecting the first nonempty subgroup.
+    */
+   const bool live_integer_ballot =
+      enc == AGX_ISA_ENCODING_AGX3B && !d->quad &&
+      d->type == AGX3_SUBGROUP_BALLOT_INTEGER && d->src_live;
+   if ((!d->compare_immediate && !live_integer_ballot) || !d->src_live)
       ADD_FIELD(27, 1);
 
    const char *mnemonic;

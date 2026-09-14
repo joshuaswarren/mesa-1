@@ -3773,6 +3773,26 @@ TEST_F(AGX3PackBinary, FloatToInt32CarriesLiveSourceCacheState)
              std::vector<uint8_t>(std::begin(native), std::end(native)));
 }
 
+TEST_F(AGX3PackBinary, FloatToInt32UsesHighRegisters)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index dest = agx_register(190, AGX_SIZE_32);
+   agx_index source = agx_register(190, AGX_SIZE_32);
+   dest.cache = true;
+   source.discard = true;
+   agx_convert_to(b, dest, agx_immediate(AGX_CONVERT_F_TO_U32), source,
+                  AGX_ROUND_RTZ);
+   agx_stop(b);
+
+   /* Native G17P uint(float) with 96 converted values still live. */
+   const uint8_t native[] = {
+      0x27, 0x07, 0x54, 0xbe, 0x03, 0x7c, 0xb5, 0x08, 0x02, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   EXPECT_EQ(pack(b),
+             std::vector<uint8_t>(std::begin(native), std::end(native)));
+}
+
 TEST_F(AGX3PackBinary, G17PHalfToInt32RejectsUngroundedShapes)
 {
    for (unsigned mode = 0; mode < 22; ++mode) {
@@ -4160,6 +4180,27 @@ TEST_F(AGX3PackBinary, BallotCompareZero)
             EXPECT_EQ(pack(b), want);
          }
       }
+   }
+}
+
+TEST_F(AGX3PackBinary, G17PBallotKeepsLiveMask)
+{
+   for (bool discard : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index source = agx_register(4, AGX_SIZE_32);
+      source.discard = discard;
+      agx_icmp_ballot_to(b, agx_register(0, AGX_SIZE_32), source,
+                        agx_zero(), AGX_ICOND_UEQ, true);
+      agx_stop(b);
+
+      std::vector<uint8_t> want = {
+         0x17, 0x07, 0x54, 0x00, 0x02, 0x08, 0x00,
+         uint8_t(discard ? 0xf8 : 0xb8), 0xa2, 0x12,
+      };
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
    }
 }
 

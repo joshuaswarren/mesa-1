@@ -437,6 +437,20 @@ test_ballot_vectors(void)
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, int_c, sizeof(int_c)));
 
+   /* G17P retains a live ballot input for the following subgroup broadcast.
+    * f27 is the source discard bit in the native live/dead witnesses above
+    * the encoder; the register-zero comparison fields remain unchanged.
+    */
+   static const uint8_t int_live_b[] = {
+      0x17, 0x07, 0x54, 0x00, 0x02, 0x08, 0x00, 0xb8, 0xa2, 0x02,
+   };
+   d.src_live = true;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, int_live_b, sizeof(int_live_b)));
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
+   CHECK(bytes_equal(out, length, int_c, sizeof(int_c)));
+   d.src_live = false;
+
    d.dest = 4;
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
    d.dest = 0;

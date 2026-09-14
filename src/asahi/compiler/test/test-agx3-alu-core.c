@@ -1711,10 +1711,20 @@ static void test_float_to_int32_liveness(void)
       AGX_ISA_ENCODING_AGX3B, 4, 2, true, AGX3_ALU_HINT_CACHE, true, 0,
       out, &len));
    exact(out, len, "27075404030496480300");
+   assert(agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 190, 190, false, AGX3_ALU_HINT_DISCARD, true, 0,
+      out, &len));
+   exact(out, len, "270754be037cb5080200");
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 256, 0, false, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 0, 256, false, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
    assert(!agx3_alu_float_to_int32(
       AGX_ISA_ENCODING_AGX3B, 4, 3, true, AGX3_ALU_HINT_NONE, false, 0,
       out, &len));
-   puts("Float-to-int32: native live-source cache vector PASS");
+   puts("Float-to-int32: native live-source cache and high-register vectors PASS");
 }
 
 static void test_i32_to_f16(void)
